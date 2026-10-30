@@ -1,11 +1,13 @@
 import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
+import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { runtimeAutomaticAgentFailureContinuationActionRequestSchema } from "../core/api-contract";
 import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
+import { requestSessionOwnedBackgroundAgentExecutionCancellation } from "../state/session-owned-background-agent-executions";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -128,6 +130,7 @@ import {
 	resolveTaskChatMessageTargetConversationSessionSummary,
 } from "../core/task-main-conversation-session-binding";
 import { getTaskMessageInjectionLedgerPath } from "../core/task-message-injection-ledger";
+import { isTaskCardShelved } from "../core/task-shelving-state";
 import { resolveTaskTitle } from "../core/task-title.js";
 import { parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
@@ -653,6 +656,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			baseRef: card.baseRef,
 			worktreeMode: card.worktreeMode,
 			taskAgentPermissionMode: settings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
+			codexConfigurationProfileId:
+				settings?.codexConfigurationProfileId ??
+				summary.codexConfigurationProfileId ??
+				card.codexConfigurationProfileId,
+			codexConfigurationPermissionSelectionSource:
+				settings?.codexConfigurationPermissionSelectionSource ?? card.codexConfigurationPermissionSelectionSource,
 			requestedAgentSessionTransport:
 				settings?.sessionTransport ?? resolveRuntimeAgentSessionTransportFromSummary(summary),
 			// 原子切主时已预留、但从未启动的新 Codex 必须全新开局，不能误续同目录的其他 Codex。
@@ -1294,6 +1303,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					taskConversationSessionMetadata = {
 						...taskConversationSessionMetadata,
 						taskConversationSessionLaunchSettings: {
+							codexConfigurationProfileId: body.codexConfigurationProfileId,
+							codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
 							taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
 								body.taskAgentPermissionMode,
 								scopedRuntimeConfig.agentAutonomousModeEnabled,
@@ -1612,6 +1623,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				await revalidateMainContextForkSourceBeforeLaunch?.();
 				const summary = await terminalManager.startTaskSession(
 					{
+						codexConfigurationProfileId: body.codexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
 						taskId: body.taskId,
 						beforeAgentProcessLaunch,
 						workspaceTaskId,
@@ -1674,6 +1687,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 
 				let nextSummary = summary;
 				startFailurePhase = "capture_initial_turn_checkpoint";
+				if (summary.codexConfigurationProfileId)
+					await persistCodexConfigurationProfileBindingForMainTaskSession({
+						workspaceId: workspaceScope.workspaceId,
+						workspacePath: workspaceScope.workspacePath,
+						conversationSessionId: body.taskId,
+						profileId: summary.codexConfigurationProfileId,
+						broadcastWorkspaceUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
+					});
 				if (shouldCaptureTurnCheckpoint) {
 					try {
 						const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
@@ -1707,7 +1728,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		refreshTaskTerminal: async (workspaceScope, input) => {
+		refreshTaskTerminal: async (workspaceScope, input, configurationProfileAutomaticAdoptionGuard) => {
 			try {
 				const body = parseTaskTerminalRefreshRequest(input);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
@@ -1735,6 +1756,20 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = findWorkspaceBoardCard(board, workspaceTaskId);
+				if (
+					configurationProfileAutomaticAdoptionGuard &&
+					((card && isTaskCardShelved(card)) ||
+						card?.taskClosureSummary?.isCurrentlyClosed ||
+						board.columns.some(
+							(column) =>
+								column.id === "trash" && column.cards.some((candidate) => candidate.id === workspaceTaskId),
+						))
+				)
+					return {
+						ok: false,
+						summary: null,
+						error: "任务已结案、搁置或在垃圾桶中，配置广播保留待采用，不自动续接。",
+					};
 				if (!card) {
 					return {
 						ok: false,
@@ -1843,6 +1878,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
 				const refreshTaskTerminalRequest = {
+					configurationProfileAutomaticAdoptionGuard: configurationProfileAutomaticAdoptionGuard
+						? {
+								...configurationProfileAutomaticAdoptionGuard,
+								readTaskExecutionEligibilityFingerprint: async () => {
+									const latestBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+									const latestCard = findWorkspaceBoardCard(latestBoard, workspaceTaskId);
+									if (
+										!latestCard ||
+										latestCard.createdAt !== card.createdAt ||
+										isTaskCardShelved(latestCard) ||
+										latestCard.taskClosureSummary?.isCurrentlyClosed ||
+										latestBoard.columns.some(
+											(column) =>
+												column.id === "trash" &&
+												column.cards.some((candidate) => candidate.id === workspaceTaskId),
+										)
+									)
+										return null;
+									return JSON.stringify([
+										workspaceScope.workspaceId,
+										workspaceTaskId,
+										latestCard.createdAt,
+										latestCard.taskShelvingState,
+										latestCard.taskClosureSummary,
+									]);
+								},
+							}
+						: undefined,
 					taskId: body.taskId,
 					// 补回这两个字段（此前重建请求把它们丢了）：
 					//   workspaceTaskId 决定 hook env 里的 KANBAN_TASK_ID 归属；
@@ -1863,6 +1926,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					codexModelCapacityErrorAutoContinuationEnabled:
 						scopedRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled,
+					codexConfigurationProfileId:
+						configurationProfileAutomaticAdoptionGuard?.profileId ??
+						sideSessionLaunchSettings?.codexConfigurationProfileId ??
+						currentSummary?.codexConfigurationProfileId ??
+						card.codexConfigurationProfileId,
+					codexConfigurationPermissionSelectionSource:
+						sideSessionLaunchSettings?.codexConfigurationPermissionSelectionSource ??
+						card.codexConfigurationPermissionSelectionSource,
 					cwd: taskCwd,
 					prompt: "",
 					images: undefined,
@@ -1878,8 +1949,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 				// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
 				// 靠它显式声明 stale_session_client_auto_resume 才分得开。
-				const refreshTaskSessionStartOrigin =
-					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal";
+				const refreshTaskSessionStartOrigin = configurationProfileAutomaticAdoptionGuard
+					? ("codex_configuration_profile_safe_auto_resume" as const)
+					: (body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal");
 				// 「从既有对话迁入」（只有人在终端面板上选定后才会带）：先迁入、钉身份，再按 id 续跑。
 				// 「从既有对话迁入」与「停止后台会话并在这里续跑」都只有人在终端面板上选定 / 确认后才会带：前者先迁入、
 				// 钉身份再按 id 续跑；后者在对话被 Claude 后台会话占着又不能安全收回时，不再看是否安全，停掉后续跑。
@@ -1963,6 +2035,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				let summary: RuntimeTaskSessionSummary | null = null;
 				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
+					await requestSessionOwnedBackgroundAgentExecutionCancellation({
+						workspaceId: workspaceScope.workspaceId,
+						taskId: taskConversationSessionId,
+					}).catch((error: unknown) => {
+						logAgentSessionRetentionWarning(
+							`后台 Agent 取消请求写入失败 taskId=${taskConversationSessionId} error=${String(error)}`,
+						);
+					});
 					const acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
 					const clineSummary = acpSummary
 						? null

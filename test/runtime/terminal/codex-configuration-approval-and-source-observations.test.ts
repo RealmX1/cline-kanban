@@ -57,6 +57,7 @@ describe("配置审批与来源提示", () => {
 		}
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const items = [first, second].map((binding) => {
 				const change = state.changes.find((entry) => entry.sourceWriterId === binding.writerId);
@@ -124,6 +125,7 @@ describe("配置审批与来源提示", () => {
 		await writeFile(filePath, stringify(configuration));
 		const dependencies = { listSessions: () => [], onUpdated: () => {} };
 		const service = createCodexConfigurationSyncService(dependencies);
+		await service.scan();
 		const state = await service.getState();
 		const model = state.changes.find((change) => change.fieldLabel.endsWith(" · model"));
 		const effort = state.changes.find((change) => change.fieldLabel.endsWith(" · model_reasoning_effort"));
@@ -208,6 +210,7 @@ describe("配置审批与来源提示", () => {
 		await writeFile(filePath, stringify(configuration));
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			expect(
 				(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[

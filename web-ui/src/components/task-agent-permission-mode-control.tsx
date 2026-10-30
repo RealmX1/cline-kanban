@@ -94,6 +94,7 @@ export function TaskAgentPermissionModeControl({
 	startInPlanMode,
 	disabled = false,
 	idPrefix,
+	selectionComesFromCodexProfile = false,
 }: {
 	value: RuntimeTaskAgentPermissionMode;
 	onChange: (value: RuntimeTaskAgentPermissionMode) => void;
@@ -105,6 +106,7 @@ export function TaskAgentPermissionModeControl({
 	startInPlanMode: boolean;
 	disabled?: boolean;
 	idPrefix: string;
+	selectionComesFromCodexProfile?: boolean;
 }): ReactElement {
 	// droid 的 autonomyMode 是单轴（spec / normal / auto-high）：勾了 plan 起步就写 spec，
 	// 这里选的档位根本不会被写入。这一点必须当场说出来。
@@ -121,7 +123,7 @@ export function TaskAgentPermissionModeControl({
 				)}
 			>
 				{TASK_AGENT_PERMISSION_MODE_OPTIONS.map((option) => {
-					const isSelected = option.value === value;
+					const isSelected = !selectionComesFromCodexProfile && option.value === value;
 					const degradation = resolveDegradationForOption(selectedAgentId, option.value);
 					return (
 						<Tooltip

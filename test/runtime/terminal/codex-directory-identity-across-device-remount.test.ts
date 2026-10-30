@@ -232,6 +232,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="slow-source-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
@@ -289,6 +290,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(sourceHome, "config.toml"), 'model="global-source-approved-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId.startsWith("user-source:") && change.approvalStatus === "pending",
@@ -331,6 +333,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="retired-local-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
@@ -382,6 +385,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		);
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const observed = await service.getState();
 			const proposal = observed.changes.find(
 				(change) => change.sourceWriterId === secondBinding.writerId && change.approvalStatus === "pending",

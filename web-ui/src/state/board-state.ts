@@ -42,6 +42,8 @@ import {
 } from "../../../src/core/api-contract";
 
 export interface TaskDraft {
+	codexConfigurationProfileId?: string;
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
@@ -260,6 +262,8 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	prompt: true,
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
+	codexConfigurationProfileId: true,
+	codexConfigurationPermissionSelectionSource: true,
 	autoReviewEnabled: true,
 	autoReviewMode: true,
 	images: true,
@@ -412,6 +416,13 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			: {}),
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
 		...(taskAgentPermissionMode !== undefined ? { taskAgentPermissionMode } : {}),
+		...(typeof card.codexConfigurationProfileId === "string" && card.codexConfigurationProfileId
+			? { codexConfigurationProfileId: card.codexConfigurationProfileId }
+			: {}),
+		...(card.codexConfigurationPermissionSelectionSource === "profile" ||
+		card.codexConfigurationPermissionSelectionSource === "task_local"
+			? { codexConfigurationPermissionSelectionSource: card.codexConfigurationPermissionSelectionSource }
+			: {}),
 		autoReviewEnabled: typeof card.autoReviewEnabled === "boolean" ? card.autoReviewEnabled : false,
 		autoReviewMode: resolveTaskAutoReviewMode(
 			typeof card.autoReviewMode === "string" ? (card.autoReviewMode as TaskAutoReviewMode) : undefined,
@@ -551,6 +562,8 @@ export function addTaskToColumnWithResult(
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
 			taskAgentPermissionMode: draft.taskAgentPermissionMode,
+			codexConfigurationProfileId: draft.codexConfigurationProfileId,
+			codexConfigurationPermissionSelectionSource: draft.codexConfigurationPermissionSelectionSource,
 			autoReviewEnabled: draft.autoReviewEnabled,
 			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
@@ -826,6 +839,15 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				taskAgentPermissionMode: shouldUpdateTaskAgentPermissionMode
 					? draft.taskAgentPermissionMode
 					: card.taskAgentPermissionMode,
+				codexConfigurationProfileId: Object.hasOwn(draft, "codexConfigurationProfileId")
+					? draft.codexConfigurationProfileId
+					: card.codexConfigurationProfileId,
+				codexConfigurationPermissionSelectionSource: Object.hasOwn(
+					draft,
+					"codexConfigurationPermissionSelectionSource",
+				)
+					? draft.codexConfigurationPermissionSelectionSource
+					: card.codexConfigurationPermissionSelectionSource,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
 				images: nextImages,

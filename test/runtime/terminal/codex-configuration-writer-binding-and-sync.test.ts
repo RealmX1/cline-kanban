@@ -32,6 +32,7 @@ import type { CodexAppServerRequestPort } from "../../../src/codex-native-sessio
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
 import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
+import { requireDefinedTestFixtureValue } from "../../utilities/require-defined-test-fixture-value";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixture: ReturnType<typeof createTempDir>;
@@ -257,9 +258,11 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		await changeConfiguration(second, (configuration) => {
 			configuration.model_reasoning_effort = "high";
 		});
+		await sync.scan();
 		const state = await sync.getState();
 		expect(state.changes).toHaveLength(2);
 		expect(state.changes.every((change) => change.mergeStatus === "shared_default_updated")).toBe(true);
+		await sync.scan();
 		await sync.scan();
 		expect((await sync.getState()).changes.map((change) => change.changeId)).toEqual(
 			state.changes.map((change) => change.changeId),
@@ -273,40 +276,66 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			"initial-model",
 		);
 	});
-	it("同字段冲突保留双方，版本门禁和幂等键防止重复覆盖", async () => {
+	it("普通同字段采用最后受理值，profile 版本与幂等身份保护后续更新", async () => {
 		const first = await writer("first"),
 			second = await writer("second");
-		const sync = service();
+		const sync = service(nativeOwnerMock().connect);
 		await changeConfiguration(first, (configuration) => {
-			configuration.model = "first-choice";
+			configuration.features = { shell_snapshot: true };
 		});
 		await sync.scan();
+		const originalProfile = requireDefinedTestFixtureValue(
+			requireDefinedTestFixtureValue((await sync.getState()).profiles)[0],
+		);
 		await changeConfiguration(second, (configuration) => {
-			configuration.model = "second-choice";
+			configuration.features = { shell_snapshot: false };
 		});
-		const conflict = (await sync.getState()).changes.find((change) => change.mergeStatus === "conflict");
-		expect(conflict).toBeDefined();
+		await sync.scan();
+		const latestProfile = requireDefinedTestFixtureValue(
+			requireDefinedTestFixtureValue((await sync.getState()).profiles)[0],
+		);
+		const fieldKey = JSON.stringify(["config.toml", "features", "shell_snapshot"]);
+		expect(latestProfile.fields.find((field) => field.fieldKey === fieldKey)?.value).toBe(false);
 		const input = {
-			changeId: conflict?.changeId ?? "",
-			expectedVersion: conflict?.version ?? 0,
+			action: "update" as const,
+			profileId: latestProfile.profileId,
+			expectedVersion: latestProfile.version,
+			fields: [{ fieldKey, value: true }],
 			idempotencyKey: randomUUID(),
-			resolution: "use_session_value" as const,
 		};
-		await sync.resolveConflict(input);
-		await sync.resolveConflict(input);
-		await expect(sync.resolveConflict({ ...input, idempotencyKey: randomUUID() })).rejects.toThrow("版本");
-		await expect(sync.acknowledge({ ...input })).rejects.toThrow("幂等键");
+		await expect(sync.mutateProfile({ ...input, expectedVersion: originalProfile.version })).rejects.toThrow(
+			"已更新",
+		);
+		await sync.mutateProfile(input);
+		await sync.mutateProfile(input);
+		await expect(sync.mutateProfile({ ...input, fields: [{ fieldKey, value: false }] })).rejects.toThrow("幂等身份");
 		expect(
 			parse(await readFile(join((await writer("future")).configurationHomeDirectoryPath, "config.toml"), "utf8"))
-				.model,
-		).toBe("second-choice");
+				.features,
+		).toEqual({ shell_snapshot: true });
 	});
 	it("禁用、显式不信任、删除及较新的重新启用都进入未来默认", async () => {
 		const first = await writer("first");
 		const sync = service();
 		for (const decision of [{ enabled: false }, { enabled: true, trusted_hash: "new-hash" }, {}] as TomlTable[]) {
 			await decideHook(first, decision);
-			await sync.scan();
+			await vi.waitFor(
+				async () => {
+					await sync.scan();
+					const stored = await readCodexConfigurationSyncStore();
+					const profileId = requireDefinedTestFixtureValue(
+						stored.writers[first.writerId].codexConfigurationProfileId,
+					);
+					const hookFieldKey = JSON.stringify([
+						"config.toml",
+						"hooks",
+						"state",
+						`${sourceHome}/hooks.json:stop:0:0`,
+					]);
+					expect(stored.profiles[profileId].fields[hookFieldKey]?.value).toEqual(decision);
+				},
+				{ timeout: 10_000 },
+			);
 			const future = await writer(randomUUID());
 			const configuration = parse(
 				await readFile(join(future.configurationHomeDirectoryPath, "config.toml"), "utf8"),
@@ -338,6 +367,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			configuration.api_key = "must-not-be-published";
 			configuration.sqlite_home = "must-not-be-shared";
 		});
+		await sync.scan();
 		const state = await sync.getState();
 		const change = state.changes.find((item) => item.sourceWriterId === first.writerId);
 		expect(change).toBeDefined();
@@ -356,6 +386,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		await changeConfiguration(first, (configuration) => {
 			configuration.model = "shared-model";
 		});
+		await sync.scan();
 		const modelChange = (await sync.getState()).changes.find((item) => item.fieldLabel.endsWith("model"));
 		expect(modelChange).toBeDefined();
 		const modelResult = await sync.synchronize({
@@ -368,12 +399,13 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			"pending_next_start",
 		);
 	});
-	it("只有显式开启同步才调用原所有者，默认操作只确认通知", async () => {
+	it("普通 hook 决定自动经原所有者传播，旧同步操作不会重复写入", async () => {
 		const first = await writer("first");
 		await writer("second");
 		const owner = nativeOwnerMock();
 		const sync = service(owner.connect);
 		await decideHook(first, { enabled: false });
+		await sync.scan();
 		const change = (await sync.getState()).changes[0];
 		const input = {
 			changeId: change.changeId,
@@ -382,7 +414,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			synchronizeExistingSessions: false,
 		};
 		await sync.synchronize(input);
-		expect(owner.writes).toHaveLength(0);
+		expect(owner.writes).toHaveLength(1);
 		const result = await sync.synchronize({
 			...input,
 			idempotencyKey: randomUUID(),
@@ -403,17 +435,12 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		const owner = nativeOwnerMock({ loseFirstReceipt: true });
 		const sync = service(owner.connect);
 		await decideHook(first, { enabled: false });
-		const change = (await sync.getState()).changes[0];
-		const input = {
-			changeId: change.changeId,
-			expectedVersion: change.version,
-			idempotencyKey: randomUUID(),
-			synchronizeExistingSessions: true,
-		};
-		const pending = await sync.synchronize(input);
+		await sync.scan();
+		const pending = await sync.getState();
 		expect(pending.changes[0].targets[0].status).toBe("pending_reload");
 		await sync.close();
 		const restarted = service(owner.connect);
+		await restarted.scan();
 		const restored = await restarted.getState();
 		expect(owner.writes).toHaveLength(2);
 		expect(owner.writes[1].edits).toEqual([]);
@@ -426,6 +453,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		const wrongOwner = nativeOwnerMock({ wrongOwner: true });
 		const sync = service(wrongOwner.connect);
 		await decideHook(first, { enabled: false });
+		await sync.scan();
 		const change = (await sync.getState()).changes[0];
 		await sync.synchronize({
 			changeId: change.changeId,
@@ -439,10 +467,12 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		await sync.close();
 		const correctOwner = nativeOwnerMock();
 		const restarted = service(correctOwner.connect);
+		await restarted.scan();
 		expect((await restarted.getState()).changes[0].targets[0].attemptCount).toBe(3);
 		const targetSummary = sessions.find((item) => item.summary.taskId === "second")?.summary;
 		if (targetSummary?.codexNativeSessionControlEndpoint)
 			targetSummary.codexNativeSessionControlEndpoint.socketPath += "-recovered";
+		await restarted.scan();
 		expect((await restarted.getState()).changes[0].targets[0].status).toBe("applied");
 		expect(correctOwner.writes).toHaveLength(1);
 	});
@@ -460,46 +490,79 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		await mkdir(sourceHome);
 		await expect(assertCodexConfigurationWriterBindingIdentity(replacement)).rejects.toThrow("已被替换");
 	});
-	it("目标会话冲突可明确选择来源值，保留冲突历史并拒绝陈旧的目标摘要", async () => {
+	it("局部模型选择持续到 profile 明确更新模型，其他字段不清除局部选择", async () => {
 		const first = await writer("first"),
 			second = await writer("second");
-		const owner = nativeOwnerMock();
-		const sync = service(owner.connect);
+		const sync = createCodexConfigurationSyncService({
+			listSessions: () => sessions,
+			onUpdated: () => {},
+			withOwnerConnection: nativeOwnerMock().connect,
+		});
+		services.push(sync);
 		await changeConfiguration(first, (configuration) => {
 			configuration.model = "shared-choice";
 		});
-		const change = (await sync.getState()).changes[0];
+		await sync.scan();
+		const suggestion = requireDefinedTestFixtureValue(
+			(await sync.getState()).changes.find((change) => change.approvalStatus === "pending"),
+		);
+		await sync.batchAction({
+			action: "approve",
+			items: [
+				{
+					entryKind: "settings_proposal",
+					changeId: suggestion.changeId,
+					expectedVersion: suggestion.version,
+					idempotencyKey: randomUUID(),
+				},
+			],
+		});
 		await changeConfiguration(second, (configuration) => {
 			configuration.model = "target-choice";
 		});
-		const result = await sync.synchronize({
-			changeId: change.changeId,
-			expectedVersion: change.version,
+		await sync.scan();
+		let state = await sync.getState();
+		const localSuggestion = requireDefinedTestFixtureValue(
+			state.changes.find(
+				(change) => change.sourceWriterId === second.writerId && change.approvalStatus === "pending",
+			),
+		);
+		let profile = requireDefinedTestFixtureValue(requireDefinedTestFixtureValue(state.profiles)[0]);
+		await sync.mutateProfile({
+			action: "update",
+			profileId: profile.profileId,
+			expectedVersion: profile.version,
+			fields: [{ fieldKey: JSON.stringify(["config.toml", "model_reasoning_effort"]), value: "high" }],
 			idempotencyKey: randomUUID(),
-			synchronizeExistingSessions: true,
 		});
-		const target = result.changes.find((item) => item.changeId === change.changeId)?.targets[0];
-		expect(target?.status).toBe("conflict");
-		const input = {
-			changeId: change.changeId,
-			expectedVersion: change.version,
-			idempotencyKey: randomUUID(),
-			targetWriterId: second.writerId,
-			expectedTargetValueDigest: target?.conflictingTargetValueDigest ?? "",
-			resolution: "use_source_change" as const,
-		};
-		await expect(sync.resolveTargetConflict({ ...input, expectedTargetValueDigest: "outdated" })).rejects.toThrow(
-			"新决定",
-		);
-		await sync.resolveTargetConflict(input);
-		await sync.resolveTargetConflict(input);
 		expect(parse(await readFile(join(second.configurationHomeDirectoryPath, "config.toml"), "utf8")).model).toBe(
-			"shared-choice",
+			"target-choice",
 		);
-		expect(
-			(await readCodexConfigurationSyncStore()).changes.find((item) => item.changeId === change.changeId)?.targets[0]
-				.conflictHistory,
-		).toHaveLength(2);
+		await sync.scan();
+		state = await sync.getState();
+		profile = requireDefinedTestFixtureValue(requireDefinedTestFixtureValue(state.profiles)[0]);
+		await sync.mutateProfile({
+			action: "update",
+			profileId: profile.profileId,
+			expectedVersion: profile.version,
+			fields: [{ fieldKey: JSON.stringify(["config.toml", "model"]), value: "new-profile-choice" }],
+			idempotencyKey: randomUUID(),
+		});
+		expect(parse(await readFile(join(second.configurationHomeDirectoryPath, "config.toml"), "utf8")).model).toBe(
+			"new-profile-choice",
+		);
+		const staleFeedback = await sync.batchAction({
+			action: "approve",
+			items: [
+				{
+					entryKind: "settings_proposal",
+					changeId: localSuggestion.changeId,
+					expectedVersion: localSuggestion.version,
+					idempotencyKey: randomUUID(),
+				},
+			],
+		});
+		expect(staleFeedback.results[0].status).not.toBe("applied");
 	});
 	it("已应用操作不会吞掉目标后来重新选择旧值的明确决定", async () => {
 		const first = await writer("first"),
@@ -507,6 +570,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		const owner = nativeOwnerMock();
 		const sync = service(owner.connect);
 		await decideHook(first, { enabled: false });
+		await sync.scan();
 		let change = (await sync.getState()).changes[0];
 		await sync.synchronize({
 			changeId: change.changeId,
@@ -515,6 +579,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			synchronizeExistingSessions: true,
 		});
 		await decideHook(first, { enabled: true });
+		await sync.scan();
 		change = (await sync.getState()).changes[0];
 		await sync.synchronize({
 			changeId: change.changeId,
@@ -523,6 +588,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			synchronizeExistingSessions: true,
 		});
 		await decideHook(second, { enabled: false });
+		await sync.scan();
 		const state = await sync.getState();
 		expect(state.changes.find((item) => item.sourceWriterId === second.writerId)?.valueSummary).toContain("已禁用");
 	});
@@ -534,6 +600,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		await changeConfiguration(first, (configuration) => {
 			configuration.model = "next-start-choice";
 		});
+		await sync.scan();
 		const change = (await sync.getState()).changes[0];
 		const pending = await sync.synchronize({
 			changeId: change.changeId,
@@ -543,6 +610,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		});
 		expect(pending.changes[0].targets[0].status).toBe("pending_next_start");
 		const replacement = await writer("second", second);
+		await sync.scan();
 		const state = await sync.getState();
 		expect(state.changes.find((item) => item.changeId === change.changeId)?.targets[0]).toMatchObject({
 			status: "applied",
@@ -628,6 +696,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		});
 		await sync.scan();
 		await writeFile(join(sourceHome, "config.toml"), 'model="user-global-choice"\n');
+		await sync.scan();
 		const state = await sync.getState();
 		expect(
 			state.changes.find(
@@ -646,6 +715,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		const targetSummary = sessions.find((item) => item.summary.taskId === "second")?.summary;
 		if (targetSummary) targetSummary.codexNativeSessionControlEndpoint = null;
 		await decideHook(first, { enabled: false });
+		await sync.scan();
 		const change = (await sync.getState()).changes[0];
 		await sync.synchronize({
 			changeId: change.changeId,
@@ -653,7 +723,9 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			idempotencyKey: randomUUID(),
 			synchronizeExistingSessions: true,
 		});
+		await sync.scan();
 		const revision = (await sync.getState()).revision;
+		await sync.scan();
 		await sync.scan();
 		await sync.scan();
 		expect((await sync.getState()).revision).toBe(revision);

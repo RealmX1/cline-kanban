@@ -185,6 +185,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		);
 		services.push(instance);
 		await decideHook(origin, selection, { enabled: false });
+		await instance.scan();
 		const change = (await instance.getState()).changes.find((item) => item.sourceWriterId === origin.writerId);
 		if (!change) throw new Error("缺少测试中的 hook 变化");
 		const unknown = await instance.synchronize({
@@ -201,6 +202,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			ownerReloadedAt: null,
 		});
 		await writeFile(definitionPath, JSON.stringify({ hooks: definition }));
+		await instance.scan();
 		const recovered = await instance.getState();
 		expect(recovered.observationProblem).toBeNull();
 		expect(batchWriteCount).toBe(1);
@@ -250,6 +252,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		);
 		services.push(instance);
 		await decideHook(origin, selection, { enabled: false });
+		await instance.scan();
 		const change = (await instance.getState()).changes.find((item) => item.sourceWriterId === origin.writerId);
 		if (!change) throw new Error("缺少测试中的 hook 变化");
 		await instance.synchronize({
@@ -258,10 +261,11 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			idempotencyKey: "target-definition-recovery",
 			synchronizeExistingSessions: true,
 		});
-		for (let index = 0; index < 4; index++) await instance.getState();
+		for (let index = 0; index < 4; index++) await instance.scan();
 		expect(ownerConnectionAttempts).toBe(3);
 		const path = join(target.configurationHomeDirectoryPath, "hooks.json");
 		await writeFile(path, "{broken-json");
+		await instance.scan();
 		const unknown = await instance.getState();
 		expect(unknown.observationProblem).toBeTruthy();
 		expect(unknown.changes.find((item) => item.changeId === change.changeId)?.targets[0]).toMatchObject({
@@ -270,6 +274,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		});
 		expect(ownerConnectionAttempts).toBe(3);
 		await writeFile(path, JSON.stringify({ hooks: definition }));
+		await instance.scan();
 		const recovered = await instance.getState();
 		expect(recovered.observationProblem).toBeNull();
 		expect(ownerConnectionAttempts).toBeGreaterThan(3);
@@ -281,6 +286,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			path,
 			JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "different-definition" }] }] } }),
 		);
+		await instance.scan();
 		const mismatch = await instance.getState();
 		expect(mismatch.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe(
 			"not_applicable",
@@ -301,6 +307,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			];
 			for (const decision of decisions) {
 				await decideHook(origin, selection, decision);
+				await instance.scan();
 				expect((await instance.getState()).observationProblem).toBeNull();
 				const stored = await readCodexConfigurationSyncStore();
 				expect(stored.sources[origin.sourceIdentity].fields[fieldKey(selection)]?.value).toEqual(decision);
@@ -329,6 +336,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		const configuration = parse(await readFile(join(sourceHome, "config.toml"), "utf8"));
 		configuration.model = "independently-updated-model";
 		await writeFile(join(sourceHome, "config.toml"), stringify(configuration));
+		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeTruthy();
 		const stored = await readCodexConfigurationSyncStore();
 		expect(stored.sources[origin.sourceIdentity].fields[fieldKey(selection)]).toEqual(initial);
@@ -337,6 +345,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		);
 		expect(stored.changes.filter((change) => change.fieldKey === fieldKey(selection))).toHaveLength(0);
 		await writeFile(selection.definitionFilePath, JSON.stringify({ hooks: definition }));
+		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeNull();
 	});
 	it.each(["missing", "broken_json"])(
@@ -352,6 +361,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			if (failure === "missing") await rm(path);
 			else await writeFile(path, "{broken-json");
 			await decideHook(origin, selection, { enabled: false });
+			await instance.scan();
 			expect((await instance.getState()).observationProblem).toBeTruthy();
 			let stored = await readCodexConfigurationSyncStore();
 			expect(stored.sources[origin.sourceIdentity].fields[fieldKey(selection)]).toEqual(initial);
@@ -379,6 +389,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		const conflictingRoot = join(sourceHome, "plugins", "cache", "fixture-marketplace", "example", "2.0.0");
 		await mkdir(conflictingRoot);
 		const instance = service();
+		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeTruthy();
 		expect(
 			(await readCodexConfigurationSyncStore()).sources[origin.sourceIdentity].fields[fieldKey(selection)],
@@ -394,6 +405,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		expect(
 			await readCodexHookDefinitionDigest(sourceHome, sourceHome, `${pluginId}:../../outside.json:stop:0:0`),
 		).toBeUndefined();
+		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeNull();
 	});
 });

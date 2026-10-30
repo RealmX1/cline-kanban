@@ -68,6 +68,7 @@ export function doesTaskSessionStartOriginCountAsHumanInterventionClearingAutoRe
 		case "resume_reclaimed_task_session_for_pending_user_decision_answer_delivery":
 			return true;
 		case "auto_restart_after_pty_exit":
+		case "codex_configuration_profile_safe_auto_resume":
 		case "stale_session_client_auto_resume":
 		case "home_agent_panel_auto_start":
 		case "durable_record_rebuilt_resume":

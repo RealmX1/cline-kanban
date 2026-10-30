@@ -35,6 +35,8 @@ export {
 };
 
 export interface RuntimeCreateTaskInput {
+	codexConfigurationProfileId?: string;
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskId?: string;
 	title?: string;
 	prompt: string;
@@ -67,6 +69,8 @@ export interface RuntimeCreateTaskInput {
 }
 
 export interface RuntimeUpdateTaskInput {
+	codexConfigurationProfileId?: string | null;
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local" | null;
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
@@ -251,6 +255,10 @@ export function addTaskToColumn(
 		globalDefaultSessionTransportForNewTasks: input.ompAgentSessionTransportForNewTasks,
 	});
 	const task: RuntimeBoardCard = {
+		...(input.codexConfigurationProfileId ? { codexConfigurationProfileId: input.codexConfigurationProfileId } : {}),
+		...(input.codexConfigurationPermissionSelectionSource
+			? { codexConfigurationPermissionSelectionSource: input.codexConfigurationPermissionSelectionSource }
+			: {}),
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
 		prompt,
@@ -608,6 +616,14 @@ export function updateTask(
 				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
+				codexConfigurationProfileId:
+					input.codexConfigurationProfileId === undefined
+						? card.codexConfigurationProfileId
+						: (input.codexConfigurationProfileId ?? undefined),
+				codexConfigurationPermissionSelectionSource:
+					input.codexConfigurationPermissionSelectionSource === undefined
+						? card.codexConfigurationPermissionSelectionSource
+						: (input.codexConfigurationPermissionSelectionSource ?? undefined),
 				title: resolveTaskTitle(input.title, prompt),
 				prompt,
 				startInPlanMode: Boolean(input.startInPlanMode),

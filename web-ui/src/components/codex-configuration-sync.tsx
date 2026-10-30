@@ -1,6 +1,7 @@
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { ChevronDown, ClipboardCheck } from "lucide-react";
 import { useId, useState } from "react";
+import { CodexConfigurationProfileManagement } from "@/components/codex-configuration-profile-management";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
@@ -21,7 +22,7 @@ const configurationChangeMergeStatusDescriptions: Record<
 	Exclude<CodexConfigurationChange["mergeStatus"], "shared_default_updated">,
 	string
 > = {
-	pending_approval: "待审批。通过后更新未来看板会话默认；来源会话保留本地改动。",
+	pending_approval: "待反馈。明确反馈将更新 profile 并广播；未反馈时保留局部选择。",
 	conflict: "检测到的设置与共享默认存在冲突，双方决定均已保留。",
 	superseded: "共享默认已有较新决定；来源会话保留自己的配置。",
 	kept_shared_value: "已保留共享默认。",
@@ -40,13 +41,34 @@ function CodexConfigurationChangeActions({
 	const synchronizationToggleId = useId();
 	const disabled = controller.pendingChangeId !== null;
 	const isPending = controller.pendingChangeId === change.changeId;
+	const isProfileManaged = Boolean(change.codexConfigurationProfileId);
+	const feedbackExpired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
 	return (
 		<article className="min-w-0 py-3" aria-label={`来自 ${change.sourceConversationSessionId} 的配置变更`}>
 			<p className="m-0 text-sm font-medium text-text-primary break-words">{change.fieldLabel}</p>
+			{change.profileName && (
+				<p className="mt-1 mb-0 text-xs text-text-secondary">
+					{change.profileName} ·{" "}
+					{change.sharingScope === "all_profiles_hook_trust"
+						? "同来源同定义的所有 profile"
+						: "所属 profile 的现有及未来会话"}
+				</p>
+			)}
+			{change.feedbackExpiresAtMs !== undefined && (
+				<p className="mt-1 mb-0 text-xs text-text-secondary">
+					{change.approvalStatus === "approved"
+						? "已反馈到 profile；所属现有和未来会话自动采用。"
+						: change.approvalStatus === "historical"
+							? "此反馈机会已被较新决定取代；当前有效值与采用进度见 profile。"
+							: feedbackExpired || change.approvalStatus === "expired"
+								? "反馈机会已结束，局部选择保留。"
+								: `本次仅调整当前会话；可在 ${new Date(change.feedbackExpiresAtMs).toLocaleTimeString()} 前反馈到 profile。`}
+				</p>
+			)}
 			{change.approvalStatus === "rejected" && (
 				<p className="mt-1 text-xs text-text-secondary">已拒绝采纳到看板默认。来源会话保留自己的配置。</p>
 			)}
-			{change.approvalStatus === "historical" && (
+			{change.approvalStatus === "historical" && change.feedbackExpiresAtMs === undefined && (
 				<p className="mt-1 text-xs text-text-secondary">升级前的历史事实，保留此前已采用的默认值。</p>
 			)}
 			<p className="mt-1 mb-0 text-xs text-text-secondary break-words">
@@ -63,12 +85,14 @@ function CodexConfigurationChangeActions({
 			)}
 			<p className="mt-1 mb-2 text-xs text-text-secondary">
 				{change.mergeStatus === "shared_default_updated"
-					? change.sourceWriterId.startsWith("user-source:")
-						? "已用于未来会话。现有会话保持各自配置。"
-						: "已用于本会话及未来会话。现有会话保持各自配置。"
+					? isProfileManaged
+						? "profile 已更新，正在自动广播；实际采用见下方进度。"
+						: change.sourceWriterId.startsWith("user-source:")
+							? "已用于未来会话。现有会话保持各自配置。"
+							: "已用于本会话及未来会话。现有会话保持各自配置。"
 					: configurationChangeMergeStatusDescriptions[change.mergeStatus]}
 			</p>
-			{change.approvalStatus === "pending" && change.mergeStatus !== "conflict" ? (
+			{change.approvalStatus === "pending" && change.mergeStatus !== "conflict" && !feedbackExpired ? (
 				<div className="flex flex-wrap gap-2">
 					<Button
 						size="sm"
@@ -80,7 +104,7 @@ function CodexConfigurationChangeActions({
 							]);
 						}}
 					>
-						通过
+						{isProfileManaged ? "反馈到 profile 并广播" : "通过"}
 					</Button>
 					<Button
 						size="sm"
@@ -91,7 +115,7 @@ function CodexConfigurationChangeActions({
 							]);
 						}}
 					>
-						拒绝
+						{isProfileManaged ? "保留本次局部选择" : "拒绝"}
 					</Button>
 				</div>
 			) : change.mergeStatus === "conflict" && change.approvalStatus === "pending" ? (
@@ -115,7 +139,7 @@ function CodexConfigurationChangeActions({
 						保留共享默认
 					</Button>
 				</div>
-			) : change.mergeStatus === "shared_default_updated" ? (
+			) : change.mergeStatus === "shared_default_updated" && !isProfileManaged ? (
 				<>
 					<div className="flex items-start gap-2 text-xs text-text-primary">
 						<RadixSwitch.Root
@@ -165,7 +189,7 @@ function CodexConfigurationChangeActions({
 					</div>
 				</>
 			) : null}
-			{change.mergeStatus !== "shared_default_updated" && change.acknowledgedAt === null && (
+			{change.mergeStatus !== "shared_default_updated" && change.acknowledgedAt === null && !feedbackExpired && (
 				<Button
 					className="mt-2"
 					size="sm"
@@ -240,8 +264,16 @@ function CodexConfigurationReviewList({
 			(!remindersOnly || (change.acknowledgedAt === null && change.recordKind !== "historical_record")) &&
 			matching(`${change.fieldLabel} ${change.sourceConversationSessionId} ${change.sourceWorkspaceId}`),
 	);
-	const proposals = changes.filter((change) => change.approvalStatus === "pending");
-	const history = changes.filter((change) => change.approvalStatus !== "pending");
+	const proposals = changes.filter(
+		(change) =>
+			change.approvalStatus === "pending" &&
+			(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
+	);
+	const history = changes.filter(
+		(change) =>
+			change.approvalStatus !== "pending" ||
+			(change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now()),
+	);
 	const observations = (controller.state?.sourceObservations ?? []).filter(
 		(observation) => (!remindersOnly || observation.acknowledgedAt === null) && matching(observation.sourceLabel),
 	);
@@ -280,7 +312,7 @@ function CodexConfigurationReviewList({
 				{(
 					[
 						["all", "全部"],
-						["settings", "设置待审批"],
+						["settings", "设置待反馈"],
 						["sources", "来源更新"],
 						...(!remindersOnly ? [["history", "历史记录"]] : []),
 					] as Array<[ReviewFilter, string]>
@@ -349,9 +381,9 @@ function CodexConfigurationReviewList({
 				</div>
 			)}
 			{(filter === "all" || filter === "settings") && (
-				<div role="group" aria-label="设置待审批">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">设置待审批 · {proposals.length}</h3>
-					{proposals.length === 0 && <p className="text-xs text-text-secondary">暂无待审批设置。</p>}
+				<div role="group" aria-label="设置待反馈">
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">设置待反馈 · {proposals.length}</h3>
+					{proposals.length === 0 && <p className="text-xs text-text-secondary">暂无待反馈设置。</p>}
 					<div className="divide-y divide-border">
 						{proposals.map((change) => (
 							<div key={change.changeId} className="flex min-w-0 items-start gap-2">
@@ -467,7 +499,7 @@ function CodexConfigurationReviewList({
 
 export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexConfigurationSyncNoticePresentation }) {
 	if (!notice.hasReminders) return null;
-	const summary = `待审批 ${notice.pendingApprovalCount} 项 · 来源更新 ${notice.sourceUpdateCount} 条`;
+	const summary = `待反馈 ${notice.pendingApprovalCount} 项 · 来源更新 ${notice.sourceUpdateCount} 条`;
 	return (
 		<button
 			ref={notice.summaryButtonRef}
@@ -523,7 +555,7 @@ export function CodexConfigurationSyncNotice({
 		>
 			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2 sm:px-4">
 				<span className="min-w-0 text-xs font-medium text-text-primary" role="status">
-					待审批 {notice.pendingApprovalCount} 项 · 来源更新 {notice.sourceUpdateCount} 条
+					待反馈 {notice.pendingApprovalCount} 项 · 来源更新 {notice.sourceUpdateCount} 条
 				</span>
 				<div className="flex shrink-0 items-center gap-1">
 					<Button
@@ -576,8 +608,10 @@ export function CodexConfigurationSyncSettings({
 				<h2 className="m-0 text-base font-semibold text-text-primary">Codex 配置同步</h2>
 			</div>
 			<p className="text-[13px] text-text-secondary">
-				真实设置变化先审批，通过后更新未来看板会话默认。来源会话保留本地改动；同步到现有会话需单独选择。
+				普通设置自动共享到所属 profile。模型、Effort、权限先保留为本次局部选择，十分钟内可一次反馈并广播。hook
+				信任按可信来源和相同定义跨 profile 复用。
 			</p>
+			{controller.state && <CodexConfigurationProfileManagement controller={controller} />}
 			{controller.state?.diagnosticCoverage && (
 				<p className="text-xs text-text-secondary" role="status">
 					基础诊断：

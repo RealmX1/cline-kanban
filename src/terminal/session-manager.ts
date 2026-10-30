@@ -4,6 +4,7 @@ import {
 	persistAutomaticAgentFailureContinuation,
 	readAutomaticAgentFailureContinuations,
 } from "../state/automatic-agent-failure-continuation-store";
+import { hasSessionOwnedBackgroundAgentExecutionRequiringRetention } from "../state/session-owned-background-agent-executions";
 import {
 	type AutomaticFailureContinuationAttemptResult,
 	claudeAutomaticFailureContinuationMayStartWrite,
@@ -20,19 +21,33 @@ import {
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 
 import { createHash, randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import {
 	type CodexPromptSubmissionAcceptanceReconciliation,
+	reconcileCodexPromptSubmissionAcceptance,
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
+import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
+import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
+import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
+import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import {
 	buildCodexConfigurationWriterEnvironment,
 	prepareCodexConfigurationWriterBinding,
 	recordCodexConfigurationWriterLaunchArguments,
 } from "../codex-configuration-sync/codex-configuration-writer-binding";
+import { readCodexProfileAdoptionNativeTurnCompletionEvidence } from "../codex-configuration-sync/codex-profile-adoption-native-turn-completion-evidence";
+import {
+	appendCodexProfileAdoptionRetainedInput,
+	createCodexProfileAdoptionRetainedInput,
+	listUnrestoredCodexProfileAdoptionRetainedInput,
+	readCodexProfileAdoptionRetainedInput,
+	saveCodexProfileAdoptionRetainedInput,
+} from "../codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -103,7 +118,10 @@ import type {
 	TerminalInputBoxStashOutcome,
 } from "../core/api-contract";
 import { runtimeTaskSessionSummarySchema } from "../core/api-contract";
-import type { CodexConfigurationWriterBinding } from "../core/codex-configuration-sync-contract";
+import type {
+	CodexConfigurationProfileAutomaticAdoptionGuard,
+	CodexConfigurationWriterBinding,
+} from "../core/codex-configuration-sync-contract";
 import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
@@ -743,6 +761,9 @@ interface SessionEntry {
 }
 
 export interface StartTaskSessionRequest {
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
+	configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard;
+	codexConfigurationProfileId?: string;
 	taskId: string;
 	automaticFailureContinuationEpisodeId?: string;
 	workspaceTaskId?: string;
@@ -1356,6 +1377,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		Promise<void>
 	>();
 	private humanTerminalInputMutationSequenceNumber = 0;
+	private readonly terminalInputRetainedDuringCodexProfileReplacement = new Map<string, string>();
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		number
@@ -6052,6 +6074,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		const runtimeSessionIncarnationId = randomUUID();
 		let codexConfigurationWriterBinding: CodexConfigurationWriterBinding | null = null;
+		let codexConfigurationProfileLaunchFields: CodexConfigurationFields | undefined;
 		const codexConversationStorageHomeDirectoryPath =
 			request.agentId === "codex" ? request.env?.CODEX_HOME : undefined;
 		let kanbanAssignedAgentNativeConversationSessionIdForFreshStart: string | undefined;
@@ -6071,6 +6094,15 @@ export class TerminalSessionManager implements TerminalSessionService {
 				this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions
 			) {
 				codexConfigurationWriterBinding = await prepareCodexConfigurationWriterBinding({
+					nativeLaunchArguments: request.args,
+					sessionModelId:
+						request.terminalAgentModelOverrideSettings?.agentId === "codex"
+							? request.terminalAgentModelOverrideSettings.modelId
+							: undefined,
+					sessionPermissionMode: request.taskAgentPermissionMode,
+					sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
+					codexConfigurationProfileId:
+						request.codexConfigurationProfileId ?? entry.summary.codexConfigurationProfileId,
 					purpose: "native_session",
 					storageHome: request.env?.CODEX_HOME ?? resolveUserCodexHomeDirectoryPath(),
 					sqliteHome: request.env?.CODEX_SQLITE_HOME,
@@ -6089,8 +6121,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 					...request,
 					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
 				};
+				codexConfigurationProfileLaunchFields = (await readCodexConfigurationSyncStore()).writers[
+					codexConfigurationWriterBinding.writerId
+				]?.launchBaselineFields;
+				const effectiveModel =
+					codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model"])]?.value;
+				if (typeof effectiveModel === "string")
+					request = {
+						...request,
+						terminalAgentModelOverrideSettings: { agentId: "codex", modelId: effectiveModel },
+					};
 			}
 			launch = await prepareAgentLaunch({
+				codexConfigurationProfileLaunchFields,
 				taskId: request.taskId,
 				taskConversationSessionMetadata: taskConversationSessionMetadataForLaunch,
 				agentId: request.agentId,
@@ -6594,6 +6637,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 						}
 					: null,
 			codexConfigurationWriterBinding,
+			...(request.agentId === "codex"
+				? { codexConfigurationProfileAutomaticProcessReplacementCancelled: false }
+				: {}),
+			codexConfigurationProfileId:
+				codexConfigurationWriterBinding?.codexConfigurationProfileId ?? request.codexConfigurationProfileId,
+			codexConfigurationPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
+			codexEffectivePermissionMode:
+				taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way"
+					? "ask_for_every_tool_use"
+					: codexConfigurationProfileLaunchFields
+						? codexConfigurationPermissionMode(codexConfigurationProfileLaunchFields)
+						: null,
 			agentConversationPromptSubmissionAcceptance: null,
 			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath } : {}),
 			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
@@ -7242,17 +7297,36 @@ export class TerminalSessionManager implements TerminalSessionService {
 
 	writeInput(taskId: string, data: Buffer): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
+		const isTerminalProtocolResponseOnly =
+			// biome-ignore lint/suspicious/noControlCharactersInRegex: 终端协议必须识别 ESC/BEL 控制字符。
+			/^(?:\u001b\[(?:\??\d+;\d+R|[?>][\d;]*c|\??[\d;]+n|\?[\d;]+\$y|[\d;]+t|[IO]|<[\d;]+[Mm]|M[\x20-\xff]{3})|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\)+(?![\s\S])/.test(
+				data.toString("latin1"),
+			);
+		const retainedInput = this.terminalInputRetainedDuringCodexProfileReplacement.get(taskId);
+		if (entry && retainedInput && data.length > 0 && !isTerminalProtocolResponseOnly) {
+			appendCodexProfileAdoptionRetainedInput(retainedInput, data);
+			const retainedByteCount = Buffer.from(
+				readCodexProfileAdoptionRetainedInput(retainedInput).bytesBase64,
+				"base64",
+			).length;
+			this.emitSummary(
+				updateSummary(entry, {
+					codexConfigurationProfileRetainedInputRecovery: {
+						retainedInputRecordPath: retainedInput,
+						retainedByteCount,
+						reason: "正在安全续接，新的终端输入已持久保留，等待原生输入框就绪。",
+					},
+				}),
+			);
+			return cloneSummary(entry.summary);
+		}
 		if (!entry?.active) {
 			return null;
 		}
 		// xterm 的查询应答、焦点和鼠标报告也经 io WebSocket 到这里；它们不是人工接管。
 		// onData/onBinary 每次 send 保留完整消息边界；只豁免整条协议报告，混入按键仍走人工输入。
 		// ponytail: 按当前 xterm 协议识别；若增加新的报告类型，在这里补协议及回归，不泛化豁免所有 ESC。
-		const isTerminalProtocolResponseOnly =
-			// biome-ignore lint/suspicious/noControlCharactersInRegex: 终端协议必须识别 ESC/BEL 控制字符。
-			/^(?:\u001b\[(?:\??\d+;\d+R|[?>][\d;]*c|\??[\d;]+n|\?[\d;]+\$y|[\d;]+t|[IO]|<[\d;]+[Mm]|M[\x20-\xff]{3})|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\)+(?![\s\S])/.test(
-				data.toString("latin1"),
-			);
+
 		if (data.length === 0 || isTerminalProtocolResponseOnly) {
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
@@ -7912,6 +7986,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	async inspectCodexNativeTurnBeforeReviewSessionReclamation(
 		taskId: string,
 	): Promise<"allow_reclamation" | "defer_reclamation"> {
+		const workspaceId = this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+		if (workspaceId && (await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({ workspaceId, taskId }))) {
+			return "defer_reclamation";
+		}
 		const entry = this.entries.get(taskId);
 		if (!entry?.active || !isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary))
 			return "allow_reclamation";
@@ -8957,6 +9035,190 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	applyCodexConfigurationProfileBinding(taskId: string, profileId: string): void {
+		const entry = this.entries.get(taskId);
+		if (!entry || entry.summary.agentId !== "codex") return;
+		if (entry.restartRequest?.kind === "task") {
+			entry.restartRequest.request.codexConfigurationProfileId = profileId;
+			entry.restartRequest.request.codexConfigurationPermissionSelectionSource = "profile";
+		}
+		const metadata = entry.summary.taskConversationSessionMetadata;
+		const summary = updateSummary(entry, {
+			codexConfigurationProfileId: profileId,
+			codexConfigurationPermissionSelectionSource: "profile",
+			...(metadata?.taskConversationSessionLaunchSettings
+				? {
+						taskConversationSessionMetadata: {
+							...metadata,
+							taskConversationSessionLaunchSettings: {
+								...metadata.taskConversationSessionLaunchSettings,
+								codexConfigurationProfileId: profileId,
+								codexConfigurationPermissionSelectionSource: "profile",
+							},
+						},
+					}
+				: {}),
+		});
+		this.emitSummary(summary);
+	}
+
+	getPendingCodexProfileProcessReplacementRetainedInputRecordPath(taskId: string): string | undefined {
+		const summary = this.entries.get(taskId)?.summary;
+		if (summary?.codexConfigurationProfileAutomaticProcessReplacementCancelled) return;
+		return listUnrestoredCodexProfileAdoptionRetainedInput().find(
+			({ record }) =>
+				record.conversationSessionId === taskId &&
+				record.nativeSessionId === summary?.agentNativeConversationSessionIdentity?.nativeSessionId &&
+				record.automaticProcessReplacementContinuationStatus === "pending_automatic_start",
+		)?.path;
+	}
+
+	private cancelPendingCodexProfileProcessReplacement(taskId: string): void {
+		const entry = this.entries.get(taskId);
+		if (
+			entry &&
+			(entry.summary.codexConfigurationProfileRetainedInputRecovery ||
+				this.terminalInputRetainedDuringCodexProfileReplacement.has(taskId))
+		)
+			this.emitSummary(
+				updateSummary(entry, { codexConfigurationProfileAutomaticProcessReplacementCancelled: true }),
+			);
+		try {
+			for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput()) {
+				if (
+					record.conversationSessionId !== taskId ||
+					record.automaticProcessReplacementContinuationStatus !== "pending_automatic_start" ||
+					(record.nativeSessionId !== entry?.summary.agentNativeConversationSessionIdentity?.nativeSessionId &&
+						path !== entry?.summary.codexConfigurationProfileRetainedInputRecovery?.retainedInputRecordPath)
+				)
+					continue;
+				record.automaticProcessReplacementContinuationStatus = "cancelled_by_explicit_stop";
+				saveCodexProfileAdoptionRetainedInput(path, record);
+				this.terminalInputRetainedDuringCodexProfileReplacement.delete(taskId);
+			}
+		} catch {
+			/* 记录不可读不能阻止 Stop；summary 中的取消事实仍拦截自动恢复。 */
+		}
+	}
+
+	async restoreTerminalInputRetainedDuringCodexProfileAdoption(): Promise<void> {
+		for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput()) {
+			const entry = this.entries.get(record.conversationSessionId);
+			if (
+				!entry ||
+				(entry.restartRequest?.kind === "task"
+					? entry.restartRequest.request.workspaceId
+					: entry.summary.codexNativeSessionControlEndpoint?.workspaceId) !== record.workspaceId ||
+				entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.nativeSessionId
+			)
+				continue;
+			if (
+				!entry.active &&
+				!entry.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled &&
+				record.automaticProcessReplacementContinuationStatus === "pending_automatic_start"
+			) {
+				this.terminalInputRetainedDuringCodexProfileReplacement.set(record.conversationSessionId, path);
+				if (entry.summary.codexConfigurationProfileRetainedInputRecovery?.retainedInputRecordPath !== path)
+					this.emitSummary(
+						updateSummary(entry, {
+							codexConfigurationProfileRetainedInputRecovery: {
+								retainedInputRecordPath: path,
+								retainedByteCount: Buffer.from(record.bytesBase64, "base64").length,
+								reason: "已恢复持久的 profile 启动记录，条件满足后自动继续同一原生会话。",
+							},
+						}),
+					);
+			}
+			if (record.status === "restore_submission_started") {
+				if (record.acceptanceCandidate && entry.summary.runtimeSessionIncarnationId) {
+					const reconciliation = await reconcileCodexPromptSubmissionAcceptance({
+						summary: {
+							...entry.summary,
+							agentConversationPromptSubmissionAcceptance: {
+								...record.acceptanceCandidate,
+								runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+							},
+						},
+						observedAtMs: Date.now(),
+					});
+					if (reconciliation) {
+						record.acceptanceCandidate.verification = reconciliation.verification;
+						if (reconciliation.accepted) {
+							record.status = "restored";
+							saveCodexProfileAdoptionRetainedInput(path, record);
+							this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
+							continue;
+						}
+						saveCodexProfileAdoptionRetainedInput(path, record);
+					}
+				}
+				this.emitSummary(
+					updateSummary(entry, {
+						codexConfigurationProfileRetainedInputRecovery: {
+							retainedInputRecordPath: path,
+							retainedByteCount: Buffer.from(record.bytesBase64, "base64").length,
+							reason: "恢复提交可能已开始，回执未知；保留输入记录，等待原生接受证据，不自动重复提交。",
+						},
+					}),
+				);
+				continue;
+			}
+			const active = entry.active;
+			const inputSnapshot = this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId);
+			if (!active || (await this.resolveInteractivePromptReadiness(entry)) !== "prompt") continue;
+			const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(record.conversationSessionId);
+			if (
+				entry.active !== active ||
+				!occupancy ||
+				occupancy.hasUncommittedInput ||
+				occupancy.screenReadingSaysNonEmpty !== false ||
+				inputSnapshot?.humanTerminalInputMutationSequenceNumber !==
+					this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId)
+						?.humanTerminalInputMutationSequenceNumber
+			)
+				continue;
+			const current = readCodexProfileAdoptionRetainedInput(path);
+			if (current.status !== "capturing") continue;
+			current.status = "restore_submission_started";
+			const bytes = Buffer.from(current.bytesBase64, "base64");
+			// 仅可还原成一条正文提交的输入才做转录补证；编辑按键与草稿保留未知，不猜测提交事实。
+			const submittedText = bytes.toString("utf8").replaceAll("\u001b[200~", "").replaceAll("\u001b[201~", "");
+			if (
+				submittedText.endsWith("\r") &&
+				!["\r", "\u001b", "\b"].some((character) => submittedText.slice(0, -1).includes(character)) &&
+				entry.summary.runtimeSessionIncarnationId
+			)
+				current.acceptanceCandidate = {
+					status: "pending",
+					attemptedAtMs: Date.now(),
+					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+					nativeSessionId: record.nativeSessionId,
+					submittedPromptSha256: submittedPromptSha256(submittedText.slice(0, -1)),
+					predecessorAcceptedEventId: entry.summary.agentConversationPromptSubmissionAcceptance?.eventId,
+				};
+			saveCodexProfileAdoptionRetainedInput(path, current);
+			this.terminalInputRetainedDuringCodexProfileReplacement.delete(record.conversationSessionId);
+			if (bytes.length) this.writeInput(record.conversationSessionId, bytes);
+			current.status = "restored";
+			saveCodexProfileAdoptionRetainedInput(path, current);
+			this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
+		}
+	}
+
+	applyCodexEffectivePermissionMode(taskId: string, fields: CodexConfigurationFields | null): void {
+		const entry = this.entries.get(taskId);
+		if (!entry || entry.summary.agentId !== "codex") return;
+		const mode =
+			entry.summary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
+				? "ask_for_every_tool_use"
+				: fields
+					? codexConfigurationPermissionMode(fields)
+					: null;
+		if (entry.summary.codexEffectivePermissionMode === mode) return;
+		const summary = updateSummary(entry, { codexEffectivePermissionMode: mode });
+		this.emitSummary(summary);
+	}
+
 	applyTaskConversationSessionMetadata(
 		taskId: string,
 		metadata: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
@@ -9021,6 +9283,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		this.cancelPendingCodexProfileProcessReplacement(taskId);
 		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
@@ -9057,11 +9320,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		gracefulTimeoutMs = 2_000,
 		preservesPendingNativeIdentityRecovery = false,
+		preservesPendingCodexProfileProcessReplacement = false,
 	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return;
 		}
+		if (!preservesPendingCodexProfileProcessReplacement) this.cancelPendingCodexProfileProcessReplacement(taskId);
 		if (!preservesPendingNativeIdentityRecovery) this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
 		this.cancelPendingAutoRestart(entry);
@@ -9285,17 +9550,222 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const pendingUserDecisionKindBeforeProcessRestart = summaryBeforeProcessStop
 			? resolveSessionFacets(summaryBeforeProcessStop).userTurnKind
 			: undefined;
-		await this.forceStopTaskSession(request.taskId, 2_000, isPendingNativeIdentityRecoveryStillCurrent !== undefined);
-		if (isPendingNativeIdentityRecoveryStillCurrent?.() === false)
-			return cloneSummary(this.ensureEntry(request.taskId).summary);
+		const configurationAdoption = request.configurationProfileAutomaticAdoptionGuard;
+		const continuesPendingProcessReplacement = Boolean(
+			configurationAdoption?.pendingProcessReplacementRetainedInputRecordPath &&
+				!this.entries.get(request.taskId)?.active,
+		);
+		if (configurationAdoption && continuesPendingProcessReplacement) {
+			const path = configurationAdoption.pendingProcessReplacementRetainedInputRecordPath;
+			if (!path || this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) !== path)
+				throw new Error("续接启动已取消或原生身份已变化，未自动启动。");
+			const record = readCodexProfileAdoptionRetainedInput(path);
+			const entry = this.entries.get(request.taskId);
+			if (
+				!entry ||
+				record.workspaceId !== request.workspaceId ||
+				record.nativeSessionId !== configurationAdoption.expectedNativeSessionId ||
+				entry.summary.runtimeSessionIncarnationId !== configurationAdoption.expectedRuntimeSessionIncarnationId
+			)
+				throw new Error("待恢复启动的原工作区、代际或原生身份尚未恢复。");
+			const eligibility = await configurationAdoption.readTaskExecutionEligibilityFingerprint?.();
+			if (configurationAdoption.readTaskExecutionEligibilityFingerprint && !eligibility)
+				throw new Error("Task 当前不能继续自动启动，保留输入与恢复条件。");
+			const store = await readCodexConfigurationSyncStore();
+			const writer = store.writers[entry.summary.codexConfigurationWriterBinding?.writerId ?? ""];
+			const binaryMetadata = await stat(writer?.nativeExecutableRealPath ?? request.binary).then(
+				(metadata) => [metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs, metadata.mode],
+				() => null,
+			);
+			const fingerprint = configurationDigest([
+				path,
+				record.nativeSessionId,
+				configurationAdoption.profileId,
+				store.profiles[configurationAdoption.profileId]?.version,
+				binaryMetadata,
+				request.binary,
+				store.observationProblem,
+				eligibility,
+			]);
+			if (
+				record.automaticProcessReplacementEvidenceFingerprint === fingerprint &&
+				(record.automaticProcessReplacementAttemptCount ?? 0) >= 3
+			)
+				throw new Error("同一持久启动证据已达三次；profile、原生二进制或来源恢复后自动重验。");
+			if (!(await configurationAdoption.onBeforeProcessReplacement(fingerprint)))
+				throw new Error("同一启动证据已达三次；profile、原生二进制或来源证据变化后自动重验。");
+			if (
+				configurationAdoption.readTaskExecutionEligibilityFingerprint &&
+				(await configurationAdoption.readTaskExecutionEligibilityFingerprint()) !== eligibility
+			)
+				throw new Error("启动登记期间 Task 资格变化，未自动启动。");
+			if (
+				entry.active ||
+				this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) !== path ||
+				entry.summary.runtimeSessionIncarnationId !== configurationAdoption.expectedRuntimeSessionIncarnationId
+			)
+				throw new Error("出现新活体、Stop 或代际变化，未重复启动。");
+			const claimed = readCodexProfileAdoptionRetainedInput(path);
+			claimed.automaticProcessReplacementAttemptCount =
+				claimed.automaticProcessReplacementEvidenceFingerprint === fingerprint
+					? (claimed.automaticProcessReplacementAttemptCount ?? 0) + 1
+					: 1;
+			claimed.automaticProcessReplacementEvidenceFingerprint = fingerprint;
+			saveCodexProfileAdoptionRetainedInput(path, claimed);
+			this.terminalInputRetainedDuringCodexProfileReplacement.set(request.taskId, path);
+		} else if (configurationAdoption) {
+			const entry = this.entries.get(request.taskId);
+			if (!entry) throw new Error("原会话已退出，等待下次启动采用 profile。");
+			const active = entry?.active;
+			const nativeSemanticGuardBeforeRead = buildCodexNativeAgentTurnExecutionSemanticGuard(entry.summary);
+			const inputSnapshot = this.getTaskTerminalInputSideMutationSnapshot(request.taskId);
+			const stillSafe = () => {
+				const current = this.entries.get(request.taskId);
+				const facets = current && resolveSessionFacets(current.summary);
+				return Boolean(
+					current &&
+						current === entry &&
+						current.active === active &&
+						active &&
+						buildCodexNativeAgentTurnExecutionSemanticGuard(current.summary) === nativeSemanticGuardBeforeRead &&
+						current.summary.agentId === "codex" &&
+						current.summary.runtimeSessionIncarnationId ===
+							configurationAdoption.expectedRuntimeSessionIncarnationId &&
+						current.summary.agentNativeConversationSessionIdentity?.nativeSessionId ===
+							configurationAdoption.expectedNativeSessionId &&
+						facets?.liveness === "live" &&
+						facets.turnOwner === "user" &&
+						(facets.userTurnKind === "review" || facets.userTurnKind === null) &&
+						!current.suppressAutoRestartOnExit &&
+						!current.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+						active.deferredStartupPromptText === null &&
+						active.programmaticDeliveryReceipt === null &&
+						!this.getTaskTerminalInputSideMutationSnapshot(request.taskId)?.hasUncommittedInput &&
+						this.getTaskTerminalInputSideMutationSnapshot(request.taskId)
+							?.humanTerminalInputMutationSequenceNumber ===
+							inputSnapshot?.humanTerminalInputMutationSequenceNumber,
+				);
+			};
+			if (!stillSafe()) throw new Error("等待回合结束、待答问题解除或明确的 Stop 限制撤销后再采用 profile。");
+			const taskExecutionEligibilityFingerprint =
+				await configurationAdoption.readTaskExecutionEligibilityFingerprint?.();
+			if (configurationAdoption.readTaskExecutionEligibilityFingerprint && !taskExecutionEligibilityFingerprint)
+				throw new Error("Task 执行资格已变化，保留待采用；恢复资格后自动重验。");
+			const nativeTurn = await this.readCurrentCodexNativeTurnExecution(entry);
+			const transcriptCompletion = nativeTurn
+				? null
+				: await readCodexProfileAdoptionNativeTurnCompletionEvidence(entry.summary);
+			const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(request.taskId);
+			if (
+				!stillSafe() ||
+				(nativeTurn?.observation.executionStatus !== "finished" && !transcriptCompletion) ||
+				!occupancy ||
+				occupancy.hasUncommittedInput ||
+				occupancy.screenReadingSaysNonEmpty !== false
+			)
+				throw new Error("原生回合或空输入框尚未确证，保留待采用并自动重验。");
+			const evidenceFingerprint = configurationDigest([
+				configurationAdoption.expectedRuntimeSessionIncarnationId,
+				configurationAdoption.expectedNativeSessionId,
+				inputSnapshot,
+				taskExecutionEligibilityFingerprint,
+				entry?.summary.lastHookAt,
+				nativeTurn?.observation.executionStatus ?? transcriptCompletion?.evidenceFingerprint,
+			]);
+			if (!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint)) || !stillSafe())
+				throw new Error("续接证据已变化或同一证据已达三次，保留待采用状态。");
+			if (
+				transcriptCompletion &&
+				(await readCodexProfileAdoptionNativeTurnCompletionEvidence(entry.summary))?.evidenceFingerprint !==
+					transcriptCompletion.evidenceFingerprint
+			)
+				throw new Error("原生转录在续接登记期间变化，保留待采用并自动重验。");
+			if (!stillSafe()) throw new Error("新输入或会话代际已变化，未停止原进程。");
+			if (
+				configurationAdoption.readTaskExecutionEligibilityFingerprint &&
+				(await configurationAdoption.readTaskExecutionEligibilityFingerprint()) !==
+					taskExecutionEligibilityFingerprint
+			)
+				throw new Error("Task 在预检期间已搁置、结案或改变归属，未停止原进程。");
+			if (!stillSafe()) throw new Error("资格重验期间出现新输入，未停止原进程。");
+			const retainedInputRecordPath = createCodexProfileAdoptionRetainedInput({
+				workspaceId: request.workspaceId ?? "",
+				conversationSessionId: request.taskId,
+				nativeSessionId: configurationAdoption.expectedNativeSessionId,
+				profileId: configurationAdoption.profileId,
+			});
+			this.terminalInputRetainedDuringCodexProfileReplacement.set(request.taskId, retainedInputRecordPath);
+			this.emitSummary(
+				updateSummary(entry, {
+					codexConfigurationProfileRetainedInputRecovery: {
+						retainedInputRecordPath,
+						retainedByteCount: 0,
+						reason: "安全续接窗口中的新输入将持久保留。",
+					},
+				}),
+			);
+		}
+		const configurationAdoptionRetainedInputRecordPath = configurationAdoption
+			? this.terminalInputRetainedDuringCodexProfileReplacement.get(request.taskId)
+			: undefined;
+		const isTaskSessionRefreshStillRequested = () =>
+			isPendingNativeIdentityRecoveryStillCurrent?.() !== false &&
+			(!configurationAdoption ||
+				Boolean(
+					configurationAdoptionRetainedInputRecordPath &&
+						this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) ===
+							configurationAdoptionRetainedInputRecordPath,
+				));
+		if (!continuesPendingProcessReplacement) {
+			if (configurationAdoption)
+				await this.forceStopTaskSession(
+					request.taskId,
+					2_000,
+					isPendingNativeIdentityRecoveryStillCurrent !== undefined,
+					true,
+				);
+			else
+				await this.forceStopTaskSession(
+					request.taskId,
+					2_000,
+					isPendingNativeIdentityRecoveryStillCurrent !== undefined,
+				);
+		}
+		if (!isTaskSessionRefreshStillRequested()) return cloneSummary(this.ensureEntry(request.taskId).summary);
+		request = { ...request, configurationProfileAutomaticAdoptionGuard: undefined };
 		const summary = await this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 			request,
 			taskSessionStartOrigin,
 			arrival,
 			pendingUserDecisionKindBeforeProcessRestart,
-			isPendingNativeIdentityRecoveryStillCurrent,
+			isTaskSessionRefreshStillRequested,
 		);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
+		if (configurationAdoption) {
+			// 停旧之后到新输入框就绪之间的击键属于下一代，不写进正在退出的 PTY。
+			const entry = this.entries.get(request.taskId);
+			if (
+				entry?.active &&
+				entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ===
+					configurationAdoption.expectedNativeSessionId
+			) {
+				for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput())
+					if (
+						record.conversationSessionId === request.taskId &&
+						record.workspaceId === request.workspaceId &&
+						record.nativeSessionId === configurationAdoption.expectedNativeSessionId &&
+						record.automaticProcessReplacementContinuationStatus === "pending_automatic_start"
+					) {
+						record.automaticProcessReplacementContinuationStatus = "started";
+						saveCodexProfileAdoptionRetainedInput(path, record);
+					}
+			}
+			for (let readinessAttempt = 0; readinessAttempt < 60; readinessAttempt++) {
+				if (!entry?.active || (await this.resolveInteractivePromptReadiness(entry)) === "prompt") break;
+				await new Promise<void>((resolveReady) => setTimeout(resolveReady, 100));
+			}
+			await this.restoreTerminalInputRetainedDuringCodexProfileAdoption();
+		}
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
 		// viewers reattaching via the control socket would receive a restore snapshot from
 		// the new mirror that never saw the banner.

@@ -58,7 +58,7 @@ export function recordCodexConfigurationSourceObservation(
 
 // 迁移只纠正展示归类；旧默认值、原始记录、传播回执与失败历史均保持原样。
 export function migrateCodexConfigurationApprovalRecords(store: CodexConfigurationSyncStore) {
-	if (store.schemaVersion === 2) return;
+	if (store.schemaVersion !== 1) return;
 	for (const change of store.changes) {
 		if (hasOnlyCodexConfigurationDefinitionChange(change)) {
 			change.recordKind = "source_observation";
@@ -88,12 +88,20 @@ function describeDifferenceValue(value: unknown, fieldName?: string) {
 			: "未保存信任决定";
 	if (value === undefined) return "未设置";
 	if (typeof value === "boolean") return value ? "开启" : "关闭";
+	if (
+		["model", "model_reasoning_effort", "approval_policy", "sandbox_mode", "approvals_reviewer"].includes(
+			fieldName ?? "",
+		) &&
+		typeof value === "string"
+	)
+		return value;
 	return `已设置（摘要 ${configurationDigest(value).slice(0, 10)}）`;
 }
 
 export function describeCodexConfigurationSettingDifferences(
 	previous: CodexConfigurationFieldValue | undefined,
 	current: CodexConfigurationFieldValue | undefined,
+	fieldKey?: string,
 ) {
 	if (isDeepStrictEqual(previous?.value, current?.value)) return [];
 	const previousValue = previous?.value,
@@ -111,8 +119,14 @@ export function describeCodexConfigurationSettingDifferences(
 	return [
 		{
 			label: "设置值",
-			previous: describeDifferenceValue(previousValue),
-			current: describeDifferenceValue(currentValue),
+			previous: describeDifferenceValue(
+				previousValue,
+				fieldKey ? configurationFieldAddress(fieldKey).keyPath.at(-1) : undefined,
+			),
+			current: describeDifferenceValue(
+				currentValue,
+				fieldKey ? configurationFieldAddress(fieldKey).keyPath.at(-1) : undefined,
+			),
 		},
 	];
 }

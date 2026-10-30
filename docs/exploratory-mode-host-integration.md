@@ -316,3 +316,17 @@ typecheck——`exploration-thread-graph-contract-parity.ts` 会在形状漂移�
   `AGENT_CONVERSATION_EXPLORATION_WORK_BRANCH_JOB_ENV` 与之字面一致，有单测钉住）；作业只写 `storeRoot`；
   所有写入经其漏斗；`usage` 回报 cache 读量。
 - 升级 = 换 `package.json` 里 `github:RealmX1/agent-conversation-exploration-thread-graph#<sha>` 的 SHA。
+
+## 后台 Agent 运行与会话回收
+
+探索图维护分身与 Claude 来源任务草稿分身均不设总运行时限，公共分身库也不再提供 `timeoutMs` 或默认 300 秒预算。`source_agent_fork` 的运行不再在 120 秒后中止。单次模型 API、Git 快照及控制请求的操作超时保持原语义。
+
+两处入口通过 `createSessionOwnedBackgroundAgentExecutor` 在启动前持久登记归属，随后保存原生进程启动身份、已识别后代、最近观察与输出活动、等待原因、恢复条件和原始结果。记录位于 workspace 的 `session-owned-background-agent-executions/`，同归属的派发检查与登记共用跨进程锁。runtime 重启后先核验原进程，活跃或退出未知的同来源作业不重复派发。
+
+闲置和 park 回收、PTY host 的脱离回收资格都先核验所属后台执行：仍运行或缺少退出证据则延期，后续 sweep 在原生证据恢复后自动重验；正常完成后的回收保留。显式 Stop 独立写入取消请求，并可依据持久启动身份在控制器退出后清理，取消确认单独保存；PID 身份变化或查询缺证不误杀，也不把本地退出冒充 provider 已停止。
+
+跨仓库修改须与 `agent-conversation-exploration-thread-graph` 的新执行器协调集成。仅删除宿主调用参数、仍安装旧的固定 SHA 会触发旧执行器的立即超时；验证时必须使用同一修复后的依赖产物，随后将 dependency 和 lockfile 一起锁定到经过验证的新提交。
+
+派发前先持久保存 `registered`、控制器原生启动身份、原生开机 UUID 和随机 execution token。内置进程执行器必须等待 `beforeProcessSpawn` 将 `dispatch_intent` 持久保存后才可 spawn；屏障期间 Stop 则不派发。registered 阶段失败可证明没有启动进程；越过屏障但无首份 PID 回报时，使用 token、原生父链和开机代际补证。原 root 消失不能代表后代全部退出；清空环境的新生孤儿保持未知，待其退出、父链恢复或原生开机代际变化后自动重验。出生时间筛选保守包含整个开始秒，避免漏掉同秒新后代。取消和退出核验另存 reconciliation 原件，辅助写入故障不改变业务结果。
+
+Stop 与执行登记共用目录锁，并先持久更新任务的取消代际。每次 `start()` 在首次 await 前捕获代际，登记、派发屏障和结果发布时再次对账；准备原生查询期间已收到 Stop 的旧请求记为 `cancelled/not_started`，不会漏进随后派发。取消观察缺失不自动等于新 Stop；之后接受的新请求使用当前代际，不因历史 Stop 永久锁死。实际后代清理在取消意图落盘后独立进行，主 Agent 的 Stop 不等待后台清理。
