@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { dirname, join } from "node:path";
 import { type IPty, spawn as spawnPty } from "node-pty";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
+import { parseAdditionalAgentStartupArguments } from "../../src/core/parse-additional-agent-startup-arguments";
+import { mergeCodexAdditionalStartupArgumentsForRestart } from "../../src/terminal/codex-additional-startup-arguments-for-restart";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 
@@ -186,7 +188,12 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				join(codexHome, "config.toml"),
 				`model="gpt-5.4"\nmodel_provider="isolated_loopback"\napproval_policy="never"\nsandbox_mode="danger-full-access"\ncheck_for_update_on_startup=false\n[features]\nhooks=true\n[model_providers.isolated_loopback]\nname="隔离回环模型"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\nsupports_websockets=false\n[projects.${JSON.stringify(repository.repositoryPath)}]\ntrust_level="trusted"\n`,
 			);
-			const start = async (taskId: string, arguments_: string[]) => {
+			const start = async (
+				taskId: string,
+				arguments_: string[],
+				additionalArguments: string[] = [],
+				includeDefaultCd = true,
+			) => {
 				const environment = fixture.createIsolatedChildProcessEnvironment({
 					CODEX_HOME: codexHome,
 					CODEX_SQLITE_HOME: codexHome,
@@ -195,13 +202,15 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				});
 				const launch = await prepareCodexNativeSessionControlHostLaunch({
 					binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
-					arguments: [
-						"--dangerously-bypass-hook-trust",
-						"--no-alt-screen",
-						"-C",
-						repository.repositoryPath,
-						...arguments_,
-					],
+					arguments: mergeCodexAdditionalStartupArgumentsForRestart(
+						[
+							"--dangerously-bypass-hook-trust",
+							"--no-alt-screen",
+							...(includeDefaultCd ? ["-C", repository.repositoryPath] : []),
+							...arguments_,
+						],
+						additionalArguments,
+					),
 					workingDirectoryPath: repository.repositoryPath,
 					environment,
 					workspaceId: "isolated-native-resume",
@@ -259,6 +268,15 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 			if (!sourceId) throw new Error("原生 hook 未记录源会话身份");
 			await stopHost(original);
 			nativeHosts.splice(nativeHosts.indexOf(original), 1);
+			const warning = await start(
+				"native-missing-cd-warning",
+				["-c", 'tui.resume_cwd="current"', "resume", sourceId],
+				[],
+				false,
+			);
+			await wait(warning, async () => warning.output().includes("requires `--cd` when using a remote workspace"));
+			await stopHost(warning);
+			nativeHosts.splice(nativeHosts.indexOf(warning), 1);
 			await expect(
 				start("native-untrusted-rejected", ["-a", "untrusted", "-s", "read-only", "resume", "--last"]),
 			).rejects.toThrow("无法为受管宿主提供 untrusted 默认审批策略");
@@ -293,11 +311,21 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				await stopHost(restricted);
 				nativeHosts.splice(nativeHosts.indexOf(restricted), 1);
 			}
-			const resumed = await start("native-resumed", [
-				"--dangerously-bypass-approvals-and-sandbox",
-				"resume",
-				sourceId,
-			]);
+			const explicitRestartWorkingDirectoryPath = repository.createLinkedWorktree({
+				worktreeDirectoryName: "explicit restart with spaces",
+				branchName: "explicit-restart-working-directory",
+			}).worktreePath;
+			await appendFile(
+				join(codexHome, "config.toml"),
+				`\n[projects.${JSON.stringify(explicitRestartWorkingDirectoryPath)}]\ntrust_level="trusted"\n`,
+			);
+			const resumed = await start(
+				"native-resumed",
+				["--dangerously-bypass-approvals-and-sandbox", "resume", sourceId],
+				parseAdditionalAgentStartupArguments(
+					`--cd ${JSON.stringify(explicitRestartWorkingDirectoryPath)} -c 'tui.resume_cwd="current"'`,
+				),
+			);
 			const receiptPath = join(
 				dirname(resumed.launch.args.at(-1) ?? ""),
 				"remote-conversation-bootstrap-receipt.json",
@@ -312,11 +340,21 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				effectiveApprovalPolicy: "never",
 				effectiveSandbox: { type: "dangerFullAccess" },
 			});
+			expect(resumed.output()).not.toContain("requires `--cd` when using a remote workspace");
+			const actualTuiArguments = (JSON.parse(await readFile(receiptPath, "utf8")) as { codexTuiArguments: string[] })
+				.codexTuiArguments;
+			expect(actualTuiArguments).toEqual(
+				expect.arrayContaining(["--cd", explicitRestartWorkingDirectoryPath, "resume", sourceId]),
+			);
+			expect(actualTuiArguments).not.toContain("-C");
+			expect(JSON.parse(await readFile(receiptPath, "utf8"))).toMatchObject({
+				executionWorkingDirectoryPath: explicitRestartWorkingDirectoryPath,
+			});
 			resumed.pty.write("\x1b[200~NATIVE_RESUMED_PROMPT\x1b[201~\r");
 			await wait(resumed, async () =>
 				(await hookEvents()).some((event) => event.taskId === "native-resumed" && event.event === "Stop"),
 			);
-			expect(await readFile(join(repository.repositoryPath, "resumed-tool.txt"), "utf8")).toBe(
+			expect(await readFile(join(explicitRestartWorkingDirectoryPath, "resumed-tool.txt"), "utf8")).toBe(
 				"NATIVE_TOOL_SUCCESS",
 			);
 			const resumedReceipt = JSON.parse(await readFile(receiptPath, "utf8")) as { nativeTranscriptPath: string };
@@ -327,6 +365,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				.filter((row) => row.type === "turn_context");
 			expect(resumedTurnContexts.at(-1)?.payload).toMatchObject({
 				approval_policy: "never",
+				cwd: explicitRestartWorkingDirectoryPath,
 				sandbox_policy: { type: "danger-full-access" },
 			});
 			await withRunningCodexAppServerControlSocketConnection(

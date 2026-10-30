@@ -41,6 +41,10 @@ import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from ".
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { hasClaudeInteractivePrompt, hasClaudeStartupUiRendered } from "./claude-readiness";
 import {
+	hasExplicitCodexConversationSelectionForRestart,
+	mergeCodexAdditionalStartupArgumentsForRestart,
+} from "./codex-additional-startup-arguments-for-restart";
+import {
 	CODEX_CLI_OPTIONS_WITH_VALUES,
 	configureCodexHooks,
 	hasCodexConfigOverride,
@@ -73,6 +77,7 @@ export interface AgentAdapterLaunchInput {
 	agentId: RuntimeAgentId;
 	binary?: string;
 	args: string[];
+	additionalAgentStartupArgumentsForThisRestart?: string[];
 	// 每任务的放权档位。与 startInPlanMode **正交**：plan 起步只决定开局模式，不得在这里
 	// 被翻译成「降权」——不能同时表达两者的 harness（droid）是显式例外，见
 	// doesPlanModeStartOverridePermissionModeForAgent。
@@ -1738,6 +1743,7 @@ const codexAdapter: AgentSessionAdapter = {
 		}
 
 		const selectsLatestWorkingDirectorySession =
+			!hasExplicitCodexConversationSelectionForRestart(input.additionalAgentStartupArgumentsForThisRestart ?? []) &&
 			!observedNativeSessionResumeAddressing &&
 			(continuesWithoutNewPrompt ||
 				(!input.taskConversationSessionMainContextForkSourceNativeSessionId &&
@@ -1771,6 +1777,14 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
+		codexArgs.splice(
+			0,
+			codexArgs.length,
+			...mergeCodexAdditionalStartupArgumentsForRestart(
+				codexArgs,
+				input.additionalAgentStartupArgumentsForThisRestart ?? [],
+			),
+		);
 		normalizeCodexConfigOverridesBeforeSubcommand(codexArgs);
 		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
 		if (input.startInPlanMode && !continuesWithoutNewPrompt) {

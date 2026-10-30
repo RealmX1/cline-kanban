@@ -209,6 +209,11 @@ import {
 	WORKSPACE_TRUST_CONFIRM_DELAY_MS,
 } from "./claude-workspace-trust";
 import {
+	hasExplicitCodexConversationSelectionForRestart,
+	hasExplicitCodexRemoteConnectionForRestart,
+	mergeCodexAdditionalStartupArgumentsForRestart,
+} from "./codex-additional-startup-arguments-for-restart";
+import {
 	buildCodexModelCapacityErrorDetectionTurnIdentity,
 	createCodexModelCapacityErrorDetector,
 } from "./codex-model-capacity-error-detection";
@@ -771,6 +776,7 @@ export interface StartTaskSessionRequest {
 	agentId: AgentAdapterLaunchInput["agentId"];
 	binary: string;
 	args: string[];
+	additionalAgentStartupArgumentsForThisRestart?: string[];
 	taskAgentPermissionMode?: AgentAdapterLaunchInput["taskAgentPermissionMode"];
 	autoContinueOnConnectionDropEnabled?: boolean;
 	codexModelCapacityErrorAutoContinuationEnabled?: boolean;
@@ -1153,6 +1159,9 @@ function cloneStartTaskSessionRequest(request: StartTaskSessionRequest): StartTa
 	return {
 		...request,
 		args: [...request.args],
+		...(request.additionalAgentStartupArgumentsForThisRestart !== undefined
+			? { additionalAgentStartupArgumentsForThisRestart: [...request.additionalAgentStartupArgumentsForThisRestart] }
+			: {}),
 		images: request.images ? request.images.map((image) => ({ ...image })) : undefined,
 		env: request.env ? { ...request.env } : undefined,
 		projectPath: request.projectPath,
@@ -1481,6 +1490,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry: SessionEntry,
 		request: StartTaskSessionRequest,
 	): Promise<boolean> {
+		if (
+			request.agentId === "codex" &&
+			hasExplicitCodexConversationSelectionForRestart(request.additionalAgentStartupArgumentsForThisRestart ?? [])
+		)
+			return false;
 		const metadata = entry.summary.taskConversationSessionMetadata;
 		if (
 			!(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt) ||
@@ -5328,6 +5342,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 		entry: SessionEntry,
 		request: StartTaskSessionRequest,
 	): Promise<void> {
+		// 显式选择与远程连接由原生 CLI 核验，旧本地转录不能证明新目标是否存在。
+		const additionalArguments = request.additionalAgentStartupArgumentsForThisRestart ?? [];
+		if (
+			request.agentId === "codex" &&
+			(hasExplicitCodexConversationSelectionForRestart(additionalArguments) ||
+				hasExplicitCodexRemoteConnectionForRestart(additionalArguments))
+		)
+			return;
 		const identity = entry.summary.agentNativeConversationSessionIdentity;
 		if (
 			request.agentId !== "codex" ||
@@ -5777,6 +5799,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		entry: SessionEntry,
 	): AgentConversationSessionResumeAddressing {
+		if (
+			request.agentId === "codex" &&
+			hasExplicitCodexConversationSelectionForRestart(request.additionalAgentStartupArgumentsForThisRestart ?? [])
+		)
+			return { kind: "addressed_by_explicit_restart_arguments" };
 		return resolveAgentConversationSessionResumeAddressing({
 			resumesPriorAgentConversation: Boolean(
 				request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
@@ -6139,6 +6166,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				agentId: request.agentId,
 				binary: request.binary,
 				args: request.args,
+				additionalAgentStartupArgumentsForThisRestart: request.additionalAgentStartupArgumentsForThisRestart,
 				taskAgentPermissionMode: request.taskAgentPermissionMode,
 				cwd: request.cwd,
 				prompt: request.prompt,
@@ -6662,6 +6690,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			agentId: request.agentId,
 			workspacePath: request.cwd,
 			pid: session.pid,
+			...(resumeAddressing.kind === "addressed_by_explicit_restart_arguments" ||
+			(request.agentId === "codex" &&
+				hasExplicitCodexRemoteConnectionForRestart(request.additionalAgentStartupArgumentsForThisRestart ?? []))
+				? { agentNativeConversationSessionIdentity: null }
+				: {}),
 			startedAt,
 			// 新活体从「没有需要提示的情况」开始；看门狗 / 退出核对会按本代的事实重新写。
 			agentNativeConversationPersistenceObservation: null,
@@ -9395,6 +9428,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean;
 		} = {},
 	): Promise<RuntimeTaskSessionSummary> {
+		const additionalArguments = request.additionalAgentStartupArgumentsForThisRestart ?? [];
+		if (additionalArguments.length > 0 && request.agentId !== "codex")
+			throw new Error("单次补传启动参数目前仅支持 Codex。");
+		if (request.agentId === "codex")
+			mergeCodexAdditionalStartupArgumentsForRestart(request.args, additionalArguments);
 		const arrival = createTaskSessionStartRequestArrival();
 		const {
 			adoptExistingAgentConversationAsTaskSessionIdentity,
@@ -9847,6 +9885,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		await this.startTaskSession(
 			{
 				...cloneStartTaskSessionRequest(restartRequest.request),
+				additionalAgentStartupArgumentsForThisRestart: undefined,
 				prompt: "",
 				images: undefined,
 				resumeFromTrash: true,

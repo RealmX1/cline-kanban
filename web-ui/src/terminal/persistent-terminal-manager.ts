@@ -1666,6 +1666,7 @@ class PersistentTerminal {
 		adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
 		// 「停止后台会话并在这里续跑」：只有人在终端面板上确认后才传 true（服务端语义见 api-contract 同名字段）。
 		forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean,
+		additionalAgentStartupArgumentsForThisRestart?: string[],
 	): Promise<{ ok: boolean; error?: string; mode?: "resume" | "fresh" }> {
 		this.suppressNextRestartReset = true;
 		const trpcClient = getRuntimeTrpcClient(this.workspaceId);
@@ -1674,6 +1675,9 @@ class PersistentTerminal {
 				taskId: this.taskId,
 				cols: this.terminal.cols,
 				rows: this.terminal.rows,
+				...(additionalAgentStartupArgumentsForThisRestart !== undefined
+					? { additionalAgentStartupArgumentsForThisRestart }
+					: {}),
 				taskSessionStartOriginDeclaredByClient,
 				...(adoptExistingAgentConversationAsTaskSessionIdentity
 					? { adoptExistingAgentConversationAsTaskSessionIdentity }

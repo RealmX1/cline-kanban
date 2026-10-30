@@ -54,7 +54,7 @@ export interface UsePersistentTerminalSessionResult {
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
-	refreshTerminal: () => Promise<void>;
+	refreshTerminal: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	// 「从既有对话迁入」：把选定的那段对话迁进本会话再按 id 续跑（服务端语义见 api-contract 的
 	// adoptExistingAgentConversationAsTaskSessionIdentity）。与 refreshTerminal 共用 isRefreshing / lastError。
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
@@ -326,24 +326,32 @@ export function usePersistentTerminalSession({
 		async (
 			adoptExistingAgentConversationAsTaskSessionIdentity?: RuntimeTaskAgentSessionInitialization,
 			forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser?: boolean,
+			additionalAgentStartupArgumentsForThisRestart?: string[],
 		) => {
 			const terminal = terminalRef.current;
 			if (!terminal) {
+				if (additionalAgentStartupArgumentsForThisRestart !== undefined)
+					throw new Error("终端尚未就绪，请稍后重试。");
 				return;
 			}
 			setIsRefreshing(true);
+			setLastError(null);
 			try {
 				const result = await terminal.refresh(
 					undefined,
 					adoptExistingAgentConversationAsTaskSessionIdentity,
 					forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser,
+					additionalAgentStartupArgumentsForThisRestart,
 				);
-				if (!result.ok && result.error) {
-					setLastError(result.error);
+				if (!result.ok) {
+					const message = result.error ?? "重启会话失败。";
+					setLastError(message);
+					if (additionalAgentStartupArgumentsForThisRestart !== undefined) throw new Error(message);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				setLastError(message);
+				if (additionalAgentStartupArgumentsForThisRestart !== undefined) throw error;
 			} finally {
 				setIsRefreshing(false);
 			}
@@ -352,7 +360,12 @@ export function usePersistentTerminalSession({
 	);
 
 	const refreshTerminal = useCallback(
-		async () => await refreshTerminalAdoptingOptionalExistingAgentConversation(),
+		async (additionalAgentStartupArgumentsForThisRestart?: string[]) =>
+			await refreshTerminalAdoptingOptionalExistingAgentConversation(
+				undefined,
+				undefined,
+				additionalAgentStartupArgumentsForThisRestart,
+			),
 		[refreshTerminalAdoptingOptionalExistingAgentConversation],
 	);
 

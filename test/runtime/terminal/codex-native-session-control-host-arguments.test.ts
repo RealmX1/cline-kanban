@@ -5,6 +5,30 @@ import {
 } from "../../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 
 describe("Codex 独享控制宿主的配置与原生 argv 边界", () => {
+	it("未知补传参数交给原生 CLI，避免中间宿主重排其未知值", async () => {
+		const additionalAgentStartupArgumentsForThisRestart = [
+			"--future-native-option",
+			"one",
+			"--another-native-option",
+			"two",
+		];
+		expect(
+			await prepareCodexNativeSessionControlHostLaunch({
+				binary: "/不会执行的原生 CLI",
+				arguments: [
+					"--dangerously-bypass-approvals-and-sandbox",
+					"resume",
+					"bound-id",
+					...additionalAgentStartupArgumentsForThisRestart,
+				],
+				workingDirectoryPath: "/不会创建的目录",
+				environment: {},
+				workspaceId: "isolated-workspace",
+				conversationSessionId: "isolated-session",
+				runtimeSessionIncarnationId: "isolated-incarnation",
+			}),
+		).toBeNull();
+	});
 	it("宿主默认与会话请求共同保持选择的权限，保留模型和 resume 的原生语义", () => {
 		const arguments_ = [
 			"-c",

@@ -40,30 +40,32 @@ async function openIsolatedQuickActionCard(
 	await page.addScriptTag({ type: "module", url: "/tests/task-card-quick-actions-browser-harness.tsx" });
 }
 
-test("桌面悬停向上展开、直接完成、评论弹窗及原文复制", async ({ page }) => {
+test("桌面悬停向下展开、直接完成、评论弹窗及原文复制", async ({ page }) => {
 	await openIsolatedQuickActionCard(page);
 	const card = page.locator("[data-task-id='quick-actions-card']");
 	await card.hover();
-	const done = card.getByRole("button", { name: "Move task to done", exact: true });
+	const done = card.getByRole("button", { name: "结案任务", exact: true });
 	await done.hover();
 	const menu = page.getByRole("menu");
-	await expect(menu).toHaveAttribute("data-side", "top");
+	await expect(menu).toHaveAttribute("data-side", "bottom");
+	await expect(menu.getByRole("menuitem")).toHaveCount(1);
 	await page.screenshot({ path: test.info().outputPath("desktop-menu-expanded.png") });
-	await page.getByRole("menuitem", { name: "添加评论并移入 Done…", exact: true }).click();
+	await page.getByRole("menuitem", { name: "添加评论并结案…", exact: true }).click();
 	await expect(page.getByRole("dialog")).toBeVisible();
 	await expect(page.getByRole("textbox", { name: "任务评论" })).toBeFocused();
-	await expect(page.getByRole("button", { name: "提交评论并移入 Done", exact: true })).toBeDisabled();
+	await expect(page.getByRole("button", { name: "归档并结案", exact: true })).toBeDisabled();
 	await page.getByRole("textbox", { name: "任务评论" }).fill("浏览器验证\n通过");
 	await page.getByRole("button", { name: "取消", exact: true }).click();
 	await expect(page.getByLabel("已提交评论")).toHaveText("");
 	await expect(page.getByLabel("直接移动次数")).toHaveText("0");
 	await done.hover();
-	await page.getByRole("menuitem", { name: "添加评论并移入 Done…", exact: true }).click();
+	await page.getByRole("menuitem", { name: "添加评论并结案…", exact: true }).click();
 	await page.getByRole("textbox", { name: "任务评论" }).fill("浏览器验证\n通过");
-	await page.getByRole("button", { name: "提交评论并移入 Done", exact: true }).click();
+	await page.getByRole("combobox", { name: "结案结果", exact: true }).selectOption("closure_outcome_unspecified");
+	await page.getByRole("button", { name: "归档并结案", exact: true }).click();
 	await expect(page.getByLabel("已提交评论")).toHaveText("浏览器验证\n通过");
 	await done.hover();
-	await page.getByRole("menuitem", { name: "添加评论并移入 Done…", exact: true }).hover();
+	await page.getByRole("menuitem", { name: "添加评论并结案…", exact: true }).hover();
 	await expect(page.getByRole("menu")).toBeVisible();
 	await page.mouse.move(0, 0);
 	await expect(page.getByRole("menu")).toHaveCount(0);
@@ -71,7 +73,7 @@ test("桌面悬停向上展开、直接完成、评论弹窗及原文复制", as
 	await done.click();
 	await expect(page.getByLabel("直接移动次数")).toHaveText("1");
 	await card.getByRole("button", { name: "View original prompt", exact: true }).hover();
-	await expect(page.getByRole("menu")).toHaveAttribute("data-side", "top");
+	await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 	await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).click();
 	await expect(page.locator("body")).toHaveAttribute(
 		"data-copied-original-prompt",
@@ -90,25 +92,27 @@ test("桌面悬停向上展开、直接完成、评论弹窗及原文复制", as
 test.describe("触屏快捷操作", () => {
 	test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
 	for (const width of [375, 390, 768])
-		test(`${width}px 首次点按向下展开，评论入口与复制不误触主操作`, async ({ page }) => {
+		test(`${width}px 独立入口向下展开，评论入口与复制不误触主操作`, async ({ page }) => {
 			await page.setViewportSize({ width, height: 844 });
 			await openIsolatedQuickActionCard(page, true);
-			const done = page.getByRole("button", { name: "Move task to done", exact: true });
-			await done.tap();
+			const done = page.getByRole("button", { name: "结案任务", exact: true });
+			await page.getByRole("button", { name: "展开结案附加操作", exact: true }).tap();
 			await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 			await expect(page.getByLabel("直接移动次数")).toHaveText("0");
 			await page.screenshot({ path: test.info().outputPath("mobile-menu-expanded.png") });
 			for (const item of await page.getByRole("menuitem").all())
 				expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-			await page.getByRole("menuitem", { name: "添加评论并移入 Done…", exact: true }).tap();
+			await page.getByRole("menuitem", { name: "添加评论并结案…", exact: true }).tap();
 			await expect(page.getByRole("dialog")).toBeVisible();
 			await page.getByRole("textbox", { name: "任务评论" }).fill("手机评论");
-			await page.getByRole("button", { name: "提交评论并移入 Done", exact: true }).tap();
+			await page
+				.getByRole("combobox", { name: "结案结果", exact: true })
+				.selectOption("closure_outcome_unspecified");
+			await page.getByRole("button", { name: "归档并结案", exact: true }).tap();
 			await expect(page.getByLabel("已提交评论")).toHaveText("手机评论");
 			await done.tap();
-			await page.getByRole("menuitem", { name: "移入 Done", exact: true }).tap();
 			await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-			await page.getByRole("button", { name: "View original prompt", exact: true }).tap();
+			await page.getByRole("button", { name: "展开查看原始 Prompt附加操作", exact: true }).tap();
 			await expect(page.getByRole("dialog")).toHaveCount(0);
 			await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 			await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).tap();
@@ -118,7 +122,6 @@ test.describe("触屏快捷操作", () => {
 			);
 			await expect(page.getByRole("dialog")).toHaveCount(0);
 			await page.getByRole("button", { name: "View original prompt", exact: true }).tap();
-			await page.getByRole("menuitem", { name: "查看原始 Prompt", exact: true }).tap();
 			await expect(page.getByRole("dialog")).toContainText("原始 Prompt");
 			await page.screenshot({ path: test.info().outputPath("mobile-task-card-quick-actions.png") });
 		});
@@ -163,11 +166,11 @@ test("PDV 默认保持最前时 Done 与 Prompt 菜单接收鼠标和键盘操�
 	);
 	await expect(panel).toHaveCSS("z-index", "70");
 	await panel.locator(".kb-board-card-shell").hover();
-	const done = panel.getByRole("button", { name: "Move task to done", exact: true });
+	const done = panel.getByRole("button", { name: "结案任务", exact: true });
 	await done.hover();
 	await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 	await page.screenshot({ path: test.info().outputPath("pdv-pinned-done-menu-expanded.png") });
-	await page.getByRole("menuitem", { name: "移入 Done", exact: true }).click();
+	await done.click();
 	await expect(page.getByLabel("直接移动次数")).toHaveText("1");
 	const prompt = panel.getByRole("button", { name: "View original prompt", exact: true });
 	await prompt.hover();
@@ -192,11 +195,9 @@ test.describe("PDV 保持最前的触屏快捷菜单", () => {
 		await openIsolatedQuickActionCard(page, true, true, true);
 		const panel = page.locator(".kb-viewport-bottom-verification-floating-panel");
 		await expect(panel).toHaveCSS("z-index", "70");
-		await panel.getByRole("button", { name: "Move task to done", exact: true }).tap();
-		await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
-		await page.getByRole("menuitem", { name: "移入 Done", exact: true }).tap();
+		await panel.getByRole("button", { name: "结案任务", exact: true }).tap();
 		await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-		await panel.getByRole("button", { name: "View original prompt", exact: true }).tap();
+		await panel.getByRole("button", { name: "展开查看原始 Prompt附加操作", exact: true }).tap();
 		await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 		await page.screenshot({ path: test.info().outputPath("pdv-pinned-touch-prompt-menu-expanded.png") });
 		await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).tap();
@@ -223,7 +224,7 @@ test("首个菜单项刚获焦点立即 Escape 仍关闭并回焦触发器", asy
 	const trigger = page.getByRole("button", { name: "View original prompt", exact: true });
 	await trigger.focus();
 	await page.keyboard.press("ArrowDown");
-	await expect(page.locator("body")).toHaveAttribute("data-immediate-escape-target", "查看原始 Prompt");
+	await expect(page.locator("body")).toHaveAttribute("data-immediate-escape-target", "复制原始 Prompt");
 	await expect(page.locator("body")).toHaveAttribute("data-immediate-escape-target-was-focused", "true");
 	await expect(page.getByRole("menu")).toHaveCount(0);
 	await expect(trigger).toBeFocused();

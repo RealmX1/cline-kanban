@@ -133,6 +133,12 @@ async function runOwnedCodexNativeSessionControlHost() {
 						...specification.endpoint,
 						operation: plan.operation,
 						nativeSessionId: receipt.nativeSessionId,
+						executionWorkingDirectoryPath: receipt.executionWorkingDirectoryPath,
+						codexTuiArguments: [
+							"--remote",
+							`unix://${specification.endpoint.socketPath}`,
+							...receipt.tuiArguments,
+						],
 						nativeTranscriptPath: receipt.nativeTranscriptPath,
 						effectiveApprovalPolicy: receipt.effectiveApprovalPolicy,
 						effectiveSandbox: receipt.effectiveSandbox,

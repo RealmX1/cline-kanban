@@ -4731,6 +4731,10 @@ export type RuntimeDismissConnectionRetrySessionsResponse = z.infer<
 
 export const runtimeTaskTerminalRefreshRequestSchema = z.object({
 	taskId: z.string(),
+	// 仅本次手动重启及其有界自动重试使用；不写入卡片或全局默认。
+	additionalAgentStartupArgumentsForThisRestart: z
+		.array(z.string().refine((argument) => !argument.includes("\0"), "启动参数不能包含空字符。"))
+		.optional(),
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
 	// 纯归因，不参与任何业务判定。省略时服务端按 refresh_task_terminal 记账（即「人点的刷新」），

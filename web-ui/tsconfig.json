@@ -15,6 +15,7 @@
       "@/*": ["src/*"],
       "@runtime-agent-prompt-image-attachment-reference": ["../src/core/agent-prompt-image-attachment-reference.ts"],
       "@runtime-project-visual-identity": ["../src/core/project-visual-identity.ts"],
+      "@runtime-parse-additional-agent-startup-arguments": ["../src/core/parse-additional-agent-startup-arguments.ts"],
       "@runtime-agent-catalog": ["../src/core/agent-catalog.ts"],
       "@runtime-agent-session-transport-selection": ["../src/core/agent-session-transport-selection.ts"],
       "@runtime-cline-tool-call-display": ["../src/cline-sdk/cline-tool-call-display.ts"],

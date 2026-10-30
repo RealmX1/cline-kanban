@@ -37,6 +37,7 @@ export interface TaskConversationSessionSharingExecutionWorkingDirectory {
 }
 
 export type AgentConversationSessionResumeAddressing =
+	| { kind: "addressed_by_explicit_restart_arguments" }
 	| {
 			kind: "addressed_by_observed_agent_native_session_id";
 			// 直接喂给 adapter 的按-id 续跑轴。恒为 `resume_existing_session`：fork 会让 harness 新造一个
