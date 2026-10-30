@@ -45,7 +45,7 @@ class MockRuntimeStateWebSocket {
 	onopen: (() => void) | null = null;
 	onmessage: ((event: MessageEvent<string>) => void) | null = null;
 	onerror: (() => void) | null = null;
-	onclose: (() => void) | null = null;
+	onclose: ((event: CloseEvent) => void) | null = null;
 	readyState = MockRuntimeStateWebSocket.CONNECTING;
 	readonly sentMessages: unknown[] = [];
 
@@ -72,7 +72,7 @@ class MockRuntimeStateWebSocket {
 
 	triggerClose(): void {
 		this.readyState = MockRuntimeStateWebSocket.CLOSED;
-		this.onclose?.();
+		this.onclose?.(new CloseEvent("close"));
 	}
 }
 

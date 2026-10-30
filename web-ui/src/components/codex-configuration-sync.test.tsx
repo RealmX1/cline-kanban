@@ -119,6 +119,114 @@ afterEach(async () => {
 });
 
 describe("Codex 配置同步提示和设置", () => {
+	const sourceObservationFixture = (index: number) => ({
+		observationId: `source-${index}`,
+		version: 1,
+		sourceLabel: `隔离来源 ${index}`,
+		firstObservedAt: 1,
+		observedAt: 1,
+		observationCount: 1,
+		detectedLocationCount: 1,
+		acknowledgedAt: null,
+		reminderDisposition: "unread" as const,
+	});
+	it.each([false, true])("两处计数均只含未读，初始已有已读=%s，确认后历史保留原时间且无按钮", async (alreadyRead) => {
+		state.changes = [];
+		state.sourceObservations = Array.from({ length: 6 }, (_, index) => sourceObservationFixture(index));
+		if (alreadyRead)
+			state.sourceObservations[0] = {
+				...state.sourceObservations[0]!,
+				acknowledgedAt: 42,
+				reminderDisposition: "confirmed",
+			};
+		queries.batch.mockImplementation(async (input) => {
+			const entry = input.items[0];
+			state = {
+				...state,
+				revision: 2,
+				sourceObservations: state.sourceObservations.map((observation) =>
+					observation.observationId === entry.changeId
+						? { ...observation, version: 2, acknowledgedAt: 84, reminderDisposition: "confirmed" as const }
+						: observation,
+				),
+			};
+			return { state, results: [{ changeId: entry.changeId, status: "applied", message: "已标记已读" }] };
+		});
+		await act(async () =>
+			root.render(
+				<>
+					<NoticeHarness workspaceId="workspace" />
+					<CodexConfigurationSyncSettings workspaceId="workspace" />
+				</>,
+			),
+		);
+		await flush();
+		const unreadCount = alreadyRead ? 5 : 6;
+		expect(
+			container
+				.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]')
+				?.getAttribute("aria-label"),
+		).toContain(`来源更新 ${unreadCount} 条`);
+		const sourceGroups = container.querySelectorAll('[role="group"][aria-label="来源更新"]');
+		for (const group of sourceGroups)
+			expect(group.querySelector("h3")?.textContent).toBe(`来源更新 · ${unreadCount}`);
+		if (alreadyRead) {
+			const historical = container.querySelector('[role="group"][aria-label="历史记录"] article')!;
+			expect(historical.querySelector("button")).toBeNull();
+			expect(historical.querySelector("time")?.dateTime).toBe(new Date(42).toISOString());
+			return;
+		}
+		await act(async () => (sourceGroups[0]!.querySelector("button") as HTMLButtonElement).click());
+		await flush();
+		expect(
+			container
+				.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]')
+				?.getAttribute("aria-label"),
+		).toContain("来源更新 5 条");
+		for (const group of container.querySelectorAll('[role="group"][aria-label="来源更新"]'))
+			expect(group.querySelector("h3")?.textContent).toBe("来源更新 · 5");
+		expect(container.querySelector('[role="group"][aria-label="历史记录"] article button')).toBeNull();
+	});
+	it("稍后条目只进入历史并保留标记已读入口，新观测重新成为未读", async () => {
+		state.changes = [];
+		state.sourceObservations = [
+			{ ...sourceObservationFixture(0), acknowledgedAt: 42, reminderDisposition: "deferred" },
+		];
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await flush();
+		expect(container.querySelector('[role="group"][aria-label="来源更新"] h3')?.textContent).toBe("来源更新 · 0");
+		const historical = container.querySelector('[role="group"][aria-label="历史记录"]')!;
+		expect(historical.textContent).toContain("已稍后处理");
+		expect(historical.querySelectorAll("button")).toHaveLength(1);
+		expect(historical.querySelector("button")?.textContent).toBe("标记已读");
+		state = {
+			...state,
+			revision: 3,
+			sourceObservations: [{ ...sourceObservationFixture(0), version: 3, observationCount: 2 }],
+		};
+		await act(async () => notifyCodexConfigurationSyncUpdated());
+		expect(container.querySelector('[role="group"][aria-label="来源更新"] h3')?.textContent).toBe("来源更新 · 1");
+	});
+	it("来源挂起只禁用自身，通知和设置共享等待，profile 操作锁不影响来源", async () => {
+		state.changes = [];
+		state.sourceObservations = [sourceObservationFixture(0), sourceObservationFixture(1)];
+		queries.batch.mockImplementation(() => new Promise(() => {}));
+		await act(async () =>
+			root.render(
+				<>
+					<NoticeHarness workspaceId="workspace" />
+					<CodexConfigurationSyncSettings workspaceId="workspace" />
+				</>,
+			),
+		);
+		await flush();
+		const first = container.querySelectorAll('[aria-label="来源更新 隔离来源 0"]');
+		await act(async () => (first[0]!.querySelector("button") as HTMLButtonElement).click());
+		for (const entry of first) expect((entry.querySelector("button") as HTMLButtonElement).disabled).toBe(true);
+		for (const entry of container.querySelectorAll('[aria-label="来源更新 隔离来源 1"]'))
+			expect((entry.querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+		expect(queries.batch).toHaveBeenCalledTimes(1);
+	});
 	it("已反馈的建议到期后仍陈述广播事实，不误写成局部选择保留", async () => {
 		state.changes[0] = {
 			...state.changes[0]!,
@@ -487,7 +595,7 @@ describe("Codex 配置同步提示和设置", () => {
 		if (!source) throw new Error("缺少来源提示");
 		expect(source.textContent).not.toContain("→");
 		expect(source.textContent).not.toContain("通过");
-		expect(source.textContent).toContain("确认");
+		expect(source.textContent).toContain("标记已读");
 		await act(async () =>
 			(container.querySelector('[aria-label="全选当前筛选结果中的设置"]') as HTMLInputElement).click(),
 		);
@@ -503,6 +611,7 @@ describe("Codex 配置同步提示和设置", () => {
 					}),
 				],
 			}),
+			expect.objectContaining({ context: { sendAsIndependentHttpRequest: false } }),
 		);
 		expect(container.textContent).toContain("来源暂不可核验");
 	});

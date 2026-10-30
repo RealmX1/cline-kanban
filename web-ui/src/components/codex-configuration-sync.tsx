@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import type { CodexConfigurationSyncNoticePresentation } from "@/hooks/use-codex-configuration-sync-notice";
-import type { CodexConfigurationChange } from "@/runtime/types";
+import type { CodexConfigurationChange, CodexConfigurationSourceObservation } from "@/runtime/types";
 
 type Controller = ReturnType<typeof useCodexConfigurationSync>;
 const targetStatusLabels = {
@@ -246,6 +246,93 @@ function CodexConfigurationChangeActions({
 }
 
 type ReviewFilter = "all" | "settings" | "sources" | "history";
+
+function CodexConfigurationSourceObservationEntry({
+	observation,
+	controller,
+}: {
+	observation: CodexConfigurationSourceObservation;
+	controller: Controller;
+}) {
+	const operation = controller.sourceOperations[observation.observationId];
+	const isHistory = observation.acknowledgedAt !== null;
+	return (
+		<article aria-label={`来源更新 ${observation.sourceLabel}`} className="py-3 text-xs text-text-secondary">
+			<p className="m-0 font-medium text-text-primary break-words">{observation.sourceLabel}</p>
+			<p>来源定义或版本已变化；标记已读只处理提醒，不改变设置或授予 Hook 信任。</p>
+			<p>
+				检测位置：
+				{observation.detectedLocations
+					?.map(
+						(location) =>
+							`${location.workspaceId ? `${location.workspaceId} · ` : ""}${location.conversationSessionId}`,
+					)
+					.join("、") || "位置详情待恢复"}
+				（不表示修改者）
+			</p>
+			<p>
+				在 {observation.detectedLocationCount} 个位置检测到，保留 {observation.observationCount}{" "}
+				条原始观测。发起者尚未证实。
+			</p>
+			{isHistory && (
+				<p>
+					{observation.reminderDisposition === "deferred" ? "已稍后处理" : "已标记已读"} ·{" "}
+					<time dateTime={new Date(observation.acknowledgedAt!).toISOString()}>
+						{new Date(observation.acknowledgedAt!).toLocaleString()}
+					</time>
+				</p>
+			)}
+			{(!isHistory || observation.reminderDisposition === "deferred") && (
+				<div className="flex flex-wrap gap-2">
+					{(
+						[["confirm_source", "标记已读"], ...(!isHistory ? [["defer", "稍后处理"]] : [])] as Array<
+							["confirm_source" | "defer", string]
+						>
+					).map(([action, label]) => (
+						<Button
+							key={action}
+							size="sm"
+							disabled={Boolean(operation)}
+							onClick={() => {
+								void controller.batch(action, [
+									{
+										entryKind: "source_observation",
+										changeId: observation.observationId,
+										expectedVersion: observation.version,
+									},
+								]);
+							}}
+						>
+							{label}
+						</Button>
+					))}
+				</div>
+			)}
+			{operation && (
+				<p role="status">
+					{operation.phase === "sending"
+						? "正在保存提醒处理状态…"
+						: operation.phase === "verifying"
+							? "回执未确认，正在核验。"
+							: "回执仍未确认；连接恢复或页面重新可见后自动核验。"}
+				</p>
+			)}
+			{operation?.phase === "unknown" && (
+				<Button
+					size="sm"
+					variant="ghost"
+					onClick={() => controller.retryUnconfirmedSourceActions(observation.observationId)}
+				>
+					重新核验
+				</Button>
+			)}
+			{!operation && controller.sourceActionMessages[observation.observationId] && (
+				<p role="status">{controller.sourceActionMessages[observation.observationId]}</p>
+			)}
+		</article>
+	);
+}
+
 const selectionIdentity = (change: CodexConfigurationChange) => `${change.changeId}:${change.version}`;
 function CodexConfigurationReviewList({
 	controller,
@@ -275,8 +362,13 @@ function CodexConfigurationReviewList({
 			(change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now()),
 	);
 	const observations = (controller.state?.sourceObservations ?? []).filter(
-		(observation) => (!remindersOnly || observation.acknowledgedAt === null) && matching(observation.sourceLabel),
+		(observation) => observation.acknowledgedAt === null && matching(observation.sourceLabel),
 	);
+	const processedObservations = remindersOnly
+		? []
+		: (controller.state?.sourceObservations ?? []).filter(
+				(observation) => observation.acknowledgedAt !== null && matching(observation.sourceLabel),
+			);
 	const selectable = filter === "all" || filter === "settings" ? proposals : [];
 	const selectedProposals = selectable.filter((change) => selected.has(selectionIdentity(change)));
 	const disabled = controller.pendingChangeId !== null;
@@ -415,63 +507,30 @@ function CodexConfigurationReviewList({
 					{observations.length === 0 && <p className="text-xs text-text-secondary">暂无来源更新。</p>}
 					<div className="divide-y divide-border">
 						{observations.map((observation) => (
-							<article
+							<CodexConfigurationSourceObservationEntry
 								key={observation.observationId}
-								aria-label={`来源更新 ${observation.sourceLabel}`}
-								className="py-3 text-xs text-text-secondary"
-							>
-								<p className="m-0 font-medium text-text-primary break-words">{observation.sourceLabel}</p>
-								<p>来源定义或版本已变化；设置值未变化，未重新授予信任。</p>
-								<p>
-									检测位置：
-									{observation.detectedLocations
-										?.map(
-											(location) =>
-												`${location.workspaceId ? `${location.workspaceId} · ` : ""}${location.conversationSessionId}`,
-										)
-										.join("、") || "位置详情待恢复"}
-									（不表示修改者）
-								</p>
-								<p>
-									在 {observation.detectedLocationCount} 个位置检测到，保留 {observation.observationCount}{" "}
-									条原始观测。发起者尚未证实。
-								</p>
-								<div className="flex flex-wrap gap-2">
-									{(
-										[
-											["confirm_source", "确认"],
-											["defer", "稍后处理"],
-										] as const
-									).map(([action, label]) => (
-										<Button
-											key={action}
-											size="sm"
-											disabled={disabled}
-											onClick={() => {
-												void controller.batch(action, [
-													{
-														entryKind: "source_observation",
-														changeId: observation.observationId,
-														expectedVersion: observation.version,
-													},
-												]);
-											}}
-										>
-											{label}
-										</Button>
-									))}
-								</div>
-							</article>
+								observation={observation}
+								controller={controller}
+							/>
 						))}
 					</div>
 				</div>
 			)}
-			{(filter === "all" || filter === "history") && history.length > 0 && (
+			{(filter === "all" || filter === "history") && history.length + processedObservations.length > 0 && (
 				<div role="group" aria-label="历史记录">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">历史记录 · {history.length}</h3>
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
+						历史记录 · {history.length + processedObservations.length}
+					</h3>
 					<div className="divide-y divide-border">
 						{history.map((change) => (
 							<CodexConfigurationChangeActions key={change.changeId} change={change} controller={controller} />
+						))}
+						{processedObservations.map((observation) => (
+							<CodexConfigurationSourceObservationEntry
+								key={observation.observationId}
+								observation={observation}
+								controller={controller}
+							/>
 						))}
 					</div>
 				</div>
@@ -622,7 +681,28 @@ export function CodexConfigurationSyncSettings({
 				</p>
 			)}
 			{!controller.state ? (
-				<p className="text-xs text-text-secondary">正在读取配置记录…</p>
+				<>
+					<p role={controller.error ? "alert" : "status"} className="text-xs text-text-secondary">
+						{controller.error ?? "正在读取配置记录…"}
+					</p>
+					{Object.keys(controller.sourceOperations).length > 0 && (
+						<p role="status" className="text-xs text-text-secondary">
+							来源处理回执尚未确认，正在核验或等待连接恢复；原决定已保存。
+						</p>
+					)}
+					{controller.error && (
+						<Button
+							size="sm"
+							variant="ghost"
+							onClick={() => {
+								void controller.refresh();
+								controller.retryUnconfirmedSourceActions();
+							}}
+						>
+							重新核验
+						</Button>
+					)}
+				</>
 			) : (
 				<CodexConfigurationReviewList controller={controller} />
 			)}

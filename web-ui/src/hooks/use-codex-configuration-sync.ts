@@ -1,4 +1,8 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+	getCodexConfigurationSourceObservationRecoveryController,
+	runCodexConfigurationSyncRequestWithinBudget,
+} from "@/hooks/codex-configuration-source-observation-recovery";
 import {
 	acknowledgeCodexConfigurationChange,
 	batchCodexConfigurationAction,
@@ -16,42 +20,78 @@ import type {
 	CodexConfigurationChange,
 	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationPropagationTarget,
-	CodexConfigurationSyncState,
 } from "@/runtime/types";
 
+const subscribeWhenDisabled = () => () => {};
+
 export function useCodexConfigurationSync(workspaceId: string | null, enabled = true) {
-	const [state, setState] = useState<CodexConfigurationSyncState | null>(null);
+	const recoveryController = useMemo(
+		() => getCodexConfigurationSourceObservationRecoveryController(workspaceId),
+		[workspaceId],
+	);
+	const { state, sourceOperations, sourceActionMessages } = useSyncExternalStore(
+		enabled ? recoveryController.subscribe : subscribeWhenDisabled,
+		recoveryController.getSnapshot,
+	);
 	const [error, setError] = useState<string | null>(null);
 	const [pendingChangeId, setPendingChangeId] = useState<string | null>(null);
-	const pending = useRef(false);
 	const [batchResults, setBatchResults] = useState<CodexConfigurationBatchActionResult["results"]>([]);
-	const operationIdentities = useRef(new Map<string, string>());
-	const unconfirmedProfileMutation = useRef<{ requestIdentity: string; idempotencyKey: string } | null>(null);
+	const scope = useMemo(
+		() => ({
+			pending: false,
+			active: true,
+			requestAbortController: new AbortController(),
+			operationIdentities: new Map<string, string>(),
+			unconfirmedProfileMutation: null as { requestIdentity: string; idempotencyKey: string } | null,
+		}),
+		[recoveryController, enabled],
+	);
+	const currentScope = useRef(scope);
+	currentScope.current = scope;
+	const isCurrentScope = useCallback(() => currentScope.current === scope && scope.active, [scope]);
+	const acceptState = useCallback(
+		(next: NonNullable<typeof state>) => {
+			if (isCurrentScope()) recoveryController.acceptState(next);
+		},
+		[isCurrentScope, recoveryController],
+	);
 	const refreshSequence = useRef(0);
 	const [feedbackOpportunityNowMs, setFeedbackOpportunityNowMs] = useState(Date.now);
 	const refresh = useCallback(async () => {
 		const sequence = ++refreshSequence.current;
 		try {
-			const next = await fetchCodexConfigurationSyncState(workspaceId);
-			if (sequence === refreshSequence.current) {
-				setState(next);
+			const next = await runCodexConfigurationSyncRequestWithinBudget(
+				(signal) => fetchCodexConfigurationSyncState(workspaceId, signal),
+				scope.requestAbortController.signal,
+			);
+			acceptState(next);
+			if (isCurrentScope() && sequence === refreshSequence.current) {
 				setError((current) => (current?.startsWith("暂时无法读取") ? null : current));
 			}
 		} catch {
-			if (sequence === refreshSequence.current) setError("暂时无法读取 Codex 配置同步状态，连接恢复后自动重试。");
+			if (isCurrentScope() && sequence === refreshSequence.current)
+				setError("暂时无法读取 Codex 配置同步状态，连接恢复后自动重试。");
 		}
-	}, [workspaceId]);
+	}, [workspaceId, scope, acceptState, isCurrentScope]);
 	useEffect(() => {
+		scope.active = true;
+		scope.requestAbortController = new AbortController();
+		setPendingChangeId(null);
+		setError(null);
+		setBatchResults([]);
 		if (!enabled) return;
 		void refresh();
-		const unsubscribe = subscribeCodexConfigurationSyncUpdated(() => {
+		const unsubscribe = subscribeCodexConfigurationSyncUpdated((reason) => {
 			void refresh();
+			if (reason === "runtime_reconnected") recoveryController.resumeUnconfirmedActions();
 		});
 		return () => {
+			scope.active = false;
+			scope.requestAbortController.abort();
 			unsubscribe();
 			refreshSequence.current++;
 		};
-	}, [enabled, refresh]);
+	}, [enabled, refresh, scope, recoveryController]);
 	useEffect(() => {
 		const deadlines =
 			state?.changes
@@ -74,31 +114,33 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 	}, [enabled, feedbackOpportunityNowMs, refresh, state?.changes]);
 	const profileAction = useCallback(
 		async (input: CodexConfigurationProfileMutationRequest) => {
-			if (pending.current) return;
-			pending.current = true;
+			if (scope.pending) return;
+			scope.pending = true;
 			setPendingChangeId("profile");
 			setError(null);
 			try {
 				const requestIdentity = JSON.stringify([workspaceId, { ...input, idempotencyKey: undefined }]);
 				const idempotencyKey =
-					unconfirmedProfileMutation.current?.requestIdentity === requestIdentity
-						? unconfirmedProfileMutation.current.idempotencyKey
+					scope.unconfirmedProfileMutation?.requestIdentity === requestIdentity
+						? scope.unconfirmedProfileMutation.idempotencyKey
 						: input.idempotencyKey;
-				unconfirmedProfileMutation.current = { requestIdentity, idempotencyKey };
-				setState(await mutateCodexConfigurationProfile(workspaceId, { ...input, idempotencyKey }));
-				unconfirmedProfileMutation.current = null;
+				scope.unconfirmedProfileMutation = { requestIdentity, idempotencyKey };
+				acceptState(await mutateCodexConfigurationProfile(workspaceId, { ...input, idempotencyKey }));
+				if (!isCurrentScope()) return;
+				scope.unconfirmedProfileMutation = null;
 				notifyCodexConfigurationSyncUpdated();
 				return true;
 			} catch (error) {
+				if (!isCurrentScope()) return;
 				setError(error instanceof Error ? error.message : "profile 操作未确认，请刷新后重试。");
 				void refresh();
 				return false;
 			} finally {
-				pending.current = false;
-				setPendingChangeId(null);
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
 			}
 		},
-		[workspaceId, refresh],
+		[workspaceId, refresh, scope, acceptState, isCurrentScope],
 	);
 	const act = useCallback(
 		async (
@@ -106,8 +148,8 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			action: "synchronize" | "acknowledge" | "use_session_value" | "keep_shared_value",
 			synchronizeExistingSessions = false,
 		) => {
-			if (pending.current) return;
-			pending.current = true;
+			if (scope.pending) return;
+			scope.pending = true;
 			setPendingChangeId(change.changeId);
 			setError(null);
 			const input = {
@@ -122,17 +164,19 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 						: action === "acknowledge"
 							? await acknowledgeCodexConfigurationChange(workspaceId, input)
 							: await resolveCodexConfigurationConflict(workspaceId, { ...input, resolution: action });
-				setState(next);
+				acceptState(next);
+				if (!isCurrentScope()) return;
 				notifyCodexConfigurationSyncUpdated();
 			} catch {
+				if (!isCurrentScope()) return;
 				setError("操作未确认。请检查最新版本与目标状态后重试，原决定已保留。");
 				void refresh();
 			} finally {
-				pending.current = false;
-				setPendingChangeId(null);
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
 			}
 		},
-		[workspaceId, refresh],
+		[workspaceId, refresh, scope, acceptState, isCurrentScope],
 	);
 	const resolveTarget = useCallback(
 		async (
@@ -140,12 +184,12 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			target: CodexConfigurationPropagationTarget,
 			resolution: "use_source_change" | "keep_target_value",
 		) => {
-			if (pending.current || !target.conflictingTargetValueDigest) return;
-			pending.current = true;
+			if (scope.pending || !target.conflictingTargetValueDigest) return;
+			scope.pending = true;
 			setPendingChangeId(change.changeId);
 			setError(null);
 			try {
-				setState(
+				acceptState(
 					await resolveCodexConfigurationTargetConflict(workspaceId, {
 						changeId: change.changeId,
 						expectedVersion: change.version,
@@ -155,16 +199,18 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 						resolution,
 					}),
 				);
+				if (!isCurrentScope()) return;
 				notifyCodexConfigurationSyncUpdated();
 			} catch {
+				if (!isCurrentScope()) return;
 				setError("目标冲突版本已变化或操作未确认，双方决定已保留。");
 				void refresh();
 			} finally {
-				pending.current = false;
-				setPendingChangeId(null);
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
 			}
 		},
-		[workspaceId, refresh],
+		[workspaceId, refresh, scope, acceptState, isCurrentScope],
 	);
 	const batch = useCallback(
 		async (
@@ -175,8 +221,14 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 				expectedVersion: number;
 			}>,
 		) => {
-			if (pending.current || !entries.length) return;
-			pending.current = true;
+			if (!entries.length) return;
+			if (
+				(action === "confirm_source" || action === "defer") &&
+				entries.every((entry) => entry.entryKind === "source_observation")
+			)
+				return recoveryController.batch(action, entries);
+			if (scope.pending) return;
+			scope.pending = true;
 			setPendingChangeId(entries.length === 1 ? entries[0]!.changeId : "batch");
 			setError(null);
 			const results: CodexConfigurationBatchActionResult["results"] = [];
@@ -184,34 +236,39 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 				for (let offset = 0; offset < entries.length; offset += 200) {
 					const items = entries.slice(offset, offset + 200).map((entry) => {
 						const identity = JSON.stringify([action, entry]);
-						let idempotencyKey = operationIdentities.current.get(identity);
+						let idempotencyKey = scope.operationIdentities.get(identity);
 						if (!idempotencyKey) {
 							idempotencyKey = crypto.randomUUID();
-							operationIdentities.current.set(identity, idempotencyKey);
+							scope.operationIdentities.set(identity, idempotencyKey);
 						}
 						return { ...entry, idempotencyKey };
 					});
 					const result = await batchCodexConfigurationAction(workspaceId, { action, items });
 					results.push(...result.results);
-					setState(result.state);
+					acceptState(result.state);
+					if (!isCurrentScope()) return;
 				}
 				setBatchResults(results);
 				notifyCodexConfigurationSyncUpdated();
 				return results;
 			} catch {
+				if (!isCurrentScope()) return;
 				setError("操作回执未确认，已保留操作身份。连接恢复后可重试，已完成项不会重复执行。");
 				void refresh();
 			} finally {
-				pending.current = false;
-				setPendingChangeId(null);
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
 			}
 		},
-		[workspaceId, refresh],
+		[workspaceId, refresh, scope, acceptState, isCurrentScope, recoveryController],
 	);
 	return {
 		state,
 		error,
 		pendingChangeId,
+		sourceOperations,
+		sourceActionMessages,
+		retryUnconfirmedSourceActions: recoveryController.resumeUnconfirmedActions,
 		act,
 		resolveTarget,
 		refresh,

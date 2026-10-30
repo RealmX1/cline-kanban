@@ -43,6 +43,99 @@ const createWriter = (name: string) =>
 	});
 
 describe("配置审批与来源提示", () => {
+	it.each(["confirm_source", "defer"] as const)("后台恢复阻塞时，来源 %s 仍独立持久化、发布和返回", async (action) => {
+		const binding = await createWriter("source-reminder-quick-receipt");
+		const hookTrustPath = join(binding.configurationHomeDirectoryPath, "hooks.json");
+		const pluginCacheProbePath = join(sourceHome, "plugins", "isolated-cache-probe");
+		await mkdir(join(sourceHome, "plugins"), { recursive: true });
+		await writeFile(hookTrustPath, '{"trusted_hash":"preserved-trust","enabled":false}');
+		await writeFile(pluginCacheProbePath, "保留插件缓存原文");
+		await mutateCodexConfigurationSyncStore((store) => {
+			store.sourceObservations.push({
+				observationId: "isolated-source-observation",
+				sourceIdentity: "isolated-source",
+				sourceKey: "isolated-hook",
+				sourceLabel: "隔离来源",
+				version: ++store.revision,
+				firstObservedAt: 1,
+				observedAt: 1,
+				observationCount: 1,
+				detectedLocationCount: 1,
+				acknowledgedAt: null,
+				reminderDisposition: "unread",
+				rawChangeIds: [],
+				detectedWriterIds: [],
+			});
+		});
+		let signalEnteredRecovery = () => {};
+		const enteredRecovery = new Promise<void>((resolve) => {
+			signalEnteredRecovery = resolve;
+		});
+		let signalReleaseRecovery = () => {};
+		const releaseRecovery = new Promise<void>((resolve) => {
+			signalReleaseRecovery = resolve;
+		});
+		const onUpdated = vi.fn();
+		const service = createCodexConfigurationSyncService({
+			listSessions: () => [],
+			onUpdated,
+			reconcileRetainedTerminalInput: async () => {
+				signalEnteredRecovery();
+				await releaseRecovery;
+			},
+		});
+		const scanning = service.scan();
+		await enteredRecovery;
+		const before = await readCodexConfigurationSyncStore();
+		const writerConfigurationPath = join(binding.configurationHomeDirectoryPath, "config.toml");
+		const localConfiguration = parse(await readFile(writerConfigurationPath, "utf8"));
+		localConfiguration.model = "not-yet-observed-local-setting";
+		await writeFile(writerConfigurationPath, stringify(localConfiguration));
+		const preservedHookTrust = await readFile(hookTrustPath, "utf8");
+		const observation = (await service.getState()).sourceObservations[0];
+		if (!observation) throw new Error("缺少隔离来源记录");
+		const request = {
+			action,
+			items: [
+				{
+					entryKind: "source_observation" as const,
+					changeId: observation.observationId,
+					expectedVersion: observation.version,
+					idempotencyKey: randomUUID(),
+				},
+			],
+		};
+		try {
+			let completed = false;
+			const operation = service.batchAction(request).then((result) => {
+				completed = true;
+				return result;
+			});
+			await vi.waitFor(() => expect(completed).toBe(true), { timeout: 1_000 });
+			const result = await operation;
+			expect(result.results[0]?.status).toBe("applied");
+			expect(onUpdated).toHaveBeenCalledWith(result.state.revision);
+			const processed = result.state.sourceObservations[0];
+			if (!processed) throw new Error("缺少已处理来源记录");
+			expect(processed.reminderDisposition).toBe(action === "defer" ? "deferred" : "confirmed");
+			expect(processed.acknowledgedAt).toEqual(expect.any(Number));
+			const replay = await service.batchAction(request);
+			expect(replay.results[0]?.status).toBe("replayed");
+			expect(replay.state.sourceObservations[0]?.acknowledgedAt).toBe(processed.acknowledgedAt);
+			const after = await readCodexConfigurationSyncStore();
+			expect(after.sources).toEqual(before.sources);
+			expect(after.writers).toEqual(before.writers);
+			expect(after.changes).toEqual(before.changes);
+			expect(await readFile(hookTrustPath, "utf8")).toBe(preservedHookTrust);
+			expect(await readFile(pluginCacheProbePath, "utf8")).toBe("保留插件缓存原文");
+			expect(parse(await readFile(writerConfigurationPath, "utf8")).model).toBe("not-yet-observed-local-setting");
+			expect(await readFile(join(sourceHome, "config.toml"), "utf8")).toBe('model="initial-model"\n');
+		} finally {
+			signalReleaseRecovery();
+			await scanning;
+			await service.close();
+		}
+	});
 	it("来源暂不可核验时保持待处理，其他有效项继续；原文件恢复后可重试原操作身份", async () => {
 		const first = await createWriter("temporarily-unreadable"),
 			second = await createWriter("available");

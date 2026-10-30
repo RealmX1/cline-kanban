@@ -3,7 +3,14 @@ import {
 	KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
 } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import type { RuntimeAppRouter } from "@runtime-trpc";
-import { createTRPCProxyClient, httpBatchLink, TRPCClientError, type TRPCLink } from "@trpc/client";
+import {
+	createTRPCProxyClient,
+	httpBatchLink,
+	httpLink,
+	splitLink,
+	TRPCClientError,
+	type TRPCLink,
+} from "@trpc/client";
 import { observable, type Unsubscribable } from "@trpc/server/observable";
 import {
 	reacquireKanbanWebUiPageLoadRequestOriginNonceUnlessAlreadyReplacedSince,
@@ -105,9 +112,16 @@ export function getRuntimeTrpcClient(workspaceId: string | null): RuntimeTrpcCli
 	const created = createTRPCProxyClient<RuntimeAppRouter>({
 		links: [
 			createKanbanWebUiPageLoadRequestOriginNonceReacquireAndRetryOnceLink(),
-			httpBatchLink({
-				url: "/api/trpc",
-				headers: () => buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(workspaceId),
+			splitLink({
+				condition: (operation) => operation.context.sendAsIndependentHttpRequest === true,
+				true: httpLink({
+					url: "/api/trpc",
+					headers: () => buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(workspaceId),
+				}),
+				false: httpBatchLink({
+					url: "/api/trpc",
+					headers: () => buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(workspaceId),
+				}),
 			}),
 		],
 	});

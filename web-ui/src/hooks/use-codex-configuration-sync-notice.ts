@@ -33,7 +33,9 @@ export function useCodexConfigurationSyncNotice({
 		controller.state?.sourceObservations.filter((observation) => observation.acknowledgedAt === null).length ?? 0;
 	const hasReminders = settingsReminders.length + sourceUpdateCount > 0;
 	const isVisible = hasReminders && isPresentationAvailable && expansionMode !== "collapsed";
-	const isOperationPending = controller.pendingChangeId !== null;
+	const isOperationPending =
+		controller.pendingChangeId !== null ||
+		Object.values(controller.sourceOperations).some((operation) => operation.phase !== "unknown");
 	const recordReadingPosition = useCallback(() => {
 		if (scrollContainerRef.current && !panelRef.current?.hidden)
 			readingPositionRef.current = scrollContainerRef.current.scrollTop;

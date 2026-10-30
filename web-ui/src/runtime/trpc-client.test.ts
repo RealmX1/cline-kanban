@@ -4,6 +4,10 @@ import {
 } from "@runtime-kanban-web-ui-page-load-request-origin-nonce";
 import { TRPCClientError } from "@trpc/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	batchCodexConfigurationAction,
+	fetchCodexConfigurationSyncState,
+} from "@/runtime/codex-configuration-sync-query";
 
 import {
 	reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime,
@@ -107,6 +111,62 @@ describe("runtime tRPC client page-load nonce", () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		resetKanbanWebUiPageLoadRequestOriginNonceStoreForTests();
+	});
+	it("来源操作与状态补读独立发送 HTTP，挂起的其他 mutation 或来源不阻塞它们", async () => {
+		await reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime();
+		const hangingRequests = new AbortController();
+		const requests: Array<{ url: URL; headers: Record<string, string> }> = [];
+		vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+			const url = new URL(String(input), "http://kanban.test");
+			requests.push({ url, headers: init?.headers as Record<string, string> });
+			if (url.pathname.includes("mutateCodexConfigurationProfile") || String(init?.body).includes("hanging-source"))
+				return new Promise<Response>((_resolve, reject) =>
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }),
+				);
+			return fakeRuntime.fetchMock(input, init);
+		});
+		const unrelated = getRuntimeTrpcClient("isolated-http-workspace")
+			.runtime.mutateCodexConfigurationProfile.mutate(
+				{ action: "set_default", profileId: "isolated", idempotencyKey: "unrelated" },
+				{ signal: hangingRequests.signal },
+			)
+			.catch(() => {});
+		const sourceRequest = (changeId: string) => ({
+			action: "confirm_source" as const,
+			items: [{ entryKind: "source_observation" as const, changeId, expectedVersion: 1, idempotencyKey: changeId }],
+		});
+		const hanging = batchCodexConfigurationAction(
+			"isolated-http-workspace",
+			sourceRequest("hanging-source"),
+			hangingRequests.signal,
+		).catch(() => {});
+		try {
+			await Promise.all([
+				batchCodexConfigurationAction("isolated-http-workspace", sourceRequest("available-source")),
+				fetchCodexConfigurationSyncState("isolated-http-workspace"),
+			]);
+			const independentRequests = requests.filter(
+				({ url }) => !url.pathname.includes("mutateCodexConfigurationProfile"),
+			);
+			expect(independentRequests).toHaveLength(3);
+			for (const { url, headers } of independentRequests) {
+				expect(url.searchParams.has("batch")).toBe(false);
+				expect(headers["x-kanban-workspace-id"]).toBe("isolated-http-workspace");
+				expect(headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME]).toBe("nonce-1");
+			}
+		} finally {
+			hangingRequests.abort();
+			await Promise.all([unrelated, hanging]);
+		}
+	});
+	it("独立状态请求在 runtime 重启后仍自动重取 nonce 并原样重试一次", async () => {
+		await reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime();
+		fakeRuntime.state.nonceAcceptedByRuntime = "isolated-restarted-runtime";
+		await fetchCodexConfigurationSyncState("isolated-independent-restart");
+		const requests = requestsTo(fakeRuntime.observedRequests, "runtime.getCodexConfigurationSyncState");
+		expect(
+			requests.map((request) => request.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME]),
+		).toEqual(["nonce-1", "nonce-2"]);
 	});
 
 	it("sends requests without the nonce header before any nonce has been issued", async () => {

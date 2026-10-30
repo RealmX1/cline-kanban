@@ -1366,7 +1366,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 	const batchAction = async (
 		input: CodexConfigurationBatchActionRequest,
 	): Promise<CodexConfigurationBatchActionResult> => {
-		await observe();
+		const isSourceReminderOnlyAction =
+			(input.action === "confirm_source" || input.action === "defer") &&
+			input.items.every((item) => item.entryKind === "source_observation");
+		// 来源已读只处理持久提醒；扫描和会话恢复由既有后台机制推进。
+		if (!isSourceReminderOnlyAction) await observe();
 		if (input.action === "approve")
 			await prepareCodexConfigurationProposalIdentityVolumeObservations(
 				input.items.filter((item) => item.entryKind === "settings_proposal").map((item) => item.changeId),
@@ -1436,7 +1440,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			);
 			results.push(result);
 		}
-		await recover();
+		if (!isSourceReminderOnlyAction) await recover();
 		await publish();
 		return {
 			results,

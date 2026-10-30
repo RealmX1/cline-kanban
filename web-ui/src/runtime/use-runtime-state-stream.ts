@@ -637,7 +637,7 @@ export function useRuntimeStateStream(
 			}
 			socket.onopen = () => {
 				notifyAgentSessionPtyHostDiagnosticsUpdated();
-				notifyCodexConfigurationSyncUpdated();
+				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
 					requestedWorkspaceForConnection,
 					(message) => {
