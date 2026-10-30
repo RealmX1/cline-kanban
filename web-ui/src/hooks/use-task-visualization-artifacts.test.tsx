@@ -2,6 +2,8 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
+import type * as TaskVisualizationQuery from "@/runtime/task-visualization-query";
+import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeStateStreamClientMessage,
 	TaskVisualizationArtifact,
@@ -12,6 +14,7 @@ import {
 	declareTaskVisualizationBrowserContext,
 	deliverTaskVisualizationStreamMessage,
 	notifyTaskVisualizationStreamDisconnected,
+	notifyTaskVisualizationStreamReconnected,
 	readTaskVisualizationBrowserPageId,
 } from "@/stores/task-visualization-browser-bridge";
 
@@ -92,6 +95,183 @@ afterEach(async () => {
 	detachSender();
 	container.remove();
 	vi.restoreAllMocks();
+	vi.useRealTimers();
+});
+
+it.each(["", '{"result":'])("清单 JSON 响应 %j 无法解析时按 400ms、1200ms 有界重试", async (response) => {
+	vi.useFakeTimers();
+	queries.list.mockImplementationOnce(async () => JSON.parse(response));
+	await act(async () => root.render(<Harness />));
+	expect(latest.isLoading).toBe(true);
+	expect(latest.error).toBeNull();
+	await act(async () => vi.advanceTimersByTimeAsync(399));
+	expect(queries.list).toHaveBeenCalledTimes(1);
+	await act(async () => vi.advanceTimersByTimeAsync(1));
+	expect(queries.list).toHaveBeenCalledTimes(2);
+	expect(latest.artifacts).toEqual([artifact]);
+	expect(latest.isLoading).toBe(false);
+});
+
+it.each(["online", "visibilitychange", "stream_reconnected", "manual"])(
+	"重试耗尽后通过 %s 补读，保留任务名、选中旧修订与 iframe",
+	async (event) => {
+		vi.useFakeTimers();
+		const taskAttribution = { workspaceId: "workspace-a", taskId: "task-a", taskTitle: "原任务名" };
+		queries.list.mockResolvedValue({ artifacts: [artifact], taskAttribution });
+		await act(async () => root.render(<Harness />));
+		await act(async () => latest.selectArtifact(artifact));
+		const selection = latest.selection;
+		const frame = container.querySelector("iframe");
+		queries.list.mockRejectedValue(new SyntaxError("Unexpected end of JSON input"));
+		await act(async () => latest.refreshArtifacts());
+		await act(async () => vi.advanceTimersByTimeAsync(400));
+		await act(async () => vi.advanceTimersByTimeAsync(1200));
+		expect(queries.list).toHaveBeenCalledTimes(4);
+		expect(latest.error).toBe("Unexpected end of JSON input");
+		expect(latest.isLoading).toBe(false);
+		expect(latest.artifacts).toEqual([artifact]);
+		expect(latest.taskAttribution).toEqual(taskAttribution);
+		expect(container.querySelector("iframe")).toBe(frame);
+		await act(async () => vi.advanceTimersByTimeAsync(30_000));
+		expect(queries.list).toHaveBeenCalledTimes(4);
+		const nextArtifact = { ...artifact, revisionId: "c".repeat(64), versionNumber: 2 };
+		queries.list.mockResolvedValue({ artifacts: [nextArtifact], taskAttribution });
+		await act(async () => {
+			if (event === "manual") latest.refreshArtifacts();
+			else if (event === "stream_reconnected") notifyTaskVisualizationStreamReconnected("workspace-a");
+			else if (event === "visibilitychange") document.dispatchEvent(new Event(event));
+			else window.dispatchEvent(new Event(event));
+		});
+		expect(queries.list).toHaveBeenCalledTimes(5);
+		expect(latest.error).toBeNull();
+		expect(latest.artifacts).toEqual([nextArtifact]);
+		expect(latest.selection).toBe(selection);
+		expect(container.querySelector("iframe")).toBe(frame);
+	},
+);
+
+it("请求每 8 秒超时后重试，第三次超时停止并可手动补读", async () => {
+	vi.useFakeTimers();
+	const signals: AbortSignal[] = [];
+	queries.list.mockImplementation((_workspaceId, _taskId, signal: AbortSignal) => {
+		signals.push(signal);
+		return new Promise(() => {});
+	});
+	await act(async () => root.render(<Harness />));
+	await act(async () => vi.advanceTimersByTimeAsync(7999));
+	expect(signals[0]).toHaveProperty("aborted", false);
+	await act(async () => vi.advanceTimersByTimeAsync(1));
+	expect(signals[0]).toHaveProperty("aborted", true);
+	await act(async () => vi.advanceTimersByTimeAsync(400));
+	await act(async () => vi.advanceTimersByTimeAsync(8000));
+	await act(async () => vi.advanceTimersByTimeAsync(1200));
+	await act(async () => vi.advanceTimersByTimeAsync(8000));
+	expect(queries.list).toHaveBeenCalledTimes(3);
+	expect(signals.every((signal) => signal.aborted)).toBe(true);
+	expect(latest.isLoading).toBe(false);
+	expect(latest.error).toBeTruthy();
+	queries.list.mockResolvedValue({ artifacts: [artifact] });
+	await act(async () => latest.refreshArtifacts());
+	expect(latest.artifacts).toEqual([artifact]);
+	expect(latest.error).toBeNull();
+});
+
+it("真实 tRPC 合批未取消时仍按期限结束清单读取，拒绝迟到结果并允许恢复", async () => {
+	vi.useFakeTimers();
+	const actualQuery = await vi.importActual<typeof TaskVisualizationQuery>("@/runtime/task-visualization-query");
+	const workspaceId = "workspace-batched-list-timeout";
+	const client = getRuntimeTrpcClient(workspaceId);
+	const unrelatedReads: Promise<unknown>[] = [];
+	const pendingResponses: { signal: AbortSignal | null | undefined; release: () => void }[] = [];
+	const lateTaskAttribution = { workspaceId, taskId: "task-a", taskTitle: "迟到任务名" };
+	const fetchMock = vi.spyOn(globalThis, "fetch").mockImplementation(
+		(input, init) =>
+			new Promise<Response>((resolve) => {
+				const paths = new URL(String(input), "http://kanban.test").pathname.replace("/api/trpc/", "").split(",");
+				expect(paths).toEqual(["taskVisualizationArtifacts.list", "projects.list"]);
+				pendingResponses.push({
+					signal: init?.signal,
+					release: () =>
+						resolve(
+							new Response(
+								JSON.stringify(
+									paths.map((path) => ({
+										result: {
+											data:
+												path === "projects.list"
+													? []
+													: { artifacts: [artifact], taskAttribution: lateTaskAttribution },
+										},
+									})),
+								),
+								{ headers: { "content-type": "application/json" } },
+							),
+						),
+				});
+			}),
+	);
+	queries.list.mockImplementation((scope: string, taskId: string, signal: AbortSignal) => {
+		const read = actualQuery.fetchTaskVisualizationArtifacts(scope, taskId, signal);
+		unrelatedReads.push(client.projects.list.query());
+		return read;
+	});
+	await act(async () => root.render(<Harness workspaceId={workspaceId} />));
+	await act(async () => vi.advanceTimersByTimeAsync(25_601));
+	expect(pendingResponses).toHaveLength(3);
+	expect(pendingResponses.every(({ signal }) => signal?.aborted === false)).toBe(true);
+	expect(latest.isLoading).toBe(false);
+	expect(latest.error).toBeTruthy();
+	const timeoutError = latest.error;
+	await act(async () => {
+		for (const response of pendingResponses) response.release();
+		await Promise.all(unrelatedReads);
+	});
+	expect(latest.artifacts).toEqual([]);
+	expect(latest.taskAttribution).toBeNull();
+	expect(latest.error).toBe(timeoutError);
+	fetchMock.mockResolvedValue(
+		new Response(JSON.stringify([{ result: { data: { artifacts: [artifact] } } }, { result: { data: [] } }]), {
+			headers: { "content-type": "application/json" },
+		}),
+	);
+	await act(async () => latest.refreshArtifacts());
+	await act(async () => vi.advanceTimersByTimeAsync(1));
+	expect(latest.artifacts).toEqual([artifact]);
+	expect(latest.error).toBeNull();
+});
+
+it.each(["NOT_FOUND", "FORBIDDEN", "UNAUTHORIZED"])("%s 错误不自动重试", async (code) => {
+	vi.useFakeTimers();
+	queries.list.mockRejectedValue(Object.assign(new Error("任务不可访问"), { data: { code } }));
+	await act(async () => root.render(<Harness />));
+	await act(async () => vi.advanceTimersByTimeAsync(30_000));
+	expect(queries.list).toHaveBeenCalledTimes(1);
+	expect(latest.error).toBe("任务不可访问");
+});
+
+it("切换任务取消旧请求，迟到响应不覆盖当前任务，卸载取消重试", async () => {
+	vi.useFakeTimers();
+	let resolveOld = (_value: unknown) => {};
+	queries.list.mockImplementationOnce(
+		() =>
+			new Promise((resolve) => {
+				resolveOld = resolve;
+			}),
+	);
+	await act(async () => root.render(<Harness />));
+	const oldSignal = queries.list.mock.calls[0]?.[2] as AbortSignal;
+	const nextArtifact = { ...artifact, taskId: "task-b", title: "目标任务图" };
+	queries.list.mockResolvedValue({ artifacts: [nextArtifact] });
+	await act(async () => root.render(<Harness taskId="task-b" />));
+	expect(oldSignal.aborted).toBe(true);
+	await act(async () => resolveOld({ artifacts: [artifact] }));
+	expect(latest.artifacts).toEqual([nextArtifact]);
+	queries.list.mockRejectedValue(new SyntaxError("响应为空"));
+	await act(async () => latest.refreshArtifacts());
+	const requestCount = queries.list.mock.calls.length;
+	await act(async () => root.render(null));
+	await act(async () => vi.advanceTimersByTimeAsync(30_000));
+	expect(queries.list).toHaveBeenCalledTimes(requestCount);
 });
 
 it("切到其他前台视图只暂停自动投递，手动阅读的 iframe 与选择保持", async () => {

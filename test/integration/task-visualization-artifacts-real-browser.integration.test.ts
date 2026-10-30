@@ -212,6 +212,8 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 			KANBAN_RUNTIME_PORT: String(port),
 			KANBAN_CLI_TRPC_TIMEOUT_MS: "3000",
 			KANBAN_CLI_HARD_TIMEOUT_MS: "15000",
+			CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"),
+			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-database"),
 		});
 		const startRuntime = async () => {
 			const child = children.register(
@@ -441,6 +443,60 @@ describe("持久 HTML 可视化的真实打包 CLI 与浏览器", { timeout: tes
 				await mkdir(browserEvidenceDirectory, { recursive: true });
 				await secondPage.screenshot({ path: join(browserEvidenceDirectory, "desktop-automatic-preview.png") });
 			}
+			const artifactListRequestPattern = /\/api\/trpc\/[^?]*taskVisualizationArtifacts\.list/u;
+			let failedArtifactListResponseCount = 0;
+			const returnUnreadableArtifactList = async (route: Route) => {
+				failedArtifactListResponseCount += 1;
+				await route.fulfill({
+					contentType: "application/json",
+					body: failedArtifactListResponseCount === 1 ? "" : '{"result":',
+				});
+			};
+			await frame.evaluate('document.body.style.minHeight = "2400px"; window.scrollTo(0, 400);');
+			const originalReadingPosition = await frame.evaluate<number>("window.scrollY");
+			expect(originalReadingPosition).toBeGreaterThan(0);
+			await secondPage.route(artifactListRequestPattern, returnUnreadableArtifactList);
+			await secondPage.evaluate('window.dispatchEvent(new Event("online"))');
+			await secondPage.getByRole("alert").filter({ hasText: "清单暂不可用" }).waitFor();
+			expect(failedArtifactListResponseCount).toBe(3);
+			expect(frame.isDetached()).toBe(false);
+			expect(await frame.evaluate<number>("window.scrollY")).toBe(originalReadingPosition);
+			expect(await secondPage.getByLabel("可视化任务署名").textContent()).toContain("远端可视化验收");
+			expect(await secondPage.getByText("此任务还没有已发布的可视化。", { exact: true }).count()).toBe(0);
+			await secondPage.unroute(artifactListRequestPattern, returnUnreadableArtifactList);
+			await secondPage.evaluate('window.dispatchEvent(new Event("online"))');
+			await secondPage.getByRole("alert").filter({ hasText: "清单暂不可用" }).waitFor({ state: "hidden" });
+			expect(frame.isDetached()).toBe(false);
+			expect(await frame.evaluate<number>("window.scrollY")).toBe(originalReadingPosition);
+			const firstRevisionPreview = await client.taskVisualizationArtifacts.preparePreview.query({
+				taskId,
+				visualizationArtifactId: (await client.taskVisualizationArtifacts.list.query({ taskId })).artifacts[0]
+					.visualizationArtifactId,
+			});
+			const recoveringViewer = await browser.newPage();
+			recoveringViewer.on("pageerror", (error) => pageErrors.push(error.message));
+			failedArtifactListResponseCount = 0;
+			await recoveringViewer.route(artifactListRequestPattern, returnUnreadableArtifactList);
+			await recoveringViewer.goto(`${origin}${firstRevisionPreview.viewerRelativeUrl}`);
+			await recoveringViewer.getByRole("alert").filter({ hasText: "清单暂不可用" }).waitFor();
+			expect(failedArtifactListResponseCount).toBe(3);
+			expect(await recoveringViewer.getByText("此任务还没有已发布的可视化。", { exact: true }).count()).toBe(0);
+			if (browserEvidenceDirectory)
+				await recoveringViewer.screenshot({
+					path: join(browserEvidenceDirectory, "artifact-list-failure-without-empty-state.png"),
+				});
+			await recoveringViewer.unroute(artifactListRequestPattern, returnUnreadableArtifactList);
+			await recoveringViewer.evaluate('window.dispatchEvent(new Event("online"))');
+			await recoveringViewer
+				.frameLocator('iframe[title="交互图表"]')
+				.getByRole("heading", { name: "交互图表第一版" })
+				.waitFor();
+			expect(await recoveringViewer.getByLabel("可视化任务署名").textContent()).toContain("远端可视化验收");
+			if (browserEvidenceDirectory)
+				await recoveringViewer.screenshot({
+					path: join(browserEvidenceDirectory, "artifact-list-recovered-independent-viewer.png"),
+				});
+			await recoveringViewer.close();
 			// 新请求返回 404；旧 frame 和旧证明即使迟到也不能把新请求写成 displayed。
 			await firstPage.close();
 			await secondPage.bringToFront();

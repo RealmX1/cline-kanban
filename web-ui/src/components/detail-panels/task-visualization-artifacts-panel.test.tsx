@@ -70,6 +70,31 @@ afterEach(async () => {
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
 });
+it("清单读取失败显示错误与重试入口，只有成功空清单显示没有已发布的可视化", async () => {
+	const emptyController = { ...controller, artifacts: [], selection: null };
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel
+				workspaceId="workspace-a"
+				taskId="task-a"
+				controller={{ ...emptyController, error: "Unexpected end of JSON input" }}
+			/>,
+		),
+	);
+	expect(container.textContent).toContain("清单暂不可用：Unexpected end of JSON input");
+	expect(container.textContent).not.toContain("此任务还没有已发布的可视化");
+	expect(container.textContent).not.toContain("Agent 生成的 HTML 发布后会显示在这里");
+	const retry = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "重试");
+	expect(retry).toBeDefined();
+	await act(async () => retry?.click());
+	expect(controller.refreshArtifacts).toHaveBeenCalled();
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel workspaceId="workspace-a" taskId="task-a" controller={emptyController} />,
+		),
+	);
+	expect(container.textContent).toContain("此任务还没有已发布的可视化");
+});
 it("任务署名在 iframe 外显示，任务名和图表标题独立且全屏保留", async () => {
 	await act(async () =>
 		root.render(

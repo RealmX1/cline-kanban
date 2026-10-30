@@ -1,10 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRecoverableForegroundRead } from "@/expanded-foreground-view/use-recoverable-foreground-read";
 import { fetchTaskVisualizationArtifacts } from "@/runtime/task-visualization-query";
-import type {
-	TaskVisualizationArtifact,
-	TaskVisualizationPreviewRequestedMessage,
-	TaskVisualizationTaskAttribution,
-} from "@/runtime/types";
+import type { TaskVisualizationArtifact, TaskVisualizationPreviewRequestedMessage } from "@/runtime/types";
 import {
 	acknowledgeTaskVisualizationPreview,
 	declareTaskVisualizationBrowserContext,
@@ -36,18 +33,41 @@ export function useTaskVisualizationArtifacts({
 	const identity = JSON.stringify([workspaceId, taskId]);
 	const activeIdentity = useRef(identity);
 	activeIdentity.current = identity;
-	const [state, setState] = useState<{
-		identity: string;
-		artifacts: TaskVisualizationArtifact[];
-		taskAttribution: TaskVisualizationTaskAttribution | null;
-		isLoading: boolean;
-		error: string | null;
-	}>({ identity, artifacts: [], taskAttribution: null, isLoading: true, error: null });
+	const readArtifacts = useCallback(
+		(signal: AbortSignal) => {
+			signal.throwIfAborted();
+			// httpBatchLink 不会因单个 operation 取消而结束整批；清单须独立结束，拒绝超时后的结果。
+			return new Promise<Awaited<ReturnType<typeof fetchTaskVisualizationArtifacts>>>((resolve, reject) => {
+				const cancelRead = () => reject(new DOMException("清单读取已取消或超时，请重试。", "AbortError"));
+				signal.addEventListener("abort", cancelRead, { once: true });
+				fetchTaskVisualizationArtifacts(workspaceId ?? "", taskId, signal).then(
+					(value) => {
+						signal.removeEventListener("abort", cancelRead);
+						resolve(value);
+					},
+					(error: unknown) => {
+						signal.removeEventListener("abort", cancelRead);
+						reject(error);
+					},
+				);
+			});
+		},
+		[workspaceId, taskId],
+	);
+	const {
+		value: artifactList,
+		loading: isLoading,
+		error,
+		refresh,
+	} = useRecoverableForegroundRead({
+		identity,
+		read: readArtifacts,
+		enabled: Boolean(workspaceId),
+	});
 	const [selectionState, setSelection] = useState<{ identity: string; selection: TaskVisualizationSelection | null }>({
 		identity,
 		selection: null,
 	});
-	const activeQuery = useRef<AbortController | null>(null);
 	const taskAttributionRetryAttemptCount = useRef(0);
 	const automaticPreview = useRef<TaskVisualizationPreviewRequestedMessage | null>(null);
 	const observeBrowserRef = useRef(observeBrowser);
@@ -97,52 +117,21 @@ export function useTaskVisualizationArtifacts({
 		if (!isAutomaticPreviewForegroundEligible && automaticPreview.current)
 			failAutomaticPreview(undefined, "已切换到其他前台视图，自动预览已取消。");
 	}, [workspaceId, taskId, observeBrowser, isAutomaticPreviewForegroundEligible, failAutomaticPreview]);
-	const refreshArtifacts = useCallback(async () => {
+	const refreshArtifacts = useCallback(() => {
 		if (activeIdentity.current !== identity) return;
-		activeQuery.current?.abort();
-		if (!workspaceId) {
-			setState({ identity, artifacts: [], taskAttribution: null, isLoading: false, error: null });
-			return;
-		}
-		const query = new AbortController();
-		activeQuery.current = query;
-		setState((current) => ({
-			identity,
-			artifacts: current.identity === identity ? current.artifacts : [],
-			taskAttribution: current.identity === identity ? current.taskAttribution : null,
-			isLoading: true,
-			error: null,
-		}));
-		try {
-			const result = await fetchTaskVisualizationArtifacts(workspaceId, taskId, query.signal);
-			if (!query.signal.aborted) {
-				setState({
-					identity,
-					artifacts: result.artifacts,
-					taskAttribution: result.taskAttribution,
-					isLoading: false,
-					error: null,
-				});
-				if (result.latestPreviewRequest?.failedAtMs !== undefined)
-					setAutomaticPreviewError(
-						result.latestPreviewRequest.deliveryFailureReason ?? "自动预览未完成，请手动选择产物重试。",
-					);
-			}
-		} catch (error) {
-			if (!query.signal.aborted)
-				setState((current) => ({
-					...current,
-					isLoading: false,
-					error: error instanceof Error ? error.message : String(error),
-				}));
-		}
-	}, [workspaceId, taskId, identity]);
+		refresh();
+	}, [identity, refresh]);
+	useEffect(() => {
+		if (artifactList?.latestPreviewRequest?.failedAtMs !== undefined)
+			setAutomaticPreviewError(
+				artifactList.latestPreviewRequest.deliveryFailureReason ?? "自动预览未完成，请手动选择产物重试。",
+			);
+	}, [artifactList]);
 	useEffect(() => {
 		taskAttributionRetryAttemptCount.current = 0;
 	}, [identity]);
 	useEffect(() => {
-		if (state.identity !== identity || state.isLoading || state.error || state.taskAttribution?.taskTitle !== null)
-			return;
+		if (isLoading || error || artifactList?.taskAttribution?.taskTitle !== null) return;
 		const delay = [1000, 5000, 15_000][taskAttributionRetryAttemptCount.current];
 		if (delay === undefined) return;
 		const timer = setTimeout(() => {
@@ -150,7 +139,7 @@ export function useTaskVisualizationArtifacts({
 			void refreshArtifacts();
 		}, delay);
 		return () => clearTimeout(timer);
-	}, [identity, state.identity, state.isLoading, state.error, state.taskAttribution, refreshArtifacts]);
+	}, [isLoading, error, artifactList, refreshArtifacts]);
 	useEffect(() => {
 		automaticPreview.current = null;
 		failedDeliveryAttemptIds.current.clear();
@@ -159,7 +148,6 @@ export function useTaskVisualizationArtifacts({
 		setSelection({ identity, selection: null });
 	}, [identity]);
 	useEffect(() => {
-		void refreshArtifacts();
 		const unsubscribe = subscribeToTaskVisualizationBrowserEvents((message) => {
 			if (message.workspaceId !== workspaceId) return;
 			if (message.type === "stream_disconnected") {
@@ -167,7 +155,6 @@ export function useTaskVisualizationArtifacts({
 				return;
 			}
 			if (message.type === "stream_reconnected") {
-				void refreshArtifacts();
 				return;
 			}
 			if (message.taskId !== taskId) return;
@@ -246,7 +233,6 @@ export function useTaskVisualizationArtifacts({
 		if (!workspaceId || !observeBrowser)
 			return () => {
 				unsubscribe();
-				activeQuery.current?.abort();
 			};
 		const declare = (hasInteraction = false) =>
 			declareTaskVisualizationBrowserContext(
@@ -280,7 +266,6 @@ export function useTaskVisualizationArtifacts({
 					automaticPreview.current = null;
 				}
 			}
-			activeQuery.current?.abort();
 			window.clearInterval(heartbeat);
 			document.removeEventListener("pointerdown", onInteraction, true);
 			document.removeEventListener("keydown", onInteraction, true);
@@ -312,15 +297,14 @@ export function useTaskVisualizationArtifacts({
 	const ensureDefaultSelection = useCallback(() => {
 		if (
 			activeIdentity.current !== identity ||
-			state.identity !== identity ||
-			state.isLoading ||
-			state.error ||
+			isLoading ||
+			error ||
 			isDefaultSelectionSuppressed.current ||
 			automaticPreview.current ||
 			pendingFailure.current
 		)
 			return;
-		const newestArtifact = [...state.artifacts].sort(
+		const newestArtifact = [...(artifactList?.artifacts ?? [])].sort(
 			(left, right) =>
 				right.publishedAtMs - left.publishedAtMs ||
 				left.visualizationArtifactId.localeCompare(right.visualizationArtifactId),
@@ -329,7 +313,7 @@ export function useTaskVisualizationArtifacts({
 		setSelection((current) => {
 			if (
 				current.identity === identity &&
-				state.artifacts.some(
+				artifactList?.artifacts.some(
 					(artifact) => artifact.visualizationArtifactId === current.selection?.visualizationArtifactId,
 				)
 			)
@@ -343,7 +327,7 @@ export function useTaskVisualizationArtifacts({
 				},
 			};
 		});
-	}, [identity, state]);
+	}, [identity, artifactList, isLoading, error]);
 	const retryDefaultSelection = useCallback(() => {
 		if (activeIdentity.current !== identity) return;
 		isDefaultSelectionSuppressed.current = false;
@@ -385,10 +369,10 @@ export function useTaskVisualizationArtifacts({
 		automaticPreview.current = null;
 	}, []);
 	return {
-		artifacts: state.identity === identity ? state.artifacts : [],
-		taskAttribution: state.identity === identity ? state.taskAttribution : null,
-		isLoading: state.identity !== identity || state.isLoading,
-		error: state.identity === identity ? state.error : null,
+		artifacts: artifactList?.artifacts ?? [],
+		taskAttribution: artifactList?.taskAttribution ?? null,
+		isLoading,
+		error,
 		selection: selectionState.identity === identity ? selectionState.selection : null,
 		refreshArtifacts,
 		selectArtifact,
