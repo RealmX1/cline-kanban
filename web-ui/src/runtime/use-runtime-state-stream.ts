@@ -4,6 +4,7 @@ import {
 	resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace,
 } from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { notifyAgentSessionPtyHostDiagnosticsUpdated } from "@/runtime/agent-session-pty-host-diagnostics-query";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
@@ -635,6 +636,7 @@ export function useRuntimeStateStream(
 				return;
 			}
 			socket.onopen = () => {
+				notifyAgentSessionPtyHostDiagnosticsUpdated();
 				notifyCodexConfigurationSyncUpdated();
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
 					requestedWorkspaceForConnection,
@@ -658,6 +660,10 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "agent_session_pty_host_diagnostics_updated") {
+						notifyAgentSessionPtyHostDiagnosticsUpdated();
+						return;
+					}
 					if (payload.type === "codex_configuration_sync_updated") {
 						notifyCodexConfigurationSyncUpdated();
 						return;

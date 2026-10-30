@@ -232,6 +232,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="slow-source-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
@@ -289,6 +290,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(sourceHome, "config.toml"), 'model="global-source-approved-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId.startsWith("user-source:") && change.approvalStatus === "pending",
@@ -331,6 +333,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="retired-local-choice"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const state = await service.getState();
 			const proposal = state.changes.find(
 				(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
@@ -382,6 +385,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		);
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
+			await service.scan();
 			const observed = await service.getState();
 			const proposal = observed.changes.find(
 				(change) => change.sourceWriterId === secondBinding.writerId && change.approvalStatus === "pending",
@@ -442,6 +446,10 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			await mutateCodexConfigurationSyncStore((store) => {
 				Object.assign(store.sources, firstStore.sources);
 				Object.assign(store.writers, firstStore.writers);
+				// 旧部署快照没有 profile，读取时从当时已采用的共享字段迁移。
+				store.schemaVersion = 2;
+				store.profiles = {};
+				store.defaultCodexConfigurationProfileId = null;
 				for (const [binding, model] of [
 					[firstBinding, "first-source-shared-model"],
 					[secondBinding, "second-source-shared-model"],
@@ -580,6 +588,9 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 					const fieldKey = Object.keys(source.fields).find((key) => source.fields[key].value === "fixture-model");
 					if (!fieldKey) throw new Error("隔离配置缺少 model 字段。");
 					source.fields[fieldKey] = { value: "shared-decision" };
+					store.schemaVersion = 2;
+					store.profiles = {};
+					store.defaultCodexConfigurationProfileId = null;
 					if (purpose === "native_session") store.writers[binding.writerId].retiredAt = Date.now();
 				});
 				const originalSources = (await readCodexConfigurationSyncStore()).sources;
@@ -610,6 +621,9 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			const fieldKey = Object.keys(source.fields).find((key) => source.fields[key].value === "fixture-model");
 			if (!fieldKey) throw new Error("隔离配置缺少 model 字段。");
 			source.fields[fieldKey] = { value: "direct-start-shared-decision" };
+			store.schemaVersion = 2;
+			store.profiles = {};
+			store.defaultCodexConfigurationProfileId = null;
 			store.writers[binding.writerId].retiredAt = Date.now();
 		});
 		const originalSources = (await readCodexConfigurationSyncStore()).sources;

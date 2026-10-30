@@ -11,6 +11,10 @@ import {
 } from "react";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { TaskCommentEntry } from "@/types";
 import { createTaskCommentEntryId } from "@/utils/create-task-comment-entry-id";
 
@@ -144,10 +148,15 @@ function TaskCommentEntryRow({
 	const keepTextareaFocusedForAction = useCallback((event: MouseEvent<HTMLButtonElement>) => {
 		event.preventDefault();
 	}, []);
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: saveDraftTextIfChanged,
+		disabled: !canSave,
+	});
 
 	return (
 		<div
 			ref={rowRef}
+			onKeyDown={handlePrimaryActionKeyDown}
 			className="group relative mt-3 mb-4 rounded-md border border-border bg-surface-2 py-1 focus-within:border-border-focus"
 			onFocus={() => setIsFocusedWithin(true)}
 			onBlur={(event) => {
@@ -190,6 +199,7 @@ function TaskCommentEntryRow({
 						disabled={!canSave}
 						onMouseDown={keepTextareaFocusedForAction}
 						onClick={saveDraftTextIfChanged}
+						{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 					/>
 				</Tooltip>
 				<Tooltip content="Delete">
@@ -270,6 +280,10 @@ export function TaskCommentsPanel({
 	const handleDeleteTaskCommentEntry = (taskCommentEntryId: string): void => {
 		onTaskCommentEntriesChange(taskCommentEntries.filter((entry) => entry.taskCommentEntryId !== taskCommentEntryId));
 	};
+	const handleNewCommentPrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleAddTaskCommentEntry,
+		disabled: !newCommentText.trim(),
+	});
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
@@ -279,7 +293,10 @@ export function TaskCommentsPanel({
 				)}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-3 pb-3">
-				<div className="rounded-md border border-border bg-surface-2 p-2 focus-within:border-border-focus">
+				<div
+					onKeyDown={handleNewCommentPrimaryActionKeyDown}
+					className="rounded-md border border-border bg-surface-2 p-2 focus-within:border-border-focus"
+				>
 					<textarea
 						ref={newCommentTextareaRef}
 						value={newCommentText}
@@ -299,6 +316,7 @@ export function TaskCommentsPanel({
 							disabled={newCommentText.trim().length === 0}
 							onMouseDown={keepNewCommentTextareaFocusedForAction}
 							onClick={handleAddTaskCommentEntry}
+							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 						>
 							Add comment
 						</Button>

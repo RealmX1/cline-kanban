@@ -57,18 +57,32 @@ export class AgentSessionPtyHostControllerConnection {
 
 	private constructor(
 		private readonly socket: Socket,
+		readonly socketPath: string,
 		readonly hostHello: HostHelloAcknowledgedMessage,
 		private eventHandlers: AgentSessionPtyHostControllerConnectionEventHandlers | null,
 	) {}
 
-	static async connectAsController(socketPath: string): Promise<AgentSessionPtyHostControllerConnection> {
+	static async connectAsController(
+		socketPath: string,
+		responseDeadlineMilliseconds: number = CONTROLLER_HANDSHAKE_DEADLINE_MS,
+	): Promise<AgentSessionPtyHostControllerConnection> {
+		const connectionAndHandshakeDeadlineAtEpochMs = Date.now() + responseDeadlineMilliseconds;
 		const socket = await new Promise<Socket>((resolve, reject) => {
 			const connectingSocket = createConnection(socketPath);
+			const connectionDeadlineTimer = setTimeout(
+				() => {
+					connectingSocket.destroy();
+					reject(new AgentSessionPtyHostUnreachableError(`连接 host 超时：${socketPath}`, false));
+				},
+				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
+			);
 			connectingSocket.once("connect", () => {
+				clearTimeout(connectionDeadlineTimer);
 				connectingSocket.off("error", onConnectError);
 				resolve(connectingSocket);
 			});
 			const onConnectError = (error: NodeJS.ErrnoException) => {
+				clearTimeout(connectionDeadlineTimer);
 				connectingSocket.destroy();
 				reject(
 					new AgentSessionPtyHostUnreachableError(
@@ -83,15 +97,18 @@ export class AgentSessionPtyHostControllerConnection {
 		// 握手完成前到达的后续帧（极少见）先攒着，连接对象建好后按序交付。
 		const framesArrivedAfterHello: ReturnType<AgentSessionPtyHostWireFrameDecoder["push"]> = [];
 		const hostHello = await new Promise<HostHelloAcknowledgedMessage>((resolve, reject) => {
-			const deadlineTimer = setTimeout(() => {
-				socket.destroy();
-				reject(
-					new AgentSessionPtyHostUnreachableError(
-						`agent session pty host handshake timed out: ${socketPath}`,
-						false,
-					),
-				);
-			}, CONTROLLER_HANDSHAKE_DEADLINE_MS);
+			const deadlineTimer = setTimeout(
+				() => {
+					socket.destroy();
+					reject(
+						new AgentSessionPtyHostUnreachableError(
+							`agent session pty host handshake timed out: ${socketPath}`,
+							false,
+						),
+					);
+				},
+				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
+			);
 			let helloReceived = false;
 			const onHandshakeData = (chunk: Buffer) => {
 				let frames: ReturnType<AgentSessionPtyHostWireFrameDecoder["push"]>;
@@ -150,7 +167,7 @@ export class AgentSessionPtyHostControllerConnection {
 				} satisfies AgentSessionPtyHostControllerToHostMessage),
 			);
 		});
-		const connection = new AgentSessionPtyHostControllerConnection(socket, hostHello, null);
+		const connection = new AgentSessionPtyHostControllerConnection(socket, socketPath, hostHello, null);
 		connection.attachSocketListeners(decoder, framesArrivedAfterHello);
 		return connection;
 	}
@@ -203,11 +220,16 @@ export class AgentSessionPtyHostControllerConnection {
 		return response.outcome;
 	}
 
-	async requestListHostedSessions(): Promise<AgentSessionPtyHostHostedSessionListing[]> {
-		const response = (await this.sendRequestAndAwaitResponse((requestId) => ({
-			type: "list_hosted_sessions_request",
-			requestId,
-		}))) as { hostedSessions: AgentSessionPtyHostHostedSessionListing[] };
+	async requestListHostedSessions(
+		responseDeadlineMilliseconds?: number,
+	): Promise<AgentSessionPtyHostHostedSessionListing[]> {
+		const response = (await this.sendRequestAndAwaitResponse(
+			(requestId) => ({
+				type: "list_hosted_sessions_request",
+				requestId,
+			}),
+			responseDeadlineMilliseconds,
+		)) as { hostedSessions: AgentSessionPtyHostHostedSessionListing[] };
 		return response.hostedSessions;
 	}
 

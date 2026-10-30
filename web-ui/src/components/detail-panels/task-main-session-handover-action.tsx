@@ -5,6 +5,10 @@ import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
+import {
 	cancelTaskMainSessionHandover,
 	getTaskMainSessionHandoverStatus,
 	prepareTaskMainSessionHandover,
@@ -113,7 +117,6 @@ export function TaskMainSessionHandoverAction({
 		mainSessionSummary.agentId ?? taskCard.mostRecentlyLaunchedAgentSessionAgentId ?? taskCard.agentId;
 	const isSupportedHandoverSource =
 		mainAgentId != null && mainAgentId !== "cline" && isRuntimeAgentLaunchSupported(mainAgentId);
-	if (!isSupportedHandoverSource && !record) return null;
 	const selectedTargetCapabilities = preview?.targetAgentCapabilities?.find(
 		(entry) => entry.agentId === targetAgentId,
 	);
@@ -262,6 +265,17 @@ export function TaskMainSessionHandoverAction({
 			if (requestEpoch.current === epoch) setBusy(false);
 		}
 	}
+	const primaryActionDisabled =
+		busy ||
+		!preview ||
+		isPreparingNoteImages ||
+		(target !== "new_codex_session" && !selectedExistingPeer?.available) ||
+		(target === "new_codex_session" && selectedTargetCapabilities?.installationStatus === "not_installed");
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: submit,
+		disabled: primaryActionDisabled,
+	});
+	if (!isSupportedHandoverSource && !record) return null;
 	return (
 		<div
 			data-verification-anchor={`task-main-session-handover:${taskCard.id}`}
@@ -369,6 +383,7 @@ export function TaskMainSessionHandoverAction({
 				</DialogFooter>
 			</Dialog>
 			<Dialog
+				onKeyDown={handlePrimaryActionKeyDown}
 				open={open}
 				onOpenChange={(value) => {
 					if (!busy) setOpen(value);
@@ -533,14 +548,8 @@ export function TaskMainSessionHandoverAction({
 						{showWaitChoice ? "暂不交接" : "取消"}
 					</Button>
 					<Button
-						disabled={
-							busy ||
-							!preview ||
-							isPreparingNoteImages ||
-							(target !== "new_codex_session" && !selectedExistingPeer?.available) ||
-							(target === "new_codex_session" &&
-								selectedTargetCapabilities?.installationStatus === "not_installed")
-						}
+						{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+						disabled={primaryActionDisabled}
 						autoFocus={showWaitChoice}
 						onClick={() => void submit()}
 					>

@@ -127,7 +127,7 @@ describe("superseded pty exit guard", () => {
 		expect(manager.getSummary("task-shell")?.pid).toBe(101);
 		listener.onExit.mockClear();
 
-		// shell 侧的窗口是**确定性**的，不是竞态：从换代块的 stop() 到装载新代之间逐行无 await，
+		// 进程内 shell 的窗口是确定性的，不是竞态：从换代块的 stop() 到装载新代之间逐行无 await，
 		// 而退出事件只能异步投递 —— 每一次「在活体上重开 shell」都必然错配。
 		spawnedSessions[0]?.triggerExit(0);
 		await Promise.resolve();

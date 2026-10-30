@@ -45,6 +45,8 @@ beforeEach(async () => {
 	fixtureDirectory.path = await realpath(fixtureDirectory.path);
 	vi.stubEnv("HOME", fixtureDirectory.path);
 	sourceHomeDirectoryPath = join(fixtureDirectory.path, ".codex");
+	vi.stubEnv("CODEX_HOME", sourceHomeDirectoryPath);
+	vi.stubEnv("CODEX_SQLITE_HOME", sourceHomeDirectoryPath);
 	await mkdir(sourceHomeDirectoryPath);
 	await writeFile(
 		join(sourceHomeDirectoryPath, "hooks.json"),
@@ -242,6 +244,7 @@ async function prepareSourceDecision(input: { barrier?: NativeRequestBarrier; lo
 	const targetWriter = await createConfigurationWriter("target-session");
 	await setWriterHookDecision(sourceWriter, propagatedHookDecision);
 	const observer = createConfigurationService();
+	await observer.scan();
 	const change = (await observer.getState()).changes[0];
 	await observer.close();
 	const owner = createNativeOwnerHarness(input);
@@ -269,7 +272,7 @@ function expectHookDecision(configuration: TomlTable, binding: CodexConfiguratio
 
 describe("原所有者写入窗口中的并发配置决定", () => {
 	it.each([
-		["hooks/list", "before"],
+		["thread/loaded/list", "before"],
 		["config/read", "before"],
 		["config/read", "after"],
 	] as const)("%s 的 %s 门闩之后保留目标同字段新决定并留下冲突证据", async (method, phase) => {
@@ -294,7 +297,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		]);
 	});
 	it("来源和目标在预检窗口修改不同字段时仍保留两边字段并采用 hook 决定", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { sourceWriter, targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;
@@ -323,7 +326,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		});
 	});
 	it("目标在预检期间已经保存同一决定时只补原所有者重载", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;
@@ -338,7 +341,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(result.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("applied");
 	});
 	it("提交前重新观察来源同字段新决定，停止尚未提交的旧传播", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { sourceWriter, targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;
@@ -351,7 +354,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(owner.batchWriteRequests).toHaveLength(0);
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, originalHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "shared_default_updated",
+			mergeStatus: "superseded",
 			targets: [{ status: "conflict", diskSavedAt: null, ownerReloadedAt: null }],
 		});
 	});
@@ -369,7 +372,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(owner.batchWriteRequests).toHaveLength(1);
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, propagatedHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "shared_default_updated",
+			mergeStatus: "superseded",
 			targets: [{ status: "conflict", diskSavedAt: expect.any(Number), ownerReloadedAt: expect.any(Number) }],
 		});
 	});
@@ -386,13 +389,15 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		const result = await synchronization;
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, newerHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)?.targets[0]).toMatchObject({
-			status: "pending_reload",
+			status: "conflict",
 			diskSavedAt: null,
 			ownerReloadedAt: null,
 		});
+		await service.scan();
 		const recovered = await service.getState();
 		expect(recovered.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("conflict");
-		expect(owner.batchWriteRequests).toHaveLength(1);
+		expect(owner.batchWriteRequests).toHaveLength(2);
+		expect(owner.batchWriteRequests[1].edits).toEqual([expect.objectContaining({ value: newerHookDecision })]);
 	});
 	it("回执丢失期间来源更新时保存事实与重载未知分开，重启不再传播旧决定", async () => {
 		const barrier = createNativeRequestBarrier("config/batchWrite", "after");
@@ -410,13 +415,16 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		const result = await synchronization;
 		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, propagatedHookDecision);
 		expect(result.changes.find((item) => item.changeId === change.changeId)).toMatchObject({
-			mergeStatus: "shared_default_updated",
+			mergeStatus: "superseded",
 			targets: [{ status: "conflict", diskSavedAt: expect.any(Number), ownerReloadedAt: null }],
 		});
 		await service.close();
-		const restored = await createConfigurationService(owner).getState();
+		const restoredConfigurationService = createConfigurationService(owner);
+		await restoredConfigurationService.scan();
+		const restored = await restoredConfigurationService.getState();
 		expect(restored.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("conflict");
-		expect(owner.batchWriteRequests).toHaveLength(1);
+		expect(owner.batchWriteRequests).toHaveLength(2);
+		expect(owner.batchWriteRequests[1].edits).toEqual([expect.objectContaining({ value: newerHookDecision })]);
 	});
 	it("回执丢失跨重启恢复时保留一次字段写入，后续只补重载且不生成目标用户决定", async () => {
 		const { sourceWriter, owner, service, change, request } = await prepareSourceDecision({ loseFirstReceipt: true });
@@ -426,6 +434,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		);
 		await service.close();
 		const restarted = createConfigurationService(owner);
+		await restarted.scan();
 		const restored = await restarted.getState();
 		expect(owner.batchWriteRequests).toHaveLength(2);
 		expect(owner.batchWriteRequests[0].edits).toHaveLength(1);

@@ -1,7 +1,10 @@
 import { KeyRound, Loader2, ShieldCheck } from "lucide-react";
 import { type FormEvent, type ReactElement, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-
 import { Button } from "@/components/ui/button";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 
 // ── Provider ──────────────────────────────────────────────────────────────────
 
@@ -155,6 +158,10 @@ export function PasscodeGate({ onAuthenticated }: PasscodeGateProps): ReactEleme
 	);
 
 	const isDisabled = state === "submitting" || state === "locked";
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleSubmit,
+		disabled: isDisabled || !passcode.trim(),
+	});
 
 	return (
 		<div className="flex min-h-screen items-center justify-center bg-surface-0 p-6">
@@ -170,7 +177,7 @@ export function PasscodeGate({ onAuthenticated }: PasscodeGateProps): ReactEleme
 						</div>
 					</div>
 
-					<form onSubmit={(e) => void handleSubmit(e)}>
+					<form onKeyDown={handlePrimaryActionKeyDown} onSubmit={(e) => void handleSubmit(e)}>
 						<div className="space-y-3">
 							<input
 								ref={inputRef}
@@ -198,6 +205,7 @@ export function PasscodeGate({ onAuthenticated }: PasscodeGateProps): ReactEleme
 							)}
 
 							<Button
+								{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 								type="submit"
 								variant="primary"
 								fill

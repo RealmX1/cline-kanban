@@ -4,6 +4,11 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
+import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
+import {
+	buildCodexArgumentsUsingCompleteProfilePermissions,
+	formatCodexConfigurationOverrideTomlValue,
+} from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
 import { isManagedCodexConversationStorageHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
@@ -66,6 +71,7 @@ import { prepareTaskPromptWithImages } from "./task-image-prompt";
 import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-selection";
 
 export interface AgentAdapterLaunchInput {
+	codexConfigurationProfileLaunchFields?: CodexConfigurationFields;
 	taskId: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
@@ -1626,7 +1632,18 @@ const codexAdapter: AgentSessionAdapter = {
 		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
 			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
 			: input.args;
-		const codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
+		let codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
+		const profilePermissionArguments =
+			input.codexConfigurationProfileLaunchFields &&
+			buildCodexArgumentsUsingCompleteProfilePermissions(codexArgs, input.codexConfigurationProfileLaunchFields);
+		if (profilePermissionArguments) codexArgs = profilePermissionArguments;
+		const profileReasoningEffort =
+			input.codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model_reasoning_effort"])];
+		if (profileReasoningEffort)
+			codexArgs.push(
+				"-c",
+				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(profileReasoningEffort.value)}`,
+			);
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
 		if (
@@ -1653,11 +1670,13 @@ const codexAdapter: AgentSessionAdapter = {
 			hasCliOption(codexArgs, "--ask-for-approval") || hasCliOption(codexArgs, "-a");
 		if (
 			codexPermissionMode === "bypass_all_permission_prompts" &&
+			!profilePermissionArguments &&
 			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
 		) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
 		} else if (
 			codexPermissionMode === "ask_for_every_tool_use" &&
+			!profilePermissionArguments &&
 			!hasExplicitCodexApprovalPolicy &&
 			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
 		) {

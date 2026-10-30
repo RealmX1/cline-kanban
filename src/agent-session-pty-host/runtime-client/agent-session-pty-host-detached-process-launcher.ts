@@ -19,16 +19,25 @@ export interface AgentSessionPtyHostDetachedLaunchRequest {
 	hostWorkingDirectoryPath: string;
 	// 仅测试用：缩短空闲自退时长。
 	idleExitAfterMilliseconds?: number;
+	readinessDeadlineMilliseconds?: number;
 }
 
-function isSocketAcceptingConnections(socketPath: string): Promise<boolean> {
+function isSocketAcceptingConnections(socketPath: string, deadlineMilliseconds: number): Promise<boolean> {
 	return new Promise((resolve) => {
 		const probe = createConnection(socketPath);
+		const deadlineTimer = setTimeout(() => {
+			probe.destroy();
+			resolve(false);
+		}, deadlineMilliseconds);
 		probe.once("connect", () => {
+			clearTimeout(deadlineTimer);
 			probe.destroy();
 			resolve(true);
 		});
-		probe.once("error", () => resolve(false));
+		probe.once("error", () => {
+			clearTimeout(deadlineTimer);
+			resolve(false);
+		});
 	});
 }
 
@@ -61,12 +70,18 @@ export async function launchDetachedAgentSessionPtyHostAndWaitUntilSocketAccepts
 		launcherSpawnError = error;
 	});
 	launcherProcess.unref();
-	const deadlineEpochMs = Date.now() + AGENT_SESSION_PTY_HOST_SOCKET_READINESS_DEADLINE_MS;
+	const deadlineEpochMs =
+		Date.now() + (request.readinessDeadlineMilliseconds ?? AGENT_SESSION_PTY_HOST_SOCKET_READINESS_DEADLINE_MS);
 	while (Date.now() < deadlineEpochMs) {
 		if (launcherSpawnError !== null) {
 			throw new Error(`could not launch agent session pty host: ${(launcherSpawnError as Error).message}`);
 		}
-		if (await isSocketAcceptingConnections(request.socketPath)) {
+		if (
+			await isSocketAcceptingConnections(
+				request.socketPath,
+				Math.min(500, Math.max(1, deadlineEpochMs - Date.now())),
+			)
+		) {
 			return;
 		}
 		await new Promise((resolve) => setTimeout(resolve, AGENT_SESSION_PTY_HOST_SOCKET_READINESS_POLL_INTERVAL_MS));

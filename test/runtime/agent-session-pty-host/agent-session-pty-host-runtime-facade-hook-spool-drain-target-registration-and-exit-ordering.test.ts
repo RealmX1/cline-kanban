@@ -15,6 +15,7 @@ import {
 } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { AgentSessionPtyHostRuntimeFacade } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-facade";
 import { resolveAgentSessionPtyHostSocketPath } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-socket-path-for-runtime-identity";
+import * as hostedSessionCliClientRequests from "../../../src/agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
 import type {
 	AgentSessionPtyHostControllerToHostMessage,
 	AgentSessionPtyHostHostedSessionExitRecord,
@@ -185,7 +186,10 @@ function buildHostedSessionListing(
 
 const runtimeHomeDirectoriesRemovedAfterEachTest: string[] = [];
 
-afterEach(() => {
+const facadesClosedAfterEachTest: AgentSessionPtyHostRuntimeFacade[] = [];
+afterEach(async () => {
+	for (const facade of facadesClosedAfterEachTest.splice(0))
+		await facade.closeControllerConnectionsAfterFlushingPendingFrames();
 	vi.restoreAllMocks();
 	for (const runtimeHomeDirectoryPath of runtimeHomeDirectoriesRemovedAfterEachTest.splice(0)) {
 		rmSync(runtimeHomeDirectoryPath, { recursive: true, force: true });
@@ -218,6 +222,11 @@ async function startFacadeOverFakeConnection(
 		fakeConnection as unknown as AgentSessionPtyHostControllerConnection,
 	);
 	let droppedSpooledHookEventCount = 0;
+	vi.spyOn(hostedSessionCliClientRequests, "queryAgentSessionPtyHostReadOnlyStatus").mockResolvedValue({
+		kind: "agent_session_pty_host_unreachable",
+		failureMessage: "测试替身的 socket",
+		noHostIsListening: true,
+	});
 	const facade = await AgentSessionPtyHostRuntimeFacade.start({
 		runtimeIdentity,
 		warn: () => {},
@@ -233,6 +242,7 @@ async function startFacadeOverFakeConnection(
 		},
 		waitBeforeRetryingSpooledHookEventApply: async () => {},
 	});
+	facadesClosedAfterEachTest.push(facade);
 	return {
 		facade,
 		fakeConnection,

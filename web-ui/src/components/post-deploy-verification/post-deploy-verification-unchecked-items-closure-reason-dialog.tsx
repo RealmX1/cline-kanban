@@ -1,7 +1,6 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import { AlertTriangle, Check, ClipboardCheck, Eye, Radio } from "lucide-react";
 import { type ReactElement, type ReactNode, useMemo, useState } from "react";
-
 import {
 	applyClosureReasonToAllUncheckedChecklistItemsInDialogDraft,
 	buildPostDeployVerificationDoneEntryClosureRequestsBySelectedTaskId,
@@ -29,6 +28,10 @@ import { cn } from "@/components/ui/cn";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type {
 	RuntimePostDeployVerificationDoneEntryClosureRequest,
 	RuntimePostDeployVerificationUncheckedChecklistItemClosureReasonCode,
@@ -334,8 +337,13 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 		);
 	};
 
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: confirmClosure,
+		disabled: !validation.isReadyToConfirmClosure || isSubmittingClosure,
+	});
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			open={open}
 			onOpenChange={(open) => {
 				// 提交进行中忽略关闭，避免半途中断逐个移列。
@@ -491,6 +499,7 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 					variant="danger"
 					disabled={!validation.isReadyToConfirmClosure || isSubmittingClosure}
 					icon={isSubmittingClosure ? <Spinner size={14} /> : undefined}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 					onClick={confirmClosure}
 				>
 					{isBatchSelection ? `结案（${selectedTaskEntries.length} 个任务）` : "确认结案"}

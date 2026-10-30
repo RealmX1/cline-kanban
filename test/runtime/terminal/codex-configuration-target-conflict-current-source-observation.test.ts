@@ -56,6 +56,7 @@ describe("目标冲突处理核验当前来源观测", () => {
 				const sourceConfiguration = parse(await readFile(sourceFilePath, "utf8"));
 				sourceConfiguration.model = "approved-source-model";
 				await writeFile(sourceFilePath, stringify(sourceConfiguration));
+				await service.scan();
 				const proposal = (await service.getState()).changes[0];
 				const approved = await service.batchAction({
 					action: "approve",
@@ -79,20 +80,27 @@ describe("目标冲突处理核验当前来源观测", () => {
 				await mutateCodexConfigurationSyncStore((store) => {
 					const change = store.changes.find((entry) => entry.changeId === approvedChange.changeId);
 					if (!change) throw new Error("缺少来源决定");
-					change.targets.push({
-						writerId: targetWriter.writerId,
-						conversationSessionId: "target-writer",
-						workspaceId: "current-source-observation-workspace",
-						status: "conflict",
-						reason: "目标已作出另一决定",
-						attemptCount: 1,
-						acceptedAt: 10,
-						diskSavedAt: 20,
-						ownerReloadedAt: null,
-						recoveryCondition: null,
-						conflictingTargetValueDigest: targetValueDigest,
-						conflictHistory: [{ observedAt: 30, value: { value: "target-local-model" } }],
-					});
+					delete change.codexConfigurationProfileId;
+					delete change.acceptedProfileFieldVersion;
+					change.targets = [
+						{
+							writerId: targetWriter.writerId,
+							conversationSessionId: "target-writer",
+							workspaceId: "current-source-observation-workspace",
+							status: "conflict",
+							reason: "目标已作出另一决定",
+							attemptCount: 1,
+							acceptedAt: 10,
+							diskSavedAt: 20,
+							ownerReloadedAt: null,
+							recoveryCondition: null,
+							conflictingTargetValueDigest: targetValueDigest,
+							conflictHistory: [{ observedAt: 30, value: { value: "target-local-model" } }],
+						},
+					];
+					for (const local of store.changes)
+						if (local.sourceWriterId === targetWriter.writerId && local.fieldKey === modelFieldKey)
+							local.mergeStatus = "conflict";
 				});
 				sourceConfiguration.model = "new-pending-source-model";
 				await writeFile(sourceFilePath, stringify(sourceConfiguration));

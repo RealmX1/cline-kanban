@@ -11,6 +11,8 @@ Treat an official upstream update as source-history integration only. Protect lo
 
 Do not stop, restart, relink, or clean up a running Kanban runtime in this skill. If a running instance must use the updated checkout, finish this skill first and then use this project's `cline-kanban-local-deploy` skill (the safe local runtime deploy workflow).
 
+后续部署必须沿用 local-deploy 的实际会话连续性门禁：持久开关只表达意图，不能代替当前 host 响应、进程启动身份与逐会话归属。首次切换遇到非托管活会话默认等待自然结束；不能在本 skill 以强制停止、离线全停或 `kill -9` 绕过。部署候选需同时包含 dbfe4 的计划交接契约和对应版本的检查脚本。
+
 默认用用户偏好的主要语言回复；如果当前项目要求中文，就用中文描述计划、风险、验证结果和后续操作。
 
 ## Boundary

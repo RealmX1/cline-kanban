@@ -1,7 +1,7 @@
 // dd2db 2.1 Relations 面板的断言型关系写入传输助手：「添加关系」（用户直接断言参照关系）与「撤销」（用户撤销生效中的断言）。
 // 把 tRPC 细节（procedure 路径、错误码、错误信息的 `<snake_case_code>: <句子>` 格式）挡在这里，hook 只管状态编排。
 //
-// 两个 procedure 都是决策类（R3）：**只能由显式的用户手势处理器（onClick）调用**，绝不能放进 effect、hook 自动流程或
+// 两个 procedure 都是决策类（R3）：**只能由显式的用户手势处理器（onClick / onKeyDown）调用**，绝不能放进 effect、hook 自动流程或
 // 自动化模块——grit/relation-user-decision-calls-only-from-explicit-user-gesture-handlers.grit 拦截 effect 回调里的调用。
 // 第一个参数必须是触发这次决策的那个 DOM / React 事件：runtime 拒绝 isTrusted 为 false 的合成事件（FORBIDDEN），
 // 并把 navigator.webdriver / userAgent 记进事件供事后甄别浏览器自动化（客户端特征只是甄别线索，不是凭据）。

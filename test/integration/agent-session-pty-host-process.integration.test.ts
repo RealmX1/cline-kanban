@@ -9,11 +9,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSessionPtyHostControllerConnection } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { AgentSessionPtyHostRuntimeFacade } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-facade";
 import { resolveAgentSessionPtyHostSocketPath } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-socket-path-for-runtime-identity";
+import { queryAgentSessionPtyHostReadOnlyStatus } from "../../src/agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
 import type { AgentSessionPtyHostHostedSessionExitRecord } from "../../src/agent-session-pty-host/wire-protocol/agent-session-pty-host-wire-protocol-messages";
+import { TerminalSessionManager } from "../../src/terminal/session-manager";
 import {
 	type LoadSensitiveDeadlineAnnotatingTestContext,
 	type LoadSensitiveWallClockTwoTierDeadline,
@@ -68,6 +70,7 @@ const hostProcessesSigkilledAfterEachTest: ChildProcess[] = [];
 const temporaryDirectoriesRemovedAfterEachTest: string[] = [];
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	// host 忽略 SIGTERM，只能 SIGKILL；只杀本用例启动时记下的子进程。
 	for (const hostProcess of hostProcessesSigkilledAfterEachTest.splice(0)) {
 		if (!hasChildProcessExited(hostProcess)) {
@@ -202,380 +205,481 @@ function isProcessAlive(pid: number): boolean {
 	}
 }
 
-describe.skipIf(process.platform === "win32")("agent session pty host process", () => {
-	it("真 hosted PTY 保留高位鼠标坐标和拆分的中文输入字节", async (testContext) => {
-		const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
-		startHostProcessFromSourceWithoutDaemonizing(socketPath, "binary-input-integration-test-build");
-		const controller = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-		const events = recordControllerEvents(controller);
-		const hostedSessionKey = "binary-terminal-input-session";
-		try {
-			const { hostedSessionChannelNumber } = await spawnHostedShellSession(
-				controller,
-				hostedSessionKey,
-				"stty raw -echo; echo ready; od -An -tx1 -N 12",
-			);
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() => (events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes("ready"),
-			);
-			const mouseReport = Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0xcb, 0x2d]);
-			const chineseInput = Buffer.from("中文", "utf8");
-			for (const chunk of [mouseReport, chineseInput.subarray(0, 1), chineseInput.subarray(1)]) {
-				controller.sendHostedSessionInputBytes(hostedSessionChannelNumber, chunk);
-			}
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
-				() => events.exitRecordsByHostedSessionKey.has(hostedSessionKey),
-			);
-
-			expect(events.exitRecordsByHostedSessionKey.get(hostedSessionKey)?.exitCode).toBe(0);
-			expect((events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").replace(/\s/g, "")).toContain(
-				Buffer.concat([mouseReport, chineseInput]).toString("hex"),
-			);
-		} finally {
-			controller.sendControlMessage({ type: "stop_hosted_session", hostedSessionKey, force: true });
-			await controller.closeAfterFlushingPendingFrames();
-		}
-	}, 80000);
-
-	it(
-		"keeps a hosted shell alive across controller disconnects, streams contiguous offsets, and retains its exit until acknowledged",
-		async (testContext) => {
+describe.skipIf(process.platform === "win32")(
+	"agent session pty host process",
+	{ timeout: AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS },
+	() => {
+		it("真 hosted PTY 保留高位鼠标坐标和拆分的中文输入字节", async (testContext) => {
 			const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
-			const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
-			const firstController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			const firstControllerEvents = recordControllerEvents(firstController);
-			const { hostedSessionChannelNumber, pid } = await spawnHostedShellSession(
-				firstController,
-				"session-a",
-				'echo ready; while read line; do echo "got:$line"; done',
-			);
+			startHostProcessFromSourceWithoutDaemonizing(socketPath, "binary-input-integration-test-build");
+			const controller = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+			const events = recordControllerEvents(controller);
+			const hostedSessionKey = "binary-terminal-input-session";
+			try {
+				const { hostedSessionChannelNumber } = await spawnHostedShellSession(
+					controller,
+					hostedSessionKey,
+					"stty raw -echo; echo ready; od -An -tx1 -N 12",
+				);
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => (events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes("ready"),
+				);
+				const mouseReport = Buffer.from([0x1b, 0x5b, 0x4d, 0x60, 0xcb, 0x2d]);
+				const chineseInput = Buffer.from("中文", "utf8");
+				for (const chunk of [mouseReport, chineseInput.subarray(0, 1), chineseInput.subarray(1)]) {
+					controller.sendHostedSessionInputBytes(hostedSessionChannelNumber, chunk);
+				}
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+					() => events.exitRecordsByHostedSessionKey.has(hostedSessionKey),
+				);
 
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() =>
-					(firstControllerEvents.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes(
-						"ready",
-					),
-			);
-			firstController.sendHostedSessionInputBytes(hostedSessionChannelNumber, Buffer.from("hello\n", "utf8"));
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() =>
-					(firstControllerEvents.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes(
-						"got:hello",
-					),
-			);
-			const firstControllerFrames =
-				firstControllerEvents.outputFramesByChannelNumber.get(hostedSessionChannelNumber) ?? [];
-			let expectedNextStartByteOffset = 0;
-			for (const frame of firstControllerFrames) {
-				expect(frame.startByteOffset).toBe(expectedNextStartByteOffset);
-				expectedNextStartByteOffset += frame.byteLength;
+				expect(events.exitRecordsByHostedSessionKey.get(hostedSessionKey)?.exitCode).toBe(0);
+				expect(
+					(events.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").replace(/\s/g, ""),
+				).toContain(Buffer.concat([mouseReport, chineseInput]).toString("hex"));
+			} finally {
+				controller.sendControlMessage({ type: "stop_hosted_session", hostedSessionKey, force: true });
+				await controller.closeAfterFlushingPendingFrames();
 			}
+		}, 80000);
 
-			await firstController.closeAfterFlushingPendingFrames();
-			const secondController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			const secondControllerEvents = recordControllerEvents(secondController);
-			const hostedSessionsSeenBySecondController = await secondController.requestListHostedSessions();
+		it(
+			"keeps a hosted shell alive across controller disconnects, streams contiguous offsets, and retains its exit until acknowledged",
+			async (testContext) => {
+				const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
+				const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
+				const firstController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				const firstControllerEvents = recordControllerEvents(firstController);
+				const { hostedSessionChannelNumber, pid } = await spawnHostedShellSession(
+					firstController,
+					"session-a",
+					'echo ready; while read line; do echo "got:$line"; done',
+				);
+				const diagnosticsBefore = await queryAgentSessionPtyHostReadOnlyStatus({
+					agentSessionPtyHostSocketPath: socketPath,
+				});
+				const diagnosticsAfter = await queryAgentSessionPtyHostReadOnlyStatus({
+					agentSessionPtyHostSocketPath: socketPath,
+				});
+				expect(diagnosticsBefore).toMatchObject({
+					hostProcessId: hostProcess.pid,
+					controllerProcessId: process.pid,
+					hostedSessions: [{ hostedSessionKey: "session-a", processId: pid, exited: false }],
+				});
+				expect(diagnosticsAfter).toMatchObject({
+					hostProcessInstanceId:
+						"hostProcessInstanceId" in diagnosticsBefore ? diagnosticsBefore.hostProcessInstanceId : null,
+				});
+				expect(firstController.isClosed).toBe(false);
+				expect(firstControllerEvents.connectionCloseReasons).toEqual([]);
 
-			expect(hostedSessionsSeenBySecondController).toHaveLength(1);
-			expect(hostedSessionsSeenBySecondController[0]).toMatchObject({
-				hostedSessionKey: "session-a",
-				pid,
-				exitRecord: null,
-			});
-			expect(hostedSessionsSeenBySecondController[0]?.outputEndByteOffset).toBeGreaterThanOrEqual(
-				expectedNextStartByteOffset,
-			);
-			expect(isProcessAlive(pid)).toBe(true);
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() =>
+						(firstControllerEvents.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes(
+							"ready",
+						),
+				);
+				firstController.sendHostedSessionInputBytes(hostedSessionChannelNumber, Buffer.from("hello\n", "utf8"));
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() =>
+						(firstControllerEvents.outputTextByChannelNumber.get(hostedSessionChannelNumber) ?? "").includes(
+							"got:hello",
+						),
+				);
+				const firstControllerFrames =
+					firstControllerEvents.outputFramesByChannelNumber.get(hostedSessionChannelNumber) ?? [];
+				let expectedNextStartByteOffset = 0;
+				for (const frame of firstControllerFrames) {
+					expect(frame.startByteOffset).toBe(expectedNextStartByteOffset);
+					expectedNextStartByteOffset += frame.byteLength;
+				}
 
-			secondController.sendControlMessage({
-				type: "stop_hosted_session",
-				hostedSessionKey: "session-a",
-				force: false,
-			});
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
-				() => secondControllerEvents.exitRecordsByHostedSessionKey.has("session-a"),
-			);
-			const hostedSessionsBeforeAcknowledgement = await secondController.requestListHostedSessions();
-			expect(hostedSessionsBeforeAcknowledgement[0]?.exitRecord).not.toBeNull();
-			secondController.sendControlMessage({
-				type: "acknowledge_hosted_session_exit",
-				hostedSessionKey: "session-a",
-			});
-			expect(await secondController.requestListHostedSessions()).toEqual([]);
+				await firstController.closeAfterFlushingPendingFrames();
+				const secondController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				const secondControllerEvents = recordControllerEvents(secondController);
+				const hostedSessionsSeenBySecondController = await secondController.requestListHostedSessions();
 
-			await secondController.closeAfterFlushingPendingFrames();
-			await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				hostProcess,
-				HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
-			);
-			expect(hostProcess.exitCode).toBe(0);
-		},
-		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
-	);
+				expect(hostedSessionsSeenBySecondController).toHaveLength(1);
+				expect(hostedSessionsSeenBySecondController[0]).toMatchObject({
+					hostedSessionKey: "session-a",
+					pid,
+					exitRecord: null,
+				});
+				expect(hostedSessionsSeenBySecondController[0]?.outputEndByteOffset).toBeGreaterThanOrEqual(
+					expectedNextStartByteOffset,
+				);
+				expect(isProcessAlive(pid)).toBe(true);
 
-	it(
-		"supersedes the previous controller, ignores SIGTERM, and ends every session on an explicit terminate-all",
-		async (testContext) => {
-			const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
-			const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
-			const firstController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			const firstControllerEvents = recordControllerEvents(firstController);
-			const { pid } = await spawnHostedShellSession(firstController, "session-b", "sleep 600");
+				secondController.sendControlMessage({
+					type: "stop_hosted_session",
+					hostedSessionKey: "session-a",
+					force: false,
+				});
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+					() => secondControllerEvents.exitRecordsByHostedSessionKey.has("session-a"),
+				);
+				const hostedSessionsBeforeAcknowledgement = await secondController.requestListHostedSessions();
+				expect(hostedSessionsBeforeAcknowledgement[0]?.exitRecord).not.toBeNull();
+				secondController.sendControlMessage({
+					type: "acknowledge_hosted_session_exit",
+					hostedSessionKey: "session-a",
+				});
+				expect(await secondController.requestListHostedSessions()).toEqual([]);
 
-			const secondController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() => firstControllerEvents.connectionCloseReasons.length > 0,
-			);
-			expect(firstControllerEvents.connectionCloseReasons).toEqual(["controller_superseded"]);
+				await secondController.closeAfterFlushingPendingFrames();
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					hostProcess,
+					HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
+				);
+				expect(hostProcess.exitCode).toBe(0);
+			},
+			AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
+		);
 
-			hostProcess.kill("SIGTERM");
-			// 确定性断言：SIGTERM 之后 host 仍能应答请求、会话仍是同一个进程。
-			const hostedSessionsAfterSigterm = await secondController.requestListHostedSessions();
-			expect(hostedSessionsAfterSigterm).toMatchObject([{ hostedSessionKey: "session-b", pid, exitRecord: null }]);
-			expect(hasChildProcessExited(hostProcess)).toBe(false);
+		it(
+			"supersedes the previous controller, ignores SIGTERM, and ends every session on an explicit terminate-all",
+			async (testContext) => {
+				const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
+				const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
+				const firstController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				const firstControllerEvents = recordControllerEvents(firstController);
+				const { pid } = await spawnHostedShellSession(firstController, "session-b", "sleep 600");
 
-			secondController.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
-			await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				hostProcess,
-				HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
-			);
-			expect(hostProcess.exitCode).toBe(0);
-			expect(isProcessAlive(pid)).toBe(false);
-		},
-		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
-	);
+				const secondController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => firstControllerEvents.connectionCloseReasons.length > 0,
+				);
+				expect(firstControllerEvents.connectionCloseReasons).toEqual(["controller_superseded"]);
 
-	it(
-		"lets a restarted runtime adopt a session the crashed runtime left running, with catch-up bytes separated from live output",
-		async (testContext) => {
+				hostProcess.kill("SIGTERM");
+				// 确定性断言：SIGTERM 之后 host 仍能应答请求、会话仍是同一个进程。
+				const hostedSessionsAfterSigterm = await secondController.requestListHostedSessions();
+				expect(hostedSessionsAfterSigterm).toMatchObject([
+					{ hostedSessionKey: "session-b", pid, exitRecord: null },
+				]);
+				expect(hasChildProcessExited(hostProcess)).toBe(false);
+
+				secondController.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					hostProcess,
+					HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
+				);
+				expect(hostProcess.exitCode).toBe(0);
+				expect(isProcessAlive(pid)).toBe(false);
+			},
+			AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
+		);
+
+		it("真实 hosted shell 换代先确认原进程退出，新会话仍能接收输入和输出", async (testContext) => {
 			const runtimeHomeDirectoryPath = createShortRuntimeHomeDirectory();
-			const runtimeIdentity = { runtimeHomeDirectoryPath, runtimePort: 3999 };
-			const hostBuildIdentity = "0123456789abcdef".repeat(4);
-			const launchedHostProcesses: ChildProcess[] = [];
-			const facadeOptions = {
-				runtimeIdentity,
+			const facade = await AgentSessionPtyHostRuntimeFacade.start({
+				runtimeIdentity: { runtimeHomeDirectoryPath, runtimePort: 3999 },
 				warn: () => {},
 				currentBuildHostDescriptor: {
-					hostBuildIdentity,
+					hostBuildIdentity: "shell-replacement-integration-test-build",
 					launchCommand: { executablePath: process.execPath, leadingArguments: [] },
 				},
-				launchHostAndWaitUntilSocketAcceptsConnections: async (launchRequest: {
-					socketPath: string;
-					hostBuildIdentity: string;
-				}) => {
-					launchedHostProcesses.push(
-						startHostProcessFromSourceWithoutDaemonizing(
-							launchRequest.socketPath,
-							launchRequest.hostBuildIdentity,
-						),
-					);
+				launchHostAndWaitUntilSocketAcceptsConnections: async (request) => {
+					startHostProcessFromSourceWithoutDaemonizing(request.socketPath, request.hostBuildIdentity);
 					await (
-						await connectAsControllerOnceHostAcceptsConnections(testContext, launchRequest.socketPath)
+						await connectAsControllerOnceHostAcceptsConnections(testContext, request.socketPath)
 					).closeAfterFlushingPendingFrames();
 				},
+			});
+			const manager = new TerminalSessionManager({
+				hostedTerminalPtyProcessSpawner: facade.createHostedTerminalPtyProcessSpawnerForWorkspace(
+					"replacement-workspace",
+					"/tmp/replacement-workspace-repository",
+				),
+			});
+			const outputChunks: Buffer[] = [];
+			manager.attach("replacement-shell", { onOutput: (chunk) => outputChunks.push(chunk) });
+			const request = {
+				taskId: "replacement-shell",
+				cwd: "/tmp",
+				binary: "/bin/sh",
+				args: ["-c", 'stty -echo; echo ready; while read line; do echo "got:$line"; done'],
+				env: { HOME: "/tmp", PATH: "/usr/bin:/bin" },
 			};
-			const crashedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
-			const outputSeenByCrashedRuntime: string[] = [];
-			const handleOfCrashedRuntime = await crashedRuntimeFacade
-				.createHostedTerminalPtyProcessSpawnerForWorkspace("workspace-1", "/tmp/workspace-1-repository")
-				.spawnHostedTerminalPtyProcess({
+			try {
+				const original = await manager.startShellSession(request);
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => Buffer.concat(outputChunks).toString("utf8").includes("ready"),
+				);
+				manager.transitionToReview(request.taskId, "manual_review");
+				const replacement = await manager.startShellSession(request);
+				if (typeof original.pid !== "number") throw new Error("原会话缺少进程 PID");
+				expect(replacement.pid).not.toBe(original.pid);
+				expect(isProcessAlive(original.pid)).toBe(false);
+				manager.writeInput(request.taskId, Buffer.from("replacement-input\n"));
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => Buffer.concat(outputChunks).toString("utf8").includes("got:replacement-input"),
+				);
+				const [ownership] = manager.listLivePtySessionProcessOwnership();
+				expect(ownership).toMatchObject({ ownership: "independent_host", processId: replacement.pid });
+				if (!ownership?.hostSocketPath) throw new Error("新会话缺少 host socket 归属");
+				const diagnostics = await queryAgentSessionPtyHostReadOnlyStatus({
+					agentSessionPtyHostSocketPath: ownership.hostSocketPath,
+				});
+				if (!("hostedSessions" in diagnostics)) throw new Error("未取得 host 只读会话状态");
+				expect(diagnostics.hostedSessions.filter((session) => !session.exited)).toMatchObject([
+					{ processId: replacement.pid, conversationSessionId: request.taskId },
+				]);
+			} finally {
+				manager.dispose();
+				await facade.closeControllerConnectionsAfterFlushingPendingFrames();
+			}
+		});
+
+		it.for([true, false])(
+			"新会话托管=%s：runtime 重启后接回原 PTY，会话关闭偏好也不丢失存量",
+			async (newHostedSessionsEnabled, testContext) => {
+				const runtimeHomeDirectoryPath = createShortRuntimeHomeDirectory();
+				const runtimeIdentity = { runtimeHomeDirectoryPath, runtimePort: 3999 };
+				const hostBuildIdentity = "0123456789abcdef".repeat(4);
+				const launchedHostProcesses: ChildProcess[] = [];
+				const facadeOptions = {
+					runtimeIdentity,
+					warn: () => {},
+					currentBuildHostDescriptor: {
+						hostBuildIdentity,
+						launchCommand: { executablePath: process.execPath, leadingArguments: [] },
+					},
+					launchHostAndWaitUntilSocketAcceptsConnections: async (launchRequest: {
+						socketPath: string;
+						hostBuildIdentity: string;
+					}) => {
+						launchedHostProcesses.push(
+							startHostProcessFromSourceWithoutDaemonizing(
+								launchRequest.socketPath,
+								launchRequest.hostBuildIdentity,
+							),
+						);
+						await (
+							await connectAsControllerOnceHostAcceptsConnections(testContext, launchRequest.socketPath)
+						).closeAfterFlushingPendingFrames();
+					},
+				};
+				const crashedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
+				const originalSpawnRequest = AgentSessionPtyHostControllerConnection.prototype.requestSpawnHostedSession;
+				vi.spyOn(
+					AgentSessionPtyHostControllerConnection.prototype,
+					"requestSpawnHostedSession",
+				).mockImplementationOnce(async function (this: AgentSessionPtyHostControllerConnection, request) {
+					await originalSpawnRequest.call(this, request);
+					throw new Error("隔离复现：host 已创建会话但 runtime 丢失回执");
+				});
+				const outputSeenByCrashedRuntime: string[] = [];
+				const handleOfCrashedRuntime = await crashedRuntimeFacade
+					.createHostedTerminalPtyProcessSpawnerForWorkspace("workspace-1", "/tmp/workspace-1-repository")
+					.spawnHostedTerminalPtyProcess({
+						taskId: "task-adopted",
+						hostedSessionKind: "shell_session",
+						binary: "/bin/sh",
+						args: [
+							"-c",
+							[
+								"echo before-restart",
+								"read go",
+								"i=0",
+								`while [ "$i" -lt ${LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT} ]; do printf 'while-runtime-absent-%04d-${LINE_PADDING_PRODUCED_WHILE_RUNTIME_ABSENT}\\n' "$i"; i=$((i+1)); done`,
+								"echo while-runtime-absent-done",
+								'while read line; do echo "got:$line"; done',
+							].join("; "),
+						],
+						cwd: "/tmp",
+						env: { PATH: "/usr/bin:/bin", TERM: "xterm-256color", HOME: "/tmp", UNSET_VARIABLE: undefined },
+						cols: 80,
+						rows: 24,
+						onData: (chunk) => outputSeenByCrashedRuntime.push(chunk.toString("utf8")),
+						onExit: () => {},
+					});
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => outputSeenByCrashedRuntime.join("").includes("before-restart"),
+				);
+				handleOfCrashedRuntime.publishTerminalSessionAdoptionRecordForRuntimeRestart?.({
+					adoptionRecordMarker: "kept-by-host",
+				});
+				// 「go」写出后立刻断开：shell 在没有 controller 的窗口里产出大段 while-runtime-absent，只能进 host 的环形缓冲。
+				handleOfCrashedRuntime.write("go\n");
+				const outputByteLengthBeforeAdoption =
+					"before-restart\r\n".length +
+					"go\r\n".length +
+					LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT * BYTE_LENGTH_OF_EACH_LINE_PRODUCED_WHILE_RUNTIME_ABSENT +
+					"while-runtime-absent-done\r\n".length;
+				await crashedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
+
+				const restartedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start({
+					...facadeOptions,
+					newHostedSessionsEnabled,
+				});
+				expect((await restartedRuntimeFacade.queryDiagnostics()).newSessionHostingMode).toBe(
+					newHostedSessionsEnabled ? "independent_host" : "disabled",
+				);
+				expect(launchedHostProcesses).toHaveLength(1);
+				const [adoptionCandidate] =
+					restartedRuntimeFacade.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace("workspace-1");
+				expect(restartedRuntimeFacade.listHostedTerminalPtySessionAdoptionCandidatesByWorkspace()).toMatchObject([
+					{ workspaceId: "workspace-1", workspaceRepositoryPath: "/tmp/workspace-1-repository" },
+				]);
+				if (!adoptionCandidate) {
+					throw new Error("expected one adoption candidate");
+				}
+				expect(adoptionCandidate).toMatchObject({
 					taskId: "task-adopted",
 					hostedSessionKind: "shell_session",
-					binary: "/bin/sh",
-					args: [
-						"-c",
-						[
-							"echo before-restart",
-							"read go",
-							"i=0",
-							`while [ "$i" -lt ${LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT} ]; do printf 'while-runtime-absent-%04d-${LINE_PADDING_PRODUCED_WHILE_RUNTIME_ABSENT}\\n' "$i"; i=$((i+1)); done`,
-							"echo while-runtime-absent-done",
-							'while read line; do echo "got:$line"; done',
-						].join("; "),
-					],
-					cwd: "/tmp",
-					env: { PATH: "/usr/bin:/bin", TERM: "xterm-256color", HOME: "/tmp", UNSET_VARIABLE: undefined },
-					cols: 80,
-					rows: 24,
-					onData: (chunk) => outputSeenByCrashedRuntime.push(chunk.toString("utf8")),
+					pid: handleOfCrashedRuntime.pid,
+					terminalSessionAdoptionRecord: { adoptionRecordMarker: "kept-by-host" },
+				});
+
+				const catchUpOutputChunks: string[] = [];
+				const liveOutputChunks: string[] = [];
+				// 确保缺席期间的全部输出（到 while-runtime-absent-done 为止）已经进了环形缓冲，再接管
+				// （否则它会作为实时输出到达，测不到追赶路径）。
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					async () => {
+						const status = await queryAgentSessionPtyHostReadOnlyStatus({
+							agentSessionPtyHostSocketPath: resolveAgentSessionPtyHostSocketPath(
+								runtimeIdentity,
+								hostBuildIdentity,
+							),
+						});
+						return (
+							"hostedSessions" in status &&
+							(status.hostedSessions[0]?.outputEndByteOffset ?? 0) >= outputByteLengthBeforeAdoption
+						);
+					},
+					{ pollIntervalMs: 100 },
+				);
+				const freshAdoptionCandidate = adoptionCandidate;
+				const adoptedHandle = await freshAdoptionCandidate.adoptHostedTerminalPtyProcess({
+					onCatchUpOutput: (bytes) => catchUpOutputChunks.push(bytes.toString("utf8")),
+					onData: (chunk) => liveOutputChunks.push(chunk.toString("utf8")),
 					onExit: () => {},
 				});
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() => outputSeenByCrashedRuntime.join("").includes("before-restart"),
-			);
-			handleOfCrashedRuntime.publishTerminalSessionAdoptionRecordForRuntimeRestart?.({
-				adoptionRecordMarker: "kept-by-host",
-			});
-			// 「go」写出后立刻断开：shell 在没有 controller 的窗口里产出大段 while-runtime-absent，只能进 host 的环形缓冲。
-			handleOfCrashedRuntime.write("go\n");
-			const outputByteLengthBeforeAdoption =
-				"before-restart\r\n".length +
-				"go\r\n".length +
-				LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT * BYTE_LENGTH_OF_EACH_LINE_PRODUCED_WHILE_RUNTIME_ABSENT +
-				"while-runtime-absent-done\r\n".length;
-			await crashedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
 
-			const restartedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
-			expect(launchedHostProcesses).toHaveLength(1);
-			const [adoptionCandidate] =
-				restartedRuntimeFacade.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace("workspace-1");
-			expect(restartedRuntimeFacade.listHostedTerminalPtySessionAdoptionCandidatesByWorkspace()).toMatchObject([
-				{ workspaceId: "workspace-1", workspaceRepositoryPath: "/tmp/workspace-1-repository" },
-			]);
-			if (!adoptionCandidate) {
-				throw new Error("expected one adoption candidate");
-			}
-			expect(adoptionCandidate).toMatchObject({
-				taskId: "task-adopted",
-				hostedSessionKind: "shell_session",
-				pid: handleOfCrashedRuntime.pid,
-				terminalSessionAdoptionRecord: { adoptionRecordMarker: "kept-by-host" },
-			});
+				// 确定性断言：adopt 只在追赶区间全部交付之后返回。此刻 shell 正阻塞在 read，实时输出一个字节也不该有。
+				expect(adoptedHandle.pid).toBe(handleOfCrashedRuntime.pid);
+				const catchUpOutputText = catchUpOutputChunks.join("");
+				expect(catchUpOutputChunks.length).toBeGreaterThanOrEqual(2);
+				expect(catchUpOutputText.length).toBeGreaterThan(HOST_CATCH_UP_OUTPUT_FRAME_MAXIMUM_BYTE_LENGTH);
+				expect(catchUpOutputText).toContain("before-restart");
+				expect(catchUpOutputText.match(/while-runtime-absent-\d{4}-x{60}\r\n/g)).toHaveLength(
+					LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT,
+				);
+				expect(catchUpOutputText).toContain("while-runtime-absent-done");
+				expect(liveOutputChunks).toEqual([]);
+				adoptedHandle.write("after-adoption\n");
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
+					() => liveOutputChunks.join("").includes("got:after-adoption"),
+				);
+				expect(liveOutputChunks.join("")).not.toContain("while-runtime-absent");
+				expect(catchUpOutputChunks.join("")).toBe(catchUpOutputText);
 
-			const catchUpOutputChunks: string[] = [];
-			const liveOutputChunks: string[] = [];
-			// 确保缺席期间的全部输出（到 while-runtime-absent-done 为止）已经进了环形缓冲，再接管
-			// （否则它会作为实时输出到达，测不到追赶路径）。
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				async () => {
-					const listingController = await AgentSessionPtyHostControllerConnection.connectAsController(
-						resolveAgentSessionPtyHostSocketPath(runtimeIdentity, hostBuildIdentity),
-					);
-					const [listing] = await listingController.requestListHostedSessions();
-					await listingController.closeAfterFlushingPendingFrames();
-					return (listing?.outputEndByteOffset ?? 0) >= outputByteLengthBeforeAdoption;
-				},
-				{ pollIntervalMs: 100 },
-			);
-			// 上面的列举连接顶替了 controller；重新以 restarted runtime 的身份连上并取候选。
-			const restartedAgainFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
-			const [freshAdoptionCandidate] =
-				restartedAgainFacade.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace("workspace-1");
-			if (!freshAdoptionCandidate) {
-				throw new Error("expected one adoption candidate after reconnecting");
-			}
-			const adoptedHandle = await freshAdoptionCandidate.adoptHostedTerminalPtyProcess({
-				onCatchUpOutput: (bytes) => catchUpOutputChunks.push(bytes.toString("utf8")),
-				onData: (chunk) => liveOutputChunks.push(chunk.toString("utf8")),
-				onExit: () => {},
-			});
+				adoptedHandle.stop({ force: true });
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+					() => adoptedHandle.hasExited(),
+				);
+				expect(isProcessAlive(handleOfCrashedRuntime.pid)).toBe(false);
+				await restartedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
+				await restartedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
+			},
+		);
 
-			// 确定性断言：adopt 只在追赶区间全部交付之后返回。此刻 shell 正阻塞在 read，实时输出一个字节也不该有。
-			expect(adoptedHandle.pid).toBe(handleOfCrashedRuntime.pid);
-			const catchUpOutputText = catchUpOutputChunks.join("");
-			expect(catchUpOutputChunks.length).toBeGreaterThanOrEqual(2);
-			expect(catchUpOutputText.length).toBeGreaterThan(HOST_CATCH_UP_OUTPUT_FRAME_MAXIMUM_BYTE_LENGTH);
-			expect(catchUpOutputText).toContain("before-restart");
-			expect(catchUpOutputText.match(/while-runtime-absent-\d{4}-x{60}\r\n/g)).toHaveLength(
-				LINE_COUNT_PRODUCED_WHILE_RUNTIME_ABSENT,
-			);
-			expect(catchUpOutputText).toContain("while-runtime-absent-done");
-			expect(liveOutputChunks).toEqual([]);
-			adoptedHandle.write("after-adoption\n");
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SHELL_OUTPUT_ARRIVES_TWO_TIER_DEADLINE,
-				() => liveOutputChunks.join("").includes("got:after-adoption"),
-			);
-			expect(liveOutputChunks.join("")).not.toContain("while-runtime-absent");
-			expect(catchUpOutputChunks.join("")).toBe(catchUpOutputText);
+		it(
+			"reclaims a session past its reclamation deadline only while no runtime is connected, and records why it exited",
+			async (testContext) => {
+				const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
+				const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
+				const detachingController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				recordControllerEvents(detachingController);
+				const { pid: pidPastDeadline } = await spawnHostedShellSession(
+					detachingController,
+					"session-past-deadline",
+					"sleep 600",
+				);
+				const { pid: pidInAgentTurn } = await spawnHostedShellSession(
+					detachingController,
+					"session-in-agent-turn",
+					"sleep 600",
+				);
+				// detach 时推的最终记录：一条期限已过，一条在 agent 回合中（null，绝不回收）。
+				detachingController.sendControlMessage({
+					type: "put_hosted_session_adoption_record",
+					hostedSessionKey: "session-past-deadline",
+					adoptionRecord: { recordedBy: "detaching runtime" },
+					hostedSessionOrphanReclamationEligibleAtEpochMs: Date.now() - 1_000,
+				});
+				detachingController.sendControlMessage({
+					type: "put_hosted_session_adoption_record",
+					hostedSessionKey: "session-in-agent-turn",
+					adoptionRecord: { recordedBy: "detaching runtime" },
+					hostedSessionOrphanReclamationEligibleAtEpochMs: null,
+				});
+				// controller 在线时 host 不插手回收（期限归 runtime 自己的调度器）。
+				expect(await detachingController.requestListHostedSessions()).toMatchObject([
+					{ hostedSessionKey: "session-past-deadline", exitRecord: null },
+					{ hostedSessionKey: "session-in-agent-turn", exitRecord: null },
+				]);
+				expect(isProcessAlive(pidPastDeadline)).toBe(true);
 
-			adoptedHandle.stop({ force: true });
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
-				() => adoptedHandle.hasExited(),
-			);
-			expect(isProcessAlive(handleOfCrashedRuntime.pid)).toBe(false);
-			await restartedAgainFacade.closeControllerConnectionsAfterFlushingPendingFrames();
-			await restartedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
-		},
-		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
-	);
+				await detachingController.closeAfterFlushingPendingFrames();
+				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
+					() => !isProcessAlive(pidPastDeadline),
+				);
+				expect(isProcessAlive(pidInAgentTurn)).toBe(true);
 
-	it(
-		"reclaims a session past its reclamation deadline only while no runtime is connected, and records why it exited",
-		async (testContext) => {
-			const socketPath = join(createShortRuntimeHomeDirectory(), "host.sock");
-			const hostProcess = startHostProcessFromSourceWithoutDaemonizing(socketPath, "integration-test-build");
-			const detachingController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			recordControllerEvents(detachingController);
-			const { pid: pidPastDeadline } = await spawnHostedShellSession(
-				detachingController,
-				"session-past-deadline",
-				"sleep 600",
-			);
-			const { pid: pidInAgentTurn } = await spawnHostedShellSession(
-				detachingController,
-				"session-in-agent-turn",
-				"sleep 600",
-			);
-			// detach 时推的最终记录：一条期限已过，一条在 agent 回合中（null，绝不回收）。
-			detachingController.sendControlMessage({
-				type: "put_hosted_session_adoption_record",
-				hostedSessionKey: "session-past-deadline",
-				adoptionRecord: { recordedBy: "detaching runtime" },
-				hostedSessionOrphanReclamationEligibleAtEpochMs: Date.now() - 1_000,
-			});
-			detachingController.sendControlMessage({
-				type: "put_hosted_session_adoption_record",
-				hostedSessionKey: "session-in-agent-turn",
-				adoptionRecord: { recordedBy: "detaching runtime" },
-				hostedSessionOrphanReclamationEligibleAtEpochMs: null,
-			});
-			// controller 在线时 host 不插手回收（期限归 runtime 自己的调度器）。
-			expect(await detachingController.requestListHostedSessions()).toMatchObject([
-				{ hostedSessionKey: "session-past-deadline", exitRecord: null },
-				{ hostedSessionKey: "session-in-agent-turn", exitRecord: null },
-			]);
-			expect(isProcessAlive(pidPastDeadline)).toBe(true);
+				const returningController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
+				recordControllerEvents(returningController);
+				const hostedSessionsSeenByReturningRuntime = await returningController.requestListHostedSessions();
+				expect(
+					hostedSessionsSeenByReturningRuntime.find(
+						(listing) => listing.hostedSessionKey === "session-past-deadline",
+					)?.exitRecord,
+				).toMatchObject({ hostedSessionTerminatedByHostReason: "reclaimed_by_host_while_runtime_absent" });
+				expect(
+					hostedSessionsSeenByReturningRuntime.find(
+						(listing) => listing.hostedSessionKey === "session-in-agent-turn",
+					)?.exitRecord,
+				).toBeNull();
 
-			await detachingController.closeAfterFlushingPendingFrames();
-			await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				HOSTED_SESSION_EXIT_ARRIVES_TWO_TIER_DEADLINE,
-				() => !isProcessAlive(pidPastDeadline),
-			);
-			expect(isProcessAlive(pidInAgentTurn)).toBe(true);
-
-			const returningController = await connectAsControllerOnceHostAcceptsConnections(testContext, socketPath);
-			recordControllerEvents(returningController);
-			const hostedSessionsSeenByReturningRuntime = await returningController.requestListHostedSessions();
-			expect(
-				hostedSessionsSeenByReturningRuntime.find((listing) => listing.hostedSessionKey === "session-past-deadline")
-					?.exitRecord,
-			).toMatchObject({ hostedSessionTerminatedByHostReason: "reclaimed_by_host_while_runtime_absent" });
-			expect(
-				hostedSessionsSeenByReturningRuntime.find((listing) => listing.hostedSessionKey === "session-in-agent-turn")
-					?.exitRecord,
-			).toBeNull();
-
-			returningController.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
-			await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
-				testContext,
-				hostProcess,
-				HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
-			);
-			expect(isProcessAlive(pidInAgentTurn)).toBe(false);
-		},
-		AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
-	);
-});
+				returningController.sendControlMessage({ type: "terminate_all_hosted_sessions_and_exit" });
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+					testContext,
+					hostProcess,
+					HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
+				);
+				expect(isProcessAlive(pidInAgentTurn)).toBe(false);
+			},
+			AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
+		);
+	},
+);

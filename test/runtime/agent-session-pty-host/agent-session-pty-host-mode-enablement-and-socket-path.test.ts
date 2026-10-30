@@ -16,35 +16,78 @@ const enabledInput = {
 };
 
 describe("resolveAgentSessionPtyHostModeEnablement", () => {
-	it("is enabled only when explicitly opted in on a fixed port", () => {
-		expect(resolveAgentSessionPtyHostModeEnablement(enabledInput)).toEqual({ agentSessionPtyHostModeEnabled: true });
+	it("受支持固定端口缺省启用，环境覆盖不依赖持久设置", () => {
+		expect(resolveAgentSessionPtyHostModeEnablement(enabledInput)).toMatchObject({
+			agentSessionPtyHostModeEnabled: true,
+		});
 		expect(
 			resolveAgentSessionPtyHostModeEnablement({
 				...enabledInput,
 				agentSessionPtyHostModeEnvironmentValue: undefined,
 			}),
-		).toEqual({ agentSessionPtyHostModeEnabled: false, disabledReason: "not_opted_in" });
+		).toMatchObject({ agentSessionPtyHostModeEnabled: true, enablementPreferenceSource: "default_enabled" });
+	});
+
+	it("显式开关持久生效，环境覆盖归一化且无效值维持关闭结果", () => {
+		const persistedDisabled = {
+			...enabledInput,
+			agentSessionPtyHostModeEnvironmentValue: undefined,
+			agentSessionPtyHostEnablementPreference: "disabled" as const,
+		};
+		expect(resolveAgentSessionPtyHostModeEnablement(persistedDisabled)).toMatchObject({
+			agentSessionPtyHostModeEnabled: false,
+			disabledReason: "persistent_preference_disabled",
+			canAdoptExistingHostedSessions: true,
+		});
+		expect(
+			resolveAgentSessionPtyHostModeEnablement({
+				...persistedDisabled,
+				agentSessionPtyHostModeEnvironmentValue: " EnAbLeD ",
+			}),
+		).toMatchObject({ agentSessionPtyHostModeEnabled: true, enablementPreferenceSource: "environment_override" });
+		for (const value of ["disabled", " DiSaBlEd ", "", "invalid"]) {
+			expect(
+				resolveAgentSessionPtyHostModeEnablement({
+					...enabledInput,
+					agentSessionPtyHostModeEnvironmentValue: value,
+				}),
+			).toMatchObject({ agentSessionPtyHostModeEnabled: false, enablementPreferenceSource: "environment_override" });
+		}
+		expect(
+			resolveAgentSessionPtyHostModeEnablement({
+				...enabledInput,
+				agentSessionPtyHostModeEnvironmentValue: "invalid",
+			}),
+		).toMatchObject({ disabledReason: "invalid_environment_override" });
+		expect(resolveAgentSessionPtyHostModeEnablement({ ...persistedDisabled, platform: "win32" })).toMatchObject({
+			disabledReason: "unsupported_platform_win32",
+			canAdoptExistingHostedSessions: false,
+		});
 	});
 
 	it("is forced off for auto ports, remote host mode, win32 and the Electron desktop shell", () => {
-		expect(resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, runtimePortWasAutoSelected: true })).toEqual({
+		expect(
+			resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, runtimePortWasAutoSelected: true }),
+		).toMatchObject({
 			agentSessionPtyHostModeEnabled: false,
 			disabledReason: "runtime_port_auto_selected",
 		});
-		expect(resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, runtimeServesRemoteHost: true })).toEqual({
+		expect(
+			resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, runtimeServesRemoteHost: true }),
+		).toMatchObject({
 			agentSessionPtyHostModeEnabled: false,
 			disabledReason: "remote_host_mode",
 		});
-		expect(resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, platform: "win32" })).toEqual({
+		expect(resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, platform: "win32" })).toMatchObject({
 			agentSessionPtyHostModeEnabled: false,
 			disabledReason: "unsupported_platform_win32",
 		});
-		expect(resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, kanbanDesktopEnvironmentValue: "1" })).toEqual(
-			{
-				agentSessionPtyHostModeEnabled: false,
-				disabledReason: "electron_desktop_shell",
-			},
-		);
+		expect(
+			resolveAgentSessionPtyHostModeEnablement({ ...enabledInput, kanbanDesktopEnvironmentValue: "1" }),
+		).toMatchObject({
+			agentSessionPtyHostModeEnabled: false,
+			disabledReason: "electron_desktop_shell",
+		});
 	});
 });
 

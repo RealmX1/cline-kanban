@@ -1,10 +1,16 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	CodexConfigurationBatchActionRequest,
+	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationResolveConflictRequest,
 	CodexConfigurationResolveTargetConflictRequest,
 	CodexConfigurationSynchronizeRequest,
 } from "@/runtime/types";
+
+export const mutateCodexConfigurationProfile = (
+	workspaceId: string | null,
+	input: CodexConfigurationProfileMutationRequest,
+) => getRuntimeTrpcClient(workspaceId).runtime.mutateCodexConfigurationProfile.mutate(input);
 
 export const batchCodexConfigurationAction = (
 	workspaceId: string | null,

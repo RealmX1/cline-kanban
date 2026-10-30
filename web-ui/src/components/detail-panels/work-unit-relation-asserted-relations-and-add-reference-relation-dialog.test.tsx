@@ -351,7 +351,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		);
 	});
 
-	it("添加关系：只要求选择对端，可填写可选类型与详情后提交，成功即关闭、重拉、提示", async () => {
+	it.each(["click", "keyboard"])("添加关系：%s 保留原始事件及端点校验，成功即关闭、重拉、提示", async (gesture) => {
 		fetchRelationNeighborhoodSummaryMock.mockImplementation(async () =>
 			buildEmptyRelationNeighborhoodSummaryResponseForTest(),
 		);
@@ -411,11 +411,20 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		);
 		expect(dialog.querySelector('[aria-label="Add relation form problems"]')).toBeNull();
 		const fetchCallCountBeforeSubmit = fetchRelationNeighborhoodSummaryMock.mock.calls.length;
-		await clickElement(findButtonByText(dialog, "Add relation"));
+		const submitButton = findButtonByText(dialog, "Add relation");
+		const keyboardEvent = new KeyboardEvent("keydown", {
+			key: "Enter",
+			ctrlKey: true,
+			bubbles: true,
+			cancelable: true,
+		});
+		if (gesture === "click") await clickElement(submitButton);
+		else await act(async () => submitButton.dispatchEvent(keyboardEvent));
 
 		expect(assertReferenceRelationMock).toHaveBeenCalledTimes(1);
 		const [triggeringUserGestureEvent, assertionInput] = assertReferenceRelationMock.mock.calls[0]!;
-		expect(triggeringUserGestureEvent.nativeEvent).toBeInstanceOf(MouseEvent);
+		if (gesture === "click") expect(triggeringUserGestureEvent.nativeEvent).toBeInstanceOf(MouseEvent);
+		else expect(triggeringUserGestureEvent.nativeEvent).toBe(keyboardEvent);
 		expect(assertionInput).toEqual({
 			workspaceId: CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST,
 			referenceRelationAssertion: {

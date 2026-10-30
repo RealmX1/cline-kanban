@@ -33,62 +33,48 @@ When the global `kanban` CLI is symlinked to a local custom branch, source edits
 - The running Node process has already loaded its current `dist/cli.js` and web bundle.
 - The browser may keep the old web bundle until the server restarts and the page refreshes.
 
-### Preferred restart: supervised kill-by-PID
+### 计划交接前核验实际会话归属
 
-If the long-lived server is run by a `while true` supervisor script (e.g. `run-cline-kanban-<port>-service.sh`), do NOT recreate the tmux session and do NOT kill by process name. Rebuild, then restart by signalling the single listener PID and letting the supervisor respawn it:
+仅在已有明确部署授权后执行以下步骤；预检本身不授予重启权限。先在隔离输出目录构建候选，确认 `dist`、`web-ui/dist` 的 realpath，不能经 task 的软链接覆盖共享 build。
 
-```sh
-# 已完成上述部署授权、备份与现场盘点后才执行（构建会更新共享产物）。
-cd /Users/bominzhang/Documents/GitHub/cline-kanban
-# 从 supervisor 的实际启动命令确认路径；下列路径只是本机示例。
-KANBAN_DEPLOY_NODE_BINARY=/Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node
-export PATH="$(dirname "$KANBAN_DEPLOY_NODE_BINARY"):$PATH"
-npm run typecheck && npm run build && \
-  "$KANBAN_DEPLOY_NODE_BINARY" scripts/verify-notification-archive-native-runtime.mjs || exit 1
-
-# resolve the PID from the PORT, never from the name
-PID=$(lsof -nP -iTCP:3484 -sTCP:LISTEN -t | head -1)
-# re-confirm it still owns the port right before killing (guards against PID reuse)
-kill -9 "$PID"
-```
-
-Read the supervisor's exit-code contract first — a typical `run-cline-kanban-<port>-service.sh` loops like this:
-
-- kanban exit `130` (SIGINT) or `143` (SIGTERM) → the loop exits → the server stays DOWN.
-- any other exit, including SIGKILL→`137` or a crash → `sleep 5` then respawn.
-
-So `kill -9 <listener-pid>` is the intended "restart to pick up a new build" lever: the still-alive supervisor relaunches kanban with its own inherited PATH and cwd, which removes the PATH-drift risk of `tmux new-session` (a fresh tmux session inherits the tmux server's environment, not your rich interactive PATH).
-
-Never kill by name on a box that runs several listeners side by side (`kanban` on 3484/3485, `mkanban` on 3492/3501, other `node` servers): `pkill -f kanban` / `killall node` would match and kill unrelated servers. `kill` takes a numeric PID and signals exactly that one process.
-
-What `kill -9 <pid>` does and does NOT do:
-
-- Sends SIGKILL to that ONE process (uncatchable, immediate). A positive PID signals only that process — NOT its children and NOT its process group (the group form is `kill -9 -<pgid>`).
-- A child task agent (a `claude`/`codex` session the server spawned) is not signalled directly. It usually dies as a secondary effect: the server holds the agent's PTY master, so when the server dies the PTY hangs up (SIGHUP / read EOF) and the agent exits. This is not guaranteed for detached children — verify separately with `pgrep -P <old-pid>` before assuming it stopped.
-
-After respawn (the supervisor waits ~5s), validate: new PID ≠ old, listens on the port, HTTP 200, loaded the fresh `dist/` build, tmux ownership intact, PATH parity, and agent detection through the runtime API (not just the shell).
-
-### Fallback restart shape (no supervisor script)
-
-When no supervisor loop owns the server, rebuild first, then recreate the tmux session with an explicit PATH so agent detection still works:
+1. 固定实际服务使用的 Node 和 npm，执行 `scripts/verify-notification-archive-native-runtime.mjs`，并保留候选 commit、备份与部署前会话盘点。
+2. 用候选源码附带的只读脚本采集本次部署基线。证据必须放持久目录，并绑定本次候选源 commit；不要使用 `latest` 指针。
 
 ```sh
-# 已完成上述部署授权、备份与现场盘点后才执行（构建会更新共享产物）。
-cd /Users/bominzhang/Documents/GitHub/cline-kanban
-git status --short --branch
-# 构建和下方服务启动使用同一 Node；预检失败时不得停止旧服务。
-export PATH="/Users/bominzhang/.nvm/versions/node/v24.12.0/bin:$PATH"
-npm run typecheck && npm run build && \
-  /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node scripts/verify-notification-archive-native-runtime.mjs || exit 1
-
-tmux kill-session -t cline-kanban-3484
-tmux new-session -d -s cline-kanban-3484 -c /Users/bominzhang/Documents/GitHub/review-validate-fix \
-'export PATH="/Users/bominzhang/.nvm/versions/node/v24.12.0/bin:/Users/bominzhang/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; exec /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/node /Users/bominzhang/.nvm/versions/node/v24.12.0/bin/kanban --no-open --skip-shutdown-cleanup --port 3484 > /tmp/cline-kanban-3484.log 2> /tmp/cline-kanban-3484.err'
+KANBAN_RUNTIME_HOST=127.0.0.1 KANBAN_RUNTIME_PORT=3484 \
+  "$KANBAN_DEPLOY_NODE_BINARY" scripts/verify-agent-session-pty-host-runtime-readiness.mjs \
+  --before-runtime-restart --wait-for-natural-session-exit \
+  --candidate-source-commit "$KANBAN_DEPLOY_SOURCE_COMMIT" \
+  --evidence-file "$KANBAN_DEPLOY_PERSISTENT_DIRECTORY/before-runtime-restart.json"
 ```
 
-Adjust paths and ports for the local machine. The important properties are: rebuild first, restart with cleanup disabled, preserve user PATH, and verify the new process. For Cline Kanban, launch the long-lived server inside a tmux session named `cline-kanban` or `cline-kanban-<port>`; use the tmux session and process identity to verify ownership of the listener.
+脚本交叉核对所属 runtime 的当前诊断、OS 进程启动身份、逐会话宿主和待接管记录。关闭偏好仍须接回旧 hosted 会话。环境变量、HTTP 200、socket 文件和历史日志均不能单独放行。遇到非托管会话，保留旧 runtime，每 30 秒只读复查，默认最多等待 30 分钟；预算耗尽保留证据，可在同一授权仍有效时重新检查。不得自动 Stop、resume、强制迁移或使用中断会话的 override。
 
-两种示例都要求先完成备份与现场盘点。若原生依赖预检失败，在源 checkout 使用同一目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3`，再从构建步骤重跑；不能跳过失败检查继续重启。部署后还须确认真实实例的 `notificationIntelligence.listArchive` 成功，首页 HTTP 200 不能证明档案数据库可用。
+旧 runtime 若明确返回新诊断 procedure 不存在，脚本改用旧 API 全项目会话 facet、两次原生进程树、固定端口监听 PID/启动命令及 generation 监听检查。已迁移项目可用持久 sessions 与原生进程交叉补证；缺证保留 unknown。此路径只允许无活会话的首次切换，不证明连续性；不响应的旧 host 不能通过新建 controller 连接检查。
+
+3. 即将停止前重新运行上述预检，重新核对同一个监听 PID 与 `lstart`。发布 build/link 后使用 dbfe4 已落入 local main 的 `kanban runtime handover-restart --wait-for-successor-seconds 60`（该命令默认输出 JSON，没有 `--json`）。它在服务端再次原子核对是否有不能保留的活会话。禁止传 `--allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host`，禁止用 `runtime stop --terminate-hosted-agent-sessions` 代替部署交接；离线全停、host 回收继续由 dbfe4 的统一契约负责。
+4. 首次运行的旧 build 若不支持 `runtime handover-restart`，只在上述旧版静默盘点通过、停止前再次通过且监听 PID/启动身份仍一致时，按原 supervisor 的退出契约进行受控停止并重新启动持久服务入口。SIGTERM 可能让旧 supervisor 一并退出；此时显式启动 canonical service runner。不要把 `kill -9` 当作部署成功条件，也不要因为有 Codex 控制宿主或旧 socket 就声称 PTY 已独立托管。
+5. 新 runtime 首次启动即读取持久偏好；受支持的固定端口实例在无持久选择、无环境覆盖时默认启用，无需第二次部署。先运行以下只读检查核对当前启动意图、实际模式与逐会话归属；若明确关闭则按关闭意图核验，不能为部署擅自覆盖用户选择。
+
+```sh
+KANBAN_RUNTIME_HOST=127.0.0.1 KANBAN_RUNTIME_PORT=3484 \
+  "$KANBAN_DEPLOY_NODE_BINARY" scripts/verify-agent-session-pty-host-runtime-readiness.mjs \
+  --evidence-file "$KANBAN_DEPLOY_PERSISTENT_DIRECTORY/after-runtime-readiness.json"
+```
+
+若部署前有 hosted 会话，再运行只读连续性观察器，绑定同一基线与候选 commit；它不会重启、停止或注入输入。首次没有 hosted 基线时，功能已可使用，跨重启连续性仍待下一次有活 hosted 会话的已授权 redeploy 取证。
+
+```sh
+KANBAN_RUNTIME_HOST=127.0.0.1 KANBAN_RUNTIME_PORT=3484 \
+  "$KANBAN_DEPLOY_NODE_BINARY" scripts/observe-agent-session-pty-host-runtime-restart-continuity.mjs \
+  --before-restart-evidence-file "$KANBAN_DEPLOY_PERSISTENT_DIRECTORY/before-runtime-restart.json" \
+  --after-restart-evidence-file "$KANBAN_DEPLOY_PERSISTENT_DIRECTORY/after-runtime-restart.json" \
+  --deployed-source-commit "$KANBAN_DEPLOY_SOURCE_COMMIT" --record-for-current-runtime
+```
+
+观察器要求原 PID、OS 启动身份、runtime incarnation、native session、host 实例和输出水位连续。新 runtime 的观察起点先写入精确记录；后续输出须超过该起点并实际送达新 runtime，不能用部署前推进的 host 水位或未送达字节补作通过证据。自然输出和新原生输入接受另行报告；加 `--require-session-io-progress` 才把两项都作为通过条件。未出现自然输入时保持待验，不向生产会话注入探针。记录按新 runtime 的 PID 与启动身份绑定，后续 PDV 读取该精确记录。首次无会话切换只能报告实际模式就绪，下一次已有 hosted 基线的已授权 redeploy 才能核验真实连续性。
+
+重启后还须验证真实实例的 `notificationIntelligence.listArchive`、CLI 链接、agent 检测、工作树差异与任务映射。当前健康和已有基线的身份连续性通过后，可用 `kanban deployment record` 如实记录已切换的 build；没有 hosted 基线或尚未出现自然 I/O 的连续性项继续留在 PDV，不得勾选通过。文件存在、HTTP 成功或新 PID 单独不足以宣告成功。
 
 ## Shutdown Guardrail
 

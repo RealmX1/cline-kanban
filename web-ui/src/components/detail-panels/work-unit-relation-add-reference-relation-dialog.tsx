@@ -1,6 +1,6 @@
 // dd2db 2.1「添加关系」对话框（T12 ②）：用户以面板所在的卡为主语，直接断言一条参照关系。
 // 对端从跨全部项目的任务里挑；kind 从注册表列（选项文案 = webUiAddRelationOptionLabel）；专有输入按 kind 显示。
-// 提交按钮的 onClick 事件原样交给传输层（runtime 据此拒绝脚本合成的点击）；runtime 拒绝时把它那句话原样显示在对话框里，
+// 提交按钮或表单快捷键的原始事件交给传输层（runtime 据此拒绝脚本合成事件）；runtime 拒绝时把它那句话原样显示在对话框里，
 // 对话框不关，用户改了再提交。表单状态在 use-work-unit-relation-add-reference-relation-dialog-form 里，这里只渲染。
 
 import {
@@ -18,6 +18,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useWorkUnitRelationAddReferenceRelationDialogForm } from "@/hooks/use-work-unit-relation-add-reference-relation-dialog-form";
 import {
 	type AddReferenceRelationDialogDraft,
@@ -178,6 +182,10 @@ function AddReferenceRelationDialogContent({
 		onReferenceRelationAssertionWriteSucceeded,
 	});
 	const draft = form.addReferenceRelationDialogDraft;
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: form.submitReferenceRelationFromExplicitUserGesture,
+		disabled: form.isReferenceRelationAssertionSubmissionInFlight,
+	});
 	const selectedReferenceRelationKind = draft.selectedReferenceRelationKind || "reference_is_generally_related_with";
 	const selectedRelationKindRegistryEntry = selectedReferenceRelationKind
 		? ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[selectedReferenceRelationKind]
@@ -192,7 +200,7 @@ function AddReferenceRelationDialogContent({
 		counterpart?.counterpartKanbanBoardCardWorkspaceId === subjectKanbanBoardCardWorkspaceId;
 
 	return (
-		<>
+		<div className="contents" onKeyDown={handlePrimaryActionKeyDown}>
 			<DialogHeader title="Add relation" icon={<Link2 size={14} />} />
 			<DialogBody className="flex flex-col gap-3">
 				<AddReferenceRelationFormField
@@ -347,12 +355,13 @@ function AddReferenceRelationDialogContent({
 					size="sm"
 					icon={form.isReferenceRelationAssertionSubmissionInFlight ? <Spinner size={12} /> : undefined}
 					disabled={form.isReferenceRelationAssertionSubmissionInFlight}
-					onClick={form.referenceRelationAssertionSubmitButtonClickHandler}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+					onClick={form.submitReferenceRelationFromExplicitUserGesture}
 				>
 					Add relation
 				</Button>
 			</DialogFooter>
-		</>
+		</div>
 	);
 }
 

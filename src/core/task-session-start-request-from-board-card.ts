@@ -36,6 +36,8 @@ export function buildTaskSessionStartRequestFromBoardCard(
 		startInPlanMode: resumeFromTrash ? undefined : taskCard.startInPlanMode,
 		// 权限档位在续跑时同样适用（与 startInPlanMode 不同：那是「开局」语义，续跑没有开局）。
 		taskAgentPermissionMode: taskCard.taskAgentPermissionMode,
+		codexConfigurationProfileId: taskCard.codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource: taskCard.codexConfigurationPermissionSelectionSource,
 		// 会话模式是「下次启动生效」的卡片声明：漏传 = 服务端静默掉回 operational 缺省。
 		taskConversationMode: taskCard.taskConversationMode,
 		...(resumeFromTrash ? { resumeFromTrash: true } : {}),

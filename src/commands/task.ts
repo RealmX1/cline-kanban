@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
+import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/client";
 import type { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
@@ -286,7 +286,7 @@ function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string)
 export function createRuntimeTrpcClient(
 	workspaceId: string | null,
 	clientOptions: { retryWhileKanbanRuntimeRestarts?: boolean; requestTimeoutMs?: number } = {},
-) {
+): TRPCClient<RuntimeAppRouter> {
 	const trpcTimeoutMs = clientOptions.requestTimeoutMs ?? resolveCliTrpcTimeoutMs();
 	return createTRPCProxyClient<RuntimeAppRouter>({
 		links: [

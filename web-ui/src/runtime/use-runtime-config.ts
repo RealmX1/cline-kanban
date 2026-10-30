@@ -18,6 +18,7 @@ export interface UseRuntimeConfigResult {
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		agentSessionPtyHostEnablementPreference?: "enabled" | "disabled";
 		newTaskStartInPlanModeByDefault?: boolean;
 		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		shortcuts?: RuntimeProjectShortcut[];
@@ -92,6 +93,7 @@ export function useRuntimeConfig(
 			selectedAgentId?: RuntimeAgentId;
 			selectedShortcutLabel?: string | null;
 			agentAutonomousModeEnabled?: boolean;
+			agentSessionPtyHostEnablementPreference?: "enabled" | "disabled";
 			newTaskStartInPlanModeByDefault?: boolean;
 			ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 			shortcuts?: RuntimeProjectShortcut[];

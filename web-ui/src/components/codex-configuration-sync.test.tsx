@@ -1,6 +1,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
 import {
 	CodexConfigurationSyncNotice,
 	CodexConfigurationSyncSettings,
@@ -17,11 +18,13 @@ const queries = vi.hoisted(() => ({
 	resolve: vi.fn(),
 	resolveTarget: vi.fn(),
 	batch: vi.fn(),
+	profile: vi.fn(),
 }));
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
 			getCodexConfigurationSyncState: { query: queries.fetch },
+			mutateCodexConfigurationProfile: { mutate: queries.profile },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 			synchronizeCodexConfigurationChange: { mutate: queries.synchronize },
 			acknowledgeCodexConfigurationChange: { mutate: queries.acknowledge },
@@ -64,6 +67,7 @@ beforeEach(() => {
 	vi.useFakeTimers();
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	queries.batch.mockReset();
+	queries.profile.mockReset().mockImplementation(async () => state);
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
@@ -115,6 +119,157 @@ afterEach(async () => {
 });
 
 describe("Codex 配置同步提示和设置", () => {
+	it("已反馈的建议到期后仍陈述广播事实，不误写成局部选择保留", async () => {
+		state.changes[0] = {
+			...state.changes[0]!,
+			codexConfigurationProfileId: "profile",
+			recordKind: "historical_record",
+			approvalStatus: "approved",
+			feedbackExpiresAtMs: Date.now() - 1,
+		};
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await flush();
+		expect(container.textContent).toContain("已反馈到 profile；所属现有和未来会话自动采用");
+		expect(container.textContent).not.toContain("反馈机会已结束，局部选择保留");
+	});
+	it.each(["编辑旧任务", "新任务已有局部权限"])(
+		"%s 时加载 profile 列表不替换已有权限，显式另选仍采用 profile 权限",
+		async (condition) => {
+			state.profiles = [
+				{
+					profileId: "default-profile",
+					name: "默认配置",
+					sourceIdentity: "source",
+					version: 1,
+					fields: [
+						{
+							fieldKey: '["config.toml","approval_policy"]',
+							fieldLabel: "approval_policy",
+							value: "on-request",
+							valueSummary: "on-request",
+							version: 1,
+							exceptionGroup: "permissions",
+						},
+						{
+							fieldKey: '["config.toml","sandbox_mode"]',
+							fieldLabel: "sandbox_mode",
+							value: "workspace-write",
+							valueSummary: "workspace-write",
+							version: 1,
+							exceptionGroup: "permissions",
+						},
+					],
+				},
+			];
+			state.defaultCodexConfigurationProfileId = "default-profile";
+			const onChange = vi.fn();
+			const onPermissionModeChange = vi.fn();
+			await act(async () =>
+				root.render(
+					<CodexConfigurationProfileSelect
+						workspaceId="workspace"
+						value={undefined}
+						onChange={onChange}
+						onPermissionModeChange={onPermissionModeChange}
+						automaticallyChooseDefaultProfile={condition !== "编辑旧任务"}
+						adoptDefaultProfilePermissions={false}
+					/>,
+				),
+			);
+			await flush();
+			expect(onPermissionModeChange).not.toHaveBeenCalled();
+			if (condition === "编辑旧任务") expect(onChange).not.toHaveBeenCalled();
+			const select = container.querySelector("select");
+			if (!select) throw new Error("缺少 profile 选择器");
+			await act(async () => {
+				select.value = "default-profile";
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+			expect(onPermissionModeChange).toHaveBeenCalledWith("ask_for_every_tool_use");
+		},
+	);
+	it("十分钟截止后即使服务端刷新失败也退出提醒，重新挂载不延长反馈期限", async () => {
+		const deadline = Date.now() + 600_000;
+		state.changes[0] = {
+			...state.changes[0]!,
+			codexConfigurationProfileId: "profile",
+			exceptionGroup: "model",
+			approvalStatus: "pending",
+			mergeStatus: "pending_approval",
+			feedbackExpiresAtMs: deadline,
+		};
+		await renderConfigurationNotice();
+		expect(container.textContent).toContain("反馈到 profile 并广播");
+		await act(async () => vi.advanceTimersByTime(300_000));
+		await act(async () => root.render(<NoticeHarness key="reloaded" workspaceId="workspace" />));
+		await flush();
+		queries.fetch.mockRejectedValue(new Error("隔离的离线状态"));
+		await act(async () => vi.advanceTimersByTime(300_001));
+		expect(container.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]')).toBeNull();
+		expect(queries.batch).not.toHaveBeenCalled();
+	});
+	it("profile 管理按会话代际切换绑定，修改设置后一次更新并广播", async () => {
+		state.profiles = ["first", "second"].map((profileId) => ({
+			profileId,
+			name: profileId === "first" ? "常用配置" : "独立配置",
+			sourceIdentity: "same-source",
+			version: 10,
+			fields: [
+				{
+					fieldKey: '["config.toml","model"]',
+					fieldLabel: "model",
+					value: "initial-model",
+					valueSummary: "initial-model",
+					version: 10,
+					exceptionGroup: "model",
+				},
+			],
+		}));
+		state.defaultCodexConfigurationProfileId = "first";
+		state.sessionProfileBindings = [
+			{
+				workspaceId: "workspace",
+				conversationSessionId: "owned-session",
+				codexConfigurationProfileId: "first",
+				localExceptionGroups: ["model"],
+				runtimeSessionIncarnationId: "original-incarnation",
+			},
+		];
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await flush();
+		const select = container.querySelector<HTMLSelectElement>('[aria-label="会话 owned-session 所属 profile"]');
+		if (!select) throw new Error("缺少会话 profile 选择");
+		await act(async () => {
+			select.value = "second";
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		expect(queries.profile).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: "bind_session",
+				profileId: "second",
+				expectedRuntimeSessionIncarnationId: "original-incarnation",
+			}),
+		);
+		const field = container.querySelector<HTMLInputElement>(
+			'[data-verification-anchor="codex-configuration-profile-management"] details input',
+		);
+		if (!field) throw new Error("缺少 profile 设置编辑器");
+		const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+		await act(async () => {
+			setter?.call(field, "updated-model");
+			field.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () => button("更新并广播").click());
+		expect(queries.profile).toHaveBeenLastCalledWith(
+			expect.objectContaining({
+				action: "update",
+				profileId: "first",
+				expectedVersion: 10,
+				fields: [{ fieldKey: '["config.toml","model"]', value: "updated-model" }],
+			}),
+		);
+	});
+
 	it("元数据刷新不续期，首次 8 秒后收起且不提交审批或移动焦点", async () => {
 		const workspaceInput = document.createElement("input");
 		document.body.append(workspaceInput);

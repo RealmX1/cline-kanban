@@ -4,6 +4,7 @@
 //
 // 本文件属于 host 进程的依赖闭包：只允许 import `node:*`、wire-protocol 与同目录模块。
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, lstatSync, mkdirSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
@@ -86,6 +87,8 @@ export class AgentSessionPtyHostControllerSocketServer {
 	private readonly hostedSessionRegistry: AgentSessionPtyHostHostedSessionRegistry;
 	private readonly hostStartedAtEpochMs: number;
 	private currentControllerSocket: Socket | null = null;
+	private currentControllerProcessId: number | null = null;
+	private readonly hostProcessInstanceId = randomUUID();
 	private hostLifecycleState: HostLifecycleState = "serving";
 	private idleExitTimer: NodeJS.Timeout | null = null;
 	private idleExitTimerDelayMilliseconds: number | null = null;
@@ -225,6 +228,7 @@ export class AgentSessionPtyHostControllerSocketServer {
 			clearTimeout(helloDeadlineTimer);
 			if (this.currentControllerSocket === socket) {
 				this.currentControllerSocket = null;
+				this.currentControllerProcessId = null;
 				this.controllerAbsentSinceEpochMs = this.readNowEpochMs();
 				this.hostedSessionRegistry.releaseControllerStateAfterControllerDisconnected();
 				this.options.appendHostLogEntry({ event: "controller_disconnected" });
@@ -324,6 +328,7 @@ export class AgentSessionPtyHostControllerSocketServer {
 		if (supersededControllerSocket !== null) {
 			// 先摘槽再断开，旧连接的 close 回调就不会把新 controller 的状态一并清掉。
 			this.currentControllerSocket = null;
+			this.currentControllerProcessId = null;
 			supersededControllerSocket.end(
 				encodeJsonControlMessageFrame({
 					type: "controller_superseded",
@@ -332,6 +337,7 @@ export class AgentSessionPtyHostControllerSocketServer {
 			this.hostedSessionRegistry.releaseControllerStateAfterControllerDisconnected();
 		}
 		this.currentControllerSocket = socket;
+		this.currentControllerProcessId = readFiniteNumberField(message, "controllerProcessId");
 		this.options.appendHostLogEntry({
 			event: "controller_connected",
 			controllerProcessId: readFiniteNumberField(message, "controllerProcessId"),
@@ -592,6 +598,31 @@ export class AgentSessionPtyHostControllerSocketServer {
 				}
 				return;
 			}
+			case "query_agent_session_pty_host_readonly_status_request": {
+				respond({
+					type: "query_agent_session_pty_host_readonly_status_response",
+					requestId,
+					hostProcessId: process.pid,
+					hostStartedAtEpochMs: this.hostStartedAtEpochMs,
+					hostProcessInstanceId: this.hostProcessInstanceId,
+					hostBuildIdentity: this.options.hostBuildIdentity,
+					hostLifecycleState: this.hostLifecycleState,
+					controllerProcessId: this.currentControllerProcessId,
+					hostedSessions: this.hostedSessionRegistry.listHostedSessions().map((listing) => ({
+						hostedSessionKey: listing.hostedSessionKey,
+						workspaceId: listing.hostedSessionDescriptor.workspaceId,
+						conversationSessionId: listing.hostedSessionDescriptor.taskId,
+						hostedSessionKind: listing.hostedSessionDescriptor.hostedSessionKind,
+						processId: listing.pid,
+						processStartedAtEpochMs: listing.spawnedAtEpochMs,
+						exited: listing.exitRecord !== null,
+						adoptionRecordPresent: listing.adoptionRecord !== null,
+						outputEndByteOffset: listing.outputEndByteOffset,
+					})),
+				});
+				return;
+			}
+
 			case "query_controller_presence_request": {
 				const controllerConnected = this.currentControllerSocket !== null;
 				respond({

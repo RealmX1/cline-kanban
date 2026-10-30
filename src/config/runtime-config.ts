@@ -7,11 +7,13 @@ import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
 import {
 	type RuntimeAgentId,
+	type RuntimeAgentSessionPtyHostEnablementPreference,
 	type RuntimeAgentSessionTransport,
 	type RuntimeProjectShortcut,
 	type RuntimeUserInterfacePreferenceDictionaryEntriesMigratedFromBrowserLocalStorage,
 	type RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 	runtimeAgentIdSchema,
+	runtimeAgentSessionPtyHostEnablementPreferenceSchema,
 	runtimeAgentSessionTransportSchema,
 } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
@@ -28,6 +30,7 @@ interface RuntimeGlobalConfigFileShape {
 	selectedAgentId?: RuntimeAgentId;
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
+	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 	newTaskStartInPlanModeByDefault?: boolean;
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
@@ -56,6 +59,7 @@ export interface RuntimeConfigState {
 	selectedAgentId: RuntimeAgentId;
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
+	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 	newTaskStartInPlanModeByDefault: boolean;
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
@@ -76,6 +80,7 @@ export interface RuntimeConfigUpdateInput {
 	selectedAgentId?: RuntimeAgentId;
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
+	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 	newTaskStartInPlanModeByDefault?: boolean;
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
@@ -269,6 +274,14 @@ export function getRuntimeGlobalConfigPath(): string {
 	return join(getRuntimeHomePath(), CONFIG_FILENAME);
 }
 
+// 诊断读取不能触发首次 agent 自动选择或创建配置文件。
+export async function readAgentSessionPtyHostPersistentPreferenceWithoutWritingConfig(): Promise<
+	RuntimeAgentSessionPtyHostEnablementPreference | undefined
+> {
+	return (await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(getRuntimeGlobalConfigPath()))
+		?.agentSessionPtyHostEnablementPreference;
+}
+
 export function getRuntimeProjectConfigPath(cwd: string): string {
 	return join(resolve(cwd), PROJECT_CONFIG_PARENT_DIR, PROJECT_CONFIG_DIR, PROJECT_CONFIG_FILENAME);
 }
@@ -338,6 +351,7 @@ function toRuntimeConfigState({
 	return {
 		globalConfigPath,
 		projectConfigPath,
+		agentSessionPtyHostEnablementPreference: globalConfig?.agentSessionPtyHostEnablementPreference,
 		selectedAgentId: normalizeAgentId(globalConfig?.selectedAgentId),
 		selectedShortcutLabel: normalizeShortcutLabel(globalConfig?.selectedShortcutLabel),
 		agentAutonomousModeEnabled: normalizeBoolean(
@@ -394,9 +408,20 @@ function toRuntimeConfigState({
 async function readRuntimeConfigFile<T>(configPath: string): Promise<T | null> {
 	try {
 		const raw = await readFile(configPath, "utf8");
-		return JSON.parse(raw) as T;
-	} catch {
-		return null;
+		const parsed: unknown = JSON.parse(raw);
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error("配置必须为 JSON 对象");
+		}
+		if ("agentSessionPtyHostEnablementPreference" in parsed) {
+			runtimeAgentSessionPtyHostEnablementPreferenceSchema.parse(parsed.agentSessionPtyHostEnablementPreference);
+		}
+		return parsed as T;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw new Error(
+			`无法读取运行时配置 ${configPath}，已保留原文件：${error instanceof Error ? error.message : String(error)}`,
+			{ cause: error },
+		);
 	}
 }
 
@@ -406,6 +431,7 @@ async function writeRuntimeGlobalConfigFile(
 		selectedAgentId?: RuntimeAgentId;
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
+		agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 		newTaskStartInPlanModeByDefault?: boolean;
 		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled?: boolean;
@@ -490,6 +516,13 @@ async function writeRuntimeGlobalConfigFile(
 			: normalizePromptTemplate(config.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE);
 
 	const payload: RuntimeGlobalConfigFileShape = {};
+	const agentSessionPtyHostEnablementPreference =
+		config.agentSessionPtyHostEnablementPreference ?? existing?.agentSessionPtyHostEnablementPreference;
+	if (agentSessionPtyHostEnablementPreference !== undefined) {
+		payload.agentSessionPtyHostEnablementPreference = runtimeAgentSessionPtyHostEnablementPreferenceSchema.parse(
+			agentSessionPtyHostEnablementPreference,
+		);
+	}
 	if (selectedAgentId !== undefined) {
 		if (hasOwnKey(existing, "selectedAgentId") || selectedAgentId !== DEFAULT_AGENT_ID) {
 			payload.selectedAgentId = selectedAgentId;
@@ -654,6 +687,7 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedAgentId: RuntimeAgentId;
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
+	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 	newTaskStartInPlanModeByDefault: boolean;
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
@@ -668,6 +702,7 @@ function createRuntimeConfigStateFromValues(input: {
 	userInterfacePreferencesSharedAcrossBrowserOrigins: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 }): RuntimeConfigState {
 	return {
+		agentSessionPtyHostEnablementPreference: input.agentSessionPtyHostEnablementPreference,
 		globalConfigPath: input.globalConfigPath,
 		projectConfigPath: input.projectConfigPath,
 		selectedAgentId: normalizeAgentId(input.selectedAgentId),
@@ -723,6 +758,7 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedAgentId: current.selectedAgentId,
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
+		agentSessionPtyHostEnablementPreference: current.agentSessionPtyHostEnablementPreference,
 		newTaskStartInPlanModeByDefault: current.newTaskStartInPlanModeByDefault,
 		ompAgentSessionTransportForNewTasks: current.ompAgentSessionTransportForNewTasks,
 		readyForReviewNotificationsEnabled: current.readyForReviewNotificationsEnabled,
@@ -767,6 +803,7 @@ export async function saveRuntimeConfig(
 		selectedAgentId: RuntimeAgentId;
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
+		agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
 		newTaskStartInPlanModeByDefault: boolean;
 		ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled: boolean;
@@ -784,6 +821,10 @@ export async function saveRuntimeConfig(
 ): Promise<RuntimeConfigState> {
 	const { globalConfigPath, projectConfigPath } = resolveRuntimeConfigPaths(cwd);
 	return await lockedFileSystem.withLocks(getRuntimeConfigLockRequests(cwd), async () => {
+		const existingGlobalConfig = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(globalConfigPath);
+		const agentSessionPtyHostEnablementPreference =
+			config.agentSessionPtyHostEnablementPreference ??
+			existingGlobalConfig?.agentSessionPtyHostEnablementPreference;
 		const userInterfacePreferencesSharedAcrossBrowserOrigins =
 			config.userInterfacePreferencesSharedAcrossBrowserOrigins ??
 			normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
@@ -794,6 +835,7 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
@@ -814,6 +856,7 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: config.readyForReviewNotificationsEnabled,
@@ -843,6 +886,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel:
 				updates.selectedShortcutLabel === undefined ? current.selectedShortcutLabel : updates.selectedShortcutLabel,
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+			agentSessionPtyHostEnablementPreference:
+				updates.agentSessionPtyHostEnablementPreference ?? current.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault:
 				updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks:
@@ -875,6 +920,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedAgentId !== current.selectedAgentId ||
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+			nextConfig.agentSessionPtyHostEnablementPreference !== current.agentSessionPtyHostEnablementPreference ||
 			nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 			nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 			nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
@@ -901,6 +947,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
@@ -924,6 +971,7 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 			readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
@@ -985,6 +1033,8 @@ export async function updateGlobalRuntimeConfig(
 						? current.selectedShortcutLabel
 						: updates.selectedShortcutLabel,
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+				agentSessionPtyHostEnablementPreference:
+					updates.agentSessionPtyHostEnablementPreference ?? current.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault:
 					updates.newTaskStartInPlanModeByDefault ?? current.newTaskStartInPlanModeByDefault,
 				ompAgentSessionTransportForNewTasks:
@@ -1017,6 +1067,7 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedAgentId !== current.selectedAgentId ||
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+				nextConfig.agentSessionPtyHostEnablementPreference !== current.agentSessionPtyHostEnablementPreference ||
 				nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 				nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
 				nextConfig.readyForReviewNotificationsEnabled !== current.readyForReviewNotificationsEnabled ||
@@ -1043,6 +1094,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,
@@ -1064,6 +1116,7 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
 				readyForReviewNotificationsEnabled: nextConfig.readyForReviewNotificationsEnabled,

@@ -23,7 +23,10 @@ export function useCodexConfigurationSyncNotice({
 	const contentId = useId();
 	const settingsReminders =
 		controller.state?.changes.filter(
-			(change) => change.recordKind === "settings_proposal" && change.acknowledgedAt === null,
+			(change) =>
+				change.recordKind === "settings_proposal" &&
+				change.acknowledgedAt === null &&
+				(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
 		) ?? [];
 	const pendingApprovalCount = settingsReminders.filter((change) => change.approvalStatus === "pending").length;
 	const sourceUpdateCount =

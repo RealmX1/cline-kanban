@@ -1,14 +1,15 @@
 // 当前 build 的 agent session PTY host 拉不起来时 facade 的降级契约（真 host 经 tsx 运行源码入口、不 daemonize）：
 // - 旧 generation 有存活会话：start 不抛、候选照常经旧 generation 链路接管；新 spawn 降级为进程内 PtySession，
 //   并在后台再试当前 generation，连上之后的 spawn 恢复进 host；
-// - 没有任何旧会话：start 照旧抛出，由调用方整体退回进程内 PTY。
+// - 没有任何旧会话：保留可诊断、可自动恢复的 facade，新会话明确降级为进程内 PTY。
 //
 // 与 agent-session-pty-host-process.integration.test.ts 分文件：那边的接管用例另有修复在改，避免同文件合并冲突。
 // socket 放在 /tmp 下的短目录：macOS 的 sun_path 上限 104 字节，os.tmpdir() 太深。
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSessionPtyHostControllerConnection } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
@@ -16,6 +17,7 @@ import type { AgentSessionPtyHostDetachedLaunchRequest } from "../../src/agent-s
 import { AgentSessionPtyHostRuntimeFacade } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-facade";
 import { resolveAgentSessionPtyHostSocketPath } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-socket-path-for-runtime-identity";
 import { HostedTerminalPtyProcessHandleOverAgentSessionPtyHost } from "../../src/agent-session-pty-host/runtime-client/hosted-terminal-pty-process-handle-over-agent-session-pty-host";
+import { readPosixProcessResourceTable } from "../../src/diagnostics/posix-process-table-with-resource-columns-reader";
 import { PtySession } from "../../src/terminal/pty-session";
 import type { TerminalPtyProcessHandle } from "../../src/terminal/terminal-pty-process-handle";
 import {
@@ -151,6 +153,98 @@ const ECHOING_SHELL_SCRIPT = 'echo ready; while read line; do echo "got:$line"; 
 describe.skipIf(process.platform === "win32")(
 	"agent session pty host runtime facade when the current build's host cannot start",
 	() => {
+		it("原 host 确证退出或 PID 换代后自动解除旧 spawn 阻塞，仍活着的原身份保持待核对", async (testContext) => {
+			const runtimeIdentity = { runtimeHomeDirectoryPath: createShortRuntimeHomeDirectory(), runtimePort: 3996 };
+			const exitedOriginalHost = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+			hostProcessesSigkilledAfterEachTest.push(exitedOriginalHost);
+			await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline(
+				testContext,
+				exitedOriginalHost,
+				HOST_PROCESS_EXITS_TWO_TIER_DEADLINE,
+			);
+			if (!exitedOriginalHost.pid) throw new Error("隔离原 host 缺少 PID");
+			const currentProcess = (await readPosixProcessResourceTable()).find(
+				(entry) => entry.processId === process.pid,
+			);
+			if (!currentProcess) throw new Error("隔离核验缺少当前进程启动身份");
+			const evidenceDirectory = join(runtimeIdentity.runtimeHomeDirectoryPath, "agent-session-pty-host");
+			mkdirSync(evidenceDirectory, { recursive: true });
+			const pendingPath = join(
+				evidenceDirectory,
+				`p${runtimeIdentity.runtimePort}-pending-hosted-session-spawn-ownership.json`,
+			);
+			const common = {
+				workspaceId: "workspace",
+				socketPath: "/isolated-original-host.sock",
+				attemptedAtEpochMs: Date.now(),
+			};
+			writeFileSync(
+				pendingPath,
+				JSON.stringify([
+					{
+						...common,
+						hostedSessionKey: "confirmed-exited-key",
+						conversationSessionId: "confirmed-exited",
+						originalHostProcessId: exitedOriginalHost.pid,
+						originalHostProcessStartTimeText: "original-host-start",
+					},
+					{
+						...common,
+						hostedSessionKey: "pid-reused-key",
+						conversationSessionId: "pid-reused",
+						originalHostProcessId: process.pid,
+						originalHostProcessStartTimeText: "different-original-host-start",
+					},
+					{
+						...common,
+						hostedSessionKey: "still-alive-key",
+						conversationSessionId: "still-alive",
+						originalHostProcessId: process.pid,
+						originalHostProcessStartTimeText: currentProcess.processStartTimeText,
+					},
+				]),
+			);
+			const facade = await AgentSessionPtyHostRuntimeFacade.start({
+				runtimeIdentity,
+				newHostedSessionsEnabled: false,
+				warn: () => {},
+				currentBuildHostDescriptor: {
+					hostBuildIdentity: CURRENT_GENERATION_HOST_BUILD_IDENTITY,
+					launchCommand: { executablePath: process.execPath, leadingArguments: [] },
+				},
+			});
+			try {
+				expect(JSON.parse(await readFile(pendingPath, "utf8"))).toEqual([
+					expect.objectContaining({ hostedSessionKey: "still-alive-key" }),
+				]);
+				const history = (await readFile(pendingPath.replace(/\.json$/u, "-resolution-history.jsonl"), "utf8"))
+					.trim()
+					.split("\n")
+					.map((line) => JSON.parse(line));
+				expect(history.map((entry) => entry.hostedSessionKey)).toEqual(["confirmed-exited-key", "pid-reused-key"]);
+				expect((await facade.queryDiagnostics()).pendingHostedSessionSpawnOwnership).toEqual([
+					expect.objectContaining({ hostedSessionKey: "still-alive-key" }),
+				]);
+				await expect(
+					facade
+						.createHostedTerminalPtyProcessSpawnerForWorkspace("workspace", null)
+						.spawnHostedTerminalPtyProcess({
+							taskId: "still-alive",
+							hostedSessionKind: "shell_session",
+							binary: "/bin/sh",
+							args: [],
+							cwd: "/tmp",
+							env: {},
+							cols: 80,
+							rows: 24,
+							onData: () => {},
+							onExit: () => {},
+						}),
+				).rejects.toThrow("创建归属仍待核对");
+			} finally {
+				await facade.closeControllerConnectionsAfterFlushingPendingFrames();
+			}
+		});
 		it(
 			"still adopts an older generation's live session, spawns new sessions in-process, and returns to hosted spawns once the current host is reachable",
 			async (testContext) => {
@@ -190,7 +284,14 @@ describe.skipIf(process.platform === "win32")(
 				const warningMessages: string[] = [];
 				let currentGenerationHostLaunchAttemptCount = 0;
 				let currentGenerationHostLaunchSucceeds = false;
+				const configurationEvidenceFilePath = join(
+					runtimeIdentity.runtimeHomeDirectoryPath,
+					"config-evidence.json",
+				);
+				writeFileSync(configurationEvidenceFilePath, "{}");
 				const facade = await AgentSessionPtyHostRuntimeFacade.start({
+					recoveryConfigurationEvidenceFilePath: configurationEvidenceFilePath,
+					waitBeforeRetryingHostReadiness: async () => {},
 					runtimeIdentity,
 					warn: (message) => warningMessages.push(message),
 					currentBuildHostDescriptor: {
@@ -214,10 +315,10 @@ describe.skipIf(process.platform === "win32")(
 					},
 				});
 
-				expect(currentGenerationHostLaunchAttemptCount).toBe(1);
-				expect(warningMessages).toHaveLength(1);
-				expect(warningMessages[0]).toContain(SIMULATED_CURRENT_GENERATION_HOST_LAUNCH_FAILURE_MESSAGE);
-				expect(warningMessages[0]).toContain("fall back to in-process PTY");
+				expect(currentGenerationHostLaunchAttemptCount).toBe(3);
+				expect(
+					warningMessages.some((message) => message.includes("agent_session_pty_host_readiness_budget_exhausted")),
+				).toBe(true);
 
 				// 接管：经旧 generation 链路收发。
 				const [adoptionCandidate] =
@@ -273,17 +374,9 @@ describe.skipIf(process.platform === "win32")(
 					() => inProcessFallbackOutputChunks.join("").includes("got:in-process"),
 				);
 
-				// 后台重试连上当前 generation 之后，新 spawn 恢复进 host。
-				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
-					testContext,
-					CURRENT_GENERATION_HOST_RECONNECTED_IN_BACKGROUND_TWO_TIER_DEADLINE,
-					() => warningMessages.some((message) => message.includes("reachable again")),
-				);
-				expect(currentGenerationHostLaunchAttemptCount).toBe(2);
-				const currentGenerationHostProcess = hostProcessesSigkilledAfterEachTest.at(-1);
-				if (!currentGenerationHostProcess || currentGenerationHostProcess === olderGenerationHostProcess) {
-					throw new Error("expected the background retry to have launched the current generation host");
-				}
+				// 相同故障耗尽预算后不再拉起；配置证据变化才自动补试。
+				expect(currentGenerationHostLaunchAttemptCount).toBe(3);
+				writeFileSync(configurationEvidenceFilePath, '{"dependencyRepaired":true}');
 				const hostedAfterRecoveryOutputChunks: string[] = [];
 				const hostedAfterRecoveryHandle = await spawnerForWorkspace.spawnHostedTerminalPtyProcess({
 					taskId: "task-spawned-after-current-generation-reachable",
@@ -297,6 +390,10 @@ describe.skipIf(process.platform === "win32")(
 					onData: (chunk) => hostedAfterRecoveryOutputChunks.push(chunk.toString("utf8")),
 					onExit: () => {},
 				});
+				expect(currentGenerationHostLaunchAttemptCount).toBe(4);
+				const currentGenerationHostProcess = hostProcessesSigkilledAfterEachTest.at(-1);
+				if (!currentGenerationHostProcess || currentGenerationHostProcess === olderGenerationHostProcess)
+					throw new Error("恢复未启动当前 host");
 				expect(hostedAfterRecoveryHandle).toBeInstanceOf(HostedTerminalPtyProcessHandleOverAgentSessionPtyHost);
 				hostedAfterRecoveryHandle.write("hosted-again\n");
 				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
@@ -331,27 +428,31 @@ describe.skipIf(process.platform === "win32")(
 			CURRENT_GENERATION_HOST_UNAVAILABLE_FALLBACK_INTEGRATION_TEST_TIMEOUT_MS,
 		);
 
-		it("still rejects start when no older generation has sessions to adopt, so the caller falls back to in-process PTY entirely", async () => {
+		it("没有旧会话也保留可诊断的降级 facade，重启不能重置同一故障的预算", async () => {
 			const runtimeIdentity = { runtimeHomeDirectoryPath: createShortRuntimeHomeDirectory(), runtimePort: 3997 };
-			const warningMessages: string[] = [];
-			let currentGenerationHostLaunchAttemptCount = 0;
-
-			await expect(
-				AgentSessionPtyHostRuntimeFacade.start({
-					runtimeIdentity,
-					warn: (message) => warningMessages.push(message),
-					currentBuildHostDescriptor: {
-						hostBuildIdentity: CURRENT_GENERATION_HOST_BUILD_IDENTITY,
-						launchCommand: { executablePath: process.execPath, leadingArguments: [] },
-					},
-					launchHostAndWaitUntilSocketAcceptsConnections: async () => {
-						currentGenerationHostLaunchAttemptCount += 1;
-						throw new Error(SIMULATED_CURRENT_GENERATION_HOST_LAUNCH_FAILURE_MESSAGE);
-					},
-				}),
-			).rejects.toThrow(SIMULATED_CURRENT_GENERATION_HOST_LAUNCH_FAILURE_MESSAGE);
-			expect(currentGenerationHostLaunchAttemptCount).toBe(1);
-			expect(warningMessages).toEqual([]);
+			let launchAttempts = 0;
+			const options = {
+				runtimeIdentity,
+				warn: () => {},
+				waitBeforeRetryingHostReadiness: async () => {},
+				currentBuildHostDescriptor: {
+					hostBuildIdentity: CURRENT_GENERATION_HOST_BUILD_IDENTITY,
+					launchCommand: { executablePath: process.execPath, leadingArguments: [] },
+				},
+				launchHostAndWaitUntilSocketAcceptsConnections: async () => {
+					launchAttempts += 1;
+					throw new Error(SIMULATED_CURRENT_GENERATION_HOST_LAUNCH_FAILURE_MESSAGE);
+				},
+			};
+			const first = await AgentSessionPtyHostRuntimeFacade.start(options);
+			expect(launchAttempts).toBe(3);
+			expect((await first.queryDiagnostics()).newSessionHostingMode).toBe("in_process_pty");
+			await expect(AgentSessionPtyHostRuntimeFacade.start(options)).rejects.toThrow("持有");
+			await first.closeControllerConnectionsAfterFlushingPendingFrames();
+			const restarted = await AgentSessionPtyHostRuntimeFacade.start(options);
+			expect(launchAttempts).toBe(3);
+			expect((await restarted.queryDiagnostics()).recoveryProgress?.attemptsStarted).toBe(3);
+			await restarted.closeControllerConnectionsAfterFlushingPendingFrames();
 		});
 	},
 );

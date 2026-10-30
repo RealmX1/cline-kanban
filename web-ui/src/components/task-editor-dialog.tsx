@@ -20,6 +20,7 @@ import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useSt
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
+import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
@@ -53,6 +54,10 @@ import { Button } from "@/components/ui/button";
 import { DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useGitRepositoryInfoOfOtherProjectForTaskEditorDialog } from "@/hooks/use-git-repository-info-of-other-project-for-task-editor-dialog";
 import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 import { useTaskEditorClipboardTaskReference } from "@/hooks/use-task-editor-clipboard-task-reference";
@@ -116,6 +121,8 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  * 仅在 create 模式下用于二次确认；edit 模式关闭是存草稿而非丢弃，不走此守卫。
  */
 export interface TaskCreateFormSnapshot {
+	codexConfigurationProfileId?: string;
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
 	taskName: string;
@@ -158,6 +165,8 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.imageCount !== baseline.imageCount ||
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
+		current.codexConfigurationProfileId !== baseline.codexConfigurationProfileId ||
+		current.codexConfigurationPermissionSelectionSource !== baseline.codexConfigurationPermissionSelectionSource ||
 		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
 		current.autoReviewMode !== baseline.autoReviewMode ||
@@ -250,6 +259,10 @@ export function TaskEditorDialog({
 	onStartInPlanModeChange,
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
+	codexConfigurationProfileId,
+	codexConfigurationPermissionSelectionSource,
+	onCodexConfigurationProfileIdChange,
+	onCodexConfigurationPermissionSelectionSourceChange,
 	taskConversationMode,
 	onTaskConversationModeChange,
 	autoReviewEnabled,
@@ -314,6 +327,10 @@ export function TaskEditorDialog({
 	onStartInPlanModeChange: (value: boolean) => void;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
+	codexConfigurationProfileId?: string;
+	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
+	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
+	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	taskConversationMode: RuntimeTaskConversationMode;
 	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
 	autoReviewEnabled: boolean;
@@ -678,6 +695,8 @@ export function TaskEditorDialog({
 		images,
 		startInPlanMode,
 		taskAgentPermissionMode,
+		codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
 		autoReviewMode,
@@ -1313,12 +1332,7 @@ export function TaskEditorDialog({
 				return;
 			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-				event.preventDefault();
-				if (event.shiftKey) {
-					handleCreateAndStartAll();
-					return;
-				}
-				handleCreateAll();
+				// 提交组合键交给浮窗宿主，避免先命中「新增下一项」。
 				return;
 			}
 			if (event.key === "Enter" && !event.shiftKey) {
@@ -1331,26 +1345,41 @@ export function TaskEditorDialog({
 				handleRemoveTask(index);
 			}
 		},
-		[handleAddTask, handleCreateAll, handleCreateAndStartAll, handleRemoveTask, taskPrompts],
+		[handleAddTask, handleRemoveTask, taskPrompts],
 	);
 
 	const setInputRef = useCallback((index: number, el: HTMLInputElement | null) => {
 		inputRefs.current[index] = el;
 	}, []);
 
+	const primaryActionDisabled =
+		!branchRef ||
+		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
+		isTaskCreationWaitingForRelationDraftHydration ||
+		isRelationAwareCreationInFlight;
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: () => (mode === "multi" ? handleCreateAll() : handleCreateSingle()),
+		disabled: primaryActionDisabled,
+	});
 	const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-		if (isKeyboardEventEmittedDuringImeComposition(event) || event.defaultPrevented || event.key !== "Enter") return;
-		if (!branchRef || !hasPromptDraftContent || isRelationAwareCreationInFlight) return;
+		handlePrimaryActionKeyDown(event);
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			event.stopPropagation();
+			return;
+		}
+		if (event.defaultPrevented || event.key !== "Enter") return;
+		if (!event.currentTarget.contains(event.target as Node)) return;
 		if (event.altKey && event.shiftKey && onCreateStartAndOpen && mode === "single") {
 			event.preventDefault();
+			event.stopPropagation();
+			if (event.repeat || primaryActionDisabled) return;
 			handleRunSingleStartAction("start_and_open");
-		} else if (event.metaKey || event.ctrlKey) {
+		} else if (!event.altKey && event.shiftKey && (event.metaKey || event.ctrlKey)) {
 			event.preventDefault();
-			if (mode === "multi") {
-				if (event.shiftKey) handleCreateAndStartAll();
-				else handleCreateAll();
-			} else if (event.shiftKey) handleRunSingleStartAction("start");
-			else handleCreateSingle();
+			event.stopPropagation();
+			if (event.repeat || primaryActionDisabled) return;
+			if (mode === "multi") handleCreateAndStartAll();
+			else handleRunSingleStartAction("start");
 		}
 	};
 
@@ -1366,6 +1395,8 @@ export function TaskEditorDialog({
 		imageCount: images.length,
 		startInPlanMode,
 		taskAgentPermissionMode,
+		codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
 		autoReviewMode,
@@ -1571,11 +1602,15 @@ export function TaskEditorDialog({
 		{
 			key: "permissions",
 			label: "Agent 权限",
-			summary: {
-				ask_for_every_tool_use: "每次询问",
-				auto_approve_file_edits_only: "允许编辑文件",
-				bypass_all_permission_prompts: "全部允许",
-			}[taskAgentPermissionMode],
+			summary:
+				effectiveTaskAgentPermissionModeAgentId === "codex" &&
+				codexConfigurationPermissionSelectionSource === "profile"
+					? "跟随 profile 完整权限"
+					: {
+							ask_for_every_tool_use: "每次询问",
+							auto_approve_file_edits_only: "允许编辑文件",
+							bypass_all_permission_prompts: "全部允许",
+						}[taskAgentPermissionMode],
 			content: (
 				<>
 					<div>
@@ -1586,18 +1621,54 @@ export function TaskEditorDialog({
 						<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
 						<TaskAgentPermissionModeControl
 							value={taskAgentPermissionMode}
-							onChange={onTaskAgentPermissionModeChange}
+							selectionComesFromCodexProfile={
+								effectiveTaskAgentPermissionModeAgentId === "codex" &&
+								codexConfigurationPermissionSelectionSource === "profile"
+							}
+							onChange={(mode) => {
+								onTaskAgentPermissionModeChange(mode);
+								onCodexConfigurationPermissionSelectionSourceChange?.("task_local");
+							}}
 							selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
 							selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
 							startInPlanMode={startInPlanMode}
 							idPrefix="task-create-agent-permission-mode"
 						/>
+						{effectiveTaskAgentPermissionModeAgentId === "codex" &&
+							codexConfigurationPermissionSelectionSource === "profile" && (
+								<p className="mt-1 text-xs text-text-secondary">
+									当前使用 profile 的完整审批与沙箱设置；选择上方档位将改为此 Task 的局部权限。
+								</p>
+							)}
 					</div>
 				</>
 			),
 		},
 	];
 	const moreTaskEditorSettings = [
+		...(effectiveTaskAgentPermissionModeAgentId === "codex" && onCodexConfigurationProfileIdChange
+			? [
+					{
+						key: "codex_configuration_profile",
+						label: "Codex profile",
+						summary: codexConfigurationProfileId ? "已绑定" : "默认配置",
+						content: (
+							<CodexConfigurationProfileSelect
+								workspaceId={targetWorkspaceId}
+								value={codexConfigurationProfileId}
+								onChange={onCodexConfigurationProfileIdChange}
+								enabled={open}
+								automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
+								adoptDefaultProfilePermissions={codexConfigurationPermissionSelectionSource !== "task_local"}
+								onPermissionModeChange={(mode) => {
+									onTaskAgentPermissionModeChange(mode);
+									onCodexConfigurationPermissionSelectionSourceChange?.("profile");
+								}}
+							/>
+						),
+					},
+				]
+			: []),
 		{
 			key: "session_initialization",
 			label: "会话上下文",
@@ -1819,6 +1890,8 @@ export function TaskEditorDialog({
 													images,
 													startInPlanMode,
 													taskAgentPermissionMode,
+													codexConfigurationProfileId,
+													codexConfigurationPermissionSelectionSource,
 													autoReviewEnabled,
 													autoReviewMode,
 													branchRef,
@@ -1852,8 +1925,6 @@ export function TaskEditorDialog({
 												onValueBlur={() => propagatePromptDraft(promptDraft)}
 												images={images}
 												onImagesChange={onImagesChange}
-												onSubmit={handleCreateSingle}
-												onSubmitAndStart={() => handleRunSingleStartAction("start")}
 												placeholder="描述要完成的任务…"
 												aria-label="任务正文"
 												minimumTextareaHeight={180}
@@ -2079,6 +2150,7 @@ export function TaskEditorDialog({
 								<Button
 									size="sm"
 									onClick={handleCreateSingle}
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 									disabled={
 										!hasPromptDraftContent ||
 										!branchRef ||
@@ -2167,7 +2239,12 @@ export function TaskEditorDialog({
 							</>
 						) : (
 							<>
-								<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+								<Button
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+									size="sm"
+									onClick={handleCreateAll}
+									disabled={primaryActionDisabled}
+								>
 									<span className="inline-flex items-center">
 										Create {validTaskCount} {taskCountLabel}
 										<ButtonShortcut />

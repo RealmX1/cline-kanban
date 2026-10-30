@@ -22,6 +22,7 @@ export function Dialog({
 	onInteractOutside,
 	onClickCapture,
 	onKeyDownCapture,
+	onKeyDown,
 	onOpenAutoFocus,
 }: {
 	onOpenAutoFocus?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onOpenAutoFocus"];
@@ -30,6 +31,7 @@ export function Dialog({
 	children: ReactNode;
 	onClickCapture?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onClickCapture"];
 	onKeyDownCapture?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onKeyDownCapture"];
+	onKeyDown?: ComponentPropsWithoutRef<typeof RadixDialog.Content>["onKeyDown"];
 	contentClassName?: string;
 	contentAriaDescribedBy?: string;
 	onEscapeKeyDown?: (event: KeyboardEvent) => void;
@@ -47,6 +49,7 @@ export function Dialog({
 					onOpenAutoFocus={onOpenAutoFocus}
 					onClickCapture={onClickCapture}
 					onKeyDownCapture={onKeyDownCapture}
+					onKeyDown={onKeyDown}
 					aria-describedby={contentAriaDescribedBy}
 					onEscapeKeyDown={onEscapeKeyDown}
 					onPointerDownOutside={onPointerDownOutside}

@@ -3,6 +3,7 @@
 // shared API contract, and fans out workspace-scoped snapshots and deltas.
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
+import { subscribeToAgentSessionPtyHostDiagnosticsChanges } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
 import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import {
 	createNotificationAssessmentService,
@@ -369,6 +370,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
+	const unsubscribePtyHostDiagnostics = subscribeToAgentSessionPtyHostDiagnosticsChanges((revision) => {
+		for (const client of runtimeStateClients)
+			sendRuntimeStateMessage(client, { type: "agent_session_pty_host_diagnostics_updated", revision });
+	});
 	const unsubscribePromptLibraryChanges = subscribeToPromptLibraryChanges((workspaceId) => {
 		for (const client of runtimeStateClients) {
 			sendRuntimeStateMessage(client, { type: "prompt_library_updated", workspaceId });
@@ -1469,6 +1474,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 		},
 		close: async () => {
+			unsubscribePtyHostDiagnostics();
 			broadcastCostRecorder?.close();
 			unsubscribePromptLibraryChanges();
 			notificationAssessment.close();

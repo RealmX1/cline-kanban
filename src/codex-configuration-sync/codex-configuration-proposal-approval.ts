@@ -8,6 +8,12 @@ import {
 	sameConfigurationField,
 } from "./codex-configuration-field-projection";
 import {
+	codexConfigurationChangeSharedFields,
+	ensureCodexConfigurationSourceProfile,
+	expireCodexConfigurationProfileFeedbackSuggestions,
+	updateCodexConfigurationProfileFields,
+} from "./codex-configuration-profiles";
+import {
 	type CodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 	type StoredCodexConfigurationChange,
@@ -59,6 +65,13 @@ export function isCodexConfigurationSourceObservationStillCurrent(
 	store: CodexConfigurationSyncStore,
 	change: StoredCodexConfigurationChange,
 ) {
+	if (change.codexConfigurationProfileId && change.approvalStatus === "approved")
+		return (
+			(change.acceptedProfileFieldVersion === undefined ||
+				(store.profiles[change.codexConfigurationProfileId]?.fieldVersions[change.fieldKey] ?? 0) ===
+					change.acceptedProfileFieldVersion) &&
+			sameConfigurationField(codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey], change.value)
+		);
 	const writer = store.writers[change.sourceWriterId];
 	const observed = writer?.lastObservedFields ?? store.sources[change.sourceIdentity]?.observedUserFields;
 	return Boolean(observed && sameConfigurationField(observed[change.fieldKey], change.value));
@@ -69,11 +82,13 @@ export async function approveStoredCodexConfigurationProposal(
 	change: StoredCodexConfigurationChange,
 	resolveSharedConflict = false,
 ) {
+	expireCodexConfigurationProfileFeedbackSuggestions(store);
 	if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
 		throw new CodexConfigurationApprovalError("not_approvable", "此记录不是待审批设置提案。");
 	const source = store.sources[change.sourceIdentity];
 	if (!source) throw new CodexConfigurationApprovalError("source_unverifiable", "配置来源绑定缺失，恢复后可重试。");
-	const shared = source.fields[change.fieldKey];
+	const sharedFields = codexConfigurationChangeSharedFields(store, change) ?? source.fields;
+	const shared = sharedFields[change.fieldKey];
 	if (
 		!sameConfigurationField(shared, change.value) &&
 		(resolveSharedConflict
@@ -115,6 +130,26 @@ export async function approveStoredCodexConfigurationProposal(
 			"stale_version",
 			"检测位置已有较新设置或定义；原提案保留，请刷新后选择。",
 		);
+	if (change.codexConfigurationProfileId && change.exceptionGroup) {
+		if (change.feedbackExpiresAtMs === undefined || Date.now() >= change.feedbackExpiresAtMs) {
+			expireCodexConfigurationProfileFeedbackSuggestions(store);
+			throw new CodexConfigurationApprovalError("not_approvable", "十分钟反馈机会已结束，局部选择保留。");
+		}
+		const feedbackFields = { ...(change.relatedFields ?? { [change.fieldKey]: change.value }) };
+		for (const fieldKey of change.relatedDeletedFieldKeys ?? []) feedbackFields[fieldKey] = undefined;
+		for (const [fieldKey, value] of Object.entries(feedbackFields))
+			if (!sameConfigurationField(current[fieldKey], value))
+				throw new CodexConfigurationApprovalError("stale_version", "本会话已有更新的完整设置，旧反馈机会已结束。");
+		change.approvalStatus = "approved";
+		change.mergeStatus = "shared_default_updated";
+		change.decidedAt = Date.now();
+		change.acknowledgedAt = Date.now();
+		updateCodexConfigurationProfileFields(store, change.codexConfigurationProfileId, feedbackFields, {
+			sourceWriterId: change.sourceWriterId,
+			adoptedFeedbackSuggestion: change,
+		});
+		return;
+	}
 	if (change.value === undefined) delete source.fields[change.fieldKey];
 	else source.fields[change.fieldKey] = structuredClone(change.value);
 	const writer = store.writers[change.sourceWriterId];
@@ -128,4 +163,12 @@ export async function approveStoredCodexConfigurationProposal(
 	change.acknowledgedAt = Date.now();
 	change.version = ++store.revision;
 	source.version = store.revision;
+	if (!writer) {
+		// 来源审批仍只更新未来默认，兼容 profile 与来源共用这次已接受的字段版本。
+		const profile = ensureCodexConfigurationSourceProfile(store, change.sourceIdentity);
+		if (change.value === undefined) delete profile.fields[change.fieldKey];
+		else profile.fields[change.fieldKey] = structuredClone(change.value);
+		profile.fieldVersions[change.fieldKey] = change.version;
+		profile.version = change.version;
+	}
 }

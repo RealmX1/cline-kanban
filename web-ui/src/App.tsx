@@ -707,6 +707,10 @@ export default function App(): ReactElement {
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
+		newTaskCodexConfigurationProfileId,
+		newTaskCodexConfigurationPermissionSelectionSource,
+		setNewTaskCodexConfigurationPermissionSelectionSource,
+		setNewTaskCodexConfigurationProfileId,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
 		newTaskConversationMode,
@@ -737,6 +741,10 @@ export default function App(): ReactElement {
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
+		editTaskCodexConfigurationProfileId,
+		editTaskCodexConfigurationPermissionSelectionSource,
+		setEditTaskCodexConfigurationPermissionSelectionSource,
+		setEditTaskCodexConfigurationProfileId,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
 		editTaskConversationMode,
@@ -2276,6 +2284,22 @@ export default function App(): ReactElement {
 						}
 						startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
 						onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
+						codexConfigurationPermissionSelectionSource={
+							editingTaskId
+								? editTaskCodexConfigurationPermissionSelectionSource
+								: newTaskCodexConfigurationPermissionSelectionSource
+						}
+						onCodexConfigurationPermissionSelectionSourceChange={
+							editingTaskId
+								? setEditTaskCodexConfigurationPermissionSelectionSource
+								: setNewTaskCodexConfigurationPermissionSelectionSource
+						}
+						codexConfigurationProfileId={
+							editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
+						}
+						onCodexConfigurationProfileIdChange={
+							editingTaskId ? setEditTaskCodexConfigurationProfileId : setNewTaskCodexConfigurationProfileId
+						}
 						taskAgentPermissionMode={editingTaskId ? editTaskAgentPermissionMode : newTaskAgentPermissionMode}
 						onTaskAgentPermissionModeChange={
 							editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode

@@ -4,6 +4,8 @@
 import type { inferRouterInputs, inferRouterOutputs } from "@trpc/server";
 import { initTRPC, TRPCError } from "@trpc/server";
 import { z } from "zod";
+import { queryCurrentRuntimeAgentSessionPtyHostDiagnostics } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
+import { agentSessionPtyHostDiagnosticsSchema } from "../core/agent-session-pty-host-diagnostics-contract";
 import type {
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
@@ -476,10 +478,12 @@ import {
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
 import {
+	type CodexConfigurationProfileAutomaticAdoptionGuard,
 	type CodexConfigurationSyncApi,
 	codexConfigurationBatchActionRequestSchema,
 	codexConfigurationBatchActionResultSchema,
 	codexConfigurationChangeMutationRequestSchema,
+	codexConfigurationProfileMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
 	codexConfigurationResolveTargetConflictRequestSchema,
 	codexConfigurationSynchronizeRequestSchema,
@@ -834,6 +838,7 @@ export interface RuntimeTrpcContext {
 		refreshTaskTerminal: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskTerminalRefreshRequest,
+			configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard,
 		) => Promise<RuntimeTaskTerminalRefreshResponse>;
 		sendTaskSessionInput: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1415,6 +1420,14 @@ const gitSyncActionInputSchema = z.object({
 	action: runtimeGitSyncActionSchema,
 });
 
+const codexConfigurationProfileMutationProcedure = procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+	.input(codexConfigurationProfileMutationRequestSchema)
+	.output(codexConfigurationSyncStateSchema)
+	.mutation(({ ctx, input }) => {
+		if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+		return ctx.codexConfigurationSyncApi.mutateProfile(input);
+	});
+
 function buildTaskEditorCreationRouter() {
 	return t.router({
 		recoverLegacyDraft: workspaceProcedure
@@ -1465,1606 +1478,1638 @@ function buildTaskEditorCreationRouter() {
 export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEditorCreationRouter> {}
 const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
 
-export const runtimeAppRouter = t.router({
-	taskCommandExecution: t.router({
-		start: workspaceProcedure
-			.input(taskCommandExecutionStartRequestSchema)
-			.output(taskCommandExecutionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.taskCommandExecutionApi)
-					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
-				return {
-					ok: true as const,
-					execution: await ctx.taskCommandExecutionApi.start(ctx.workspaceScope.workspaceId, input),
-				};
-			}),
-		inspect: workspaceProcedure
-			.input(taskCommandExecutionIdentityRequestSchema)
-			.output(taskCommandExecutionResponseSchema)
-			.query(async ({ ctx, input }) => {
-				if (!ctx.taskCommandExecutionApi)
-					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
-				return {
-					ok: true as const,
-					execution: await ctx.taskCommandExecutionApi.inspect(ctx.workspaceScope.workspaceId, input),
-				};
-			}),
-		cancel: workspaceProcedure
-			.input(taskCommandExecutionIdentityRequestSchema)
-			.output(taskCommandExecutionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.taskCommandExecutionApi)
-					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
-				return {
-					ok: true as const,
-					execution: await ctx.taskCommandExecutionApi.cancel(ctx.workspaceScope.workspaceId, input),
-				};
-			}),
-	}),
-	dailyWorkProgressStatistics: t.router({
-		getSummary: t.procedure
-			.input(runtimeDailyWorkProgressRequestSchema)
-			.output(runtimeDailyWorkProgressSummarySchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.dailyWorkProgressStatisticsApi)
-					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
-				return ctx.dailyWorkProgressStatisticsApi.getSummary(input);
-			}),
-		claimCelebrations: t.procedure
-			.input(runtimeClaimDailyWorkProgressCelebrationsRequestSchema)
-			.output(runtimeClaimDailyWorkProgressCelebrationsResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.dailyWorkProgressStatisticsApi)
-					throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
-				return ctx.dailyWorkProgressStatisticsApi.claimCelebrations(input);
-			}),
-	}),
-	notificationIntelligence: t.router({
-		getSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(notificationIntelligenceSettingsResponseSchema)
-			.query(() => getNotificationIntelligenceSettings()),
-		saveSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(notificationIntelligenceSettingsSchema)
-			.mutation(async ({ input }) => {
-				await saveNotificationIntelligenceSettings(input);
-				return { ok: true };
-			}),
-		saveProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(saveKanbanModelProviderProfileRequestSchema)
-			.mutation(async ({ input }) => {
-				await saveKanbanModelProviderProfile(input);
-				return { ok: true };
-			}),
-		speechModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.query(
-			() => NOTIFICATION_SPEECH_MODEL_CATALOG,
-		),
-		markAllArchivedNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ includeCompletedTasks: z.boolean() }))
-			.mutation(async ({ input, ctx }) => {
-				const changedCount = await getNotificationLifecycleArchive().markAllVisited(input.includeCompletedTasks);
-				await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
-				return { changedCount };
-			}),
-		clearAllNotificationPanels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(async ({ ctx }) => {
-			const changedCount = await getNotificationLifecycleArchive().clearAllPanels();
+const runtimeApplicationTaskCommandExecutionProcedureRouter = t.router({
+	start: workspaceProcedure
+		.input(taskCommandExecutionStartRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.start(ctx.workspaceScope.workspaceId, input),
+			};
+		}),
+	inspect: workspaceProcedure
+		.input(taskCommandExecutionIdentityRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.query(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.inspect(ctx.workspaceScope.workspaceId, input),
+			};
+		}),
+	cancel: workspaceProcedure
+		.input(taskCommandExecutionIdentityRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.cancel(ctx.workspaceScope.workspaceId, input),
+			};
+		}),
+});
+
+const runtimeApplicationDailyWorkProgressStatisticsProcedureRouter = t.router({
+	getSummary: t.procedure
+		.input(runtimeDailyWorkProgressRequestSchema)
+		.output(runtimeDailyWorkProgressSummarySchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.dailyWorkProgressStatisticsApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
+			return ctx.dailyWorkProgressStatisticsApi.getSummary(input);
+		}),
+	claimCelebrations: t.procedure
+		.input(runtimeClaimDailyWorkProgressCelebrationsRequestSchema)
+		.output(runtimeClaimDailyWorkProgressCelebrationsResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.dailyWorkProgressStatisticsApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "今日进展统计尚未就绪" });
+			return ctx.dailyWorkProgressStatisticsApi.claimCelebrations(input);
+		}),
+});
+
+const runtimeApplicationNotificationIntelligenceProcedureRouter = t.router({
+	getSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(notificationIntelligenceSettingsResponseSchema)
+		.query(() => getNotificationIntelligenceSettings()),
+	saveSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(notificationIntelligenceSettingsSchema)
+		.mutation(async ({ input }) => {
+			await saveNotificationIntelligenceSettings(input);
+			return { ok: true };
+		}),
+	saveProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(saveKanbanModelProviderProfileRequestSchema)
+		.mutation(async ({ input }) => {
+			await saveKanbanModelProviderProfile(input);
+			return { ok: true };
+		}),
+	speechModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.query(
+		() => NOTIFICATION_SPEECH_MODEL_CATALOG,
+	),
+	markAllArchivedNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ includeCompletedTasks: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			const changedCount = await getNotificationLifecycleArchive().markAllVisited(input.includeCompletedTasks);
 			await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
 			return { changedCount };
 		}),
-		listPanelTaskGroups: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(notificationArchiveListRequestSchema)
-			.output(notificationArchiveListResponseSchema)
-			.query(({ input }) => getNotificationLifecycleArchive().panelGroups(input)),
-		listArchive: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(notificationArchiveListRequestSchema)
-			.output(notificationArchiveListResponseSchema)
-			.query(({ input }) => getNotificationLifecycleArchive().list(input)),
-		getLifecycle: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ candidateId: z.string() }))
-			.output(notificationCandidateLifecycleSchema.nullable())
-			.query(({ input }) => getNotificationLifecycleArchive().get(input.candidateId)),
-		claimDelivery: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100) }))
-			.mutation(async ({ input }) => ({
-				claimed: await getNotificationLifecycleArchive().claimDelivery(input.candidateId, input.clientId),
-			})),
-		recordClientFilter: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(
-				z.object({
-					candidateId: z.string(),
-					clientId: z.string().max(100),
-					reason: z.enum([
-						"notifications_disabled",
-						"foreground_visible",
-						"visible_peer_tab",
-						"eligible",
-						"stale",
-					]),
-				}),
-			)
-			.mutation(async ({ input }) => {
-				await getNotificationLifecycleArchive().update(
-					input.candidateId,
-					{},
-					"client_notification_policy_decided",
-					input,
-				);
-				return { ok: true };
+	clearAllNotificationPanels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(async ({ ctx }) => {
+		const changedCount = await getNotificationLifecycleArchive().clearAllPanels();
+		await ctx.runtimeApi.broadcastNotificationArchiveChanged?.();
+		return { changedCount };
+	}),
+	listPanelTaskGroups: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(notificationArchiveListRequestSchema)
+		.output(notificationArchiveListResponseSchema)
+		.query(({ input }) => getNotificationLifecycleArchive().panelGroups(input)),
+	listArchive: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(notificationArchiveListRequestSchema)
+		.output(notificationArchiveListResponseSchema)
+		.query(({ input }) => getNotificationLifecycleArchive().list(input)),
+	getLifecycle: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ candidateId: z.string() }))
+		.output(notificationCandidateLifecycleSchema.nullable())
+		.query(({ input }) => getNotificationLifecycleArchive().get(input.candidateId)),
+	claimDelivery: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ candidateId: z.string(), clientId: z.string().max(100) }))
+		.mutation(async ({ input }) => ({
+			claimed: await getNotificationLifecycleArchive().claimDelivery(input.candidateId, input.clientId),
+		})),
+	recordClientFilter: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(
+			z.object({
+				candidateId: z.string(),
+				clientId: z.string().max(100),
+				reason: z.enum(["notifications_disabled", "foreground_visible", "visible_peer_tab", "eligible", "stale"]),
 			}),
-		recordClientObservation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(
-				z.object({
-					candidateId: z.string(),
-					clientId: z.string().max(100),
-					observation: z.enum([
-						"desktop_accepted",
-						"desktop_blocked",
-						"speech_started",
-						"sound_disabled",
-						"chime_requested",
-						"speech_chime_fallback_requested",
-						"speech_ended",
-						"speech_failed",
-						"speech_stale_skipped",
-						"browser_speech_has_no_audio_export",
-					]),
-					detail: z.string().max(1000).optional(),
-				}),
-			)
-			.mutation(async ({ input }) => {
-				const archive = getNotificationLifecycleArchive();
-				if ((await archive.get(input.candidateId))?.candidate.deliveryClaimedBy !== input.clientId)
-					throw new TRPCError({ code: "FORBIDDEN" });
-				await archive.update(
-					input.candidateId,
-					{},
-					`client_${input.observation}`,
-					redactNotificationEvidence(input),
-				);
-				return { ok: true };
+		)
+		.mutation(async ({ input }) => {
+			await getNotificationLifecycleArchive().update(
+				input.candidateId,
+				{},
+				"client_notification_policy_decided",
+				input,
+			);
+			return { ok: true };
+		}),
+	recordClientObservation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(
+			z.object({
+				candidateId: z.string(),
+				clientId: z.string().max(100),
+				observation: z.enum([
+					"desktop_accepted",
+					"desktop_blocked",
+					"speech_started",
+					"sound_disabled",
+					"chime_requested",
+					"speech_chime_fallback_requested",
+					"speech_ended",
+					"speech_failed",
+					"speech_stale_skipped",
+					"browser_speech_has_no_audio_export",
+				]),
+				detail: z.string().max(1000).optional(),
 			}),
-		synthesizeSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ candidateId: z.string(), clientId: z.string().max(100), retry: z.boolean().optional() }))
-			.mutation(({ input }) => synthesizeNotificationSpeech(input)),
-		retryArchivedSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ candidateId: z.string() }))
-			.mutation(({ input }) =>
-				synthesizeNotificationSpeech({ candidateId: input.candidateId, preview: true, retry: true }),
-			),
-		previewSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(() =>
-			previewNotificationSpeech(),
+		)
+		.mutation(async ({ input }) => {
+			const archive = getNotificationLifecycleArchive();
+			if ((await archive.get(input.candidateId))?.candidate.deliveryClaimedBy !== input.clientId)
+				throw new TRPCError({ code: "FORBIDDEN" });
+			await archive.update(input.candidateId, {}, `client_${input.observation}`, redactNotificationEvidence(input));
+			return { ok: true };
+		}),
+	synthesizeSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ candidateId: z.string(), clientId: z.string().max(100), retry: z.boolean().optional() }))
+		.mutation(({ input }) => synthesizeNotificationSpeech(input)),
+	retryArchivedSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ candidateId: z.string() }))
+		.mutation(({ input }) =>
+			synthesizeNotificationSpeech({ candidateId: input.candidateId, preview: true, retry: true }),
 		),
-		archivedAudio: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(z.object({ candidateId: z.string() }))
-			.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
-	}),
-	support: t.router({
-		saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
-			.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))
-			.mutation(({ input }) => savePersistentAgentPromptImageAttachments(input.images)),
-		readAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeReadAgentPromptImageAttachmentsRequestSchema)
-			.output(z.array(runtimeTaskImageSchema))
-			.query(({ input }) => readPersistentAgentPromptImageAttachments(input.imageAttachmentIds)),
-		createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(createTaskLookupConversationRequestSchema)
-			.output(taskLookupConversationSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.createConversation(input);
-			}),
-		listTaskLookupConversations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(z.array(taskLookupConversationSchema))
-			.query(({ ctx }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.listConversations();
-			}),
-		getTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(taskLookupConversationIdentitySchema)
-			.output(taskLookupConversationSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.getConversation(input.conversationId);
-			}),
-		submitTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(submitTaskLookupTurnRequestSchema)
-			.output(taskLookupConversationSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.submitTurn(input);
-			}),
-		cancelTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(taskLookupConversationIdentitySchema)
-			.output(taskLookupConversationSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.cancelTurn(input.conversationId);
-			}),
-		readTaskLookupCandidatePreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(taskLookupCandidatePreviewRequestSchema)
-			.output(taskLookupCandidatePreviewSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskLookupConversationApi.readCandidatePreview(input.conversationId, input.taskReference);
-			}),
-		getTaskIndexingContext: workspaceProcedure.output(sharedTaskIndexingContextSchema).query(({ ctx }) => {
-			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.taskIndexingSupportApi.getTaskIndexingContext(ctx.workspaceScope);
-		}),
-		triageIncomingWorkItem: workspaceProcedure
-			.input(incomingWorkItemSchema)
-			.output(incomingWorkItemTriageResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
-			}),
-		getTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(taskAssistanceModelProviderRoutingSettingsSchema)
-			.query(({ ctx }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.getTaskAssistanceModelProviderRoutingSettings();
-			}),
-		setTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(taskAssistanceModelProviderRoutingSettingsSchema)
-			.output(taskAssistanceModelProviderRoutingSettingsSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.setTaskAssistanceModelProviderRoutingSettings(input);
-			}),
-		getGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(taskIndexingSupportExecutorSettingsSchema)
-			.query(({ ctx }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.getGlobalExecutorSettings();
-			}),
-		setGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(taskIndexingSupportExecutorSettingsSchema)
-			.output(taskIndexingSupportExecutorSettingsSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.setGlobalExecutorSettings(input);
-			}),
-		analyzeTaskProjectAssignment: workspaceProcedure
-			.input(taskProjectAssignmentAnalysisRequestSchema)
-			.output(taskProjectAssignmentAnalysisResponseSchema)
-			.mutation(({ ctx, input, signal }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input, signal);
-			}),
-		getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
-			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.taskIndexingSupportApi.getExecutorSettings(ctx.workspaceScope);
-		}),
-		setExecutorSettings: workspaceProcedure
-			.input(taskIndexingSupportExecutorSettingsSchema)
-			.output(taskIndexingSupportExecutorSettingsSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
-			}),
-	}),
-	taskEditorCreation: taskEditorCreationRouter,
-	independentTaskCreation: t.router({
-		read: workspaceProcedure
-			.input(z.object({ requestId: z.string().uuid() }))
-			.output(independentTaskCreationDraftSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.read(ctx.workspaceScope, input);
-			}),
-		latestDraft: workspaceProcedure
-			.input(z.object({ sourceTaskId: z.string(), sourceTaskConversationSessionId: z.string() }))
-			.output(independentTaskCreationDraftSchema.nullable())
-			.query(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.latestDraft(ctx.workspaceScope, input);
-			}),
-		prepare: workspaceProcedure
-			.input(independentTaskCreationDraftRequestSchema)
-			.output(independentTaskCreationDraftSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.prepare(ctx.workspaceScope, input);
-			}),
-		saveDraft: workspaceProcedure
-			.input(independentTaskCreationDraftEditSchema)
-			.output(independentTaskCreationDraftSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.saveDraft(ctx.workspaceScope, input);
-			}),
-		generate: workspaceProcedure
-			.input(z.object({ requestId: z.string().uuid(), allowIncompleteContext: z.boolean().optional() }))
-			.output(independentTaskCreationDraftSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.generate(ctx.workspaceScope, input);
-			}),
-		create: workspaceProcedure
-			.input(z.object({ requestId: z.string().uuid() }))
-			.output(independentTaskCreationDraftSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.create(
-					ctx.workspaceScope,
-					input,
-					ctx,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		list: workspaceProcedure
-			.input(independentTaskCreationListRequestSchema)
-			.output(independentTaskCreationListResponseSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.independentTaskCreationApi.list(ctx.workspaceScope, input);
-			}),
-	}),
-	runtime: t.router({
-		prepareTaskMainSessionHandover: workspaceProcedure
-			.input(taskMainSessionHandoverPrepareRequestSchema)
-			.output(taskMainSessionHandoverPrepareResponseSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.prepare(ctx.workspaceScope, input);
-			}),
-		requestTaskMainSessionHandover: workspaceProcedure
-			.input(taskMainSessionHandoverRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.request(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		getTaskMainSessionHandoverStatus: workspaceProcedure
-			.input(taskMainSessionHandoverPrepareRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.getStatus(ctx.workspaceScope, input);
-			}),
-		cancelTaskMainSessionHandover: workspaceProcedure
-			.input(taskMainSessionHandoverPrepareRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.cancel(ctx.workspaceScope, input);
-			}),
-		retryTaskMainSessionHandover: workspaceProcedure
-			.input(taskMainSessionHandoverPrepareRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
-			}),
-		recoverTaskMainSessionHandoverWithNewAgentSession: workspaceProcedure
-			.input(taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.recoverWithNewAgentSession(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		recoverTaskMainSessionHandoverWithNewCodexSession: workspaceProcedure
-			.input(taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema)
-			.output(taskMainSessionHandoverStatusResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskMainSessionHandoverApi.recoverWithNewCodexSession(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		getTaskRvfHistory: workspaceProcedure
-			.input(taskRvfHistoryRequestSchema)
-			.output(taskRvfHistoryResponseSchema)
-			.query(({ ctx, input }) => getTaskRvfHistory(ctx.workspaceScope, input)),
-		// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
-		issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
-			.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
-			.mutation(() => ({
-				kanbanWebUiPageLoadIssuedRequestOriginNonce: issueKanbanWebUiPageLoadRequestOriginNonce(),
-			})),
-		getConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeConfigResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
-			}),
-		getCodexConfigurationSyncState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(codexConfigurationSyncStateSchema)
-			.query(({ ctx }) => {
-				if (!ctx.codexConfigurationSyncApi)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Codex 配置同步服务未启用。" });
-				return ctx.codexConfigurationSyncApi.getState();
-			}),
-		batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(codexConfigurationBatchActionRequestSchema)
-			.output(codexConfigurationBatchActionResultSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.codexConfigurationSyncApi.batchAction(input);
-			}),
-		synchronizeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(codexConfigurationSynchronizeRequestSchema)
-			.output(codexConfigurationSyncStateSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.codexConfigurationSyncApi.synchronize(input);
-			}),
-		resolveCodexConfigurationConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(codexConfigurationResolveConflictRequestSchema)
-			.output(codexConfigurationSyncStateSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.codexConfigurationSyncApi.resolveConflict(input);
-			}),
-		acknowledgeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(codexConfigurationChangeMutationRequestSchema)
-			.output(codexConfigurationSyncStateSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.codexConfigurationSyncApi.acknowledge(input);
-			}),
-		resolveCodexConfigurationTargetConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(codexConfigurationResolveTargetConflictRequestSchema)
-			.output(codexConfigurationSyncStateSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.codexConfigurationSyncApi.resolveTargetConflict(input);
-			}),
-		saveConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeConfigSaveRequestSchema)
-			.output(runtimeConfigResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.saveConfig(ctx.workspaceScope, input);
-			}),
-		saveClineProviderSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineProviderSettingsSaveRequestSchema)
-			.output(runtimeClineProviderSettingsSaveResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.saveClineProviderSettings(ctx.workspaceScope, input);
-			}),
-		addClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineAddProviderRequestSchema)
-			.output(runtimeClineAddProviderResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.addClineProvider(ctx.workspaceScope, input);
-			}),
-		updateClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineUpdateProviderRequestSchema)
-			.output(runtimeClineUpdateProviderResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.updateClineProvider(ctx.workspaceScope, input);
-			}),
-		// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
-		// 就实现不了「再按一次再给三个」。
-		setCurrentWorkPhaseGoal: workspaceProcedure
-			.input(runtimeSetCurrentWorkPhaseGoalRequestSchema)
-			.output(runtimeTaskSessionInputResponseSchema)
-			.mutation(
-				async ({ ctx, input }) =>
-					await ctx.runtimeApi.setCurrentWorkPhaseGoal(
-						ctx.workspaceScope,
-						input,
-						ctx.kanbanRequestOriginActorEvidence,
-					),
-			),
+	previewSpeech: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce.mutation(() => previewNotificationSpeech()),
+	archivedAudio: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(z.object({ candidateId: z.string() }))
+		.query(({ input }) => readArchivedNotificationAudio(input.candidateId)),
+});
 
-		suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeTaskNameSuggestionRequestSchema)
-			.output(runtimeTaskNameSuggestionResponseSchema)
-			.mutation(async ({ ctx, input, signal }) => {
-				return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
-			}),
-		startTaskSession: workspaceProcedure
-			.input(runtimeTaskSessionStartRequestSchema)
-			.output(runtimeTaskSessionStartResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.startTaskSession(ctx.workspaceScope, input);
-			}),
-		stopTaskSession: workspaceProcedure
-			.input(runtimeTaskSessionStopRequestSchema)
-			.output(runtimeTaskSessionStopResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
-			}),
-		// 停掉当前 agent 会话并立刻用另一条通话通道续跑同一段对话（目前只有 omp 有第二条通道）。
-		// 失败时会话停在已停止、如实报错，不回滚也不降级——见响应 schema 的注释。
-		switchAgentSessionTransport: workspaceProcedure
-			.input(runtimeAgentSessionTransportSwitchRequestSchema)
-			.output(runtimeAgentSessionTransportSwitchResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.switchAgentSessionTransport(
+const runtimeApplicationSupportProcedureRouter = t.router({
+	saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
+		.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))
+		.mutation(({ input }) => savePersistentAgentPromptImageAttachments(input.images)),
+	readAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeReadAgentPromptImageAttachmentsRequestSchema)
+		.output(z.array(runtimeTaskImageSchema))
+		.query(({ input }) => readPersistentAgentPromptImageAttachments(input.imageAttachmentIds)),
+	createTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(createTaskLookupConversationRequestSchema)
+		.output(taskLookupConversationSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.createConversation(input);
+		}),
+	listTaskLookupConversations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(z.array(taskLookupConversationSchema))
+		.query(({ ctx }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.listConversations();
+		}),
+	getTaskLookupConversation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(taskLookupConversationIdentitySchema)
+		.output(taskLookupConversationSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.getConversation(input.conversationId);
+		}),
+	submitTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(submitTaskLookupTurnRequestSchema)
+		.output(taskLookupConversationSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.submitTurn(input);
+		}),
+	cancelTaskLookupTurn: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(taskLookupConversationIdentitySchema)
+		.output(taskLookupConversationSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.cancelTurn(input.conversationId);
+		}),
+	readTaskLookupCandidatePreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(taskLookupCandidatePreviewRequestSchema)
+		.output(taskLookupCandidatePreviewSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskLookupConversationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskLookupConversationApi.readCandidatePreview(input.conversationId, input.taskReference);
+		}),
+	getTaskIndexingContext: workspaceProcedure.output(sharedTaskIndexingContextSchema).query(({ ctx }) => {
+		if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+		return ctx.taskIndexingSupportApi.getTaskIndexingContext(ctx.workspaceScope);
+	}),
+	triageIncomingWorkItem: workspaceProcedure
+		.input(incomingWorkItemSchema)
+		.output(incomingWorkItemTriageResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.triageIncomingWorkItem(ctx.workspaceScope, input);
+		}),
+	getTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(taskAssistanceModelProviderRoutingSettingsSchema)
+		.query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getTaskAssistanceModelProviderRoutingSettings();
+		}),
+	setTaskAssistanceModelProviderRoutingSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(taskAssistanceModelProviderRoutingSettingsSchema)
+		.output(taskAssistanceModelProviderRoutingSettingsSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.setTaskAssistanceModelProviderRoutingSettings(input);
+		}),
+	getGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(taskIndexingSupportExecutorSettingsSchema)
+		.query(({ ctx }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.getGlobalExecutorSettings();
+		}),
+	setGlobalExecutorSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(taskIndexingSupportExecutorSettingsSchema)
+		.output(taskIndexingSupportExecutorSettingsSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.setGlobalExecutorSettings(input);
+		}),
+	analyzeTaskProjectAssignment: workspaceProcedure
+		.input(taskProjectAssignmentAnalysisRequestSchema)
+		.output(taskProjectAssignmentAnalysisResponseSchema)
+		.mutation(({ ctx, input, signal }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.analyzeTaskProjectAssignment(ctx.workspaceScope, input, signal);
+		}),
+	getExecutorSettings: workspaceProcedure.output(taskIndexingSupportExecutorSettingsSchema).query(({ ctx }) => {
+		if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+		return ctx.taskIndexingSupportApi.getExecutorSettings(ctx.workspaceScope);
+	}),
+	setExecutorSettings: workspaceProcedure
+		.input(taskIndexingSupportExecutorSettingsSchema)
+		.output(taskIndexingSupportExecutorSettingsSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.setExecutorSettings(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationIndependentTaskCreationProcedureRouter = t.router({
+	read: workspaceProcedure
+		.input(z.object({ requestId: z.string().uuid() }))
+		.output(independentTaskCreationDraftSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.read(ctx.workspaceScope, input);
+		}),
+	latestDraft: workspaceProcedure
+		.input(z.object({ sourceTaskId: z.string(), sourceTaskConversationSessionId: z.string() }))
+		.output(independentTaskCreationDraftSchema.nullable())
+		.query(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.latestDraft(ctx.workspaceScope, input);
+		}),
+	prepare: workspaceProcedure
+		.input(independentTaskCreationDraftRequestSchema)
+		.output(independentTaskCreationDraftSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.prepare(ctx.workspaceScope, input);
+		}),
+	saveDraft: workspaceProcedure
+		.input(independentTaskCreationDraftEditSchema)
+		.output(independentTaskCreationDraftSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.saveDraft(ctx.workspaceScope, input);
+		}),
+	generate: workspaceProcedure
+		.input(z.object({ requestId: z.string().uuid(), allowIncompleteContext: z.boolean().optional() }))
+		.output(independentTaskCreationDraftSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.generate(ctx.workspaceScope, input);
+		}),
+	create: workspaceProcedure
+		.input(z.object({ requestId: z.string().uuid() }))
+		.output(independentTaskCreationDraftSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.create(
+				ctx.workspaceScope,
+				input,
+				ctx,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	list: workspaceProcedure
+		.input(independentTaskCreationListRequestSchema)
+		.output(independentTaskCreationListResponseSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.independentTaskCreationApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.independentTaskCreationApi.list(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationRuntimeProcedureRouter = t.router({
+	prepareTaskMainSessionHandover: workspaceProcedure
+		.input(taskMainSessionHandoverPrepareRequestSchema)
+		.output(taskMainSessionHandoverPrepareResponseSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.prepare(ctx.workspaceScope, input);
+		}),
+	requestTaskMainSessionHandover: workspaceProcedure
+		.input(taskMainSessionHandoverRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.request(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
+		}),
+	getTaskMainSessionHandoverStatus: workspaceProcedure
+		.input(taskMainSessionHandoverPrepareRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.getStatus(ctx.workspaceScope, input);
+		}),
+	cancelTaskMainSessionHandover: workspaceProcedure
+		.input(taskMainSessionHandoverPrepareRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.cancel(ctx.workspaceScope, input);
+		}),
+	retryTaskMainSessionHandover: workspaceProcedure
+		.input(taskMainSessionHandoverPrepareRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.retry(ctx.workspaceScope, input);
+		}),
+	recoverTaskMainSessionHandoverWithNewAgentSession: workspaceProcedure
+		.input(taskMainSessionHandoverRecoverWithNewAgentSessionRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.recoverWithNewAgentSession(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	recoverTaskMainSessionHandoverWithNewCodexSession: workspaceProcedure
+		.input(taskMainSessionHandoverRecoverWithNewCodexSessionRequestSchema)
+		.output(taskMainSessionHandoverStatusResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskMainSessionHandoverApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskMainSessionHandoverApi.recoverWithNewCodexSession(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	getTaskRvfHistory: workspaceProcedure
+		.input(taskRvfHistoryRequestSchema)
+		.output(taskRvfHistoryResponseSchema)
+		.query(({ ctx, input }) => getTaskRvfHistory(ctx.workspaceScope, input)),
+	// Web UI 在 runtime-state-stream 每次连上 / 重连时调用；带着失效 nonce 也能调（它就是重取入口）。
+	issueKanbanWebUiPageLoadRequestOriginNonce: t.procedure
+		.output(kanbanWebUiPageLoadRequestOriginNonceIssueResponseSchema)
+		.mutation(() => ({
+			kanbanWebUiPageLoadIssuedRequestOriginNonce: issueKanbanWebUiPageLoadRequestOriginNonce(),
+		})),
+	getAgentSessionPtyHostDiagnostics: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(agentSessionPtyHostDiagnosticsSchema)
+		.query(() => queryCurrentRuntimeAgentSessionPtyHostDiagnostics()),
+	getConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeConfigResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
+		}),
+	getCodexConfigurationSyncState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(codexConfigurationSyncStateSchema)
+		.query(({ ctx }) => {
+			if (!ctx.codexConfigurationSyncApi)
+				throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Codex 配置同步服务未启用。" });
+			return ctx.codexConfigurationSyncApi.getState();
+		}),
+	mutateCodexConfigurationProfile: codexConfigurationProfileMutationProcedure,
+	batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationBatchActionRequestSchema)
+		.output(codexConfigurationBatchActionResultSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.batchAction(input);
+		}),
+	synchronizeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationSynchronizeRequestSchema)
+		.output(codexConfigurationSyncStateSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.synchronize(input);
+		}),
+	resolveCodexConfigurationConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationResolveConflictRequestSchema)
+		.output(codexConfigurationSyncStateSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.resolveConflict(input);
+		}),
+	acknowledgeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationChangeMutationRequestSchema)
+		.output(codexConfigurationSyncStateSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.acknowledge(input);
+		}),
+	resolveCodexConfigurationTargetConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationResolveTargetConflictRequestSchema)
+		.output(codexConfigurationSyncStateSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.resolveTargetConflict(input);
+		}),
+	saveConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeConfigSaveRequestSchema)
+		.output(runtimeConfigResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.saveConfig(ctx.workspaceScope, input);
+		}),
+	saveClineProviderSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineProviderSettingsSaveRequestSchema)
+		.output(runtimeClineProviderSettingsSaveResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.saveClineProviderSettings(ctx.workspaceScope, input);
+		}),
+	addClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineAddProviderRequestSchema)
+		.output(runtimeClineAddProviderResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.addClineProvider(ctx.workspaceScope, input);
+		}),
+	updateClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineUpdateProviderRequestSchema)
+		.output(runtimeClineUpdateProviderResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.updateClineProvider(ctx.workspaceScope, input);
+		}),
+	// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
+	// 就实现不了「再按一次再给三个」。
+	setCurrentWorkPhaseGoal: workspaceProcedure
+		.input(runtimeSetCurrentWorkPhaseGoalRequestSchema)
+		.output(runtimeTaskSessionInputResponseSchema)
+		.mutation(
+			async ({ ctx, input }) =>
+				await ctx.runtimeApi.setCurrentWorkPhaseGoal(
 					ctx.workspaceScope,
 					input,
 					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		transitionTaskToReview: workspaceProcedure
-			.input(runtimeTaskSessionTransitionToReviewRequestSchema)
-			.output(runtimeTaskSessionTransitionToReviewResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.transitionTaskToReview(ctx.workspaceScope, input);
-			}),
-		// 「agent 问了你一个问题、但那个会话可能已经被回收」——列出仍需你拍板 / 仍待送达的决策。
-		// 数据源是 durable 账本，与会话进程是否还活着完全无关。
-		listAgentRaisedPendingUserDecisions: workspaceProcedure
-			.input(runtimeListAgentRaisedPendingUserDecisionsRequestSchema)
-			.output(runtimeListAgentRaisedPendingUserDecisionsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope, input);
-			}),
-		// 问答记录：已了结的提问与答案（面板作答 / 终端作答含备注 / 放弃 / 被新问题取代）。
-		listAgentRaisedUserDecisionHistoryForTask: workspaceProcedure
-			.input(runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema)
-			.output(runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
-			}),
-		saveAgentRaisedPendingUserDecisionAnswerDraft: workspaceProcedure
-			.input(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema)
-			.output(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.saveAgentRaisedPendingUserDecisionAnswerDraft(ctx.workspaceScope, input);
-			}),
-		answerAgentRaisedPendingUserDecision: workspaceProcedure
-			.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)
-			.output(runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.answerAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
-			}),
-		dismissAgentRaisedPendingUserDecision: workspaceProcedure
-			.input(runtimeDismissAgentRaisedPendingUserDecisionRequestSchema)
-			.output(runtimeDismissAgentRaisedPendingUserDecisionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.dismissAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
-			}),
-		actOnAutomaticFailureContinuation: workspaceProcedure
-			.input(runtimeAutomaticAgentFailureContinuationActionRequestSchema)
-			.output(runtimeAutomaticAgentFailureContinuationActionResponseSchema)
-			.mutation(async ({ ctx, input }) =>
-				ctx.runtimeApi.actOnAutomaticFailureContinuation(ctx.workspaceScope, input),
-			),
-		continueConnectionRetrySessions: workspaceProcedure
-			.input(runtimeContinueConnectionRetrySessionsRequestSchema)
-			.output(runtimeContinueConnectionRetrySessionsResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.continueConnectionRetrySessions(ctx.workspaceScope, input);
-			}),
-		dismissConnectionRetrySessions: workspaceProcedure
-			.input(runtimeDismissConnectionRetrySessionsRequestSchema)
-			.output(runtimeDismissConnectionRetrySessionsResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.dismissConnectionRetrySessions(ctx.workspaceScope, input);
-			}),
-		parkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
-			.input(runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema)
-			.output(runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.parkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
-			}),
-		unparkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
-			.input(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema)
-			.output(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.unparkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
-			}),
-		isTaskParkedAwaitingDispatchedBackgroundWork: workspaceProcedure
-			.input(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema)
-			.output(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.isTaskParkedAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
-			}),
-		refreshTaskTerminal: workspaceProcedure
-			.input(runtimeTaskTerminalRefreshRequestSchema)
-			.output(runtimeTaskTerminalRefreshResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.refreshTaskTerminal(ctx.workspaceScope, input);
-			}),
-		sendTaskSessionInput: workspaceProcedure
-			.input(runtimeTaskSessionInputRequestSchema)
-			.output(runtimeTaskSessionInputResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.sendTaskSessionInput(ctx.workspaceScope, input);
-			}),
-		getTaskChatMessages: workspaceProcedure
-			.input(runtimeTaskChatMessagesRequestSchema)
-			.output(runtimeTaskChatMessagesResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
-			}),
-		getTaskConversationHistoryPage: workspaceProcedure
-			.input(runtimeTaskConversationHistoryPageRequestSchema)
-			.output(runtimeTaskConversationHistoryPageResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
-			}),
-		getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeSlashCommandsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineSlashCommands(ctx.workspaceScope);
-			}),
-		reloadTaskChatSession: workspaceProcedure
-			.input(runtimeTaskChatReloadRequestSchema)
-			.output(runtimeTaskChatReloadResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.reloadTaskChatSession(ctx.workspaceScope, input);
-			}),
-		sendTaskChatMessage: workspaceProcedure
-			.input(runtimeTaskChatSendRequestSchema)
-			.output(runtimeTaskChatSendResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.sendTaskChatMessage(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		getDeferredRestorationHarnessNotifications: workspaceProcedure
-			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
-			.output(runtimeDeferredRestorationHarnessNotificationsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getDeferredRestorationHarnessNotifications(ctx.workspaceScope, input);
-			}),
-		releaseDeferredRestorationHarnessNotificationsIntoTaskSession: workspaceProcedure
-			.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
-			.output(runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
-					ctx.workspaceScope,
-					input,
-				);
-			}),
-		cancelTaskChatDelivery: workspaceProcedure
-			.input(runtimeTaskChatDeliveryCancelRequestSchema)
-			.output(runtimeTaskChatDeliveryCancelResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.cancelTaskChatDelivery(ctx.workspaceScope, input);
-			}),
-		getWorkspacePromptLibrary: workspaceProcedure
-			.input(runtimePromptLibraryReadRequestSchema)
-			.output(runtimePromptLibraryResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getWorkspacePromptLibrary(ctx.workspaceScope, input);
-			}),
-		mutateWorkspacePromptLibrary: workspaceProcedure
-			.input(runtimePromptLibraryMutateRequestSchema)
-			.output(runtimePromptLibraryResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
-			}),
-		getTaskPromptDeliveryQueue: workspaceProcedure
-			.input(runtimeTaskPromptDeliveryQueueReadRequestSchema)
-			.output(runtimeTaskPromptDeliveryQueueResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getTaskPromptDeliveryQueue(ctx.workspaceScope, input);
-			}),
-		mutateTaskPromptDeliveryQueue: workspaceProcedure
-			.input(runtimeTaskPromptDeliveryQueueMutateRequestSchema)
-			.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		enqueueAgentIdleGatedProgrammaticTaskChatMessage: workspaceProcedure
-			.input(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema)
-			.output(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		getWorkspaceTaskEditDrafts: workspaceProcedure
-			.input(runtimeTaskEditDraftsReadRequestSchema)
-			.output(runtimeTaskEditDraftsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
-			}),
-		mutateWorkspaceTaskEditDrafts: workspaceProcedure
-			.input(runtimeTaskEditDraftsMutateRequestSchema)
-			.output(runtimeTaskEditDraftsResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.mutateWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
-			}),
-		// 读框 → 回填折叠粘贴 → 写库 → 转发 Ctrl+S 清框，一次请求走完整条链。
-		// 前端只拦按键、不碰内容：同一份易随 agent 版本漂移的 TUI 画法知识只在服务端存一份。
-		stashTerminalInputBoxToPromptLibrary: workspaceProcedure
-			.input(runtimeTerminalInputBoxStashRequestSchema)
-			.output(runtimeTerminalInputBoxStashResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
-			}),
-		abortTaskChatTurn: workspaceProcedure
-			.input(runtimeTaskChatAbortRequestSchema)
-			.output(runtimeTaskChatAbortResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.abortTaskChatTurn(ctx.workspaceScope, input);
-			}),
-		cancelTaskChatTurn: workspaceProcedure
-			.input(runtimeTaskChatCancelRequestSchema)
-			.output(runtimeTaskChatCancelResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.cancelTaskChatTurn(ctx.workspaceScope, input);
-			}),
-		resolveTaskAgentUserDecision: workspaceProcedure
-			.input(runtimeTaskAgentUserDecisionResolveRequestSchema)
-			.output(runtimeTaskAgentUserDecisionResolveResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.resolveTaskAgentUserDecision(ctx.workspaceScope, input);
-			}),
-		getClineProviderCatalog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineProviderCatalogResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);
-			}),
-		getClineAccountProfile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineAccountProfileResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineAccountProfile(ctx.workspaceScope);
-			}),
-		getClineKanbanAccess: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineKanbanAccessResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineKanbanAccess(ctx.workspaceScope);
-			}),
-		getFeaturebaseToken: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeFeaturebaseTokenResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getFeaturebaseToken(ctx.workspaceScope);
-			}),
-		getClineAccountBalance: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineAccountBalanceResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineAccountBalance(ctx.workspaceScope);
-			}),
-		getClineAccountOrganizations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineAccountOrganizationsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineAccountOrganizations(ctx.workspaceScope);
-			}),
-		switchClineAccount: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineAccountSwitchRequestSchema)
-			.output(runtimeClineAccountSwitchResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.switchClineAccount(ctx.workspaceScope, input);
-			}),
-		getClineProviderModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineProviderModelsRequestSchema)
-			.output(runtimeClineProviderModelsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
-			}),
-		getTerminalAgentModelSelectionOptions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeTerminalAgentModelSelectionOptionsRequestSchema)
-			.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getTerminalAgentModelSelectionOptions(ctx.workspaceScope, input);
-			}),
-		getAvailableAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeAvailableAgentSessionsRequestSchema)
-			.output(runtimeAvailableAgentSessionsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
-			}),
-		operateCodexConversationStorage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeCodexConversationStorageOperationRequestSchema)
-			.output(runtimeCodexConversationStorageOperationResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
-				return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
-			}),
-		getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineMcpAuthStatusResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);
-			}),
-		runClineMcpServerOAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineMcpOAuthRequestSchema)
-			.output(runtimeClineMcpOAuthResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.runClineMcpServerOAuth(ctx.workspaceScope, input);
-			}),
-		getClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineMcpSettingsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getClineMcpSettings(ctx.workspaceScope);
-			}),
-		saveClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineMcpSettingsSaveRequestSchema)
-			.output(runtimeClineMcpSettingsSaveResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.saveClineMcpSettings(ctx.workspaceScope, input);
-			}),
-		runClineProviderOAuthLogin: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineOauthLoginRequestSchema)
-			.output(runtimeClineOauthLoginResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.runClineProviderOAuthLogin(ctx.workspaceScope, input);
-			}),
-		startClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeClineDeviceAuthStartResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.runtimeApi.startClineDeviceAuth(ctx.workspaceScope);
-			}),
-		completeClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeClineDeviceAuthCompleteRequestSchema)
-			.output(runtimeClineDeviceAuthCompleteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.completeClineDeviceAuth(ctx.workspaceScope, input);
-			}),
-		startShellSession: workspaceProcedure
-			.input(runtimeShellSessionStartRequestSchema)
-			.output(runtimeShellSessionStartResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.startShellSession(ctx.workspaceScope, input);
-			}),
-		runCommand: workspaceProcedure
-			.input(runtimeCommandRunRequestSchema)
-			.output(runtimeCommandRunResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.runCommand(ctx.workspaceScope, input);
-			}),
-		resetAllState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeDebugResetAllStateResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.runtimeApi.resetAllState(ctx.workspaceScope);
-			}),
-		openFile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeOpenFileRequestSchema)
-			.output(runtimeOpenFileResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.openFile(input);
-			}),
-		getUpdateStatus: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeUpdateStatusResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.runtimeApi.getUpdateStatus(ctx.workspaceScope);
-			}),
-		runUpdateNow: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeRunUpdateResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
-			}),
-		// `kanban runtime handover-restart`：热重启，agent session PTY host 里的会话留给下一个 runtime 接管。
-		// 输入从首版起冻结（新 CLI 会对旧 runtime 发它）。回完响应才开始 handover。
-		requestPlannedHandoverRestartPreservingHostedAgentSessions:
-			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-				.input(runtimePlannedHandoverRestartRequestSchema)
-				.output(runtimePlannedHandoverRestartResponseSchema)
-				.mutation(async ({ ctx, input }) => {
-					return await ctx.runtimeApi.requestPlannedHandoverRestartPreservingHostedAgentSessions(input);
+				),
+		),
+
+	suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeTaskNameSuggestionRequestSchema)
+		.output(runtimeTaskNameSuggestionResponseSchema)
+		.mutation(async ({ ctx, input, signal }) => {
+			return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
+		}),
+	startTaskSession: workspaceProcedure
+		.input(runtimeTaskSessionStartRequestSchema)
+		.output(runtimeTaskSessionStartResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.startTaskSession(ctx.workspaceScope, input);
+		}),
+	stopTaskSession: workspaceProcedure
+		.input(runtimeTaskSessionStopRequestSchema)
+		.output(runtimeTaskSessionStopResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.stopTaskSession(ctx.workspaceScope, input);
+		}),
+	// 停掉当前 agent 会话并立刻用另一条通话通道续跑同一段对话（目前只有 omp 有第二条通道）。
+	// 失败时会话停在已停止、如实报错，不回滚也不降级——见响应 schema 的注释。
+	switchAgentSessionTransport: workspaceProcedure
+		.input(runtimeAgentSessionTransportSwitchRequestSchema)
+		.output(runtimeAgentSessionTransportSwitchResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.switchAgentSessionTransport(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	transitionTaskToReview: workspaceProcedure
+		.input(runtimeTaskSessionTransitionToReviewRequestSchema)
+		.output(runtimeTaskSessionTransitionToReviewResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.transitionTaskToReview(ctx.workspaceScope, input);
+		}),
+	// 「agent 问了你一个问题、但那个会话可能已经被回收」——列出仍需你拍板 / 仍待送达的决策。
+	// 数据源是 durable 账本，与会话进程是否还活着完全无关。
+	listAgentRaisedPendingUserDecisions: workspaceProcedure
+		.input(runtimeListAgentRaisedPendingUserDecisionsRequestSchema)
+		.output(runtimeListAgentRaisedPendingUserDecisionsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.listAgentRaisedPendingUserDecisions(ctx.workspaceScope, input);
+		}),
+	// 问答记录：已了结的提问与答案（面板作答 / 终端作答含备注 / 放弃 / 被新问题取代）。
+	listAgentRaisedUserDecisionHistoryForTask: workspaceProcedure
+		.input(runtimeListAgentRaisedUserDecisionHistoryForTaskRequestSchema)
+		.output(runtimeListAgentRaisedUserDecisionHistoryForTaskResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
+		}),
+	saveAgentRaisedPendingUserDecisionAnswerDraft: workspaceProcedure
+		.input(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema)
+		.output(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.saveAgentRaisedPendingUserDecisionAnswerDraft(ctx.workspaceScope, input);
+		}),
+	answerAgentRaisedPendingUserDecision: workspaceProcedure
+		.input(runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema)
+		.output(runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.answerAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
+		}),
+	dismissAgentRaisedPendingUserDecision: workspaceProcedure
+		.input(runtimeDismissAgentRaisedPendingUserDecisionRequestSchema)
+		.output(runtimeDismissAgentRaisedPendingUserDecisionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.dismissAgentRaisedPendingUserDecision(ctx.workspaceScope, input);
+		}),
+	actOnAutomaticFailureContinuation: workspaceProcedure
+		.input(runtimeAutomaticAgentFailureContinuationActionRequestSchema)
+		.output(runtimeAutomaticAgentFailureContinuationActionResponseSchema)
+		.mutation(async ({ ctx, input }) => ctx.runtimeApi.actOnAutomaticFailureContinuation(ctx.workspaceScope, input)),
+	continueConnectionRetrySessions: workspaceProcedure
+		.input(runtimeContinueConnectionRetrySessionsRequestSchema)
+		.output(runtimeContinueConnectionRetrySessionsResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.continueConnectionRetrySessions(ctx.workspaceScope, input);
+		}),
+	dismissConnectionRetrySessions: workspaceProcedure
+		.input(runtimeDismissConnectionRetrySessionsRequestSchema)
+		.output(runtimeDismissConnectionRetrySessionsResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.dismissConnectionRetrySessions(ctx.workspaceScope, input);
+		}),
+	parkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
+		.input(runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema)
+		.output(runtimeTaskParkAwaitingDispatchedBackgroundWorkResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.parkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
+		}),
+	unparkTaskAwaitingDispatchedBackgroundWork: workspaceProcedure
+		.input(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema)
+		.output(runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.unparkTaskAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
+		}),
+	isTaskParkedAwaitingDispatchedBackgroundWork: workspaceProcedure
+		.input(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema)
+		.output(runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.isTaskParkedAwaitingDispatchedBackgroundWork(ctx.workspaceScope, input);
+		}),
+	refreshTaskTerminal: workspaceProcedure
+		.input(runtimeTaskTerminalRefreshRequestSchema)
+		.output(runtimeTaskTerminalRefreshResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.refreshTaskTerminal(ctx.workspaceScope, input);
+		}),
+	sendTaskSessionInput: workspaceProcedure
+		.input(runtimeTaskSessionInputRequestSchema)
+		.output(runtimeTaskSessionInputResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.sendTaskSessionInput(ctx.workspaceScope, input);
+		}),
+	getTaskChatMessages: workspaceProcedure
+		.input(runtimeTaskChatMessagesRequestSchema)
+		.output(runtimeTaskChatMessagesResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getTaskChatMessages(ctx.workspaceScope, input);
+		}),
+	getTaskConversationHistoryPage: workspaceProcedure
+		.input(runtimeTaskConversationHistoryPageRequestSchema)
+		.output(runtimeTaskConversationHistoryPageResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
+		}),
+	getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeSlashCommandsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineSlashCommands(ctx.workspaceScope);
+		}),
+	reloadTaskChatSession: workspaceProcedure
+		.input(runtimeTaskChatReloadRequestSchema)
+		.output(runtimeTaskChatReloadResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.reloadTaskChatSession(ctx.workspaceScope, input);
+		}),
+	sendTaskChatMessage: workspaceProcedure
+		.input(runtimeTaskChatSendRequestSchema)
+		.output(runtimeTaskChatSendResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.sendTaskChatMessage(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	getDeferredRestorationHarnessNotifications: workspaceProcedure
+		.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+		.output(runtimeDeferredRestorationHarnessNotificationsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getDeferredRestorationHarnessNotifications(ctx.workspaceScope, input);
+		}),
+	releaseDeferredRestorationHarnessNotificationsIntoTaskSession: workspaceProcedure
+		.input(runtimeDeferredRestorationHarnessNotificationsRequestSchema)
+		.output(runtimeReleaseDeferredRestorationHarnessNotificationsResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.releaseDeferredRestorationHarnessNotificationsIntoTaskSession(
+				ctx.workspaceScope,
+				input,
+			);
+		}),
+	cancelTaskChatDelivery: workspaceProcedure
+		.input(runtimeTaskChatDeliveryCancelRequestSchema)
+		.output(runtimeTaskChatDeliveryCancelResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.cancelTaskChatDelivery(ctx.workspaceScope, input);
+		}),
+	getWorkspacePromptLibrary: workspaceProcedure
+		.input(runtimePromptLibraryReadRequestSchema)
+		.output(runtimePromptLibraryResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getWorkspacePromptLibrary(ctx.workspaceScope, input);
+		}),
+	mutateWorkspacePromptLibrary: workspaceProcedure
+		.input(runtimePromptLibraryMutateRequestSchema)
+		.output(runtimePromptLibraryResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.mutateWorkspacePromptLibrary(ctx.workspaceScope, input);
+		}),
+	getTaskPromptDeliveryQueue: workspaceProcedure
+		.input(runtimeTaskPromptDeliveryQueueReadRequestSchema)
+		.output(runtimeTaskPromptDeliveryQueueResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getTaskPromptDeliveryQueue(ctx.workspaceScope, input);
+		}),
+	mutateTaskPromptDeliveryQueue: workspaceProcedure
+		.input(runtimeTaskPromptDeliveryQueueMutateRequestSchema)
+		.output(runtimeTaskPromptDeliveryQueueMutateResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.mutateTaskPromptDeliveryQueue(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	enqueueAgentIdleGatedProgrammaticTaskChatMessage: workspaceProcedure
+		.input(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema)
+		.output(runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	getWorkspaceTaskEditDrafts: workspaceProcedure
+		.input(runtimeTaskEditDraftsReadRequestSchema)
+		.output(runtimeTaskEditDraftsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
+		}),
+	mutateWorkspaceTaskEditDrafts: workspaceProcedure
+		.input(runtimeTaskEditDraftsMutateRequestSchema)
+		.output(runtimeTaskEditDraftsResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.mutateWorkspaceTaskEditDrafts(ctx.workspaceScope, input);
+		}),
+	// 读框 → 回填折叠粘贴 → 写库 → 转发 Ctrl+S 清框，一次请求走完整条链。
+	// 前端只拦按键、不碰内容：同一份易随 agent 版本漂移的 TUI 画法知识只在服务端存一份。
+	stashTerminalInputBoxToPromptLibrary: workspaceProcedure
+		.input(runtimeTerminalInputBoxStashRequestSchema)
+		.output(runtimeTerminalInputBoxStashResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
+		}),
+	abortTaskChatTurn: workspaceProcedure
+		.input(runtimeTaskChatAbortRequestSchema)
+		.output(runtimeTaskChatAbortResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.abortTaskChatTurn(ctx.workspaceScope, input);
+		}),
+	cancelTaskChatTurn: workspaceProcedure
+		.input(runtimeTaskChatCancelRequestSchema)
+		.output(runtimeTaskChatCancelResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.cancelTaskChatTurn(ctx.workspaceScope, input);
+		}),
+	resolveTaskAgentUserDecision: workspaceProcedure
+		.input(runtimeTaskAgentUserDecisionResolveRequestSchema)
+		.output(runtimeTaskAgentUserDecisionResolveResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.resolveTaskAgentUserDecision(ctx.workspaceScope, input);
+		}),
+	getClineProviderCatalog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineProviderCatalogResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);
+		}),
+	getClineAccountProfile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineAccountProfileResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineAccountProfile(ctx.workspaceScope);
+		}),
+	getClineKanbanAccess: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineKanbanAccessResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineKanbanAccess(ctx.workspaceScope);
+		}),
+	getFeaturebaseToken: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeFeaturebaseTokenResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getFeaturebaseToken(ctx.workspaceScope);
+		}),
+	getClineAccountBalance: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineAccountBalanceResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineAccountBalance(ctx.workspaceScope);
+		}),
+	getClineAccountOrganizations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineAccountOrganizationsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineAccountOrganizations(ctx.workspaceScope);
+		}),
+	switchClineAccount: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineAccountSwitchRequestSchema)
+		.output(runtimeClineAccountSwitchResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.switchClineAccount(ctx.workspaceScope, input);
+		}),
+	getClineProviderModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineProviderModelsRequestSchema)
+		.output(runtimeClineProviderModelsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
+		}),
+	getTerminalAgentModelSelectionOptions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeTerminalAgentModelSelectionOptionsRequestSchema)
+		.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getTerminalAgentModelSelectionOptions(ctx.workspaceScope, input);
+		}),
+	getAvailableAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeAvailableAgentSessionsRequestSchema)
+		.output(runtimeAvailableAgentSessionsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.getAvailableAgentSessions(ctx.workspaceScope, input);
+		}),
+	operateCodexConversationStorage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeCodexConversationStorageOperationRequestSchema)
+		.output(runtimeCodexConversationStorageOperationResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
+			return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
+		}),
+	getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineMcpAuthStatusResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);
+		}),
+	runClineMcpServerOAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineMcpOAuthRequestSchema)
+		.output(runtimeClineMcpOAuthResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.runClineMcpServerOAuth(ctx.workspaceScope, input);
+		}),
+	getClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineMcpSettingsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getClineMcpSettings(ctx.workspaceScope);
+		}),
+	saveClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineMcpSettingsSaveRequestSchema)
+		.output(runtimeClineMcpSettingsSaveResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.saveClineMcpSettings(ctx.workspaceScope, input);
+		}),
+	runClineProviderOAuthLogin: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineOauthLoginRequestSchema)
+		.output(runtimeClineOauthLoginResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.runClineProviderOAuthLogin(ctx.workspaceScope, input);
+		}),
+	startClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeClineDeviceAuthStartResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.runtimeApi.startClineDeviceAuth(ctx.workspaceScope);
+		}),
+	completeClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeClineDeviceAuthCompleteRequestSchema)
+		.output(runtimeClineDeviceAuthCompleteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.completeClineDeviceAuth(ctx.workspaceScope, input);
+		}),
+	startShellSession: workspaceProcedure
+		.input(runtimeShellSessionStartRequestSchema)
+		.output(runtimeShellSessionStartResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.startShellSession(ctx.workspaceScope, input);
+		}),
+	runCommand: workspaceProcedure
+		.input(runtimeCommandRunRequestSchema)
+		.output(runtimeCommandRunResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.runCommand(ctx.workspaceScope, input);
+		}),
+	resetAllState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeDebugResetAllStateResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.runtimeApi.resetAllState(ctx.workspaceScope);
+		}),
+	openFile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeOpenFileRequestSchema)
+		.output(runtimeOpenFileResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.openFile(input);
+		}),
+	getUpdateStatus: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeUpdateStatusResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.runtimeApi.getUpdateStatus(ctx.workspaceScope);
+		}),
+	runUpdateNow: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeRunUpdateResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.runtimeApi.runUpdateNow(ctx.workspaceScope);
+		}),
+	// `kanban runtime handover-restart`：热重启，agent session PTY host 里的会话留给下一个 runtime 接管。
+	// 输入从首版起冻结（新 CLI 会对旧 runtime 发它）。回完响应才开始 handover。
+	requestPlannedHandoverRestartPreservingHostedAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimePlannedHandoverRestartRequestSchema)
+		.output(runtimePlannedHandoverRestartResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.requestPlannedHandoverRestartPreservingHostedAgentSessions(input);
+		}),
+	// `kanban runtime stop --terminate-hosted-agent-sessions`：停 runtime 并终止全部 hosted 会话（含未接管的）。
+	requestRuntimeStopTerminatingHostedAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeStopTerminatingHostedAgentSessionsResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.runtimeApi.requestRuntimeStopTerminatingHostedAgentSessions();
+		}),
+	// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。procedureRejectingUnknownWebUiPageLoadRequestOriginNonce 不强制 workspace scope。
+	markTaskNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeNotificationMarkVisitedRequestSchema)
+		.output(runtimeNotificationMutationResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.markTaskNotificationsVisited(ctx.workspaceScope, input);
+		}),
+	clearNotificationLog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeNotificationClearRequestSchema)
+		.output(runtimeNotificationMutationResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.clearNotificationLog(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationWorkspaceProcedureRouter = t.router({
+	allocateTaskIdForNewWebUiTaskCard: workspaceProcedure
+		.output(runtimeTaskIdAllocationForNewWebUiTaskCardResponseSchema)
+		.mutation(async ({ ctx }) => ({
+			allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry:
+				await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
+					requestingWorkspaceId: ctx.workspaceScope.workspaceId,
 				}),
-		// `kanban runtime stop --terminate-hosted-agent-sessions`：停 runtime 并终止全部 hosted 会话（含未接管的）。
-		requestRuntimeStopTerminatingHostedAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeStopTerminatingHostedAgentSessionsResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.runtimeApi.requestRuntimeStopTerminatingHostedAgentSessions();
-			}),
-		// 通知中心 mutation：跨 repo，用 input.workspaceId（非连接 scope）。procedureRejectingUnknownWebUiPageLoadRequestOriginNonce 不强制 workspace scope。
-		markTaskNotificationsVisited: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeNotificationMarkVisitedRequestSchema)
-			.output(runtimeNotificationMutationResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.markTaskNotificationsVisited(ctx.workspaceScope, input);
-			}),
-		clearNotificationLog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeNotificationClearRequestSchema)
-			.output(runtimeNotificationMutationResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.runtimeApi.clearNotificationLog(ctx.workspaceScope, input);
-			}),
+		})),
+	getGitSummary: workspaceProcedure
+		.input(optionalTaskWorkspaceInfoRequestSchema)
+		.output(runtimeGitSummaryResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadGitSummary(ctx.workspaceScope, input ?? null);
+		}),
+	runGitSyncAction: workspaceProcedure
+		.input(gitSyncActionInputSchema)
+		.output(runtimeGitSyncResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.runGitSyncAction(ctx.workspaceScope, input);
+		}),
+	checkoutGitBranch: workspaceProcedure
+		.input(runtimeGitCheckoutRequestSchema)
+		.output(runtimeGitCheckoutResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.checkoutGitBranch(ctx.workspaceScope, input);
+		}),
+	discardGitChanges: workspaceProcedure
+		.input(optionalTaskWorkspaceInfoRequestSchema)
+		.output(runtimeGitDiscardResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.discardGitChanges(ctx.workspaceScope, input ?? null);
+		}),
+	getChanges: workspaceProcedure
+		.input(runtimeWorkspaceChangesRequestSchema)
+		.output(runtimeWorkspaceChangesResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadChanges(ctx.workspaceScope, input);
+		}),
+	ensureWorktree: workspaceProcedure
+		.input(runtimeWorktreeEnsureRequestSchema)
+		.output(runtimeWorktreeEnsureResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.ensureWorktree(ctx.workspaceScope, input);
+		}),
+	deleteWorktree: workspaceProcedure
+		.input(runtimeWorktreeDeleteRequestSchema)
+		.output(runtimeWorktreeDeleteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.deleteWorktree(ctx.workspaceScope, input);
+		}),
+	getTaskWorkspaceGitStatuses: workspaceProcedure
+		.output(runtimeTaskWorkspaceGitStatusesResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.workspaceApi.loadTaskWorkspaceGitStatuses(ctx.workspaceScope);
+		}),
+	getTaskContext: workspaceProcedure
+		.input(runtimeTaskWorkspaceInfoRequestSchema)
+		.output(runtimeTaskWorkspaceInfoResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadTaskContext(ctx.workspaceScope, input);
+		}),
+	getTaskRetainedCommittedLineChangeHistory: workspaceProcedure
+		.input(runtimeTaskWorkspaceInfoRequestSchema)
+		.output(runtimeTaskRetainedCommittedLineChangeHistorySchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadTaskRetainedCommittedLineChangeHistory(ctx.workspaceScope, input);
+		}),
+	searchFiles: workspaceProcedure
+		.input(runtimeWorkspaceFileSearchRequestSchema)
+		.output(runtimeWorkspaceFileSearchResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.searchFiles(ctx.workspaceScope, input);
+		}),
+	getState: workspaceProcedure.output(runtimeWorkspaceStateResponseSchema).query(async ({ ctx }) => {
+		return await ctx.workspaceApi.loadState(ctx.workspaceScope);
 	}),
-	workspace: t.router({
-		allocateTaskIdForNewWebUiTaskCard: workspaceProcedure
-			.output(runtimeTaskIdAllocationForNewWebUiTaskCardResponseSchema)
-			.mutation(async ({ ctx }) => ({
-				allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry:
-					await allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable({
-						requestingWorkspaceId: ctx.workspaceScope.workspaceId,
-					}),
-			})),
-		getGitSummary: workspaceProcedure
-			.input(optionalTaskWorkspaceInfoRequestSchema)
-			.output(runtimeGitSummaryResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadGitSummary(ctx.workspaceScope, input ?? null);
-			}),
-		runGitSyncAction: workspaceProcedure
-			.input(gitSyncActionInputSchema)
-			.output(runtimeGitSyncResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.runGitSyncAction(ctx.workspaceScope, input);
-			}),
-		checkoutGitBranch: workspaceProcedure
-			.input(runtimeGitCheckoutRequestSchema)
-			.output(runtimeGitCheckoutResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.checkoutGitBranch(ctx.workspaceScope, input);
-			}),
-		discardGitChanges: workspaceProcedure
-			.input(optionalTaskWorkspaceInfoRequestSchema)
-			.output(runtimeGitDiscardResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.discardGitChanges(ctx.workspaceScope, input ?? null);
-			}),
-		getChanges: workspaceProcedure
-			.input(runtimeWorkspaceChangesRequestSchema)
-			.output(runtimeWorkspaceChangesResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadChanges(ctx.workspaceScope, input);
-			}),
-		ensureWorktree: workspaceProcedure
-			.input(runtimeWorktreeEnsureRequestSchema)
-			.output(runtimeWorktreeEnsureResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.ensureWorktree(ctx.workspaceScope, input);
-			}),
-		deleteWorktree: workspaceProcedure
-			.input(runtimeWorktreeDeleteRequestSchema)
-			.output(runtimeWorktreeDeleteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.deleteWorktree(ctx.workspaceScope, input);
-			}),
-		getTaskWorkspaceGitStatuses: workspaceProcedure
-			.output(runtimeTaskWorkspaceGitStatusesResponseSchema)
+	notifyStateUpdated: workspaceProcedure
+		.output(runtimeWorkspaceStateNotifyResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.workspaceApi.notifyStateUpdated(ctx.workspaceScope);
+		}),
+	saveState: workspaceProcedure
+		.input(runtimeWorkspaceStateSaveRequestSchema)
+		.output(runtimeWorkspaceStateResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.saveState(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
+		}),
+	addBacklogTask: workspaceProcedure
+		.input(runtimeAddBacklogTaskRequestSchema)
+		.output(runtimeAddBacklogTaskResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.addBacklogTask(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
+		}),
+	// 浏览器建卡后、放行 agent 启动前调用：卡片落盘不再依赖 120ms 防抖的整板保存赢下 revision 竞争（cf427）。
+	persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: workspaceProcedure
+		.input(runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema)
+		.output(runtimeWorkspaceStateResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	// `kanban task create` 只经这里落盘：runtime 按请求头的 CLI 行动者声明解析行动者后进入持久化漏斗。
+	// runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。其余 CLI 写动词走 taskCardAction.*。
+	applyKanbanCliTaskBoardMutation: workspaceProcedure
+		.input(runtimeKanbanCliTaskBoardMutationRequestSchema)
+		.output(runtimeKanbanCliTaskBoardMutationResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.applyKanbanCliTaskBoardMutation(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
+		return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);
+	}),
+	getGitLog: workspaceProcedure
+		.input(runtimeGitLogRequestSchema)
+		.output(runtimeGitLogResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadGitLog(ctx.workspaceScope, input);
+		}),
+	getGitRefs: workspaceProcedure
+		.input(optionalTaskWorkspaceInfoRequestSchema)
+		.output(runtimeGitRefsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadGitRefs(ctx.workspaceScope, input ?? null);
+		}),
+	getCommitDiff: workspaceProcedure
+		.input(runtimeGitCommitDiffRequestSchema)
+		.output(runtimeGitCommitDiffResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadCommitDiff(ctx.workspaceScope, input);
+		}),
+	getCommitChangedFileMetadata: workspaceProcedure
+		.input(runtimeGitCommitChangedFileMetadataRequestSchema)
+		.output(runtimeGitCommitChangedFileMetadataResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadCommitChangedFileMetadata(ctx.workspaceScope, input);
+		}),
+	getCommitFileDiffPatch: workspaceProcedure
+		.input(runtimeGitCommitFileDiffPatchRequestSchema)
+		.output(runtimeGitCommitFileDiffPatchResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadCommitFileDiffPatch(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationTaskCardActionProcedureRouter = t.router({
+	readTaskClosureHistory: workspaceProcedure
+		.input(taskClosureHistoryRequestSchema)
+		.output(taskClosureHistoryResponseSchema)
+		.query(({ ctx, input }) => ctx.taskCardActionApi.readTaskClosureHistory(ctx.workspaceScope, input)),
+	correctTaskClosureOutcome: workspaceProcedure
+		.input(taskClosureOutcomeCorrectionRequestSchema)
+		.output(taskClosureRecordSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.taskCardActionApi.correctTaskClosureOutcome(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+	cancelTaskClosureOperation: workspaceProcedure
+		.input(taskClosureHistoryRequestSchema)
+		.output(taskClosureHistoryResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.taskCardActionApi.cancelTaskClosureOperation(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+
+	applyTaskStickerEntryMutation: workspaceProcedure
+		.input(runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema)
+		.output(runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.taskCardActionApi.applyTaskStickerEntryMutation(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+	transferNeverStartedBacklogTaskToProject: workspaceProcedure
+		.input(runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema)
+		.output(runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject)
+				throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	appendTaskComment: workspaceProcedure
+		.input(appendTaskCommentRequestSchema)
+		.output(appendTaskCommentResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.taskIndexingSupportApi.appendTaskComment(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	readTaskCardWithBoardColumn: workspaceProcedure
+		.input(runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema)
+		.output(runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.readTaskCardWithBoardColumn(ctx.workspaceScope, input);
+		}),
+	startTaskCardAgentSessionMovingItIntoInProgress: workspaceProcedure
+		.input(runtimeTaskCardActionStartAgentSessionRequestSchema)
+		.output(runtimeTaskCardActionStartAgentSessionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.startTaskCardAgentSessionMovingItIntoInProgress(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	moveTaskCardIntoReviewByHandingTurnToUser: workspaceProcedure
+		.input(runtimeTaskCardActionMoveIntoReviewRequestSchema)
+		.output(runtimeTaskCardActionMoveIntoReviewResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.moveTaskCardIntoReviewByHandingTurnToUser(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects: workspaceProcedure
+		.input(runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema)
+		.output(runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree: workspaceProcedure
+		.input(runtimeTaskCardActionMoveIntoDoneRequestSchema)
+		.output(runtimeTaskCardActionMoveIntoDoneResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	restoreTaskCardFromDoneIntoReviewResumingAgentSession: workspaceProcedure
+		.input(runtimeTaskCardActionRestoreFromDoneRequestSchema)
+		.output(runtimeTaskCardActionRestoreFromDoneResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	permanentlyDeleteTaskCardsWithFullResourceCleanup: workspaceProcedure
+		.input(runtimeTaskCardActionPermanentlyDeleteRequestSchema)
+		.output(runtimeTaskCardActionPermanentlyDeleteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	renameCurrentTask: workspaceProcedure
+		.input(runtimeRenameCurrentTaskRequestSchema)
+		.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
+		.mutation(
+			async ({ ctx, input }) =>
+				await ctx.taskCardActionApi.renameCurrentTask(
+					ctx.workspaceScope,
+					input,
+					ctx.kanbanRequestOriginActorEvidence,
+				),
+		),
+
+	updateTaskCardFieldValues: workspaceProcedure
+		.input(runtimeTaskCardActionUpdateFieldValuesRequestSchema)
+		.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.updateTaskCardFieldValues(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	setTaskCardShelvingStateWithoutSessionSideEffects: workspaceProcedure
+		.input(runtimeTaskCardActionSetShelvingStateRequestSchema)
+		.output(runtimeTaskCardActionSetShelvingStateResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.taskCardActionApi.setTaskCardShelvingStateWithoutSessionSideEffects(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+	setTaskPinboardPinStateOfTaskCard: workspaceProcedure
+		.input(runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema)
+		.output(runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.taskCardActionApi.setTaskPinboardPinStateOfTaskCard(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+});
+
+const runtimeApplicationProjectsProcedureRouter = t.router({
+	setProjectVisualIdentity: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(setProjectVisualIdentityRequestSchema)
+		.output(projectVisualIdentitySchema)
+		.mutation(({ ctx, input }) => ctx.projectsApi.setProjectVisualIdentity(input)),
+	resetProjectVisualIdentityToDefault: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(resetProjectVisualIdentityRequestSchema)
+		.output(projectVisualIdentitySchema)
+		.mutation(({ ctx, input }) => ctx.projectsApi.resetProjectVisualIdentityToDefault(input)),
+	readProjectIconImage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(readProjectIconImageRequestSchema)
+		.output(readProjectIconImageResponseSchema)
+		.query(({ ctx, input }) => ctx.projectsApi.readProjectIconImage(input)),
+	list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeProjectsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
+		}),
+	getAllProjectsTaskGroupQuerySnapshot: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeAllProjectsTaskGroupQueryRequestSchema)
+		.output(runtimeAllProjectsTaskGroupQuerySnapshotSchema)
+		.query(({ ctx, input }) => ctx.projectsApi.getAllProjectsTaskGroupQuerySnapshot(input)),
+	add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeProjectAddRequestSchema)
+		.output(runtimeProjectAddResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input);
+		}),
+	getPermanentDeletionPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeProjectPermanentDeletionPreviewRequestSchema)
+		.output(runtimeProjectPermanentDeletionPreviewResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.projectsApi.getPermanentDeletionPreview(ctx.requestedWorkspaceId, input);
+		}),
+	permanentlyDeleteProjectData: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeProjectPermanentDeletionRequestSchema)
+		.output(runtimeProjectPermanentDeletionResultSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.projectsApi.permanentlyDeleteProjectData(ctx.requestedWorkspaceId, input);
+		}),
+	pickDirectory: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeProjectDirectoryPickerResponseSchema)
+		.mutation(async ({ ctx }) => {
+			return await ctx.projectsApi.pickProjectDirectory(ctx.requestedWorkspaceId);
+		}),
+	listDirectoryContents: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeDirectoryListRequestSchema)
+		.output(runtimeDirectoryListResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.projectsApi.listDirectoryContents(ctx.requestedWorkspaceId, input);
+		}),
+	// 跨全部注册项目的任务搜索索引：非 workspace-scoped（procedureRejectingUnknownWebUiPageLoadRequestOriginNonce，忽略连接 scope），供 Spotlight
+	// 「包含其它项目」按需拉取。
+	getAllProjectsTaskSearchIndex: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeAllProjectsTaskSearchIndexResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.projectsApi.getAllProjectsTaskSearchIndex();
+		}),
+	// 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）：选中任务时记「我最后打开」。
+	// 非 workspace-scoped，按 input.workspaceId 写（同 markTaskNotificationsVisited）。
+	recordTaskOpenedByUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeRecordTaskOpenedByUserRequestSchema)
+		.output(runtimeRecordTaskOpenedByUserResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.projectsApi.recordTaskOpenedByUser(input);
+		}),
+	// 跨项目切换面板「显示更早」：按放宽后的时间窗现算全部项目的条目（不进广播）。
+	listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon:
+		procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.output(runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema)
 			.query(async ({ ctx }) => {
-				return await ctx.workspaceApi.loadTaskWorkspaceGitStatuses(ctx.workspaceScope);
+				return await ctx.projectsApi.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon();
 			}),
-		getTaskContext: workspaceProcedure
-			.input(runtimeTaskWorkspaceInfoRequestSchema)
-			.output(runtimeTaskWorkspaceInfoResponseSchema)
+	// 跨项目切换面板：其他项目任务 worktree 的 git 元数据（ahead/behind、未提交改动），面板可见时按需轮询。
+	// 非 workspace-scoped：按 input 里每条的 workspaceId 读；服务端按键缓存并用 fs-stat 门控。
+	readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
+		procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema)
+			.output(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema)
 			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadTaskContext(ctx.workspaceScope, input);
+				return await ctx.projectsApi.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(input);
 			}),
-		getTaskRetainedCommittedLineChangeHistory: workspaceProcedure
-			.input(runtimeTaskWorkspaceInfoRequestSchema)
-			.output(runtimeTaskRetainedCommittedLineChangeHistorySchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadTaskRetainedCommittedLineChangeHistory(ctx.workspaceScope, input);
-			}),
-		searchFiles: workspaceProcedure
-			.input(runtimeWorkspaceFileSearchRequestSchema)
-			.output(runtimeWorkspaceFileSearchResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.searchFiles(ctx.workspaceScope, input);
-			}),
-		getState: workspaceProcedure.output(runtimeWorkspaceStateResponseSchema).query(async ({ ctx }) => {
-			return await ctx.workspaceApi.loadState(ctx.workspaceScope);
+});
+
+const runtimeApplicationHooksProcedureRouter = t.router({
+	ingest: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeHookIngestRequestSchema)
+		.output(runtimeHookIngestResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.hooksApi.ingest(input);
 		}),
-		notifyStateUpdated: workspaceProcedure
-			.output(runtimeWorkspaceStateNotifyResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.workspaceApi.notifyStateUpdated(ctx.workspaceScope);
-			}),
-		saveState: workspaceProcedure
-			.input(runtimeWorkspaceStateSaveRequestSchema)
-			.output(runtimeWorkspaceStateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.saveState(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
-			}),
-		addBacklogTask: workspaceProcedure
-			.input(runtimeAddBacklogTaskRequestSchema)
-			.output(runtimeAddBacklogTaskResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.addBacklogTask(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		// 浏览器建卡后、放行 agent 启动前调用：卡片落盘不再依赖 120ms 防抖的整板保存赢下 revision 竞争（cf427）。
-		persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart: workspaceProcedure
-			.input(runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema)
-			.output(runtimeWorkspaceStateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		// `kanban task create` 只经这里落盘：runtime 按请求头的 CLI 行动者声明解析行动者后进入持久化漏斗。
-		// runtime 离线时 CLI 直接报错，不回退直接写盘（dd2db 1a.2b）。其余 CLI 写动词走 taskCardAction.*。
-		applyKanbanCliTaskBoardMutation: workspaceProcedure
-			.input(runtimeKanbanCliTaskBoardMutationRequestSchema)
-			.output(runtimeKanbanCliTaskBoardMutationResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.applyKanbanCliTaskBoardMutation(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		getWorkspaceChanges: workspaceProcedure.output(runtimeWorkspaceChangesResponseSchema).query(async ({ ctx }) => {
-			return await ctx.workspaceApi.loadWorkspaceChanges(ctx.workspaceScope);
+});
+
+const runtimeApplicationDeploymentProcedureRouter = t.router({
+	resolveTaskPostDeployVerificationEntryNavigationTargets: workspaceProcedure
+		.input(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema)
+		.output(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema)
+		.query(({ ctx, input }) =>
+			ctx.deploymentApi.resolveTaskPostDeployVerificationEntryNavigationTargets(
+				ctx.workspaceScope,
+				input,
+				ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary,
+			),
+		),
+	getPostDeployVerificationState: workspaceProcedure
+		.input(runtimeGetPostDeployVerificationStateRequestSchema)
+		.output(runtimeGetPostDeployVerificationStateResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.getPostDeployVerificationState(ctx.workspaceScope, input);
 		}),
-		getGitLog: workspaceProcedure
-			.input(runtimeGitLogRequestSchema)
-			.output(runtimeGitLogResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadGitLog(ctx.workspaceScope, input);
-			}),
-		getGitRefs: workspaceProcedure
-			.input(optionalTaskWorkspaceInfoRequestSchema)
-			.output(runtimeGitRefsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadGitRefs(ctx.workspaceScope, input ?? null);
-			}),
-		getCommitDiff: workspaceProcedure
-			.input(runtimeGitCommitDiffRequestSchema)
-			.output(runtimeGitCommitDiffResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadCommitDiff(ctx.workspaceScope, input);
-			}),
-		getCommitChangedFileMetadata: workspaceProcedure
-			.input(runtimeGitCommitChangedFileMetadataRequestSchema)
-			.output(runtimeGitCommitChangedFileMetadataResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadCommitChangedFileMetadata(ctx.workspaceScope, input);
-			}),
-		getCommitFileDiffPatch: workspaceProcedure
-			.input(runtimeGitCommitFileDiffPatchRequestSchema)
-			.output(runtimeGitCommitFileDiffPatchResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workspaceApi.loadCommitFileDiffPatch(ctx.workspaceScope, input);
-			}),
-	}),
+	updateVerificationChecklist: workspaceProcedure
+		.input(runtimeUpdateVerificationChecklistRequestSchema)
+		.output(runtimeUpdateVerificationChecklistResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.updateVerificationChecklist(ctx.workspaceScope, input);
+		}),
+	runPostDeployVerificationItem: workspaceProcedure
+		.input(runtimeRunPostDeployVerificationItemRequestSchema)
+		.output(runtimeRunPostDeployVerificationItemResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.runPostDeployVerificationItem(ctx.workspaceScope, input);
+		}),
+	requestVerificationComplete: workspaceProcedure
+		.input(runtimeRequestVerificationCompleteRequestSchema)
+		.output(runtimeRequestVerificationCompleteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.requestVerificationComplete(ctx.workspaceScope, input);
+		}),
+	confirmVerificationComplete: workspaceProcedure
+		.input(runtimeConfirmVerificationCompleteRequestSchema)
+		.output(runtimeConfirmVerificationCompleteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
+		}),
+	markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: workspaceProcedure
+		.input(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema)
+		.output(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.deploymentApi.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone(
+				ctx.workspaceScope,
+				input,
+			);
+		}),
+	listDeferredNaturalUsageObservationRecords: workspaceProcedure
+		.output(runtimeListDeferredNaturalUsageObservationRecordsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.deploymentApi.listDeferredNaturalUsageObservationRecords(ctx.workspaceScope);
+		}),
+	listWorkspacesHavingPostDeployVerificationDeploymentGroups: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema)
+		.query(async ({ ctx }) => {
+			return await ctx.deploymentApi.listWorkspacesHavingPostDeployVerificationDeploymentGroups();
+		}),
+});
+
+const runtimeApplicationWorkUnitProcedureRouter = t.router({
+	listPermanentlyDeletedTaskCards: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(listPermanentlyDeletedTaskCardsRequestSchema)
+		.output(listPermanentlyDeletedTaskCardsResponseSchema)
+		.query(({ ctx, input }) => ctx.workUnitRelationReadApi.listPermanentlyDeletedTaskCards(input)),
+	getPermanentlyDeletedTaskPromptVersions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(permanentlyDeletedTaskPromptVersionsRequestSchema)
+		.output(permanentlyDeletedTaskPromptVersionsResponseSchema)
+		.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getPermanentlyDeletedTaskPromptVersions(input)),
+	resolveKanbanBoardCardIdentityByBareTaskId: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema)
+		.output(resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId(input);
+		}),
+	getDirectlyRelatedTaskPreviewPage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(getDirectlyRelatedTaskPreviewPageRequestSchema)
+		.output(getDirectlyRelatedTaskPreviewPageResponseSchema)
+		.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getDirectlyRelatedTaskPreviewPage(input)),
+	getRelationNeighborhoodSummary: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(getRelationNeighborhoodSummaryRequestSchema)
+		.output(getRelationNeighborhoodSummaryResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary(input);
+		}),
+	listConversationSessionOwnershipPeriods: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(listConversationSessionOwnershipPeriodsRequestSchema)
+		.output(listConversationSessionOwnershipPeriodsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationReadApi.listConversationSessionOwnershipPeriods(input);
+		}),
+	getWorkUnitContext: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(getWorkUnitContextRequestSchema)
+		.output(getWorkUnitContextResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationReadApi.getWorkUnitContext(input);
+		}),
+	setRecordedRelationPresentationMutePreference: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(setRecordedRelationPresentationMutePreferenceRequestSchema)
+		.output(setRecordedRelationPresentationMutePreferenceResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationPresentationPreferenceApi.setRecordedRelationPresentationMutePreference(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	// dd2db 2.1 断言型关系写入（R3.4 `assert-reference-relation` / `revoke-effective-relation-assertion`）。
+	readRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(relationModelingEditorDraftReadRequestSchema)
+		.output(referenceRelationModelingEditorDraftSchema.nullable())
+		.query(async ({ ctx, input }) => {
+			const draft = await ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input);
+			if (!draft?.createdTaskId || !ctx.taskEditorCreationSubmissionApi) return draft;
+			const migrated = await ctx.taskEditorCreationSubmissionApi.migrateLegacyDraft(input.workspaceId, draft);
+			await ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft({ ...input, draft: migrated });
+			return migrated;
+		}),
+	saveRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(relationModelingEditorDraftSaveRequestSchema)
+		.output(z.object({ saved: z.boolean() }))
+		.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft(input)),
+	getRelationModelingPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(relationModelingPreviewRequestSchema)
+		.output(relationModelingPreviewResponseSchema)
+		.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getRelationModelingPreview(input)),
+	suggestReferenceRelationsForTaskModeling: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(referenceRelationModelingSuggestionsRequestSchema)
+		.output(referenceRelationModelingSuggestionsResponseSchema)
+		.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.suggestReferenceRelationsForTaskModeling(input)),
+	applyReferenceRelationModelingChangesDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(applyReferenceRelationModelingChangesRequestSchema)
+		.output(applyReferenceRelationModelingChangesResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.workUnitRelationAssertionWriteApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+
+	assertReferenceRelationAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(assertReferenceRelationAsActingWorkUnitRequestSchema)
+		.output(interWorkUnitRelationAssertionWriteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationAsActingWorkUnit(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	revokeEffectiveRelationAssertionAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(revokeEffectiveRelationAssertionAsActingWorkUnitRequestSchema)
+		.output(interWorkUnitRelationAssertionWriteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionAsActingWorkUnit(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	// 决策类：只在 Web UI、只由显式用户手势触发；runtime 校验 nonce、拒绝 CLI 头与不可信的合成 DOM 事件。
+	assertReferenceRelationDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(assertReferenceRelationDirectlyAsWebUiUserRequestSchema)
+		.output(interWorkUnitRelationAssertionWriteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationDirectlyAsWebUiUser(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+	revokeEffectiveRelationAssertionDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema)
+		.output(interWorkUnitRelationAssertionWriteResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionDirectlyAsWebUiUser(
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+		}),
+});
+
+const runtimeApplicationConversationTreeProcedureRouter = t.router({
+	// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：findings 出处锚与（远期）会话树共享同一
+	// 数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
+	getConversationSessionTurnProjection: workspaceProcedure
+		.input(runtimeConversationSessionTurnProjectionRequestSchema)
+		.output(runtimeConversationSessionTurnProjectionResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationTaskVisualizationArtifactsProcedureRouter = t.router({
+	publish: workspaceProcedure
+		.input(taskVisualizationPublishRequestSchema)
+		.output(taskVisualizationPublishResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskVisualizationArtifactApi)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+			return ctx.taskVisualizationArtifactApi.publish(ctx.workspaceScope, input);
+		}),
+	list: workspaceProcedure
+		.input(taskVisualizationListRequestSchema)
+		.output(taskVisualizationListResponseSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskVisualizationArtifactApi)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+			return ctx.taskVisualizationArtifactApi.list(ctx.workspaceScope, input);
+		}),
+	preparePreview: workspaceProcedure
+		.input(taskVisualizationSelectArtifactRequestSchema)
+		.output(taskVisualizationPreparePreviewResponseSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.taskVisualizationArtifactApi)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+			return ctx.taskVisualizationArtifactApi.preparePreview(ctx.workspaceScope, input);
+		}),
+	requestPreview: workspaceProcedure
+		.input(taskVisualizationSelectArtifactRequestSchema)
+		.output(taskVisualizationRequestPreviewResponseSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.taskVisualizationArtifactApi)
+				throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
+			return ctx.taskVisualizationArtifactApi.requestPreview(ctx.workspaceScope, input);
+		}),
+});
+
+const runtimeApplicationExploratoryProcedureRouter = t.router({
+	// workspace 级 findings 全量读取（集合恒小，上限 500；蓝图 §D.3）。
+	getFindings: workspaceProcedure
+		.input(runtimeGetExploratoryFindingsRequestSchema)
+		.output(runtimeGetExploratoryFindingsResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.getFindings(ctx.workspaceScope, input);
+		}),
+	// 人工保存主路径（蓝图 §D.2.1）：落库即 active + user_saved；同 findingId 幂等。
+	saveFinding: workspaceProcedure
+		.input(runtimeSaveExploratoryFindingRequestSchema)
+		.output(runtimeSaveExploratoryFindingResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.saveFinding(ctx.workspaceScope, input);
+		}),
+	// pending 建议确认 → active（蓝图 §D.2.2）；状态机违规报错，不存在 id 幂等回 null。
+	confirmFinding: workspaceProcedure
+		.input(runtimeConfirmExploratoryFindingRequestSchema)
+		.output(runtimeConfirmExploratoryFindingResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.confirmFinding(ctx.workspaceScope, input);
+		}),
+	// pending 建议拒绝 → 物理删除（尚未成为资产，蓝图 §D.2.2）。
+	rejectFinding: workspaceProcedure
+		.input(runtimeRejectExploratoryFindingRequestSchema)
+		.output(runtimeRejectExploratoryFindingResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.rejectFinding(ctx.workspaceScope, input);
+		}),
+	// active ↔ archived 软删/恢复；pending/superseded 不可 archive（状态机违规报错）。
+	archiveFinding: workspaceProcedure
+		.input(runtimeArchiveExploratoryFindingRequestSchema)
+		.output(runtimeArchiveExploratoryFindingResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.archiveFinding(ctx.workspaceScope, input);
+		}),
+	// agent 建议通道（蓝图 §D.2.2）：落库即 suggested_pending_confirmation + agent_suggested，
+	// provenance 可解析性校验在 handler 完成；durable 落盘后广播 exploratory_findings_updated。
+	ingestFindingCandidate: workspaceProcedure
+		.input(runtimeIngestExploratoryFindingCandidateRequestSchema)
+		.output(runtimeIngestExploratoryFindingCandidateResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.ingestFindingCandidate(ctx.workspaceScope, input);
+		}),
+	// exploration thread graph（B.2）：读图是 query（免费），维护是 mutation（会 fork，花钱）。
+	getExplorationThreadGraph: workspaceProcedure
+		.input(runtimeGetExplorationThreadGraphRequestSchema)
+		.output(runtimeGetExplorationThreadGraphResponseSchema)
+		.query(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.getExplorationThreadGraph(ctx.workspaceScope, input);
+		}),
+	requestExplorationThreadGraphMaintenance: workspaceProcedure
+		.input(runtimeRequestExplorationThreadGraphMaintenanceRequestSchema)
+		.output(runtimeRequestExplorationThreadGraphMaintenanceResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.exploratoryApi.requestExplorationThreadGraphMaintenance(ctx.workspaceScope, input);
+		}),
+});
+
+// 保留具名子路由类型，避免新契约使声明输出超过 TypeScript 的序列化长度上限。
+type RuntimeAppRouterProcedureRecord = {
+	taskCommandExecution: typeof runtimeApplicationTaskCommandExecutionProcedureRouter;
+	dailyWorkProgressStatistics: typeof runtimeApplicationDailyWorkProgressStatisticsProcedureRouter;
+	notificationIntelligence: typeof runtimeApplicationNotificationIntelligenceProcedureRouter;
+	support: typeof runtimeApplicationSupportProcedureRouter;
+	taskEditorCreation: TaskEditorCreationRouter;
+	independentTaskCreation: typeof runtimeApplicationIndependentTaskCreationProcedureRouter;
+	runtime: typeof runtimeApplicationRuntimeProcedureRouter;
+	workspace: typeof runtimeApplicationWorkspaceProcedureRouter;
+	taskCardAction: typeof runtimeApplicationTaskCardActionProcedureRouter;
+	projects: typeof runtimeApplicationProjectsProcedureRouter;
+	hooks: typeof runtimeApplicationHooksProcedureRouter;
+	deployment: typeof runtimeApplicationDeploymentProcedureRouter;
+	workUnit: typeof runtimeApplicationWorkUnitProcedureRouter;
+	conversationTree: typeof runtimeApplicationConversationTreeProcedureRouter;
+	taskVisualizationArtifacts: typeof runtimeApplicationTaskVisualizationArtifactsProcedureRouter;
+	exploratory: typeof runtimeApplicationExploratoryProcedureRouter;
+};
+const runtimeAppRouterProcedureRecord: RuntimeAppRouterProcedureRecord = {
+	taskCommandExecution: runtimeApplicationTaskCommandExecutionProcedureRouter,
+	dailyWorkProgressStatistics: runtimeApplicationDailyWorkProgressStatisticsProcedureRouter,
+	notificationIntelligence: runtimeApplicationNotificationIntelligenceProcedureRouter,
+	support: runtimeApplicationSupportProcedureRouter,
+	taskEditorCreation: taskEditorCreationRouter,
+	independentTaskCreation: runtimeApplicationIndependentTaskCreationProcedureRouter,
+	runtime: runtimeApplicationRuntimeProcedureRouter,
+	workspace: runtimeApplicationWorkspaceProcedureRouter,
 	// 看板卡片 per-card 动作（契约与错误语义见 api-contract 的 taskCardAction 一节）。全部 workspace-scoped：
 	// 作用于 x-kanban-workspace-id 指向的任意已注册项目，跨项目执行动作不需要切换浏览器当前项目。
-	taskCardAction: t.router({
-		readTaskClosureHistory: workspaceProcedure
-			.input(taskClosureHistoryRequestSchema)
-			.output(taskClosureHistoryResponseSchema)
-			.query(({ ctx, input }) => ctx.taskCardActionApi.readTaskClosureHistory(ctx.workspaceScope, input)),
-		correctTaskClosureOutcome: workspaceProcedure
-			.input(taskClosureOutcomeCorrectionRequestSchema)
-			.output(taskClosureRecordSchema)
-			.mutation(({ ctx, input }) =>
-				ctx.taskCardActionApi.correctTaskClosureOutcome(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				),
-			),
-		cancelTaskClosureOperation: workspaceProcedure
-			.input(taskClosureHistoryRequestSchema)
-			.output(taskClosureHistoryResponseSchema)
-			.mutation(({ ctx, input }) =>
-				ctx.taskCardActionApi.cancelTaskClosureOperation(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				),
-			),
-
-		applyTaskStickerEntryMutation: workspaceProcedure
-			.input(runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema)
-			.output(runtimeTaskCardActionApplyTaskStickerEntryMutationResponseSchema)
-			.mutation(({ ctx, input }) =>
-				ctx.taskCardActionApi.applyTaskStickerEntryMutation(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				),
-			),
-		transferNeverStartedBacklogTaskToProject: workspaceProcedure
-			.input(runtimeTaskCardActionTransferBacklogTaskToProjectRequestSchema)
-			.output(runtimeTaskCardActionTransferBacklogTaskToProjectResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject)
-					throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskCardActionApi.transferNeverStartedBacklogTaskToProject(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		appendTaskComment: workspaceProcedure
-			.input(appendTaskCommentRequestSchema)
-			.output(appendTaskCommentResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskIndexingSupportApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-				return ctx.taskIndexingSupportApi.appendTaskComment(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		readTaskCardWithBoardColumn: workspaceProcedure
-			.input(runtimeTaskCardActionReadTaskCardWithBoardColumnRequestSchema)
-			.output(runtimeTaskCardActionReadTaskCardWithBoardColumnResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.readTaskCardWithBoardColumn(ctx.workspaceScope, input);
-			}),
-		startTaskCardAgentSessionMovingItIntoInProgress: workspaceProcedure
-			.input(runtimeTaskCardActionStartAgentSessionRequestSchema)
-			.output(runtimeTaskCardActionStartAgentSessionResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.startTaskCardAgentSessionMovingItIntoInProgress(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		moveTaskCardIntoReviewByHandingTurnToUser: workspaceProcedure
-			.input(runtimeTaskCardActionMoveIntoReviewRequestSchema)
-			.output(runtimeTaskCardActionMoveIntoReviewResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.moveTaskCardIntoReviewByHandingTurnToUser(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects: workspaceProcedure
-			.input(runtimeTaskCardActionMoveBetweenNonTrashColumnsRequestSchema)
-			.output(runtimeTaskCardActionMoveBetweenNonTrashColumnsResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffects(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree: workspaceProcedure
-			.input(runtimeTaskCardActionMoveIntoDoneRequestSchema)
-			.output(runtimeTaskCardActionMoveIntoDoneResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		restoreTaskCardFromDoneIntoReviewResumingAgentSession: workspaceProcedure
-			.input(runtimeTaskCardActionRestoreFromDoneRequestSchema)
-			.output(runtimeTaskCardActionRestoreFromDoneResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		permanentlyDeleteTaskCardsWithFullResourceCleanup: workspaceProcedure
-			.input(runtimeTaskCardActionPermanentlyDeleteRequestSchema)
-			.output(runtimeTaskCardActionPermanentlyDeleteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.permanentlyDeleteTaskCardsWithFullResourceCleanup(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		renameCurrentTask: workspaceProcedure
-			.input(runtimeRenameCurrentTaskRequestSchema)
-			.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
-			.mutation(
-				async ({ ctx, input }) =>
-					await ctx.taskCardActionApi.renameCurrentTask(
-						ctx.workspaceScope,
-						input,
-						ctx.kanbanRequestOriginActorEvidence,
-					),
-			),
-
-		updateTaskCardFieldValues: workspaceProcedure
-			.input(runtimeTaskCardActionUpdateFieldValuesRequestSchema)
-			.output(runtimeTaskCardActionUpdateFieldValuesResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.updateTaskCardFieldValues(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		setTaskCardShelvingStateWithoutSessionSideEffects: workspaceProcedure
-			.input(runtimeTaskCardActionSetShelvingStateRequestSchema)
-			.output(runtimeTaskCardActionSetShelvingStateResponseSchema)
-			.mutation(({ ctx, input }) =>
-				ctx.taskCardActionApi.setTaskCardShelvingStateWithoutSessionSideEffects(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				),
-			),
-		setTaskPinboardPinStateOfTaskCard: workspaceProcedure
-			.input(runtimeTaskCardActionSetTaskPinboardPinStateRequestSchema)
-			.output(runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.taskCardActionApi.setTaskPinboardPinStateOfTaskCard(
-					ctx.workspaceScope,
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-	}),
-	projects: t.router({
-		setProjectVisualIdentity: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(setProjectVisualIdentityRequestSchema)
-			.output(projectVisualIdentitySchema)
-			.mutation(({ ctx, input }) => ctx.projectsApi.setProjectVisualIdentity(input)),
-		resetProjectVisualIdentityToDefault: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(resetProjectVisualIdentityRequestSchema)
-			.output(projectVisualIdentitySchema)
-			.mutation(({ ctx, input }) => ctx.projectsApi.resetProjectVisualIdentityToDefault(input)),
-		readProjectIconImage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(readProjectIconImageRequestSchema)
-			.output(readProjectIconImageResponseSchema)
-			.query(({ ctx, input }) => ctx.projectsApi.readProjectIconImage(input)),
-		list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeProjectsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.projectsApi.listProjects(ctx.requestedWorkspaceId);
-			}),
-		getAllProjectsTaskGroupQuerySnapshot: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeAllProjectsTaskGroupQueryRequestSchema)
-			.output(runtimeAllProjectsTaskGroupQuerySnapshotSchema)
-			.query(({ ctx, input }) => ctx.projectsApi.getAllProjectsTaskGroupQuerySnapshot(input)),
-		add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeProjectAddRequestSchema)
-			.output(runtimeProjectAddResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input);
-			}),
-		getPermanentDeletionPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeProjectPermanentDeletionPreviewRequestSchema)
-			.output(runtimeProjectPermanentDeletionPreviewResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.projectsApi.getPermanentDeletionPreview(ctx.requestedWorkspaceId, input);
-			}),
-		permanentlyDeleteProjectData: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeProjectPermanentDeletionRequestSchema)
-			.output(runtimeProjectPermanentDeletionResultSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.projectsApi.permanentlyDeleteProjectData(ctx.requestedWorkspaceId, input);
-			}),
-		pickDirectory: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeProjectDirectoryPickerResponseSchema)
-			.mutation(async ({ ctx }) => {
-				return await ctx.projectsApi.pickProjectDirectory(ctx.requestedWorkspaceId);
-			}),
-		listDirectoryContents: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeDirectoryListRequestSchema)
-			.output(runtimeDirectoryListResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.projectsApi.listDirectoryContents(ctx.requestedWorkspaceId, input);
-			}),
-		// 跨全部注册项目的任务搜索索引：非 workspace-scoped（procedureRejectingUnknownWebUiPageLoadRequestOriginNonce，忽略连接 scope），供 Spotlight
-		// 「包含其它项目」按需拉取。
-		getAllProjectsTaskSearchIndex: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.output(runtimeAllProjectsTaskSearchIndexResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.projectsApi.getAllProjectsTaskSearchIndex();
-			}),
-		// 跨项目切换面板（docs/context-cross-project-recently-active-task-switcher.md）：选中任务时记「我最后打开」。
-		// 非 workspace-scoped，按 input.workspaceId 写（同 markTaskNotificationsVisited）。
-		recordTaskOpenedByUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeRecordTaskOpenedByUserRequestSchema)
-			.output(runtimeRecordTaskOpenedByUserResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.projectsApi.recordTaskOpenedByUser(input);
-			}),
-		// 跨项目切换面板「显示更早」：按放宽后的时间窗现算全部项目的条目（不进广播）。
-		listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon:
-			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-				.output(runtimeCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizonResponseSchema)
-				.query(async ({ ctx }) => {
-					return await ctx.projectsApi.listCrossProjectTaskSwitcherEntriesWithinExtendedActivityHorizon();
-				}),
-		// 跨项目切换面板：其他项目任务 worktree 的 git 元数据（ahead/behind、未提交改动），面板可见时按需轮询。
-		// 非 workspace-scoped：按 input 里每条的 workspaceId 读；服务端按键缓存并用 fs-stat 门控。
-		readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries:
-			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-				.input(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema)
-				.output(runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema)
-				.query(async ({ ctx, input }) => {
-					return await ctx.projectsApi.readTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries(input);
-				}),
-	}),
-	hooks: t.router({
-		ingest: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(runtimeHookIngestRequestSchema)
-			.output(runtimeHookIngestResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.hooksApi.ingest(input);
-			}),
-	}),
-	deployment: t.router({
-		resolveTaskPostDeployVerificationEntryNavigationTargets: workspaceProcedure
-			.input(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema)
-			.output(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema)
-			.query(({ ctx, input }) =>
-				ctx.deploymentApi.resolveTaskPostDeployVerificationEntryNavigationTargets(
-					ctx.workspaceScope,
-					input,
-					ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary,
-				),
-			),
-		getPostDeployVerificationState: workspaceProcedure
-			.input(runtimeGetPostDeployVerificationStateRequestSchema)
-			.output(runtimeGetPostDeployVerificationStateResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.getPostDeployVerificationState(ctx.workspaceScope, input);
-			}),
-		updateVerificationChecklist: workspaceProcedure
-			.input(runtimeUpdateVerificationChecklistRequestSchema)
-			.output(runtimeUpdateVerificationChecklistResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.updateVerificationChecklist(ctx.workspaceScope, input);
-			}),
-		runPostDeployVerificationItem: workspaceProcedure
-			.input(runtimeRunPostDeployVerificationItemRequestSchema)
-			.output(runtimeRunPostDeployVerificationItemResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.runPostDeployVerificationItem(ctx.workspaceScope, input);
-			}),
-		requestVerificationComplete: workspaceProcedure
-			.input(runtimeRequestVerificationCompleteRequestSchema)
-			.output(runtimeRequestVerificationCompleteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.requestVerificationComplete(ctx.workspaceScope, input);
-			}),
-		confirmVerificationComplete: workspaceProcedure
-			.input(runtimeConfirmVerificationCompleteRequestSchema)
-			.output(runtimeConfirmVerificationCompleteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.confirmVerificationComplete(ctx.workspaceScope, input);
-			}),
-		markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone: workspaceProcedure
-			.input(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneRequestSchema)
-			.output(runtimeMarkPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDoneResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.deploymentApi.markPostDeployVerificationTaskVerifiedAfterKanbanCliMovedItToDone(
-					ctx.workspaceScope,
-					input,
-				);
-			}),
-		listDeferredNaturalUsageObservationRecords: workspaceProcedure
-			.output(runtimeListDeferredNaturalUsageObservationRecordsResponseSchema)
-			.query(async ({ ctx }) => {
-				return await ctx.deploymentApi.listDeferredNaturalUsageObservationRecords(ctx.workspaceScope);
-			}),
-		listWorkspacesHavingPostDeployVerificationDeploymentGroups:
-			procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-				.output(runtimeListWorkspacesHavingPostDeployVerificationDeploymentGroupsResponseSchema)
-				.query(async ({ ctx }) => {
-					return await ctx.deploymentApi.listWorkspacesHavingPostDeployVerificationDeploymentGroups();
-				}),
-	}),
+	taskCardAction: runtimeApplicationTaskCardActionProcedureRouter,
+	projects: runtimeApplicationProjectsProcedureRouter,
+	hooks: runtimeApplicationHooksProcedureRouter,
+	deployment: runtimeApplicationDeploymentProcedureRouter,
 	// dd2db 1b：工作单元间关系的读侧（记录型邻域、跨 project 身份解析、会话归属、上下文端口）。全是只读 query。
-	workUnit: t.router({
-		listPermanentlyDeletedTaskCards: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(listPermanentlyDeletedTaskCardsRequestSchema)
-			.output(listPermanentlyDeletedTaskCardsResponseSchema)
-			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.listPermanentlyDeletedTaskCards(input)),
-		getPermanentlyDeletedTaskPromptVersions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(permanentlyDeletedTaskPromptVersionsRequestSchema)
-			.output(permanentlyDeletedTaskPromptVersionsResponseSchema)
-			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getPermanentlyDeletedTaskPromptVersions(input)),
-		resolveKanbanBoardCardIdentityByBareTaskId: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(resolveKanbanBoardCardIdentityByBareTaskIdRequestSchema)
-			.output(resolveKanbanBoardCardIdentityByBareTaskIdResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId(input);
-			}),
-		getDirectlyRelatedTaskPreviewPage: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(getDirectlyRelatedTaskPreviewPageRequestSchema)
-			.output(getDirectlyRelatedTaskPreviewPageResponseSchema)
-			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getDirectlyRelatedTaskPreviewPage(input)),
-		getRelationNeighborhoodSummary: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(getRelationNeighborhoodSummaryRequestSchema)
-			.output(getRelationNeighborhoodSummaryResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationReadApi.getRelationNeighborhoodSummary(input);
-			}),
-		listConversationSessionOwnershipPeriods: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(listConversationSessionOwnershipPeriodsRequestSchema)
-			.output(listConversationSessionOwnershipPeriodsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationReadApi.listConversationSessionOwnershipPeriods(input);
-			}),
-		getWorkUnitContext: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(getWorkUnitContextRequestSchema)
-			.output(getWorkUnitContextResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationReadApi.getWorkUnitContext(input);
-			}),
-		setRecordedRelationPresentationMutePreference: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(setRecordedRelationPresentationMutePreferenceRequestSchema)
-			.output(setRecordedRelationPresentationMutePreferenceResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationPresentationPreferenceApi.setRecordedRelationPresentationMutePreference(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		// dd2db 2.1 断言型关系写入（R3.4 `assert-reference-relation` / `revoke-effective-relation-assertion`）。
-		readRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(relationModelingEditorDraftReadRequestSchema)
-			.output(referenceRelationModelingEditorDraftSchema.nullable())
-			.query(async ({ ctx, input }) => {
-				const draft = await ctx.workUnitRelationReadApi.readRelationModelingEditorDraft(input);
-				if (!draft?.createdTaskId || !ctx.taskEditorCreationSubmissionApi) return draft;
-				const migrated = await ctx.taskEditorCreationSubmissionApi.migrateLegacyDraft(input.workspaceId, draft);
-				await ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft({ ...input, draft: migrated });
-				return migrated;
-			}),
-		saveRelationModelingEditorDraft: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(relationModelingEditorDraftSaveRequestSchema)
-			.output(z.object({ saved: z.boolean() }))
-			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.saveRelationModelingEditorDraft(input)),
-		getRelationModelingPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(relationModelingPreviewRequestSchema)
-			.output(relationModelingPreviewResponseSchema)
-			.query(({ ctx, input }) => ctx.workUnitRelationReadApi.getRelationModelingPreview(input)),
-		suggestReferenceRelationsForTaskModeling: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(referenceRelationModelingSuggestionsRequestSchema)
-			.output(referenceRelationModelingSuggestionsResponseSchema)
-			.mutation(({ ctx, input }) => ctx.workUnitRelationReadApi.suggestReferenceRelationsForTaskModeling(input)),
-		applyReferenceRelationModelingChangesDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(applyReferenceRelationModelingChangesRequestSchema)
-			.output(applyReferenceRelationModelingChangesResponseSchema)
-			.mutation(({ ctx, input }) =>
-				ctx.workUnitRelationAssertionWriteApi.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				),
-			),
+	workUnit: runtimeApplicationWorkUnitProcedureRouter,
+	conversationTree: runtimeApplicationConversationTreeProcedureRouter,
+	taskVisualizationArtifacts: runtimeApplicationTaskVisualizationArtifactsProcedureRouter,
+	exploratory: runtimeApplicationExploratoryProcedureRouter,
+};
 
-		assertReferenceRelationAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(assertReferenceRelationAsActingWorkUnitRequestSchema)
-			.output(interWorkUnitRelationAssertionWriteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationAsActingWorkUnit(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		revokeEffectiveRelationAssertionAsActingWorkUnit: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(revokeEffectiveRelationAssertionAsActingWorkUnitRequestSchema)
-			.output(interWorkUnitRelationAssertionWriteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionAsActingWorkUnit(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		// 决策类：只在 Web UI、只由显式用户手势触发；runtime 校验 nonce、拒绝 CLI 头与不可信的合成 DOM 事件。
-		assertReferenceRelationDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(assertReferenceRelationDirectlyAsWebUiUserRequestSchema)
-			.output(interWorkUnitRelationAssertionWriteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationAssertionWriteApi.assertReferenceRelationDirectlyAsWebUiUser(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-		revokeEffectiveRelationAssertionDirectlyAsWebUiUser: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-			.input(revokeEffectiveRelationAssertionDirectlyAsWebUiUserRequestSchema)
-			.output(interWorkUnitRelationAssertionWriteResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.workUnitRelationAssertionWriteApi.revokeEffectiveRelationAssertionDirectlyAsWebUiUser(
-					input,
-					ctx.kanbanRequestOriginActorEvidence,
-				);
-			}),
-	}),
-	conversationTree: t.router({
-		// 会话 turn 投影（只读派生层，姊妹蓝图 §2.2）：findings 出处锚与（远期）会话树共享同一
-		// 数据源。M0 只接 Cline SDK 源，其余 transport 按 session 粒度降级。
-		getConversationSessionTurnProjection: workspaceProcedure
-			.input(runtimeConversationSessionTurnProjectionRequestSchema)
-			.output(runtimeConversationSessionTurnProjectionResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.conversationTreeApi.getConversationSessionTurnProjection(ctx.workspaceScope, input);
-			}),
-	}),
-	taskVisualizationArtifacts: t.router({
-		publish: workspaceProcedure
-			.input(taskVisualizationPublishRequestSchema)
-			.output(taskVisualizationPublishResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskVisualizationArtifactApi)
-					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
-				return ctx.taskVisualizationArtifactApi.publish(ctx.workspaceScope, input);
-			}),
-		list: workspaceProcedure
-			.input(taskVisualizationListRequestSchema)
-			.output(taskVisualizationListResponseSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskVisualizationArtifactApi)
-					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
-				return ctx.taskVisualizationArtifactApi.list(ctx.workspaceScope, input);
-			}),
-		preparePreview: workspaceProcedure
-			.input(taskVisualizationSelectArtifactRequestSchema)
-			.output(taskVisualizationPreparePreviewResponseSchema)
-			.query(({ ctx, input }) => {
-				if (!ctx.taskVisualizationArtifactApi)
-					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
-				return ctx.taskVisualizationArtifactApi.preparePreview(ctx.workspaceScope, input);
-			}),
-		requestPreview: workspaceProcedure
-			.input(taskVisualizationSelectArtifactRequestSchema)
-			.output(taskVisualizationRequestPreviewResponseSchema)
-			.mutation(({ ctx, input }) => {
-				if (!ctx.taskVisualizationArtifactApi)
-					throw new TRPCError({ code: "PRECONDITION_FAILED", message: "运行时尚未启用可视化发布。" });
-				return ctx.taskVisualizationArtifactApi.requestPreview(ctx.workspaceScope, input);
-			}),
-	}),
-	exploratory: t.router({
-		// workspace 级 findings 全量读取（集合恒小，上限 500；蓝图 §D.3）。
-		getFindings: workspaceProcedure
-			.input(runtimeGetExploratoryFindingsRequestSchema)
-			.output(runtimeGetExploratoryFindingsResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.getFindings(ctx.workspaceScope, input);
-			}),
-		// 人工保存主路径（蓝图 §D.2.1）：落库即 active + user_saved；同 findingId 幂等。
-		saveFinding: workspaceProcedure
-			.input(runtimeSaveExploratoryFindingRequestSchema)
-			.output(runtimeSaveExploratoryFindingResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.saveFinding(ctx.workspaceScope, input);
-			}),
-		// pending 建议确认 → active（蓝图 §D.2.2）；状态机违规报错，不存在 id 幂等回 null。
-		confirmFinding: workspaceProcedure
-			.input(runtimeConfirmExploratoryFindingRequestSchema)
-			.output(runtimeConfirmExploratoryFindingResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.confirmFinding(ctx.workspaceScope, input);
-			}),
-		// pending 建议拒绝 → 物理删除（尚未成为资产，蓝图 §D.2.2）。
-		rejectFinding: workspaceProcedure
-			.input(runtimeRejectExploratoryFindingRequestSchema)
-			.output(runtimeRejectExploratoryFindingResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.rejectFinding(ctx.workspaceScope, input);
-			}),
-		// active ↔ archived 软删/恢复；pending/superseded 不可 archive（状态机违规报错）。
-		archiveFinding: workspaceProcedure
-			.input(runtimeArchiveExploratoryFindingRequestSchema)
-			.output(runtimeArchiveExploratoryFindingResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.archiveFinding(ctx.workspaceScope, input);
-			}),
-		// agent 建议通道（蓝图 §D.2.2）：落库即 suggested_pending_confirmation + agent_suggested，
-		// provenance 可解析性校验在 handler 完成；durable 落盘后广播 exploratory_findings_updated。
-		ingestFindingCandidate: workspaceProcedure
-			.input(runtimeIngestExploratoryFindingCandidateRequestSchema)
-			.output(runtimeIngestExploratoryFindingCandidateResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.ingestFindingCandidate(ctx.workspaceScope, input);
-			}),
-		// exploration thread graph（B.2）：读图是 query（免费），维护是 mutation（会 fork，花钱）。
-		getExplorationThreadGraph: workspaceProcedure
-			.input(runtimeGetExplorationThreadGraphRequestSchema)
-			.output(runtimeGetExplorationThreadGraphResponseSchema)
-			.query(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.getExplorationThreadGraph(ctx.workspaceScope, input);
-			}),
-		requestExplorationThreadGraphMaintenance: workspaceProcedure
-			.input(runtimeRequestExplorationThreadGraphMaintenanceRequestSchema)
-			.output(runtimeRequestExplorationThreadGraphMaintenanceResponseSchema)
-			.mutation(async ({ ctx, input }) => {
-				return await ctx.exploratoryApi.requestExplorationThreadGraphMaintenance(ctx.workspaceScope, input);
-			}),
-	}),
-});
+export const runtimeAppRouter: ReturnType<typeof t.router<RuntimeAppRouterProcedureRecord>> = t.router(
+	runtimeAppRouterProcedureRecord,
+);
 
 export type RuntimeAppRouter = typeof runtimeAppRouter;
 export type RuntimeAppRouterInputs = inferRouterInputs<RuntimeAppRouter>;

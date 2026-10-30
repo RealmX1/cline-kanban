@@ -185,6 +185,7 @@ export function DirectoryAutocomplete({
 				return;
 			}
 
+			if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) return;
 			if (!isOpen || suggestions.length === 0) {
 				return;
 			}
