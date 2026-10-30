@@ -246,15 +246,14 @@ export function TaskPromptComposer({
 				return;
 			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+				const submit = event.shiftKey ? onSubmitAndStart : onSubmit;
+				// 无匹配回调时交给宿主表单，也不能把组合键当成补全候选的 Enter。
+				if (event.altKey) return;
+				if (!submit && !persistentAttachments.isPreparingImages) return;
 				event.preventDefault();
-				if (persistentAttachments.isPreparingImages) return;
-				if (event.shiftKey) {
-					if (onSubmitAndStart) {
-						onSubmitAndStart();
-						return;
-					}
-				}
-				onSubmit?.();
+				event.stopPropagation();
+				if (disabled || !enabled || event.repeat || persistentAttachments.isPreparingImages) return;
+				submit?.();
 				return;
 			}
 
@@ -297,6 +296,8 @@ export function TaskPromptComposer({
 		},
 		[
 			applySuggestion,
+			disabled,
+			enabled,
 			isSuggestionPickerOpen,
 			onEscape,
 			onSubmit,

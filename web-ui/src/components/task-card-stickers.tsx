@@ -3,6 +3,10 @@ import { ChevronDown, ChevronUp, Pencil, Plus, StickyNote, Trash2, X } from "luc
 import { useId } from "react";
 import { Button } from "@/components/ui/button";
 import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
+import {
 	resolveTaskStickerOverlayExplicitActivationSource,
 	type TaskCardStickersController,
 } from "@/hooks/use-task-card-stickers";
@@ -10,6 +14,10 @@ import {
 export function TaskCardStickers({ controller }: { controller: TaskCardStickersController }) {
 	const titleId = useId();
 	const { entries, editor, open, isSaving, readOnly } = controller;
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: controller.saveDraft,
+		disabled: readOnly || isSaving || !editor?.stickerText.trim(),
+	});
 	const latestEditedEntry = editor
 		? entries.find((entry) => entry.taskStickerEntryId === editor.taskStickerEntryId)
 		: undefined;
@@ -89,6 +97,7 @@ export function TaskCardStickers({ controller }: { controller: TaskCardStickersC
 						onClick={(event) => event.stopPropagation()}
 						onDoubleClick={(event) => event.stopPropagation()}
 						onKeyDown={(event) => {
+							handlePrimaryActionKeyDown(event);
 							controller.beginKeyboardInteraction();
 							event.stopPropagation();
 							if (event.key === "Escape") {
@@ -247,6 +256,7 @@ export function TaskCardStickers({ controller }: { controller: TaskCardStickersC
 											size="sm"
 											disabled={isSaving || !editor.stickerText.trim()}
 											onClick={controller.saveDraft}
+											{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 										>
 											{isSaving ? "正在保存…" : "保存便签"}
 										</Button>

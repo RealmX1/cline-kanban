@@ -48,6 +48,10 @@ import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { useAgentSessionPtyHostDiagnostics } from "@/hooks/use-agent-session-pty-host-diagnostics";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
 import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
 import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
@@ -213,7 +217,7 @@ function AgentRow({
 				}
 			}}
 			onKeyDown={(event) => {
-				if (event.key === "Enter" && isInstalled && !disabled) {
+				if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && isInstalled && !disabled) {
 					onSelect();
 				}
 			}}
@@ -960,10 +964,20 @@ export function RuntimeSettingsDialog({
 		[draftThemeId, onOpenChange, isSavingAllSettings],
 	);
 
+	const primaryActionDisabled = controlsDisabled || isPreparingGitPromptImages || (!hasUnsavedChanges && !saveError);
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleSave,
+		disabled: primaryActionDisabled,
+	});
 	const currentThemeDef = THEMES.find((t) => t.id === draftThemeId);
 
 	return (
-		<Dialog open={open} onOpenChange={handleDialogOpenChange} contentClassName="!max-w-[780px]">
+		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
+			open={open}
+			onOpenChange={handleDialogOpenChange}
+			contentClassName="!max-w-[780px]"
+		>
 			<DialogHeader title="Settings" icon={<Settings size={16} />} />
 			<div className="flex h-[min(480px,60vh)]">
 				<SettingsNav items={navItems} activeId={activeSection} onSelect={handleNavSelect} />
@@ -1621,7 +1635,8 @@ export function RuntimeSettingsDialog({
 				<Button
 					variant="primary"
 					onClick={() => void handleSave()}
-					disabled={controlsDisabled || isPreparingGitPromptImages || (!hasUnsavedChanges && !saveError)}
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+					disabled={primaryActionDisabled}
 				>
 					Save
 				</Button>

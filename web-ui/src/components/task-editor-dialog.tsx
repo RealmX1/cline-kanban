@@ -54,6 +54,10 @@ import { Button } from "@/components/ui/button";
 import { DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useGitRepositoryInfoOfOtherProjectForTaskEditorDialog } from "@/hooks/use-git-repository-info-of-other-project-for-task-editor-dialog";
 import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 import { useTaskEditorClipboardTaskReference } from "@/hooks/use-task-editor-clipboard-task-reference";
@@ -1328,12 +1332,7 @@ export function TaskEditorDialog({
 				return;
 			}
 			if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-				event.preventDefault();
-				if (event.shiftKey) {
-					handleCreateAndStartAll();
-					return;
-				}
-				handleCreateAll();
+				// 提交组合键交给浮窗宿主，避免先命中「新增下一项」。
 				return;
 			}
 			if (event.key === "Enter" && !event.shiftKey) {
@@ -1346,26 +1345,41 @@ export function TaskEditorDialog({
 				handleRemoveTask(index);
 			}
 		},
-		[handleAddTask, handleCreateAll, handleCreateAndStartAll, handleRemoveTask, taskPrompts],
+		[handleAddTask, handleRemoveTask, taskPrompts],
 	);
 
 	const setInputRef = useCallback((index: number, el: HTMLInputElement | null) => {
 		inputRefs.current[index] = el;
 	}, []);
 
+	const primaryActionDisabled =
+		!branchRef ||
+		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
+		isTaskCreationWaitingForRelationDraftHydration ||
+		isRelationAwareCreationInFlight;
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: () => (mode === "multi" ? handleCreateAll() : handleCreateSingle()),
+		disabled: primaryActionDisabled,
+	});
 	const handleEditorKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-		if (isKeyboardEventEmittedDuringImeComposition(event) || event.defaultPrevented || event.key !== "Enter") return;
-		if (!branchRef || !hasPromptDraftContent || isRelationAwareCreationInFlight) return;
+		handlePrimaryActionKeyDown(event);
+		if (isKeyboardEventEmittedDuringImeComposition(event)) {
+			event.stopPropagation();
+			return;
+		}
+		if (event.defaultPrevented || event.key !== "Enter") return;
+		if (!event.currentTarget.contains(event.target as Node)) return;
 		if (event.altKey && event.shiftKey && onCreateStartAndOpen && mode === "single") {
 			event.preventDefault();
+			event.stopPropagation();
+			if (event.repeat || primaryActionDisabled) return;
 			handleRunSingleStartAction("start_and_open");
-		} else if (event.metaKey || event.ctrlKey) {
+		} else if (!event.altKey && event.shiftKey && (event.metaKey || event.ctrlKey)) {
 			event.preventDefault();
-			if (mode === "multi") {
-				if (event.shiftKey) handleCreateAndStartAll();
-				else handleCreateAll();
-			} else if (event.shiftKey) handleRunSingleStartAction("start");
-			else handleCreateSingle();
+			event.stopPropagation();
+			if (event.repeat || primaryActionDisabled) return;
+			if (mode === "multi") handleCreateAndStartAll();
+			else handleRunSingleStartAction("start");
 		}
 	};
 
@@ -1911,8 +1925,6 @@ export function TaskEditorDialog({
 												onValueBlur={() => propagatePromptDraft(promptDraft)}
 												images={images}
 												onImagesChange={onImagesChange}
-												onSubmit={handleCreateSingle}
-												onSubmitAndStart={() => handleRunSingleStartAction("start")}
 												placeholder="描述要完成的任务…"
 												aria-label="任务正文"
 												minimumTextareaHeight={180}
@@ -2138,6 +2150,7 @@ export function TaskEditorDialog({
 								<Button
 									size="sm"
 									onClick={handleCreateSingle}
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 									disabled={
 										!hasPromptDraftContent ||
 										!branchRef ||
@@ -2226,7 +2239,12 @@ export function TaskEditorDialog({
 							</>
 						) : (
 							<>
-								<Button size="sm" onClick={handleCreateAll} disabled={validTaskCount === 0 || !branchRef}>
+								<Button
+									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+									size="sm"
+									onClick={handleCreateAll}
+									disabled={primaryActionDisabled}
+								>
 									<span className="inline-flex items-center">
 										Create {validTaskCount} {taskCountLabel}
 										<ButtonShortcut />

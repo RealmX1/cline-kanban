@@ -13,6 +13,10 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { KANBAN_FORK_GITHUB_ISSUES_URL } from "@/config/issue-reporting-urls";
+import {
+	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
+	useFormPrimaryActionSubmitKeyboardShortcut,
+} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 import type { TaskImage } from "@/types";
@@ -113,10 +117,15 @@ export function BugReportDialog({
 		}
 	}, [activeView, autoCreateTask, currentProject, description, devProject, images, onOpenChange, title]);
 
+	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
+		onSubmit: handleSubmit,
+		disabled: isSubmitting,
+	});
 	const submitLabel = canAutoCreateTask ? "Create bug task" : "Open GitHub issue";
 
 	return (
 		<Dialog
+			onKeyDown={handlePrimaryActionKeyDown}
 			open={open}
 			onOpenChange={(isOpen) => {
 				if (!isOpen && isSubmitting) {
@@ -158,9 +167,6 @@ export function BugReportDialog({
 						images={images}
 						onImagesChange={setImages}
 						workspaceId={devProject?.id ?? currentProject?.id}
-						onSubmit={() => {
-							if (!isSubmitting) void handleSubmit();
-						}}
 						placeholder={"复现步骤 / 期望结果 / 实际结果。\n可直接粘贴图片作为附件。"}
 					/>
 				</div>
@@ -191,7 +197,12 @@ export function BugReportDialog({
 				<Button variant="default" onClick={() => onOpenChange(false)} disabled={isSubmitting}>
 					Cancel
 				</Button>
-				<Button variant="primary" onClick={() => void handleSubmit()} disabled={isSubmitting}>
+				<Button
+					{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+					variant="primary"
+					onClick={() => void handleSubmit()}
+					disabled={isSubmitting}
+				>
 					{isSubmitting ? (
 						<>
 							<Spinner size={14} />

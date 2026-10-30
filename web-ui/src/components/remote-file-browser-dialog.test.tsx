@@ -49,6 +49,25 @@ function flushQuery() {
 /* ------------------------------------------------------------------ */
 
 describe("RemoteFileBrowserDialog", () => {
+	it("路径表单的组合键导航到输入路径，并阻止外层选择目录", async () => {
+		mockQuery.mockResolvedValue(makeResponse());
+		const onSelect = vi.fn();
+		renderDialog({ onSelect });
+		await flushQuery();
+		const input = document.querySelector<HTMLInputElement>('[aria-label="Directory path input"]')!;
+		await act(async () => {
+			Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "/srv/projects/app-a");
+			input.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () =>
+			input.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bubbles: true, cancelable: true }),
+			),
+		);
+		expect(mockQuery).toHaveBeenLastCalledWith({ path: "/srv/projects/app-a" });
+		expect(onSelect).not.toHaveBeenCalled();
+	});
+
 	let container: HTMLDivElement;
 	let root: Root;
 
