@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import {
 	type CodexConfigurationFields,
 	type CodexConfigurationFieldValue,
@@ -335,12 +336,27 @@ export function reuseConfirmedCodexHookTrust(
 ) {
 	const { keyPath } = configurationFieldAddress(fieldKey);
 	if (!field.definitionDigest || !keyPath.includes("state") || !configurationTable(field.value)) return field;
+	const hookSourceKey = keyPath.at(-1) ?? "";
 	const decision =
-		store.hookTrustDecisions[hookTrustDecisionIdentity(sourceIdentity, keyPath.at(-1) ?? "", field.definitionDigest)];
+		store.hookTrustDecisions[hookTrustDecisionIdentity(sourceIdentity, hookSourceKey, field.definitionDigest)];
 	if (!decision) return field;
+	if (decision.trustedHash !== null) {
+		// 内容事实缺失不能补造；插件及已有内容约束不能降为旧格式信任。
+		if (decision.trustedContentHash === undefined) return field;
+		if (
+			decision.trustedContentHash === null &&
+			(!isAbsolute(hookSourceKey) || typeof field.value.trusted_content_hash === "string")
+		)
+			return field;
+	}
 	const state = { ...field.value };
-	if (decision.trustedHash === null) delete state.trusted_hash;
-	else state.trusted_hash = decision.trustedHash;
+	if (decision.trustedHash === null) {
+		delete state.trusted_hash;
+		delete state.trusted_content_hash;
+	} else {
+		state.trusted_hash = decision.trustedHash;
+		if (typeof decision.trustedContentHash === "string") state.trusted_content_hash = decision.trustedContentHash;
+	}
 	return { ...field, value: state };
 }
 
@@ -362,13 +378,22 @@ export function shareObservedCodexHookTrust(
 		configurationTable(value?.value) && typeof value.value.trusted_hash === "string"
 			? value.value.trusted_hash
 			: null;
-	if (trustedHash === previousTrustedHash) return;
+	const previousTrustedContentHash =
+		configurationTable(previous?.value) && typeof previous.value.trusted_content_hash === "string"
+			? previous.value.trusted_content_hash
+			: null;
+	const trustedContentHash =
+		configurationTable(value?.value) && typeof value.value.trusted_content_hash === "string"
+			? value.value.trusted_content_hash
+			: null;
+	if (trustedHash === previousTrustedHash && trustedContentHash === previousTrustedContentHash) return;
 	store.hookTrustDecisions[hookTrustDecisionIdentity(writer.binding.sourceIdentity, hookSourceKey, definitionDigest)] =
 		{
 			sourceIdentity: writer.binding.sourceIdentity,
 			hookSourceKey,
 			definitionDigest,
 			trustedHash,
+			trustedContentHash,
 			version: ++store.revision,
 		};
 	for (const profile of Object.values(store.profiles)) {

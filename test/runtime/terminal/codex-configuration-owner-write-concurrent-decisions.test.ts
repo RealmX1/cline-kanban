@@ -45,6 +45,8 @@ beforeEach(async () => {
 	fixtureDirectory.path = await realpath(fixtureDirectory.path);
 	vi.stubEnv("HOME", fixtureDirectory.path);
 	sourceHomeDirectoryPath = join(fixtureDirectory.path, ".codex");
+	vi.stubEnv("CODEX_HOME", sourceHomeDirectoryPath);
+	vi.stubEnv("CODEX_SQLITE_HOME", sourceHomeDirectoryPath);
 	await mkdir(sourceHomeDirectoryPath);
 	await writeFile(
 		join(sourceHomeDirectoryPath, "hooks.json"),
@@ -270,7 +272,7 @@ function expectHookDecision(configuration: TomlTable, binding: CodexConfiguratio
 
 describe("原所有者写入窗口中的并发配置决定", () => {
 	it.each([
-		["hooks/list", "before"],
+		["thread/loaded/list", "before"],
 		["config/read", "before"],
 		["config/read", "after"],
 	] as const)("%s 的 %s 门闩之后保留目标同字段新决定并留下冲突证据", async (method, phase) => {
@@ -295,7 +297,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		]);
 	});
 	it("来源和目标在预检窗口修改不同字段时仍保留两边字段并采用 hook 决定", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { sourceWriter, targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;
@@ -324,7 +326,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		});
 	});
 	it("目标在预检期间已经保存同一决定时只补原所有者重载", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;
@@ -339,7 +341,7 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(result.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("applied");
 	});
 	it("提交前重新观察来源同字段新决定，停止尚未提交的旧传播", async () => {
-		const barrier = createNativeRequestBarrier("hooks/list");
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
 		const { sourceWriter, targetWriter, owner, service, change, request } = await prepareSourceDecision({ barrier });
 		const synchronization = service.synchronize(request);
 		await barrier.reached;

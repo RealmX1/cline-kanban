@@ -82,7 +82,7 @@ export function migrateCodexConfigurationApprovalRecords(store: CodexConfigurati
 }
 
 function describeDifferenceValue(value: unknown, fieldName?: string) {
-	if (fieldName === "trusted_hash")
+	if (fieldName === "trusted_hash" || fieldName === "trusted_content_hash")
 		return typeof value === "string"
 			? `已保存信任决定（摘要 ${configurationDigest(value).slice(0, 10)}）`
 			: "未保存信任决定";
@@ -112,7 +112,14 @@ export function describeCodexConfigurationSettingDifferences(
 		return [...new Set([...Object.keys(previousValue), ...Object.keys(currentValue)])]
 			.filter((key) => !isDeepStrictEqual(previousValue[key], currentValue[key]))
 			.map((key) => ({
-				label: key === "enabled" ? "启用状态" : key === "trusted_hash" ? "信任绑定" : key,
+				label:
+					key === "enabled"
+						? "启用状态"
+						: key === "trusted_hash"
+							? "信任绑定"
+							: key === "trusted_content_hash"
+								? "内容信任绑定"
+								: key,
 				previous: describeDifferenceValue(previousValue[key], key),
 				current: describeDifferenceValue(currentValue[key], key),
 			}));
