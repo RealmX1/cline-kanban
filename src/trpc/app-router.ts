@@ -910,6 +910,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTerminalInputBoxStashRequest,
 		) => Promise<RuntimeTerminalInputBoxStashResponse>;
+		getTerminalInputBoxStashOperationStatus: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string; operationId: string },
+		) => Promise<RuntimeTerminalInputBoxStashResponse>;
 		reloadTaskChatSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatReloadRequest,
@@ -2196,6 +2200,16 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
 		}),
+	getTerminalInputBoxStashOperationStatus: workspaceProcedure
+		.input(
+			runtimeTerminalInputBoxStashRequestSchema
+				.required({ operationId: true })
+				.pick({ taskId: true, operationId: true }),
+		)
+		.output(runtimeTerminalInputBoxStashResponseSchema)
+		.query(async ({ ctx, input }) =>
+			ctx.runtimeApi.getTerminalInputBoxStashOperationStatus(ctx.workspaceScope, input),
+		),
 	abortTaskChatTurn: workspaceProcedure
 		.input(runtimeTaskChatAbortRequestSchema)
 		.output(runtimeTaskChatAbortResponseSchema)

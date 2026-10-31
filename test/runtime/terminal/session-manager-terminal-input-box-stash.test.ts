@@ -12,11 +12,27 @@
 //   - 同一 task 的暂存串行化落在 manager（per-workspace 长驻）而不是调用方：连按 / 多标签页并发不得让
 //     同一份正文入库两次。
 
+import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { readWorkspacePromptLibrarySnapshot } from "../../../src/state/prompt-library-store";
+import {
+	getCodexDraftStashOperationDirectory,
+	prepareCodexDraftStashEditorBridge,
+	readCodexDraftEditorReservation,
+	reserveCodexDraftEditorInvocation,
+	runCodexDraftStashEditorInvocation,
+	writeCodexDraftStashJsonDurably,
+} from "../../../src/terminal/codex-draft-stash-editor-bridge";
+import { createIdleHarnessBackgroundSessionReclaimWatchState } from "../../../src/terminal/harness-background-session-reclaim-watch-after-unsafe-resume-refusal";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { stashTaskTerminalInputBoxIntoPromptLibrary } from "../../../src/terminal/stash-task-terminal-input-box-into-prompt-library";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
+import type { TerminalScreenSnapshot } from "../../../src/terminal/terminal-input-box-reader";
 
 const BOX_COLUMN_COUNT = 60;
 const BOX_BOUNDARY_LINE = "─".repeat(BOX_COLUMN_COUNT);
@@ -90,6 +106,7 @@ function injectClaudeEntryWithScreen(
 		},
 		listenerIdCounter: 1,
 		listeners: new Map(),
+		harnessBackgroundSessionReclaimWatchState: createIdleHarnessBackgroundSessionReclaimWatchState(),
 	};
 	(manager as unknown as { entries: Map<string, typeof entry> }).entries.set("task-1", entry);
 	return { writeSpy, trackerState };
@@ -226,6 +243,209 @@ describe("captureTaskTerminalInputBoxContentForPromptLibraryStash", () => {
 });
 
 describe("forwardStashKeyToClearTaskTerminalInputBox", () => {
+	it("Codex 暂存期间抵达的输入保存在持久文件，清框确认后回放；人工 Ctrl+G 单独归属", async () => {
+		const isolatedHome = mkdtempSync(join(tmpdir(), "codex-manager-stash-"));
+		vi.stubEnv("HOME", isolatedHome);
+		const manager = new TerminalSessionManager({ automaticFailureContinuationWorkspaceId: "workspace-stash" });
+		try {
+			const bridge = await prepareCodexDraftStashEditorBridge({
+				workspaceId: "workspace-stash",
+				conversationSessionId: "task-1",
+				runtimeSessionIncarnationId: randomUUID(),
+				environment: {},
+			});
+			const nativeEditorFilePath = join(isolatedHome, "native-editor.md");
+			const draft = "  导出原稿 😀\n尾部空白  \n\n";
+			writeFileSync(nativeEditorFilePath, draft);
+			const { writeSpy, trackerState } = injectClaudeEntryWithScreen(manager, []);
+			const entry = (
+				manager as unknown as {
+					entries: Map<
+						string,
+						{
+							summary: RuntimeTaskSessionSummary;
+							active: { ptyOutputChunkArrivalSequenceNumber: number };
+							terminalStateMirror: { getScreenSnapshot: () => Promise<TerminalScreenSnapshot> };
+						}
+					>;
+				}
+			).entries.get("task-1");
+			if (!entry) throw new Error("缺少测试会话");
+			entry.summary.agentId = "codex";
+			entry.summary.runtimeSessionIncarnationId = bridge.runtimeSessionIncarnationId;
+			entry.active.ptyOutputChunkArrivalSequenceNumber = 0;
+			entry.terminalStateMirror.getScreenSnapshot = async () => {
+				const text = readFileSync(nativeEditorFilePath, "utf8");
+				return {
+					columnCount: 60,
+					cursorRow: 0,
+					cursorColumn: text ? 8 : 2,
+					lines: [
+						{
+							text: `› ${text ? "原稿" : "Ask Codex to do anything"}`,
+							isWrapped: false,
+							dimmedTextColumnRanges: text ? [] : [[2, 60]],
+						},
+					],
+				};
+			};
+			manager.writeInput("task-1", Buffer.from(draft));
+			writeSpy.mockClear();
+			let editorCompletion: Promise<number> | undefined;
+			writeSpy.mockImplementation((bytes: Buffer) => {
+				if (bytes.length !== 1 || bytes[0] !== 0x07) return;
+				editorCompletion = runCodexDraftStashEditorInvocation(bridge.directoryPath, nativeEditorFilePath).then(
+					(code) => {
+						entry.active.ptyOutputChunkArrivalSequenceNumber += 1;
+						entry.summary.lastOutputAt = Date.now();
+						return code;
+					},
+				);
+				manager.writeInput("task-1", Buffer.from("稍后继续输入"));
+			});
+			const response = await stashTaskTerminalInputBoxIntoPromptLibrary(
+				{ getTerminalSessionManagerForWorkspace: async () => manager },
+				{
+					workspaceId: "workspace-stash",
+					taskId: "task-1",
+					scope: "task",
+					initiatedBy: "human_pressed_stash_key_in_terminal",
+					operationId: randomUUID(),
+				},
+			);
+			expect(response.outcome).toBe("stashed_into_prompt_library");
+			expect(await editorCompletion).toBe(0);
+			expect(writeSpy.mock.calls.map(([bytes]) => Buffer.from(bytes).toString())).toEqual([
+				"\u0007",
+				"稍后继续输入",
+			]);
+			expect(trackerState.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+			expect(
+				(await readWorkspacePromptLibrarySnapshot("workspace-stash")).taskScopedPromptsByTaskId["task-1"]?.map(
+					(prompt) => prompt.text,
+				),
+			).toEqual([draft]);
+			writeSpy.mockImplementation(() => {});
+			manager.writeInput("task-1", Buffer.from("\u0007"));
+			expect(readCodexDraftEditorReservation(bridge)?.origin).toBe("manual");
+		} finally {
+			manager.dispose();
+			vi.unstubAllEnvs();
+			rmSync(isolatedHome, { recursive: true, force: true });
+		}
+	});
+
+	async function preparePersistentRecoveryFixture(manager: TerminalSessionManager) {
+		const bridge = await prepareCodexDraftStashEditorBridge({
+			workspaceId: "workspace-stash",
+			conversationSessionId: "task-1",
+			runtimeSessionIncarnationId: randomUUID(),
+			environment: {},
+		});
+		const createdAtMs = Date.now();
+		const operation = {
+			workspaceId: bridge.workspaceId,
+			conversationSessionId: bridge.conversationSessionId,
+			runtimeSessionIncarnationId: bridge.runtimeSessionIncarnationId,
+			taskId: "task-1",
+			operationId: randomUUID(),
+			promptId: randomUUID(),
+			createdAtMs,
+			captureDeadlineAtMs: createdAtMs + 10_000,
+			writeDeadlineAtMs: createdAtMs + 20_000,
+		};
+		const directoryPath = getCodexDraftStashOperationDirectory(bridge.workspaceId, operation.operationId);
+		mkdirSync(directoryPath, { recursive: true });
+		expect(reserveCodexDraftEditorInvocation(bridge, { origin: "stash", operation })).toBe(true);
+		writeCodexDraftStashJsonDurably(join(bridge.directoryPath, "most-recent-stash-operation.json"), operation);
+		writeCodexDraftStashJsonDurably(join(directoryPath, "editor-finished.json"), {
+			exitCode: 0,
+			finishedAtMs: Date.now(),
+		});
+		writeCodexDraftStashJsonDurably(join(directoryPath, "input-box-clear-confirmed.json"), {
+			confirmedAtMs: Date.now(),
+		});
+		const { writeSpy } = injectClaudeEntryWithScreen(manager, []);
+		const entry = (
+			manager as unknown as { entries: Map<string, { summary: RuntimeTaskSessionSummary }> }
+		).entries.get("task-1");
+		if (!entry) throw new Error("缺少测试会话");
+		entry.summary.agentId = "codex";
+		entry.summary.runtimeSessionIncarnationId = bridge.runtimeSessionIncarnationId;
+		return { bridge, directoryPath, entry, writeSpy };
+	}
+
+	async function resumePersistentRecovery(manager: TerminalSessionManager): Promise<void> {
+		await (
+			manager as unknown as { resumeCodexDraftStashRetainedInput: (taskId: string) => Promise<void> }
+		).resumeCodexDraftStashRetainedInput("task-1");
+	}
+
+	it("清框证据已持久化但预约未释放时，恢复仍释放预约并回放保留输入", async () => {
+		const isolatedHome = mkdtempSync(join(tmpdir(), "codex-manager-recovery-"));
+		vi.stubEnv("HOME", isolatedHome);
+		const manager = new TerminalSessionManager({ automaticFailureContinuationWorkspaceId: "workspace-stash" });
+		try {
+			const { bridge, directoryPath, writeSpy } = await preparePersistentRecoveryFixture(manager);
+			writeFileSync(join(directoryPath, "terminal-input-retained.bin"), "恢复期间输入");
+
+			await resumePersistentRecovery(manager);
+
+			expect(readCodexDraftEditorReservation(bridge)).toBeNull();
+			expect(writeSpy).toHaveBeenCalledWith(Buffer.from("恢复期间输入"));
+			expect(readFileSync(join(directoryPath, "terminal-input-replayed.bin"), "utf8")).toBe("恢复期间输入");
+			expect(
+				(manager as unknown as { codexDraftStashRecoveryTaskIds: Set<string> }).codexDraftStashRecoveryTaskIds.has(
+					"task-1",
+				),
+			).toBe(false);
+		} finally {
+			manager.dispose();
+			vi.unstubAllEnvs();
+			rmSync(isolatedHome, { recursive: true, force: true });
+		}
+	});
+
+	it("只剩回放开始标记时保留未知状态并提示核对，绝不重复写入", async () => {
+		const isolatedHome = mkdtempSync(join(tmpdir(), "codex-manager-recovery-"));
+		vi.stubEnv("HOME", isolatedHome);
+		const manager = new TerminalSessionManager({ automaticFailureContinuationWorkspaceId: "workspace-stash" });
+		try {
+			const { directoryPath, entry, writeSpy } = await preparePersistentRecoveryFixture(manager);
+			const replayStartedPath = join(directoryPath, "terminal-input-replay-may-have-started.bin");
+			writeFileSync(replayStartedPath, "可能已写入的输入");
+
+			await resumePersistentRecovery(manager);
+
+			expect(writeSpy).not.toHaveBeenCalled();
+			expect(entry.summary.warningMessage).toContain(replayStartedPath);
+			expect(readFileSync(replayStartedPath, "utf8")).toBe("可能已写入的输入");
+			expect(
+				(manager as unknown as { codexDraftStashRecoveryTaskIds: Set<string> }).codexDraftStashRecoveryTaskIds.has(
+					"task-1",
+				),
+			).toBe(true);
+		} finally {
+			manager.dispose();
+			vi.unstubAllEnvs();
+			rmSync(isolatedHome, { recursive: true, force: true });
+		}
+	});
+
+	it("旧 Codex 会话不支持 Ctrl+S：不转发无效按键，也不重置未提交草稿跟踪", () => {
+		const manager = new TerminalSessionManager();
+		const { writeSpy, trackerState } = injectClaudeEntryWithScreen(manager, buildInputBoxScreen("保留原稿"));
+		manager.writeInput("task-1", Buffer.from("保留原稿"));
+		const entry = (
+			manager as unknown as { entries: Map<string, { summary: RuntimeTaskSessionSummary }> }
+		).entries.get("task-1");
+		if (!entry) throw new Error("缺少测试会话");
+		entry.summary.agentId = "codex";
+		writeSpy.mockClear();
+		expect(manager.forwardStashKeyToClearTaskTerminalInputBox("task-1", "incarnation-1")).toBe(false);
+		expect(writeSpy).not.toHaveBeenCalled();
+		expect(trackerState.hasUncommittedInputFromInputSideByteTracking).toBe(true);
+	});
 	it("把 Ctrl+S 字节转发给 agent，并把输入侧当前组合归零", () => {
 		const manager = new TerminalSessionManager();
 		const { writeSpy, trackerState } = injectClaudeEntryWithScreen(manager, buildInputBoxScreen("待暂存的内容"));
