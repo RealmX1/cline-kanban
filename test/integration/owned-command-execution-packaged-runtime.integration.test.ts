@@ -81,6 +81,7 @@ it.skipIf(!cli)(
 					launchAttemptCount: number;
 					revokedAtEpochMs: number | null;
 					businessDisposition: string | null;
+					specification: { readOnlyRecoveryEvidenceObservationCommand?: string[] };
 				};
 			};
 		};
@@ -168,11 +169,17 @@ it.skipIf(!cli)(
 				"-e",
 				`require('node:fs').writeFileSync(${JSON.stringify(resultFile)},JSON.stringify({disposition:'machine_evidence_pending',recovery:{trigger:'fixture_changed',action:'resume_same_run',maximum_unchanged_retries:1}}))`,
 			];
+			const readOnlyRecoveryEvidenceObservationCommand = [
+				process.execPath,
+				"-e",
+				`process.stdout.write(JSON.stringify({evidenceSha256:'${"b".repeat(64)}'}))`,
+			];
 			writeFileSync(
 				specificationFile,
 				JSON.stringify({
 					command,
 					resumeCommand: command,
+					readOnlyRecoveryEvidenceObservationCommand,
 					workingDirectory: project.repositoryPath,
 					resultFile,
 					materialSha256: "a".repeat(64),
@@ -196,6 +203,9 @@ it.skipIf(!cli)(
 			const second = await runCli(startArguments);
 			expect(first.execution?.executionId).toBe(second.execution?.executionId);
 			expect(second.execution?.launchAttemptCount).toBe(1);
+			expect(second.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toEqual(
+				readOnlyRecoveryEvidenceObservationCommand,
+			);
 			const executionId = first.execution?.executionId;
 			if (!executionId) throw new Error("所属执行未受理");
 			const cancelled = await runCli([
@@ -226,6 +236,9 @@ it.skipIf(!cli)(
 			]);
 			expect(restored.execution?.businessDisposition).toBe("cancelled");
 			expect(restored.execution?.launchAttemptCount).toBe(1);
+			expect(restored.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toEqual(
+				readOnlyRecoveryEvidenceObservationCommand,
+			);
 			writeFileSync(
 				join(artifacts, "packaged-command-execution-receipts.json"),
 				JSON.stringify({ first, second, cancelled, restored }, null, 2),
