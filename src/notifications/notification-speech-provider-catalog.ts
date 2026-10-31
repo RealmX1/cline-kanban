@@ -4,8 +4,7 @@ import type {
 } from "../core/notification-intelligence-settings-contract";
 
 // 只列已核对接口和音色的模型；添加模型必须同时补充适配契约测试。
-// 推荐依据（2026-10）：qwen-audio-3.0-tts-plus 是百炼推荐表首位，双语音色、支持 SSML 与 instruction，
-// 官方难读文本基准中文 68.7% / 英文 65.7%（qwen3-tts-flash 为 57.0% / 60.5%）。
+// 3.1 Plus 的配套音色和 HTTP 参数已按官方文档核对；推荐标记不迁移用户已保存的模型与音色。
 export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 	{
 		modelId: "hexgrad/Kokoro-82M",
@@ -17,8 +16,17 @@ export const NOTIFICATION_SPEECH_MODEL_CATALOG = [
 		pitch: false,
 	},
 	{
-		modelId: "qwen-audio-3.0-tts-plus",
+		modelId: "qwen-audio-3.1-tts-plus",
 		isRecommendedForCodingAgentNotificationSpeech: true,
+		provider: "alibaba",
+		voices: ["longanlingxin_v3.1", "xunanchuan_v3.1", "longanhuan_v3.1", "longanfengyue_v3.1"],
+		instructions: true,
+		speed: true,
+		pitch: true,
+	},
+	{
+		modelId: "qwen-audio-3.0-tts-plus",
+		isRecommendedForCodingAgentNotificationSpeech: false,
 		provider: "alibaba",
 		voices: ["longanlingxin", "longanlufeng"],
 		instructions: true,

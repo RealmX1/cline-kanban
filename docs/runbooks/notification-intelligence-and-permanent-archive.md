@@ -60,18 +60,26 @@
 
 任务起名、通知评估和语音合成是三个用途绑定。前两者使用 OpenAI-compatible 文本协议；第三者使用各 provider 原生 TTS 协议，不把音频服务硬塞进聊天接口。
 
-| 来源 | 首批模型与能力 | 限制 |
+| 来源 | 模型与能力 | 限制 |
 | --- | --- | --- |
 | 浏览器系统语音 | 当前设备音色、语言、语速、音调、音量 | 浏览器支持和用户激活限制；没有音频导出，历史记录这一事实 |
 | DeepInfra | `hexgrad/Kokoro-82M`；核对过的中英文音色、语速 | 音色必须匹配语言，无风格指令；WAV/base64 原生接口 |
-| 阿里 | **`qwen-audio-3.0-tts-plus`（推荐）**/`flash`；音色、语速、音调、风格 | Audio HTTP 接口仅北京；与 Qwen3 接口分离 |
+| 阿里 | **`qwen-audio-3.1-tts-plus`（推荐）**；保留 `qwen-audio-3.0-tts-plus`、`qwen-audio-3.0-tts-flash`；音色、语速、音调、风格 | 当前适配仅支持北京；Audio HTTP 接口与 Qwen3 接口分离 |
 | 阿里 | `qwen3-tts-flash`、`qwen3-tts-instruct-flash` | 后者支持风格指令；地域与 workspace 配置显式保存 |
 
-**模型推荐（2026-10 调研）**：coding agent 通知是中英混读、夹带技术名词的场景，推荐 `qwen-audio-3.0-tts-plus` + 双语音色 `longanlingxin`（女）/`longanlufeng`（男）。它是百炼推荐表首位，支持 SSML 与 instruction，官方难读文本基准中文 68.7%、英文 65.7%、中文「代码」类 89.7%；`qwen3-tts-flash` 无发音控制，官方 FAQ 承认可能把符号念出来，同一基准 57.0%/60.5%。价格约 ¥1.4 对 ¥0.8 每万字符，单条播报约 150 字。`qwen-audio-3.1-tts-flash` 没有中英混读音色，不收录；`qwen-tts`、`cosyvoice-v1` 将于 2026-10-10 退役。设置页模型下拉框给推荐模型标「（推荐）」，目录字段为 `isRecommendedForCodingAgentNotificationSpeech`。
+**模型推荐（2026-10-30 更新）**：通知播报推荐 `qwen-audio-3.1-tts-plus`，本次选用龙安灵心女声 `longanlingxin_v3.1`。目录同时收录官方配套的许南川 `xunanchuan_v3.1`、龙安欢 `longanhuan_v3.1`、龙安风悦 `longanfengyue_v3.1`。3.1 Plus 复用 Audio HTTP 的 `input.voice`、`language_hints`、`format=wav`、`sample_rate=24000`、`rate`、`pitch` 与单数 `instruction`；不能混用 Qwen3 的 `Cherry` 或 3.0 的 `longanlingxin`。3.0 与 Qwen3 模型及其原音色继续保留。设置页从同一目录读取模型、能力和音色，推荐字段仍为 `isRecommendedForCodingAgentNotificationSpeech`，不会据此改写用户配置。
+
+### 切换已有运行实例
+
+先通过运行实例的 `notificationIntelligence.speechModels` 确认已包含 `qwen-audio-3.1-tts-plus` 与 `longanlingxin_v3.1`。源码目录更新不代表运行实例已更新；不支持新模型时保留原配置，等待包含该支持的版本部署。本任务不自动部署。
+
+运行实例具备支持后，使用当前 TTS Provider 和地域，以新模型、所选音色及原语速/音调对一条短文本做一次真实合成，并验证下载结果是有效 PCM WAV；失败或结果不确定时不保存新配置、不自动重试。成功后重新读取 `notificationIntelligence.getSettings`，仅替换 `notificationSpeechBinding.modelId` 和 `speechVoice`，通过现有 `notificationIntelligence.saveSettings` 保存，保留 Provider 绑定和其余设置。设置页的试听使用已保存配置，不能用「先保存再试听」替代此预检。
+
+切换后以设置回读和后续通知生命周期中的 `speech_synthesis_requested` / `speech_synthesis_completed` 核对实际模型与音色，读取已留档音频验证 WAV。只读部署后验证仅观察这些事实，不改配置、不请求付费合成、不调用重新合成。
 
 ### 播报文本适配：先导 + 停顿 + 口语化正文
 
-任何模型在难读文本上都会错约三分之一，所以无论选哪个模型，送进 TTS 的文本都先经过以下三层适配：
+技术通知包含路径、符号和中英混读，送进 TTS 的文本都先经过以下三层适配：
 
 1. **AI 摘要分两份**（`notification-assessment-service.ts`，`promptVersion: 2`）：`summaryText` 给面板看，路径一律写仓库相对路径；新增可选的 `spokenSummaryText` 专为朗读而写，1–2 句、中文 ≤100 字，不写路径、行号、哈希、URL、markdown 和符号，名字非说不可时用反引号包一次（这是给规整器的内部标记，本身不会送进 TTS——括号进 TTS 要么被念出来要么无效）。模型漏给或给错类型时回退 `summaryText`，不会让评估失败。落档为 candidate 字段 `spokenSummaryTextForNotificationSpeech`；延期兜底发布时清空，避免念出与兜底文案矛盾的「还在等」。
 2. **确定性规整器**（`notification-speech-technical-text-to-spoken-form.ts`）：所有路径都经过，用于 AI 评估关闭或失败、延期兜底文案，以及 LLM 漏网的符号。
@@ -84,7 +92,7 @@
    - Y 从卡片标题确定性派生：去掉 `[TAG]` 前缀，截到第一个分句，再用 `Intl.Segmenter` 在词边界截到约 20 个汉字；没有真实标题时念任务 ID。不交给 LLM 起名，保证同一任务每次念得一样。
    - 脚本在 `publish()` 定稿，落档为 candidate 字段 `notificationSpeechAnnouncementScript`；旧记录在合成前现场组装。
    - 第三方 TTS：先导和正文分两次并行请求（统一要 WAV），服务端用 `notification-speech-pcm-wav-segment-join.ts` 拼成一个 WAV，中间插入 1200 ms 静音（两段各自还有首尾留白，听感约 1.5 秒）。档案、重放、重新合成链路不变；任一段失败即整体失败、不自动重试。
-   - 不用 SSML `<break>` 的原因：`qwen3-tts-flash` 和 Kokoro 不支持，qwen-audio 内置音色是否支持也没有官方确认。
+   - 统一用 PCM 静音拼接：`qwen3-tts-flash` 和 Kokoro 不支持 SSML；3.1 Plus 配套音色虽支持 SSML，仍沿用跨 Provider 的同一停顿链路。
    - DashScope qwen3-tts 返回的是流式 WAV，RIFF 与 data 的长度字段是占位值，拼接时以实际字节为准。
    - 浏览器系统语音：推流消息带上 `notificationSpeechAnnouncementScript`，前端先念先导，`setTimeout` 1500 ms 后再念正文。
    - 试听样例故意带文件路径、行号范围和哈希，一次就能听到先导、停顿和规整效果。
@@ -103,4 +111,4 @@
 
 真实系统音色、系统凭据库授权弹窗和用户账户上的第三方模型可用性仍需部署后的设备/账户验证；测试不使用真实付费密钥。不能把请求构造测试或模拟音频当作听感、provider 账户权限验证。
 
-来源：[DeepInfra Kokoro API](https://deepinfra.com/hexgrad/Kokoro-82M/api)、[阿里 Audio HTTP API](https://help.aliyun.com/zh/model-studio/cosyvoice-tts-http-api)、[Qwen TTS API](https://help.aliyun.com/zh/model-studio/qwen-tts-api)、[Audio 音色列表](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-voice-list)。
+来源：[DeepInfra Kokoro API](https://deepinfra.com/hexgrad/Kokoro-82M/api)、[Qwen-Audio HTTP API](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-http-api)、[Qwen TTS API](https://help.aliyun.com/zh/model-studio/qwen-tts-api)、[Audio 音色列表](https://help.aliyun.com/zh/model-studio/qwen-audio-tts-voice-list)。
