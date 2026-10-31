@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -556,6 +557,103 @@ describe("所属执行与一次逻辑交回", () => {
 		} finally {
 			clock.mockRestore();
 		}
+	});
+
+	it.each(["semantic_change", "changing_failure_text"])(
+		"只读恢复观察 %s 仅在稳定语义变化后重新取得有界预算",
+		async (scenario) => {
+			const { service, request, launch, inspectWorker } = fixture();
+			inspectWorker.mockResolvedValue("exited");
+			const observationFile = join(directory, "stable-observation.json");
+			await writeFile(observationFile, JSON.stringify({ evidenceSha256: "b".repeat(64) }));
+			const observationCommand = [
+				process.execPath,
+				"-e",
+				scenario === "semantic_change"
+					? `process.stdout.write(JSON.stringify({...JSON.parse(require('node:fs').readFileSync(${JSON.stringify(observationFile)},'utf8')),sampledAt:Date.now(),nonce:Math.random()}))`
+					: `process.stderr.write(require('node:fs').readFileSync(${JSON.stringify(observationFile)},'utf8'));process.exitCode=2`,
+			];
+			const record = await service.start("workspace", {
+				...request,
+				specification: { ...request.specification, readOnlyRecoveryEvidenceObservationCommand: observationCommand },
+			});
+			await writeFile(
+				request.specification.resultFile,
+				JSON.stringify({
+					disposition: "machine_evidence_pending",
+					recovery: { action: "resume_same_run", maximum_unchanged_retries: 1 },
+				}),
+			);
+			let now = Date.now();
+			const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+			try {
+				await service.sweepExecution("workspace", record.executionId);
+				now += 30_001;
+				await service.sweepExecution("workspace", record.executionId);
+				expect(launch).toHaveBeenCalledTimes(2);
+				now += 30_001;
+				await service.sweepExecution("workspace", record.executionId);
+				expect(launch).toHaveBeenCalledTimes(2);
+				await writeFile(observationFile, JSON.stringify({ evidenceSha256: "c".repeat(64) }));
+				now += 30_001;
+				await service.sweepExecution("workspace", record.executionId);
+				expect(launch).toHaveBeenCalledTimes(scenario === "semantic_change" ? 3 : 2);
+				await service.cancel("workspace", record);
+				now += 30_001;
+				await service.sweepExecution("workspace", record.executionId);
+				expect(launch).toHaveBeenCalledTimes(scenario === "semantic_change" ? 3 : 2);
+			} finally {
+				clock.mockRestore();
+			}
+		},
+	);
+
+	it("Stop 会终止在途只读观察，不继续派发业务恢复", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const startedFile = join(directory, "read-only-observation-started.txt");
+		const descendantProcessIdentityFile = join(directory, "read-only-observation-descendant-process.txt");
+		const record = await service.start("workspace", {
+			...request,
+			specification: {
+				...request.specification,
+				readOnlyRecoveryEvidenceObservationCommand: [
+					process.execPath,
+					"-e",
+					`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(`require('node:fs').writeFileSync(${JSON.stringify(descendantProcessIdentityFile)},String(process.pid));setTimeout(()=>{},20000)`)}],{stdio:['ignore','inherit','inherit']});require('node:fs').writeFileSync(${JSON.stringify(startedFile)},'started');setTimeout(()=>{},20000)`,
+				],
+			},
+		});
+		await writeFile(
+			request.specification.resultFile,
+			JSON.stringify({ disposition: "machine_evidence_pending", recovery: { action: "resume_same_run" } }),
+		);
+		const sweep = service.sweepExecution("workspace", record.executionId).catch(() => undefined);
+		await vi.waitFor(async () => expect(await readFile(startedFile, "utf8")).toBe("started"));
+		let descendantProcessId = 0;
+		await vi.waitFor(async () => {
+			descendantProcessId = Number(await readFile(descendantProcessIdentityFile, "utf8"));
+			expect(descendantProcessId).toBeGreaterThan(0);
+		});
+		await service.cancel("workspace", record);
+		await sweep;
+		await vi.waitFor(
+			() => {
+				try {
+					const status = execFileSync("ps", ["-p", String(descendantProcessId), "-o", "stat="], {
+						encoding: "utf8",
+						stdio: ["ignore", "pipe", "ignore"],
+					}).trim();
+					// kill(pid, 0) 对已结束、尚待宿主收尸的 zombie 也成功；原生 Z 状态已不能继续观察或产生副作用。
+					expect(status).toMatch(/^Z/u);
+				} catch (error) {
+					if (!(error instanceof Error && "status" in error && error.status === 1)) throw error;
+				}
+			},
+			{ timeout: 5_000 },
+		);
+		expect(launch).toHaveBeenCalledTimes(1);
+		expect((await service.inspect("workspace", record)).businessDisposition).toBe("cancelled");
 	});
 
 	it("原生主会话变化只暂停结果交回，机器进度和恢复继续", async () => {
