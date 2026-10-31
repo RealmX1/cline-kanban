@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { captureCodexConfigurationChangePresentationEvidence } from "./codex-configuration-change-presentation";
 import {
 	type CodexConfigurationFields,
 	configurationTable,
@@ -192,6 +193,7 @@ function registerObservedChange(
 	store: CodexConfigurationSyncStore,
 	change: CodexConfigurationSyncStore["changes"][number],
 ) {
+	captureCodexConfigurationChangePresentationEvidence(store, change);
 	if (hasOnlyCodexConfigurationDefinitionChange(change)) {
 		change.recordKind = "source_observation";
 		change.approvalStatus = "not_required";

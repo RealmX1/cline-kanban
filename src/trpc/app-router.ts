@@ -482,6 +482,8 @@ import {
 	type CodexConfigurationSyncApi,
 	codexConfigurationBatchActionRequestSchema,
 	codexConfigurationBatchActionResultSchema,
+	codexConfigurationChangeDetailsRequestSchema,
+	codexConfigurationChangeDetailsSchema,
 	codexConfigurationChangeMutationRequestSchema,
 	codexConfigurationProfileMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
@@ -1887,6 +1889,13 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 			return ctx.codexConfigurationSyncApi.getState();
 		}),
 	mutateCodexConfigurationProfile: codexConfigurationProfileMutationProcedure,
+	getCodexConfigurationChangeDetails: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationChangeDetailsRequestSchema)
+		.output(codexConfigurationChangeDetailsSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getChangeDetails(input);
+		}),
 	batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(codexConfigurationBatchActionRequestSchema)
 		.output(codexConfigurationBatchActionResultSchema)
