@@ -2,6 +2,10 @@ import { lstat, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
+	captureCodexConfigurationConflictPresentationEvidence,
+	currentCodexConfigurationSharedValueDigest,
+} from "./codex-configuration-change-presentation";
+import {
 	type CodexConfigurationFields,
 	configurationFieldAddress,
 	projectCodexConfigurationFields,
@@ -81,6 +85,7 @@ export async function approveStoredCodexConfigurationProposal(
 	store: CodexConfigurationSyncStore,
 	change: StoredCodexConfigurationChange,
 	resolveSharedConflict = false,
+	expectedSharedValueDigest?: string,
 ) {
 	expireCodexConfigurationProfileFeedbackSuggestions(store);
 	if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
@@ -89,14 +94,32 @@ export async function approveStoredCodexConfigurationProposal(
 	if (!source) throw new CodexConfigurationApprovalError("source_unverifiable", "配置来源绑定缺失，恢复后可重试。");
 	const sharedFields = codexConfigurationChangeSharedFields(store, change) ?? source.fields;
 	const shared = sharedFields[change.fieldKey];
+	const feedbackFields = { ...(change.relatedFields ?? { [change.fieldKey]: change.value }) };
+	for (const fieldKey of change.relatedDeletedFieldKeys ?? []) feedbackFields[fieldKey] = undefined;
+	const relatedSharedFieldChanged =
+		!resolveSharedConflict &&
+		change.codexConfigurationProfileId !== undefined &&
+		change.exceptionGroup !== undefined &&
+		Object.entries(feedbackFields).some(
+			([fieldKey, value]) =>
+				fieldKey !== change.fieldKey &&
+				!sameConfigurationField(sharedFields[fieldKey], value) &&
+				!sameConfigurationField(sharedFields[fieldKey], change.sharedFieldsAtObservation?.[fieldKey]),
+		);
 	if (
-		!sameConfigurationField(shared, change.value) &&
-		(resolveSharedConflict
-			? !sameConfigurationField(shared, change.sharedValueAtConflict)
-			: change.mergeStatus === "conflict" || !sameConfigurationField(shared, change.sharedValueAtProposal))
+		relatedSharedFieldChanged ||
+		(!sameConfigurationField(shared, change.value) &&
+			(resolveSharedConflict
+				? expectedSharedValueDigest !== undefined
+					? currentCodexConfigurationSharedValueDigest(store, change) !== expectedSharedValueDigest
+					: !sameConfigurationField(shared, change.sharedValueAtConflict)
+				: change.mergeStatus === "conflict" || !sameConfigurationField(shared, change.sharedValueAtProposal)))
 	) {
+		if (change.mergeStatus !== "conflict") {
+			change.sharedValueAtConflict = structuredClone(shared);
+			captureCodexConfigurationConflictPresentationEvidence(store, change);
+		}
 		change.mergeStatus = "conflict";
-		change.sharedValueAtConflict = shared;
 		change.version = ++store.revision;
 		throw new CodexConfigurationApprovalError("conflict", "共享默认已变化；双方决定保留，请单独处理冲突。");
 	}
@@ -135,8 +158,6 @@ export async function approveStoredCodexConfigurationProposal(
 			expireCodexConfigurationProfileFeedbackSuggestions(store);
 			throw new CodexConfigurationApprovalError("not_approvable", "十分钟反馈机会已结束，局部选择保留。");
 		}
-		const feedbackFields = { ...(change.relatedFields ?? { [change.fieldKey]: change.value }) };
-		for (const fieldKey of change.relatedDeletedFieldKeys ?? []) feedbackFields[fieldKey] = undefined;
 		for (const [fieldKey, value] of Object.entries(feedbackFields))
 			if (!sameConfigurationField(current[fieldKey], value))
 				throw new CodexConfigurationApprovalError("stale_version", "本会话已有更新的完整设置，旧反馈机会已结束。");
@@ -162,6 +183,8 @@ export async function approveStoredCodexConfigurationProposal(
 	change.decidedAt = Date.now();
 	change.acknowledgedAt = Date.now();
 	change.version = ++store.revision;
+	source.fieldChangeIds ??= {};
+	source.fieldChangeIds[change.fieldKey] = change.changeId;
 	source.version = store.revision;
 	if (!writer) {
 		// 来源审批仍只更新未来默认，兼容 profile 与来源共用这次已接受的字段版本。

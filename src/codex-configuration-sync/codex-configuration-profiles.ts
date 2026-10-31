@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { captureCodexConfigurationChangePresentationEvidence } from "./codex-configuration-change-presentation";
 import {
 	type CodexConfigurationFields,
 	type CodexConfigurationFieldValue,
@@ -168,6 +169,7 @@ export function updateCodexConfigurationProfileFields(
 	profileId: string,
 	fields: Record<string, CodexConfigurationFieldValue | undefined>,
 	input: {
+		modificationInitiator?: StoredCodexConfigurationChange["modificationInitiator"];
 		sourceWriterId?: string;
 		sharingScope?: "profile" | "all_profiles_hook_trust";
 		adoptedFeedbackSuggestion?: StoredCodexConfigurationChange;
@@ -177,6 +179,19 @@ export function updateCodexConfigurationProfileFields(
 	if (!profile) throw new Error("Codex profile 不存在。");
 	for (const [fieldKey, value] of Object.entries(fields)) {
 		const previous = profile.fields[fieldKey];
+		const priorFieldVersion = profile.fieldVersions[fieldKey];
+		const priorChange = store.changes.find(
+			(entry) =>
+				entry.codexConfigurationProfileId === profileId &&
+				entry.fieldKey === fieldKey &&
+				priorFieldVersion !== undefined &&
+				entry.acceptedProfileFieldVersion === priorFieldVersion,
+		);
+		const presentationEvidence = {
+			sharedFieldsAtObservation: previous ? { [fieldKey]: structuredClone(previous) } : {},
+			sharedFieldVersionsAtObservation: priorFieldVersion !== undefined ? { [fieldKey]: priorFieldVersion } : {},
+			sharedChangeIdsAtObservation: priorChange ? { [fieldKey]: priorChange.changeId } : {},
+		};
 		const exceptionGroup = codexConfigurationExceptionGroup(fieldKey);
 		const version = ++store.revision;
 		if (value === undefined) delete profile.fields[fieldKey];
@@ -206,6 +221,11 @@ export function updateCodexConfigurationProfileFields(
 				};
 		}
 		const change: StoredCodexConfigurationChange = {
+			modificationInitiator: input.modificationInitiator,
+			...presentationEvidence,
+			sourceTaskSnapshot:
+				input.adoptedFeedbackSuggestion?.sourceTaskSnapshot ??
+				store.writers[input.sourceWriterId ?? ""]?.sourceTaskSnapshot,
 			changeId: randomUUID(),
 			version,
 			sourceWriterId: input.sourceWriterId ?? `profile:${profileId}`,
@@ -231,6 +251,10 @@ export function updateCodexConfigurationProfileFields(
 				...change,
 				changeId: adoptedSuggestion.changeId,
 				observedAt: adoptedSuggestion.observedAt,
+				previous: adoptedSuggestion.previous,
+				sharedFieldsAtObservation: adoptedSuggestion.sharedFieldsAtObservation,
+				sharedFieldVersionsAtObservation: adoptedSuggestion.sharedFieldVersionsAtObservation,
+				sharedChangeIdsAtObservation: adoptedSuggestion.sharedChangeIdsAtObservation,
 			});
 		const acceptedChange = adoptedSuggestion ?? change;
 		for (const writer of Object.values(store.writers)) {
@@ -257,6 +281,8 @@ export function updateCodexConfigurationProfileFields(
 		const source = store.sources[profile.sourceIdentity];
 		if (!source) throw new Error("profile 的原配置来源待恢复。");
 		if (ensureCodexConfigurationSourceProfile(store, profile.sourceIdentity).profileId === profileId) {
+			source.fieldChangeIds ??= {};
+			source.fieldChangeIds[fieldKey] = acceptedChange.changeId;
 			if (value === undefined) delete source.fields[fieldKey];
 			else source.fields[fieldKey] = structuredClone(value);
 			source.version = version;
@@ -299,7 +325,7 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 	const deletedFieldKeys = fieldKeys.filter((key) => observed[key] === undefined);
 	writer.localExceptionOverrides[group] = { profileVersionAtSelection: profile.version, fields, deletedFieldKeys };
 	const observedAt = Date.now();
-	store.changes.push({
+	const change: StoredCodexConfigurationChange = {
 		changeId: randomUUID(),
 		version: ++store.revision,
 		sourceWriterId: writer.binding.writerId,
@@ -307,6 +333,12 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 		codexConfigurationProfileId: profile.profileId,
 		fieldKey,
 		previous: writer.lastObservedFields[fieldKey],
+		sourceTaskSnapshot: writer.sourceTaskSnapshot,
+		relatedPreviousFields: structuredClone(
+			Object.fromEntries(
+				fieldKeys.flatMap((key) => (writer.lastObservedFields[key] ? [[key, writer.lastObservedFields[key]]] : [])),
+			),
+		),
 		value: observed[fieldKey],
 		relatedFields: Object.fromEntries(fieldKeys.map((key) => [key, observed[key]])),
 		relatedDeletedFieldKeys: deletedFieldKeys,
@@ -321,7 +353,9 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 		mergeStatus: "pending_approval",
 		acknowledgedAt: null,
 		targets: [],
-	});
+	};
+	captureCodexConfigurationChangePresentationEvidence(store, change);
+	store.changes.push(change);
 }
 
 function hookTrustDecisionIdentity(sourceIdentity: string, hookSourceKey: string, definitionDigest: string) {

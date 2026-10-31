@@ -715,6 +715,50 @@ describe("Codex profile 自动共享", () => {
 			await restarted.close();
 		}
 	});
+	it("权限组审批核验全部共享字段，较新的全局权限决定不被旧反馈覆盖", async () => {
+		const binding = await writer("permission-group-stale-feedback");
+		const sourcePath = join(sourceHome, "config.toml");
+		await writeFile(sourcePath, 'approval_policy="on-request"\n');
+		const replacement = await writer("permission-group-replacement");
+		const path = join(replacement.configurationHomeDirectoryPath, "config.toml");
+		await writeFile(path, 'approval_policy="never"\nsandbox_mode="workspace-write"\n');
+		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			await sync.scan();
+			const suggestion = requireDefinedTestFixtureValue(
+				(await sync.getState()).changes.find(
+					(change) => change.exceptionGroup === "permissions" && change.approvalStatus === "pending",
+				),
+			);
+			await writeFile(sourcePath, 'approval_policy="on-request"\nsandbox_mode="read-only"\n');
+			await sync.scan();
+			const globalSuggestion = requireDefinedTestFixtureValue(
+				(await sync.getState()).changes.find(
+					(change) => change.fieldLabel.endsWith(" · sandbox_mode") && change.approvalStatus === "pending",
+				),
+			);
+			const item = (change: typeof suggestion) => ({
+				entryKind: "settings_proposal" as const,
+				changeId: change.changeId,
+				expectedVersion: change.version,
+				idempotencyKey: randomUUID(),
+			});
+			expect(
+				(await sync.batchAction({ action: "approve", items: [item(globalSuggestion)] })).results[0]?.status,
+			).toBe("applied");
+			const result = await sync.batchAction({ action: "approve", items: [item(suggestion)] });
+			expect(result.results[0]?.status).toBe("conflict");
+			const profileId = requireDefinedTestFixtureValue(binding.codexConfigurationProfileId);
+			expect(result.state.profiles?.find((profile) => profile.profileId === profileId)?.fields).toEqual(
+				expect.arrayContaining([expect.objectContaining({ fieldLabel: "sandbox_mode", value: "read-only" })]),
+			);
+			expect(result.state.changes.find((change) => change.changeId === suggestion.changeId)?.mergeStatus).toBe(
+				"conflict",
+			);
+		} finally {
+			await sync.close();
+		}
+	});
 	it("同一字段 A 到 B 再到 A 时，旧的 A 操作仍然失效", async () => {
 		const binding = await writer("first");
 		await mutateCodexConfigurationSyncStore((store) => {

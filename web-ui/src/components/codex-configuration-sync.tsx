@@ -1,12 +1,22 @@
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { ChevronDown, ClipboardCheck } from "lucide-react";
 import { useId, useState } from "react";
+import {
+	CodexConfigurationComparisonRows,
+	CodexConfigurationFullComparisonControls,
+	CodexConfigurationSourceEvidenceView,
+} from "@/components/codex-configuration-change-comparison";
 import { CodexConfigurationProfileManagement } from "@/components/codex-configuration-profile-management";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { useCodexConfigurationChangeDetails } from "@/hooks/use-codex-configuration-change-details";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import type { CodexConfigurationSyncNoticePresentation } from "@/hooks/use-codex-configuration-sync-notice";
-import type { CodexConfigurationChange, CodexConfigurationSourceObservation } from "@/runtime/types";
+import type {
+	CodexConfigurationChange,
+	CodexConfigurationPropagationTarget,
+	CodexConfigurationSourceObservation,
+} from "@/runtime/types";
 
 type Controller = ReturnType<typeof useCodexConfigurationSync>;
 const targetStatusLabels = {
@@ -37,6 +47,7 @@ function CodexConfigurationChangeActions({
 	change: CodexConfigurationChange;
 	controller: Controller;
 }) {
+	const details = useCodexConfigurationChangeDetails(controller.workspaceId, change);
 	const [synchronizeExistingSessions, setSynchronizeExistingSessions] = useState(false);
 	const synchronizationToggleId = useId();
 	const disabled = controller.pendingChangeId !== null;
@@ -44,7 +55,11 @@ function CodexConfigurationChangeActions({
 	const isProfileManaged = Boolean(change.codexConfigurationProfileId);
 	const feedbackExpired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
 	return (
-		<article className="min-w-0 py-3" aria-label={`来自 ${change.sourceConversationSessionId} 的配置变更`}>
+		<article
+			className="min-w-0 flex-1 py-3"
+			data-verification-anchor="codex-configuration-change-comparison"
+			aria-label={`来自 ${change.sourceConversationSessionId} 的配置变更`}
+		>
 			<p className="m-0 text-sm font-medium text-text-primary break-words">{change.fieldLabel}</p>
 			{change.profileName && (
 				<p className="mt-1 mb-0 text-xs text-text-secondary">
@@ -52,6 +67,11 @@ function CodexConfigurationChangeActions({
 					{change.sharingScope === "all_profiles_hook_trust"
 						? "同来源同定义的所有 profile"
 						: "所属 profile 的现有及未来会话"}
+				</p>
+			)}
+			{!change.profileName && (
+				<p className="mt-1 mb-0 text-xs text-text-secondary">
+					选择范围：看板 Codex 的未来默认；现有会话的实际采用见会话同步进度。
 				</p>
 			)}
 			{change.feedbackExpiresAtMs !== undefined && (
@@ -71,18 +91,36 @@ function CodexConfigurationChangeActions({
 			{change.approvalStatus === "historical" && change.feedbackExpiresAtMs === undefined && (
 				<p className="mt-1 text-xs text-text-secondary">升级前的历史事实，保留此前已采用的默认值。</p>
 			)}
-			<p className="mt-1 mb-0 text-xs text-text-secondary break-words">
-				检测位置：{change.sourceWorkspaceId ? `${change.sourceWorkspaceId} · ` : ""}
-				{change.sourceConversationSessionId}（不表示修改者）
-			</p>
-			{change.settingDifferences.map((difference) => (
-				<p key={difference.label} className="mt-1 mb-0 text-xs text-text-primary break-words">
-					{difference.label}：{difference.previous} → {difference.current}
+			{details.sourceEvidence ? (
+				<div className="mt-2">
+					<CodexConfigurationSourceEvidenceView evidence={details.sourceEvidence} />
+				</div>
+			) : (
+				<p className="mt-1 mb-0 text-xs text-text-secondary break-words">
+					检测位置：{change.sourceWorkspaceId ? `${change.sourceWorkspaceId} · ` : ""}
+					{change.sourceConversationSessionId}（不表示修改者）
 				</p>
-			))}
-			{change.settingDifferences.length === 0 && (
+			)}
+			<p className="mt-1 text-xs text-text-secondary">
+				观测时间：
+				<time dateTime={new Date(change.observedAt).toISOString()}>
+					{new Date(change.observedAt).toLocaleString()}
+				</time>
+			</p>
+			{change.hookExplanation && <p className="mt-2 text-xs text-text-primary">{change.hookExplanation}</p>}
+			{details.comparison ? (
+				<CodexConfigurationComparisonRows comparison={details.comparison} />
+			) : (
+				change.settingDifferences.map((difference) => (
+					<p key={difference.label} className="mt-1 mb-0 text-xs text-text-primary break-words">
+						{difference.label}：{difference.previous} → {difference.current}
+					</p>
+				))
+			)}
+			{!details.comparison && change.settingDifferences.length === 0 && (
 				<p className="mt-1 mb-0 text-xs text-text-secondary">设置值未变化，来源定义已更新；未重新授予信任。</p>
 			)}
+			{change.comparison && <CodexConfigurationFullComparisonControls details={details} />}
 			<p className="mt-1 mb-2 text-xs text-text-secondary">
 				{change.mergeStatus === "shared_default_updated"
 					? isProfileManaged
@@ -104,7 +142,7 @@ function CodexConfigurationChangeActions({
 							]);
 						}}
 					>
-						{isProfileManaged ? "反馈到 profile 并广播" : "通过"}
+						{isProfileManaged ? "反馈到 profile 并广播" : "采用新值作为未来默认"}
 					</Button>
 					<Button
 						size="sm"
@@ -115,7 +153,7 @@ function CodexConfigurationChangeActions({
 							]);
 						}}
 					>
-						{isProfileManaged ? "保留本次局部选择" : "拒绝"}
+						{isProfileManaged ? "保留本次局部选择" : "拒绝更新未来默认"}
 					</Button>
 				</div>
 			) : change.mergeStatus === "conflict" && change.approvalStatus === "pending" ? (
@@ -124,19 +162,29 @@ function CodexConfigurationChangeActions({
 						size="sm"
 						disabled={disabled}
 						onClick={() => {
-							void controller.act(change, "use_session_value");
+							void controller.act(
+								change,
+								"use_session_value",
+								false,
+								details.comparison?.expectedSharedValueDigest,
+							);
 						}}
 					>
-						采用此会话决定
+						采用检测到的新值，更新共享默认
 					</Button>
 					<Button
 						size="sm"
 						disabled={disabled}
 						onClick={() => {
-							void controller.act(change, "keep_shared_value");
+							void controller.act(
+								change,
+								"keep_shared_value",
+								false,
+								details.comparison?.expectedSharedValueDigest,
+							);
 						}}
 					>
-						保留共享默认
+						保留当前共享默认
 					</Button>
 				</div>
 			) : change.mergeStatus === "shared_default_updated" && !isProfileManaged ? (
@@ -216,32 +264,73 @@ function CodexConfigurationChangeActions({
 							· {target.reason}
 							{target.recoveryCondition && <span> 恢复条件：{target.recoveryCondition}。</span>}
 							{target.status === "conflict" && target.conflictingTargetValueDigest && (
-								<div className="mt-1 flex flex-wrap gap-2">
-									<Button
-										size="sm"
-										disabled={disabled}
-										onClick={() => {
-											void controller.resolveTarget(change, target, "use_source_change");
-										}}
-									>
-										向 {target.conversationSessionId} 应用来源决定
-									</Button>
-									<Button
-										size="sm"
-										disabled={disabled}
-										onClick={() => {
-											void controller.resolveTarget(change, target, "keep_target_value");
-										}}
-									>
-										保留 {target.conversationSessionId} 的决定
-									</Button>
-								</div>
+								<CodexConfigurationTargetConflict change={change} target={target} controller={controller} />
 							)}
 						</li>
 					))}
 				</ul>
 			)}
 		</article>
+	);
+}
+
+function CodexConfigurationTargetConflict({
+	change,
+	target,
+	controller,
+}: {
+	change: CodexConfigurationChange;
+	target: CodexConfigurationPropagationTarget;
+	controller: Controller;
+}) {
+	const details = useCodexConfigurationChangeDetails(controller.workspaceId, change, target.writerId);
+	const comparison = details.comparison;
+	const displayedDigest = comparison?.expectedTargetValueDigest;
+	const disabled =
+		controller.pendingChangeId !== null ||
+		Boolean(comparison && displayedDigest !== target.conflictingTargetValueDigest);
+	return (
+		<div className="mt-2">
+			{comparison?.targetSourceEvidence && (
+				<CodexConfigurationSourceEvidenceView evidence={comparison.targetSourceEvidence} label="目标方" />
+			)}
+			{comparison && <CodexConfigurationComparisonRows comparison={comparison} />}
+			{change.targetComparisons?.[target.writerId] && <CodexConfigurationFullComparisonControls details={details} />}
+			<div className="mt-1 flex flex-wrap gap-2">
+				<Button
+					size="sm"
+					disabled={disabled}
+					onClick={() => {
+						void controller.resolveTarget(
+							change,
+							{
+								...target,
+								conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
+							},
+							"use_source_change",
+						);
+					}}
+				>
+					向 {target.conversationSessionId} 应用来源决定
+				</Button>
+				<Button
+					size="sm"
+					disabled={disabled}
+					onClick={() => {
+						void controller.resolveTarget(
+							change,
+							{
+								...target,
+								conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
+							},
+							"keep_target_value",
+						);
+					}}
+				>
+					保留 {target.conversationSessionId} 的决定
+				</Button>
+			</div>
+		</div>
 	);
 }
 
@@ -256,6 +345,9 @@ function CodexConfigurationSourceObservationEntry({
 }) {
 	const operation = controller.sourceOperations[observation.observationId];
 	const isHistory = observation.acknowledgedAt !== null;
+	const observedChanges = (controller.state?.changes ?? []).filter((change) =>
+		observation.changeIds?.includes(change.changeId),
+	);
 	return (
 		<article aria-label={`来源更新 ${observation.sourceLabel}`} className="py-3 text-xs text-text-secondary">
 			<p className="m-0 font-medium text-text-primary break-words">{observation.sourceLabel}</p>
@@ -274,6 +366,15 @@ function CodexConfigurationSourceObservationEntry({
 				在 {observation.detectedLocationCount} 个位置检测到，保留 {observation.observationCount}{" "}
 				条原始观测。发起者尚未证实。
 			</p>
+			{observedChanges
+				.filter((change, index, all) => all.findIndex((entry) => entry.fieldKey === change.fieldKey) === index)
+				.map((change) => (
+					<CodexConfigurationObservedDefinitionChange
+						key={change.changeId}
+						change={change}
+						controller={controller}
+					/>
+				))}
 			{isHistory && (
 				<p>
 					{observation.reminderDisposition === "deferred" ? "已稍后处理" : "已标记已读"} ·{" "}
@@ -333,6 +434,31 @@ function CodexConfigurationSourceObservationEntry({
 	);
 }
 
+function CodexConfigurationObservedDefinitionChange({
+	change,
+	controller,
+}: {
+	change: CodexConfigurationChange;
+	controller: Controller;
+}) {
+	const details = useCodexConfigurationChangeDetails(controller.workspaceId, change);
+	return (
+		<div className="my-3 border-t border-border pt-2">
+			<p className="font-medium text-text-primary break-words">{change.fieldLabel}</p>
+			{details.sourceEvidence && <CodexConfigurationSourceEvidenceView evidence={details.sourceEvidence} />}
+			<p>
+				观测时间：
+				<time dateTime={new Date(change.observedAt).toISOString()}>
+					{new Date(change.observedAt).toLocaleString()}
+				</time>
+			</p>
+			{change.hookExplanation && <p>{change.hookExplanation}</p>}
+			{details.comparison && <CodexConfigurationComparisonRows comparison={details.comparison} />}
+			<CodexConfigurationFullComparisonControls details={details} />
+		</div>
+	);
+}
+
 const selectionIdentity = (change: CodexConfigurationChange) => `${change.changeId}:${change.version}`;
 function CodexConfigurationReviewList({
 	controller,
@@ -349,7 +475,9 @@ function CodexConfigurationReviewList({
 		(change) =>
 			change.recordKind !== "source_observation" &&
 			(!remindersOnly || (change.acknowledgedAt === null && change.recordKind !== "historical_record")) &&
-			matching(`${change.fieldLabel} ${change.sourceConversationSessionId} ${change.sourceWorkspaceId}`),
+			matching(
+				`${change.fieldLabel} ${change.fieldKey ?? ""} ${change.sourceConversationSessionId} ${change.sourceWorkspaceId} ${JSON.stringify(change.sourceEvidence ?? {})} ${(change.comparison?.rows ?? []).map((row) => row.label).join(" ")}`,
+			),
 	);
 	const proposals = changes.filter(
 		(change) =>
@@ -361,13 +489,24 @@ function CodexConfigurationReviewList({
 			change.approvalStatus !== "pending" ||
 			(change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now()),
 	);
+	const observationSearchText = (observation: CodexConfigurationSourceObservation) =>
+		`${observation.sourceLabel} ${JSON.stringify(
+			(controller.state?.changes ?? [])
+				.filter((change) => observation.changeIds?.includes(change.changeId))
+				.map((change) => [
+					change.fieldLabel,
+					change.fieldKey,
+					change.sourceEvidence,
+					change.comparison?.rows.map((row) => row.label),
+				]),
+		)}`;
 	const observations = (controller.state?.sourceObservations ?? []).filter(
-		(observation) => observation.acknowledgedAt === null && matching(observation.sourceLabel),
+		(observation) => observation.acknowledgedAt === null && matching(observationSearchText(observation)),
 	);
 	const processedObservations = remindersOnly
 		? []
 		: (controller.state?.sourceObservations ?? []).filter(
-				(observation) => observation.acknowledgedAt !== null && matching(observation.sourceLabel),
+				(observation) => observation.acknowledgedAt !== null && matching(observationSearchText(observation)),
 			);
 	const selectable = filter === "all" || filter === "settings" ? proposals : [];
 	const selectedProposals = selectable.filter((change) => selected.has(selectionIdentity(change)));
@@ -422,7 +561,7 @@ function CodexConfigurationReviewList({
 				<input
 					type="search"
 					aria-label="筛选配置记录"
-					placeholder="筛选字段或检测位置"
+					placeholder="搜索任务标题、ID、插件或字段"
 					value={search}
 					onChange={(event) => setSearch(event.target.value)}
 					className="min-w-0 w-full sm:w-56 rounded border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary focus-visible:outline-2 focus-visible:outline-accent"

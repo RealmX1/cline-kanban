@@ -121,12 +121,88 @@ export const codexConfigurationPropagationTargetSchema = z.object({
 });
 export type CodexConfigurationPropagationTarget = z.infer<typeof codexConfigurationPropagationTargetSchema>;
 
+export const codexConfigurationTaskSourceSnapshotSchema = z.object({
+	workspaceId: z.string(),
+	projectPath: z.string(),
+	taskId: z.string(),
+	taskTitle: z.string(),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	conversationSessionId: z.string(),
+	runtimeSessionIncarnationId: z.string(),
+});
+export type CodexConfigurationTaskSourceSnapshot = z.infer<typeof codexConfigurationTaskSourceSnapshotSchema>;
+export const codexConfigurationSourceEvidenceSchema = z.object({
+	initiator: z.object({ status: z.enum(["confirmed", "unknown"]), description: z.string() }),
+	detectedOwner: z.object({
+		writerId: z.string(),
+		workspaceId: z.string(),
+		conversationSessionId: z.string(),
+		description: z.string(),
+		task: codexConfigurationTaskSourceSnapshotSchema.optional(),
+		currentTaskLink: z
+			.object({ workspaceId: z.string(), taskId: z.string(), taskIncarnationCreatedAtEpochMs: z.number() })
+			.optional(),
+		unavailableReason: z.string().optional(),
+	}),
+	recoveryCondition: z.string().nullable(),
+});
+export type CodexConfigurationSourceEvidence = z.infer<typeof codexConfigurationSourceEvidenceSchema>;
+const codexConfigurationComparedValueSchema = z.object({
+	state: z.enum(["present", "absent", "unknown"]),
+	text: z.string(),
+});
+const codexConfigurationValueOriginSchema = z.object({
+	description: z.string(),
+	changeId: z.string().optional(),
+	fieldVersion: z.number().optional(),
+	sourceEvidence: codexConfigurationSourceEvidenceSchema.optional(),
+});
+export type CodexConfigurationValueOrigin = z.infer<typeof codexConfigurationValueOriginSchema>;
+export const codexConfigurationComparisonRowSchema = z.object({
+	fieldKey: z.string(),
+	label: z.string(),
+	changeKind: z.enum(["added", "modified", "deleted", "unchanged", "unknown"]),
+	previous: codexConfigurationComparedValueSchema,
+	detected: codexConfigurationComparedValueSchema,
+	sharedAtConflict: codexConfigurationComparedValueSchema.optional(),
+	sharedCurrent: codexConfigurationComparedValueSchema.optional(),
+	sharedOrigin: codexConfigurationValueOriginSchema.optional(),
+	sharedAtConflictOrigin: codexConfigurationValueOriginSchema.optional(),
+	target: codexConfigurationComparedValueSchema.optional(),
+});
+export const codexConfigurationChangeComparisonSchema = z.object({
+	rows: z.array(codexConfigurationComparisonRowSchema),
+	expectedSharedValueDigest: z.string(),
+	targetWriterId: z.string().optional(),
+	expectedTargetValueDigest: z.string().optional(),
+	targetSourceEvidence: codexConfigurationSourceEvidenceSchema.optional(),
+});
+export const codexConfigurationChangeDetailsRequestSchema = z.object({
+	changeId: z.string().min(1),
+	expectedVersion: z.number().int().positive(),
+	targetWriterId: z.string().min(1).optional(),
+});
+export type CodexConfigurationChangeDetailsRequest = z.infer<typeof codexConfigurationChangeDetailsRequestSchema>;
+export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeComparisonSchema.extend({
+	changeId: z.string(),
+	version: z.number(),
+	fieldLabel: z.string(),
+	sourceEvidence: codexConfigurationSourceEvidenceSchema,
+	hookExplanation: z.string().nullable(),
+});
+export type CodexConfigurationChangeDetails = z.infer<typeof codexConfigurationChangeDetailsSchema>;
+
 export const codexConfigurationChangeSchema = z.object({
 	changeId: z.string(),
 	version: z.number().int().positive(),
 	sourceWriterId: z.string(),
 	sourceConversationSessionId: z.string(),
 	sourceWorkspaceId: z.string(),
+	fieldKey: z.string().optional(),
+	sourceEvidence: codexConfigurationSourceEvidenceSchema.optional(),
+	comparison: codexConfigurationChangeComparisonSchema.optional(),
+	targetComparisons: z.record(z.string(), codexConfigurationChangeComparisonSchema).optional(),
+	hookExplanation: z.string().nullable().optional(),
 	fieldLabel: z.string(),
 	previousValueSummary: z.string(),
 	valueSummary: z.string(),
@@ -154,6 +230,7 @@ export const codexConfigurationChangeSchema = z.object({
 	targets: z.array(codexConfigurationPropagationTargetSchema),
 });
 export const codexConfigurationSourceObservationSchema = z.object({
+	changeIds: z.array(z.string()).optional(),
 	observationId: z.string(),
 	version: z.number().int().positive(),
 	sourceLabel: z.string(),
@@ -264,6 +341,7 @@ export const codexConfigurationSynchronizeRequestSchema = codexConfigurationChan
 export type CodexConfigurationSynchronizeRequest = z.infer<typeof codexConfigurationSynchronizeRequestSchema>;
 export const codexConfigurationResolveConflictRequestSchema = codexConfigurationChangeMutationRequestSchema.extend({
 	resolution: z.enum(["use_session_value", "keep_shared_value"]),
+	expectedSharedValueDigest: z.string().min(1).optional(),
 });
 export type CodexConfigurationResolveConflictRequest = z.infer<typeof codexConfigurationResolveConflictRequestSchema>;
 export const codexConfigurationResolveTargetConflictRequestSchema =
@@ -278,6 +356,7 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
+	getChangeDetails: (input: CodexConfigurationChangeDetailsRequest) => Promise<CodexConfigurationChangeDetails>;
 	mutateProfile: (input: CodexConfigurationProfileMutationRequest) => Promise<CodexConfigurationSyncState>;
 	getState: () => Promise<CodexConfigurationSyncState>;
 	batchAction: (input: CodexConfigurationBatchActionRequest) => Promise<CodexConfigurationBatchActionResult>;
