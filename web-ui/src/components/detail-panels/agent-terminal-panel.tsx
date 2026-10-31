@@ -889,6 +889,16 @@ function AgentTerminalPanelLayout({
 	// 同理，打开任务时的陈旧会话自动续跑在路上（等停留时长 / 请求在途）时也不给重启：日志里有过续跑 6 秒后
 	// 用户点重启、把刚起的进程杀掉重来的实例——那几秒里屏幕上没有任何迹象表明续跑已经在路上。
 	const isAutomaticStaleSessionResumeInProgress = automaticStaleSessionResumePhase !== null;
+	const [restartResponseWaitElapsedSeconds, setRestartResponseWaitElapsedSeconds] = useState(0);
+	useEffect(() => {
+		setRestartResponseWaitElapsedSeconds(0);
+		if (!isRefreshing) return;
+		const restartRequestedAt = Date.now();
+		const timer = window.setInterval(() => {
+			setRestartResponseWaitElapsedSeconds(Math.floor((Date.now() - restartRequestedAt) / 1_000));
+		}, 1_000);
+		return () => window.clearInterval(timer);
+	}, [isRefreshing, taskId, workspaceId]);
 	const canRefresh =
 		showRefreshButton &&
 		!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(summary) &&
@@ -1207,6 +1217,20 @@ function AgentTerminalPanelLayout({
 			{/* 阅读模式是叠加而非替换：xterm 始终挂载、PTY 继续跑、输出继续进 buffer（xterm 的渲染
 			    挂起只由整个浏览器标签页的 visibilitychange 驱动，不看元素是否可见），所以两种模式
 			    可以随时来回切且切回时没有积压回放。阅读视图读的也正是这同一个 buffer。 */}
+			{isRefreshing ? (
+				<div
+					role="status"
+					className="flex shrink-0 items-center gap-2 border-b border-border bg-surface-2 px-3 py-2 text-xs text-text-secondary"
+					data-verification-anchor={`agent-session-restart-progress:${taskId}`}
+				>
+					<Spinner size={12} />
+					<span>
+						{restartResponseWaitElapsedSeconds >= 15
+							? `响应较慢，重启请求仍在等待确认（已等待 ${restartResponseWaitElapsedSeconds} 秒）。`
+							: "正在重启会话，等待运行时响应…"}
+					</span>
+				</div>
+			) : null}
 			<div
 				style={{
 					position: "relative",
@@ -1283,7 +1307,10 @@ function AgentTerminalPanelLayout({
 				/>
 			) : null}
 			{lastError ? (
-				<div className="flex gap-2 rounded-none border-t border-status-red/30 bg-status-red/10 p-3 text-[13px] text-status-red">
+				<div
+					role="alert"
+					className="flex gap-2 rounded-none border-t border-status-red/30 bg-status-red/10 p-3 text-[13px] text-status-red"
+				>
 					{lastError}
 				</div>
 			) : null}

@@ -1,6 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTerminalInputBoxStashResponse } from "@/runtime/types";
+
+const stashClient = vi.hoisted(() => ({ mutate: vi.fn(), query: vi.fn(), toast: vi.fn() }));
+vi.mock("@/runtime/trpc-client", () => ({
+	getRuntimeTrpcClient: () => ({
+		runtime: {
+			stashTerminalInputBoxToPromptLibrary: { mutate: stashClient.mutate },
+			getTerminalInputBoxStashOperationStatus: { query: stashClient.query },
+		},
+	}),
+}));
+vi.mock("@/components/app-toaster", () => ({ showAppToast: stashClient.toast }));
 
 const platformState = { isMacPlatform: false };
 vi.mock("@/utils/platform", () => ({
@@ -9,9 +20,177 @@ vi.mock("@/utils/platform", () => ({
 	},
 }));
 
-const { describeTerminalInputBoxStashOutcome, isStashTerminalInputBoxToPromptLibraryShortcut } = await import(
-	"@/terminal/terminal-input-box-stash-shortcut"
-);
+const {
+	describeTerminalInputBoxStashOutcome,
+	isStashTerminalInputBoxToPromptLibraryShortcut,
+	stashTerminalInputBoxToPromptLibrary,
+	recoverPendingTerminalInputBoxStash,
+} = await import("@/terminal/terminal-input-box-stash-shortcut");
+
+describe("暂存回执恢复", () => {
+	beforeEach(() => {
+		localStorage.clear();
+		stashClient.mutate.mockReset();
+		stashClient.query.mockReset();
+		stashClient.toast.mockReset();
+	});
+	afterEach(() => vi.restoreAllMocks());
+	it("HTTP 回执丢失后只查询同一操作，绝不重新发送暂存", async () => {
+		stashClient.mutate.mockRejectedValue(new Error("回执丢失"));
+		stashClient.query.mockResolvedValue(
+			createStashResponse({
+				outcome: "stashed_into_prompt_library",
+				stashedPromptId: "saved-prompt",
+				stashedTextCharacterCount: 20,
+			}),
+		);
+		await stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+		expect(stashClient.mutate).toHaveBeenCalledTimes(1);
+		expect(stashClient.query).toHaveBeenCalledTimes(1);
+		expect(stashClient.query.mock.calls[0]?.[0]).toEqual(stashClient.mutate.mock.calls[0]?.[0]);
+		expect(localStorage.getItem("terminal-input-box-stash-operation:workspace:task")).toBeNull();
+	});
+	it("重连复用持久操作 ID，读回结果后解除进行中状态", async () => {
+		const operationId = "a7330bf1-a315-45f6-a9cb-93d6b06d80ed";
+		localStorage.setItem(
+			"terminal-input-box-stash-operation:workspace:task",
+			JSON.stringify({ operationId, startedAtMs: Date.now() }),
+		);
+		stashClient.query.mockResolvedValue(
+			createStashResponse({
+				outcome: "stashed_into_prompt_library_but_input_box_not_cleared",
+				stashedPromptId: "saved-prompt",
+			}),
+		);
+		await recoverPendingTerminalInputBoxStash({ workspaceId: "workspace", taskId: "task" });
+		expect(stashClient.mutate).not.toHaveBeenCalled();
+		expect(stashClient.query.mock.calls[0]?.[0]).toEqual({ operationId, taskId: "task" });
+		expect(stashClient.toast.mock.calls[0]?.[0].message).toContain("尚未确认输入框清空");
+	});
+	it("请求期限后仍持续 not found 时收口未受理身份，允许显式重新暂存", async () => {
+		const key = "terminal-input-box-stash-operation:workspace:task";
+		const unreceivedOperationId = "a7330bf1-a315-45f6-a9cb-93d6b06d80ed";
+		localStorage.setItem(
+			key,
+			JSON.stringify({ operationId: unreceivedOperationId, startedAtMs: Date.now() - 25_000 }),
+		);
+		stashClient.query.mockResolvedValue(
+			createStashResponse({ outcome: "codex_draft_stash_operation_not_found", ok: false }),
+		);
+
+		await recoverPendingTerminalInputBoxStash({ workspaceId: "workspace", taskId: "task" });
+
+		expect(localStorage.getItem(key)).toBeNull();
+		stashClient.mutate.mockResolvedValue(createStashResponse({ outcome: "stashed_into_prompt_library" }));
+		await stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+		expect(stashClient.mutate).toHaveBeenCalledTimes(1);
+		expect(stashClient.mutate.mock.calls[0]?.[0].operationId).not.toBe(unreceivedOperationId);
+	});
+	it("首次请求未到达服务端时，25 秒查询边界收口并可重新发起 mutation", async () => {
+		vi.useFakeTimers();
+		try {
+			stashClient.mutate.mockRejectedValueOnce(new Error("请求未到达服务端"));
+			stashClient.query.mockResolvedValue(
+				createStashResponse({ outcome: "codex_draft_stash_operation_not_found", ok: false }),
+			);
+			const firstAttempt = stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+
+			await vi.advanceTimersByTimeAsync(25_000);
+			await firstAttempt;
+
+			expect(localStorage.getItem("terminal-input-box-stash-operation:workspace:task")).toBeNull();
+			stashClient.mutate.mockResolvedValueOnce(createStashResponse({ outcome: "stashed_into_prompt_library" }));
+			await stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+			expect(stashClient.mutate).toHaveBeenCalledTimes(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+	it.each(["prompt_library_write_failed", "codex_draft_export_failed"] as const)(
+		"%s 后仍查询固定操作，迟到保存成功不换新 Prompt ID",
+		async (outcome) => {
+			vi.useFakeTimers();
+			try {
+				stashClient.mutate.mockResolvedValue(createStashResponse({ outcome, ok: false }));
+				stashClient.query
+					.mockResolvedValueOnce(createStashResponse({ outcome, ok: false }))
+					.mockResolvedValueOnce(
+						createStashResponse({ outcome: "stashed_into_prompt_library_but_input_box_not_cleared" }),
+					);
+
+				const attempt = stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+				await vi.advanceTimersByTimeAsync(500);
+				await attempt;
+
+				expect(stashClient.mutate).toHaveBeenCalledTimes(1);
+				expect(stashClient.query).toHaveBeenCalledTimes(2);
+				expect(stashClient.query.mock.calls[1]?.[0]).toEqual(stashClient.mutate.mock.calls[0]?.[0]);
+				expect(localStorage.getItem("terminal-input-box-stash-operation:workspace:task")).toBeNull();
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+	it.each(["codex_draft_export_failed", "prompt_library_write_failed"] as const)(
+		"确证 %s 没有后续补写后收口，后续快捷键可以重新暂存",
+		async (outcome) => {
+			vi.useFakeTimers();
+			try {
+				const failedResponse = {
+					...createStashResponse({ outcome, ok: false }),
+					capturedDraftPromptSaveRecoveryPending: false,
+				};
+				stashClient.mutate.mockResolvedValueOnce(failedResponse);
+				stashClient.query.mockResolvedValue(failedResponse);
+				const firstAttempt = stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+				await vi.advanceTimersByTimeAsync(25_000);
+				await firstAttempt;
+
+				expect(localStorage.getItem("terminal-input-box-stash-operation:workspace:task")).toBeNull();
+				stashClient.mutate.mockResolvedValueOnce(createStashResponse({ outcome: "stashed_into_prompt_library" }));
+				await stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+				expect(stashClient.mutate).toHaveBeenCalledTimes(2);
+			} finally {
+				vi.useRealTimers();
+			}
+		},
+	);
+	it("并发败者的回执不删除另一标签页已登记的胜者身份", async () => {
+		let resolveMutation: (response: RuntimeTerminalInputBoxStashResponse) => void = () => {};
+		stashClient.mutate.mockReturnValue(
+			new Promise<RuntimeTerminalInputBoxStashResponse>((resolve) => {
+				resolveMutation = resolve;
+			}),
+		);
+		const attempt = stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+		await vi.waitFor(() => expect(stashClient.mutate).toHaveBeenCalledTimes(1));
+		const key = "terminal-input-box-stash-operation:workspace:task";
+		const winner = { operationId: "b8431bf1-a315-45f6-a9cb-93d6b06d80ed", startedAtMs: Date.now() };
+		localStorage.setItem(key, JSON.stringify(winner));
+
+		resolveMutation(
+			createStashResponse({
+				outcome: "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task",
+				ok: false,
+			}),
+		);
+		await attempt;
+
+		expect(JSON.parse(localStorage.getItem(key) ?? "null")).toEqual(winner);
+	});
+	it("浏览器存储不可用时明确失败，原生导出尚未开始", async () => {
+		vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+			throw new Error("存储不可用");
+		});
+		await stashTerminalInputBoxToPromptLibrary({ workspaceId: "workspace", taskId: "task" });
+		expect(stashClient.mutate).not.toHaveBeenCalled();
+		expect(stashClient.query).not.toHaveBeenCalled();
+		expect(stashClient.toast.mock.calls[0]?.[0]).toMatchObject({
+			intent: "danger",
+			message: expect.stringContaining("本次未执行"),
+		});
+	});
+});
 
 function createKeyEvent(init: KeyboardEventInit & { type?: string } = {}): KeyboardEvent {
 	const { type = "keydown", ...rest } = init;
@@ -167,7 +346,7 @@ describe("describeTerminalInputBoxStashOutcome", () => {
 		);
 		expect(toast?.intent).toBe("warning");
 		expect(toast?.message).toContain("42");
-		expect(toast?.message).toContain("未被清空");
+		expect(toast?.message).toContain("尚未确认输入框清空");
 	});
 
 	it("被重入闸门挡下的那一次必须有回执，不许静默吞掉按键", () => {

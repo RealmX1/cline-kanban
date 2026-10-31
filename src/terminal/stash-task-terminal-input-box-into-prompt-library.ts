@@ -11,12 +11,19 @@
 // 这些一步都不能错的次序迟早会在其中一份里走样。
 
 import { randomUUID } from "node:crypto";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import type {
 	PromptLibraryEntryOrigin,
 	PromptLibraryScope,
 	RuntimeTerminalInputBoxStashResponse,
 } from "../core/api-contract";
 import { mutateWorkspacePromptLibrary } from "../state/prompt-library-store";
+import {
+	getCodexDraftStashOperationDirectory,
+	writeCodexDraftStashJsonDurably,
+} from "./codex-draft-stash-editor-bridge";
+import { readCodexDraftStashOperationStatus } from "./codex-draft-stash-operation";
 import type { TerminalSessionManager } from "./session-manager";
 
 // 一次终端输入框暂存是谁发起的。
@@ -48,12 +55,17 @@ export interface StashTaskTerminalInputBoxIntoPromptLibraryRequest {
 	taskId: string;
 	scope: PromptLibraryScope;
 	initiatedBy: TerminalInputBoxStashInitiator;
+	operationId?: string;
 }
 
 export async function stashTaskTerminalInputBoxIntoPromptLibrary(
 	deps: StashTaskTerminalInputBoxIntoPromptLibraryDependencies,
 	request: StashTaskTerminalInputBoxIntoPromptLibraryRequest,
 ): Promise<RuntimeTerminalInputBoxStashResponse> {
+	if (request.operationId) {
+		const existing = readCodexDraftStashOperationStatus(request.workspaceId, request.taskId, request.operationId);
+		if (existing.outcome !== "codex_draft_stash_operation_not_found") return existing;
+	}
 	let terminalManager: TerminalSessionManager;
 	try {
 		terminalManager = await deps.getTerminalSessionManagerForWorkspace();
@@ -67,134 +79,149 @@ export async function stashTaskTerminalInputBoxIntoPromptLibrary(
 			error: error instanceof Error ? error.message : String(error),
 		};
 	}
-	return await terminalManager.runTaskTerminalInputBoxStashAttemptExclusivelyPerTask<RuntimeTerminalInputBoxStashResponse>(
-		request.taskId,
-		async () => {
-			const capture = await terminalManager.captureTaskTerminalInputBoxContentForPromptLibraryStash(request.taskId);
-			if (!capture) {
-				return {
-					ok: true,
-					outcome: "no_active_terminal_session" as const,
-					stashedPromptId: null,
-					stashedTextCharacterCount: 0,
-					fidelity: null,
-				};
-			}
-			if (capture.status !== "captured_stashable_text") {
-				// 转发 Ctrl+S 与否**只看发起方**，不按捕获状态分类讨论。
-				//
-				// 争用抢占这条路径上根本没有人按键，也就没有任何键需要「替他送到 agent」。此时转发就是
-				// 凭空清掉人类打了一半的那半句：正文被 agent 自己的暂存区吞掉、Kanban 侧一无所有，而
-				// 抢占方随后如实返回失败、这次投递压根不会发生——内容没了，连一次投递都没换到。
-				//
-				// 只有 input_box_content_unreadable 是真正会丢字的那一格（输入侧字节跟踪确知框里有未提交
-				// 内容、读屏拿不到正文）；另两格不丢字（两侧都说空 / 屏上有字但一个字节都没经过 writeInput，
-				// 多半是 agent 自己渲染的占位提示）。即便如此这里也不按状态开口子：判据是「没人按键」，
-				// 一句话说得完、也没有下一个状态被漏掉的余地，而按状态枚举一旦将来新增一格就会默认落进
-				// 「照常清框」那一侧。
-				if (request.initiatedBy === "programmatic_delivery_contention_preemption") {
+	const response =
+		await terminalManager.runTaskTerminalInputBoxStashAttemptExclusivelyPerTask<RuntimeTerminalInputBoxStashResponse>(
+			request.taskId,
+			async () => {
+				const codexResult = await terminalManager.stashCodexTaskTerminalInputBoxIntoPromptLibrary?.(request);
+				if (codexResult) return codexResult;
+				const capture = await terminalManager.captureTaskTerminalInputBoxContentForPromptLibraryStash(
+					request.taskId,
+				);
+				if (!capture) {
 					return {
 						ok: true,
-						// 三格里只有「读不到正文」需要一个专属取值：它与用户按键路径的
-						// ..._forwarded_to_agent_native_stash 是同一个捕获结果、相反的处置，共用一个名字
-						// 就等于让回执自己撒谎（名字里明写着 forwarded）。另两格的名字本就不含处置，
-						// 两条路径共用不会说错话——而它们之间那点事实差别（有没有把一个键打进一个我们
-						// 认定为空的框）不改变任何调用方的决策。
+						outcome: "no_active_terminal_session" as const,
+						stashedPromptId: null,
+						stashedTextCharacterCount: 0,
+						fidelity: null,
+					};
+				}
+				if (capture.status !== "captured_stashable_text") {
+					// 转发 Ctrl+S 与否**只看发起方**，不按捕获状态分类讨论。
+					//
+					// 争用抢占这条路径上根本没有人按键，也就没有任何键需要「替他送到 agent」。此时转发就是
+					// 凭空清掉人类打了一半的那半句：正文被 agent 自己的暂存区吞掉、Kanban 侧一无所有，而
+					// 抢占方随后如实返回失败、这次投递压根不会发生——内容没了，连一次投递都没换到。
+					//
+					// 只有 input_box_content_unreadable 是真正会丢字的那一格（输入侧字节跟踪确知框里有未提交
+					// 内容、读屏拿不到正文）；另两格不丢字（两侧都说空 / 屏上有字但一个字节都没经过 writeInput，
+					// 多半是 agent 自己渲染的占位提示）。即便如此这里也不按状态开口子：判据是「没人按键」，
+					// 一句话说得完、也没有下一个状态被漏掉的余地，而按状态枚举一旦将来新增一格就会默认落进
+					// 「照常清框」那一侧。
+					if (request.initiatedBy === "programmatic_delivery_contention_preemption") {
+						return {
+							ok: true,
+							// 三格里只有「读不到正文」需要一个专属取值：它与用户按键路径的
+							// ..._forwarded_to_agent_native_stash 是同一个捕获结果、相反的处置，共用一个名字
+							// 就等于让回执自己撒谎（名字里明写着 forwarded）。另两格的名字本就不含处置，
+							// 两条路径共用不会说错话——而它们之间那点事实差别（有没有把一个键打进一个我们
+							// 认定为空的框）不改变任何调用方的决策。
+							outcome:
+								capture.status === "input_box_empty"
+									? ("input_box_empty_nothing_to_stash" as const)
+									: capture.status === "input_box_content_unreadable"
+										? ("input_box_content_unreadable_and_left_untouched" as const)
+										: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
+							stashedPromptId: null,
+							stashedTextCharacterCount: 0,
+							fidelity: capture.fidelity,
+						};
+					}
+					// 用户亲手按了 Ctrl+S：没有可入库的正文，但仍然转发。那是这个键的原生语义，agent 自己的
+					// 暂存区会接住任何我们读不到的内容——不入库不等于要把用户的按键吞掉。
+					const forwardedToSameTerminalSessionIncarnation =
+						terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
+							request.taskId,
+							capture.terminalSessionIncarnationToken,
+						);
+					if (!forwardedToSameTerminalSessionIncarnation) {
+						// 读框到这一刻之间那条 PTY 已经退出/被换代。既没入库也没转发，什么都没发生——
+						// 报「没有可信的终端会话」，而不是硬说「已交给 agent 自己处理」。
+						return {
+							ok: true,
+							outcome: "no_active_terminal_session" as const,
+							stashedPromptId: null,
+							stashedTextCharacterCount: 0,
+							fidelity: capture.fidelity,
+						};
+					}
+					return {
+						ok: true,
 						outcome:
 							capture.status === "input_box_empty"
 								? ("input_box_empty_nothing_to_stash" as const)
 								: capture.status === "input_box_content_unreadable"
-									? ("input_box_content_unreadable_and_left_untouched" as const)
+									? ("input_box_content_unreadable_forwarded_to_agent_native_stash" as const)
 									: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
 						stashedPromptId: null,
 						stashedTextCharacterCount: 0,
 						fidelity: capture.fidelity,
 					};
 				}
-				// 用户亲手按了 Ctrl+S：没有可入库的正文，但仍然转发。那是这个键的原生语义，agent 自己的
-				// 暂存区会接住任何我们读不到的内容——不入库不等于要把用户的按键吞掉。
-				const forwardedToSameTerminalSessionIncarnation =
+				const scope = request.scope;
+				const stashedPromptId = randomUUID();
+				try {
+					await mutateWorkspacePromptLibrary(request.workspaceId, {
+						kind: "upsert_prompt",
+						promptId: stashedPromptId,
+						text: capture.text,
+						scope,
+						// scope 非 task 时传 null：带着一个用不上的 taskId 只会让存储层的桶判定多一个歧义输入。
+						taskId: scope === "task" ? request.taskId : null,
+						origin: PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR[request.initiatedBy],
+						// 保真度随条目一起落库，别只回给这一次请求的调用方：抢占来源的条目写进来时用户
+						// 根本不在场，那条只弹一次的 toast 没有任何人看得见。
+						terminalInputBoxStashFidelity: capture.fidelity,
+					});
+				} catch (error) {
+					// **不**转发 Ctrl+S：正文原样留在框里，用户看得见、能重试。转发只会把它藏进 agent 的
+					// 暂存区，而 Kanban 这边什么都没有——那是「回执说成功、东西不在」的同一种撒谎。
+					return {
+						ok: false,
+						outcome: "prompt_library_write_failed" as const,
+						capturedDraftPromptSaveRecoveryPending: false,
+						stashedPromptId: null,
+						stashedTextCharacterCount: 0,
+						fidelity: capture.fidelity,
+						error: error instanceof Error ? error.message : String(error),
+					};
+				}
+				// 上面这段 await 跨了文件锁与落盘（可达数十毫秒），期间 refresh 会整体换掉 active。
+				// 令牌对不上时 manager 拒绝转发，这里必须把「框没清」如实说出来：正文确实进库了
+				// （ok 仍为 true、stashedPromptId 有效），但框还在。
+				const clearedTheSameTerminalSessionIncarnationWeReadFrom =
 					terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
 						request.taskId,
 						capture.terminalSessionIncarnationToken,
 					);
-				if (!forwardedToSameTerminalSessionIncarnation) {
-					// 读框到这一刻之间那条 PTY 已经退出/被换代。既没入库也没转发，什么都没发生——
-					// 报「没有可信的终端会话」，而不是硬说「已交给 agent 自己处理」。
-					return {
-						ok: true,
-						outcome: "no_active_terminal_session" as const,
-						stashedPromptId: null,
-						stashedTextCharacterCount: 0,
-						fidelity: capture.fidelity,
-					};
-				}
 				return {
 					ok: true,
-					outcome:
-						capture.status === "input_box_empty"
-							? ("input_box_empty_nothing_to_stash" as const)
-							: capture.status === "input_box_content_unreadable"
-								? ("input_box_content_unreadable_forwarded_to_agent_native_stash" as const)
-								: ("input_box_screen_text_not_corroborated_by_keystroke_tracking" as const),
-					stashedPromptId: null,
-					stashedTextCharacterCount: 0,
+					outcome: clearedTheSameTerminalSessionIncarnationWeReadFrom
+						? ("stashed_into_prompt_library" as const)
+						: ("stashed_into_prompt_library_but_input_box_not_cleared" as const),
+					stashedPromptId,
+					stashedTextCharacterCount: capture.text.length,
 					fidelity: capture.fidelity,
 				};
-			}
-			const scope = request.scope;
-			const stashedPromptId = randomUUID();
-			try {
-				await mutateWorkspacePromptLibrary(request.workspaceId, {
-					kind: "upsert_prompt",
-					promptId: stashedPromptId,
-					text: capture.text,
-					scope,
-					// scope 非 task 时传 null：带着一个用不上的 taskId 只会让存储层的桶判定多一个歧义输入。
-					taskId: scope === "task" ? request.taskId : null,
-					origin: PROMPT_LIBRARY_ENTRY_ORIGIN_BY_TERMINAL_INPUT_BOX_STASH_INITIATOR[request.initiatedBy],
-					// 保真度随条目一起落库，别只回给这一次请求的调用方：抢占来源的条目写进来时用户
-					// 根本不在场，那条只弹一次的 toast 没有任何人看得见。
-					terminalInputBoxStashFidelity: capture.fidelity,
-				});
-			} catch (error) {
-				// **不**转发 Ctrl+S：正文原样留在框里，用户看得见、能重试。转发只会把它藏进 agent 的
-				// 暂存区，而 Kanban 这边什么都没有——那是「回执说成功、东西不在」的同一种撒谎。
-				return {
-					ok: false,
-					outcome: "prompt_library_write_failed" as const,
-					stashedPromptId: null,
-					stashedTextCharacterCount: 0,
-					fidelity: capture.fidelity,
-					error: error instanceof Error ? error.message : String(error),
-				};
-			}
-			// 上面这段 await 跨了文件锁与落盘（可达数十毫秒），期间 refresh 会整体换掉 active。
-			// 令牌对不上时 manager 拒绝转发，这里必须把「框没清」如实说出来：正文确实进库了
-			// （ok 仍为 true、stashedPromptId 有效），但框还在。
-			const clearedTheSameTerminalSessionIncarnationWeReadFrom =
-				terminalManager.forwardStashKeyToClearTaskTerminalInputBox(
-					request.taskId,
-					capture.terminalSessionIncarnationToken,
-				);
-			return {
-				ok: true,
-				outcome: clearedTheSameTerminalSessionIncarnationWeReadFrom
-					? ("stashed_into_prompt_library" as const)
-					: ("stashed_into_prompt_library_but_input_box_not_cleared" as const),
-				stashedPromptId,
-				stashedTextCharacterCount: capture.text.length,
-				fidelity: capture.fidelity,
-			};
-		},
-		() => ({
-			// 同一 task 上已有一次暂存在跑。这一次按键没入库、也没转发 Ctrl+S，框里内容一个字没少。
-			// ok 为 false：用户要求的事这一次确实没做成，静默报成功就是这条工作流要根除的那种撒谎。
-			ok: false,
-			outcome: "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task" as const,
-			stashedPromptId: null,
-			stashedTextCharacterCount: 0,
-			fidelity: null,
-		}),
-	);
+			},
+			() => ({
+				// 同一 task 上已有一次暂存在跑。这一次按键没入库、也没转发 Ctrl+S，框里内容一个字没少。
+				// ok 为 false：用户要求的事这一次确实没做成，静默报成功就是这条工作流要根除的那种撒谎。
+				ok: false,
+				outcome: "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task" as const,
+				stashedPromptId: null,
+				stashedTextCharacterCount: 0,
+				fidelity: null,
+			}),
+		);
+	if (!request.operationId) return response;
+	const directoryPath = getCodexDraftStashOperationDirectory(request.workspaceId, request.operationId);
+	mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
+	const responseWithOperationId = { ...response, operationId: request.operationId };
+	writeCodexDraftStashJsonDurably(join(directoryPath, "operation-response.json"), {
+		taskId: request.taskId,
+		response: responseWithOperationId,
+	});
+	return responseWithOperationId;
 }

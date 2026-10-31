@@ -21,6 +21,7 @@ const {
 	mockHasRenderedAnyTerminalContent,
 	mockAutomaticStaleSessionResumePhase,
 	mockFocusTerminalInputAfterShortcutInsertion,
+	mockIsRefreshing,
 } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockResyncTerminalView: vi.fn(async () => {}),
@@ -30,6 +31,7 @@ const {
 	mockHasRenderedAnyTerminalContent: vi.fn(() => true),
 	mockAutomaticStaleSessionResumePhase: vi.fn((): StaleAgentTerminalSessionAutomaticResumePhase | null => null),
 	mockFocusTerminalInputAfterShortcutInsertion: vi.fn(() => true),
+	mockIsRefreshing: vi.fn(() => false),
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
@@ -38,7 +40,7 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 		lastError: null,
 		hasRenderedAnyTerminalContent: mockHasRenderedAnyTerminalContent(),
 		isStopping: false,
-		isRefreshing: false,
+		isRefreshing: mockIsRefreshing(),
 		isResyncingTerminalView: false,
 		automaticStaleSessionResumePhase: mockAutomaticStaleSessionResumePhase(),
 		isSearchOpen: false,
@@ -139,6 +141,7 @@ describe("AgentTerminalPanel", () => {
 		mockUseIsMobile.mockReturnValue(false);
 		mockHasRenderedAnyTerminalContent.mockReturnValue(true);
 		mockAutomaticStaleSessionResumePhase.mockReturnValue(null);
+		mockIsRefreshing.mockReturnValue(false);
 	});
 
 	afterEach(() => {
@@ -147,6 +150,34 @@ describe("AgentTerminalPanel", () => {
 			root.unmount();
 		});
 		container.remove();
+	});
+
+	it.each([true, false])("重启立即显示等待提示，长等待显示时长，完成后清理（完整工具栏=%s）", (showSessionToolbar) => {
+		vi.useFakeTimers();
+		const renderPanel = () =>
+			act(() =>
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={createSummary("codex")}
+							showSessionToolbar={showSessionToolbar}
+						/>
+					</TooltipProvider>,
+				),
+			);
+		mockIsRefreshing.mockReturnValue(true);
+		renderPanel();
+		expect(container.textContent).toContain("正在重启会话，等待运行时响应…");
+		expect(container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]')?.disabled).toBe(true);
+		act(() => vi.advanceTimersByTime(15_000));
+		expect(container.textContent).toContain("已等待 15 秒");
+		mockIsRefreshing.mockReturnValue(false);
+		renderPanel();
+		expect(container.textContent).not.toContain("已等待");
+		expect(container.textContent).not.toContain("正在重启会话");
+		expect(container.querySelector<HTMLButtonElement>('[aria-label="Restart agent session"]')?.disabled).toBe(false);
 	});
 
 	it("shows restart in the compact terminal header without requiring a close button", () => {

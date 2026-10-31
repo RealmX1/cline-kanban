@@ -466,8 +466,9 @@ export class AgentSessionPtyHostRuntimeFacade {
 			return this.spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(request);
 		await this.recoverCurrentGenerationHostWithPersistentBudget();
 		if (!this.isConnectedToCurrentGenerationHost()) {
-			if (this.currentGenerationRecoveryBudget?.progress?.lastFailureMayHideHostedSessions)
-				throw new Error("host 归属未知，拒绝降级后重复启动");
+			if (this.currentGenerationRecoveryBudget?.progress?.lastFailureMayHideHostedSessions) {
+				throw new AgentSessionPtyHostUnreachableError("host 归属未知，拒绝降级后重复启动", false);
+			}
 			return this.spawnInProcessPtySessionWhileCurrentGenerationHostIsUnreachable(request);
 		}
 		let link = await this.ensureConnectedToCurrentGenerationHost();

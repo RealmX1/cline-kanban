@@ -24,6 +24,21 @@ const ESCAPE = "\u001b";
 const PASTE_START = "\u001b[200~";
 const PASTE_END = "\u001b[201~";
 
+it("只有粘贴和终端应答之外的 Ctrl+G 才声明人工编辑器来源", () => {
+	const tracker = createTerminalInputBoxOccupancyTrackerState();
+	expect(
+		recordTerminalInputBytesIntoOccupancyTracker(tracker, Buffer.from(`${PASTE_START}正文\u0007${PASTE_END}`), 1)
+			.externalEditorShortcutObserved,
+	).toBeUndefined();
+	expect(
+		recordTerminalInputBytesIntoOccupancyTracker(tracker, Buffer.from("\u001b]10;rgb:00/00/00\u0007"), 2)
+			.externalEditorShortcutObserved,
+	).toBeUndefined();
+	expect(
+		recordTerminalInputBytesIntoOccupancyTracker(tracker, Buffer.from("\u0007"), 3).externalEditorShortcutObserved,
+	).toBe(true);
+});
+
 // nowEpochMs 默认 0：绝大多数用例不关心时间，让「未闭合粘贴挂了多久」恒为 0，永不触发强制封账。
 // 只有钉封账上界的那两例显式喂时刻。
 function feed(state: TerminalInputBoxOccupancyTrackerState, text: string, nowEpochMs = 0): void {

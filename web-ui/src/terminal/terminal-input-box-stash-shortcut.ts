@@ -7,6 +7,7 @@
 import { showAppToast } from "@/components/app-toaster";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeTerminalInputBoxStashResponse } from "@/runtime/types";
+import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 import { isMacPlatform } from "@/utils/platform";
 
 // Ctrl+S / （macOS 上）Cmd+S。
@@ -53,6 +54,16 @@ export function describeTerminalInputBoxStashOutcome(
 	response: RuntimeTerminalInputBoxStashResponse,
 ): TerminalInputBoxStashToast | null {
 	switch (response.outcome) {
+		case "codex_draft_stash_capability_not_ready":
+		case "input_box_contains_unsupported_attachments":
+			return {
+				intent: "warning",
+				message: response.error ?? "当前会话尚不支持完整暂存，原稿已保留；新建或正常重启 Codex 会话后生效",
+			};
+		case "codex_draft_export_failed":
+			return { intent: "warning", message: response.error ?? "未确认原生草稿导出，原稿已保留" };
+		case "codex_draft_stash_in_progress":
+			return { intent: "none", message: "正在无损暂存草稿到 Prompts，暂时锁定当前会话输入…" };
 		case "stashed_into_prompt_library":
 			return {
 				intent: describeStashFidelityCaveat(response) === "" ? "success" : "warning",
@@ -63,7 +74,7 @@ export function describeTerminalInputBoxStashOutcome(
 			// 「框没清」说出来：只报成功会让用户看着还在的输入框反过来怀疑内容到底存进去没有。
 			return {
 				intent: "warning",
-				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到 Prompt Library${describeStashFidelityCaveat(response)}；期间终端会话已被刷新或退出，输入框未被清空（内容仍留在框里，可自行删除）`,
+				message: `已暂存 ${response.stashedTextCharacterCount} 个字符到 Prompt Library${describeStashFidelityCaveat(response)}；尚未确认输入框清空，请核对原稿，避免重复保存`,
 			};
 		case "another_terminal_input_box_stash_attempt_already_in_flight_for_this_task":
 			// 连按 / 多标签页同时触发。这一次按键什么都没做——说出来，别让用户以为存了两条或者以为存成功了。
@@ -100,23 +111,171 @@ export async function stashTerminalInputBoxToPromptLibrary(args: {
 	workspaceId: string;
 	taskId: string;
 }): Promise<void> {
+	const key = pendingStashStorageKey(args);
+	if (stashRequestsInFlight.has(key)) return;
+	const initiation = await withStashInitiationLock(key, async () => {
+		const previousOperationId = readPendingStashOperationId(args);
+		if (previousOperationId) return { operationId: previousOperationId, created: false };
+		const operationId = createRandomUuidV4WithInsecureContextFallback();
+		try {
+			localStorage.setItem(key, JSON.stringify({ operationId, startedAtMs: Date.now() }));
+		} catch {
+			showAppToast(
+				{ intent: "danger", message: "无法持久保存暂存操作身份，本次未执行；输入框原稿保留" },
+				`terminal-input-box-stash:${args.taskId}`,
+			);
+			return null;
+		}
+		return { operationId, created: true };
+	});
+	if (!initiation) return;
+	if (!initiation.created) {
+		await recoverPendingTerminalInputBoxStash(args);
+		return;
+	}
+	const { operationId } = initiation;
+	stashRequestsInFlight.add(key);
+	showAppToast(
+		{ intent: "none", message: "正在无损暂存草稿到 Prompts，暂时锁定当前会话输入…", timeout: 25_000 },
+		`terminal-input-box-stash:${args.taskId}`,
+	);
 	try {
 		const response = await getRuntimeTrpcClient(args.workspaceId).runtime.stashTerminalInputBoxToPromptLibrary.mutate(
-			{ taskId: args.taskId },
+			{ taskId: args.taskId, operationId },
+			{ signal: AbortSignal.timeout(25_000) },
 		);
+		if (!stashOutcomeNeedsRecovery(response)) removePendingStashOperationId(args, operationId);
 		const toast = describeTerminalInputBoxStashOutcome(response);
 		if (toast) {
 			showAppToast({ intent: toast.intent, message: toast.message }, `terminal-input-box-stash:${args.taskId}`);
 		}
+		if (stashOutcomeNeedsRecovery(response)) await queryPendingStashUntilSettled(args, operationId);
 	} catch (error) {
-		// 请求根本没到服务端：这一次按键什么都没做，框里的内容原封不动。必须说出来——静默失败正是
-		// 这一整条工作流要根除的东西。
+		// 请求报错可能只是回执丢失；保留操作身份，只查询，不发送第二次导出。
+		await queryPendingStashUntilSettled(args, operationId).catch(() =>
+			showAppToast(
+				{
+					intent: "warning",
+					message: `暂存回执暂不可用，将在重连后查询：${error instanceof Error ? error.message : String(error)}`,
+				},
+				`terminal-input-box-stash:${args.taskId}`,
+			),
+		);
+	} finally {
+		stashRequestsInFlight.delete(key);
+	}
+}
+
+const stashRequestsInFlight = new Set<string>();
+const STASH_REQUEST_TIMEOUT_MS = 25_000;
+interface PendingStashOperation {
+	operationId: string;
+	startedAtMs: number;
+}
+function pendingStashStorageKey(args: { workspaceId: string; taskId: string }): string {
+	return `terminal-input-box-stash-operation:${args.workspaceId}:${args.taskId}`;
+}
+async function withStashInitiationLock<T>(key: string, callback: () => Promise<T>): Promise<T> {
+	if (typeof navigator.locks?.request !== "function") return callback();
+	return navigator.locks.request(`${key}:initiation`, { mode: "exclusive" }, callback);
+}
+function readPendingStashOperation(args: { workspaceId: string; taskId: string }): PendingStashOperation | null {
+	try {
+		const raw = localStorage.getItem(pendingStashStorageKey(args));
+		if (!raw) return null;
+		const stored = JSON.parse(raw) as { operationId?: string; startedAtMs?: number };
+		return typeof stored.operationId === "string" && typeof stored.startedAtMs === "number"
+			? { operationId: stored.operationId, startedAtMs: stored.startedAtMs }
+			: null;
+	} catch {
+		return null;
+	}
+}
+function readPendingStashOperationId(args: { workspaceId: string; taskId: string }): string | null {
+	return readPendingStashOperation(args)?.operationId ?? null;
+}
+function removePendingStashOperationId(args: { workspaceId: string; taskId: string }, operationId: string): void {
+	if (readPendingStashOperationId(args) === operationId) localStorage.removeItem(pendingStashStorageKey(args));
+}
+function stashOutcomeNeedsRecovery(response: RuntimeTerminalInputBoxStashResponse): boolean {
+	return (
+		response.outcome === "codex_draft_stash_in_progress" ||
+		response.outcome === "codex_draft_stash_operation_not_found" ||
+		((response.outcome === "codex_draft_export_failed" || response.outcome === "prompt_library_write_failed") &&
+			response.capturedDraftPromptSaveRecoveryPending !== false)
+	);
+}
+export function isTerminalInputBoxStashInFlight(args: { workspaceId: string; taskId: string }): boolean {
+	if (stashRequestsInFlight.has(pendingStashStorageKey(args))) return true;
+	const operation = readPendingStashOperation(args);
+	return operation !== null && Date.now() - operation.startedAtMs < STASH_REQUEST_TIMEOUT_MS;
+}
+async function queryPendingStashUntilSettled(
+	args: { workspaceId: string; taskId: string },
+	operationId: string,
+): Promise<void> {
+	const deadlineAtMs = Date.now() + STASH_REQUEST_TIMEOUT_MS;
+	let lastResponse: RuntimeTerminalInputBoxStashResponse | null = null;
+	while (Date.now() < deadlineAtMs) {
+		const response = await getRuntimeTrpcClient(
+			args.workspaceId,
+		).runtime.getTerminalInputBoxStashOperationStatus.query(
+			{ taskId: args.taskId, operationId },
+			{ signal: AbortSignal.timeout(Math.max(1, deadlineAtMs - Date.now())) },
+		);
+		lastResponse = response;
+		const operation = readPendingStashOperation(args);
+		if (
+			response.outcome === "codex_draft_stash_operation_not_found" &&
+			operation?.operationId === operationId &&
+			Date.now() - operation.startedAtMs >= STASH_REQUEST_TIMEOUT_MS
+		) {
+			removePendingStashOperationId(args, operationId);
+			showAppToast(
+				{ intent: "warning", message: "服务端未受理这次暂存，原稿保留；可再次按快捷键重新暂存" },
+				`terminal-input-box-stash:${args.taskId}`,
+			);
+			return;
+		}
+		if (!stashOutcomeNeedsRecovery(response)) {
+			removePendingStashOperationId(args, operationId);
+			const toast = describeTerminalInputBoxStashOutcome(response);
+			if (toast) showAppToast(toast, `terminal-input-box-stash:${args.taskId}`);
+			return;
+		}
+		await new Promise<void>((resolve) => setTimeout(resolve, 500));
+	}
+	const operation = readPendingStashOperation(args);
+	if (
+		lastResponse?.outcome === "codex_draft_stash_operation_not_found" &&
+		operation?.operationId === operationId &&
+		Date.now() - operation.startedAtMs >= STASH_REQUEST_TIMEOUT_MS
+	) {
+		removePendingStashOperationId(args, operationId);
 		showAppToast(
-			{
-				intent: "danger",
-				message: `暂存到 Prompt Library 失败，内容仍留在输入框里：${error instanceof Error ? error.message : String(error)}`,
-			},
+			{ intent: "warning", message: "服务端未受理这次暂存，原稿保留；可再次按快捷键重新暂存" },
 			`terminal-input-box-stash:${args.taskId}`,
 		);
+		return;
+	}
+	showAppToast(
+		{ intent: "warning", message: "暂存操作尚未确认；操作身份已保留，重连后继续查询，不会重复导出草稿" },
+		`terminal-input-box-stash:${args.taskId}`,
+	);
+}
+export async function recoverPendingTerminalInputBoxStash(args: {
+	workspaceId: string;
+	taskId: string;
+}): Promise<void> {
+	const key = pendingStashStorageKey(args);
+	const operationId = readPendingStashOperationId(args);
+	if (!operationId || stashRequestsInFlight.has(key)) return;
+	stashRequestsInFlight.add(key);
+	try {
+		await queryPendingStashUntilSettled(args, operationId);
+	} catch {
+		/* 保留操作身份，下一次连接成功后继续只读核对。 */
+	} finally {
+		stashRequestsInFlight.delete(key);
 	}
 }

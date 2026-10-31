@@ -16,6 +16,7 @@ import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/ta
 import { requestSessionOwnedBackgroundAgentExecutionCancellation } from "../state/session-owned-background-agent-executions";
 import { computeAssistantMessageProvenanceSha256 } from "../task-conversation-sessions/explicit-session-report";
 import { createTaskConversationSessionService } from "../task-conversation-sessions/task-conversation-session-service";
+import { readCodexDraftStashOperationStatus } from "../terminal/codex-draft-stash-operation";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -775,6 +776,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		taskId: string;
 		scope: PromptLibraryScope;
 		initiatedBy: TerminalInputBoxStashInitiator;
+		operationId?: string;
 	}): Promise<RuntimeTerminalInputBoxStashResponse> =>
 		await stashTaskTerminalInputBoxIntoPromptLibrary(
 			{
@@ -785,6 +787,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				taskId: args.taskId,
 				scope: args.scope,
 				initiatedBy: args.initiatedBy,
+				operationId: args.operationId,
 			},
 		);
 
@@ -3872,7 +3875,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				taskId: input.taskId,
 				scope: input.scope ?? "task",
 				initiatedBy: "human_pressed_stash_key_in_terminal",
+				operationId: input.operationId,
 			}),
+		getTerminalInputBoxStashOperationStatus: async (workspaceScope, input) =>
+			readCodexDraftStashOperationStatus(workspaceScope.workspaceId, input.taskId, input.operationId),
 		startShellSession: async (workspaceScope, input) => {
 			try {
 				const body = parseShellSessionStartRequest(input);
