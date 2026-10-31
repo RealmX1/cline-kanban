@@ -114,7 +114,7 @@ function resumeRequest(summary: RuntimeTaskSessionSummary): StartTaskSessionRequ
 		startInPlanMode: true,
 		taskAgentPermissionMode: "ask_for_every_tool_use",
 		taskConversationSessionMetadata: summary.taskConversationSessionMetadata,
-		taskConversationSessionMainContextForkSourceNativeSessionId: parentId,
+		taskConversationSessionContextForkSourceNativeSessionId: parentId,
 		resumePriorAgentConversationWithoutResendingPrompt: true,
 	};
 }
@@ -183,7 +183,7 @@ describe("空侧会话的原生身份补证恢复", () => {
 			expect.objectContaining({
 				prompt: "",
 				startInPlanMode: undefined,
-				taskConversationSessionMainContextForkSourceNativeSessionId: undefined,
+				taskConversationSessionContextForkSourceNativeSessionId: undefined,
 				observedAgentNativeConversationSessionResumeAddressing: expect.objectContaining({
 					sourceSessionId: childId,
 				}),
@@ -347,7 +347,7 @@ describe("空侧会话的原生身份补证恢复", () => {
 				expect.objectContaining({
 					prompt: "",
 					startInPlanMode: undefined,
-					taskConversationSessionMainContextForkSourceNativeSessionId: undefined,
+					taskConversationSessionContextForkSourceNativeSessionId: undefined,
 					taskAgentPermissionMode: "ask_for_every_tool_use",
 					terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "retained-side-session-model" },
 					observedAgentNativeConversationSessionResumeAddressing: expect.objectContaining({
@@ -478,7 +478,7 @@ describe("空侧会话的原生身份补证恢复", () => {
 			expect.objectContaining({
 				prompt: "",
 				startInPlanMode: undefined,
-				taskConversationSessionMainContextForkSourceNativeSessionId: undefined,
+				taskConversationSessionContextForkSourceNativeSessionId: undefined,
 				taskAgentPermissionMode: "ask_for_every_tool_use",
 				terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "retained-side-session-model" },
 				observedAgentNativeConversationSessionResumeAddressing: expect.objectContaining({

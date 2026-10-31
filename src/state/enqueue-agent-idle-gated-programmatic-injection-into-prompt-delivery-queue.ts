@@ -23,6 +23,7 @@ export type AgentIdleGatedProgrammaticInjectionEnqueueOutcome =
 	| "refused_queue_capacity_exhausted";
 
 export interface AgentIdleGatedProgrammaticInjectionEnqueueInput {
+	taskConversationSessionReportOrigin?: QueuedTaskPromptDeliveryEntry["taskConversationSessionReportOrigin"];
 	taskId: string;
 	workspaceTaskId?: string | null;
 	queueEntryId: string;
@@ -52,6 +53,7 @@ export function applyAgentIdleGatedProgrammaticInjectionEnqueue(
 		return { next: snapshot, outcome: "refused_queue_capacity_exhausted" };
 	}
 	const enqueued: QueuedTaskPromptDeliveryEntry = {
+		taskConversationSessionReportOrigin: input.taskConversationSessionReportOrigin,
 		queueEntryId: input.queueEntryId,
 		taskId: input.taskId,
 		text: input.text,

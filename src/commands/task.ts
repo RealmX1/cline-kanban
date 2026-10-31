@@ -90,6 +90,7 @@ import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
+import { registerTaskConversationSessionCommands } from "./task-conversation-session";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -1973,6 +1974,12 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
 	registerTaskVisualizationCommand(task);
+	registerTaskConversationSessionCommands(task, {
+		resolveWorkspace: async (projectPath) =>
+			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
+		createClient: createRuntimeTrpcClient,
+		run: runTaskCommand,
+	});
 	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
 	commandExecution
 		.command("start")

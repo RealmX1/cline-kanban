@@ -818,7 +818,7 @@ export interface StartTaskSessionRequest {
 	projectPath?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
@@ -1587,8 +1587,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? { ...previous, resumeRequestedAtMs: previous.resumeRequestedAtMs ?? now() }
 					: {
 							runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: now(),
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -5922,7 +5921,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const sourceNativeConversationSessionId = resumesExistingConversation
 			? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 			: (request.taskAgentSessionInitialization?.sourceSessionId ??
-				request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+				request.taskConversationSessionContextForkSourceNativeSessionId ??
 				request.parentSessionId);
 		if (
 			!this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions ||
@@ -5981,7 +5980,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const sourceId = resumesExistingConversation
 				? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 				: (request.taskAgentSessionInitialization?.sourceSessionId ??
-					request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+					request.taskConversationSessionContextForkSourceNativeSessionId ??
 					request.parentSessionId);
 			const environment = { ...process.env, ...request.env };
 			let storageHome =
@@ -6276,8 +6275,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
-				taskConversationSessionMainContextForkSourceNativeSessionId:
-					request.taskConversationSessionMainContextForkSourceNativeSessionId,
+				taskConversationSessionContextForkSourceNativeSessionId:
+					request.taskConversationSessionContextForkSourceNativeSessionId,
 				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
 				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
 				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
@@ -6290,7 +6289,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way",
 				forkLatestWorkingDirectorySession:
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
-					"forked_from_main_current_turn",
+						"forked_from_main_current_turn" ||
+					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
+						"forked_from_conversation_session",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
 			throwIfTaskSessionStartWasCancelled();
@@ -6762,8 +6763,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				!entry.summary.agentNativeConversationSessionIdentity
 					? {
 							runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: null,
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -10859,7 +10859,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					const requestForRestart = cloneStartTaskSessionRequest(request);
-					if (requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId) {
+					if (requestForRestart.taskConversationSessionContextForkSourceNativeSessionId) {
 						if (
 							await this.deferSideSessionResumeWaitingForNativeIdentity(entry, {
 								...requestForRestart,
@@ -10872,7 +10872,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							!observedChildIdentity ||
 							observedChildIdentity.sourceAgentId !== requestForRestart.agentId ||
 							observedChildIdentity.nativeSessionId ===
-								requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId
+								requestForRestart.taskConversationSessionContextForkSourceNativeSessionId
 						) {
 							this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
 								entry,

@@ -32,6 +32,7 @@ import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
 	combineAppendSystemPrompts,
+	renderByTheWaySessionOptionalReportGuidance,
 	renderTaskCollaborationSessionResponsibilityGuidance,
 	resolveHomeAgentAppendSystemPrompt,
 	resolveTaskSessionAppendSystemPrompt,
@@ -123,7 +124,7 @@ export interface AgentAdapterLaunchInput {
 	readOnlyQuestionSession?: boolean;
 	forkLatestWorkingDirectorySession?: boolean;
 	// 仅首次侧会话 fork 使用；与历史播种及子会话自身的重启寻址分开。
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	codexConversationStorageHomeDirectoryPath?: string;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 }
@@ -1203,6 +1204,12 @@ function resolveAgentAppendSystemPrompt(input: AgentAdapterLaunchInput): string 
 					input.taskId,
 				)
 			: null,
+		input.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
+			? renderByTheWaySessionOptionalReportGuidance(
+					input.taskConversationSessionMetadata.workspaceTaskId,
+					input.taskId,
+				)
+			: null,
 		input.exploratoryModeAppendSystemPrompt,
 		input.interWorkUnitRelationNeighborhoodAppendSystemPrompt,
 	);
@@ -1217,6 +1224,12 @@ function prependTaskSessionGuidanceToPrompt(input: AgentAdapterLaunchInput): str
 		),
 		input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator"
 			? renderTaskCollaborationSessionResponsibilityGuidance(
+					input.taskConversationSessionMetadata.workspaceTaskId,
+					input.taskId,
+				)
+			: null,
+		input.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
+			? renderByTheWaySessionOptionalReportGuidance(
 					input.taskConversationSessionMetadata.workspaceTaskId,
 					input.taskId,
 				)
@@ -1326,10 +1339,16 @@ const claudeAdapter: AgentSessionAdapter = {
 		const taskAgentSessionInitialization = resolveTaskAgentSessionInitialization(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "claude");
 		const inheritsNativeForkModelWithoutCardDefault = Boolean(
-			(input.taskConversationSessionMainContextForkSourceNativeSessionId &&
-				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
-				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
-					"forked_from_main_current_turn" &&
+			(input.observedAgentNativeConversationSessionResumeAddressing &&
+				input.taskConversationSessionMetadata &&
+				(input.taskConversationSessionMetadata.taskConversationSessionRoleAtCreation ??
+					input.taskConversationSessionMetadata.taskConversationSessionRole) !== "main") ||
+				(input.taskConversationSessionContextForkSourceNativeSessionId &&
+					input.taskConversationSessionMetadata?.taskConversationSessionRole !== "main") ||
+				((input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					"forked_from_main_current_turn" ||
+					input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+						"forked_from_conversation_session") &&
 					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
 						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
@@ -1375,7 +1394,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				input.resumePriorAgentConversationWithoutResendingPrompt ||
 				taskAgentSessionInitialization ||
 				input.forkLatestWorkingDirectorySession ||
-				input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				input.taskConversationSessionContextForkSourceNativeSessionId,
 		);
 		// 优先级：**重启寻址（按 id）→ resumeFromTrash（cwd-latest）→ 建卡播种 → fork cwd-latest**。
 		// 按-id 必须排在最前：`--continue` 挑的是「工作目录下最近一段对话」，而主会话与它的 By the way
@@ -1396,7 +1415,7 @@ const claudeAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(args, "--continue")) {
 				args.push("--continue");
 			}
-		} else if (input.taskConversationSessionMainContextForkSourceNativeSessionId) {
+		} else if (input.taskConversationSessionContextForkSourceNativeSessionId) {
 			const forkArgs = removeNativeSessionSelectionArguments(args, "claude", [
 				"--resume",
 				"-r",
@@ -1410,7 +1429,7 @@ const claudeAdapter: AgentSessionAdapter = {
 				args.length,
 				...forkArgs,
 				"--resume",
-				input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				input.taskConversationSessionContextForkSourceNativeSessionId,
 				"--fork-session",
 			);
 		} else if (taskAgentSessionInitialization) {
@@ -1622,10 +1641,16 @@ const codexAdapter: AgentSessionAdapter = {
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const explicitModelId = resolveTerminalAgentModelOverride(input, "codex");
 		const inheritsNativeForkModelWithoutCardDefault = Boolean(
-			(input.taskConversationSessionMainContextForkSourceNativeSessionId &&
-				input.taskConversationSessionMetadata?.taskConversationSessionRole === "task_collaborator") ||
-				(input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
-					"forked_from_main_current_turn" &&
+			(input.observedAgentNativeConversationSessionResumeAddressing &&
+				input.taskConversationSessionMetadata &&
+				(input.taskConversationSessionMetadata.taskConversationSessionRoleAtCreation ??
+					input.taskConversationSessionMetadata.taskConversationSessionRole) !== "main") ||
+				(input.taskConversationSessionContextForkSourceNativeSessionId &&
+					input.taskConversationSessionMetadata?.taskConversationSessionRole !== "main") ||
+				((input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+					"forked_from_main_current_turn" ||
+					input.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
+						"forked_from_conversation_session") &&
 					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
 						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
@@ -1712,11 +1737,11 @@ const codexAdapter: AgentSessionAdapter = {
 			if (!hasCliOption(codexArgs, "--last")) {
 				codexArgs.push("--last");
 			}
-		} else if (input.taskConversationSessionMainContextForkSourceNativeSessionId) {
+		} else if (input.taskConversationSessionContextForkSourceNativeSessionId) {
 			if (!hasCodexWorkingDirectoryOverride(codexArgs)) codexArgs.push("-C", input.cwd);
 			applyRecordedCodexNativeSessionSelectionArguments(
 				codexArgs,
-				input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				input.taskConversationSessionContextForkSourceNativeSessionId,
 				"fork",
 			);
 		} else if (taskAgentSessionInitialization) {
@@ -1746,7 +1771,7 @@ const codexAdapter: AgentSessionAdapter = {
 			!hasExplicitCodexConversationSelectionForRestart(input.additionalAgentStartupArgumentsForThisRestart ?? []) &&
 			!observedNativeSessionResumeAddressing &&
 			(continuesWithoutNewPrompt ||
-				(!input.taskConversationSessionMainContextForkSourceNativeSessionId &&
+				(!input.taskConversationSessionContextForkSourceNativeSessionId &&
 					!taskAgentSessionInitialization &&
 					!parentSessionId &&
 					input.forkLatestWorkingDirectorySession));
@@ -1798,7 +1823,7 @@ const codexAdapter: AgentSessionAdapter = {
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "resume_existing_session");
 		const forksSession =
 			!continuesWithoutNewPrompt &&
-			(Boolean(input.taskConversationSessionMainContextForkSourceNativeSessionId) ||
+			(Boolean(input.taskConversationSessionContextForkSourceNativeSessionId) ||
 				taskAgentSessionInitialization?.sourceSessionReuseMode === "fork_existing_session" ||
 				(!taskAgentSessionInitialization &&
 					(parentSessionId !== null || Boolean(input.forkLatestWorkingDirectorySession))));
@@ -2844,7 +2869,7 @@ const ompAdapter: AgentSessionAdapter = {
 		// `--continue` 落到 fallback「该 cwd 下最近的一条 session」；仅在上游确认无同 harness 的
 		// 共目录竞争者且没有绑定时允许使用，它不锁定具体 sessionId。
 		const resumesPriorAgentConversation =
-			shouldContinuePriorConversation || Boolean(input.taskConversationSessionMainContextForkSourceNativeSessionId);
+			shouldContinuePriorConversation || Boolean(input.taskConversationSessionContextForkSourceNativeSessionId);
 		if (observedNativeSessionResumeAddressing) {
 			const resumeArgs = removeNativeSessionSelectionArguments(args, "omp", [
 				"--resume",
@@ -2853,17 +2878,14 @@ const ompAdapter: AgentSessionAdapter = {
 				"--fork",
 			]);
 			args.splice(0, args.length, ...resumeArgs, "--resume", observedNativeSessionResumeAddressing.sourceSessionId);
-		} else if (
-			input.taskConversationSessionMainContextForkSourceNativeSessionId &&
-			!shouldContinuePriorConversation
-		) {
+		} else if (input.taskConversationSessionContextForkSourceNativeSessionId && !shouldContinuePriorConversation) {
 			const forkArgs = removeNativeSessionSelectionArguments(args, "omp", ["--resume", "-r", "--session", "--fork"]);
 			args.splice(
 				0,
 				args.length,
 				...removeCliOptionsWithValues(forkArgs, ["--model", "-m"]),
 				"--fork",
-				input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				input.taskConversationSessionContextForkSourceNativeSessionId,
 			);
 			if (input.startInPlanMode) {
 				args.push(
@@ -2871,7 +2893,7 @@ const ompAdapter: AgentSessionAdapter = {
 					await writeOmpTaskCollaboratorForkInitialPlanModeExtension({
 						directory: getHookAgentDirectory("omp"),
 						taskId: input.taskId,
-						sourceNativeSessionId: input.taskConversationSessionMainContextForkSourceNativeSessionId,
+						sourceNativeSessionId: input.taskConversationSessionContextForkSourceNativeSessionId,
 					}),
 				);
 			}

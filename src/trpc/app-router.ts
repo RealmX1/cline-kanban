@@ -7,6 +7,7 @@ import { z } from "zod";
 import { queryCurrentRuntimeAgentSessionPtyHostDiagnostics } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
 import { agentSessionPtyHostDiagnosticsSchema } from "../core/agent-session-pty-host-diagnostics-contract";
 import type {
+	QueuedTaskPromptDeliveryEntry,
 	RuntimeAddBacklogTaskRequest,
 	RuntimeAddBacklogTaskResponse,
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
@@ -236,6 +237,13 @@ import {
 	type RuntimeAutomaticAgentFailureContinuationActionRequest,
 	type RuntimeTaskCardActionSetShelvingStateRequest,
 	type RuntimeTaskCardActionSetShelvingStateResponse,
+	type RuntimeTaskConversationSessionCreateRequest,
+	type RuntimeTaskConversationSessionCreateResponse,
+	type RuntimeTaskConversationSessionGetRequest,
+	type RuntimeTaskConversationSessionGetResponse,
+	type RuntimeTaskConversationSessionListResponse,
+	type RuntimeTaskConversationSessionReportRequest,
+	type RuntimeTaskConversationSessionReportResponse,
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
@@ -428,6 +436,14 @@ import {
 	runtimeTaskChatSendResponseSchema,
 	runtimeTaskConversationHistoryPageRequestSchema,
 	runtimeTaskConversationHistoryPageResponseSchema,
+	runtimeTaskConversationSessionCreateRequestSchema,
+	runtimeTaskConversationSessionCreateResponseSchema,
+	runtimeTaskConversationSessionGetRequestSchema,
+	runtimeTaskConversationSessionGetResponseSchema,
+	runtimeTaskConversationSessionListRequestSchema,
+	runtimeTaskConversationSessionListResponseSchema,
+	runtimeTaskConversationSessionReportRequestSchema,
+	runtimeTaskConversationSessionReportResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -775,6 +791,34 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskNameSuggestionRequest,
 			abortSignal?: AbortSignal,
 		) => Promise<RuntimeTaskNameSuggestionResponse>;
+		createTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionCreateRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskConversationSessionCreateResponse>;
+		listTaskConversationSessions: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string },
+		) => Promise<RuntimeTaskConversationSessionListResponse>;
+		getTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionGetRequest,
+		) => Promise<RuntimeTaskConversationSessionGetResponse>;
+		reportTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionReportRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskConversationSessionReportResponse>;
+		reconcileTaskConversationSessionOperations: () => Promise<void>;
+		closeTaskConversationSessionOperations: () => Promise<void>;
+		isTaskConversationSessionReportExecutionAllowed: (
+			scope: RuntimeTrpcWorkspaceScope,
+			origin: NonNullable<QueuedTaskPromptDeliveryEntry["taskConversationSessionReportOrigin"]>,
+		) => Promise<boolean>;
+		recordExplicitTaskConversationSessionStart: (
+			scope: RuntimeTrpcWorkspaceScope,
+			sessionId: string,
+		) => Promise<void>;
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
@@ -1979,10 +2023,35 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input, signal }) => {
 			return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
 		}),
+	createTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionCreateRequestSchema)
+		.output(runtimeTaskConversationSessionCreateResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.createTaskConversationSession(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
+	listTaskConversationSessions: workspaceProcedure
+		.input(runtimeTaskConversationSessionListRequestSchema)
+		.output(runtimeTaskConversationSessionListResponseSchema)
+		.query(({ ctx, input }) => ctx.runtimeApi.listTaskConversationSessions(ctx.workspaceScope, input)),
+	getTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionGetRequestSchema)
+		.output(runtimeTaskConversationSessionGetResponseSchema)
+		.query(({ ctx, input }) => ctx.runtimeApi.getTaskConversationSession(ctx.workspaceScope, input)),
+	reportTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionReportRequestSchema)
+		.output(runtimeTaskConversationSessionReportResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.reportTaskConversationSession(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	startTaskSession: workspaceProcedure
 		.input(runtimeTaskSessionStartRequestSchema)
 		.output(runtimeTaskSessionStartResponseSchema)
 		.mutation(async ({ ctx, input }) => {
+			if (
+				!input.taskSessionStartOriginDeclaredByClient ||
+				input.taskSessionStartOriginDeclaredByClient === "external_entry_point"
+			)
+				await ctx.runtimeApi.recordExplicitTaskConversationSessionStart(ctx.workspaceScope, input.taskId);
 			return await ctx.runtimeApi.startTaskSession(ctx.workspaceScope, input);
 		}),
 	stopTaskSession: workspaceProcedure
@@ -2080,6 +2149,11 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.input(runtimeTaskTerminalRefreshRequestSchema)
 		.output(runtimeTaskTerminalRefreshResponseSchema)
 		.mutation(async ({ ctx, input }) => {
+			if (
+				!input.taskSessionStartOriginDeclaredByClient ||
+				input.taskSessionStartOriginDeclaredByClient === "external_entry_point"
+			)
+				await ctx.runtimeApi.recordExplicitTaskConversationSessionStart(ctx.workspaceScope, input.taskId);
 			return await ctx.runtimeApi.refreshTaskTerminal(ctx.workspaceScope, input);
 		}),
 	sendTaskSessionInput: workspaceProcedure

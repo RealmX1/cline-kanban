@@ -308,7 +308,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 							startInPlanMode: true,
 							cols: 140,
 							rows: 42,
-							taskConversationSessionMainContextForkSourceNativeSessionId: first.id,
+							taskConversationSessionContextForkSourceNativeSessionId: first.id,
 							taskConversationSessionMetadata: {
 								workspaceTaskId: parentTaskId,
 								taskConversationSessionRole: "task_collaborator",
