@@ -9,6 +9,42 @@ import { transcriptMetadataMatchesNativeConversationIdentity } from "../agent-se
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { type CodexConfigurationFields, configurationFieldAddress } from "./codex-configuration-field-projection";
 
+export interface CodexNativeTurnPermissionTranscriptFingerprint {
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+}
+
+const transcriptFingerprintByEvidence = new WeakMap<
+	CodexConfigurationFields,
+	CodexNativeTurnPermissionTranscriptFingerprint
+>();
+
+export function codexNativeTurnPermissionTranscriptFingerprintOf(
+	evidence: CodexConfigurationFields,
+): CodexNativeTurnPermissionTranscriptFingerprint | null {
+	return transcriptFingerprintByEvidence.get(evidence) ?? null;
+}
+
+export async function codexNativeTurnPermissionTranscriptFingerprintStillCurrent(
+	transcriptPath: string,
+	fingerprint: CodexNativeTurnPermissionTranscriptFingerprint,
+): Promise<boolean> {
+	try {
+		const current = await stat(transcriptPath);
+		return (
+			current.isFile() &&
+			current.dev === fingerprint.dev &&
+			current.ino === fingerprint.ino &&
+			current.size === fingerprint.size &&
+			current.mtimeMs === fingerprint.mtimeMs
+		);
+	} catch {
+		return false;
+	}
+}
+
 // 文件中的选择不证明当前线程采用；只读取变更之后、身份绑定的实际原生回合上下文。
 export async function readCodexNativeTurnPermissionEvidence(input: {
 	summary: RuntimeTaskSessionSummary;
@@ -103,7 +139,18 @@ export async function readCodexNativeTurnPermissionEvidence(input: {
 				(input.selectedFields[sandboxKey] && input.selectedFields[sandboxKey].value !== sandboxMode))
 		)
 			return null;
-		return { [approvalKey]: { value: context.approval_policy }, [sandboxKey]: { value: sandboxMode } };
+		const evidence = {
+			[approvalKey]: { value: context.approval_policy },
+			[sandboxKey]: { value: sandboxMode },
+		};
+		// 发布时用这次读取结束的文件身份判断转录是否又追加了更新的回合，避免旧证据覆盖新权限。
+		transcriptFingerprintByEvidence.set(evidence, {
+			dev: after.dev,
+			ino: after.ino,
+			size: after.size,
+			mtimeMs: after.mtimeMs,
+		});
+		return evidence;
 	} catch {
 		return null;
 	}
