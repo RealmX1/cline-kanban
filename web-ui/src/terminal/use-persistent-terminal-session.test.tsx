@@ -72,6 +72,9 @@ function HookHarness({
 		isSearchOpen,
 		searchResults,
 		focusTerminalInputAfterShortcutInsertion,
+		refreshTerminal,
+		isRefreshing,
+		lastError,
 	} = usePersistentTerminalSession({
 		taskId,
 		workspaceId,
@@ -89,7 +92,12 @@ function HookHarness({
 			data-search-open={String(isSearchOpen)}
 			data-search-result-count={String(searchResults.resultCount)}
 			data-search-result-index={String(searchResults.resultIndex)}
+			data-is-refreshing={String(isRefreshing)}
+			data-last-error={lastError ?? ""}
 		>
+			<button type="button" onClick={() => void refreshTerminal()}>
+				重启会话
+			</button>
 			<button type="button" onClick={() => closeTerminalSearch()}>
 				close
 			</button>
@@ -126,6 +134,92 @@ describe("usePersistentTerminalSession", () => {
 		container = document.createElement("div");
 		document.body.appendChild(container);
 		root = createRoot(container);
+	});
+
+	it("重复点击不重复提交，旧任务的迟到失败不会覆盖当前任务的重启进度", async () => {
+		const firstTerminal = createPersistentTerminalMock();
+		const secondTerminal = createPersistentTerminalMock();
+		let finishFirstRestart: ((result: { ok: boolean; error?: string }) => void) | undefined;
+		let finishSecondRestart: ((result: { ok: boolean }) => void) | undefined;
+		firstTerminal.refresh.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishFirstRestart = resolve;
+				}),
+		);
+		secondTerminal.refresh.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishSecondRestart = resolve;
+				}),
+		);
+		ensurePersistentTerminalMock.mockImplementation(({ taskId }: { taskId: string }) =>
+			taskId === "first" ? firstTerminal : secondTerminal,
+		);
+		const renderTask = (taskId: string) =>
+			act(() => root.render(<HookHarness taskId={taskId} workspaceId="workspace-1" sessionStartedAt={1} />));
+		const clickRestart = () =>
+			[...container.querySelectorAll("button")].find((button) => button.textContent === "重启会话")?.click();
+		renderTask("first");
+		act(() => {
+			clickRestart();
+			clickRestart();
+		});
+		expect(firstTerminal.refresh).toHaveBeenCalledTimes(1);
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("true");
+		renderTask("second");
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("false");
+		act(() => {
+			clickRestart();
+		});
+		await act(async () => {
+			finishFirstRestart?.({ ok: false, error: "旧任务的迟到错误" });
+		});
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("true");
+		expect(container.firstElementChild?.getAttribute("data-last-error")).toBe("");
+		await act(async () => {
+			finishSecondRestart?.({ ok: true });
+		});
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("false");
+	});
+
+	it("切回仍在重启的任务时保持等待锁，不会再发一次，迟到失败只结算原来那次", async () => {
+		const firstTerminal = createPersistentTerminalMock();
+		const secondTerminal = createPersistentTerminalMock();
+		let finishFirstRestart: ((result: { ok: boolean; error?: string }) => void) | undefined;
+		firstTerminal.refresh.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishFirstRestart = resolve;
+				}),
+		);
+		ensurePersistentTerminalMock.mockImplementation(({ taskId }: { taskId: string }) =>
+			taskId === "first" ? firstTerminal : secondTerminal,
+		);
+		const renderTask = (taskId: string) =>
+			act(() => root.render(<HookHarness taskId={taskId} workspaceId="workspace-1" sessionStartedAt={1} />));
+		const clickRestart = () =>
+			[...container.querySelectorAll("button")].find((button) => button.textContent === "重启会话")?.click();
+		renderTask("first");
+		act(() => {
+			clickRestart();
+		});
+		expect(firstTerminal.refresh).toHaveBeenCalledTimes(1);
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("true");
+		renderTask("second");
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("false");
+		renderTask("first");
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("true");
+		act(() => {
+			clickRestart();
+		});
+		expect(firstTerminal.refresh).toHaveBeenCalledTimes(1);
+		expect(secondTerminal.refresh).not.toHaveBeenCalled();
+		await act(async () => {
+			finishFirstRestart?.({ ok: false, error: "第一次请求的迟到失败" });
+		});
+		expect(container.firstElementChild?.getAttribute("data-is-refreshing")).toBe("false");
+		expect(container.firstElementChild?.getAttribute("data-last-error")).toBe("第一次请求的迟到失败");
 	});
 
 	afterEach(() => {
