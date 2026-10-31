@@ -1,5 +1,5 @@
 // 把多段 PCM WAV 按顺序拼成一段，段间插入静音：通知播报「先导 → 停顿 → 正文」的停顿就是在这里插入的。
-// 不用 SSML <break>：qwen3-tts-flash 与 Kokoro 不支持，qwen-audio 内置音色是否支持也没有官方确认；分段拼接对所有 provider 一致可用。
+// qwen3-tts-flash 与 Kokoro 不支持 SSML <break>；分段拼接让支持 SSML 的 Qwen-Audio 也沿用同一停顿链路。
 // 注意：DashScope qwen3-tts 返回的是流式 WAV，RIFF 与 data 的长度字段都是占位值（实测 0x7FFFFF9B），
 // 所以 data 长度一律以实际剩余字节为准，不信任头里的长度。
 // 评估过的替代：wavefile 包自 2020 年后未维护，且同样需要自己处理流式头，不引入。
