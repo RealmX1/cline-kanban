@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import packageJson from "../../package.json" with { type: "json" };
 import { resolveAgentGuidanceDocumentPath } from "../core/agent-guidance-document-reference";
+import { renderAgentWorkDelegationSelectionGuidance } from "../core/agent-work-delegation-selection-guidance";
 
 import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
@@ -150,9 +151,11 @@ export function renderTaskSessionWorktreeGuardPrompt(
 ${renderTaskAgentNamingAndWorkPhaseGoalGuidance()}
 ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
 
+${renderAgentWorkDelegationSelectionGuidance()}
+
 按需操作：\`${resolveAgentGuidanceDocumentPath("kanban-command-reference.md")}\`。引用或复用别的任务时，用 work-unit assert-reference-relation 记录关系；work-unit get-relation-neighborhood-summary 查来源。
 HTML 用 task visualization publish 发布到本任务，附属资源显式映射；status=published 才表示发布成功，awaiting_runtime_acceptance 表示待接收。预览用 task visualization request-preview，不调用宿主机 open。
-可按需用 task conversation-session create 分流偏离主线的只读 By the way，或把可独立协作的工作交给可写 task_collaborator。先 list/get 复用已有会话，说明创建原因并使用稳定幂等键；默认继承创建者已持久化历史，也可选 current_main 或 fresh。跨 Agent 选择 fresh，不支持的复刻会明确拒绝。创建后继续主线，不必等待，未回报不催收、不自动回灌。
+同 Task 侧会话使用 task conversation-session create。先 list/get 复用已有会话，说明创建原因并使用稳定幂等键；默认继承创建者已持久化历史，也可选 current_main 或 fresh。跨 Agent 选择 fresh，不支持的复刻会明确拒绝。创建后继续主线，不必等待，未回报不催收、不自动回灌。
 侧会话共用工作目录，创建前划清文件责任。继承历史只作背景，不能当作要求继续执行旧任务或真人批准。可写 peer 用 report 自愿回报，默认给创建者，也可指定同 Task 的会话；后续追问用 task message --attempt-id <会话ID>。系统回收可自动恢复，显式 Stop、结案、搁置和交接等待继续生效。
 交接材料写入 KANBAN_TASK_CROSS_TASK_HANDOFF_ARTIFACT_DIRECTORY 或已提交文件，确保重启后可读。普通消息、等待与恢复由通用会话入口处理；人工 rewind 和 checkpoint 按用户授权使用。`;
 }

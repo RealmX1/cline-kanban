@@ -2,6 +2,10 @@ import { readFile } from "node:fs/promises";
 import type { TRPCClient } from "@trpc/client";
 import type { Command } from "commander";
 import {
+	AGENT_WORK_DELEGATION_SELECTION_CAVEAT,
+	SAME_TASK_COLLABORATION_SESSION_CREATION_GUIDANCE,
+} from "../core/agent-work-delegation-selection-guidance";
+import {
 	runtimeTaskConversationSessionCreateRequestSchema,
 	runtimeTaskConversationSessionReportRequestSchema,
 } from "../core/api-contract";
@@ -43,7 +47,14 @@ export function registerTaskConversationSessionCommands(
 		command
 			.option("--task-id <id>", "宿主任务 ID，默认调用会话所属任务。", process.env.KANBAN_TASK_ID)
 			.option("--project-path <path>", "项目主仓库路径。");
-	scoped(sessions.command("create").description("后台创建侧会话；创建者继续工作，无需等待结果。"))
+	scoped(sessions.command("create").description("后台创建同 Task 的互补协作会话或只读旁支讨论；创建者继续工作。"))
+		.addHelpText(
+			"after",
+			`\n${SAME_TASK_COLLABORATION_SESSION_CREATION_GUIDANCE}
+当前会话内部由其调度并整合结果的分工通常用 Subagent；需要独立目标和生命周期的工作可用 task create。
+共享工作目录没有文件写入隔离，创建前明确工作范围与文件责任。
+${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
+		)
 		.requiredOption("--role <role>", "by_the_way（只读）或 task_collaborator（可写）。")
 		.option("--context-source <source>", "creator、current_main 或 fresh。", "creator")
 		.option("--agent <id>", "默认沿用创建者 Agent；跨 Agent 请使用 fresh。")

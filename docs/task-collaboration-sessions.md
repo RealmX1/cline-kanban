@@ -2,6 +2,14 @@
 
 Sessions 的 Create session 提供「协作会话」与 By the way。协作会话使用与「创建任务」相同的可启动 agent 目录和安装状态；可以选不同于主会话的 agent，也可以再开一条相同 agent 的会话。
 
+## 工作分流的定位
+
+Subagent 用于当前会话内部的执行分工，由当前会话调度并整合结果。Peer Session 是同一 Task 内与主线紧密相关且互补的独立协作线，适合需要用户单独查看、持续讨论和调整方向，并能受益于共享当前 workspace/worktree 的工作。只读旁支讨论可使用 By the way，需要参与实现则使用可写 `task_collaborator`。
+
+新 Task 用于需要独立安排、跟踪和验收的工作，包括主线完成后的接续事项和关联较弱的新发现；也可并行开展。等待前置成果时记录依赖和接续条件，创建任务本身不建立自动接续编排。Peer 仍服务于同一 Task 的目标和授权范围，主会话继续负责卡片生命周期。
+
+以上是选择时的参考建议。请在已有授权和权限边界内，结合实际目标、可用能力及协作成本自行判断。完整例子见 [Agent 工作分流参考](agent-guidance/kanban-command-reference.md#工作分流参考)。主会话和可写 Peer 的共享启动指导提供简短定位，创建入口的 CLI 帮助补充各自场景与约束；原生 Subagent 工具继续由对应 harness 提供。
+
 ## 角色与归属
 
 | 角色 | 上下文 | 文件与命令 | 卡片生命周期 |
@@ -46,7 +54,7 @@ ACP 冷恢复后的活体摘要同时覆盖整板首帧和增量推流，避免�
 
 ## Agent 按需分流与可选回报
 
-当前主 Agent 和可写 peer 可自行判断是否把偏离主线的讨论放入只读 By the way，或把明确分工放入可写 peer。先 `task conversation-session list/get` 核对已有会话，优先复用；需要时 `create`，创建后继续工作。系统不自动等待、催收或将普通回答回灌主线。
+当前主 Agent 和可写 peer 按工作分流参考自行判断是否创建只读 By the way 或可写 peer。先 `task conversation-session list/get` 核对已有会话，优先复用；需要时 `create`，创建后继续工作。系统不自动等待、催收或将普通回答回灌主线。
 
 ```sh
 kanban task conversation-session create --task-id <Task ID> --role task_collaborator --reason '独立核对恢复边界' --message '检查既有实现并按需回报' --idempotency-key <稳定请求键> --project-path <主仓库>
