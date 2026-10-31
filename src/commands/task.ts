@@ -4,6 +4,10 @@ import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/cli
 import type { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
+import {
+	AGENT_WORK_DELEGATION_SELECTION_CAVEAT,
+	INDEPENDENT_TASK_CREATION_GUIDANCE,
+} from "../core/agent-work-delegation-selection-guidance";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -90,6 +94,7 @@ import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
+import { registerTaskConversationSessionCommands } from "./task-conversation-session";
 import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
@@ -1973,6 +1978,12 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
 	registerTaskVisualizationCommand(task);
+	registerTaskConversationSessionCommands(task, {
+		resolveWorkspace: async (projectPath) =>
+			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
+		createClient: createRuntimeTrpcClient,
+		run: runTaskCommand,
+	});
 	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
 	commandExecution
 		.command("start")
@@ -2142,7 +2153,13 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("create")
-		.description("Create a task in backlog.")
+		.description("在 Backlog 创建具有独立目标和生命周期的 Task。")
+		.addHelpText(
+			"after",
+			`\n${INDEPENDENT_TASK_CREATION_GUIDANCE}
+当前会话内部的分工可考虑 Subagent；同 Task 内与主线互补、适合共享工作目录且受益于用户独立参与的协作可考虑 task conversation-session create。
+${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
+		)
 		.option("--title <text>", "Task title.")
 		.requiredOption("--prompt <text>", "Task prompt text.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")

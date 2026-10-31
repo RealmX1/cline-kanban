@@ -54,7 +54,7 @@ export function isTaskConversationSessionWithoutTaskLifecycleAuthority(
 	return metadata !== undefined && metadata.taskConversationSessionRole !== "main";
 }
 
-// 首次侧问 fork 与协作会话共用目录时，前后端必须采用同一份寻址判据。
+// 人工与 agent 创建复用来源身份判据；已有侧会话不限制再次复刻。
 export function resolveTaskConversationSessionMainContextForkSelection(input: {
 	sessionRole?: "by_the_way" | "task_collaborator";
 	workspaceTaskId: string;
@@ -72,16 +72,6 @@ export function resolveTaskConversationSessionMainContextForkSelection(input: {
 		if (input.mainSessionSummary?.startedAt == null) {
 			return { forkRejectionReason: "主会话尚未建立，请使用全新上下文。" };
 		}
-	}
-	if (
-		!isTaskCollaborator &&
-		sessions.some(
-			(summary) =>
-				summary.taskConversationSessionMetadata?.workspaceTaskId === input.workspaceTaskId &&
-				summary.taskConversationSessionMetadata.taskConversationSessionRole === "by_the_way",
-		)
-	) {
-		return { forkRejectionReason: "已有 By the way 会话，后续侧问请从全新上下文开始。" };
 	}
 	// Cline 按宿主任务 id 加载消息，不使用 cwd-latest。
 	if (!isTaskCollaborator && input.launchAgentId !== "claude" && input.launchAgentId !== "codex") {
@@ -127,7 +117,7 @@ export function resolveTaskConversationSessionMainContextForkSelection(input: {
 	};
 }
 
-// 保留既有侧问入口及其次数规则；协作会话必须显式声明角色并满足更严格的身份要求。
+// 兼容既有人工侧问入口。
 export function resolveByTheWayMainSessionForkSelection(
 	input: Omit<Parameters<typeof resolveTaskConversationSessionMainContextForkSelection>[0], "sessionRole">,
 ): ReturnType<typeof resolveTaskConversationSessionMainContextForkSelection> {

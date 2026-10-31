@@ -12,6 +12,7 @@ export const taskCommandExecutionSpecificationSchema = z
 		materialSha256: z.string().regex(/^[a-f0-9]{64}$/),
 		label: z.string().min(1),
 		recoveryEvidencePaths: z.array(z.string()).default([]),
+		readOnlyRecoveryEvidenceObservationCommand: commandArgumentsSchema.optional(),
 	})
 	.strict();
 export type TaskCommandExecutionSpecification = z.infer<typeof taskCommandExecutionSpecificationSchema>;

@@ -90,7 +90,7 @@ export interface StartAcpTaskSessionRequest {
 	// **同时不重放 startInPlanMode**：omp 的 loadSession 会返回该会话当前的 modes，
 	// 重新按 plan 起步会把用户在对话中途已经切走的模式按回去。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	beforeAgentProcessLaunch?: () => Promise<void>;
@@ -328,7 +328,7 @@ export class AcpTaskSessionService {
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
 		const isForkingMainContext =
 			!shouldResumeWithoutResendingPrompt &&
-			Boolean(request.taskConversationSessionMainContextForkSourceNativeSessionId);
+			Boolean(request.taskConversationSessionContextForkSourceNativeSessionId);
 
 		// 乐观消息只表示发送尝试；在协议证明接受之前不将回合交给 Agent。
 		const promptText = shouldResumeWithoutResendingPrompt ? "" : request.prompt.trim();
@@ -412,8 +412,8 @@ export class AcpTaskSessionService {
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
-				taskConversationSessionMainContextForkSourceNativeSessionId: isForkingMainContext
-					? request.taskConversationSessionMainContextForkSourceNativeSessionId
+				taskConversationSessionContextForkSourceNativeSessionId: isForkingMainContext
+					? request.taskConversationSessionContextForkSourceNativeSessionId
 					: undefined,
 				revalidateTaskConversationSessionMainContextForkSource: isForkingMainContext
 					? request.revalidateTaskConversationSessionMainContextForkSource

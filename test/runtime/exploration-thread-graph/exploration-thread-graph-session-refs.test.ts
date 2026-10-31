@@ -109,6 +109,44 @@ describe("assembleExplorationThreadGraphSessionRefs", () => {
 		expect(assembly.sessionRefs[1]).toMatchObject({ forkedFromParentSessionTurnNumber: 4 });
 	});
 
+	it("直接从当前主会话复刻的 By the way 仍保留主会话轮号锚点", () => {
+		const assembly = assembleExplorationThreadGraphSessionRefs({
+			explorationId: "exploration-1",
+			sessionSummaries: [
+				makeSummary({ taskId: "exploration-1" }),
+				makeSummary({
+					taskId: "by-the-way-main-fork",
+					agentNativeConversationSessionIdentity: makeNativeIdentity({ nativeSessionId: "native-main-fork" }),
+					taskConversationSessionMetadata: {
+						...makeByTheWayMetadata(5),
+						taskConversationSessionContextSource: "forked_from_conversation_session",
+						contextSourceSelectionAtCreation: "current_main",
+						contextSourceTaskConversationSessionId: "exploration-1",
+					},
+				}),
+			],
+		});
+		expect(assembly.sessionRefs[1]).toMatchObject({ forkedFromParentSessionTurnNumber: 5 });
+	});
+
+	it("peer 来源的多级侧会话不把 peer 轮号冒充主会话图谱锚点", () => {
+		const assembly = assembleExplorationThreadGraphSessionRefs({
+			explorationId: "exploration-1",
+			sessionSummaries: [
+				makeSummary({ taskId: "exploration-1" }),
+				makeSummary({
+					taskId: "nested-side-session",
+					agentNativeConversationSessionIdentity: makeNativeIdentity({ nativeSessionId: "nested-native" }),
+					taskConversationSessionMetadata: {
+						...makeByTheWayMetadata(4),
+						contextSourceTaskConversationSessionId: "peer-session",
+					},
+				}),
+			],
+		});
+		expect(assembly.sessionRefs[1]).not.toHaveProperty("forkedFromParentSessionTurnNumber");
+	});
+
 	it("launchArgvTemplate 逐字取自启动快照，绝不重算", () => {
 		const promptWithAwkwardWhitespace = "line one\n\n   indented\ttab";
 		const assembly = assembleExplorationThreadGraphSessionRefs({

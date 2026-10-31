@@ -78,6 +78,7 @@ import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/proce
 import { createTaskAgentConversationModelTokenUsageJournalMonitor } from "../diagnostics/task-agent-conversation-model-token-usage-journal-monitor";
 import { createTaskAttributedProcessTreeResourceSampler } from "../diagnostics/task-attributed-process-tree-resource-sampler";
 import { createTaskWorktreeDiskUsageMeasurementMonitor } from "../diagnostics/task-worktree-disk-usage-measurement-monitor";
+import { logTuiFreezeError } from "../diagnostics/tui-freeze-logger";
 import { translateExplorationThreadGraphMaintenanceOutcome } from "../exploration-thread-graph/exploration-thread-graph-maintenance-outcome-translation";
 import { createExplorationThreadGraphMaintenanceTrigger } from "../exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
 import { loadExplorationThreadGraphProjection } from "../exploration-thread-graph/exploration-thread-graph-projection-loader";
@@ -655,6 +656,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
 	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
+		isTaskConversationSessionReportExecutionAllowed: async (workspaceId, origin) => {
+			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
+			return workspacePath
+				? runtimeApi.isTaskConversationSessionReportExecutionAllowed({ workspaceId, workspacePath }, origin)
+				: false;
+		},
 		getTaskSessionSummary: findRuntimeSessionSummary,
 		hasPendingProgrammaticTaskChatInputDelivery: (workspaceId, taskId) =>
 			deps.workspaceRegistry
@@ -1136,6 +1143,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		requestRuntimeStopTerminatingHostedAgentSessions,
 		queuedTaskPromptDeliveryDispatcher,
 	});
+	// 单飞恢复扫描只处理已登记的会话操作；无需浏览器保持打开。
+	const reconcileConversationSessions = () => {
+		void runtimeApi
+			.reconcileTaskConversationSessionOperations()
+			.catch((error: unknown) => logTuiFreezeError("侧会话恢复扫描失败", error));
+	};
+	const conversationSessionRecoveryTimer = setInterval(reconcileConversationSessions, 15_000);
+	conversationSessionRecoveryTimer.unref();
+	reconcileConversationSessions();
 	const taskCommandExecutionApi = createTaskCommandExecutionService({
 		readOwner: async (workspaceId, taskId, execution) => {
 			const workspacePath =
@@ -2162,6 +2178,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return httpServerStoppedAcceptingConnections;
 	};
 	const stopStartingNewBackgroundWork = (preserveAlreadyStartedQueueDispatches = false) => {
+		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();
 		// 计划内 handover 先停止新认领，给已进入写链的投递保留同一个有界排空窗口。
@@ -2180,6 +2197,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
 		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
 			taskEditorCreationSubmissionApi.close(),
 			taskVisualizationArtifactApi.stop(),

@@ -295,6 +295,84 @@ describe("session-manager · 原生提交接受与前置 hook 的时序", () => 
 		vi.clearAllTimers();
 		vi.useRealTimers();
 	});
+	it("原文摘要超过十五秒后仍由同正文原生接受清除提示，不能匹配仅空白不同的消息", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "preserved-prompt-whitespace";
+		const { entry, write } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		manager.markAgentConversationPromptSubmissionPending(taskId, Date.now(), {
+			source: "harness_submit_hook",
+			submittedPromptText: "执行\r\n\t保留  正文",
+			submittedPromptTextNormalization: "preserve_internal_whitespace",
+		});
+		await vi.advanceTimersByTimeAsync(15_001);
+		manager.confirmAcceptedAgentConversationInput(taskId, {
+			eventId: "missing-body",
+			observedAtMs: Date.now(),
+			nativeSessionId: `${taskId}-native`,
+			runtimeSessionIncarnationId: `${taskId}-incarnation`,
+		});
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("unconfirmed");
+		confirmCorrespondingNativeInput(manager, taskId, "执行 保留 正文", "different-whitespace");
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance?.status).toBe("unconfirmed");
+		confirmCorrespondingNativeInput(manager, taskId, "执行\n\t保留  正文", "exact-whitespace");
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toMatchObject({
+			status: "accepted",
+			eventId: "exact-whitespace",
+			submittedPromptTextNormalization: "preserve_internal_whitespace",
+		});
+		expect(write).not.toHaveBeenCalled();
+	});
+	it("旧 Codex hook 的有损摘要即使匹配实时单行消息，也等待历史唯一性核验", () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "legacy-codex-prompt-digest";
+		const { entry } = installFakeClaudeEntry(manager, taskId, {
+			mirrorSnapshot: CLAUDE_READY_PROMPT,
+			state: "awaiting_review",
+			reviewReason: "hook",
+		});
+		entry.summary.agentId = "codex";
+		manager.markAgentConversationPromptSubmissionPending(taskId, Date.now(), {
+			source: "harness_submit_hook",
+			submittedPromptText: "执行 步骤",
+		});
+		const candidate = entry.summary.agentConversationPromptSubmissionAcceptance;
+		confirmCorrespondingNativeInput(manager, taskId, "执行 步骤", "could-be-collision");
+		expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(candidate);
+	});
+	it.each(["preserve_internal_whitespace", "collapse_all_whitespace"] as const)(
+		"程序化投递与 %s hook 重叠时保留原候选和原回执",
+		async (submittedPromptTextNormalization) => {
+			const manager = new TerminalSessionManager();
+			const taskId = "programmatic-prompt-hook-normalization-overlap";
+			const { entry } = installFakeClaudeEntry(manager, taskId, {
+				mirrorSnapshot: "model: test\n› ",
+				state: "awaiting_review",
+				reviewReason: "hook",
+			});
+			entry.summary.agentId = "codex";
+			if (entry.summary.agentNativeConversationSessionIdentity)
+				entry.summary.agentNativeConversationSessionIdentity.sourceAgentId = "codex";
+			const prompt = "执行\n\t保留  正文";
+			manager.submitTaskChatInputWhenReady(taskId, prompt, { onDeliveryOutcome: vi.fn() });
+			await vi.advanceTimersByTimeAsync(SETTLE_MS + PASTE_INGESTION_MAX_WAIT_MS);
+			const candidate = entry.summary.agentConversationPromptSubmissionAcceptance;
+			const receipt = entry.active.programmaticDeliveryReceipt;
+			expect(receipt?.phase).toBe("awaiting_submit_confirmation");
+			expect(candidate?.submissionSource).toBe("programmatic_submission");
+			manager.markAgentConversationPromptSubmissionPending(taskId, Date.now() + 1, {
+				source: "harness_submit_hook",
+				submittedPromptText:
+					submittedPromptTextNormalization === "collapse_all_whitespace" ? prompt.replace(/\s+/g, " ") : prompt,
+				submittedPromptTextNormalization,
+			});
+			expect(entry.summary.agentConversationPromptSubmissionAcceptance).toBe(candidate);
+			expect(entry.active.programmaticDeliveryReceipt).toBe(receipt);
+		},
+	);
 	it.each([
 		{
 			sample: "38fd3 预算内确认",

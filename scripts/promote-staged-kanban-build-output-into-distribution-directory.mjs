@@ -91,6 +91,9 @@ async function pathIsRealDirectoryNotSymbolicLink(path) {
 }
 
 async function removeEmptyDirectoriesBottomUp(directoryPath) {
+	if (!(await lstat(directoryPath)).isDirectory()) {
+		throw new Error(`拒绝清理软链接或非真实暂存目录：${directoryPath}`);
+	}
 	const entries = await readdir(directoryPath, { withFileTypes: true });
 	for (const entry of entries) {
 		if (entry.isDirectory()) {
@@ -109,6 +112,9 @@ export async function promoteStagedKanbanBuildOutputIntoDistributionDirectory({
 	stagingDirectoryPath,
 	distributionDirectoryPath,
 }) {
+	if (!(await lstat(stagingDirectoryPath)).isDirectory()) {
+		throw new Error(`拒绝发布软链接或非真实暂存根目录：${stagingDirectoryPath}`);
+	}
 	const stagedRelativeFilePaths = await listRelativeRegularFilePathsRecursivelyRejectingSymbolicLinks(stagingDirectoryPath);
 	const promotedRelativeFilePathsInPromotionOrder = orderStagedRelativeFilePathsForPromotion(stagedRelativeFilePaths);
 
@@ -195,9 +201,19 @@ function readRequiredCommandLineOption(optionName) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	const stagingDirectoryPath = readRequiredCommandLineOption("--staging-directory");
 	const result = await promoteStagedKanbanBuildOutputIntoDistributionDirectory({
-		stagingDirectoryPath: readRequiredCommandLineOption("--staging-directory"),
+		stagingDirectoryPath,
 		distributionDirectoryPath: readRequiredCommandLineOption("--distribution-directory"),
 	});
-	process.stdout.write(`${JSON.stringify(result)}\n`);
+	let stagingDirectoryCleanup = { status: "succeeded", error: null };
+	try {
+		await removeEmptyDirectoriesBottomUp(stagingDirectoryPath);
+		if (await pathIsRealDirectoryNotSymbolicLink(stagingDirectoryPath)) {
+			stagingDirectoryCleanup = { status: "pending", error: "暂存目录仍包含文件；保留现场，不把清理未完成写成发布失败" };
+		}
+	} catch (error) {
+		stagingDirectoryCleanup = { status: "pending", error: error instanceof Error ? error.message : String(error) };
+	}
+	process.stdout.write(`${JSON.stringify({ ...result, stagingDirectoryCleanup })}\n`);
 }
