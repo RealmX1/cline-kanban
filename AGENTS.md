@@ -56,6 +56,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。
 - **有效活动必须有会话归属与语义证据**：前置提交 hook、Enter、PTY 重绘不证明接受；原生用户记录或可关联协议处理事件确认后才推进接受边沿。各独立会话各记活动，卡片与默认排序只取当前主绑定；缓存继续用专用请求参考，Cursor 新内容仅作显式估计。全文同上。
 - **输入接受不能受工具历史预算阻塞**：Codex 用户消息单独记原生位置水位；历史补证只修正标记，不发布新输入或重开回合。持久扫描、按键候选和退出/Rewind 边界见 `docs/runbooks/prompt-submission-acceptance-reconciliation.md`。
+- **Codex 暂存与注入分开**：Ctrl+S／Cmd+S 只走本代原生编辑器桥接，写库失败须非零退出；确认原生清框/恢复后才解锁与回放。注入继续 `turn/start`，旧会话不得转发无效 Ctrl+S。协议与恢复见 `docs/codex-draft-stash-to-prompts.md`。
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。

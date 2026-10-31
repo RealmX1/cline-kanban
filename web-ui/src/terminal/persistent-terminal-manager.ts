@@ -31,6 +31,8 @@ import { resolveTerminalClipboardKeyboardShortcutAction } from "@/terminal/termi
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import {
 	isStashTerminalInputBoxToPromptLibraryShortcut,
+	isTerminalInputBoxStashInFlight,
+	recoverPendingTerminalInputBoxStash,
 	stashTerminalInputBoxToPromptLibrary,
 } from "@/terminal/terminal-input-box-stash-shortcut";
 import { createKanbanTerminalOptions } from "@/terminal/terminal-options";
@@ -484,6 +486,15 @@ class PersistentTerminal {
 				void stashTerminalInputBoxToPromptLibrary({ workspaceId: this.workspaceId, taskId: this.taskId });
 				return false;
 			}
+			if (
+				isTerminalInputBoxStashInFlight({ workspaceId: this.workspaceId, taskId: this.taskId }) &&
+				event.type === "keydown" &&
+				!event.metaKey &&
+				!event.altKey
+			) {
+				event.preventDefault();
+				return false;
+			}
 			return true;
 		});
 		this.searchAddon.onDidChangeResults((results) => {
@@ -748,6 +759,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.connectionReady = true;
+		void recoverPendingTerminalInputBoxStash({ workspaceId: this.workspaceId, taskId: this.taskId });
 		this.clearReconnectTimer();
 		this.lastError = null;
 		this.notifyLastError();
