@@ -9,6 +9,11 @@ import {
 	type RuntimeTaskSessionSummary,
 	runtimeStateStreamTaskSessionsMessageSchema,
 } from "../../src/core/api-contract";
+import {
+	collectKanbanCliInvocationEnvironmentActorClaims,
+	encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
+	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
+} from "../../src/core/kanban-cli-invocation-environment-actor-claims";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { Browser, BrowserType } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -798,6 +803,172 @@ setInterval(() => {}, 1000);
 			await expect.poll(() => unreadAnswerIndicator.count()).toBe(0);
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-mobile.png") });
 			expect(pageErrors).toEqual([]);
+			if (
+				mainAgentId === "codex" &&
+				collaborationAgentId === "codex" &&
+				sessionRole === "task_collaborator" &&
+				!withoutInitialUserMessage
+			) {
+				await createdSideSessionButton.click();
+				const selectedBeforeBackgroundCreation = page.locator(
+					`button[data-task-conversation-session-id="${sideSessionId}"]`,
+				);
+				expect(await selectedBeforeBackgroundCreation.getAttribute("aria-current")).toBe("true");
+				const fromPeer = createTRPCProxyClient<RuntimeAppRouter>({
+					links: [
+						httpLink({
+							url: `${origin}/api/trpc`,
+							headers: {
+								"x-kanban-workspace-id": workspaceId,
+								[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME]:
+									encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+										collectKanbanCliInvocationEnvironmentActorClaims({
+											environment: {
+												KANBAN_TASK_ID: taskId,
+												KANBAN_TASK_CONVERSATION_SESSION_ID: sideSessionId,
+												KANBAN_HOOK_WORKSPACE_ID: workspaceId,
+												CODEX_THREAD_ID: identity.nativeSessionId,
+											},
+											invokingKanbanCliCodeVersion: "isolated-browser-test",
+											invokingProcessWorkingDirectory: repository.repositoryPath,
+										}),
+									),
+							},
+						}),
+					],
+				});
+				const request = {
+					taskId,
+					sessionRole: "task_collaborator" as const,
+					contextSource: "creator" as const,
+					initialMessage: "",
+					creationReason: "复核 peer 再创建",
+					idempotencyKey: "peer-background-creation",
+				};
+				const backgroundCreated = await fromPeer.runtime.createTaskConversationSession.mutate(request);
+				expect(backgroundCreated.ok, JSON.stringify(backgroundCreated)).toBe(true);
+				const childId = backgroundCreated.creation?.taskConversationSessionId;
+				if (!childId) throw new Error("未预留派生 peer ID");
+				await expect
+					.poll(() => existsSync(join(repository.repositoryPath, `launch-${childId}.json`)), { timeout: 20_000 })
+					.toBe(true);
+				const childLaunch = JSON.parse(
+					readFileSync(join(repository.repositoryPath, `launch-${childId}.json`), "utf8"),
+				);
+				expect(childLaunch.forkSourceNativeSessionId).toBe(identity.nativeSessionId);
+				const retried = await fromPeer.runtime.createTaskConversationSession.mutate(request);
+				expect(retried.creation?.taskConversationSessionId).toBe(childId);
+				expect(
+					JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${childId}.json`), "utf8")).pid,
+				).toBe(childLaunch.pid);
+				const runConversationSessionCli = async (argumentsAfterSubcommand: string[]) => {
+					const child = children.register(
+						spawn(
+							process.execPath,
+							[
+								"--require",
+								join(sourcePath, "test/integration/shutdown-ipc-hook.cjs"),
+								packagedCliPath,
+								"task",
+								"conversation-session",
+								...argumentsAfterSubcommand,
+								"--task-id",
+								taskId,
+								"--project-path",
+								repository.repositoryPath,
+							],
+							{
+								cwd: repository.repositoryPath,
+								env: {
+									...environment,
+									KANBAN_TASK_ID: taskId,
+									KANBAN_TASK_CONVERSATION_SESSION_ID: sideSessionId,
+									KANBAN_HOOK_WORKSPACE_ID: workspaceId,
+									CODEX_THREAD_ID: identity.nativeSessionId,
+								},
+								stdio: ["ignore", "pipe", "pipe", "ipc"],
+							},
+						),
+					);
+					let output = "";
+					let errors = "";
+					child.stdout?.on("data", (chunk) => {
+						output += String(chunk);
+					});
+					child.stderr?.on("data", (chunk) => {
+						errors += String(chunk);
+					});
+					expect(await waitForChildProcessExit(child, 45_000)).toBe(true);
+					expect(child.exitCode, errors).toBe(0);
+					return JSON.parse(output);
+				};
+				const createdThroughCli = await runConversationSessionCli([
+					"create",
+					"--role",
+					"task_collaborator",
+					"--reason",
+					request.creationReason,
+					"--idempotency-key",
+					request.idempotencyKey,
+				]);
+				expect(createdThroughCli.creation.taskConversationSessionId).toBe(childId);
+				const listedThroughCli = await runConversationSessionCli(["list"]);
+				expect(listedThroughCli.sessions.some((session: { taskId: string }) => session.taskId === childId)).toBe(
+					true,
+				);
+				const inspectedThroughCli = await runConversationSessionCli(["get", "--session-id", childId]);
+				expect(inspectedThroughCli.summary.taskId).toBe(childId);
+				const reportArguments = [
+					"report",
+					"--target-session",
+					childId,
+					"--message",
+					"独立 CLI 回报验证",
+					"--idempotency-key",
+					"peer-cli-report",
+				];
+				const reportThroughCli = await runConversationSessionCli(reportArguments);
+				expect(reportThroughCli.ok, JSON.stringify(reportThroughCli)).toBe(true);
+				const replayedReport = await runConversationSessionCli(reportArguments);
+				expect(replayedReport.reportId).toBe(reportThroughCli.reportId);
+				writeFileSync(
+					join(evidenceDirectory, "agent-conversation-session-cli-results.json"),
+					JSON.stringify(
+						{ createdThroughCli, listedThroughCli, inspectedThroughCli, reportThroughCli, replayedReport },
+						null,
+						2,
+					),
+				);
+				const inspected = await fromPeer.runtime.getTaskConversationSession.query({
+					taskId,
+					taskConversationSessionId: childId,
+				});
+				expect(inspected.summary?.taskConversationSessionMetadata).toMatchObject({
+					creatorTaskConversationSessionId: sideSessionId,
+					contextSourceTaskConversationSessionId: sideSessionId,
+					defaultReportTargetTaskConversationSessionId: sideSessionId,
+				});
+				const listed = await fromPeer.runtime.listTaskConversationSessions.query({ taskId });
+				expect(listed.sessions.some((session) => session.taskId === childId)).toBe(true);
+				await expect
+					.poll(() => page.locator(`button[data-task-conversation-session-id="${childId}"]`).count())
+					.toBe(1);
+				expect(await selectedBeforeBackgroundCreation.getAttribute("aria-current")).toBe("true");
+				for (const key of ["first-read-only-fork", "second-read-only-fork"]) {
+					const question = await fromPeer.runtime.createTaskConversationSession.mutate({
+						...request,
+						sessionRole: "by_the_way",
+						idempotencyKey: key,
+					});
+					expect(question.ok, JSON.stringify(question)).toBe(true);
+				}
+				expect(await selectedBeforeBackgroundCreation.getAttribute("aria-current")).toBe("true");
+				await page.screenshot({ path: join(evidenceDirectory, "agent-background-selection-preserved.png") });
+				writeFileSync(
+					join(evidenceDirectory, "agent-background-creation.json"),
+					JSON.stringify({ backgroundCreated, retried, inspected }, null, 2),
+				);
+			}
 			await scoped.runtime.stopTaskSession.mutate({ taskId: sideSessionId });
 			expect((await scoped.workspace.getState.query()).sessions[taskId]?.pid).toBe(mainPid);
 			// 关闭浏览器后重启整个运行时，验证恢复不依赖浏览器内存或仍存在的活体对象。
@@ -836,6 +1007,7 @@ setInterval(() => {}, 1000);
 				JSON.parse(readFileSync(join(repository.repositoryPath, `launch-${sideSessionId}.json`), "utf8"))
 					.nativeSessionId,
 			).toBe(identity.nativeSessionId);
+
 			await scoped.runtime.stopTaskSession.mutate({ taskId });
 			const stoppedState = await scoped.workspace.getState.query();
 			expect(stoppedState.sessions[sideSessionId]?.pid).toBeNull();

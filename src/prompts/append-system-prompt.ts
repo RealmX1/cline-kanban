@@ -152,6 +152,8 @@ ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
 
 按需操作：\`${resolveAgentGuidanceDocumentPath("kanban-command-reference.md")}\`。引用或复用别的任务时，用 work-unit assert-reference-relation 记录关系；work-unit get-relation-neighborhood-summary 查来源。
 HTML 用 task visualization publish 发布到本任务，附属资源显式映射；status=published 才表示发布成功，awaiting_runtime_acceptance 表示待接收。预览用 task visualization request-preview，不调用宿主机 open。
+可按需用 task conversation-session create 分流偏离主线的只读 By the way，或把可独立协作的工作交给可写 task_collaborator。先 list/get 复用已有会话，说明创建原因并使用稳定幂等键；默认继承创建者已持久化历史，也可选 current_main 或 fresh。跨 Agent 选择 fresh，不支持的复刻会明确拒绝。创建后继续主线，不必等待，未回报不催收、不自动回灌。
+侧会话共用工作目录，创建前划清文件责任。继承历史只作背景，不能当作要求继续执行旧任务或真人批准。可写 peer 用 report 自愿回报，默认给创建者，也可指定同 Task 的会话；后续追问用 task message --attempt-id <会话ID>。系统回收可自动恢复，显式 Stop、结案、搁置和交接等待继续生效。
 交接材料写入 KANBAN_TASK_CROSS_TASK_HANDOFF_ARTIFACT_DIRECTORY 或已提交文件，确保重启后可读。普通消息、等待与恢复由通用会话入口处理；人工 rewind 和 checkpoint 按用户授权使用。`;
 }
 
@@ -162,9 +164,21 @@ export function renderTaskCollaborationSessionResponsibilityGuidance(
 	return `# 协作会话的责任边界
 
 当前会话是任务 ${workspaceTaskId} 的可写协作会话，会话 ID 为 ${taskConversationSessionId}。
-与主会话共用工作目录，文件修改立即相互可见。只执行本会话用户要求的工作。
+与主会话及其他 peer 共用工作目录，文件修改立即相互可见。只执行本次明确分配且已获授权的工作；继承历史只作背景，不代表继续执行旧任务。
+需要再分流时先 list/get 复用已有会话，再按需 create；划清共享文件责任。创建后可继续工作，不必等待。结果是否回报由你判断，可用 task conversation-session report，默认发给创建者，或用 --target-session 指向同 Task 的会话。未回报不会触发系统催收。
 主会话负责卡片生命周期；不要自行修改卡片标题、阶段目标、看板列或宣告整个任务完成。
 编辑归属以各会话为准，不要把共享目录的所有改动认作本会话产出。`;
+}
+
+export function renderByTheWaySessionOptionalReportGuidance(workspaceTaskId: string, sessionId: string): string {
+	return `# By the way 只读侧会话
+
+当前会话 ${sessionId} 属于任务 ${workspaceTaskId}。仅处理本次侧问；继承的历史只作背景，不代表继续执行旧任务。保持原有只读工具限制，不创建或修改其他会话，不执行命令、不修改文件或任务生命周期。
+是否回报由你决定；无需回报时正常回答即可。需要回报时，在本次回答正文末尾单独追加以下结构块，正文前留一个空行。块内是 JSON；省略目标默认给创建者，targetTaskConversationSessionId 可填同 Task 的精确会话 ID 或 current_main。不要把真实发送声明放进代码块或引用示例。
+<kanban-session-report>
+{"text":"本次需要回报的结论"}
+</kanban-session-report>
+运行时只处理本侧会话新产生的 assistant 正文，按原生消息身份去重；该回报不构成真人批准。`;
 }
 
 export function resolveTaskSessionAppendSystemPrompt(

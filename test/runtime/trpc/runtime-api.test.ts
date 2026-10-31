@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1072,7 +1073,7 @@ describe("createRuntimeApi startTaskSession", () => {
 
 		expect(start).toHaveBeenCalledWith(
 			expect.objectContaining({
-				taskConversationSessionMainContextForkSourceNativeSessionId:
+				taskConversationSessionContextForkSourceNativeSessionId:
 					main.agentNativeConversationSessionIdentity?.nativeSessionId,
 			}),
 			...(sessionTransport === "pty_terminal" ? [expect.any(String)] : []),
@@ -1167,7 +1168,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect(unselectedStart).not.toHaveBeenCalled();
 			expect(selectedStart).toHaveBeenCalledWith(
 				expect.objectContaining({
-					taskConversationSessionMainContextForkSourceNativeSessionId:
+					taskConversationSessionContextForkSourceNativeSessionId:
 						currentMainSummary.agentNativeConversationSessionIdentity?.nativeSessionId,
 					taskConversationSessionMetadata: expect.objectContaining({
 						taskConversationSessionLaunchSettings: expect.objectContaining({ sessionTransport }),
@@ -1277,7 +1278,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
 					expect.objectContaining({
 						terminalAgentModelOverrideSettings: { agentId: "claude", modelId: "claude-sonnet-5[1m]" },
-						taskConversationSessionMainContextForkSourceNativeSessionId: mainIdentity.nativeSessionId,
+						taskConversationSessionContextForkSourceNativeSessionId: mainIdentity.nativeSessionId,
 					}),
 					expect.any(String),
 				);
@@ -1895,33 +1896,52 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
-	it.each([false, true])("混合通道停止：仅停止协作会话或收拢整个任务，停止整任务=%s", async (stopWholeTask) => {
-		const side = createCollaborationSummary({ agentId: "codex", sessionTransport: "pty_terminal" });
-		const main = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
-		const acpService = {
-			listSummaries: () => [main],
-			stopTaskSession: vi.fn(async (id: string) => (id === main.taskId ? main : null)),
-		};
-		const terminalManager = { listSummaries: () => [side], stopTaskSession: vi.fn(() => side) };
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		const response = await api.stopTaskSession(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: stopWholeTask ? main.taskId : side.taskId },
-		);
-		expect(response.ok).toBe(true);
-		expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith(side.taskId);
-		if (stopWholeTask) expect(acpService.stopTaskSession).toHaveBeenCalledWith(main.taskId);
-		else expect(acpService.stopTaskSession).not.toHaveBeenCalledWith(main.taskId);
-	});
+	it.each([
+		{ stopWholeTask: false, corruptOperations: false },
+		{ stopWholeTask: true, corruptOperations: false },
+		{ stopWholeTask: true, corruptOperations: true },
+	])(
+		"混合通道停止：停止整任务=$stopWholeTask，操作记录损坏=$corruptOperations",
+		async ({ stopWholeTask, corruptOperations }) => {
+			const side = createCollaborationSummary({ agentId: "codex", sessionTransport: "pty_terminal" });
+			const main = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
+			const acpService = {
+				listSummaries: () => [main],
+				stopTaskSession: vi.fn(async (id: string) => (id === main.taskId ? main : null)),
+			};
+			const terminalManager = { listSummaries: () => [side], stopTaskSession: vi.fn(() => side) };
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
+				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			const workspaceId = corruptOperations ? "workspace-with-corrupted-session-operations" : "workspace-1";
+			const operationDirectoryPath = join(
+				workspaceStateMocks.runtimeHomePath,
+				"task-conversation-session-operations",
+			);
+			if (corruptOperations) {
+				mkdirSync(operationDirectoryPath, { recursive: true });
+				writeFileSync(
+					join(operationDirectoryPath, `${createHash("sha256").update(workspaceId).digest("hex")}.json`),
+					"损坏的操作记录",
+				);
+			}
+			const response = await api.stopTaskSession(
+				{ workspaceId, workspacePath: "/tmp/repo" },
+				{ taskId: stopWholeTask ? main.taskId : side.taskId },
+			);
+			expect(response.ok).toBe(true);
+			expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith(side.taskId);
+			if (stopWholeTask) expect(acpService.stopTaskSession).toHaveBeenCalledWith(main.taskId);
+			else expect(acpService.stopTaskSession).not.toHaveBeenCalledWith(main.taskId);
+		},
+	);
 
 	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
@@ -1969,7 +1989,7 @@ describe("createRuntimeApi startTaskSession", () => {
 				taskId: "side-session-1",
 				workspaceTaskId: "task-1",
 				cwd: "/tmp/main-task-worktree",
-				taskConversationSessionMetadata,
+				taskConversationSessionMetadata: expect.objectContaining(taskConversationSessionMetadata),
 			}),
 			expect.any(String),
 		);
@@ -2227,10 +2247,11 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
 
-	it("rejects a later cwd-latest fork after a By the way session already exists", async () => {
+	it("缺少主身份且已有竞争会话时拒绝 cwd-latest 复刻", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const existingByTheWaySummary = createSummary({
 			taskId: "side-session-existing",
+			agentId: "codex",
 			taskConversationSessionMetadata: {
 				workspaceTaskId: "task-1",
 				taskConversationSessionRole: "by_the_way",
@@ -2278,7 +2299,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			},
 		);
 
-		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("已有 By the way 会话") });
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("原生会话 ID") });
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
 
@@ -2366,7 +2387,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			} else {
 				expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
 					expect.objectContaining({
-						taskConversationSessionMainContextForkSourceNativeSessionId: hasMainNativeIdentity
+						taskConversationSessionContextForkSourceNativeSessionId: hasMainNativeIdentity
 							? mainNativeSessionId
 							: undefined,
 					}),

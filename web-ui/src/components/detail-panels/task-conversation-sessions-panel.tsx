@@ -38,7 +38,7 @@ interface TaskSessionCreationDraft {
 const taskSessionCreationDraftsByWorkspaceAndTask = new Map<string, TaskSessionCreationDraft>();
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
 
-const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
+const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["claude", "codex"]);
 const supportedAgentCatalog = getRuntimeLaunchSupportedAgentCatalog();
 
 function resolveDefaultCollaborationAgentId(mainAgentId: RuntimeAgentId): RuntimeAgentId {
@@ -298,10 +298,7 @@ export function TaskConversationSessionsPanel({
 
 		try {
 			const result = await onCreateTaskConversationSession({
-				codexConfigurationProfileId:
-					codexConfigurationProfileId ??
-					mainSessionSummary.codexConfigurationProfileId ??
-					taskCard?.codexConfigurationProfileId,
+				...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
 				agentId: selectedAgentId,
 				sessionRole,
 				initialUserQuestion,
@@ -375,6 +372,8 @@ export function TaskConversationSessionsPanel({
 					<button
 						type="button"
 						className="w-full rounded-md px-2 pb-1 pt-2 text-left"
+						data-task-conversation-session-id={mainSessionSummary.taskId}
+						aria-current={selectedTaskConversationSessionId === mainSessionSummary.taskId ? "true" : undefined}
 						onClick={() => selectSession(mainSessionSummary)}
 					>
 						<div className="flex items-center gap-2">
@@ -429,6 +428,8 @@ export function TaskConversationSessionsPanel({
 							<button
 								type="button"
 								className="w-full rounded-md px-2 pb-1 pt-2 text-left"
+								data-task-conversation-session-id={summary.taskId}
+								aria-current={selectedTaskConversationSessionId === summary.taskId ? "true" : undefined}
 								onClick={() => selectSession(summary)}
 							>
 								<div className="flex items-center gap-2">
@@ -459,9 +460,13 @@ export function TaskConversationSessionsPanel({
 											: "尚未发送消息")}
 								</p>
 								<p className="mt-1 text-[11px] text-text-tertiary">
-									{metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
-										? `Forked from main · ${turnsAgo} turns ago`
-										: `Started from scratch · ${turnsAgo} turns ago`}
+									{metadata.contextSourceTaskConversationSessionId
+										? `继承自会话 ${metadata.contextSourceTaskConversationSessionId}`
+										: metadata.taskConversationSessionContextSource === "forked_from_main_current_turn"
+											? `Forked from main · ${turnsAgo} turns ago`
+											: metadata.creatorTaskConversationSessionId
+												? `全新上下文 · 创建者 ${metadata.creatorTaskConversationSessionId}`
+												: `Started from scratch · ${turnsAgo} turns ago`}
 								</p>
 							</button>
 							<TaskConversationSessionIdentifierChips
@@ -622,9 +627,7 @@ export function TaskConversationSessionsPanel({
 								? "可执行命令与修改文件，权限和 Plan 起步设置沿用当前卡片。"
 								: !isByTheWaySessionCreationSupported
 									? `${effectiveAgentId} By the way sessions are not available.`
-									: effectiveAgentId === "cline"
-										? "Cline will answer in read-only Plan mode."
-										: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
+									: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
 						</p>
 						{creationError ? <p className="mt-2 text-xs text-status-red">{creationError}</p> : null}
 						<Button

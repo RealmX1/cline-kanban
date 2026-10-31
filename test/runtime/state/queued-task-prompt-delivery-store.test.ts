@@ -1283,6 +1283,41 @@ describe("queued-task-prompt-delivery-store — restart-crossing 盖章", () => 
 		});
 	});
 
+	it.each([false, true])("侧会话回报跨重启：已尝试投递=%s，只有零尝试条目自动接管", async (alreadyDispatched) => {
+		await mutateWorkspaceQueuedTaskPromptDeliveries(WORKSPACE_ID, enqueue("session-report", "回报"), NOW);
+		const snapshot = await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID);
+		const entry = taskEntries(snapshot)[0];
+		if (!entry) throw new Error("缺少测试条目");
+		entry.workspaceTaskId = TASK_ID;
+		entry.programmaticInjectionLedgerReceiptLink = {
+			injectionLedgerIdempotencyKey: "report-key",
+			injectionSource: "task_conversation_session_report",
+			settledTerminalDeliveryReceipt: null,
+		};
+		entry.taskConversationSessionReportOrigin = {
+			workspaceTaskId: TASK_ID,
+			taskIncarnationCreatedAt: 1,
+			sourceTaskConversationSessionId: "peer",
+			targetTaskConversationSessionId: TASK_ID,
+		};
+		if (alreadyDispatched) {
+			entry.deliveryState = "handed_to_transport";
+			entry.deliveryAttemptCount = 1;
+			entry.dispatchIdempotencyKey = "already-submitted";
+		}
+		await writeFile(getWorkspaceQueuedTaskPromptDeliveriesPath(WORKSPACE_ID), JSON.stringify(snapshot), "utf8");
+		const restored = await stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart({
+			workspaceId: WORKSPACE_ID,
+			runtimeProcessStartedAtEpochMs: NOW + 100,
+			sweepingRuntimeProcessInstanceId: "new-runtime",
+			liveRuntimeProcessInstanceIds: NO_LIVE_RUNTIME_PROCESS_INSTANCES,
+			nowEpochMs: NOW + 200,
+		});
+		expect(taskEntries(restored.snapshot)[0]?.deliveryState).toBe(alreadyDispatched ? "settled_failed" : "queued");
+		if (!alreadyDispatched)
+			expect(taskEntries(restored.snapshot)[0]?.custodianRuntimeProcessInstanceId).toBe("new-runtime");
+	});
+
 	// 回归钉子（reviewer kimi-code 报的 medium）：runtime 在 handed_to_transport 与回执之间崩溃后，
 	// 认领门会被这条僵尸条目永远挡住，而 cancel（只覆盖 queued/claimed）、dismiss（只覆盖终态）、
 	// reconfirm（只写时间戳）对它全部无效 —— 该 task 的队列就此永久卡死。

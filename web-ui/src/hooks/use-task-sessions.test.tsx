@@ -25,6 +25,7 @@ function expectedStartPanelWidth(persistedWidthPx: number): number {
 }
 
 const startTaskSessionMutateMock = vi.hoisted(() => vi.fn());
+const createTaskConversationSessionMutateMock = vi.hoisted(() => vi.fn());
 const sendTaskSessionInputMutateMock = vi.hoisted(() => vi.fn());
 const trackTaskResumedFromTrashMock = vi.hoisted(() => vi.fn());
 const loadDetailTerminalPanelWidthMock = vi.hoisted(() => vi.fn(() => 0));
@@ -33,6 +34,7 @@ vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
 			sendTaskSessionInput: { mutate: sendTaskSessionInputMutateMock },
+			createTaskConversationSession: { mutate: createTaskConversationSessionMutateMock },
 			startTaskSession: {
 				mutate: startTaskSessionMutateMock,
 			},
@@ -95,6 +97,25 @@ describe("useTaskSessions", () => {
 	beforeEach(() => {
 		sendTaskSessionInputMutateMock.mockReset();
 		startTaskSessionMutateMock.mockReset();
+		createTaskConversationSessionMutateMock.mockReset();
+		createTaskConversationSessionMutateMock.mockImplementation(async (input: { idempotencyKey: string }) => {
+			const taskId = `task-conversation-session-${input.idempotencyKey}`;
+			return {
+				ok: true,
+				creation: { taskConversationSessionId: taskId },
+				summary: {
+					taskId,
+					state: "running",
+					agentId: "codex",
+					pid: 124,
+					startedAt: 1,
+					updatedAt: 1,
+					lastOutputAt: null,
+					reviewReason: null,
+					exitCode: null,
+				},
+			};
+		});
 		trackTaskResumedFromTrashMock.mockReset();
 		loadDetailTerminalPanelWidthMock.mockReset();
 		loadDetailTerminalPanelWidthMock.mockReturnValue(PERSISTED_PANEL_WIDTH_PX);
@@ -343,17 +364,17 @@ describe("useTaskSessions", () => {
 			});
 			expect(result?.ok).toBe(true);
 		});
-		expect(startTaskSessionMutateMock).toHaveBeenCalledExactlyOnceWith(
+		expect(createTaskConversationSessionMutateMock).toHaveBeenCalledExactlyOnceWith(
 			expect.objectContaining({
-				prompt: "",
-				taskTitle: input.sessionRole === "task_collaborator" ? "协作会话" : "By the way",
-				taskConversationSessionMetadata: expect.objectContaining({
-					taskConversationSessionRole: input.sessionRole,
-					taskConversationSessionContextSource: input.contextSource,
-					latestUserMessagePreview: null,
-				}),
+				taskId: "task-1",
+				initialMessage: "",
+				sessionRole: input.sessionRole,
+				contextSource: input.contextSource === "started_from_scratch" ? "fresh" : "current_main",
+				creatorTaskConversationSessionId: "task-1",
+				idempotencyKey: expect.any(String),
 			}),
 		);
+		expect(startTaskSessionMutateMock).not.toHaveBeenCalled();
 	});
 
 	it("creates a read-only By the way session related to the current main turn", async () => {
@@ -389,23 +410,18 @@ describe("useTaskSessions", () => {
 
 		const taskConversationSessionId = "task-conversation-session-11111111-1111-4111-8111-111111111111";
 		expect(result).toEqual({ ok: true, taskConversationSessionId });
-		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+		expect(createTaskConversationSessionMutateMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				taskId: taskConversationSessionId,
-				workspaceTaskId: "task-1",
-				prompt: "Why does this type exist?",
+				taskId: "task-1",
+				sessionRole: "by_the_way",
+				creatorTaskConversationSessionId: "task-1",
+				contextSource: "current_main",
+				initialMessage: "Why does this type exist?",
 				agentId: "codex",
-				taskConversationSessionMetadata: {
-					workspaceTaskId: "task-1",
-					taskConversationSessionRole: "by_the_way",
-					taskConversationSessionContextSource: "forked_from_main_current_turn",
-					parentTaskConversationSessionId: "task-1",
-					mainSessionOriginTurnNumber: 4,
-					mainSessionOriginUserMessagePreview: "Implement the feature",
-					latestUserMessagePreview: "Why does this type exist?",
-				},
+				idempotencyKey: "11111111-1111-4111-8111-111111111111",
 			}),
 		);
+		expect(startTaskSessionMutateMock).not.toHaveBeenCalled();
 	});
 
 	it("协作 fork 透传父会话和上下文，由服务端按主身份解析模型", async () => {
@@ -447,26 +463,18 @@ describe("useTaskSessions", () => {
 
 		const taskConversationSessionId = "task-conversation-session-11111111-1111-4111-8111-111111111111";
 		expect(result).toEqual({ ok: true, taskConversationSessionId });
-		expect(startTaskSessionMutateMock).toHaveBeenCalledWith(
+		expect(createTaskConversationSessionMutateMock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				taskId: taskConversationSessionId,
-				workspaceTaskId: "task-1",
-				prompt: "Why does this type exist?",
+				taskId: "task-1",
+				sessionRole: "task_collaborator",
+				creatorTaskConversationSessionId: "task-1",
+				contextSource: "current_main",
+				initialMessage: "Why does this type exist?",
 				agentId: "codex",
-				taskAgentPermissionMode: "bypass_all_permission_prompts",
-				startInPlanMode: false,
-				terminalAgentModelOverrideSettings: undefined,
-				taskConversationSessionMetadata: {
-					workspaceTaskId: "task-1",
-					taskConversationSessionRole: "task_collaborator",
-					taskConversationSessionContextSource: "forked_from_main_current_turn",
-					parentTaskConversationSessionId: "task-1",
-					mainSessionOriginTurnNumber: 4,
-					mainSessionOriginUserMessagePreview: "Implement the feature",
-					latestUserMessagePreview: "Why does this type exist?",
-				},
+				idempotencyKey: "11111111-1111-4111-8111-111111111111",
 			}),
 		);
+		expect(startTaskSessionMutateMock).not.toHaveBeenCalled();
 	});
 
 	it("forwards the card's conversation mode declaration when starting a task（蓝图 §A.1：漏传 = 静默掉回 operational）", async () => {
@@ -566,19 +574,14 @@ describe("useTaskSessions", () => {
 			});
 		});
 
-		const payload = startTaskSessionMutateMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
-		// 侧会话被强制只读（无命令执行），带上 exploratory 会让服务端注入它永远履行不了的
-		// 「kanban exploratory CLI 写回 map」维护协议；省略该字段 = 服务端缺省 operational。
+		const payload = createTaskConversationSessionMutateMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
 		expect("taskConversationMode" in payload).toBe(false);
-		// 其余载荷保持原样（防过度删除回归）：role 元数据与问题文本仍照常转发。
 		expect(payload).toEqual(
 			expect.objectContaining({
-				taskId: "task-conversation-session-11111111-1111-4111-8111-111111111111",
-				workspaceTaskId: "task-1",
-				prompt: "Why does this type exist?",
-				taskConversationSessionMetadata: expect.objectContaining({
-					taskConversationSessionRole: "by_the_way",
-				}),
+				taskId: "task-1",
+				initialMessage: "Why does this type exist?",
+				sessionRole: "by_the_way",
+				contextSource: "fresh",
 			}),
 		);
 	});

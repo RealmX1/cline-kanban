@@ -1,7 +1,7 @@
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import Database from "better-sqlite3";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadTaskConversationHistoryPage } from "../../../src/agent-session-history/task-conversation-history-page";
 import {
@@ -72,6 +72,36 @@ function claudeMessage(uuid: string, parentUuid: string | null, role: "user" | "
 }
 
 describe("Done 任务只读会话历史", () => {
+	it("原生消息身份不随转录插入或页内字节位置变化", async () => {
+		const records = [
+			{ type: "session_meta", payload: { id: "native", source: "cli" } },
+			{
+				type: "response_item",
+				timestamp: "2026-10-31T00:00:00Z",
+				payload: {
+					type: "message",
+					id: "stable-assistant-message",
+					role: "assistant",
+					phase: "final_answer",
+					content: [{ type: "output_text", text: "回报正文" }],
+				},
+			},
+		];
+		const f = await fixture("codex", records);
+		const before = (await loadTaskConversationHistoryPage(f.input)).messages[0];
+		await writeFile(
+			f.path,
+			`${[records[0], { type: "metadata", payload: { text: "新增前置记录" } }, records[1]]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		const after = (await loadTaskConversationHistoryPage(f.input)).messages[0];
+		expect(before?.id).not.toBe(after?.id);
+		expect(before?.meta?.nativeMessageIdentity).toBe("native-id:stable-assistant-message");
+		expect(after?.meta?.nativeMessageIdentity).toBe(before?.meta?.nativeMessageIdentity);
+		expect(after?.meta?.nativeMessagePhase).toBe("final_answer");
+	});
+
 	it.each(["source_archived", "rolled_back"] as const)(
 		"%s：正式目录绑定改变后读取当前原生路径，不启动会话或读取旧副本",
 		async (migrationStage) => {
@@ -102,10 +132,10 @@ describe("Done 任务只读会话历史", () => {
 					.map((record) => JSON.stringify(record))
 					.join("\n")}\n`,
 			);
-			const nativeCodexStateDatabase = new Database(join(boundCodexHomeDirectoryPath, "state_5.sqlite"));
+			const nativeCodexStateDatabase = new DatabaseSync(join(boundCodexHomeDirectoryPath, "state_5.sqlite"));
 			nativeCodexStateDatabase.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)");
 			nativeCodexStateDatabase
-				.prepare("INSERT INTO threads VALUES (?, ?)")
+				.prepare("INSERT INTO threads (id, rollout_path) VALUES (?, ?)")
 				.run(nativeSessionId, currentBoundTranscriptPath);
 			nativeCodexStateDatabase.close();
 			const migrationRecordPath = getCodexConversationMigrationRecordPath(

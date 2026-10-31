@@ -7,8 +7,8 @@ Sessions 的 Create session 提供「协作会话」与 By the way。协作会�
 | 角色 | 上下文 | 文件与命令 | 卡片生命周期 |
 | --- | --- | --- | --- |
 | `main`（旧记录可以省略 metadata） | 既有主会话规则 | 遵循卡片权限 | 主责任入口 |
-| `by_the_way` | 保留既有 fresh / fork 限制 | 保留只读限制 | 不自动转审或收尾 |
-| `task_collaborator` | 全新上下文，或同 Agent 时复刻当前主会话；首条消息可选 | 共用宿主工作目录，遵循创建时权限快照 | 不自动转审或收尾 |
+| `by_the_way` | 全新上下文或复刻同 Agent 的来源会话 | 保留只读限制 | 不自动转审或收尾 |
+| `task_collaborator` | 全新上下文，或同 Agent 时复刻创建者/当前主会话；首条消息可选 | 共用宿主工作目录，遵循创建时权限快照 | 不自动转审或收尾 |
 
 `workspaceTaskId` 标识宿主卡片与工作目录；`taskId` 标识当前会话。协作会话拥有独立的 `task-conversation-session-<uuid>`，不创建第二张卡片。`KANBAN_TASK_ID` 仍指宿主，`KANBAN_TASK_CONVERSATION_SESSION_ID` 指当前会话。原生会话身份、hook 与转录以当前会话寻址。
 
@@ -28,7 +28,7 @@ PTY 的空启动不进入响应回合，启动横幅和历史重播不产生新�
 
 OMP TUI 的 `plan.defaultOnStartup` 只对空白历史生效，ACP `set_mode` 也只改内存。TUI fork 使用 `--fork <source-id>`；需要 Plan 起步时加载会话专属的托管扩展，在原生模式恢复之前为独立子身份追加 `mode_change` 并 `flush`。扩展使用已核对的原生 `SessionManager` 方法；若后续 OMP 的只读上下文不再暴露这些方法，则明确退出，避免静默投递可写首条消息。ACP fork 核对握手能力，再以返回的新 ID 重播历史并设置本次连接的 Plan 状态；重播沿用恢复守卫，不推进本轮产出时间戳。
 
-本能力复刻的是创建时 harness 可读取的已持久化上下文，不提供任意历史 turn 锚定，也不保证包含仍在生成且尚未落盘的内容。By the way 的既有首次 fork 规则保持。
+本能力复刻的是创建时 harness 可读取的已持久化上下文，不提供任意历史 turn 锚定，也不保证包含仍在生成且尚未落盘的内容。By the way 可多次复刻；人工与 Agent 入口使用相同服务和身份门禁，不再限制仅首次 fork。
 
 PTY、ACP 和既有 SDK 通路均保留宿主与当前会话两个 ID。启动返回前持久化 summary；恢复按自身原生 ID 与启动快照寻址。续跑不重投首条消息，也不重新执行 Plan 起步。OMP 协作会话切换 transport 时更新自身快照，不改宿主卡片的通道。
 
@@ -43,6 +43,37 @@ ACP 冷恢复后的活体摘要同时覆盖整板首帧和增量推流，避免�
 单独停止或重启协作会话只影响该会话。停止宿主任务时，运行时枚举全部 transport，停止所有归属于该任务的会话。资源统计归属宿主；关系投影明确识别主会话，投影表版本提升到 2。
 
 编辑归属仍按各会话记录；共享 worktree 的全部改动不会自动归入主会话。本功能不迁移跨 agent 历史，不聚合平级会话状态，也不实现完整 Task Force。
+
+## Agent 按需分流与可选回报
+
+当前主 Agent 和可写 peer 可自行判断是否把偏离主线的讨论放入只读 By the way，或把明确分工放入可写 peer。先 `task conversation-session list/get` 核对已有会话，优先复用；需要时 `create`，创建后继续工作。系统不自动等待、催收或将普通回答回灌主线。
+
+```sh
+kanban task conversation-session create --task-id <Task ID> --role task_collaborator --reason '独立核对恢复边界' --message '检查既有实现并按需回报' --idempotency-key <稳定请求键> --project-path <主仓库>
+kanban task conversation-session list --task-id <Task ID> --project-path <主仓库>
+kanban task conversation-session get --task-id <Task ID> --session-id <会话 ID> --project-path <主仓库>
+kanban task conversation-session report --task-id <Task ID> --message '检查结论' --idempotency-key <稳定回报键> --project-path <主仓库>
+```
+
+`create` 默认使用调用者的 Agent，并以 `--context-source creator` 复刻创建者；`current_main` 选择受理时当前主会话，`fresh` 使用全新上下文。跨 Agent 使用 `fresh`；不支持的复刻明确返回原因。历史只覆盖创建时已持久化的内容，之后各自独立发展。继承历史只作背景，角色标签、历史批准和旧任务指令都不是本次新增授权。`--message-file` 可传持久 UTF-8 正文；首条消息可留空。Agent 创建保留用户正在看的会话，Sessions 后台显示新增项；人工创建仍按明确操作选择新会话。
+
+`get` 返回创建进度、摘要、回报接受状态和分页历史；用 `nextCursor` 作为下一次 `--cursor`。追问复用 `task message --attempt-id <会话 ID>`。可写 peer 的 `report` 默认给创建者，`--target-session current_main` 固定受理时当前主会话，也可填同 Task 的任意 Agent 会话 ID；跨 Task 被拒绝。报告正文会标识来源及程序化性质，不解除等待真人的问答、权限、计划或交接门禁。
+
+By the way 保留只读工具限制，不能调用写 CLI。确需回报时，在新回答末尾、空行后追加独立结构块（真实声明不能包在代码块或引用里）：
+
+```text
+<kanban-session-report>
+{"text":"需要回报的结论","targetTaskConversationSessionId":"current_main"}
+</kanban-session-report>
+```
+
+运行时只扫描绑定子身份新产生的 assistant 正文，排除创建边界之前的继承历史、工具消息与代码/引用示例。原生消息 ID 用于去重，旧格式以可信原生记录指纹补充；不采用会随转录重写变化的页内字节位置。扫描进度跨重启保留；没有声明就不发送。回报经持久队列等待接收资格，真实接受与受理分开记录。系统回收目标只按自己的精确原生身份和启动快照恢复，不再次 fork；缺身份等待补证。Stop、Done、搁置与交接等待继续禁止执行，显式 Stop 会取消尚未送达的相关回报。
+
+创建请求在启动前持久预留 ID、启动快照及原生来源身份。同一 Task 代次内相同幂等键返回原请求，不同正文/配置冲突。未知启动不再次创建或重投首条消息；绑定摘要、原生身份及独享控制端点是补证来源。同证据至多三次、至少间隔 15 秒，预算跨重启保存；证据变化后自动重验，其他会话继续工作。尚未尝试投递的持久回报可跨重启接管；已交给 transport 的未知结果沿既有原生接受补证链，保留原失败历史。
+
+新 metadata 分开保存 `creatorTaskConversationSessionId`、`contextSourceTaskConversationSessionId`、`contextSourceNativeSessionIdentity` 与 `defaultReportTargetTaskConversationSessionId`。旧 `sideSessionOriginMain*` 字段仅兼容读取。Sessions、独立建卡按实际来源读取；图谱暂时不能表达 peer 的多级来源轮号时保留未知，不把 peer 轮号当成主会话轮号。
+
+peer 共用工作目录，没有写入隔离；创建者负责明确共享文件与任务范围，不能把其他会话的改动自动算作自己的成果。本期不提供跨 Task 通信或 Task Force 编排。
 
 ## 跨 harness 主会话交接
 
