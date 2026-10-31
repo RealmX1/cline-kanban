@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import type { AgentSessionPtyHostLaunchCommand } from "./agent-session-pty-host-build-identity-and-launch-command";
+import { AgentSessionPtyHostUnreachableError } from "./agent-session-pty-host-controller-connection";
 
 const AGENT_SESSION_PTY_HOST_SOCKET_READINESS_POLL_INTERVAL_MS = 50;
 const AGENT_SESSION_PTY_HOST_SOCKET_READINESS_DEADLINE_MS = 10_000;
@@ -74,7 +75,12 @@ export async function launchDetachedAgentSessionPtyHostAndWaitUntilSocketAccepts
 		Date.now() + (request.readinessDeadlineMilliseconds ?? AGENT_SESSION_PTY_HOST_SOCKET_READINESS_DEADLINE_MS);
 	while (Date.now() < deadlineEpochMs) {
 		if (launcherSpawnError !== null) {
-			throw new Error(`could not launch agent session pty host: ${(launcherSpawnError as Error).message}`);
+			// 宿主进程没创建出来，socket 上没有 host。标成无人监听，恢复预算才会走进程内回退，
+			// 而不是把这次明确的启动失败当成可能藏着会话的归属未知。
+			throw new AgentSessionPtyHostUnreachableError(
+				`could not launch agent session pty host: ${(launcherSpawnError as Error).message}`,
+				true,
+			);
 		}
 		if (
 			await isSocketAcceptingConnections(

@@ -1,6 +1,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
+import { AgentSessionPtyHostUnreachableError } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { launchDetachedAgentSessionPtyHostAndWaitUntilSocketAcceptsConnections } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-detached-process-launcher";
 
 // 替身 host：在 --socket-path 上监听，第一个连接（launcher 的就绪探测）到来后退出，另有 5s 自杀兜底。
@@ -43,18 +44,20 @@ describe.skipIf(process.platform === "win32")(
 			const temporaryDirectoryPath = createShortTemporaryDirectory();
 
 			// 确定性判据：错误文案来自 spawn 的 error 事件（「could not launch」），而不是就绪期限耗尽（「did not start listening」）。
-			await expect(
-				launchDetachedAgentSessionPtyHostAndWaitUntilSocketAcceptsConnections({
-					launchCommand: {
-						executablePath: join(temporaryDirectoryPath, "missing-node-binary"),
-						leadingArguments: [],
-					},
-					socketPath: join(temporaryDirectoryPath, "host.sock"),
-					hostBuildIdentity: "stand-in",
-					hostLogFilePath: join(temporaryDirectoryPath, "host.log"),
-					hostWorkingDirectoryPath: temporaryDirectoryPath,
-				}),
-			).rejects.toThrow(/could not launch agent session pty host/);
+			// 宿主 Node 缺失必须是宿主不可达，且标成无人监听，不能冒充 agent CLI 缺失。
+			const thrown = await launchDetachedAgentSessionPtyHostAndWaitUntilSocketAcceptsConnections({
+				launchCommand: {
+					executablePath: join(temporaryDirectoryPath, "missing-node-binary"),
+					leadingArguments: [],
+				},
+				socketPath: join(temporaryDirectoryPath, "host.sock"),
+				hostBuildIdentity: "stand-in",
+				hostLogFilePath: join(temporaryDirectoryPath, "host.log"),
+				hostWorkingDirectoryPath: temporaryDirectoryPath,
+			}).catch((error: unknown) => error);
+			expect(thrown).toBeInstanceOf(AgentSessionPtyHostUnreachableError);
+			expect(String(thrown)).toMatch(/could not launch agent session pty host/);
+			expect((thrown as AgentSessionPtyHostUnreachableError).noHostIsListening).toBe(true);
 		});
 	},
 );

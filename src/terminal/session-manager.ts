@@ -31,6 +31,7 @@ import {
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
+import { AgentSessionPtyHostUnreachableError } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
@@ -1176,7 +1177,34 @@ function cloneStartShellSessionRequest(request: StartShellSessionRequest): Start
 	};
 }
 
+function isAgentSessionPtyHostLaunchOrOwnershipMessage(message: string): boolean {
+	return (
+		message.includes("could not launch agent session pty host") ||
+		message.includes("agent session pty host did not start listening") ||
+		message.includes("host 归属未知，拒绝降级后重复启动")
+	);
+}
+
+// 宿主失败有时是直接的 UnreachableError，有时被包进普通 Error 或 cause。
+// 文案里的 ENOENT 属于宿主 Node / socket，不能再走 agent CLI 缺失那条分支。
+function agentSessionPtyHostCommunicationFailureMessage(error: unknown): string | null {
+	const seen = new Set<unknown>();
+	let current: unknown = error;
+	let hostLaunchOrOwnershipMessage: string | null = null;
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		if (current instanceof AgentSessionPtyHostUnreachableError) return current.message;
+		if (hostLaunchOrOwnershipMessage === null && isAgentSessionPtyHostLaunchOrOwnershipMessage(current.message)) {
+			hostLaunchOrOwnershipMessage = current.message;
+		}
+		current = current.cause;
+	}
+	return hostLaunchOrOwnershipMessage;
+}
+
 function formatSpawnFailure(binary: string, error: unknown): string {
+	const hostCommunicationFailureMessage = agentSessionPtyHostCommunicationFailureMessage(error);
+	if (hostCommunicationFailureMessage !== null) return `会话宿主通信失败：${hostCommunicationFailureMessage}`;
 	const message = error instanceof Error ? error.message : String(error);
 	const normalized = message.toLowerCase();
 	if (normalized.includes("posix_spawnp failed") || normalized.includes("enoent")) {
@@ -1186,6 +1214,8 @@ function formatSpawnFailure(binary: string, error: unknown): string {
 }
 
 function formatShellSpawnFailure(binary: string, error: unknown): string {
+	const hostCommunicationFailureMessage = agentSessionPtyHostCommunicationFailureMessage(error);
+	if (hostCommunicationFailureMessage !== null) return `会话宿主通信失败：${hostCommunicationFailureMessage}`;
 	const message = error instanceof Error ? error.message : String(error);
 	const normalized = message.toLowerCase();
 	if (normalized.includes("posix_spawnp failed") || normalized.includes("enoent")) {
@@ -9808,8 +9838,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// viewers reattaching via the control socket would receive a restore snapshot from
 		// the new mirror that never saw the banner.
 		const entry = this.entries.get(request.taskId);
-		if (entry) {
-			const banner = Buffer.from("\r\n[kanban] Refreshing terminal session...\r\n", "utf8");
+		if (
+			entry?.active &&
+			entry.summary.runtimeSessionIncarnationId !== summaryBeforeProcessStop?.runtimeSessionIncarnationId
+		) {
+			const banner = Buffer.from("\r\n[kanban] 终端会话已重新启动。\r\n", "utf8");
 			entry.terminalStateMirror?.applyOutput(banner);
 			for (const listener of entry.listeners.values()) {
 				listener.onOutput?.(banner);
