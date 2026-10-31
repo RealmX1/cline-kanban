@@ -18,6 +18,7 @@ import {
 } from "../cline-sdk/cline-task-session-service";
 import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
 import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
+import { readCodexConfigurationTaskSourceContext } from "../codex-configuration-sync/codex-configuration-task-source-context";
 import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
@@ -518,6 +519,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return Array.from(summariesByTaskId.values());
 	};
 	const codexConfigurationSyncService = createCodexConfigurationSyncService({
+		readTaskSourceContext: () =>
+			readCodexConfigurationTaskSourceContext(deps.workspaceRegistry.listManagedWorkspaces()),
 		listTaskProfileBindings: async () => {
 			const bindings: Array<{ workspaceId: string; conversationSessionId: string; profileId: string }> = [];
 			const results = await Promise.allSettled(

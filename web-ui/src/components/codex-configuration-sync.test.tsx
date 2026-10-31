@@ -13,6 +13,7 @@ import type { CodexConfigurationSyncState } from "@/runtime/types";
 
 const queries = vi.hoisted(() => ({
 	fetch: vi.fn(),
+	details: vi.fn(),
 	synchronize: vi.fn(),
 	acknowledge: vi.fn(),
 	resolve: vi.fn(),
@@ -24,6 +25,7 @@ vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
 			getCodexConfigurationSyncState: { query: queries.fetch },
+			getCodexConfigurationChangeDetails: { query: queries.details },
 			mutateCodexConfigurationProfile: { mutate: queries.profile },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 			synchronizeCodexConfigurationChange: { mutate: queries.synchronize },
@@ -63,6 +65,7 @@ const button = (label: string) =>
 				(element) => element.textContent === label,
 			) as HTMLButtonElement);
 beforeEach(() => {
+	queries.details.mockReset();
 	localStorage.clear();
 	vi.useFakeTimers();
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -119,6 +122,88 @@ afterEach(async () => {
 });
 
 describe("Codex 配置同步提示和设置", () => {
+	it("默认直显任务归属与冲突值，展开失败可重试，操作绑定展示的共享值", async () => {
+		const change = state.changes[0]!;
+		change.fieldLabel = "config.toml · ponytail@ponytail:hooks/hooks.json · Hook subagent_start:0:0";
+		change.approvalStatus = "pending";
+		change.mergeStatus = "conflict";
+		change.sourceEvidence = {
+			initiator: { status: "unknown", description: "缺少原生修改记录" },
+			detectedOwner: {
+				writerId: "writer-first",
+				workspaceId: "workspace",
+				conversationSessionId: "side-session",
+				description: "持久 writer 绑定",
+				task: {
+					workspaceId: "workspace",
+					projectPath: "/projects/kanban",
+					taskId: "9c8d6",
+					taskTitle: "配置来源回归",
+					taskIncarnationCreatedAtEpochMs: 1,
+					conversationSessionId: "side-session",
+					runtimeSessionIncarnationId: "incarnation",
+				},
+			},
+			recoveryCondition: "归属恢复后自动重验",
+		};
+		change.comparison = {
+			expectedSharedValueDigest: "displayed-shared",
+			rows: [
+				{
+					fieldKey: "hook-field",
+					label: "trusted_content_hash",
+					changeKind: "modified",
+					previous: { state: "present", text: "旧内容信任" },
+					detected: { state: "present", text: "新内容信任" },
+					sharedAtConflict: { state: "present", text: "冲突时信任" },
+					sharedCurrent: { state: "present", text: "共享方的当前信任" },
+					sharedOrigin: { description: "共享字段版本 7", fieldVersion: 7 },
+				},
+			],
+		};
+		queries.details.mockRejectedValueOnce(new Error("暂不可读")).mockResolvedValue({
+			...change.comparison,
+			changeId: change.changeId,
+			version: change.version,
+			fieldLabel: change.fieldLabel,
+			sourceEvidence: change.sourceEvidence,
+			hookExplanation: "完整 Hook 指纹",
+		});
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		expect(container.textContent).toContain("配置来源回归");
+		expect(container.textContent).toContain("9c8d6");
+		expect(container.textContent).toContain("共享方的当前信任");
+		expect(container.textContent).toContain("缺少原生修改记录");
+		expect(queries.details).not.toHaveBeenCalled();
+		await act(async () => button("展开完整比较").click());
+		expect(container.textContent).toContain("暂不可读");
+		await act(async () => button("重试加载完整比较").click());
+		expect(queries.details).toHaveBeenCalledTimes(2);
+		queries.resolve.mockResolvedValue(state);
+		await act(async () => button("采用检测到的新值，更新共享默认").click());
+		expect(queries.resolve.mock.calls.at(-1)?.[0]).toMatchObject({ expectedSharedValueDigest: "displayed-shared" });
+		state = {
+			...state,
+			changes: state.changes.map((entry) =>
+				entry.changeId === change.changeId && entry.sourceEvidence
+					? {
+							...entry,
+							sourceEvidence: {
+								...entry.sourceEvidence,
+								detectedOwner: {
+									...entry.sourceEvidence.detectedOwner,
+									currentTaskLink: undefined,
+									unavailableReason: "原任务已删除",
+								},
+							},
+						}
+					: entry,
+			),
+		};
+		await act(async () => notifyCodexConfigurationSyncUpdated());
+		await flush();
+		expect(queries.details).toHaveBeenCalledTimes(3);
+	});
 	const sourceObservationFixture = (index: number) => ({
 		observationId: `source-${index}`,
 		version: 1,
@@ -187,6 +272,54 @@ describe("Codex 配置同步提示和设置", () => {
 			expect(group.querySelector("h3")?.textContent).toBe("来源更新 · 5");
 		expect(container.querySelector('[role="group"][aria-label="历史记录"] article button')).toBeNull();
 	});
+	it.each(["配置来源回归", "9c8d6", "ponytail", "sandbox_mode"])(
+		"已处理来源更新仍按嵌套记录搜索 %s",
+		async (search) => {
+			state.changes[0] = {
+				...state.changes[0]!,
+				changeId: "nested-source-change",
+				fieldLabel: "config.toml · ponytail@ponytail:hooks/hooks.json · Hook stop:0:0",
+				fieldKey: '["config.toml","sandbox_mode"]',
+				sourceEvidence: {
+					initiator: { status: "unknown", description: "缺少原生修改记录" },
+					detectedOwner: {
+						writerId: "writer-first",
+						workspaceId: "workspace",
+						conversationSessionId: "side-session",
+						description: "持久 writer 绑定",
+						task: {
+							workspaceId: "workspace",
+							projectPath: "/projects/kanban",
+							taskId: "9c8d6",
+							taskTitle: "配置来源回归",
+							taskIncarnationCreatedAtEpochMs: 1,
+							conversationSessionId: "side-session",
+							runtimeSessionIncarnationId: "incarnation",
+						},
+					},
+					recoveryCondition: "归属恢复后自动重验",
+				},
+			};
+			state.sourceObservations = [
+				{
+					...sourceObservationFixture(0),
+					changeIds: ["nested-source-change"],
+					acknowledgedAt: 42,
+					reminderDisposition: "confirmed",
+				},
+			];
+			await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+			await flush();
+			const input = container.querySelector<HTMLInputElement>('[aria-label="筛选配置记录"]')!;
+			await act(async () => {
+				Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, search);
+				input.dispatchEvent(new Event("input", { bubbles: true }));
+			});
+			const history = container.querySelector('[role="group"][aria-label="历史记录"]')!;
+			expect(history.textContent).toContain("隔离来源 0");
+			expect(history.textContent).toContain("ponytail@ponytail");
+		},
+	);
 	it("稍后条目只进入历史并保留标记已读入口，新观测重新成为未读", async () => {
 		state.changes = [];
 		state.sourceObservations = [

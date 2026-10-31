@@ -108,7 +108,7 @@
     "@trpc/server": "^11.11.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/headless": "^6.0.0",
-    "agent-conversation-exploration-thread-graph": "github:RealmX1/agent-conversation-exploration-thread-graph#5b20a8767ff79d92da33bfec136f4912f76d642a",
+    "agent-conversation-exploration-thread-graph": "github:RealmX1/agent-conversation-exploration-thread-graph#233d3e765405fd27df0499c6cb4916ee3566d86b",
     "better-sqlite3": "12.11.1",
     "commander": "^14.0.3",
     "fzf": "^0.5.2",

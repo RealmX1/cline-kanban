@@ -1,6 +1,7 @@
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	CodexConfigurationBatchActionRequest,
+	CodexConfigurationChangeDetailsRequest,
 	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationResolveConflictRequest,
 	CodexConfigurationResolveTargetConflictRequest,
@@ -41,6 +42,15 @@ export function subscribeCodexConfigurationSyncUpdated(
 }
 export const fetchCodexConfigurationSyncState = (workspaceId: string | null, signal?: AbortSignal) =>
 	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationSyncState.query(undefined, {
+		signal,
+		context: { sendAsIndependentHttpRequest: true },
+	});
+export const fetchCodexConfigurationChangeDetails = (
+	workspaceId: string | null,
+	input: CodexConfigurationChangeDetailsRequest,
+	signal?: AbortSignal,
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationChangeDetails.query(input, {
 		signal,
 		context: { sendAsIndependentHttpRequest: true },
 	});
