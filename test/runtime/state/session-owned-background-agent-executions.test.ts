@@ -1,4 +1,4 @@
-import { readdir, readFile, unlink } from "node:fs/promises";
+import { readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
 	ForkedWorkBranchExecutor,
@@ -6,6 +6,7 @@ import type {
 } from "agent-conversation-exploration-thread-graph/core";
 import * as nativeProcesses from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import {
 	cancelSessionOwnedBackgroundAgentExecutions,
 	createSessionOwnedBackgroundAgentExecutor,
@@ -92,7 +93,129 @@ async function originalRecordPath(): Promise<string> {
 	return join(directory, filenames.find((name) => name.endsWith(".execution.json")) ?? "missing");
 }
 
+function createDeferredBarrier() {
+	let release!: () => void;
+	const reached = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	return { reached, release };
+}
+
 describe("后台 Agent 持久归属与恢复", () => {
+	it.each(["registered", "dispatch_intent"] as const)(
+		"%s 阶段兼容旧控制器身份，并保留未知直至原生证据恢复",
+		async (launchState) => {
+			const observedIdentity = `${process.pid} Thu Oct 29 00:00:00 2026`;
+			const snapshot = vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(
+				new Map([
+					[
+						process.pid,
+						{
+							processPid: process.pid,
+							parentProcessPid: 1,
+							processGroupId: 7,
+							startIdentity: observedIdentity,
+						},
+					],
+				]),
+			);
+			let releaseDelegate: () => void = () => {};
+			let entered = false;
+			const pending = ownedExecutor({
+				start: async (input) => {
+					if (launchState === "dispatch_intent") await input.beforeProcessSpawn?.();
+					entered = true;
+					await new Promise<void>((resolve) => {
+						releaseDelegate = resolve;
+					});
+					return { stopReason: "completed", outputText: "控制器仍在发布结果" };
+				},
+			}).start(request);
+			await vi.waitFor(() => expect(entered).toBe(true));
+			const path = await originalRecordPath();
+			const record = JSON.parse(await readFile(path, "utf8"));
+			const nextDelegate = vi.fn(async () => ({ stopReason: "completed" as const, outputText: "新请求" }));
+			try {
+				for (const persistedIdentity of [
+					`${process.pid} 999 Thu Oct 29 00:00:00 2026`,
+					null,
+					"unreadable-start-identity",
+				]) {
+					await writeFile(path, JSON.stringify({ ...record, controllerProcessStartIdentity: persistedIdentity }));
+					expect(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention(owner)).toBe(true);
+					await expect(ownedExecutor({ start: nextDelegate }).start(request)).rejects.toThrow("活跃或退出未知");
+					expect(nextDelegate).not.toHaveBeenCalled();
+				}
+				expect(JSON.parse(await readFile(`${path}.exit-reconciliation.json`, "utf8"))).toMatchObject({
+					status: "unknown",
+					reason: "controller_start_identity_unknown",
+				});
+				snapshot.mockRejectedValue(new Error("原生查询失败"));
+				expect(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention(owner)).toBe(true);
+				await expect(ownedExecutor({ start: nextDelegate }).start(request)).rejects.toThrow();
+				expect(nextDelegate).not.toHaveBeenCalled();
+				await writeFile(
+					path,
+					JSON.stringify({
+						...record,
+						controllerProcessStartIdentity: `${process.pid} 999 Thu Oct 29 00:00:00 2026`,
+					}),
+				);
+				snapshot.mockResolvedValue(
+					new Map([
+						[
+							process.pid,
+							{
+								processPid: process.pid,
+								parentProcessPid: 1,
+								processGroupId: 7,
+								startIdentity: `${process.pid} Thu Oct 29 00:00:01 2026`,
+							},
+						],
+					]),
+				);
+				expect(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention(owner)).toBe(false);
+				snapshot.mockResolvedValue(new Map());
+				expect(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention(owner)).toBe(false);
+			} finally {
+				releaseDelegate();
+				await pending;
+			}
+		},
+	);
+
+	it.each(["source_agent_draft_generation", "exploration_thread_graph_maintenance"] as const)(
+		"%s 复用调用方 signal，取消不能发布结构化业务结果",
+		async (purpose) => {
+			const controller = new AbortController();
+			let finish: () => void = () => {};
+			let forkSignal: AbortSignal | undefined;
+			const executor = createSessionOwnedBackgroundAgentExecutor({
+				...owner,
+				runtimeSessionIncarnationId: "incarnation",
+				purpose,
+				executor: {
+					start: async (input) => {
+						await input.beforeProcessSpawn?.();
+						forkSignal = input.signal;
+						expect(input).not.toHaveProperty("timeoutMs");
+						await new Promise<void>((resolve) => {
+							finish = resolve;
+						});
+						return { stopReason: "completed", outputText: "迟到结果", structured: { forbidden: true } };
+					},
+				},
+			});
+			const pending = executor.start({ ...request, signal: controller.signal });
+			await vi.waitFor(() => expect(forkSignal).toBeDefined());
+			controller.abort();
+			expect(forkSignal?.aborted).toBe(true);
+			finish();
+			expect(await pending).toMatchObject({ stopReason: "cancelled" });
+			expect((await pending).structured).toBeUndefined();
+		},
+	);
+
 	it("控制器退出后不重复派发活进程，退出证据恢复后自动解除回收保护", async () => {
 		const snapshot = vi.mocked(nativeProcesses.readNativeProcessOwnershipSnapshot).mockResolvedValue(nativeSnapshot);
 		const first = ownedExecutor({
@@ -175,6 +298,85 @@ describe("后台 Agent 持久归属与恢复", () => {
 		expect(result.stopReason).toBe("cancelled");
 		expect(result.structured).toBeUndefined();
 		await cancellation.processCancellationConfirmationCompleted;
+	});
+
+	it.each(["signal", "stop"] as const)("最终记录异步写入期间取消（%s），结果与 Stop 串行发布", async (mode) => {
+		const finalWriteReached = createDeferredBarrier();
+		const releaseFinalWrite = createDeferredBarrier();
+		const stopLockAttempted = createDeferredBarrier();
+		const controller = new AbortController();
+		const originalWrite = lockedFileSystem.writeTextFileAtomic.bind(lockedFileSystem);
+		const write = vi
+			.spyOn(lockedFileSystem, "writeTextFileAtomic")
+			.mockImplementation(async (path, content, options) => {
+				if (path.endsWith(".execution.json")) {
+					const record = JSON.parse(content);
+					if (record.status === "finished" && record.result?.stopReason === "completed") {
+						finalWriteReached.release();
+						await releaseFinalWrite.reached;
+					}
+				}
+				await originalWrite(path, content, options);
+			});
+		const originalWithLock = lockedFileSystem.withLock.bind(lockedFileSystem);
+		let stopping = false;
+		const lock = vi.spyOn(lockedFileSystem, "withLock").mockImplementation(async (request, operation) => {
+			if (stopping && request.type === "directory") stopLockAttempted.release();
+			return await originalWithLock(request, operation);
+		});
+		const pending = ownedExecutor({
+			start: async (input) => {
+				await input.beforeProcessSpawn?.();
+				return { stopReason: "completed", outputText: "迟到结果", structured: { forbiddenAfterStop: true } };
+			},
+		}).start({ ...request, signal: controller.signal });
+		let cancellationConfirmation: Promise<PromiseSettledResult<void>[]> | undefined;
+		try {
+			await finalWriteReached.reached;
+			if (mode === "signal") controller.abort();
+			else {
+				stopping = true;
+				cancellationConfirmation = requestSessionOwnedBackgroundAgentExecutionCancellation(owner).then(
+					(cancellation) => cancellation.processCancellationConfirmationCompleted,
+				);
+				await stopLockAttempted.reached;
+				const directory = join(
+					getWorkspaceDirectoryPath(owner.workspaceId),
+					"session-owned-background-agent-executions",
+				);
+				// 发布已取得资格：Stop 尚不能持久推进代际，不能先返回再由旧结果覆盖。
+				expect((await readdir(directory)).some((name) => name.endsWith(".cancellation-request.json"))).toBe(false);
+				expect(
+					(await readdir(directory)).some((name) => name.endsWith(".admission-cancellation-generation.json")),
+				).toBe(false);
+			}
+			releaseFinalWrite.release();
+			const result = await pending;
+			const path = await originalRecordPath();
+			if (mode === "signal") {
+				expect(result.stopReason).toBe("cancelled");
+				expect(result.structured).toBeUndefined();
+				expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+					status: "exit_unknown",
+					result: { stopReason: "cancelled", cancellationConfirmation: "unknown" },
+				});
+				expect(JSON.parse(await readFile(path, "utf8")).result.structured).toBeUndefined();
+			} else {
+				expect(result.stopReason).toBe("completed");
+				const recordBeforeStop = await readFile(path, "utf8");
+				await cancellationConfirmation;
+				expect(await readFile(path, "utf8")).toBe(recordBeforeStop);
+				expect(JSON.parse(await readFile(`${path}.cancellation-request.json`, "utf8"))).toHaveProperty(
+					"requestedAtEpochMs",
+				);
+			}
+		} finally {
+			releaseFinalWrite.release();
+			await pending;
+			await cancellationConfirmation;
+			write.mockRestore();
+			lock.mockRestore();
+		}
 	});
 
 	it("登记前的原生准备等待期间 Stop，也阻止此前请求派发并允许之后的新请求", async () => {
