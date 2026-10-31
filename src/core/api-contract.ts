@@ -2690,8 +2690,8 @@ export type RuntimeStateStreamExploratoryFindingsUpdatedMessage = z.infer<
 // 建模与落盘，服务端把它合成 projection 整值后整份下发。下面这批 schema 是**边界镜像**，不是第二
 // 份定义——它们存在的唯一理由是 web-ui 不能 import 核心包（`/core` 静态导出依赖 node `fs` 的 store，
 // 打进浏览器 bundle 会炸），因此契约层必须自带一份可被 `@runtime-contract` 解析的形状。
-// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-contract-parity.ts
-// 做编译期双向对账：核心包换 SHA 后形状若漂移，根 typecheck 立刻红。
+// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-consumer-contract-compatibility.ts
+// 做编译期消费方向检查：核心输出缺字段、类型不兼容或枚举扩大时，根 typecheck 立刻红。
 //
 // lane 布局**在服务端算好**随行下发（核心包的 projection 每行自带 laneLayout），前端只负责画。
 export const runtimeExplorationThreadGraphTurnRefSchema = z.object({
@@ -5081,6 +5081,8 @@ export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind",
 			kind: z.literal("upsert_prompt"),
 			promptId: z.string(),
 			text: z.string(),
+			// 持久暂存操作重放只补建缺失条目，不覆盖用户后来编辑或移动的内容。
+			leaveExistingPromptUnchanged: z.boolean().optional(),
 			// 仅新建时生效；已存在的条目换桶请用 set_prompt_scope。
 			scope: promptLibraryScopeSchema,
 			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
@@ -5270,6 +5272,11 @@ export type RuntimeTaskEditDraftsMutateRequest = z.infer<typeof runtimeTaskEditD
 // 前端只负责拦下按键，不碰内容——同一份易随版本漂移的 TUI 画法知识只在服务端存一份。
 
 export const terminalInputBoxStashOutcomeSchema = z.enum([
+	"codex_draft_stash_capability_not_ready",
+	"codex_draft_stash_in_progress",
+	"codex_draft_stash_operation_not_found",
+	"codex_draft_export_failed",
+	"input_box_contains_unsupported_attachments",
 	// 正文已入库，Ctrl+S 已转发（框被 agent 自己清掉）。
 	"stashed_into_prompt_library",
 	// 正文**已经**入库（stashedPromptId 有效），但清框那一步没做成：写库跨文件锁与落盘期间，读框时
@@ -5310,6 +5317,7 @@ export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashO
 
 export const runtimeTerminalInputBoxStashRequestSchema = z.object({
 	taskId: z.string(),
+	operationId: z.uuid().optional(),
 	// 省略即 task scope，与面板里「新建 prompt」的默认一致。
 	scope: promptLibraryScopeSchema.optional(),
 });
@@ -5317,6 +5325,9 @@ export type RuntimeTerminalInputBoxStashRequest = z.infer<typeof runtimeTerminal
 
 export const runtimeTerminalInputBoxStashResponseSchema = z.object({
 	ok: z.boolean(),
+	operationId: z.uuid().optional(),
+	// 只在持久证据已排除迟到捕获或补写时为 false；省略表示旧版响应，继续保守查询。
+	capturedDraftPromptSaveRecoveryPending: z.boolean().optional(),
 	outcome: terminalInputBoxStashOutcomeSchema,
 	stashedPromptId: z.string().nullable(),
 	// 只回字符数不回正文：正文最大可达粘贴留存上限（1 MiB），而调用方要的只是一句「存进去多少」。

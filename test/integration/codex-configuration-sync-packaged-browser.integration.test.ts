@@ -153,6 +153,16 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				const notice = page.locator('[data-verification-anchor="codex-configuration-sync-notice"]');
 				const summary = page.locator('[data-verification-anchor="codex-configuration-sync-summary"]');
 				await notice.waitFor({ timeout: 30_000 });
+				const modelComparison = notice
+					.locator("article")
+					.filter({ has: page.getByText("config.toml · model", { exact: true }) });
+				await modelComparison.getByRole("button", { name: "展开完整比较", exact: true }).click();
+				await modelComparison.getByRole("button", { name: "收起完整比较", exact: true }).waitFor();
+				await modelComparison.getByText('"fixture-updated"', { exact: true }).waitFor();
+				expect(await modelComparison.textContent()).toContain('"fixture-initial"');
+				expect(await modelComparison.textContent()).toContain("缺少修改发起者的原生记录");
+				await modelComparison.getByRole("button", { name: "收起完整比较", exact: true }).click();
+				checks.push("完整比较经真实打包态只读 tRPC 返回修改前后值，检测归属与未知修改者独立展示");
 				await page.getByRole("button", { name: "Open terminal", exact: true }).click();
 				await page.locator(".xterm-screen").first().waitFor();
 				await page.locator("html").evaluate(async (element) => {
@@ -290,6 +300,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					{ width: 844, height: 390 },
 				]) {
 					await page.setViewportSize(viewport);
+					await page.waitForFunction(
+						`document.querySelector(".kb-top-bar")?.getBoundingClientRect().height === ${viewport.width < 768 ? 89 : 40}`,
+					);
 					const before = await measureWorkspaceGeometry(`${viewport.width}-expanded`);
 					await notice.getByRole("button", { name: "收起", exact: true }).click();
 					assertUnchangedGeometry(before, await measureWorkspaceGeometry(`${viewport.width}-collapsed`));
@@ -331,6 +344,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					await mobilePage.goto(`${new URL(origin).origin}/${workspaceId}?task=notice-focus-task`);
 					const mobileNotice = mobilePage.locator('[data-verification-anchor="codex-configuration-sync-notice"]');
 					await mobileNotice.waitFor({ state: "attached" });
+					// 配置记录可能先于任务导航返回，等 Focus View 的手机控制完成挂载再核验。
+					await mobilePage.getByRole("button", { name: "展开上方导航与工具", exact: true }).waitFor();
+					await mobileNotice.waitFor({ state: "hidden" });
 					expect(await mobileNotice.isHidden()).toBe(true);
 					await mobilePage.getByRole("button", { name: "展开上方导航与工具", exact: true }).tap();
 					await mobileNotice.waitFor();
@@ -383,13 +399,15 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					}),
 				);
 				await notice.waitFor({ timeout: 15_000 });
-				await notice.getByRole("button", { name: "确认", exact: true }).waitFor();
+				await notice.getByRole("button", { name: "标记已读", exact: true }).waitFor();
 				assertUnchangedGeometry(beforeNewDesktopNotice, await measureWorkspaceGeometry("desktop-after-new-notice"));
 				expect(await notice.textContent()).toContain("待反馈 0 项 · 来源更新 1 条");
-				expect(await notice.getByRole("button", { name: "通过", exact: true }).count()).toBe(0);
-				await notice.getByRole("button", { name: "确认", exact: true }).click();
+				expect(
+					await notice.getByRole("button", { name: /反馈到 profile 并广播|采用新值作为未来默认/ }).count(),
+				).toBe(0);
+				await notice.getByRole("button", { name: "标记已读", exact: true }).click();
 				await notice.waitFor({ state: "detached", timeout: 15_000 });
-				checks.push("来源定义变更独立提示，不计设置审批，只有确认和稍后");
+				checks.push("来源定义变更独立提示，不计设置审批，标记已读与稍后均不授予信任");
 				await page.setViewportSize({ width: 390, height: 844 });
 				const beforeNewMobileNotice = await measureWorkspaceGeometry("390-before-new-notice");
 				configuration.model = "fixture-next-decision";

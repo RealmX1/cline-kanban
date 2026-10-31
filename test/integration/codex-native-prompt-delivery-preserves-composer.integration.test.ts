@@ -15,7 +15,11 @@ import {
 	readTaskMessageInjectionLedger,
 	withTaskMessageInjectionLedgerLock,
 } from "../../src/core/task-message-injection-ledger";
+import { readWorkspacePromptLibrarySnapshot } from "../../src/state/prompt-library-store";
+import { prepareCodexDraftStashEditorBridge } from "../../src/terminal/codex-draft-stash-editor-bridge";
+import { runCodexDraftStashOperation } from "../../src/terminal/codex-draft-stash-operation";
 import { deliverCodexNativePromptWithoutChangingComposer } from "../../src/terminal/codex-native-prompt-delivery";
+import { readCodexTerminalComposerOccupancy } from "../../src/terminal/codex-terminal-composer-occupancy";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../src/terminal/session-manager";
 import {
 	createTerminalInputBoxOccupancyTrackerState,
@@ -346,11 +350,19 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platfo
 			if (/^(KANBAN_|CLINE_KANBAN_|RVF_|CODEX_|OPENAI_|ANTHROPIC_|CLAUDE_)/u.test(key)) delete environment[key];
 		Object.assign(environment, {
 			CODEX_HOME: codexHome,
+			CODEX_SQLITE_HOME: codexHome,
 			TERM: "xterm-256color",
 			VISUAL: `${quote(process.execPath)} ${quote(editorPath)}`,
 			EDITOR: `${quote(process.execPath)} ${quote(editorPath)}`,
 		});
 		const runtimeSessionIncarnationId = randomUUID();
+		const draftEditorBridge = await prepareCodexDraftStashEditorBridge({
+			workspaceId: "isolated-workspace",
+			conversationSessionId: "isolated-conversation",
+			runtimeSessionIncarnationId,
+			environment,
+		});
+		Object.assign(environment, draftEditorBridge.environmentOverrides);
 		const launch = await prepareCodexNativeSessionControlHostLaunch({
 			binary: process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex",
 			arguments: [
@@ -378,11 +390,11 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platfo
 			cols: 120,
 			rows: 36,
 		});
-		const terminalStateMirror = new TerminalStateMirror(120, 36);
+		const terminalStateMirror = new TerminalStateMirror(120, 36, { onInputResponse: (data) => pty.write(data) });
 		let output = "";
 		let lastObservedCurrentScreenText = "";
 		const readCurrentScreen = async () => {
-			const screen = await terminalStateMirror.getScreenSnapshot();
+			const screen = await terminalStateMirror.getScreenSnapshot({ includeDimmedTextColumnRanges: true });
 			lastObservedCurrentScreenText = screen.lines.map((line) => line.text.trimEnd()).join("\n");
 			return screen;
 		};
@@ -396,8 +408,6 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platfo
 		pty.onData((text) => {
 			output += text;
 			terminalStateMirror.applyOutput(Buffer.from(text));
-			if (text.includes("\u001b[6n")) pty.write("\u001b[1;1R");
-			if (text.includes("\u001b[c")) pty.write("\u001b[?1;2c");
 		});
 		const wait = (description: string, condition: () => Promise<boolean>) =>
 			waitForConditionWithinLoadSensitiveTwoTierDeadline(
@@ -599,6 +609,89 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platfo
 				.split("\n")
 				.map((line) => JSON.parse(line) as { text: string });
 			expect(edits).toEqual([{ text: draft }]);
+			await wait("手动编辑器返回原生输入框", async () =>
+				(await readCurrentScreen()).lines.some((line) => line.text.trim() === "末尾"),
+			);
+			const submissionCountBeforeStash = (await hooks()).filter(
+				(event) => event.hook_event_name === "UserPromptSubmit",
+			).length;
+			const modelRequestCountBeforeStash = modelRequests.length;
+			const savedDrafts = [
+				`  STASH_LONG_DRAFT\n${"中文 English 😀  ".repeat(300)}\n末尾空格  \n\n`,
+				"  STASH_MULTILINE\n第二行 😀\n third line  \n\n",
+				"   \n  ",
+			];
+			pty.write("\u0003");
+			await wait(
+				"清理原编辑器留下的草稿后显示空框",
+				async () => readCodexTerminalComposerOccupancy(await readCurrentScreen()) === "empty",
+			);
+			for (const savedDraft of savedDrafts) {
+				pty.write(`\u001b[200~${savedDraft}\u001b[201~`);
+				await wait(
+					"原生输入框接收待暂存草稿",
+					async () => readCodexTerminalComposerOccupancy(await readCurrentScreen()) !== "empty",
+				);
+				const result = await runCodexDraftStashOperation({
+					bridge: draftEditorBridge,
+					taskId: "isolated-card",
+					operationId: randomUUID(),
+					isCurrent: () => !exited,
+					triggerExport: () => pty.write("\u0007"),
+					confirmInputBoxEmpty: async () =>
+						readCodexTerminalComposerOccupancy(await readCurrentScreen()) === "empty",
+				});
+				expect(result, lastObservedCurrentScreenText).toMatchObject({
+					outcome: "stashed_into_prompt_library",
+					stashedTextCharacterCount: savedDraft.length,
+				});
+			}
+			expect(
+				(await readWorkspacePromptLibrarySnapshot("isolated-workspace")).taskScopedPromptsByTaskId[
+					"isolated-card"
+				]?.map((entry) => entry.text),
+			).toEqual(savedDrafts);
+			const failedDraft = "  STASH_WRITE_FAILURE\n保留原文 😀  \n\n";
+			pty.write(`\u001b[200~${failedDraft}\u001b[201~`);
+			await wait(
+				"失败用例的草稿已经进入 composer",
+				async () => readCodexTerminalComposerOccupancy(await readCurrentScreen()) !== "empty",
+			);
+			const failed = await runCodexDraftStashOperation({
+				bridge: draftEditorBridge,
+				taskId: "isolated-card",
+				operationId: randomUUID(),
+				isCurrent: () => !exited,
+				triggerExport: () => pty.write("\u0007"),
+				confirmInputBoxEmpty: async () => false,
+				confirmInputBoxRestoredAfterFailure: async () => {
+					const screen = await readCurrentScreen();
+					return (
+						output.includes("Failed to open editor: editor exited") &&
+						!screen.lines.some((line) => line.text.includes("Save and close external editor"))
+					);
+				},
+				saveCapturedPrompt: async () => {
+					throw new Error("隔离写库失败");
+				},
+			});
+			expect(failed.outcome).toBe("prompt_library_write_failed");
+			await wait("写库失败后原生输入框恢复", async () =>
+				(await readCurrentScreen()).lines.some((line) => line.text.startsWith("›   STASH_WRITE_FAILURE")),
+			);
+			pty.write("\u0007");
+			await wait(
+				"普通编辑器读回失败后保留的完整原稿",
+				async () => (await readFile(observedEditorPath, "utf8")).split("\n").filter(Boolean).length === 2,
+			);
+			const lastEdit = JSON.parse(
+				(await readFile(observedEditorPath, "utf8")).split("\n").filter(Boolean).at(-1) ?? "null",
+			) as { text: string };
+			expect(lastEdit.text).toBe(failedDraft);
+			expect((await hooks()).filter((event) => event.hook_event_name === "UserPromptSubmit")).toHaveLength(
+				submissionCountBeforeStash,
+			);
+			expect(modelRequests).toHaveLength(modelRequestCountBeforeStash);
 		} finally {
 			if (!exited) pty.kill("SIGTERM");
 			const escalation = setTimeout(() => {

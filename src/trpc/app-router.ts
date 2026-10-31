@@ -482,6 +482,8 @@ import {
 	type CodexConfigurationSyncApi,
 	codexConfigurationBatchActionRequestSchema,
 	codexConfigurationBatchActionResultSchema,
+	codexConfigurationChangeDetailsRequestSchema,
+	codexConfigurationChangeDetailsSchema,
 	codexConfigurationChangeMutationRequestSchema,
 	codexConfigurationProfileMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
@@ -907,6 +909,10 @@ export interface RuntimeTrpcContext {
 		stashTerminalInputBoxToPromptLibrary: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTerminalInputBoxStashRequest,
+		) => Promise<RuntimeTerminalInputBoxStashResponse>;
+		getTerminalInputBoxStashOperationStatus: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: { taskId: string; operationId: string },
 		) => Promise<RuntimeTerminalInputBoxStashResponse>;
 		reloadTaskChatSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1887,6 +1893,13 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 			return ctx.codexConfigurationSyncApi.getState();
 		}),
 	mutateCodexConfigurationProfile: codexConfigurationProfileMutationProcedure,
+	getCodexConfigurationChangeDetails: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationChangeDetailsRequestSchema)
+		.output(codexConfigurationChangeDetailsSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getChangeDetails(input);
+		}),
 	batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(codexConfigurationBatchActionRequestSchema)
 		.output(codexConfigurationBatchActionResultSchema)
@@ -2187,6 +2200,16 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.stashTerminalInputBoxToPromptLibrary(ctx.workspaceScope, input);
 		}),
+	getTerminalInputBoxStashOperationStatus: workspaceProcedure
+		.input(
+			runtimeTerminalInputBoxStashRequestSchema
+				.required({ operationId: true })
+				.pick({ taskId: true, operationId: true }),
+		)
+		.output(runtimeTerminalInputBoxStashResponseSchema)
+		.query(async ({ ctx, input }) =>
+			ctx.runtimeApi.getTerminalInputBoxStashOperationStatus(ctx.workspaceScope, input),
+		),
 	abortTaskChatTurn: workspaceProcedure
 		.input(runtimeTaskChatAbortRequestSchema)
 		.output(runtimeTaskChatAbortResponseSchema)

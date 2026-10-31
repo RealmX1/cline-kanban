@@ -1,24 +1,75 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import fsPromises, { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type {
 	CompletedTurnSequenceSnapshot,
 	CompletedTurnSequenceSource,
 	ConversationSessionRef,
+	ExplorationThreadGraphMaintenanceProposal,
+	ForkedWorkBranchResult,
 	RunExplorationThreadGraphMaintenanceJobInput,
 	RunExplorationThreadGraphMaintenanceJobResult,
 } from "agent-conversation-exploration-thread-graph/core";
 import {
 	createEmptyExplorationThreadGraphCollection,
+	mutateExplorationThreadGraph,
+	readExplorationThreadGraphCollection,
+	readExplorationTopicRegistry,
 	resolveExplorationThreadGraphCollectionPath,
+	resolveExplorationTopicRegistryPath,
+	runExplorationThreadGraphMaintenanceJob,
 } from "agent-conversation-exploration-thread-graph/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import type * as nativeProcesses from "agent-conversation-exploration-thread-graph/harness-claude-code";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	type RuntimeTaskSessionSummary,
+	runtimeExplorationThreadGraphProjectionViewSchema,
+} from "../../../src/core/api-contract";
 import { createExplorationThreadGraphMaintenanceTrigger } from "../../../src/exploration-thread-graph/exploration-thread-graph-maintenance-trigger";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
+import {
+	createSessionOwnedBackgroundAgentExecutor,
+	hasSessionOwnedBackgroundAgentExecutionRequiringRetention,
+	requestSessionOwnedBackgroundAgentExecutionCancellation,
+} from "../../../src/state/session-owned-background-agent-executions";
+import { getWorkspaceDirectoryPath } from "../../../src/state/workspace-state";
+import { createTempDir } from "../../utilities/temp-dir";
+
+// 核心作业与 store 使用真实安装产物；这里只隔离原生进程查询，单测不启动或清理宿主进程。
+vi.mock("agent-conversation-exploration-thread-graph/harness-claude-code", async (importOriginal) => ({
+	...(await importOriginal<typeof nativeProcesses>()),
+	readNativeSystemBootIdentity: async () => "isolated-boot-generation",
+	readNativeProcessOwnershipSnapshot: async () =>
+		new Map([
+			[
+				process.pid,
+				{
+					processPid: process.pid,
+					parentProcessPid: 1,
+					processGroupId: 1,
+					startIdentity: `${process.pid} Thu Oct 29 00:00:00 2026`,
+				},
+			],
+		]),
+	observeExecutionOwnedProcesses: async () => ({ ownedStartIdentities: new Map(), hasUnprovenOrphanOwnership: false }),
+}));
+
+let isolatedHome: ReturnType<typeof createTempDir>;
+beforeEach(() => {
+	isolatedHome = createTempDir("exploration-maintenance-cancellation-home-");
+	vi.stubEnv("HOME", isolatedHome.path);
+});
+afterEach(() => {
+	vi.useRealTimers();
+	vi.unstubAllEnvs();
+	isolatedHome.cleanup();
+});
 
 // 四道闸各挡一次钱：模式闸 / 防抖闸 / 单飞闸 / 节流闸。任何一道漏掉，重型会话上就是每 turn ≈ $4.5。
-// 本套件不 spawn 任何进程、不落盘：storeRoot 指向空临时目录（核心包对缺失文件退化为空集合），
-// turn 源与作业 runner 全部注入。
+// 四道闸使用注入的 turn 源与 runner；取消回归使用真实核心作业和隔离文件 store。
+// 全部 HOME 隔离，不启动原生进程；真实安装导出另由无 mock 套件核验。
 
 function makeSummary(overrides: Partial<RuntimeTaskSessionSummary> = {}): RuntimeTaskSessionSummary {
 	return {
@@ -81,6 +132,122 @@ const ACCEPTED_JOB_RESULT: RunExplorationThreadGraphMaintenanceJobResult = {
 	remainingTurnCount: 0,
 	usage: null,
 };
+
+function createDeferredBarrier() {
+	let release: () => void = () => {};
+	const reached = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	return { reached, release };
+}
+
+const maintenanceProposal: ExplorationThreadGraphMaintenanceProposal = {
+	placements: [
+		{
+			turnRef: { conversationSessionId: "native-session-1", turnNumber: 1, turnCheckpointCommit: null },
+			threadId: "proposed-thread",
+			placementConfidence: "high",
+			deviationRationale: null,
+		},
+	],
+	newThreads: [
+		{
+			temporaryThreadId: "proposed-thread",
+			threadTitle: "消费兼容",
+			parentThreadId: null,
+			forkedFromTurnRef: null,
+			primaryTopicId: "proposed-topic",
+		},
+	],
+	topicProposals: [
+		{
+			temporaryTopicId: "proposed-topic",
+			topicTitle: "消费兼容",
+			topicAliases: [],
+			topicSummaryMarkdown: null,
+		},
+	],
+	threadRevisions: [],
+	edges: [],
+	eventMarks: [],
+	subjectTaggings: [],
+};
+
+async function createRealMaintenanceJobHarness(
+	options: { pauseAtTurnReadNumber?: 2 | 3; changedApplySignature?: boolean } = {},
+) {
+	const workspaceId = "maintenance-cancellation-workspace";
+	const explorationId = "exploration-1";
+	const storeRoot = join(isolatedHome.path, "graph-store");
+	await mutateExplorationThreadGraph(storeRoot, explorationId, async (snapshot) => snapshot, 1_000);
+	const forkReturned = createDeferredBarrier();
+	const blockedTurnReadReached = createDeferredBarrier();
+	const releaseBlockedTurnRead = createDeferredBarrier();
+	let turnReads = 0;
+	let jobSignal: AbortSignal | undefined;
+	const turnSource: CompletedTurnSequenceSource = {
+		readCompletedTurnSequence: async (sessionRef) => {
+			turnReads += 1;
+			// 前两次分别是宿主廉价投影和核心作业入场；第三次已在真实 store 写锁内。
+			if (turnReads === options.pauseAtTurnReadNumber) {
+				blockedTurnReadReached.release();
+				await releaseBlockedTurnRead.reached;
+			}
+			const snapshot = await makeTurnSource([1]).readCompletedTurnSequence(sessionRef);
+			return options.changedApplySignature && turnReads === 3
+				? { ...snapshot, sourceSignature: "changed-before-apply" }
+				: snapshot;
+		},
+	};
+	const onUpdated = vi.fn();
+	const relayFindingCandidates = vi.fn();
+	const trigger = createExplorationThreadGraphMaintenanceTrigger({
+		listWorkspaceSessionSummaries: () => [makeSummary()],
+		onExplorationThreadGraphUpdated: onUpdated,
+		relayFindingCandidates,
+		resolveStoreRoot: () => storeRoot,
+		createStopEdgeTurnSource: () => turnSource,
+		createInProgressSafeTurnSource: () => turnSource,
+		createForkedWorkBranchExecutor: () => ({
+			start: async (input) => {
+				await input.beforeProcessSpawn?.();
+				return { stopReason: "completed", outputText: "真实核心消费的受控提案", structured: maintenanceProposal };
+			},
+		}),
+		runMaintenanceJob: async (input) => {
+			jobSignal = input.signal;
+			return await runExplorationThreadGraphMaintenanceJob({
+				...input,
+				executor: {
+					start: async (request): Promise<ForkedWorkBranchResult> => {
+						const result = await input.executor.start(request);
+						forkReturned.release();
+						return result;
+					},
+				},
+			});
+		},
+	});
+	const readGraphAndTopicBytes = async () =>
+		await Promise.all([
+			readFile(resolveExplorationThreadGraphCollectionPath(storeRoot, explorationId), "utf8"),
+			readFile(resolveExplorationTopicRegistryPath(storeRoot), "utf8"),
+		]);
+	return {
+		workspaceId,
+		explorationId,
+		storeRoot,
+		trigger,
+		onUpdated,
+		relayFindingCandidates,
+		forkReturned,
+		blockedTurnReadReached,
+		releaseBlockedTurnRead,
+		readGraphAndTopicBytes,
+		jobSignal: () => jobSignal,
+		start: async () => await trigger.requestImmediateMaintenance({ workspaceId, explorationId }),
+	};
+}
 
 async function createTriggerHarness(
 	options: {
@@ -152,6 +319,248 @@ describe("createExplorationThreadGraphMaintenanceTrigger", () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
 	});
+
+	it("真实核心作业在未取消时写入 graph/topic 并广播", async () => {
+		const harness = await createRealMaintenanceJobHarness();
+		expect(await harness.start()).toMatchObject({
+			kind: "completed",
+			result: { outcome: "accepted", placedTurnCount: 1 },
+		});
+		expect(
+			(await readExplorationThreadGraphCollection(harness.storeRoot, harness.explorationId)).turnThreadPlacements,
+		).toHaveLength(1);
+		expect((await readExplorationTopicRegistry(harness.storeRoot)).topics).toHaveLength(1);
+		expect(harness.onUpdated).toHaveBeenCalledTimes(1);
+		expect(
+			runtimeExplorationThreadGraphProjectionViewSchema.safeParse(harness.onUpdated.mock.calls[0]?.[2]).success,
+		).toBe(true);
+	});
+
+	it("核心作业入场读转录期间 Stop，尚未调用 executor 也不能继续派发或落盘", async () => {
+		const harness = await createRealMaintenanceJobHarness({ pauseAtTurnReadNumber: 2 });
+		const originalBytes = await harness.readGraphAndTopicBytes();
+		const pending = harness.start();
+		try {
+			await harness.blockedTurnReadReached.reached;
+			const cancellation = await requestSessionOwnedBackgroundAgentExecutionCancellation({
+				workspaceId: harness.workspaceId,
+				taskId: harness.explorationId,
+			});
+			expect(harness.jobSignal()?.aborted).toBe(true);
+			harness.releaseBlockedTurnRead.release();
+			expect(await pending).toMatchObject({
+				kind: "completed",
+				result: { outcome: "fork_failed", stopReason: "cancelled" },
+			});
+			await cancellation.processCancellationConfirmationCompleted;
+			expect(await harness.readGraphAndTopicBytes()).toEqual(originalBytes);
+			const directory = join(
+				getWorkspaceDirectoryPath(harness.workspaceId),
+				"session-owned-background-agent-executions",
+			);
+			const filename = (await readdir(directory)).find((name) => name.endsWith(".execution.json"));
+			expect(JSON.parse(await readFile(join(directory, filename ?? "missing"), "utf8"))).toMatchObject({
+				launchState: "not_started",
+				status: "finished",
+			});
+		} finally {
+			harness.releaseBlockedTurnRead.release();
+			await pending;
+			harness.trigger.dispose();
+		}
+	});
+
+	it("fork 已返回后等真实 store 锁，显式 Stop 仍立即取消且不写 graph/topic", async () => {
+		const harness = await createRealMaintenanceJobHarness();
+		const originalBytes = await harness.readGraphAndTopicBytes();
+		const lockEntered = createDeferredBarrier();
+		const releaseLock = createDeferredBarrier();
+		const heldLock = mutateExplorationThreadGraph(harness.storeRoot, harness.explorationId, async () => {
+			lockEntered.release();
+			await releaseLock.reached;
+			return null;
+		});
+		await lockEntered.reached;
+		const pending = harness.start();
+		try {
+			await harness.forkReturned.reached;
+			const directory = join(
+				getWorkspaceDirectoryPath(harness.workspaceId),
+				"session-owned-background-agent-executions",
+			);
+			const filename = (await readdir(directory)).find((name) => name.endsWith(".execution.json"));
+			expect(JSON.parse(await readFile(join(directory, filename ?? "missing"), "utf8"))).toMatchObject({
+				status: "running",
+				finishedAtEpochMs: null,
+				waitingReason: "background_operation_completion_pending",
+			});
+			expect(
+				await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({
+					workspaceId: harness.workspaceId,
+					taskId: harness.explorationId,
+				}),
+			).toBe(true);
+			const duplicateFork = vi.fn(async () => ({ stopReason: "completed" as const, outputText: "不应重复派发" }));
+			await expect(
+				createSessionOwnedBackgroundAgentExecutor({
+					workspaceId: harness.workspaceId,
+					taskId: harness.explorationId,
+					runtimeSessionIncarnationId: null,
+					purpose: "exploration_thread_graph_maintenance",
+					executor: { start: duplicateFork },
+				}).start({
+					parentSession: {
+						harnessKind: "claude_code",
+						nativeSessionId: "native-session-1",
+						transcriptPath: "/transcripts/native-session-1.jsonl",
+						workingDirectory: "/repo",
+						launchArgvTemplate: {
+							model: "default",
+							appendSystemPrompt: "exploratory",
+							settingsPath: "/settings.json",
+							extraArgs: [],
+						},
+					},
+					promptText: "重复请求",
+					outputSchema: { type: "object", properties: {} },
+				}),
+			).rejects.toThrow("活跃或退出未知");
+			expect(duplicateFork).not.toHaveBeenCalled();
+			const cancellation = await requestSessionOwnedBackgroundAgentExecutionCancellation({
+				workspaceId: harness.workspaceId,
+				taskId: harness.explorationId,
+			});
+			expect(harness.jobSignal()?.aborted).toBe(true);
+			releaseLock.release();
+			await heldLock;
+			expect(await pending).toMatchObject({
+				kind: "completed",
+				result: { outcome: "fork_failed", stopReason: "cancelled" },
+			});
+			await cancellation.processCancellationConfirmationCompleted;
+			expect(await harness.readGraphAndTopicBytes()).toEqual(originalBytes);
+			expect(harness.onUpdated).not.toHaveBeenCalled();
+			expect(harness.relayFindingCandidates).not.toHaveBeenCalled();
+			// 历史 Stop 不封锁后续新操作。
+			expect(await harness.start()).toMatchObject({ kind: "completed", result: { outcome: "accepted" } });
+		} finally {
+			releaseLock.release();
+			await heldLock;
+			await pending;
+			harness.trigger.dispose();
+		}
+	});
+
+	it.each([false, true])(
+		"锁内重读期间跨进程 Stop，不靠轮询且不写 graph/topic/stale（签名变化=%s）",
+		async (changedApplySignature) => {
+			// 暂停周期观察，证明落盘前的同步补证能独立关闭短取消窗口。
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+			const harness = await createRealMaintenanceJobHarness({ pauseAtTurnReadNumber: 3, changedApplySignature });
+			const originalBytes = await harness.readGraphAndTopicBytes();
+			const pending = harness.start();
+			try {
+				await harness.blockedTurnReadReached.reached;
+				const directory = join(
+					getWorkspaceDirectoryPath(harness.workspaceId),
+					"session-owned-background-agent-executions",
+				);
+				// 与其他 runtime 写入相同的持久 UUID，不经过本进程的即时通知。
+				const taskIdentityDigest = createHash("sha256").update(harness.explorationId).digest("hex");
+				const cancellationPath = join(
+					directory,
+					`task-${taskIdentityDigest}.admission-cancellation-generation.json`,
+				);
+				await writeFile(
+					cancellationPath,
+					JSON.stringify({ taskId: harness.explorationId, cancellationGeneration: randomUUID() }),
+				);
+				expect(harness.jobSignal()?.aborted).toBe(false);
+				harness.releaseBlockedTurnRead.release();
+				expect(await pending).toMatchObject({
+					kind: "completed",
+					result: { outcome: "fork_failed", stopReason: "cancelled" },
+				});
+				expect(harness.jobSignal()?.aborted).toBe(true);
+				expect(await harness.readGraphAndTopicBytes()).toEqual(originalBytes);
+				expect(harness.onUpdated).not.toHaveBeenCalled();
+				expect(harness.relayFindingCandidates).not.toHaveBeenCalled();
+			} finally {
+				harness.releaseBlockedTurnRead.release();
+				await pending;
+				harness.trigger.dispose();
+			}
+		},
+	);
+
+	it.each([false, true])(
+		"真实 store 提交已取得资格时，Stop 不能在 graph/topic/stale 写入前返回（stale=%s）",
+		async (changedApplySignature) => {
+			const harness = await createRealMaintenanceJobHarness({ changedApplySignature });
+			const originalBytes = await harness.readGraphAndTopicBytes();
+			const writeReached = createDeferredBarrier();
+			const releaseWrite = createDeferredBarrier();
+			const stopLockAttempted = createDeferredBarrier();
+			const originalMkdir = fsPromises.mkdir;
+			const graphDirectory = dirname(
+				resolveExplorationThreadGraphCollectionPath(harness.storeRoot, harness.explorationId),
+			);
+			let armed = true;
+			const mkdirSpy = vi.spyOn(fsPromises, "mkdir").mockImplementation(async (path, options) => {
+				if (armed && String(path) === graphDirectory) {
+					armed = false;
+					writeReached.release();
+					await releaseWrite.reached;
+				}
+				return await originalMkdir(path, options);
+			});
+			syncBuiltinESMExports();
+			const originalWithLock = lockedFileSystem.withLock.bind(lockedFileSystem);
+			let stopping = false;
+			const lockSpy = vi.spyOn(lockedFileSystem, "withLock").mockImplementation(async (request, operation) => {
+				if (stopping && request.type === "directory") stopLockAttempted.release();
+				return await originalWithLock(request, operation);
+			});
+			const pending = harness.start();
+			let cancellationConfirmation: Promise<PromiseSettledResult<void>[]> | undefined;
+			try {
+				await writeReached.reached;
+				expect(await harness.readGraphAndTopicBytes()).toEqual(originalBytes);
+				stopping = true;
+				cancellationConfirmation = requestSessionOwnedBackgroundAgentExecutionCancellation({
+					workspaceId: harness.workspaceId,
+					taskId: harness.explorationId,
+				}).then((cancellation) => cancellation.processCancellationConfirmationCompleted);
+				await stopLockAttempted.reached;
+				const directory = join(
+					getWorkspaceDirectoryPath(harness.workspaceId),
+					"session-owned-background-agent-executions",
+				);
+				expect(
+					(await readdir(directory)).some((name) => name.endsWith(".admission-cancellation-generation.json")),
+				).toBe(false);
+				expect(harness.jobSignal()?.aborted).toBe(false);
+				releaseWrite.release();
+				expect(await pending).toMatchObject({
+					kind: "completed",
+					result: { outcome: changedApplySignature ? "rejected" : "accepted" },
+				});
+				await cancellationConfirmation;
+				const bytesAfterStop = await harness.readGraphAndTopicBytes();
+				expect(bytesAfterStop).not.toEqual(originalBytes);
+				expect(await harness.readGraphAndTopicBytes()).toEqual(bytesAfterStop);
+				expect(harness.onUpdated).toHaveBeenCalledTimes(changedApplySignature ? 0 : 1);
+			} finally {
+				releaseWrite.release();
+				await pending;
+				await cancellationConfirmation;
+				mkdirSpy.mockRestore();
+				syncBuiltinESMExports();
+				lockSpy.mockRestore();
+				harness.trigger.dispose();
+			}
+		},
+	);
 
 	it("模式闸：非 exploratory 卡片一律不判——切模式本身就是唯一的开启动作", async () => {
 		const harness = await createTriggerHarness({

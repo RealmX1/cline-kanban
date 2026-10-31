@@ -21,6 +21,10 @@ import {
 	type SpawnHostedSessionOutcome,
 	type SpawnHostedSessionRequestMessage,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
+import {
+	describeAgentSessionPtyHostResponseDeadlineExceeded,
+	scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo,
+} from "./agent-session-pty-host-response-deadline-after-pending-socket-io";
 
 const CONTROLLER_HANDSHAKE_DEADLINE_MS = 5_000;
 const CONTROLLER_REQUEST_RESPONSE_DEADLINE_MS = 15_000;
@@ -47,7 +51,7 @@ export interface AgentSessionPtyHostControllerConnectionEventHandlers {
 interface PendingControllerRequest {
 	resolve: (message: unknown) => void;
 	reject: (error: Error) => void;
-	deadlineTimer: NodeJS.Timeout;
+	cancelResponseDeadline: () => void;
 }
 
 export class AgentSessionPtyHostControllerConnection {
@@ -69,36 +73,53 @@ export class AgentSessionPtyHostControllerConnection {
 		const connectionAndHandshakeDeadlineAtEpochMs = Date.now() + responseDeadlineMilliseconds;
 		const socket = await new Promise<Socket>((resolve, reject) => {
 			const connectingSocket = createConnection(socketPath);
-			const connectionDeadlineTimer = setTimeout(
+			let settled = false;
+			// 长阻塞恢复后，到期计时器会先于缓冲区里的 connect。先让出一次 I/O，再拆连接。
+			const cancelConnectionDeadline = scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo(
+				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
 				() => {
+					if (settled) return;
+					settled = true;
 					connectingSocket.destroy();
 					reject(new AgentSessionPtyHostUnreachableError(`连接 host 超时：${socketPath}`, false));
 				},
-				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
 			);
-			connectingSocket.once("connect", () => {
-				clearTimeout(connectionDeadlineTimer);
-				connectingSocket.off("error", onConnectError);
-				resolve(connectingSocket);
-			});
-			const onConnectError = (error: NodeJS.ErrnoException) => {
-				clearTimeout(connectionDeadlineTimer);
-				connectingSocket.destroy();
-				reject(
-					new AgentSessionPtyHostUnreachableError(
-						`cannot connect to agent session pty host at ${socketPath}: ${error.message}`,
-						error.code === "ECONNREFUSED" || error.code === "ENOENT",
-					),
-				);
+			const finishConnection = (settle: () => void) => {
+				if (settled) return;
+				settled = true;
+				cancelConnectionDeadline();
+				settle();
 			};
+			const onConnectError = (error: NodeJS.ErrnoException) => {
+				finishConnection(() => {
+					connectingSocket.destroy();
+					reject(
+						new AgentSessionPtyHostUnreachableError(
+							`cannot connect to agent session pty host at ${socketPath}: ${error.message}`,
+							error.code === "ECONNREFUSED" || error.code === "ENOENT",
+						),
+					);
+				});
+			};
+			connectingSocket.once("connect", () => {
+				finishConnection(() => {
+					connectingSocket.off("error", onConnectError);
+					resolve(connectingSocket);
+				});
+			});
 			connectingSocket.once("error", onConnectError);
 		});
 		const decoder = new AgentSessionPtyHostWireFrameDecoder();
 		// 握手完成前到达的后续帧（极少见）先攒着，连接对象建好后按序交付。
 		const framesArrivedAfterHello: ReturnType<AgentSessionPtyHostWireFrameDecoder["push"]> = [];
 		const hostHello = await new Promise<HostHelloAcknowledgedMessage>((resolve, reject) => {
-			const deadlineTimer = setTimeout(
+			let settled = false;
+			// 与连接阶段共用同一截止时间。hello 已在缓冲里时，同样先让出一次 I/O。
+			const cancelHelloDeadline = scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo(
+				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
 				() => {
+					if (settled) return;
+					settled = true;
 					socket.destroy();
 					reject(
 						new AgentSessionPtyHostUnreachableError(
@@ -107,17 +128,23 @@ export class AgentSessionPtyHostControllerConnection {
 						),
 					);
 				},
-				Math.max(1, connectionAndHandshakeDeadlineAtEpochMs - Date.now()),
 			);
+			const finishHandshake = (settle: () => void) => {
+				if (settled) return;
+				settled = true;
+				cancelHelloDeadline();
+				settle();
+			};
 			let helloReceived = false;
 			const onHandshakeData = (chunk: Buffer) => {
 				let frames: ReturnType<AgentSessionPtyHostWireFrameDecoder["push"]>;
 				try {
 					frames = decoder.push(chunk);
 				} catch (error) {
-					clearTimeout(deadlineTimer);
-					socket.destroy();
-					reject(error instanceof Error ? error : new Error(String(error)));
+					finishHandshake(() => {
+						socket.destroy();
+						reject(error instanceof Error ? error : new Error(String(error)));
+					});
 					return;
 				}
 				for (const frame of frames) {
@@ -131,31 +158,34 @@ export class AgentSessionPtyHostControllerConnection {
 					const messageType = readWireControlMessageType(frame.message);
 					if (messageType === "host_hello_acknowledged") {
 						helloReceived = true;
-						clearTimeout(deadlineTimer);
-						socket.off("data", onHandshakeData);
-						socket.off("close", onHandshakeClose);
-						resolve(frame.message as HostHelloAcknowledgedMessage);
+						finishHandshake(() => {
+							socket.off("data", onHandshakeData);
+							socket.off("close", onHandshakeClose);
+							resolve(frame.message as HostHelloAcknowledgedMessage);
+						});
 					} else if (messageType === "controller_rejected") {
-						clearTimeout(deadlineTimer);
-						socket.destroy();
-						reject(
-							new AgentSessionPtyHostUnreachableError(
-								`agent session pty host rejected controller: ${JSON.stringify(frame.message)}`,
-								false,
-							),
-						);
+						finishHandshake(() => {
+							socket.destroy();
+							reject(
+								new AgentSessionPtyHostUnreachableError(
+									`agent session pty host rejected controller: ${JSON.stringify(frame.message)}`,
+									false,
+								),
+							);
+						});
 						return;
 					}
 				}
 			};
 			const onHandshakeClose = () => {
-				clearTimeout(deadlineTimer);
-				reject(
-					new AgentSessionPtyHostUnreachableError(
-						`agent session pty host closed during handshake: ${socketPath}`,
-						false,
-					),
-				);
+				finishHandshake(() => {
+					reject(
+						new AgentSessionPtyHostUnreachableError(
+							`agent session pty host closed during handshake: ${socketPath}`,
+							false,
+						),
+					);
+				});
 			};
 			socket.on("data", onHandshakeData);
 			socket.once("close", onHandshakeClose);
@@ -295,13 +325,22 @@ export class AgentSessionPtyHostControllerConnection {
 			);
 		}
 		const requestId = randomUUID();
+		const request = buildRequest(requestId);
 		return new Promise((resolve, reject) => {
-			const deadlineTimer = setTimeout(() => {
-				this.pendingRequestsByRequestId.delete(requestId);
-				reject(new AgentSessionPtyHostUnreachableError("agent session pty host request timed out", false));
-			}, responseDeadlineMilliseconds);
-			this.pendingRequestsByRequestId.set(requestId, { resolve, reject, deadlineTimer });
-			this.sendControlMessage(buildRequest(requestId));
+			const cancelResponseDeadline = scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo(
+				responseDeadlineMilliseconds,
+				(observation) => {
+					if (!this.pendingRequestsByRequestId.delete(requestId)) return;
+					reject(
+						new AgentSessionPtyHostUnreachableError(
+							describeAgentSessionPtyHostResponseDeadlineExceeded(request.type, observation),
+							false,
+						),
+					);
+				},
+			);
+			this.pendingRequestsByRequestId.set(requestId, { resolve, reject, cancelResponseDeadline });
+			this.sendControlMessage(request);
 		});
 	}
 
@@ -336,7 +375,7 @@ export class AgentSessionPtyHostControllerConnection {
 		this.socket.on("close", () => {
 			this.closed = true;
 			for (const pendingRequest of this.pendingRequestsByRequestId.values()) {
-				clearTimeout(pendingRequest.deadlineTimer);
+				pendingRequest.cancelResponseDeadline();
 				pendingRequest.reject(
 					new AgentSessionPtyHostUnreachableError("agent session pty host connection closed", false),
 				);
@@ -389,7 +428,7 @@ export class AgentSessionPtyHostControllerConnection {
 				return;
 			}
 			this.pendingRequestsByRequestId.delete(requestId);
-			clearTimeout(pendingRequest.deadlineTimer);
+			pendingRequest.cancelResponseDeadline();
 			pendingRequest.resolve(message);
 		}
 	}

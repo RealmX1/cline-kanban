@@ -207,7 +207,7 @@ by-the-way 会话缺 sidecar 只剔它自己。
 
 web-ui **不 import 核心包**：`/core` 静态导出依赖 node `fs` 的 store，打进浏览器 bundle 会炸。所以
 `api-contract.ts` 自带一份 projection view 的 zod 镜像，lane 布局在服务端算好随行下发。两份形状的一致性
-由 `exploration-thread-graph-contract-parity.ts` 做**编译期双向对账**——核心包换 SHA 后形状若漂移，
+由 `exploration-thread-graph-consumer-contract-compatibility.ts` 做**编译期消费方向检查**——核心输出缺少宿主必需字段、字段类型不兼容或枚举扩大时，
 根 typecheck 立刻红，且错误就落在那个文件上。
 
 ### agent 侧读通道：`kanban exploratory get-exploration-thread-graph`
@@ -292,9 +292,9 @@ turn 行」双向定位可复用（`data-conversation-anchor` 属性契约 + `da
 
 ## 9. 与核心包的契约指针（B.2 已接线；改动前对照 handoff A.13）
 
-**当前钉住的 SHA**：`4fd33ae34c9e2cc6d1b24ee4a8a12b9aa6aa2bb8`（根 `package.json` 的
+**当前钉住的 SHA**：`233d3e765405fd27df0499c6cb4916ee3566d86b`（根 `package.json` 的
 `github:RealmX1/agent-conversation-exploration-thread-graph#<sha>`）。升级 = 换这个 SHA，然后跑根
-typecheck——`exploration-thread-graph-contract-parity.ts` 会在形状漂移时当场报错。
+typecheck——`exploration-thread-graph-consumer-contract-compatibility.ts` 会在消费不兼容时当场报错；核心新增宿主未消费的字段不阻断升级。升级还须运行无 mock 的安装产物导出与投影解析回归，不能只依赖 mock 工厂补齐 API 的测试。
 `.plan/` 下的 handoff 与完工交接**不进 npm 包**（`files` 只含 `dist` / `README.md` / `CONTEXT.md`），
 要读得直接看那个仓库。
 
@@ -321,7 +321,7 @@ typecheck——`exploration-thread-graph-contract-parity.ts` 会在形状漂移�
 
 探索图维护分身与 Claude 来源任务草稿分身均不设总运行时限，公共分身库也不再提供 `timeoutMs` 或默认 300 秒预算。`source_agent_fork` 的运行不再在 120 秒后中止。单次模型 API、Git 快照及控制请求的操作超时保持原语义。
 
-两处入口通过 `createSessionOwnedBackgroundAgentExecutor` 在启动前持久登记归属，随后保存原生进程启动身份、已识别后代、最近观察与输出活动、等待原因、恢复条件和原始结果。记录位于 workspace 的 `session-owned-background-agent-executions/`，同归属的派发检查与登记共用跨进程锁。runtime 重启后先核验原进程，活跃或退出未知的同来源作业不重复派发。
+维护入口通过 `runSessionOwnedBackgroundAgentOperation` 在作业入场时持久登记归属，直到整个维护作业返回才结束；来源草稿入口继续通过 `createSessionOwnedBackgroundAgentExecutor` 复用同一操作包装器。随后保存原生进程启动身份、已识别后代、最近观察与输出活动、等待原因、恢复条件和原始结果。记录位于 workspace 的 `session-owned-background-agent-executions/`，同归属的派发检查与登记共用跨进程锁。runtime 重启后先核验原进程，活跃或退出未知的同来源作业不重复派发。
 
 闲置和 park 回收、PTY host 的脱离回收资格都先核验所属后台执行：仍运行或缺少退出证据则延期，后续 sweep 在原生证据恢复后自动重验；正常完成后的回收保留。显式 Stop 独立写入取消请求，并可依据持久启动身份在控制器退出后清理，取消确认单独保存；PID 身份变化或查询缺证不误杀，也不把本地退出冒充 provider 已停止。
 
@@ -330,3 +330,9 @@ typecheck——`exploration-thread-graph-contract-parity.ts` 会在形状漂移�
 派发前先持久保存 `registered`、控制器原生启动身份、原生开机 UUID 和随机 execution token。内置进程执行器必须等待 `beforeProcessSpawn` 将 `dispatch_intent` 持久保存后才可 spawn；屏障期间 Stop 则不派发。registered 阶段失败可证明没有启动进程；越过屏障但无首份 PID 回报时，使用 token、原生父链和开机代际补证。原 root 消失不能代表后代全部退出；清空环境的新生孤儿保持未知，待其退出、父链恢复或原生开机代际变化后自动重验。出生时间筛选保守包含整个开始秒，避免漏掉同秒新后代。取消和退出核验另存 reconciliation 原件，辅助写入故障不改变业务结果。
 
 Stop 与执行登记共用目录锁，并先持久更新任务的取消代际。每次 `start()` 在首次 await 前捕获代际，登记、派发屏障和结果发布时再次对账；准备原生查询期间已收到 Stop 的旧请求记为 `cancelled/not_started`，不会漏进随后派发。取消观察缺失不自动等于新 Stop；之后接受的新请求使用当前代际，不因历史 Stop 永久锁死。实际后代清理在取消意图落盘后独立进行，主 Agent 的 Stop 不等待后台清理。
+
+控制器身份由核心包 `/harness-claude-code` 的 `compareNativeProcessStartIdentities` 核对，兼容旧 PID + PGID + 出生时间与新 PID + 出生时间。持久身份缺失或不可比较时保留 `unknown`；只有成功完整快照中的进程缺席或出生身份确实变化，才解除控制器保护。查询失败不转换为进程缺席，也不把控制器加入作业后代集合。
+
+维护作业的 signal 覆盖 fork 返回、等 store 锁及锁内重读。Stop 在持久代际写入后立即通知本进程操作，其他进程仍按既有 marker 与代际周期补证。固定核心的 store 原子写不接收 signal，因此宿主在 fork 后、store 锁内最后一份 turn 重读返回前取得与 Stop 共用的 admission 目录锁，持有至 graph/topic/stale 的真实文件提交及最终执行记录发布完成；fork 和等 store 锁期间不持有此锁。
+
+取消与提交按同一把锁确定先后：Stop 先取得资格则作业不写 graph/topic/stale，最终结果为取消且去掉结构化业务载荷；提交先取得资格则 Stop 等待该短提交窗口完成后才持久更新代际并返回，不会出现 Stop 已返回、旧作业才写图的情况。最终结果发布也在该锁内重新对账，调用方 AbortSignal 若在异步最终记录写入期间取消，则重写取消记录并撤回业务载荷。此处不回滚已取得资格的提交，也不等待后台进程清理。新操作捕获当前代际，历史 Stop 不永久封锁新请求；原生结果和未知退出记录继续保留供重启核验。

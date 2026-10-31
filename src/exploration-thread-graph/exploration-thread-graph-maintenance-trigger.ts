@@ -32,7 +32,7 @@ import {
 	ClaudeCodeTranscriptCompletedTurnSource,
 } from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import type { RuntimeIngestExploratoryFindingCandidateRequest, RuntimeTaskSessionSummary } from "../core/api-contract";
-import { createSessionOwnedBackgroundAgentExecutor } from "../state/session-owned-background-agent-executions";
+import { runSessionOwnedBackgroundAgentOperation } from "../state/session-owned-background-agent-executions";
 import { collectExplorationThreadGraphFindingCandidateRequests } from "./exploration-thread-graph-finding-candidate-relay";
 import { decideExplorationThreadGraphMaintenanceThrottle } from "./exploration-thread-graph-maintenance-throttle";
 import { loadExplorationThreadGraphProjection } from "./exploration-thread-graph-projection-loader";
@@ -43,7 +43,7 @@ import { resolveWorkspaceExplorationThreadGraphStoreRoot } from "./exploration-t
 // 所以它基本不会推迟单次判定；而它能把「agent 连着结束几个短 turn」合并成一次 fork。
 export const EXPLORATION_THREAD_GRAPH_MAINTENANCE_DEBOUNCE_MS = 45_000;
 
-// 单次作业的墙钟上限。核心包默认 300s；这里不放宽——超时的分身照样计费，拖久了只是多烧钱。
+// 作业不设总运行时限；显式 Stop 的持久取消覆盖分身、等锁与落盘前重读。
 
 export type ExplorationThreadGraphMaintenanceOutcome =
 	| { kind: "completed"; result: RunExplorationThreadGraphMaintenanceJobResult }
@@ -168,7 +168,8 @@ export function createExplorationThreadGraphMaintenanceTrigger(
 			sessionSummaries,
 		});
 		const sessionRefs = sessionRefAssembly.sessionRefs;
-		if (sessionRefs.length === 0) {
+		const primarySession = sessionRefs[0];
+		if (!primarySession) {
 			return { kind: "not_started", reason: "no_usable_sessions" };
 		}
 
@@ -203,22 +204,51 @@ export function createExplorationThreadGraphMaintenanceTrigger(
 			// 所以增量语义下的 mode 就是 incremental。
 			const maintenanceJobMode = throttleDecision.shouldRun ? throttleDecision.mode : "incremental";
 
-			const result = await runMaintenanceJob({
-				explorationId: input.explorationId,
-				sessions: sessionRefs,
-				turnSource: input.turnSource,
-				executor: createSessionOwnedBackgroundAgentExecutor({
+			const result = await runSessionOwnedBackgroundAgentOperation(
+				{
 					workspaceId: input.workspaceId,
 					taskId: input.explorationId,
 					runtimeSessionIncarnationId:
 						sessionSummaries.find((summary) => summary.taskId === input.explorationId)
 							?.runtimeSessionIncarnationId ?? null,
+					parentNativeSessionId: primarySession.nativeSessionId,
 					purpose: "exploration_thread_graph_maintenance",
 					executor: createForkedWorkBranchExecutor(),
+				},
+				async ({ executor, signal, refreshCancellation, acquireCommitPermission }) => {
+					let forkReturned = false;
+					return await runMaintenanceJob({
+						explorationId: input.explorationId,
+						sessions: sessionRefs,
+						turnSource: {
+							readCompletedTurnSequence: async (sessionRef) => {
+								const snapshot = await input.turnSource.readCompletedTurnSequence(sessionRef);
+								refreshCancellation();
+								// 固定核心按 sessions 顺序重读；最后一份返回前取得提交资格。
+								// 只保护漏斗、真实 store 写入和结果发布，不阻塞 fork/等锁期间的 Stop。
+								if (forkReturned && sessionRef === sessionRefs[sessionRefs.length - 1])
+									await acquireCommitPermission();
+								return snapshot;
+							},
+						},
+						executor: {
+							start: async (request) => {
+								const result = await executor.start(request);
+								forkReturned = true;
+								return result;
+							},
+						},
+						signal,
+						storeRoot,
+						mode: maintenanceJobMode,
+					});
+				},
+				(result): RunExplorationThreadGraphMaintenanceJobResult => ({
+					outcome: "fork_failed",
+					stopReason: "cancelled",
+					outputTextExcerpt: result.outcome === "fork_failed" ? result.outputTextExcerpt : "",
 				}),
-				storeRoot,
-				mode: maintenanceJobMode,
-			});
+			);
 
 			// 只有真正落盘了才重算并广播——被拒 / 跳过 / fork 失败时图没变，广播一次相同的值只是噪音。
 			if (result.outcome === "accepted") {

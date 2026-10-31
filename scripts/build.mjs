@@ -153,6 +153,11 @@ try {
 		// agent session PTY host（独立长驻进程，持有 agent 会话的 PTY master）
 		buildBundleIntoStagingDirectory({
 			...shared,
+			entryPoints: ["src/terminal/codex-draft-stash-editor-process-entry.ts"],
+			outfile: join(distributionDirectoryPath, "codex-draft-stash-editor.js"),
+		}),
+		buildBundleIntoStagingDirectory({
+			...shared,
 			entryPoints: ["src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"],
 			outfile: join(distributionDirectoryPath, "agent-session-pty-host.js"),
 			metafile: true,
@@ -160,7 +165,7 @@ try {
 	]);
 
 	console.log(
-		"esbuild：已打包 cli.js、kanban-agent-hook-cli.js、index.js、agent-session-pty-host.js 和 codex-native-session-control-host.js",
+		"esbuild：已打包 cli.js、kanban-agent-hook-cli.js、index.js、agent-session-pty-host.js、codex-native-session-control-host.js 和 codex-draft-stash-editor.js",
 	);
 
 	await copyFile(
