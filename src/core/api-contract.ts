@@ -1260,6 +1260,12 @@ export type RuntimeLastAgentConversationPromptCacheReferenceObservation = z.infe
 	typeof runtimeLastAgentConversationPromptCacheReferenceObservationSchema
 >;
 
+export const runtimeSubmittedPromptTextNormalizationSchema = z.enum([
+	"preserve_internal_whitespace",
+	"collapse_all_whitespace",
+]);
+export type RuntimeSubmittedPromptTextNormalization = z.infer<typeof runtimeSubmittedPromptTextNormalizationSchema>;
+
 // pending/unconfirmed 只表达投递核验进度，不能代替 harness 已接受这一事实。
 export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object({
 	status: z.enum(["pending", "unconfirmed", "accepted"]),
@@ -1272,10 +1278,12 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	acceptedByHistoricalReconciliation: z.boolean().optional(),
 	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
 	submittedPromptSha256: z.string().optional(),
+	submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 	predecessorAcceptedEventId: z.string().optional(),
 	verification: z
 		.object({
 			checkedAtMs: z.number(),
+			submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 			nextCheckAtMs: z.number().nullable(),
 			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
 			reason: z.enum([
@@ -5889,6 +5897,7 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 	claudeNativeTaskListIdForPhaseGoalProjection: z.string().min(1).max(200).nullable().optional(),
 	// hook 是否从子代理内部触发（`kanban hooks` 从 hook stdin 的 `agent_id` 派生；Claude Code 只在子代理
 	// 内的事件上带它，主线程一律不带）。子代理的请求走自己的缓存前缀，不刷新主对话的 Cache warm 起点。
