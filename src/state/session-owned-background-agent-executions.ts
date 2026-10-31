@@ -9,6 +9,7 @@ import type {
 	ForkedWorkBranchResult,
 } from "agent-conversation-exploration-thread-graph/core";
 import {
+	compareNativeProcessStartIdentities,
 	confirmOwnedProcessCancellation,
 	observeExecutionOwnedProcesses,
 	readNativeProcessOwnershipSnapshot,
@@ -18,6 +19,8 @@ import {
 import { z } from "zod";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getWorkspaceDirectoryPath } from "./workspace-state";
+
+const activeCancellationRefreshersByGenerationPath = new Map<string, Set<() => void>>();
 
 const executionRecordSchema = z.object({
 	executionOwnershipToken: z.string().uuid(),
@@ -125,20 +128,24 @@ async function inspectExecutionProcessExit(record: ExecutionRecord): Promise<{
 			reason: "process_spawn_not_started_proven",
 		};
 	const snapshot = await readNativeProcessOwnershipSnapshot();
-	const controller = snapshot.get(record.controllerProcessPid);
-	const controllerMayStillOwnDispatch =
-		controller !== undefined &&
-		(record.controllerProcessStartIdentity === null ||
-			controller.startIdentity === record.controllerProcessStartIdentity);
+	// undefined 观察只来自成功完整的快照；查询抛错继续由调用方保留未知。
+	const controllerIdentityComparison = compareNativeProcessStartIdentities(
+		snapshot.get(record.controllerProcessPid)?.startIdentity,
+		record.controllerProcessStartIdentity ?? undefined,
+	);
+	const controllerMayStillOwnDispatch = controllerIdentityComparison !== "different";
+	const controllerIdentityUnknown = controllerIdentityComparison === "unknown";
 	if (record.launchState === "registered") {
 		// 内置执行器须先等待持久屏障；registered 阶段的 controller 已退出即能证明未派发。
 		return {
 			requiresRetention: controllerMayStillOwnDispatch && record.status !== "finished",
 			ownedStartIdentities: new Map(),
-			ownershipUnknown: false,
-			reason: controllerMayStillOwnDispatch
-				? "controller_has_not_crossed_spawn_barrier"
-				: "controller_exited_before_spawn_barrier",
+			ownershipUnknown: controllerIdentityUnknown && record.status !== "finished",
+			reason: controllerIdentityUnknown
+				? "controller_start_identity_unknown"
+				: controllerMayStillOwnDispatch
+					? "controller_has_not_crossed_spawn_barrier"
+					: "controller_exited_before_spawn_barrier",
 		};
 	}
 	const observed = await observeExecutionOwnedProcesses({
@@ -153,14 +160,17 @@ async function inspectExecutionProcessExit(record: ExecutionRecord): Promise<{
 			observed.hasUnprovenOrphanOwnership ||
 			(record.status === "running" && controllerMayStillOwnDispatch),
 		ownedStartIdentities: observed.ownedStartIdentities,
-		ownershipUnknown: observed.hasUnprovenOrphanOwnership,
+		ownershipUnknown:
+			observed.hasUnprovenOrphanOwnership || (record.status === "running" && controllerIdentityUnknown),
 		reason: active
 			? "owned_processes_running"
 			: observed.hasUnprovenOrphanOwnership
 				? "native_orphan_ownership_unknown"
-				: record.status === "running" && controllerMayStillOwnDispatch
-					? "controller_result_publication_pending"
-					: "native_process_tree_exit_proven",
+				: record.status === "running" && controllerIdentityUnknown
+					? "controller_start_identity_unknown"
+					: record.status === "running" && controllerMayStillOwnDispatch
+						? "controller_result_publication_pending"
+						: "native_process_tree_exit_proven",
 	};
 }
 
@@ -242,6 +252,16 @@ async function persistBackgroundAgentCancellationRequests(input: {
 			JSON.stringify({ taskId: input.taskId, cancellationGeneration: randomUUID(), requestedAtEpochMs: Date.now() }),
 			{ durable: true },
 		);
+		const cancellationGenerationPath = taskExecutionCancellationGenerationPath(input.workspaceId, input.taskId);
+		// 本进程立即观察同一份持久代际，避免依赖轮询才阻止落盘；其他进程继续周期补证。
+		for (const refreshCancellation of activeCancellationRefreshersByGenerationPath.get(cancellationGenerationPath) ??
+			[]) {
+			try {
+				refreshCancellation();
+			} catch {
+				// 即时通知缺证不阻断 marker 持久化；周期观察与落盘前核验继续补证。
+			}
+		}
 		const records = (await readExecutionRecords(input.workspaceId)).filter(
 			({ record }) => record.taskId === input.taskId,
 		);
@@ -278,127 +298,225 @@ export async function cancelSessionOwnedBackgroundAgentExecutions(input: {
 	await Promise.all(records.map(({ path, record }) => confirmRegisteredBackgroundAgentCancellation(path, record)));
 }
 
-export function createSessionOwnedBackgroundAgentExecutor(input: {
+interface SessionOwnedBackgroundAgentExecutionOwner {
 	workspaceId: string;
 	taskId: string;
 	runtimeSessionIncarnationId: string | null;
 	purpose: ExecutionRecord["purpose"];
 	executor: ForkedWorkBranchExecutor;
-}): ForkedWorkBranchExecutor {
+}
+
+function cancelForkResult(result: ForkedWorkBranchResult): ForkedWorkBranchResult {
+	const { structured: _cancelledBusinessPayload, ...nativeResult } = result;
 	return {
-		async start(request): Promise<ForkedWorkBranchResult> {
-			// 首次 await 前捕获取消代际；登记准备期间发生的 Stop 不能被漏掉。
-			const cancellationGenerationPath = taskExecutionCancellationGenerationPath(input.workspaceId, input.taskId);
-			const admissionCancellationGeneration = readTaskExecutionCancellationGeneration(
-				cancellationGenerationPath,
-				input.taskId,
-			);
-			const requestAcceptedAtEpochMs = Date.now();
-			const cancellationGenerationChanged = () => {
-				const observed = readTaskExecutionCancellationGeneration(cancellationGenerationPath, input.taskId);
-				// 只把新的持久 UUID 视为 Stop；辅助原件缺失不证明用户发起了取消。
-				return observed !== null && observed !== admissionCancellationGeneration;
+		...nativeResult,
+		stopReason: "cancelled",
+		cancellationConfirmation:
+			result.stopReason === "cancelled"
+				? (result.cancellationConfirmation ?? "unknown")
+				: result.cancellationConfirmation === "not_started"
+					? "not_started"
+					: "unknown",
+	};
+}
+
+// 归属与取消持续到整个业务操作返回，分身结束不能提前释放维护作业的保护。
+export async function runSessionOwnedBackgroundAgentOperation<OperationResult>(
+	input: SessionOwnedBackgroundAgentExecutionOwner & { parentNativeSessionId: string; signal?: AbortSignal },
+	operation: (execution: {
+		executor: ForkedWorkBranchExecutor;
+		signal: AbortSignal;
+		refreshCancellation: () => void;
+		acquireCommitPermission: () => Promise<void>;
+	}) => Promise<OperationResult>,
+	cancelOperationResult: (result: OperationResult) => OperationResult,
+): Promise<OperationResult> {
+	// 首次 await 前捕获取消代际；登记准备期间发生的 Stop 不能被漏掉。
+	const cancellationGenerationPath = taskExecutionCancellationGenerationPath(input.workspaceId, input.taskId);
+	const admissionCancellationGeneration = readTaskExecutionCancellationGeneration(
+		cancellationGenerationPath,
+		input.taskId,
+	);
+	const requestAcceptedAtEpochMs = Date.now();
+	const cancellationGenerationChanged = () => {
+		const observed = readTaskExecutionCancellationGeneration(cancellationGenerationPath, input.taskId);
+		// 只把新的持久 UUID 视为 Stop；辅助原件缺失不证明用户发起了取消。
+		return observed !== null && observed !== admissionCancellationGeneration;
+	};
+	await mkdir(executionDirectory(input.workspaceId), { recursive: true });
+	const path = join(executionDirectory(input.workspaceId), `${randomUUID()}.execution.json`);
+	const controllerSnapshot = await readNativeProcessOwnershipSnapshot().catch(() => null);
+	const record: ExecutionRecord = {
+		executionOwnershipToken: randomUUID(),
+		admissionCancellationGeneration,
+		controllerProcessPid: process.pid,
+		controllerProcessStartIdentity: controllerSnapshot?.get(process.pid)?.startIdentity ?? null,
+		systemBootIdentity: await readNativeSystemBootIdentity(),
+		launchState: "registered",
+		taskId: input.taskId,
+		runtimeSessionIncarnationId: input.runtimeSessionIncarnationId,
+		parentNativeSessionId: input.parentNativeSessionId,
+		purpose: input.purpose,
+		status: "running",
+		startedAtEpochMs: requestAcceptedAtEpochMs,
+		finishedAtEpochMs: null,
+		processObservation: null,
+		waitingReason: "awaiting_native_process_ownership_observation",
+		recoveryCondition: "native_process_identity_or_original_result_available",
+	};
+	let admissionCancellationResult: ForkedWorkBranchResult | null = null;
+	await lockedFileSystem.withLock({ type: "directory", path: executionDirectory(input.workspaceId) }, async () => {
+		if (cancellationGenerationChanged()) {
+			admissionCancellationResult = {
+				outputText: "登记准备期间已被显式 Stop 取消",
+				stopReason: "cancelled",
+				localProcessLaunchStatus: "not_started",
+				cancellationConfirmation: "not_started",
 			};
-			await mkdir(executionDirectory(input.workspaceId), { recursive: true });
-			const path = join(executionDirectory(input.workspaceId), `${randomUUID()}.execution.json`);
-			const controllerSnapshot = await readNativeProcessOwnershipSnapshot().catch(() => null);
-			const record: ExecutionRecord = {
-				executionOwnershipToken: randomUUID(),
-				admissionCancellationGeneration,
-				controllerProcessPid: process.pid,
-				controllerProcessStartIdentity: controllerSnapshot?.get(process.pid)?.startIdentity ?? null,
-				systemBootIdentity: await readNativeSystemBootIdentity(),
-				launchState: "registered",
-				taskId: input.taskId,
-				runtimeSessionIncarnationId: input.runtimeSessionIncarnationId,
-				parentNativeSessionId: request.parentSession.nativeSessionId,
-				purpose: input.purpose,
-				status: "running",
-				startedAtEpochMs: requestAcceptedAtEpochMs,
-				finishedAtEpochMs: null,
-				processObservation: null,
-				waitingReason: "awaiting_native_process_ownership_observation",
-				recoveryCondition: "native_process_identity_or_original_result_available",
-			};
-			let admissionCancellationResult: ForkedWorkBranchResult | null = null;
-			await lockedFileSystem.withLock(
+			record.launchState = "not_started";
+			record.status = "finished";
+			record.finishedAtEpochMs = Date.now();
+			record.waitingReason = "explicit_stop_before_execution_admission";
+			record.recoveryCondition = "new_request_after_explicit_cancellation";
+			record.result = admissionCancellationResult;
+			await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { lock: null });
+			return;
+		}
+		// 在途或退出未知的同归属作业不重复派发；已结束记录保留作审计。
+		for (const { record, path: previousPath } of await readExecutionRecords(input.workspaceId)) {
+			if (
+				record.taskId === input.taskId &&
+				record.purpose === input.purpose &&
+				record.parentNativeSessionId === input.parentNativeSessionId &&
+				(await executionHasLiveOrUnprovenProcesses(record, previousPath))
+			) {
+				throw new Error("同一来源仍有活跃或退出未知的后台 Agent；等待原生退出或结果证据后自动重验。");
+			}
+		}
+		await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { lock: null });
+	});
+	let observationsSaved = Promise.resolve();
+	const controller = new AbortController();
+	const forwardAbort = (): void => controller.abort();
+	input.signal?.addEventListener("abort", forwardAbort, { once: true });
+	if (input.signal?.aborted) controller.abort();
+	let cancellationReadPending = false;
+	const refreshCancellation = (): void => {
+		if (cancellationGenerationChanged()) controller.abort();
+	};
+	const activeCancellationRefreshers =
+		activeCancellationRefreshersByGenerationPath.get(cancellationGenerationPath) ?? new Set<() => void>();
+	activeCancellationRefreshers.add(refreshCancellation);
+	activeCancellationRefreshersByGenerationPath.set(cancellationGenerationPath, activeCancellationRefreshers);
+	const cancellationObserver = setInterval(() => {
+		try {
+			refreshCancellation();
+		} catch {
+			/* 辅助读取缺证不视为用户取消，独立 marker 查询仍继续。 */
+		}
+		if (cancellationReadPending) return;
+		cancellationReadPending = true;
+		void readFile(`${path}.cancellation-request.json`, "utf8")
+			.then(() => controller.abort())
+			.catch(() => {})
+			.finally(() => {
+				cancellationReadPending = false;
+			});
+	}, 200);
+	const saveObservation = (observation: ForkedWorkBranchProcessObservation): void => {
+		if (observation.executionOwnershipToken !== record.executionOwnershipToken)
+			throw new Error("进程观察的执行归属不匹配");
+		record.launchState = "started";
+		record.processObservation = observation;
+		record.waitingReason = observation.processStartIdentity
+			? "owned_background_agent_running"
+			: "native_process_identity_unavailable";
+		const serialized = JSON.stringify(record);
+		observationsSaved = observationsSaved
+			.catch(() => {})
+			.then(() => lockedFileSystem.writeTextFileAtomic(path, serialized));
+		void observationsSaved.catch(() => {});
+	};
+	const backgroundExecutionProgress: { forkResult: ForkedWorkBranchResult | null } = {
+		forkResult: admissionCancellationResult,
+	};
+	// 核心 store 不接收 signal；锁内最后一次重读后取得提交资格，直到真实写盘和最终发布完成才释放。
+	// 与 Stop 写代际共用 admission 锁，不在 fork 或等 store 锁期间持有。
+	const commitState: {
+		protection: Promise<void> | null;
+		permission: Promise<void> | null;
+		release?: () => void;
+	} = { protection: null, permission: null };
+	const acquireCommitPermission = async (): Promise<void> => {
+		if (!commitState.permission) {
+			let grantPermission!: () => void;
+			let rejectPermission!: (reason: unknown) => void;
+			commitState.permission = new Promise<void>((resolve, reject) => {
+				grantPermission = resolve;
+				rejectPermission = reject;
+			});
+			const released = new Promise<void>((resolve) => {
+				commitState.release = resolve;
+			});
+			commitState.protection = lockedFileSystem.withLock(
 				{ type: "directory", path: executionDirectory(input.workspaceId) },
 				async () => {
-					if (cancellationGenerationChanged()) {
-						admissionCancellationResult = {
-							outputText: "登记准备期间已被显式 Stop 取消",
-							stopReason: "cancelled",
-							localProcessLaunchStatus: "not_started",
-							cancellationConfirmation: "not_started",
-						};
-						record.launchState = "not_started";
-						record.status = "finished";
-						record.finishedAtEpochMs = Date.now();
-						record.waitingReason = "explicit_stop_before_execution_admission";
-						record.recoveryCondition = "new_request_after_explicit_cancellation";
-						record.result = admissionCancellationResult;
-						await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { lock: null });
-						return;
-					}
-					// 在途或退出未知的同归属作业不重复派发；已结束记录保留作审计。
-					for (const { record, path: previousPath } of await readExecutionRecords(input.workspaceId)) {
-						if (
-							record.taskId === input.taskId &&
-							record.purpose === input.purpose &&
-							record.parentNativeSessionId === request.parentSession.nativeSessionId &&
-							(await executionHasLiveOrUnprovenProcesses(record, previousPath))
-						) {
-							throw new Error("同一来源仍有活跃或退出未知的后台 Agent；等待原生退出或结果证据后自动重验。");
-						}
-					}
-					await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { lock: null });
+					refreshCancellation();
+					grantPermission();
+					await released;
 				},
 			);
-			if (admissionCancellationResult) return admissionCancellationResult;
-			let observationsSaved = Promise.resolve();
-			const controller = new AbortController();
-			const forwardAbort = (): void => controller.abort();
-			request.signal?.addEventListener("abort", forwardAbort, { once: true });
-			if (request.signal?.aborted) controller.abort();
-			let cancellationReadPending = false;
-			const cancellationObserver = setInterval(() => {
-				try {
-					if (cancellationGenerationChanged()) controller.abort();
-				} catch {
-					/* 辅助读取缺证不视为用户取消，独立 marker 查询仍继续。 */
+			void commitState.protection.catch(rejectPermission);
+		}
+		await commitState.permission;
+		refreshCancellation();
+	};
+	try {
+		refreshCancellation();
+		if (admissionCancellationResult) controller.abort();
+		const executor: ForkedWorkBranchExecutor = {
+			start: async (request) => {
+				refreshCancellation();
+				if (controller.signal.aborted) {
+					backgroundExecutionProgress.forkResult = {
+						outputText: "派发前已被显式取消",
+						stopReason: "cancelled",
+						localProcessLaunchStatus: "not_started",
+						cancellationConfirmation: "not_started",
+					};
+					record.launchState = "not_started";
+					return backgroundExecutionProgress.forkResult;
 				}
-				if (cancellationReadPending) return;
-				cancellationReadPending = true;
-				void readFile(`${path}.cancellation-request.json`, "utf8")
-					.then(() => controller.abort())
-					.catch(() => {})
-					.finally(() => {
-						cancellationReadPending = false;
+				const forwardRequestAbort = (): void => controller.abort();
+				request.signal?.addEventListener("abort", forwardRequestAbort, { once: true });
+				if (request.signal?.aborted) controller.abort();
+				try {
+					let result = await input.executor.start({
+						...request,
+						signal: controller.signal,
+						onProcessObservation: (observation) => {
+							saveObservation(observation);
+							request.onProcessObservation?.(observation);
+						},
+						executionOwnershipToken: record.executionOwnershipToken,
+						beforeProcessSpawn: async () => {
+							await request.beforeProcessSpawn?.();
+							if (cancellationGenerationChanged()) controller.abort();
+							try {
+								await readFile(`${path}.cancellation-request.json`, "utf8");
+								controller.abort();
+							} catch (error) {
+								if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+							}
+							if (controller.signal.aborted) return;
+							await observationsSaved;
+							record.launchState = "dispatch_intent";
+							await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { durable: true });
+							if (cancellationGenerationChanged()) controller.abort();
+						},
 					});
-			}, 200);
-			const saveObservation = (observation: ForkedWorkBranchProcessObservation): void => {
-				if (observation.executionOwnershipToken !== record.executionOwnershipToken)
-					throw new Error("进程观察的执行归属不匹配");
-				record.launchState = "started";
-				record.processObservation = observation;
-				record.waitingReason = observation.processStartIdentity
-					? "owned_background_agent_running"
-					: "native_process_identity_unavailable";
-				const serialized = JSON.stringify(record);
-				observationsSaved = observationsSaved
-					.catch(() => {})
-					.then(() => lockedFileSystem.writeTextFileAtomic(path, serialized));
-				void observationsSaved.catch(() => {});
-				request.onProcessObservation?.(observation);
-			};
-			try {
-				let result = await input.executor.start({
-					...request,
-					signal: controller.signal,
-					onProcessObservation: saveObservation,
-					executionOwnershipToken: record.executionOwnershipToken,
-					beforeProcessSpawn: async () => {
-						await request.beforeProcessSpawn?.();
+					await observationsSaved.catch(() => {});
+					await lockedFileSystem.withLock({ path: `${path}.execution-control`, type: "file" }, async () => {
 						if (cancellationGenerationChanged()) controller.abort();
 						try {
 							await readFile(`${path}.cancellation-request.json`, "utf8");
@@ -406,54 +524,91 @@ export function createSessionOwnedBackgroundAgentExecutor(input: {
 						} catch (error) {
 							if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 						}
-						if (controller.signal.aborted) return;
-						await observationsSaved;
-						record.launchState = "dispatch_intent";
-						await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record), { durable: true });
-						if (cancellationGenerationChanged()) controller.abort();
-					},
-				});
-				await observationsSaved.catch(() => {});
-				await lockedFileSystem.withLock({ path: `${path}.execution-control`, type: "file" }, async () => {
-					if (cancellationGenerationChanged()) controller.abort();
-					try {
-						await readFile(`${path}.cancellation-request.json`, "utf8");
-						controller.abort();
-					} catch (error) {
-						if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-					}
-					if (controller.signal.aborted && result.stopReason !== "cancelled") {
-						const { structured: _cancelledBusinessPayload, ...nativeResult } = result;
-						result = { ...nativeResult, stopReason: "cancelled", cancellationConfirmation: "unknown" };
-					}
-					if (
-						result.localProcessLaunchStatus === "not_started" ||
-						result.cancellationConfirmation === "not_started"
-					)
-						record.launchState = "not_started";
-					record.status = result.cancellationConfirmation === "unknown" ? "exit_unknown" : "finished";
-					record.waitingReason = record.status === "finished" ? null : "cancellation_confirmation_unavailable";
-					record.result = result;
-					record.finishedAtEpochMs = Date.now();
-					await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record));
-				});
-				return result;
-			} catch (error) {
-				await observationsSaved.catch(() => {});
-				if (record.launchState === "registered") {
-					record.launchState = "not_started";
-					record.status = "finished";
-				} else record.status = "exit_unknown";
-				record.waitingReason =
-					record.launchState === "not_started"
-						? "configuration_or_spawn_preflight_recovery_required"
-						: "original_result_or_exit_evidence_required";
+						if (controller.signal.aborted) result = cancelForkResult(result);
+						if (
+							result.localProcessLaunchStatus === "not_started" ||
+							result.cancellationConfirmation === "not_started"
+						)
+							record.launchState = "not_started";
+						record.result = result;
+						record.waitingReason = "background_operation_completion_pending";
+						await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record));
+					});
+					backgroundExecutionProgress.forkResult = result;
+					return result;
+				} finally {
+					request.signal?.removeEventListener("abort", forwardRequestAbort);
+				}
+			},
+		};
+		let operationResult: OperationResult = await operation({
+			executor,
+			signal: controller.signal,
+			refreshCancellation,
+			acquireCommitPermission,
+		});
+		await observationsSaved.catch(() => {});
+		const publishResult = async (): Promise<OperationResult> => {
+			for (;;) {
+				refreshCancellation();
+				const cancelled = controller.signal.aborted;
+				if (cancelled) {
+					if (backgroundExecutionProgress.forkResult)
+						backgroundExecutionProgress.forkResult = cancelForkResult(backgroundExecutionProgress.forkResult);
+					operationResult = cancelOperationResult(operationResult);
+				}
+				record.status =
+					backgroundExecutionProgress.forkResult?.cancellationConfirmation === "unknown"
+						? "exit_unknown"
+						: "finished";
+				record.waitingReason = record.status === "finished" ? null : "cancellation_confirmation_unavailable";
+				record.result = backgroundExecutionProgress.forkResult;
+				record.finishedAtEpochMs = Date.now();
 				await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record));
-				throw error;
-			} finally {
-				clearInterval(cancellationObserver);
-				request.signal?.removeEventListener("abort", forwardAbort);
+				// 调用方 AbortSignal 不经持久锁；若它在异步写入中取消，重写并撤回业务载荷。
+				refreshCancellation();
+				if (!cancelled && controller.signal.aborted) continue;
+				return operationResult;
 			}
-		},
+		};
+		return await (commitState.protection
+			? publishResult()
+			: lockedFileSystem.withLock(
+					{ type: "directory", path: executionDirectory(input.workspaceId) },
+					publishResult,
+				));
+	} catch (error) {
+		await observationsSaved.catch(() => {});
+		if (record.launchState === "registered") {
+			record.launchState = "not_started";
+			record.status = "finished";
+		} else record.status = "exit_unknown";
+		record.waitingReason =
+			record.launchState === "not_started"
+				? "configuration_or_spawn_preflight_recovery_required"
+				: "original_result_or_exit_evidence_required";
+		await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(record));
+		throw error;
+	} finally {
+		clearInterval(cancellationObserver);
+		commitState.release?.();
+		await commitState.protection?.catch(() => {});
+		input.signal?.removeEventListener("abort", forwardAbort);
+		activeCancellationRefreshers.delete(refreshCancellation);
+		if (activeCancellationRefreshers.size === 0)
+			activeCancellationRefreshersByGenerationPath.delete(cancellationGenerationPath);
+	}
+}
+
+export function createSessionOwnedBackgroundAgentExecutor(
+	input: SessionOwnedBackgroundAgentExecutionOwner,
+): ForkedWorkBranchExecutor {
+	return {
+		start: (request) =>
+			runSessionOwnedBackgroundAgentOperation(
+				{ ...input, parentNativeSessionId: request.parentSession.nativeSessionId, signal: request.signal },
+				async ({ executor }) => await executor.start(request),
+				cancelForkResult,
+			),
 	};
 }

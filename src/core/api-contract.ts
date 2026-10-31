@@ -2690,8 +2690,8 @@ export type RuntimeStateStreamExploratoryFindingsUpdatedMessage = z.infer<
 // 建模与落盘，服务端把它合成 projection 整值后整份下发。下面这批 schema 是**边界镜像**，不是第二
 // 份定义——它们存在的唯一理由是 web-ui 不能 import 核心包（`/core` 静态导出依赖 node `fs` 的 store，
 // 打进浏览器 bundle 会炸），因此契约层必须自带一份可被 `@runtime-contract` 解析的形状。
-// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-contract-parity.ts
-// 做编译期双向对账：核心包换 SHA 后形状若漂移，根 typecheck 立刻红。
+// 与核心包类型的一致性由 src/exploration-thread-graph/exploration-thread-graph-consumer-contract-compatibility.ts
+// 做编译期消费方向检查：核心输出缺字段、类型不兼容或枚举扩大时，根 typecheck 立刻红。
 //
 // lane 布局**在服务端算好**随行下发（核心包的 projection 每行自带 laneLayout），前端只负责画。
 export const runtimeExplorationThreadGraphTurnRefSchema = z.object({
