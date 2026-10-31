@@ -14,6 +14,7 @@
 ## 部署后验证与工作流边界
 
 - 任务实现收尾 / 宣告完成 / 进入 review 前，必须调用 `cline-kanban-post-deploy-verification-authoring`，只注册真实实例才能验证的断言；行为变化时幂等 reconcile。
+- 本地部署的持久阶段与复盘由独立 producer 配合通用 `task command-execution` 承接，不另建调度器；授权、候选绑定、幂等登记和独立发现合同见 `docs/local-deployment-execution-and-retrospective.md`。
 - Kanban 仅提供通用任务、会话、等待与重启恢复；不编排 RVF 分界、自动 rewind、Land 再投递或阶段资格。人工 rewind、checkpoint、原生 fork 与前缀核验继续保留。
 - 旧 RVF 用 `kanban task rvf-history` 只读查询；历史完成、失败和投递事实独立展示，缺证及当前候选覆盖为 unknown。见 `docs/task-rvf-history-query.md`。
 - 审阅、普通 Git 提交与 base 同步按本任务真实授权和各自约定执行。开工、计划与实现阶段不自动吸收 local main；Stop、禁止提交、同步、推送或部署的明确限制继续有效。

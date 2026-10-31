@@ -20,6 +20,7 @@ import {
 	getThisRuntimeProcessInstanceId,
 	readRuntimeProcessInstanceLiveness,
 } from "../state/runtime-process-instance-heartbeat-registry";
+import { readOnlyTaskCommandExecutionRecoveryEvidenceObservation } from "./read-only-task-command-execution-recovery-evidence-observation";
 import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
@@ -101,6 +102,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	let stopped = false;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	const activeSweeps = new Set<string>();
+	const activeReadOnlyRecoveryEvidenceObservationControllers = new Map<string, AbortController>();
 	const executionIdsWithInitialDispatchInProgress = new Set<string>();
 	const originatingSessionKeysWithExecutionSweepInProgress = new Set<string>();
 	const update = async (
@@ -392,6 +394,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			return intent;
 		});
 		if (!intent) return record;
+		activeReadOnlyRecoveryEvidenceObservationControllers.get(`${workspaceId}/${record.executionId}`)?.abort();
 		record = await update(workspaceId, record.executionId, (value) => ({
 			...value,
 			revokedAtEpochMs: value.revokedAtEpochMs ?? intent.revokedAtEpochMs,
@@ -532,6 +535,16 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					await launch(record);
 					return;
 				}
+				const observationCommand = record.specification.readOnlyRecoveryEvidenceObservationCommand;
+				if (
+					observationCommand &&
+					record.lastRecoveryEvidenceSha256 !== null &&
+					Math.max(
+						record.nextRecoveryAtEpochMs ?? 0,
+						typeof recovery?.retry_not_before_epoch_ms === "number" ? recovery.retry_not_before_epoch_ms : 0,
+					) > Date.now()
+				)
+					return;
 				const evidence = [
 					JSON.stringify({
 						disposition,
@@ -554,6 +567,25 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 						}
 					}
 				}
+				if (observationCommand) {
+					await assertOwnership(record);
+					if (stopped) return;
+					const controller = new AbortController();
+					activeReadOnlyRecoveryEvidenceObservationControllers.set(sweepKey, controller);
+					let semanticObservation: string;
+					try {
+						semanticObservation = await readOnlyTaskCommandExecutionRecoveryEvidenceObservation({
+							command: observationCommand,
+							workingDirectory: record.specification.workingDirectory,
+							signal: controller.signal,
+						});
+					} finally {
+						activeReadOnlyRecoveryEvidenceObservationControllers.delete(sweepKey);
+					}
+					await assertOwnership(record);
+					if (stopped) return;
+					evidence.push(semanticObservation);
+				}
 				const fingerprint = sha256(JSON.stringify(evidence));
 				const changed = record.lastRecoveryEvidenceSha256 !== fingerprint;
 				const notBefore =
@@ -573,7 +605,14 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					typeof recovery?.maximum_unchanged_retries === "number"
 						? Math.max(0, Math.min(3, Math.floor(recovery.maximum_unchanged_retries)))
 						: 1;
-				if (!changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries) return;
+				if (!changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries) {
+					if (observationCommand)
+						await update(workspaceId, executionId, (value) => ({
+							...value,
+							nextRecoveryAtEpochMs: Date.now() + 30_000,
+						}));
+					return;
+				}
 				await launch(record, worker === "unknown" ? "producer_single_flight" : undefined, fingerprint);
 				return;
 			}
@@ -837,6 +876,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		stop: () => {
 			stopped = true;
 			if (timer) clearTimeout(timer);
+			for (const controller of activeReadOnlyRecoveryEvidenceObservationControllers.values()) controller.abort();
 		},
 	};
 }

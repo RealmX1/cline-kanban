@@ -12,6 +12,7 @@ const promotionScriptPath = fileURLToPath(
 interface PromotionScriptResult {
 	promotedRelativeFilePathsInPromotionOrder: string[];
 	removedStaleRelativeFilePaths: string[];
+	stagingDirectoryCleanup: { status: "succeeded" | "pending"; error: string | null };
 }
 
 function writeFileCreatingParentDirectories(filePath: string, content: string): void {
@@ -47,6 +48,21 @@ function runPromotionScript(stagingDirectoryPath: string, distributionDirectoryP
 }
 
 describe("promote-staged-kanban-build-output-into-distribution-directory", () => {
+	it("拒绝软链接暂存根目录，候选文件和空目录都完整保留", () => {
+		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
+		const candidateDirectoryPath = join(dirname(distributionDirectoryPath), "immutable-candidate-distribution");
+		const stagingSymbolicLinkPath = join(dirname(stagingDirectoryPath), "symbolic-staging-root");
+		writeFileCreatingParentDirectories(join(candidateDirectoryPath, "cli.js"), "绑定候选入口");
+		writeFileCreatingParentDirectories(join(candidateDirectoryPath, "web-ui/index.html"), "绑定候选页面");
+		mkdirSync(join(candidateDirectoryPath, "empty-candidate-directory"));
+		symlinkSync(candidateDirectoryPath, stagingSymbolicLinkPath);
+		expect(() => runPromotionScript(stagingSymbolicLinkPath, distributionDirectoryPath)).toThrow(/拒绝发布软链接/);
+		expect(readFileSync(join(candidateDirectoryPath, "cli.js"), "utf8")).toBe("绑定候选入口");
+		expect(readFileSync(join(candidateDirectoryPath, "web-ui/index.html"), "utf8")).toBe("绑定候选页面");
+		expect(existsSync(join(candidateDirectoryPath, "empty-candidate-directory"))).toBe(true);
+		expect(existsSync(join(distributionDirectoryPath, "cli.js"))).toBe(false);
+	});
+
 	it("promotes content-hashed assets before web-ui/index.html and promotes cli.js last", () => {
 		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
 		for (const relativeFilePath of [
@@ -65,6 +81,8 @@ describe("promote-staged-kanban-build-output-into-distribution-directory", () =>
 		const result = runPromotionScript(stagingDirectoryPath, distributionDirectoryPath);
 
 		const promotionOrder = result.promotedRelativeFilePathsInPromotionOrder;
+		expect(result.stagingDirectoryCleanup.status).toBe("succeeded");
+		expect(existsSync(stagingDirectoryPath)).toBe(false);
 		expect(promotionOrder.at(-1)).toBe("cli.js");
 		expect(promotionOrder.indexOf("web-ui/index.html")).toBeGreaterThan(
 			promotionOrder.indexOf("web-ui/assets/index-NEW.js"),
