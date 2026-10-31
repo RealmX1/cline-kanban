@@ -70,8 +70,35 @@ post-mortem 2026-09-24 的约束是「身份只认 agent 报告，绝不从路�
 
 ## 7. 复现与重跑
 
+本节保留 2026-10-01 的隔离方法。2026-10-22 版本可用文件凭据模式完整隔离 HOME，见下一节。
+
 - **隔离方式**：只覆写 `CURSOR_CONFIG_DIR` / `CURSOR_DATA_DIR`。HOME 覆写会让 macOS keychain 认证失效（`Not logged in`）。
 - **剥离 env**：剥掉 `KANBAN_*` / `CLINE_KANBAN_*` / `ORCA_*`，避免 hook 把事件报回宿主 task 或 Orca。用户级 hooks 路径不随 `CURSOR_CONFIG_DIR` 走。
 - **cwd 位置**：放在 `/private/tmp/...` 下。
 - **运行**：用 node-pty 驱动，脚本见证据目录的 `experiment-scripts/`。
 - **隔离 kanban 实例跑真 cursor-agent**：kanban 的状态目录绑在 `homedir()` 上，必须覆写 HOME。此时要在隔离 HOME 里软链 `Library/Keychains` → `~/Library/Keychains`，cursor-agent 才能认证（只读用法，收尾先 `unlink` 再删目录）。端到端记录见证据目录 README 的「隔离 kanban 实例端到端」一节。
+
+## 8. 2026-10-31：原生 fork 与 Kanban 接入边界
+
+CLI `2026.10.22-27dcf5f` 已支持 `/fork`。固定安装包 `8008.index.js` 的
+`src/state/fork-chat-session.ts` 会复制全部历史 blob，保留 `latestRootBlobId`、模式和已存模型等元数据，
+分配独立 `agentId`；本轮 12 个真实分身均通过完整 blob 校验和与历史根指针对比，且未改写父历史。
+Grok 缓存实测与脚本见 [缓存报告第十节](agent-session-fork-prompt-cache-measurements.md#十2026-10-31cursor-grok-47-原生分身与缓存复测)。
+
+这不等于 Kanban 已接通 Cursor 分身：协作会话的完整复刻、主会话交接仍只放行 Claude / Codex / OMP，
+Cursor 启动器目前只实现新建、精确 ID 续跑与原生身份管理。本轮没有放开生产契约或改写启动行为。
+
+两个接入细节须保留：
+
+- 原生 `/fork` 的可见回执只给出旧父 ID。准备进程在 fork 后退出时，`sessionEnd` 仍报告父 ID，
+  子 ID 直到后续实际运行分身才在 hook 中上报。因此不能把准备进程的退出 hook 当成子身份接受事实。
+  本轮诊断只读脚本私有 SQLite 的副本，从原生 `meta.agentId` 取子 ID；这不改变运行时禁止打开真实 Cursor store、
+  不从目录名猜身份的规则。正式接入仍需可靠的模型调用前子身份回执，再接权限、角色指导与冷恢复。
+- headless 的显式 `--model` 不保证写入 store 的 `lastUsedModel`。本轮同时固定 CLI 参数并核对原生初始化模型，
+  不能仅靠被 fork 的 store 推断当前实际模型。PTY slash 文本与 Enter 要分两次输入，等 React 完成输入状态更新；
+  同批写入曾停在候选菜单，这些调用未创建子 store、也未提交模型请求。
+
+当前文件凭据隔离方式：只读必要的 macOS Keychain 凭据，复制进私有 HOME 的 `.cursor/auth.json`（0600），
+设置 `AGENT_CLI_CREDENTIAL_STORE=file`，同时钉住私有 `CURSOR_CONFIG_DIR` / `CURSOR_DATA_DIR`。
+这样测试的 token 刷新、hooks、会话和缓存文件均落在私有目录，无需共享真实 Keychain 目录。
+复现应使用与现有 `better-sqlite3` / `node-pty` 绑定匹配的 Node；本机本轮使用 Node 24.12.0，未重建共享依赖。

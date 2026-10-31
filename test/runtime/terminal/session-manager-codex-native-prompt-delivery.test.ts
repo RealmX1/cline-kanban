@@ -109,6 +109,53 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 }
 
 describe("session manager 的 Codex 原生投递", () => {
+	it("原生投递准备期间开始暂存时先暂停，暂存结束后沿用原消息继续提交", async () => {
+		let enterNativeSubmit!: () => void;
+		const nativePreparation = new Promise<void>((resolve) => {
+			enterNativeSubmit = resolve;
+		});
+		let finishStash!: () => void;
+		const stashCompletion = new Promise<void>((resolve) => {
+			finishStash = resolve;
+		});
+		const nativeWrite = vi.fn();
+		const manager = new TerminalSessionManager({
+			deliverCodexNativePromptWithoutChangingComposer: async (input) => {
+				await nativePreparation;
+				if (!(await input.beforeSubmit())) return { status: "cancelled" };
+				nativeWrite();
+				return {
+					status: "confirmed",
+					evidence: {
+						clientUserMessageId: input.clientUserMessageId,
+						nativeSessionId: "thread-1",
+						nativeTurnId: "turn-1",
+						nativeUserMessageId: "message-1",
+					},
+				};
+			},
+		});
+		const { write } = installSession(manager, "");
+		const outcome = vi.fn();
+		manager.submitTaskChatInputWhenReady("conversation-1", "原消息", { onDeliveryOutcome: outcome });
+		await vi.advanceTimersByTimeAsync(1_100);
+		const stash = manager.runTaskTerminalInputBoxStashAttemptExclusivelyPerTask(
+			"conversation-1",
+			() => stashCompletion,
+			() => undefined,
+		);
+		enterNativeSubmit();
+		await vi.advanceTimersByTimeAsync(200);
+		expect(nativeWrite).not.toHaveBeenCalled();
+		expect(outcome).not.toHaveBeenCalled();
+		finishStash();
+		await stash;
+		await vi.advanceTimersByTimeAsync(100);
+		expect(nativeWrite).toHaveBeenCalledTimes(1);
+		expect(outcome).toHaveBeenCalledWith(expect.objectContaining({ status: "delivered_and_submit_confirmed" }));
+		expect(write).not.toHaveBeenCalled();
+		manager.dispose();
+	});
 	it("hard stop 在冻结 host 或进入 detach 前就封住原生投递和新投递", async () => {
 		let captured: CodexNativePromptDeliveryInput | undefined;
 		let release!: () => void;

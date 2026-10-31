@@ -11,6 +11,7 @@ import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type CodexConfigurationBatchActionRequest,
 	type CodexConfigurationBatchActionResult,
+	type CodexConfigurationChangeDetailsRequest,
 	type CodexConfigurationProfileMutationRequest,
 	type CodexConfigurationResolveConflictRequest,
 	type CodexConfigurationResolveTargetConflictRequest,
@@ -24,6 +25,11 @@ import {
 	listRuntimeCodexConfigurationTraceTargets,
 	waitForCodexConfigurationRequestWriterOwnershipVerifications,
 } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
+import {
+	type CodexConfigurationTaskSourceContext,
+	currentCodexConfigurationSharedValueDigest,
+	describeCodexConfigurationChange,
+} from "./codex-configuration-change-presentation";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -70,6 +76,7 @@ import { readCodexNativeTurnPermissionEvidence } from "./codex-native-turn-permi
 
 type SessionTarget = { workspaceId: string; summary: RuntimeTaskSessionSummary };
 interface CodexConfigurationSyncServiceDependencies {
+	readTaskSourceContext?: () => Promise<CodexConfigurationTaskSourceContext>;
 	listTaskProfileBindings?: () => Promise<{
 		bindings: Array<{ workspaceId: string; conversationSessionId: string; profileId: string }>;
 		unavailableWorkspaceCount: number;
@@ -105,6 +112,7 @@ function publicState(
 	store: CodexConfigurationSyncStore,
 	sessions: SessionTarget[],
 	diagnosticCoverage?: CodexConfigurationSyncState["diagnosticCoverage"],
+	taskSourceContext?: CodexConfigurationTaskSourceContext,
 ): CodexConfigurationSyncState {
 	return codexConfigurationSyncStateSchema.parse({
 		revision: store.revision,
@@ -151,6 +159,7 @@ function publicState(
 		diagnosticCoverage,
 		sourceObservations: [...store.sourceObservations].reverse().map((observation) => ({
 			...observation,
+			changeIds: observation.rawChangeIds,
 			detectedLocations: observation.detectedWriterIds.map((writerId) => ({
 				workspaceId: store.writers[writerId]?.binding.workspaceId ?? "",
 				conversationSessionId: store.writers[writerId]?.binding.conversationSessionId ?? "用户全局配置",
@@ -158,8 +167,20 @@ function publicState(
 		})),
 		changes: [...store.changes].reverse().map((change) => {
 			const writer = store.writers[change.sourceWriterId];
-			const { fileName, keyPath } = configurationFieldAddress(change.fieldKey);
+			const presentation = describeCodexConfigurationChange(store, change, false, undefined, taskSourceContext);
 			return {
+				fieldKey: change.fieldKey,
+				sourceEvidence: presentation.sourceEvidence,
+				comparison: presentation,
+				targetComparisons: Object.fromEntries(
+					change.targets
+						.filter((target) => target.status === "conflict")
+						.map((target) => [
+							target.writerId,
+							describeCodexConfigurationChange(store, change, false, target.writerId, taskSourceContext),
+						]),
+				),
+				hookExplanation: presentation.hookExplanation,
 				codexConfigurationProfileId: change.codexConfigurationProfileId,
 				profileName: store.profiles[change.codexConfigurationProfileId ?? ""]?.name,
 				feedbackExpiresAtMs: change.feedbackExpiresAtMs,
@@ -174,9 +195,7 @@ function publicState(
 						? (store.profiles[change.codexConfigurationProfileId]?.name ?? "profile 设置")
 						: "用户全局配置"),
 				sourceWorkspaceId: writer?.binding.workspaceId ?? "",
-				fieldLabel: keyPath.includes("state")
-					? `${fileName} · hook ${keyPath.at(-1)?.split(":").slice(-3).join(":")}`
-					: `${fileName} · ${keyPath.join(".")}`,
+				fieldLabel: presentation.fieldLabel,
 				previousValueSummary: summarizeConfigurationField(change.fieldKey, change.previous),
 				valueSummary: summarizeConfigurationField(change.fieldKey, change.value),
 				observedAt: change.observedAt,
@@ -210,20 +229,56 @@ function publicState(
 }
 
 export function createCodexConfigurationSyncService(deps: CodexConfigurationSyncServiceDependencies) {
+	let taskSourceContext: CodexConfigurationTaskSourceContext | undefined;
+	let taskSourceContextReadInFlight: Promise<void> | null = null;
+	const refreshTaskSourceContext = async () => {
+		if (!deps.readTaskSourceContext) return;
+		taskSourceContextReadInFlight ??= deps
+			.readTaskSourceContext()
+			.then(
+				(context) => {
+					taskSourceContext = context;
+				},
+				() => {
+					taskSourceContext = undefined;
+				},
+			)
+			.finally(() => {
+				taskSourceContextReadInFlight = null;
+			});
+		let timeout: NodeJS.Timeout | undefined;
+		try {
+			await Promise.race([
+				taskSourceContextReadInFlight,
+				new Promise<void>((resolve) => {
+					timeout = setTimeout(() => {
+						// 历史归属快照仍有效；当前链接未核验时隐藏，不拖住其他配置记录。
+						if (taskSourceContext) taskSourceContext = { ...taskSourceContext, taskLinks: {} };
+						resolve();
+					}, 1_000);
+				}),
+			]);
+		} finally {
+			clearTimeout(timeout);
+		}
+	};
 	let stopped = false;
 	let timer: NodeJS.Timeout | undefined;
 	let debounce: NodeJS.Timeout | undefined;
 	let scanning: Promise<void> | null = null;
 	let recovering: Promise<void> | null = null;
 	let lastPublishedRevision = -1;
+	let lastPublishedTaskSourceContextDigest: string | undefined;
 	const watchers = new Map<string, FSWatcher>();
 	const traceMonitor = createCodexConfigurationTargetObservationMonitor({
 		listTargetPaths: listRuntimeCodexConfigurationTraceTargets,
 	});
 	const publish = async () => {
 		const revision = (await readCodexConfigurationSyncStore()).revision;
-		if (lastPublishedRevision !== revision) {
+		const taskSourceContextDigest = configurationDigest(taskSourceContext ?? null);
+		if (lastPublishedRevision !== revision || lastPublishedTaskSourceContextDigest !== taskSourceContextDigest) {
 			lastPublishedRevision = revision;
+			lastPublishedTaskSourceContextDigest = taskSourceContextDigest;
 			deps.onUpdated(revision);
 		}
 	};
@@ -315,6 +370,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		return reconcilingSessionProfileBindings;
 	};
 	const observe = async () => {
+		await refreshTaskSourceContext();
 		const hasUnavailableProfileBinding = await reconcileSessionProfileBindings();
 		const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
 		let taskProfileObservationProblem = hasUnavailableProfileBinding;
@@ -354,6 +410,27 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const observationPersistenceOptions = { skipUnchangedObservationPersistence: true };
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			expireCodexConfigurationProfileFeedbackSuggestions(store);
+			for (const [writerId, task] of Object.entries(taskSourceContext?.writerTasks ?? {})) {
+				const writer = store.writers[writerId];
+				if (
+					writer &&
+					!writer.sourceTaskSnapshot &&
+					writer.binding.runtimeSessionIncarnationId === task.runtimeSessionIncarnationId &&
+					writer.binding.workspaceId === task.workspaceId &&
+					writer.binding.conversationSessionId === task.conversationSessionId &&
+					task.taskIncarnationCreatedAtEpochMs <= writer.binding.createdAt
+				) {
+					writer.sourceTaskSnapshot = task;
+					store.revision++;
+				}
+			}
+			for (const change of store.changes) {
+				const task = store.writers[change.sourceWriterId]?.sourceTaskSnapshot;
+				if (!change.sourceTaskSnapshot && task) {
+					change.sourceTaskSnapshot = task;
+					store.revision++;
+				}
+			}
 			let problem: string | null = taskProfileObservationProblem
 				? "部分 Task profile 绑定暂不可读，保留现有归属，恢复后自动补证。"
 				: null;
@@ -1444,7 +1521,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await publish();
 		return {
 			results,
-			state: publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage()),
+			state: publicState(
+				await readCodexConfigurationSyncStore(),
+				deps.listSessions(),
+				traceMonitor.getCoverage(),
+				taskSourceContext,
+			),
 		};
 	};
 	const mutateChange = async (
@@ -1476,10 +1558,15 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
 					throw new Error("此记录不是待审批提案。");
 				if (change.mergeStatus !== "conflict") throw new Error("此配置变更已不处于冲突状态。");
-				if (!sameConfigurationField(source.fields[change.fieldKey], change.sharedValueAtConflict))
-					throw new Error("共享值已有更新，不能用旧冲突覆盖新决定。");
+				const shared = codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey];
+				if (
+					input.expectedSharedValueDigest !== undefined
+						? currentCodexConfigurationSharedValueDigest(store, change) !== input.expectedSharedValueDigest
+						: !sameConfigurationField(shared, change.sharedValueAtConflict)
+				)
+					throw new Error("共享值已有更新，请刷新比较后重新选择；原选择不会自动重放。");
 				if (input.resolution === "use_session_value") {
-					await approveStoredCodexConfigurationProposal(store, change, true);
+					await approveStoredCodexConfigurationProposal(store, change, true, input.expectedSharedValueDigest);
 				} else {
 					change.mergeStatus = "kept_shared_value";
 					change.approvalStatus = "rejected";
@@ -1522,7 +1609,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
+		return publicState(
+			await readCodexConfigurationSyncStore(),
+			deps.listSessions(),
+			traceMonitor.getCoverage(),
+			taskSourceContext,
+		);
 	};
 	const resolveTargetConflict = async (input: CodexConfigurationResolveTargetConflictRequest) => {
 		await observe();
@@ -1602,7 +1694,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
+		return publicState(
+			await readCodexConfigurationSyncStore(),
+			deps.listSessions(),
+			traceMonitor.getCoverage(),
+			taskSourceContext,
+		);
 	};
 	const mutateProfile = async (input: CodexConfigurationProfileMutationRequest) => {
 		await observe();
@@ -1650,7 +1747,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							if (codexConfigurationExceptionGroup(key) === "permissions" && !(key in fields))
 								fields[key] = value;
 					if (input.name !== undefined) profile.name = input.name;
-					updateCodexConfigurationProfileFields(store, profile.profileId, fields);
+					updateCodexConfigurationProfileFields(store, profile.profileId, fields, {
+						modificationInitiator: {
+							status: "confirmed",
+							description: "看板 profile 编辑操作（未记录具体操作者身份）",
+						},
+					});
 					profile.version = ++store.revision;
 				} else {
 					const session = deps
@@ -1686,12 +1788,32 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await reconcileSessionProfileBindings();
 		await recover();
 		await publish();
-		return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
+		return publicState(
+			await readCodexConfigurationSyncStore(),
+			deps.listSessions(),
+			traceMonitor.getCoverage(),
+			taskSourceContext,
+		);
 	};
 	return {
 		mutateProfile,
+		getChangeDetails: async (input: CodexConfigurationChangeDetailsRequest) => {
+			await refreshTaskSourceContext();
+			const store = await readCodexConfigurationSyncStore();
+			const change = store.changes.find((entry) => entry.changeId === input.changeId);
+			if (!change || change.version !== input.expectedVersion) throw new Error("配置记录版本已变化，请刷新比较。");
+			if (input.targetWriterId && !change.targets.some((target) => target.writerId === input.targetWriterId))
+				throw new Error("目标不属于此配置记录。");
+			return describeCodexConfigurationChange(store, change, true, input.targetWriterId, taskSourceContext);
+		},
 		getState: async () => {
-			return publicState(await readCodexConfigurationSyncStore(), deps.listSessions(), traceMonitor.getCoverage());
+			await refreshTaskSourceContext();
+			return publicState(
+				await readCodexConfigurationSyncStore(),
+				deps.listSessions(),
+				traceMonitor.getCoverage(),
+				taskSourceContext,
+			);
 		},
 		batchAction,
 		scan,

@@ -1891,7 +1891,7 @@ const cursorAdapter: AgentSessionAdapter = {
 		);
 		const resumesPriorAgentConversation = Boolean(continuesWithoutNewPrompt || taskAgentSessionInitialization);
 		// chat 选择优先级：**重启寻址（按记录的 id）→ 无 id 的续跑（`--continue`）→ 建卡播种 → kanban 刚分配的新 id**。
-		// cursor 不支持 fork（契约层已 superRefine 拦下），所以按 id 只有 `--resume` 一种落法；新 id 开局也用
+		// Kanban 尚未接入 Cursor 原生 /fork（契约层已拦下），当前启动器按 id 只走 `--resume`；新 id 开局也用
 		// `--resume <新 id> <prompt>`：实测 cursor 会以该 id 建 chat 并自动提交 prompt。
 		const chatIdSelectedForLaunch =
 			observedNativeSessionResumeAddressing?.sourceSessionId ??

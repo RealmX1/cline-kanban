@@ -147,6 +147,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			change: CodexConfigurationChange,
 			action: "synchronize" | "acknowledge" | "use_session_value" | "keep_shared_value",
 			synchronizeExistingSessions = false,
+			expectedSharedValueDigest = change.comparison?.expectedSharedValueDigest,
 		) => {
 			if (scope.pending) return;
 			scope.pending = true;
@@ -163,7 +164,11 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 						? await synchronizeCodexConfigurationChange(workspaceId, { ...input, synchronizeExistingSessions })
 						: action === "acknowledge"
 							? await acknowledgeCodexConfigurationChange(workspaceId, input)
-							: await resolveCodexConfigurationConflict(workspaceId, { ...input, resolution: action });
+							: await resolveCodexConfigurationConflict(workspaceId, {
+									...input,
+									resolution: action,
+									expectedSharedValueDigest,
+								});
 				acceptState(next);
 				if (!isCurrentScope()) return;
 				notifyCodexConfigurationSyncUpdated();
@@ -263,6 +268,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		[workspaceId, refresh, scope, acceptState, isCurrentScope, recoveryController],
 	);
 	return {
+		workspaceId,
 		state,
 		error,
 		pendingChangeId,

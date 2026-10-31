@@ -6,10 +6,14 @@ import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
 	type CodexConfigurationPropagationTarget,
+	type CodexConfigurationSourceEvidence,
 	type CodexConfigurationSourceObservation,
+	type CodexConfigurationTaskSourceSnapshot,
 	type CodexConfigurationWriterBinding,
 	codexConfigurationPropagationTargetSchema,
+	codexConfigurationSourceEvidenceSchema,
 	codexConfigurationSourceObservationSchema,
+	codexConfigurationTaskSourceSnapshotSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
@@ -27,6 +31,7 @@ export interface StoredCodexConfigurationProfile {
 }
 
 export interface StoredCodexConfigurationWriter {
+	sourceTaskSnapshot?: CodexConfigurationTaskSourceSnapshot;
 	legacyLaunchExceptionSelectionAtMigration?: { profileId: string; profileVersion: number };
 	pendingNativePermissionVerificationAtMs?: number;
 	pendingSessionProfileBinding?: {
@@ -56,12 +61,24 @@ export interface StoredCodexConfigurationWriter {
 	retiredAt?: number;
 }
 export interface StoredCodexConfigurationSource {
+	fieldChangeIds?: Record<string, string>;
 	home: string;
 	version: number;
 	fields: CodexConfigurationFields;
 	observedUserFields: CodexConfigurationFields;
 }
 export interface StoredCodexConfigurationChange {
+	modificationInitiator?: CodexConfigurationSourceEvidence["initiator"];
+	sharedConflictEvidence?: {
+		fields: CodexConfigurationFields;
+		fieldVersions: Record<string, number>;
+		changeIds: Record<string, string>;
+	};
+	sourceTaskSnapshot?: CodexConfigurationTaskSourceSnapshot;
+	relatedPreviousFields?: CodexConfigurationFields;
+	sharedFieldsAtObservation?: CodexConfigurationFields;
+	sharedFieldVersionsAtObservation?: Record<string, number>;
+	sharedChangeIdsAtObservation?: Record<string, string>;
 	changeId: string;
 	version: number;
 	sourceWriterId: string;
@@ -197,11 +214,18 @@ const storeSchema = z.object({
 	revision: z.number().int().nonnegative(),
 	sources: z.record(
 		z.string(),
-		z.object({ home: z.string(), version: z.number(), fields: fieldsSchema, observedUserFields: fieldsSchema }),
+		z.object({
+			home: z.string(),
+			version: z.number(),
+			fields: fieldsSchema,
+			observedUserFields: fieldsSchema,
+			fieldChangeIds: z.record(z.string(), z.string()).optional(),
+		}),
 	),
 	writers: z.record(
 		z.string(),
 		z.object({
+			sourceTaskSnapshot: codexConfigurationTaskSourceSnapshotSchema.optional(),
 			pendingSessionProfileBinding: z
 				.object({
 					workspaceId: z.string(),
@@ -243,6 +267,19 @@ const storeSchema = z.object({
 	),
 	changes: z.array(
 		z.object({
+			modificationInitiator: codexConfigurationSourceEvidenceSchema.shape.initiator.optional(),
+			sharedConflictEvidence: z
+				.object({
+					fields: fieldsSchema,
+					fieldVersions: z.record(z.string(), z.number()),
+					changeIds: z.record(z.string(), z.string()),
+				})
+				.optional(),
+			sourceTaskSnapshot: codexConfigurationTaskSourceSnapshotSchema.optional(),
+			relatedPreviousFields: fieldsSchema.optional(),
+			sharedFieldsAtObservation: fieldsSchema.optional(),
+			sharedFieldVersionsAtObservation: z.record(z.string(), z.number()).optional(),
+			sharedChangeIdsAtObservation: z.record(z.string(), z.string()).optional(),
 			changeId: z.string(),
 			version: z.number(),
 			sourceWriterId: z.string(),

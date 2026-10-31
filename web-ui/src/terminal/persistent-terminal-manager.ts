@@ -31,6 +31,8 @@ import { resolveTerminalClipboardKeyboardShortcutAction } from "@/terminal/termi
 import { clearTerminalGeometry, reportTerminalGeometry } from "@/terminal/terminal-geometry-registry";
 import {
 	isStashTerminalInputBoxToPromptLibraryShortcut,
+	isTerminalInputBoxStashInFlight,
+	recoverPendingTerminalInputBoxStash,
 	stashTerminalInputBoxToPromptLibrary,
 } from "@/terminal/terminal-input-box-stash-shortcut";
 import { createKanbanTerminalOptions } from "@/terminal/terminal-options";
@@ -484,6 +486,15 @@ class PersistentTerminal {
 				void stashTerminalInputBoxToPromptLibrary({ workspaceId: this.workspaceId, taskId: this.taskId });
 				return false;
 			}
+			if (
+				isTerminalInputBoxStashInFlight({ workspaceId: this.workspaceId, taskId: this.taskId }) &&
+				event.type === "keydown" &&
+				!event.metaKey &&
+				!event.altKey
+			) {
+				event.preventDefault();
+				return false;
+			}
 			return true;
 		});
 		this.searchAddon.onDidChangeResults((results) => {
@@ -542,7 +553,7 @@ class PersistentTerminal {
 	}
 
 	// 「服务端 mirror 已随旧 runtime 丢失」这条证据必须反映 mirror 的**当前**状态，而不是某一刻的历史结论：
-	// 空 restore 之后只要渲染过任何内容——续跑后服务端写进新 mirror 的「Refreshing terminal session」banner、
+	// 空 restore 之后只要渲染过任何内容——续跑后服务端写进新 mirror 的会话重启完成提示、
 	// agent 输出——就说明 mirror 已经有东西了，证据随即作废。否则续跑出来的新活体之后在用户眼前自然退出，
 	// 过了冷却再回来，仍会被这份陈旧的空快照当成「mirror 已丢」再拉起一次（refresh 不会再要一份快照来纠正它）。
 	// hasRenderedAnyTerminalContent 正是「自最近一次空 restore 以来」的那一位：空快照落屏把它落回 false，
@@ -748,6 +759,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.connectionReady = true;
+		void recoverPendingTerminalInputBoxStash({ workspaceId: this.workspaceId, taskId: this.taskId });
 		this.clearReconnectTimer();
 		this.lastError = null;
 		this.notifyLastError();
