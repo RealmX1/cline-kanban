@@ -81,7 +81,12 @@ it.skipIf(!cli)(
 					launchAttemptCount: number;
 					revokedAtEpochMs: number | null;
 					businessDisposition: string | null;
-					specification: { readOnlyRecoveryEvidenceObservationCommand?: string[] };
+					specification: {
+						readOnlyRecoveryEvidenceObservationCommand?: string[];
+						ownerSessionInterruptPolicy?: string;
+						continuationNoticesFile?: string;
+						producerExecutionRevocationFile?: string;
+					};
 				};
 			};
 		};
@@ -180,6 +185,12 @@ it.skipIf(!cli)(
 					command,
 					resumeCommand: command,
 					readOnlyRecoveryEvidenceObservationCommand,
+					ownerSessionInterruptPolicy: "preserve_execution",
+					continuationNoticesFile: join(fixture.fixtureRootDirectoryPath, "continuation-notices.json"),
+					producerExecutionRevocationFile: join(
+						fixture.fixtureRootDirectoryPath,
+						"producer-execution-revocation.json",
+					),
 					workingDirectory: project.repositoryPath,
 					resultFile,
 					materialSha256: "a".repeat(64),
@@ -203,6 +214,13 @@ it.skipIf(!cli)(
 			const second = await runCli(startArguments);
 			expect(first.execution?.executionId).toBe(second.execution?.executionId);
 			expect(second.execution?.launchAttemptCount).toBe(1);
+			expect(second.execution?.specification.ownerSessionInterruptPolicy).toBe("preserve_execution");
+			expect(second.execution?.specification.continuationNoticesFile).toBe(
+				join(fixture.fixtureRootDirectoryPath, "continuation-notices.json"),
+			);
+			expect(second.execution?.specification.producerExecutionRevocationFile).toBe(
+				join(fixture.fixtureRootDirectoryPath, "producer-execution-revocation.json"),
+			);
 			expect(second.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toEqual(
 				readOnlyRecoveryEvidenceObservationCommand,
 			);

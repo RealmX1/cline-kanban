@@ -4084,6 +4084,34 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
 	});
 
+	it("ACP 取消当前回合声明回合范围，明确停止会话继续使用整任务范围", async () => {
+		const summary = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
+		const onTaskSessionStopRequested = vi.fn<NonNullable<CreateRuntimeApiDependencies["onTaskSessionStopRequested"]>>(
+			async () => undefined,
+		);
+		const acpService = {
+			listSummaries: () => [summary],
+			cancelTaskTurn: vi.fn(async () => summary),
+			stopTaskSession: vi.fn(async () => summary),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: () => "workspace-1",
+			loadScopedRuntimeConfig: async () => createRuntimeConfigState(),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: async () => ({ listSummaries: () => [] }) as never,
+			getScopedAcpTaskSessionService: async () => acpService as never,
+			getScopedClineTaskSessionService: async () => createClineTaskSessionServiceMock() as never,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			onTaskSessionStopRequested,
+		});
+		const scope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
+		expect((await api.cancelTaskChatTurn(scope, { taskId: summary.taskId })).ok).toBe(true);
+		expect(onTaskSessionStopRequested).toHaveBeenCalledWith("workspace-1", summary.taskId, "current_agent_turn");
+		expect((await api.stopTaskSession(scope, { taskId: summary.taskId })).ok).toBe(true);
+		expect(onTaskSessionStopRequested).toHaveBeenLastCalledWith("workspace-1", summary.taskId);
+	});
+
 	it("returns cline chat messages and sends chat message through cline service", async () => {
 		const summary = createSummary({ agentId: "cline", pid: null });
 		const latestMessage = {

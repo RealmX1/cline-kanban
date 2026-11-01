@@ -6,6 +6,9 @@ export const taskCommandExecutionSpecificationSchema = z
 		command: commandArgumentsSchema,
 		resumeCommand: commandArgumentsSchema,
 		resumeCommandPreservesBusinessSingleFlight: z.boolean().default(false),
+		ownerSessionInterruptPolicy: z.enum(["cancel_execution", "preserve_execution"]).default("cancel_execution"),
+		continuationNoticesFile: z.string().min(1).optional(),
+		producerExecutionRevocationFile: z.string().min(1).optional(),
 		cancelCommand: commandArgumentsSchema.optional(),
 		workingDirectory: z.string().min(1),
 		resultFile: z.string().min(1),
@@ -27,6 +30,35 @@ export const taskCommandExecutionIdentityRequestSchema = z.object({
 });
 export type TaskCommandExecutionStartRequest = z.input<typeof taskCommandExecutionStartRequestSchema>;
 export type TaskCommandExecutionIdentityRequest = z.infer<typeof taskCommandExecutionIdentityRequestSchema>;
+
+export const taskCommandExecutionContinuationNoticeSchema = z
+	.object({
+		noticeId: z.string().min(1).max(256),
+		stage: z.string().min(1).max(80),
+		text: z.string().min(1).max(2000),
+		requiresCurrentResultNoticeMatch: z.boolean().optional(),
+	})
+	.strict();
+export type TaskCommandExecutionContinuationNotice = z.infer<typeof taskCommandExecutionContinuationNoticeSchema>;
+
+const taskCommandExecutionResultDeliverySchema = z.object({
+	producerNoticeId: z.string().nullable().default(null),
+	stage: z.string().default("final_agent_review"),
+	resultId: z.string(),
+	text: z.string(),
+	textSha256: z.string(),
+	state: z.enum(["known_not_submitted", "submission_unknown", "native_accepted"]),
+	attemptCount: z.number(),
+	attemptId: z.string().nullable(),
+	awaitingTransportReceipt: z.boolean(),
+	lastPreflightFailureEvidenceSha256: z.string().nullable(),
+	unchangedPreflightRetryCount: z.number(),
+	retryPreflightNotBeforeEpochMs: z.number().nullable(),
+	reconciliationAttemptCount: z.number(),
+	lastReconciliationEvidenceSha256: z.string().nullable(),
+	nextReconciliationAtEpochMs: z.number().nullable(),
+	nativeReceipt: z.record(z.string(), z.unknown()).nullable(),
+});
 
 export const taskCommandExecutionRecordSchema = z.object({
 	executionId: z.string().uuid(),
@@ -77,24 +109,8 @@ export const taskCommandExecutionRecordSchema = z.object({
 	nextRecoveryAtEpochMs: z.number().nullable(),
 	parkOwned: z.boolean(),
 	logicalResultCount: z.number(),
-	resultDelivery: z
-		.object({
-			resultId: z.string(),
-			text: z.string(),
-			textSha256: z.string(),
-			state: z.enum(["known_not_submitted", "submission_unknown", "native_accepted"]),
-			attemptCount: z.number(),
-			attemptId: z.string().nullable(),
-			awaitingTransportReceipt: z.boolean(),
-			lastPreflightFailureEvidenceSha256: z.string().nullable(),
-			unchangedPreflightRetryCount: z.number(),
-			retryPreflightNotBeforeEpochMs: z.number().nullable(),
-			reconciliationAttemptCount: z.number(),
-			lastReconciliationEvidenceSha256: z.string().nullable(),
-			nextReconciliationAtEpochMs: z.number().nullable(),
-			nativeReceipt: z.record(z.string(), z.unknown()).nullable(),
-		})
-		.nullable(),
+	resultDelivery: taskCommandExecutionResultDeliverySchema.nullable(),
+	resultDeliveryHistory: z.array(taskCommandExecutionResultDeliverySchema).default([]),
 	cancellationObservation: z.record(z.string(), z.unknown()).nullable(),
 });
 export type TaskCommandExecutionRecord = z.infer<typeof taskCommandExecutionRecordSchema>;

@@ -12,6 +12,7 @@ import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-
 import {
 	type TaskCommandExecutionIdentityRequest,
 	type TaskCommandExecutionRecord,
+	type TaskCommandExecutionSpecification,
 	type TaskCommandExecutionStartRequest,
 	taskCommandExecutionStartRequestSchema,
 } from "../core/task-command-execution-contract";
@@ -21,6 +22,11 @@ import {
 	readRuntimeProcessInstanceLiveness,
 } from "../state/runtime-process-instance-heartbeat-registry";
 import { readOnlyTaskCommandExecutionRecoveryEvidenceObservation } from "./read-only-task-command-execution-recovery-evidence-observation";
+import {
+	assertTaskCommandContinuationNoticeStillEligible,
+	formatTaskCommandContinuationNotice,
+	readEligibleTaskCommandContinuationNotices,
+} from "./task-command-execution-continuation-notices";
 import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
@@ -65,6 +71,45 @@ export interface TaskCommandExecutionDependencies {
 	inspectWorker?: (record: TaskCommandExecutionRecord) => Promise<"running" | "exited" | "not_started" | "unknown">;
 }
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+
+function canonicalTaskCommandExecutionMaterialJson(specification: TaskCommandExecutionSpecification): string {
+	const material: Record<string, unknown> = {
+		command: specification.command,
+		resumeCommand: specification.resumeCommand,
+		resumeCommandPreservesBusinessSingleFlight: specification.resumeCommandPreservesBusinessSingleFlight,
+	};
+	if (specification.ownerSessionInterruptPolicy !== "cancel_execution")
+		material.ownerSessionInterruptPolicy = specification.ownerSessionInterruptPolicy;
+	if (specification.continuationNoticesFile !== undefined)
+		material.continuationNoticesFile = specification.continuationNoticesFile;
+	if (specification.producerExecutionRevocationFile !== undefined)
+		material.producerExecutionRevocationFile = specification.producerExecutionRevocationFile;
+	if (specification.cancelCommand !== undefined) material.cancelCommand = specification.cancelCommand;
+	material.workingDirectory = specification.workingDirectory;
+	material.resultFile = specification.resultFile;
+	material.materialSha256 = specification.materialSha256;
+	material.label = specification.label;
+	material.recoveryEvidencePaths = specification.recoveryEvidencePaths;
+	if (specification.readOnlyRecoveryEvidenceObservationCommand !== undefined)
+		material.readOnlyRecoveryEvidenceObservationCommand = specification.readOnlyRecoveryEvidenceObservationCommand;
+	return JSON.stringify(material);
+}
+interface TaskCommandExecutionRevocationRequest {
+	source: string;
+	scope: string;
+	requestBasis: string;
+}
+
+async function producerExecutionRevocationExists(record: TaskCommandExecutionRecord): Promise<boolean> {
+	if (!record.specification.producerExecutionRevocationFile) return false;
+	try {
+		await stat(record.specification.producerExecutionRevocationFile);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
 
 async function readExecutionRevocationIntent(
 	record: TaskCommandExecutionRecord,
@@ -125,7 +170,8 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	};
 	const assertOwnership = async (record: TaskCommandExecutionRecord, forDelivery = false) => {
 		const current = await inspect(record.workspaceId, record);
-		if (await readExecutionRevocationIntent(current)) throw new Error("所属执行已有持久撤销意图");
+		if ((await readExecutionRevocationIntent(current)) || (await producerExecutionRevocationExists(current)))
+			throw new Error("所属执行已有持久撤销意图");
 		if (
 			current.revokedAtEpochMs !== null ||
 			current.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId()
@@ -171,7 +217,8 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		if (
 			latest.revokedAtEpochMs !== null ||
 			latest.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId() ||
-			(await readExecutionRevocationIntent(latest))
+			(await readExecutionRevocationIntent(latest)) ||
+			(await producerExecutionRevocationExists(latest))
 		)
 			throw new Error("异步核验期间所属执行已撤销或托管权变化");
 		return latest;
@@ -187,14 +234,19 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			current.revokedAtEpochMs !== null ||
 			current.resultDelivery?.state === "native_accepted" ||
 			current.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId() ||
-			(await readExecutionRevocationIntent(current))
+			(await readExecutionRevocationIntent(current)) ||
+			(await producerExecutionRevocationExists(current))
 		)
 			return;
 		const parkOwned = await deps.park(current);
 		const latest = await update(record.workspaceId, record.executionId, (value) =>
 			value.revokedAtEpochMs !== null ? value : { ...value, parkOwned: parkOwned || value.parkOwned },
 		);
-		if (latest.revokedAtEpochMs !== null || (await readExecutionRevocationIntent(latest)))
+		if (
+			latest.revokedAtEpochMs !== null ||
+			(await readExecutionRevocationIntent(latest)) ||
+			(await producerExecutionRevocationExists(latest))
+		)
 			await releaseOwnedWait(latest);
 	};
 	const launch = async (
@@ -291,19 +343,26 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		if (
 			!isAbsolute(input.specification.workingDirectory) ||
 			!isAbsolute(input.specification.resultFile) ||
+			(input.specification.continuationNoticesFile !== undefined &&
+				!isAbsolute(input.specification.continuationNoticesFile)) ||
+			(input.specification.producerExecutionRevocationFile !== undefined &&
+				!isAbsolute(input.specification.producerExecutionRevocationFile)) ||
 			(await realpath(input.specification.workingDirectory)) !== (await realpath(owner.worktreePath))
 		)
 			throw new Error("命令工作目录必须是所属任务工作树，结果路径须为绝对路径");
 		const metadata = await stat(owner.worktreePath);
 		const worktreeRealPath = await realpath(owner.worktreePath);
-		const materialSha256 = sha256(JSON.stringify(input.specification));
+		const canonicalMaterialSha256 = sha256(canonicalTaskCommandExecutionMaterialJson(input.specification));
+		const parsedMaterialSha256 = sha256(JSON.stringify(input.specification));
 		const registered = await mutateTaskCommandExecutions(workspaceId, async (records) => {
 			const existing = records.find(
 				(item) => item.taskId === input.taskId && item.idempotencyKey === input.idempotencyKey,
 			);
 			if (existing) {
+				const sameMaterial =
+					existing.materialSha256 === canonicalMaterialSha256 || existing.materialSha256 === parsedMaterialSha256;
 				if (
-					existing.materialSha256 !== materialSha256 ||
+					!sameMaterial ||
 					existing.taskIncarnationCreatedAtEpochMs !== owner.taskIncarnationCreatedAtEpochMs ||
 					existing.originatingNativeSessionId !== owner.nativeSessionId
 				)
@@ -332,7 +391,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					createdAtEpochMs: metadata.birthtimeMs,
 				},
 				idempotencyKey: input.idempotencyKey,
-				materialSha256,
+				materialSha256: canonicalMaterialSha256,
 				specification: { ...input.specification, resultFile: canonicalResultFilePath },
 				custodianRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
 				createdAtEpochMs: Date.now(),
@@ -358,6 +417,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				parkOwned: false,
 				logicalResultCount: 0,
 				resultDelivery: null,
+				resultDeliveryHistory: [],
 				cancellationObservation: null,
 			};
 			return { records: [...records, record], result: { record, newlyRegistered: true } };
@@ -381,13 +441,22 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		}
 		return inspect(workspaceId, registered.record);
 	};
-	const cancel = async (workspaceId: string, identity: TaskCommandExecutionIdentityRequest) => {
+	const cancel = async (
+		workspaceId: string,
+		identity: TaskCommandExecutionIdentityRequest,
+		request: TaskCommandExecutionRevocationRequest = {
+			source: "explicit_command_execution_cancel",
+			scope: "command_execution",
+			requestBasis: "显式 command-execution cancel 请求",
+		},
+	) => {
 		let record = await inspect(workspaceId, identity);
 		const intent = await lockedFileSystem.withLock({ path: record.revocationFile }, async () => {
 			const priorIntent = await readExecutionRevocationIntent(record);
 			const intent = priorIntent ?? {
 				executionId: record.executionId,
 				revokedAtEpochMs: record.revokedAtEpochMs ?? Date.now(),
+				...request,
 			};
 			if (!priorIntent)
 				await lockedFileSystem.writeJsonFileAtomic(record.revocationFile, intent, { durable: true, lock: null });
@@ -407,14 +476,49 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		await releaseOwnedWait(record);
 		return update(workspaceId, record.executionId, (value) => ({ ...value, cancellationObservation: observation }));
 	};
+	const cancelForTask = async (workspaceId: string, taskId: string, ownerSessionInterrupt = false) => {
+		const records = (await readTaskCommandExecutions(workspaceId)).filter(
+			(record) =>
+				record.revokedAtEpochMs === null &&
+				(record.taskId === taskId || record.originatingConversationSessionId === taskId) &&
+				(!ownerSessionInterrupt || record.specification.ownerSessionInterruptPolicy === "cancel_execution"),
+		);
+		const request = ownerSessionInterrupt
+			? {
+					source: "owner_session_current_turn_interrupt",
+					scope: "command_execution",
+					requestBasis: "所属执行声明主会话回合打断时取消后台工作",
+				}
+			: {
+					source: "explicit_task_session_stop",
+					scope: "task_owned_command_executions",
+					requestBasis: "明确的任务会话停止操作，覆盖其所属执行",
+				};
+		await Promise.all(
+			records.map(async (record) => {
+				await lockedFileSystem.withLock({ path: record.revocationFile }, async () => {
+					if (!(await readExecutionRevocationIntent(record)))
+						await lockedFileSystem.writeJsonFileAtomic(
+							record.revocationFile,
+							{ executionId: record.executionId, revokedAtEpochMs: Date.now(), ...request },
+							{ durable: true, lock: null },
+						);
+				});
+			}),
+		);
+		await Promise.all(records.map((record) => cancel(workspaceId, record, request)));
+	};
 	const sweepExecution = async (workspaceId: string, executionId: string) => {
 		const sweepKey = `${workspaceId}/${executionId}`;
 		if (stopped || activeSweeps.has(sweepKey)) return;
 		activeSweeps.add(sweepKey);
 		let acquiredOriginatingSessionSweepKey: string | null = null;
 		try {
-			let record = (await readTaskCommandExecutions(workspaceId)).find((item) => item.executionId === executionId);
-			if (!record) return;
+			const initialRecord = (await readTaskCommandExecutions(workspaceId)).find(
+				(item) => item.executionId === executionId,
+			);
+			if (!initialRecord) return;
+			let record: TaskCommandExecutionRecord = initialRecord;
 			const originatingConversationSessionSweepKey = `${workspaceId}/${record.originatingConversationSessionId}`;
 			if (
 				executionIdsWithInitialDispatchInProgress.has(executionId) ||
@@ -423,6 +527,14 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				return;
 			originatingSessionKeysWithExecutionSweepInProgress.add(originatingConversationSessionSweepKey);
 			acquiredOriginatingSessionSweepKey = originatingConversationSessionSweepKey;
+			if (record.revokedAtEpochMs === null && (await producerExecutionRevocationExists(record))) {
+				await cancel(workspaceId, record, {
+					source: "producer_execution_revocation_evidence_file",
+					scope: "command_execution",
+					requestBasis: `生产方声明的持久撤销原件已出现：${record.specification.producerExecutionRevocationFile}`,
+				});
+				return;
+			}
 			if (record.revokedAtEpochMs === null && (await readExecutionRevocationIntent(record))) {
 				await cancel(workspaceId, record);
 				return;
@@ -476,158 +588,227 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			} catch {
 				/* 原件未出现或写入未完成，继续等待机器证据。 */
 			}
-			const disposition = record.resultDelivery ? record.businessDisposition : result?.disposition;
+			const disposition = result?.disposition ?? record.businessDisposition;
 			if (result?.disposition === "cancelled") {
-				await cancel(workspaceId, record);
+				await cancel(workspaceId, record, {
+					source: "producer_cancellation_result",
+					scope: "command_execution",
+					requestBasis: "生产方发布已取消结果；不推断为真人指令",
+				});
 				return;
 			}
+			const notices = await readEligibleTaskCommandContinuationNotices(record, result);
+			for (const notice of notices) {
+				const prior = [
+					...record.resultDeliveryHistory,
+					...(record.resultDelivery ? [record.resultDelivery] : []),
+				].find((delivery) => delivery.producerNoticeId === notice.noticeId);
+				if (prior && prior.textSha256 !== sha256(formatTaskCommandContinuationNotice(record, notice)))
+					throw new Error("同一后台事件 ID 的正文已变化；保留原投递历史，生产方应登记新修订 ID");
+			}
+			const eligibleNoticeIds = new Set(notices.map((notice) => notice.noticeId));
+			const acceptedNoticeIds = new Set(
+				[
+					...record.resultDeliveryHistory,
+					...(record.resultDelivery?.state === "native_accepted" ? [record.resultDelivery] : []),
+				]
+					.filter((delivery) => delivery.state === "native_accepted")
+					.map((delivery) => delivery.producerNoticeId),
+			);
+			const currentDelivery = record.resultDelivery;
+			const hasUnacceptedNotice = notices.some((notice) => !acceptedNoticeIds.has(notice.noticeId));
+			if (
+				currentDelivery &&
+				(currentDelivery.state === "native_accepted" ||
+					(currentDelivery.state === "known_not_submitted" && !currentDelivery.awaitingTransportReceipt)) &&
+				((currentDelivery.producerNoticeId !== null && !eligibleNoticeIds.has(currentDelivery.producerNoticeId)) ||
+					(currentDelivery.producerNoticeId === null && hasUnacceptedNotice) ||
+					(currentDelivery.state === "native_accepted" && hasUnacceptedNotice))
+			) {
+				record = await update(workspaceId, executionId, (value) => ({
+					...value,
+					resultDeliveryHistory: value.resultDelivery
+						? [...value.resultDeliveryHistory, value.resultDelivery]
+						: value.resultDeliveryHistory,
+					resultDelivery: null,
+				}));
+			}
+			const nextNotice = notices.find((notice) => !acceptedNoticeIds.has(notice.noticeId));
 			if (disposition !== "agent_review_ready" && disposition !== "agent_judgment_required") {
-				if (result && disposition === "machine_evidence_pending") {
-					record = await update(workspaceId, executionId, (value) => ({
-						...value,
-						businessDisposition: disposition,
-						progress: result,
-						recovery:
-							typeof result?.recovery === "object" && result.recovery !== null
-								? (result.recovery as Record<string, unknown>)
-								: null,
-					}));
-				}
-				const worker = await (deps.inspectWorker ?? inspectOwnedCommandSupervisor)(record);
-				if (worker === "running") return;
-				if (worker === "unknown") {
-					const attempts =
-						record.unprovenSupervisorRecoveryObservation?.unprovenSingleFlightResumeAttemptCount ?? 0;
-					const mayResumeBusinessSingleFlight =
-						record.specification.resumeCommandPreservesBusinessSingleFlight &&
-						record.launchAttemptCount > 0 &&
-						attempts < 1;
-					record = await update(workspaceId, executionId, (value) => ({
-						...value,
-						unprovenSupervisorRecoveryObservation: {
-							launchNonce: value.launchNonce,
-							missingEvidence: "supervisor_or_owned_process_exit",
-							equivalentEvidenceSources: [
-								"supervisor_terminal_progress",
-								"native_business_result",
-								"boot_identity",
-								"producer_registered_business_single_flight",
-							],
-							recoveryAction: mayResumeBusinessSingleFlight
-								? "resume_registered_business_single_flight"
-								: "await_process_or_native_evidence",
-							unprovenSingleFlightResumeAttemptCount: attempts,
-							maximumUnprovenSingleFlightResumeAttempts: 1,
-						},
-					}));
-					if (!mayResumeBusinessSingleFlight) return;
-				}
-				const recovery = record.recovery;
-				if (recovery && recovery.action !== "resume_same_run") return;
-				if (record.launchAttemptCount === 0) {
-					// 首次派发前只探测 park 依赖，不消耗尚未执行的业务恢复预算。
-					if ((record.nextRecoveryAtEpochMs ?? 0) > Date.now()) return;
-					record = await update(workspaceId, executionId, (value) => ({
-						...value,
-						nextRecoveryAtEpochMs: Date.now() + 30_000,
-					}));
-					await retainOwnedWait(record);
-					await launch(record);
-					return;
-				}
-				const observationCommand = record.specification.readOnlyRecoveryEvidenceObservationCommand;
-				if (
-					observationCommand &&
-					record.lastRecoveryEvidenceSha256 !== null &&
-					Math.max(
-						record.nextRecoveryAtEpochMs ?? 0,
-						typeof recovery?.retry_not_before_epoch_ms === "number" ? recovery.retry_not_before_epoch_ms : 0,
-					) > Date.now()
-				)
-					return;
-				const evidence = [
-					JSON.stringify({
-						disposition,
-						trigger: recovery?.trigger,
-						missingEvidence: recovery?.missing_evidence,
-						equivalentSources: recovery?.equivalent_evidence_sources,
-					}),
-				];
-				const producerPaths = Array.isArray(record.recovery?.evidence_paths)
-					? record.recovery.evidence_paths.filter((path): path is string => typeof path === "string")
-					: [];
-				for (const path of [...record.specification.recoveryEvidencePaths, ...producerPaths]) {
-					try {
-						evidence.push(sha256(await readFile(path, "utf8")));
-					} catch {
-						try {
-							evidence.push(JSON.stringify(await readdir(path)));
-						} catch {
-							evidence.push("unavailable");
-						}
+				await (async () => {
+					if (result && disposition === "machine_evidence_pending") {
+						record = await update(workspaceId, executionId, (value) => ({
+							...value,
+							businessDisposition: disposition,
+							progress: result,
+							recovery:
+								typeof result?.recovery === "object" && result.recovery !== null
+									? (result.recovery as Record<string, unknown>)
+									: null,
+						}));
 					}
-				}
-				if (observationCommand) {
-					await assertOwnership(record);
-					if (stopped) return;
-					const controller = new AbortController();
-					activeReadOnlyRecoveryEvidenceObservationControllers.set(sweepKey, controller);
-					let semanticObservation: string;
-					try {
-						semanticObservation = await readOnlyTaskCommandExecutionRecoveryEvidenceObservation({
-							command: observationCommand,
-							workingDirectory: record.specification.workingDirectory,
-							signal: controller.signal,
-						});
-					} finally {
-						activeReadOnlyRecoveryEvidenceObservationControllers.delete(sweepKey);
+					const worker = await (deps.inspectWorker ?? inspectOwnedCommandSupervisor)(record);
+					if (worker === "running") return;
+					if (worker === "unknown") {
+						const attempts =
+							record.unprovenSupervisorRecoveryObservation?.unprovenSingleFlightResumeAttemptCount ?? 0;
+						const mayResumeBusinessSingleFlight =
+							record.specification.resumeCommandPreservesBusinessSingleFlight &&
+							record.launchAttemptCount > 0 &&
+							attempts < 1;
+						record = await update(workspaceId, executionId, (value) => ({
+							...value,
+							unprovenSupervisorRecoveryObservation: {
+								launchNonce: value.launchNonce,
+								missingEvidence: "supervisor_or_owned_process_exit",
+								equivalentEvidenceSources: [
+									"supervisor_terminal_progress",
+									"native_business_result",
+									"boot_identity",
+									"producer_registered_business_single_flight",
+								],
+								recoveryAction: mayResumeBusinessSingleFlight
+									? "resume_registered_business_single_flight"
+									: "await_process_or_native_evidence",
+								unprovenSingleFlightResumeAttemptCount: attempts,
+								maximumUnprovenSingleFlightResumeAttempts: 1,
+							},
+						}));
+						if (!mayResumeBusinessSingleFlight) return;
 					}
-					await assertOwnership(record);
-					if (stopped) return;
-					evidence.push(semanticObservation);
-				}
-				const fingerprint = sha256(JSON.stringify(evidence));
-				const changed = record.lastRecoveryEvidenceSha256 !== fingerprint;
-				const notBefore =
-					typeof record.recovery?.retry_not_before_epoch_ms === "number"
-						? record.recovery.retry_not_before_epoch_ms
-						: null;
-				if (result && record.lastRecoveryEvidenceSha256 === null) {
-					await update(workspaceId, executionId, (value) => ({
-						...value,
-						lastRecoveryEvidenceSha256: fingerprint,
-						nextRecoveryAtEpochMs: notBefore ?? Date.now() + 30_000,
-					}));
-					return;
-				}
-				if ((notBefore ?? record.nextRecoveryAtEpochMs ?? 0) > Date.now()) return;
-				const maximumUnchangedRetries =
-					typeof recovery?.maximum_unchanged_retries === "number"
-						? Math.max(0, Math.min(3, Math.floor(recovery.maximum_unchanged_retries)))
-						: 1;
-				if (!changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries) {
-					if (observationCommand)
-						await update(workspaceId, executionId, (value) => ({
+					const recovery = record.recovery;
+					if (recovery && recovery.action !== "resume_same_run") return;
+					if (record.launchAttemptCount === 0) {
+						// 首次派发前只探测 park 依赖，不消耗尚未执行的业务恢复预算。
+						if ((record.nextRecoveryAtEpochMs ?? 0) > Date.now()) return;
+						record = await update(workspaceId, executionId, (value) => ({
 							...value,
 							nextRecoveryAtEpochMs: Date.now() + 30_000,
 						}));
+						await retainOwnedWait(record);
+						await launch(record);
+						return;
+					}
+					const observationCommand = record.specification.readOnlyRecoveryEvidenceObservationCommand;
+					if (
+						observationCommand &&
+						record.lastRecoveryEvidenceSha256 !== null &&
+						Math.max(
+							record.nextRecoveryAtEpochMs ?? 0,
+							typeof recovery?.retry_not_before_epoch_ms === "number" ? recovery.retry_not_before_epoch_ms : 0,
+						) > Date.now()
+					)
+						return;
+					const evidence = [
+						JSON.stringify({
+							disposition,
+							trigger: recovery?.trigger,
+							missingEvidence: recovery?.missing_evidence,
+							equivalentSources: recovery?.equivalent_evidence_sources,
+							...(typeof recovery?.continuation_request_id === "string"
+								? { continuationRequestId: recovery.continuation_request_id }
+								: {}),
+						}),
+					];
+					const producerPaths = Array.isArray(record.recovery?.evidence_paths)
+						? record.recovery.evidence_paths.filter((path): path is string => typeof path === "string")
+						: [];
+					for (const path of [...record.specification.recoveryEvidencePaths, ...producerPaths]) {
+						try {
+							evidence.push(sha256(await readFile(path, "utf8")));
+						} catch {
+							try {
+								evidence.push(JSON.stringify(await readdir(path)));
+							} catch {
+								evidence.push("unavailable");
+							}
+						}
+					}
+					if (observationCommand) {
+						await assertOwnership(record);
+						if (stopped) return;
+						const controller = new AbortController();
+						activeReadOnlyRecoveryEvidenceObservationControllers.set(sweepKey, controller);
+						let semanticObservation: string;
+						try {
+							semanticObservation = await readOnlyTaskCommandExecutionRecoveryEvidenceObservation({
+								command: observationCommand,
+								workingDirectory: record.specification.workingDirectory,
+								signal: controller.signal,
+							});
+						} finally {
+							activeReadOnlyRecoveryEvidenceObservationControllers.delete(sweepKey);
+						}
+						await assertOwnership(record);
+						if (stopped) return;
+						evidence.push(semanticObservation);
+					}
+					const fingerprint = sha256(JSON.stringify(evidence));
+					const changed = record.lastRecoveryEvidenceSha256 !== fingerprint;
+					const notBefore =
+						typeof record.recovery?.retry_not_before_epoch_ms === "number"
+							? record.recovery.retry_not_before_epoch_ms
+							: null;
+					if (
+						result &&
+						record.lastRecoveryEvidenceSha256 === null &&
+						typeof recovery?.continuation_request_id !== "string"
+					) {
+						await update(workspaceId, executionId, (value) => ({
+							...value,
+							lastRecoveryEvidenceSha256: fingerprint,
+							nextRecoveryAtEpochMs: notBefore ?? Date.now() + 30_000,
+						}));
+						return;
+					}
+					if ((notBefore ?? record.nextRecoveryAtEpochMs ?? 0) > Date.now()) return;
+					const maximumUnchangedRetries =
+						typeof recovery?.maximum_unchanged_retries === "number"
+							? Math.max(0, Math.min(3, Math.floor(recovery.maximum_unchanged_retries)))
+							: 1;
+					if (!changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries) {
+						if (observationCommand)
+							await update(workspaceId, executionId, (value) => ({
+								...value,
+								nextRecoveryAtEpochMs: Date.now() + 30_000,
+							}));
+						return;
+					}
+					await launch(record, worker === "unknown" ? "producer_single_flight" : undefined, fingerprint);
 					return;
-				}
-				await launch(record, worker === "unknown" ? "producer_single_flight" : undefined, fingerprint);
-				return;
+				})();
+				if (!nextNotice && !record.resultDelivery) return;
 			}
 			if (!record.resultDelivery) {
-				const text = `所属命令执行结果：${record.specification.label}\n${JSON.stringify(result)}\n原始结果：${record.specification.resultFile}`;
+				if (!nextNotice && record.specification.continuationNoticesFile) return;
+				if (!nextNotice && record.logicalResultCount > 0) return;
+				const text = formatTaskCommandContinuationNotice(
+					{
+						...record,
+						businessDisposition:
+							disposition === "agent_review_ready" || disposition === "agent_judgment_required"
+								? disposition
+								: record.businessDisposition,
+					},
+					nextNotice,
+				);
 				record = await update(workspaceId, executionId, (value) =>
 					value.resultDelivery
 						? value
 						: {
 								...value,
-								businessDisposition: disposition,
+								businessDisposition:
+									disposition === "agent_review_ready" || disposition === "agent_judgment_required"
+										? disposition
+										: value.businessDisposition,
 								progress: result,
-								logicalResultCount: 1,
+								logicalResultCount: value.logicalResultCount + 1,
 								resultDelivery: {
-									resultId: `command-execution-result-${executionId}`,
+									resultId: nextNotice
+										? `command-execution-result-${executionId}-${sha256(nextNotice.noticeId)}`
+										: `command-execution-result-${executionId}`,
+									producerNoticeId: nextNotice?.noticeId ?? null,
+									stage: nextNotice?.stage ?? "final_agent_review",
 									text,
 									textSha256: sha256(text),
 									state: "known_not_submitted",
@@ -644,6 +825,76 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 								},
 							},
 				);
+			}
+			if (
+				record.resultDelivery?.producerNoticeId === null &&
+				record.resultDelivery.state === "known_not_submitted" &&
+				!record.resultDelivery.awaitingTransportReceipt &&
+				!nextNotice
+			) {
+				const notifiableDisposition =
+					disposition === "agent_review_ready" || disposition === "agent_judgment_required" ? disposition : null;
+				if (!result || !notifiableDisposition) return;
+				const refreshedText = formatTaskCommandContinuationNotice({
+					...record,
+					businessDisposition: notifiableDisposition,
+				});
+				if (refreshedText !== record.resultDelivery.text || record.businessDisposition !== notifiableDisposition) {
+					record = await update(workspaceId, executionId, (value) => {
+						const current = value.resultDelivery;
+						if (
+							!current ||
+							current.producerNoticeId !== null ||
+							current.state !== "known_not_submitted" ||
+							current.awaitingTransportReceipt
+						)
+							return value;
+						const textChanged = refreshedText !== current.text;
+						// 投递尝试一开始就会按 resultId 冻结 prompt_sha256。确证尚未提交只说明原生 prompt
+						// 未登记，不能改写该身份上的正文。尚未调用 deliver 时仍就地更新同一结果。
+						const frozenLedgerIdentityAlreadyRegistered =
+							textChanged &&
+							(current.attemptId !== null || current.attemptCount > 0 || current.nativeReceipt !== null);
+						if (!frozenLedgerIdentityAlreadyRegistered) {
+							return {
+								...value,
+								businessDisposition: notifiableDisposition,
+								resultDelivery: {
+									...current,
+									text: refreshedText,
+									textSha256: sha256(refreshedText),
+									lastPreflightFailureEvidenceSha256: null,
+									unchangedPreflightRetryCount: 0,
+									retryPreflightNotBeforeEpochMs: null,
+								},
+							};
+						}
+						return {
+							...value,
+							businessDisposition: notifiableDisposition,
+							logicalResultCount: value.logicalResultCount + 1,
+							resultDeliveryHistory: [...value.resultDeliveryHistory, current],
+							resultDelivery: {
+								resultId: `command-execution-result-${executionId}-fallback-${value.logicalResultCount}`,
+								producerNoticeId: null,
+								stage: current.stage,
+								text: refreshedText,
+								textSha256: sha256(refreshedText),
+								state: "known_not_submitted",
+								attemptCount: 0,
+								attemptId: null,
+								nativeReceipt: null,
+								awaitingTransportReceipt: false,
+								lastPreflightFailureEvidenceSha256: null,
+								unchangedPreflightRetryCount: 0,
+								retryPreflightNotBeforeEpochMs: null,
+								reconciliationAttemptCount: 0,
+								lastReconciliationEvidenceSha256: null,
+								nextReconciliationAtEpochMs: null,
+							},
+						};
+					});
+				}
 			}
 			if (
 				record.resultDelivery?.state === "known_not_submitted" &&
@@ -715,30 +966,56 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 						: 0,
 				},
 			}));
+			const revertUnwrittenSubmissionAttempt = async (incrementedAttempt: boolean) => {
+				await update(workspaceId, executionId, (value) => {
+					if (value.resultDelivery?.attemptId !== attemptId || value.resultDelivery.state !== "submission_unknown")
+						return value;
+					return {
+						...value,
+						resultDelivery: {
+							...value.resultDelivery,
+							state: "known_not_submitted",
+							awaitingTransportReceipt: false,
+							attemptCount: incrementedAttempt
+								? Math.max(0, value.resultDelivery.attemptCount - 1)
+								: value.resultDelivery.attemptCount,
+						},
+					};
+				});
+			};
 			const validate: TaskChatDeliveryWriteValidator = async (phase) => {
-				const current = await assertOwnership(record, true);
+				let current = await assertOwnership(record, true);
+				await assertTaskCommandContinuationNoticeStillEligible(current);
+				current = await assertOwnership(record, true);
 				if (stopped || current.resultDelivery?.attemptId !== attemptId) throw new Error("旧投递尝试已失去归属");
-				if (phase === "before_first_transport_write") {
-					await update(workspaceId, executionId, (value) => {
-						if (
-							value.revokedAtEpochMs !== null ||
-							value.resultDelivery?.attemptId !== attemptId ||
-							value.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId()
-						)
-							throw new Error("写前登记时执行已撤销或尝试已变化");
-						return {
-							...value,
-							resultDelivery: value.resultDelivery && {
-								...value.resultDelivery,
-								state: "submission_unknown",
-								attemptCount:
-									value.resultDelivery.attemptCount +
-									(value.resultDelivery.state === "known_not_submitted" ? 1 : 0),
-							},
-						};
-					});
+				if (phase !== "before_first_transport_write") return;
+				let incrementedAttempt = false;
+				await update(workspaceId, executionId, (value) => {
+					if (
+						value.revokedAtEpochMs !== null ||
+						value.resultDelivery?.attemptId !== attemptId ||
+						value.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId()
+					)
+						throw new Error("写前登记时执行已撤销或尝试已变化");
+					incrementedAttempt = value.resultDelivery?.state === "known_not_submitted";
+					return {
+						...value,
+						resultDelivery: value.resultDelivery && {
+							...value.resultDelivery,
+							state: "submission_unknown",
+							attemptCount:
+								value.resultDelivery.attemptCount +
+								(value.resultDelivery.state === "known_not_submitted" ? 1 : 0),
+						},
+					};
+				});
+				try {
 					await releaseOwnedWait(record);
+					await assertTaskCommandContinuationNoticeStillEligible(await assertOwnership(record, true));
 					await assertOwnership(record, true);
+				} catch (error) {
+					await revertUnwrittenSubmissionAttempt(incrementedAttempt);
+					throw error;
 				}
 			};
 			const settled = async (receipt: InjectionLedgerTerminalDeliveryReceipt) => {
@@ -837,26 +1114,9 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		inspect,
 		cancel,
 		sweepExecution,
-		cancelForTask: async (workspaceId: string, taskId: string) => {
-			const records = (await readTaskCommandExecutions(workspaceId)).filter(
-				(record) =>
-					record.revokedAtEpochMs === null &&
-					(record.taskId === taskId || record.originatingConversationSessionId === taskId),
-			);
-			await Promise.all(
-				records.map(async (record) => {
-					await lockedFileSystem.withLock({ path: record.revocationFile }, async () => {
-						if (!(await readExecutionRevocationIntent(record)))
-							await lockedFileSystem.writeJsonFileAtomic(
-								record.revocationFile,
-								{ executionId: record.executionId, revokedAtEpochMs: Date.now() },
-								{ durable: true, lock: null },
-							);
-					});
-				}),
-			);
-			await Promise.all(records.map((record) => cancel(workspaceId, record)));
-		},
+		cancelForTask: (workspaceId: string, taskId: string) => cancelForTask(workspaceId, taskId),
+		handleOwnerSessionInterrupt: (workspaceId: string, conversationSessionId: string) =>
+			cancelForTask(workspaceId, conversationSessionId, true),
 		startRecovery: () => {
 			stopped = false;
 			const tick = async () => {

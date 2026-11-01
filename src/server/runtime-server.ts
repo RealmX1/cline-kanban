@@ -137,8 +137,8 @@ import {
 	writeTaskClosureOperation,
 } from "../task-closure/task-closure-operation-store";
 import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
+import { observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
 import { createTaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
-import { observeUserStopBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-user-stop-port";
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
@@ -157,7 +157,7 @@ import { createDeploymentApi } from "../trpc/deployment-api";
 import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
-import { createRuntimeApi } from "../trpc/runtime-api";
+import { createRuntimeApi, type TaskSessionStopRequestScope } from "../trpc/runtime-api";
 import { createTaskCardActionApi } from "../trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
@@ -1101,12 +1101,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		| ((workspaceId: string, taskId: string) => Promise<void>)
 		| undefined;
 	let recordTaskEditorCreationStop: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
-	let cancelOwnedCommandExecutionsForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	let applyOwnedCommandExecutionPolicyForSessionStopRequest:
+		| ((workspaceId: string, taskId: string, stopRequestScope?: TaskSessionStopRequestScope) => Promise<void>)
+		| undefined;
 	const runtimeApi = createRuntimeApi({
 		recordManagedTaskPromptDeliveries: true,
-		onTaskSessionStopRequested: async (workspaceId, taskId) => {
+		onTaskSessionStopRequested: async (workspaceId, taskId, stopRequestScope) => {
 			try {
-				await cancelOwnedCommandExecutionsForStoppedTask?.(workspaceId, taskId);
+				await applyOwnedCommandExecutionPolicyForSessionStopRequest?.(workspaceId, taskId, stopRequestScope);
 				await recordProgrammaticReviewExplicitUserStopObservations({
 					workspaceId,
 					workspaceTaskId: taskId,
@@ -1424,10 +1426,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		listWorkspaceIds: async () => (await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
 		warn: deps.warn,
 	});
-	cancelOwnedCommandExecutionsForStoppedTask = taskCommandExecutionApi.cancelForTask;
-	const stopObservingOwnedCommandExecutionUserStops = observeUserStopBeforeOwnedCommandExecutionTerminalInterrupt(
-		taskCommandExecutionApi.cancelForTask,
-	);
+	applyOwnedCommandExecutionPolicyForSessionStopRequest = (workspaceId, taskId, stopRequestScope) =>
+		stopRequestScope === "current_agent_turn"
+			? taskCommandExecutionApi.handleOwnerSessionInterrupt(workspaceId, taskId)
+			: taskCommandExecutionApi.cancelForTask(workspaceId, taskId);
+	const stopObservingOwnedCommandExecutionOwnerSessionInterrupts =
+		observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt(
+			taskCommandExecutionApi.handleOwnerSessionInterrupt,
+		);
 
 	codexConfigurationSyncService.start();
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
@@ -2189,7 +2195,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			queuedTaskPromptDeliveryDispatcher.stop();
 		}
 		taskCommandExecutionApi.stop();
-		stopObservingOwnedCommandExecutionUserStops();
+		stopObservingOwnedCommandExecutionOwnerSessionInterrupts();
 		unregisterQueuedTaskPromptDeliveryDispatchObserver();
 		stopObservingManagedTaskPromptDeliveries();
 	};
