@@ -11,6 +11,7 @@ import {
 } from "../core/independent-task-creation-contract";
 import { resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
+import { isExplicitFreshTaskConversationSessionContext } from "../core/task-conversation-session-context-source";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import type { KanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
@@ -221,11 +222,17 @@ export function createIndependentTaskCreationService(deps: IndependentTaskCreati
 					return record.draft;
 				}
 				const artifactDirectory = independentTaskCreationArtifactDirectory(scope.workspaceId, input.requestId);
-				const originId =
-					source.taskConversationSessionMetadata.sideSessionOriginMainSessionId ??
-					source.taskConversationSessionMetadata.parentTaskConversationSessionId ??
-					resolveMainTaskConversationSessionId(card);
-				const parent = deps.findSession?.(scope.workspaceId, originId) ?? state.sessions[originId] ?? null;
+				const sourceMetadata = source.taskConversationSessionMetadata;
+				const originId = isExplicitFreshTaskConversationSessionContext(sourceMetadata)
+					? null
+					: (sourceMetadata.contextSourceTaskConversationSessionId ??
+						sourceMetadata.creatorTaskConversationSessionId ??
+						sourceMetadata.sideSessionOriginMainSessionId ??
+						sourceMetadata.parentTaskConversationSessionId ??
+						resolveMainTaskConversationSessionId(card));
+				const parent = originId
+					? (deps.findSession?.(scope.workspaceId, originId) ?? state.sessions[originId] ?? null)
+					: null;
 				let sourceContextSnapshotWasCaptured = false;
 				try {
 					const context = await (deps.captureContext ?? captureIndependentTaskSourceContext)({

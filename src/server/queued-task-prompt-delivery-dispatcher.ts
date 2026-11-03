@@ -133,6 +133,10 @@ const INJECTION_LEDGER_RECEIPT_WHEN_DELIVERY_OUTCOME_IS_UNKNOWN = {
 } as const;
 
 export interface QueuedTaskPromptDeliveryDispatcherDependencies {
+	isTaskConversationSessionReportExecutionAllowed?: (
+		workspaceId: string,
+		origin: NonNullable<QueuedTaskPromptDeliveryEntry["taskConversationSessionReportOrigin"]>,
+	) => Promise<boolean>;
 	// 三 transport 合并后的会话摘要（runtime-server 的 findRuntimeSessionSummary）。
 	getTaskSessionSummary: (workspaceId: string, taskId: string) => RuntimeTaskSessionSummary | null;
 	// 仅 PTY 有意义；没有终端会话的 task 恒返回 false。
@@ -242,6 +246,24 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 
 	const knownWorkspaceIds = new Set<string>();
 	const cachedSnapshotByWorkspaceId = new Map<string, WorkspaceQueuedTaskPromptDeliverySnapshot>();
+	const reportExecutionQualificationByWorkspaceAndEntryId = new Map<string, Map<string, boolean>>();
+	const refreshReportExecutionQualification = async (
+		workspaceId: string,
+		entry: QueuedTaskPromptDeliveryEntry,
+	): Promise<boolean> => {
+		if (!entry.taskConversationSessionReportOrigin) return true;
+		const allowed =
+			(await deps
+				.isTaskConversationSessionReportExecutionAllowed?.(workspaceId, entry.taskConversationSessionReportOrigin)
+				.catch(() => false)) ?? false;
+		let qualifications = reportExecutionQualificationByWorkspaceAndEntryId.get(workspaceId);
+		if (!qualifications) {
+			qualifications = new Map();
+			reportExecutionQualificationByWorkspaceAndEntryId.set(workspaceId, qualifications);
+		}
+		qualifications.set(entry.queueEntryId, allowed);
+		return allowed;
+	};
 	const snapshotLoadByWorkspaceId = new Map<string, Promise<WorkspaceQueuedTaskPromptDeliverySnapshot>>();
 	const previousStopEventIdentityByTaskKey = new Map<string, string | null>();
 	const handedOffAtTurnKeyByTaskKey = new Map<string, string>();
@@ -339,6 +361,14 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 	const rememberSnapshot = (workspaceId: string, snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot): void => {
 		knownWorkspaceIds.add(workspaceId);
 		cachedSnapshotByWorkspaceId.set(workspaceId, snapshot);
+		const reportIds = new Set(
+			Object.values(snapshot.entriesByTaskId)
+				.flat()
+				.filter((entry) => entry.taskConversationSessionReportOrigin)
+				.map((entry) => entry.queueEntryId),
+		);
+		for (const id of reportExecutionQualificationByWorkspaceAndEntryId.get(workspaceId)?.keys() ?? [])
+			if (!reportIds.has(id)) reportExecutionQualificationByWorkspaceAndEntryId.get(workspaceId)?.delete(id);
 		armProgrammaticInjectionDeadlineTimer(workspaceId, snapshot);
 		if (stopped) return;
 		for (const [taskId, entries] of Object.entries(snapshot.entriesByTaskId)) {
@@ -385,7 +415,7 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		return snapshot;
 	};
 
-	const resolveBlockReasonForEntry = (
+	const resolveSessionBlockReasonForEntry = (
 		workspaceId: string,
 		entry: QueuedTaskPromptDeliveryEntry,
 		summary: RuntimeTaskSessionSummary | null,
@@ -400,6 +430,17 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 			nowEpochMs: now(),
 			thisRuntimeProcessInstanceId: custody?.thisRuntimeProcessInstanceId ?? null,
 		});
+
+	const resolveBlockReasonForEntry = (
+		workspaceId: string,
+		entry: QueuedTaskPromptDeliveryEntry,
+		summary: RuntimeTaskSessionSummary | null,
+	): QueuedTaskPromptDispatchBlockReason | null =>
+		resolveSessionBlockReasonForEntry(workspaceId, entry, summary) ??
+		(entry.taskConversationSessionReportOrigin &&
+		reportExecutionQualificationByWorkspaceAndEntryId.get(workspaceId)?.get(entry.queueEntryId) !== true
+			? "session_report_execution_qualification_pending"
+			: null);
 
 	const buildProjectedEntriesByTaskId = async (
 		workspaceId: string,
@@ -578,6 +619,13 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		}
 		// 锁外的廉价预判：绝大多数触发都会在这里被挡下（agent 还在干活），不值得为它抢文件锁。
 		const headEntry = awaitingEntries[0];
+		if (
+			headEntry?.taskConversationSessionReportOrigin &&
+			resolveSessionBlockReasonForEntry(workspaceId, headEntry, summary) === null
+		) {
+			await refreshReportExecutionQualification(workspaceId, headEntry);
+			await broadcastProjectionIfChanged(workspaceId);
+		}
 		if (headEntry === undefined || resolveBlockReasonForEntry(workspaceId, headEntry, summary) !== null) {
 			return;
 		}
@@ -751,6 +799,8 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		}
 
 		const validateHandedOffQueueEntryAndSessionBindingBeforeTerminalWrite = async (): Promise<void> => {
+			if (!(await refreshReportExecutionQualification(workspaceId, claimedHead)))
+				throw new Error("侧会话回报目标的任务执行资格已改变，未写入。");
 			if (stopped) throw new Error("运行时已停止投递，未继续写入终端。");
 			const fresh = await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId);
 			const current = fresh.entriesByTaskId[taskId]?.find(

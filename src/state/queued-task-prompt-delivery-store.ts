@@ -1167,6 +1167,20 @@ export async function stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart(
 							settledProgrammaticInjectionCount += 1;
 							return settleExpiredQueuedTaskPromptDeliveryEntry(entry, nowEpochMs);
 						}
+						// 侧会话的持久回报意图可接管尚未交给 transport 的条目；已开始的尝试沿原接受补证链。
+						const reportOrigin = entry.taskConversationSessionReportOrigin;
+						if (
+							reportOrigin &&
+							entry.deliveryState === "queued" &&
+							entry.deliveryAttemptCount === 0 &&
+							!entry.dispatchIdempotencyKey &&
+							input.custodianLivenessObservationAvailable !== false &&
+							reportOrigin.targetTaskConversationSessionId === entry.taskId &&
+							reportOrigin.workspaceTaskId === entry.workspaceTaskId
+						) {
+							recoveredPreflightQueryCustodyCount += 1;
+							return { ...entry, custodianRuntimeProcessInstanceId: input.sweepingRuntimeProcessInstanceId };
+						}
 						const recovery = resolveNativeIndependentUserTurnPreflightRestartRecovery({
 							entry,
 							summary: input.currentTaskSessionSummariesByTaskId?.get(taskId),

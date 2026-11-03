@@ -25,12 +25,14 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 	"真实 Codex 的持久提交接受补证（本地模型）",
 	{ timeout: 120_000 },
 	() => {
-		it("已结束回合的原生 UserMessage 自动清除旧标记，不发布新输入或改变交棒", async (test) => {
+		it("已结束回合的真实多行 UserMessage 自动清除持久标记，不发布新输入或改变交棒", async (test) => {
 			const fixture = createIsolatedGitTestWorkspaceFixture({ fixtureRootDirectoryNamePrefix: "kca-fact-" });
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "acceptance-facts" });
 			const codexHome = join(fixture.fixtureRootDirectoryPath, "codex-home");
 			await mkdir(codexHome);
 			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+			vi.stubEnv("CODEX_HOME", codexHome);
+			vi.stubEnv("CODEX_SQLITE_HOME", codexHome);
 			vi.stubEnv("TMPDIR", "/tmp");
 			let modelRequestCount = 0;
 			const server = createServer(async (request, response) => {
@@ -77,7 +79,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 			);
 			const manager = new TerminalSessionManager({ prepareCodexNativeSessionControlHostLaunch });
 			const taskId = "isolated-acceptance-facts";
-			const prompt = "PROMPT_ACCEPTANCE_FACTS_FIXTURE";
+			const prompt = "PROMPT_ACCEPTANCE_FACTS_FIXTURE\n  保留  连续空格\n\t缩进";
 			const current = () => manager.getSummary(taskId) as RuntimeTaskSessionSummary;
 			const onAccepted = vi.fn();
 			const observer = createNativeAgentConversationActivityObserver({
@@ -110,6 +112,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 					workspaceId: "isolated-acceptance",
 					env: fixture.createIsolatedChildProcessEnvironment({
 						CODEX_HOME: codexHome,
+						CODEX_SQLITE_HOME: codexHome,
 						TERM: "xterm-256color",
 						CODEX_INTERNAL_ORIGINATOR_OVERRIDE: undefined,
 					}),
@@ -119,6 +122,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				manager.markAgentConversationPromptSubmissionPending(taskId, current().startedAt ?? Date.now(), {
 					source: "harness_submit_hook",
 					submittedPromptText: prompt,
+					submittedPromptTextNormalization: "preserve_internal_whitespace",
 				});
 				await waitForConditionWithinLoadSensitiveTwoTierDeadline(
 					test,

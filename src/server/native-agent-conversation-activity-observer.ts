@@ -1,7 +1,11 @@
 import { type FSWatcher, type Stats, unwatchFile, watch, watchFile } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
-import type { CodexPromptSubmissionAcceptanceReconciliation } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
+import {
+	type CodexPromptSubmissionAcceptanceReconciliation,
+	requiresLegacyHookPromptTextNormalizationReconciliation,
+	shouldRestartLegacyHookPromptAcceptanceReconciliation,
+} from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 // summary 更新和提交候选仅唤醒原生核验，不构成输入接受证据。
 
 import type { CodexCurrentNativeTurnToolActivityReadCursor } from "../agent-session-history/codex-current-native-turn-tool-activity-reader";
@@ -235,7 +239,7 @@ export function createNativeAgentConversationActivityObserver(
 			observeTranscriptFileChanges(state, summary.agentNativeConversationSessionIdentity.transcriptPath);
 		if (state.acceptanceReconciliationRetryTimer) return;
 		const next = pending.verification?.nextCheckAtMs;
-		if (next === null) return;
+		if (next === null && !shouldRestartLegacyHookPromptAcceptanceReconciliation(pending)) return;
 		state.acceptanceReconciliationRetryTimer = setTimeout(
 			() => {
 				state.acceptanceReconciliationRetryTimer = null;
@@ -402,6 +406,9 @@ export function createNativeAgentConversationActivityObserver(
 			const pendingVerification = summaryBeforeRead.agentConversationPromptSubmissionAcceptance?.verification;
 			const shouldReconcilePromptSubmissionAcceptance =
 				forceAcceptanceReconciliation ||
+				shouldRestartLegacyHookPromptAcceptanceReconciliation(
+					summaryBeforeRead.agentConversationPromptSubmissionAcceptance,
+				) ||
 				!pendingVerification ||
 				(pendingVerification.nextCheckAtMs !== null && nowMs() >= pendingVerification.nextCheckAtMs);
 			// 状态未知只退避独立执行查询；消息活动和接受证据仍按自身冷却期读取。
@@ -533,6 +540,21 @@ export function createNativeAgentConversationActivityObserver(
 							if (event.eventId) state.successfullyAppliedAcceptedUserInputEventIds.add(event.eventId);
 							if (!hasReplacementSubmissionCandidate()) state.candidateExpiresAtMs = null;
 						}
+					}
+					// 实时事件仍按自身事实处理；旧有损候选只通过已完成唯一性核验的历史出口确认。
+					if (
+						reconciliation &&
+						acceptedInputWillBeProcessedAsLiveEvent &&
+						isReadStillCurrent() &&
+						requiresLegacyHookPromptTextNormalizationReconciliation(
+							summaryBeforeRead.agentConversationPromptSubmissionAcceptance,
+						)
+					) {
+						await options.onPromptSubmissionAcceptanceReconciliation?.(
+							summaryBeforeRead.taskId,
+							state.workspaceId,
+							reconciliation,
+						);
 					}
 					// 下游写入成功后才提交读取游标；失败可按同一事件身份重试，不丢接受边沿。
 					state.cursor = result.cursor;

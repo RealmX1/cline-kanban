@@ -16,6 +16,12 @@ import {
 	codexConfigurationTaskSourceSnapshotSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
+import {
+	createDefaultNonThrowingLockCompromiseHandler,
+	DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
+	DEFAULT_LOCK_STALE_MS,
+	releaseAdvisoryFileLock,
+} from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
@@ -398,10 +404,21 @@ export async function mutateCodexConfigurationSyncStore<T>(
 	const directory = getCodexConfigurationSyncDirectory();
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	if ((await lstat(directory)).isSymbolicLink()) throw new Error("Codex 配置绑定目录被替换，已保留现场。");
-	const release = await lockfile.lock(directory, {
-		realpath: false,
-		retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
-	});
+	const lockAcquisitionStartedAtMs = performance.now();
+	const lockfilePath = `${directory}.lock`;
+	const release = await lockfile
+		.lock(directory, {
+			realpath: false,
+			stale: DEFAULT_LOCK_STALE_MS,
+			retries: DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
+			// 与统一锁封装相同：失效回调不得抛出，否则定时器里的默认 throw 会杀掉整个运行时。
+			onCompromised: createDefaultNonThrowingLockCompromiseHandler(lockfilePath),
+		})
+		.catch((error: unknown) => {
+			if (error instanceof Error)
+				error.message = `Codex 配置存储取锁失败：lockPath=${lockfilePath} phase=lock_acquisition waitedMs=${Math.round(performance.now() - lockAcquisitionStartedAtMs)}；${error.message}`;
+			throw error;
+		});
 	const pendingPath = join(directory, `${randomUUID()}.pending-configuration-sync-state.json`);
 	try {
 		const { store, persistedSerializedContent } = await readCodexConfigurationSyncStoreWithPersistedContent();
@@ -429,6 +446,7 @@ export async function mutateCodexConfigurationSyncStore<T>(
 		return result;
 	} finally {
 		await rm(pendingPath, { force: true });
-		await release();
+		// compromise 之后 release 会以 ERELEASED 拒绝；吞掉该良性失败，避免已完成的配置写或 resume 被这次善后拖失败。
+		await releaseAdvisoryFileLock(release, lockfilePath);
 	}
 }

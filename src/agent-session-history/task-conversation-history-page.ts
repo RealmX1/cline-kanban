@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { type FileHandle, open, realpath, stat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import Database from "better-sqlite3";
 import { z } from "zod";
 import {
@@ -91,6 +93,13 @@ function projectNativeHistoryRecord(
 	const message = agentId === "cursor" ? { ...rawMessage, role: payload.role } : rawMessage;
 	const rawTimestamp = record.timestamp ?? message.timestamp;
 	const timestamp = typeof rawTimestamp === "number" ? rawTimestamp : Date.parse(String(rawTimestamp ?? ""));
+	const nativeMessageId = [record.uuid, message.id, payload.id].find(
+		(value): value is string => typeof value === "string" && value.length > 0,
+	);
+	const nativeMessageIdentity = nativeMessageId
+		? `native-id:${nativeMessageId}`
+		: `native-record:${createHash("sha256").update(JSON.stringify(record)).digest("hex")}`;
+	const nativeMessagePhase = typeof message.phase === "string" ? message.phase : undefined;
 	const messages: RuntimeTaskChatMessage[] = [];
 	const append = (role: RuntimeTaskChatMessage["role"], content: string, toolName?: string, toolCallId?: string) => {
 		if (!content.trim()) return;
@@ -104,7 +113,7 @@ function projectNativeHistoryRecord(
 			role,
 			content,
 			createdAt: Number.isFinite(timestamp) ? timestamp : 0,
-			meta: { toolName, toolCallId },
+			meta: { toolName, toolCallId, ...(role === "assistant" ? { nativeMessageIdentity, nativeMessagePhase } : {}) },
 		});
 	};
 	const user =
@@ -305,6 +314,56 @@ export interface LoadTaskConversationHistoryPageInput {
 	onVerifiedTranscriptSegment?: (transcriptPath: string) => void;
 }
 
+const requireNodeModule = createRequire(import.meta.url);
+
+function isBetterSqliteNativeAbiMismatch(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("NODE_MODULE_VERSION");
+}
+
+function isBuiltinSqliteDatabaseUnavailable(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("unable to open database file");
+}
+
+// 共享安装的 better-sqlite3 可能只对应另一个 Node ABI。打不开时改读运行时自带 sqlite 的同一只读指针；库文件缺失仍交给唯一历史入口回退。
+function readCodexThreadRolloutPath(databasePath: string, nativeSessionId: string): string | undefined {
+	let nativeCodexStateDatabase: Database.Database | null = null;
+	try {
+		nativeCodexStateDatabase = new Database(databasePath, { readonly: true, fileMustExist: true });
+		const row = nativeCodexStateDatabase
+			.prepare("SELECT rollout_path FROM threads WHERE id = ?")
+			.get(nativeSessionId);
+		if (!row) return undefined;
+		return z.object({ rollout_path: z.string() }).parse(row).rollout_path;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "SQLITE_CANTOPEN") return undefined;
+		if (!isBetterSqliteNativeAbiMismatch(error)) throw error;
+		return readCodexThreadRolloutPathWithBuiltinSqlite(databasePath, nativeSessionId);
+	} finally {
+		nativeCodexStateDatabase?.close();
+	}
+}
+
+function readCodexThreadRolloutPathWithBuiltinSqlite(
+	databasePath: string,
+	nativeSessionId: string,
+): string | undefined {
+	let database: DatabaseSync | null = null;
+	try {
+		const { DatabaseSync: BuiltinDatabaseSync } = requireNodeModule("node:sqlite") as {
+			DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => DatabaseSync;
+		};
+		database = new BuiltinDatabaseSync(databasePath, { readOnly: true });
+		const row = database.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(nativeSessionId);
+		if (!row) return undefined;
+		return z.object({ rollout_path: z.string() }).parse(row).rollout_path;
+	} catch (error) {
+		if (isBuiltinSqliteDatabaseUnavailable(error)) return undefined;
+		throw error;
+	} finally {
+		database?.close();
+	}
+}
+
 async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summary: RuntimeTaskSessionSummary) {
 	const nativeConversationIdentity = summary.agentNativeConversationSessionIdentity;
 	if (
@@ -328,22 +387,10 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 	)
 		return summary;
 	// 正式迁移或回退后，旧 summary 的路径可以已归档或过期；只读原生当前指针，不启动 agent 或猜选分片。
-	let nativeCodexStateDatabase: Database.Database | null = null;
-	let authoritativeTranscriptPath: string | undefined;
-	try {
-		nativeCodexStateDatabase = new Database(
-			join(authoritativeCodexConversationStorageHomeDirectoryPath, "state_5.sqlite"),
-			{ readonly: true, fileMustExist: true },
-		);
-		const row = nativeCodexStateDatabase
-			.prepare("SELECT rollout_path FROM threads WHERE id = ?")
-			.get(nativeConversationIdentity.nativeSessionId);
-		if (row) authoritativeTranscriptPath = z.object({ rollout_path: z.string() }).parse(row).rollout_path;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "SQLITE_CANTOPEN") throw error;
-	} finally {
-		nativeCodexStateDatabase?.close();
-	}
+	let authoritativeTranscriptPath = readCodexThreadRolloutPath(
+		join(authoritativeCodexConversationStorageHomeDirectoryPath, "state_5.sqlite"),
+		nativeConversationIdentity.nativeSessionId,
+	);
 	if (!authoritativeTranscriptPath) {
 		const candidates = (
 			await listKnownCodexTranscriptSegmentPaths(

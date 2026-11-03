@@ -237,6 +237,20 @@ describe("卡片头部时长药丸", () => {
 		);
 		expect(host.querySelector('[role="status"]')?.textContent).toContain("提交待确认");
 	});
+	it("主卡与 Focus View 共用的卡片正文使用中性补证提示，确认后消失", () => {
+		const acceptance = {
+			status: "unconfirmed" as const,
+			attemptedAtMs: NOW - 60_000,
+			runtimeSessionIncarnationId: "current-process",
+		};
+		const host = renderCard(createSummary({ agentConversationPromptSubmissionAcceptance: acceptance }));
+		const status = host.querySelector('[role="status"]');
+		expect(status?.textContent).toBe("输入确认待补证");
+		expect(status?.className).toContain("text-text-secondary");
+		expect(status?.getAttribute("title")).toContain("最近一次提交候选");
+		renderCard(createSummary({ agentConversationPromptSubmissionAcceptance: { ...acceptance, status: "accepted" } }));
+		expect(host.querySelector('[role="status"]')).toBeNull();
+	});
 
 	it("恢复后药丸读取历史交棒与统一活动，进程待命起点不能刷新它们", () => {
 		const host = renderCard(

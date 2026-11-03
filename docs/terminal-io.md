@@ -112,8 +112,9 @@ Kanban 的 PTY 是一个全新的终端（前端 xterm.js），不是宿主 tmux
 ## 6. Codex 程序化投递保留当前草稿
 
 `session-manager` 对已启动的 Codex 普通文字优先调用 `codex-native-prompt-delivery.ts`，通过当前 TUI 独享的
-控制端点执行 `turn/start`。投递不读写 composer 正文，也不更改 `VISUAL`、`EDITOR` 或 Ctrl+G：用户手动打开的
-外部编辑器仍由 Codex 调用。草稿原地保留，不进入 Prompt Library。本路线不扩展附件存储；启动交接与 slash
+控制端点执行 `turn/start`。投递不读写 composer 正文，不依赖草稿导出或编辑器暂存。用户手动 Ctrl+G 仍打开原
+编辑器；Ctrl+S／Cmd+S 的进程专属桥接与回执恢复另见 `docs/codex-draft-stash-to-prompts.md`。注入时草稿原地保留，
+不进入 Prompt Library。本路线不扩展附件存储；启动交接与 slash
 命令仍走既有终端路线。
 
 提交前检查 workspace、conversation session、本代 incarnation、原生 thread 与 cwd；只使用已经加载且没有

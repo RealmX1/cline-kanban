@@ -119,6 +119,50 @@ describe("独立任务上下文的固定来源身份", () => {
 		expect(context.warnings).toEqual([]);
 	});
 
+	it("从 peer 再分出的会话按通用来源身份读取，不混入当前主会话", async () => {
+		const fixture = createSourceContextFixture();
+		const source = {
+			...fixture.source,
+			taskConversationSessionMetadata: {
+				...fixture.source.taskConversationSessionMetadata,
+				contextSourceTaskConversationSessionId: "origin-peer",
+				contextSourceNativeSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId: "origin-peer-native",
+					transcriptPath: fixture.originTranscriptPath,
+				},
+			},
+		};
+		const context = await captureIndependentTaskSourceContext({ ...fixture, source });
+		expect(context.before.map((message) => message.text)).toEqual(["固定来源主会话正文"]);
+		expect(context.warnings).toEqual([]);
+	});
+
+	it("fresh 侧会话不把创建者历史整理成起点前上下文", async () => {
+		const fixture = createSourceContextFixture();
+		const context = await captureIndependentTaskSourceContext({
+			...fixture,
+			source: {
+				...fixture.source,
+				taskConversationSessionMetadata: {
+					...fixture.source.taskConversationSessionMetadata,
+					contextSourceSelectionAtCreation: "fresh",
+					creatorTaskConversationSessionId: "main",
+					creatorNativeConversationSessionIdentity: {
+						sourceAgentId: "codex",
+						nativeSessionId: fixture.parentIdentity.nativeSessionId,
+						transcriptPath: fixture.parentIdentity.transcriptPath,
+					},
+					sideSessionOriginMainNativeSessionId: undefined,
+					sideSessionOriginMainAgentId: undefined,
+				},
+			},
+		});
+		expect(context.before).toEqual([]);
+		expect(context.after.map((message) => message.text)).toEqual(["侧会话正文"]);
+		expect(context.warnings.join("\n")).not.toContain("主会话");
+	});
+
 	it("缺少固定原生身份的存量记录可以回退，但必须明示来源未被确认", async () => {
 		const fixture = createSourceContextFixture();
 		const context = await captureIndependentTaskSourceContext({

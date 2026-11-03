@@ -306,64 +306,49 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		[currentProjectId],
 	);
 
+	const sideSessionCreationRequestsRef = useRef(new Map<string, { fingerprint: string; idempotencyKey: string }>());
 	const createTaskConversationSession = useCallback(
 		async (input: CreateTaskConversationSessionInput): Promise<StartTaskSessionResult> => {
 			if (!currentProjectId) {
 				return { ok: false, message: "No project selected." };
 			}
 			const sessionRole = input.sessionRole ?? "by_the_way";
-			const isTaskCollaborator = sessionRole === "task_collaborator";
-			const initialUserQuestion = input.initialUserQuestion.trim();
-			const sessionTitle = isTaskCollaborator ? "协作会话" : "By the way";
-			const taskConversationSessionId = `task-conversation-session-${createRandomUuidV4WithInsecureContextFallback()}`;
+			const request = {
+				taskId: input.task.id,
+				sessionRole,
+				agentId: input.agentId,
+				contextSource:
+					input.contextSource === "started_from_scratch" ? ("fresh" as const) : ("current_main" as const),
+				initialMessage: input.initialUserQuestion.trim(),
+				creationReason: "用户在 Sessions 中创建侧会话",
+				creatorTaskConversationSessionId: resolveMainTaskConversationSessionId(input.task),
+				codexConfigurationProfileId: input.codexConfigurationProfileId,
+			};
+			const fingerprint = JSON.stringify(request);
+			const previous = sideSessionCreationRequestsRef.current.get(input.task.id);
+			const idempotencyKey =
+				previous?.fingerprint === fingerprint
+					? previous.idempotencyKey
+					: createRandomUuidV4WithInsecureContextFallback();
+			sideSessionCreationRequestsRef.current.set(input.task.id, { fingerprint, idempotencyKey });
 			try {
-				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(taskConversationSessionId);
+				const geometry = resolveAgentTerminalGeometryForTaskSessionSpawn(input.task.id);
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
-				const payload = await trpcClient.runtime.startTaskSession.mutate({
-					taskId: taskConversationSessionId,
-					workspaceTaskId: input.task.id,
-					codexConfigurationProfileId: input.codexConfigurationProfileId ?? input.task.codexConfigurationProfileId,
-					codexConfigurationPermissionSelectionSource: input.codexConfigurationProfileId
-						? "profile"
-						: input.task.codexConfigurationPermissionSelectionSource,
-					prompt: initialUserQuestion,
-					taskTitle: initialUserQuestion ? `${sessionTitle}: ${initialUserQuestion.slice(0, 80)}` : sessionTitle,
-					baseRef: input.task.baseRef,
+				const payload = await trpcClient.runtime.createTaskConversationSession.mutate({
+					...request,
+					idempotencyKey,
 					cols: geometry.cols,
 					rows: geometry.rows,
-					agentId: input.agentId,
-					clineSettings: isTaskCollaborator ? undefined : input.task.clineSettings,
-					terminalAgentModelOverrideSettings: isTaskCollaborator
-						? undefined
-						: input.task.terminalAgentModelOverrideSettings,
-					...(isTaskCollaborator
-						? {
-								taskAgentPermissionMode: input.task.taskAgentPermissionMode,
-								startInPlanMode: input.task.startInPlanMode,
-							}
-						: {}),
-					// By the way 侧会话刻意不传 taskConversationMode：它被 system prompt/adapter 强制
-					// 只读（无命令执行），exploratory 注入的「kanban exploratory CLI 写回 map」维护协议
-					// 永远履行不了。省略 = 服务端缺省 operational（api-contract startTaskSession 注释）。
-					...(input.task.worktreeMode ? { worktreeMode: input.task.worktreeMode } : {}),
-					taskConversationSessionMetadata: {
-						workspaceTaskId: input.task.id,
-						taskConversationSessionRole: sessionRole,
-						taskConversationSessionContextSource: input.contextSource,
-						parentTaskConversationSessionId:
-							input.contextSource === "forked_from_main_current_turn"
-								? resolveMainTaskConversationSessionId(input.task)
-								: null,
-						mainSessionOriginTurnNumber: input.mainSessionOriginTurnNumber,
-						mainSessionOriginUserMessagePreview: input.mainSessionOriginUserMessagePreview,
-						latestUserMessagePreview: initialUserQuestion || null,
-					},
 				});
 				if (!payload.ok || !payload.summary) {
-					return { ok: false, message: payload.error ?? "无法创建会话。" };
+					return { ok: false, message: payload.error ?? payload.creation?.notice ?? "无法创建会话。" };
 				}
 				upsertSessionUnlessProjectSwitchedSinceRequest(currentProjectId, payload.summary);
-				return { ok: true, taskConversationSessionId };
+				sideSessionCreationRequestsRef.current.delete(input.task.id);
+				return {
+					ok: true,
+					taskConversationSessionId: payload.creation?.taskConversationSessionId ?? payload.summary.taskId,
+				};
 			} catch (error) {
 				return { ok: false, message: error instanceof Error ? error.message : String(error) };
 			}

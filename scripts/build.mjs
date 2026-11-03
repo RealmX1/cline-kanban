@@ -138,6 +138,12 @@ try {
 			const javascript = result.outputFiles.find((file) => file.path.endsWith("kanban-agent-hook-cli.js"));
 			if (!javascript || javascript.contents.length > 2_500_000) throw new Error("轻量 hook 入口超过 2.5 MB 构建预算");
 		}),
+		// 独立部署执行器不依赖被替换的 runtime 或 Agent 进程。
+		buildBundleIntoStagingDirectory({
+			...shared,
+			entryPoints: ["src/deployment/local-deployment-execution-command-line.ts"],
+			outfile: join(distributionDirectoryPath, "local-deployment-execution.js"),
+		}),
 		// Library export
 		buildBundleIntoStagingDirectory({
 			...shared,
@@ -153,6 +159,11 @@ try {
 		// agent session PTY host（独立长驻进程，持有 agent 会话的 PTY master）
 		buildBundleIntoStagingDirectory({
 			...shared,
+			entryPoints: ["src/terminal/codex-draft-stash-editor-process-entry.ts"],
+			outfile: join(distributionDirectoryPath, "codex-draft-stash-editor.js"),
+		}),
+		buildBundleIntoStagingDirectory({
+			...shared,
 			entryPoints: ["src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts"],
 			outfile: join(distributionDirectoryPath, "agent-session-pty-host.js"),
 			metafile: true,
@@ -160,7 +171,7 @@ try {
 	]);
 
 	console.log(
-		"esbuild：已打包 cli.js、kanban-agent-hook-cli.js、index.js、agent-session-pty-host.js 和 codex-native-session-control-host.js",
+		"esbuild：已打包 cli.js、kanban-agent-hook-cli.js、index.js、agent-session-pty-host.js、codex-native-session-control-host.js 和 codex-draft-stash-editor.js",
 	);
 
 	await copyFile(

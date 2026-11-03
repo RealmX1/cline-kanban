@@ -20,6 +20,10 @@ import {
 	readWireControlMessageType,
 	type TerminateAllHostedSessionsIfNoControllerOutcome,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
+import {
+	describeAgentSessionPtyHostResponseDeadlineExceeded,
+	scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo,
+} from "./agent-session-pty-host-response-deadline-after-pending-socket-io";
 
 // runtime spawn hosted 会话时注入：会话所在 host 的 socket 路径与会话 key。名字只增不改（存活会话里冻结着旧值）。
 export const AGENT_SESSION_PTY_HOST_SOCKET_PATH_ENVIRONMENT_VARIABLE_NAME = "KANBAN_AGENT_SESSION_PTY_HOST_SOCKET_PATH";
@@ -57,6 +61,7 @@ function sendOneHostedSessionCliClientRequest(
 	responseDeadlineMilliseconds: number,
 ): Promise<{ kind: "responded"; response: unknown } | HostedSessionCliClientRequestFailure> {
 	const requestId = randomUUID();
+	const request = buildRequest(requestId);
 	return new Promise((resolve) => {
 		let settled = false;
 		const socket = createConnection(agentSessionPtyHostSocketPath);
@@ -65,16 +70,18 @@ function sendOneHostedSessionCliClientRequest(
 				return;
 			}
 			settled = true;
-			clearTimeout(deadlineTimer);
+			cancelResponseDeadline();
 			socket.destroy();
 			resolve(result);
 		};
-		const deadlineTimer = setTimeout(() => {
-			settle({
-				kind: "agent_session_pty_host_unreachable",
-				failureMessage: `agent session pty host did not respond within ${responseDeadlineMilliseconds}ms`,
-			});
-		}, responseDeadlineMilliseconds);
+		const cancelResponseDeadline = scheduleAgentSessionPtyHostResponseDeadlineAfterPendingSocketIo(
+			responseDeadlineMilliseconds,
+			(observation) =>
+				settle({
+					kind: "agent_session_pty_host_unreachable",
+					failureMessage: describeAgentSessionPtyHostResponseDeadlineExceeded(request.type, observation),
+				}),
+		);
 		const decoder = new AgentSessionPtyHostWireFrameDecoder();
 		socket.once("connect", () => {
 			socket.write(
@@ -84,7 +91,7 @@ function sendOneHostedSessionCliClientRequest(
 					hostedSessionCliClientProcessId: process.pid,
 				} satisfies AgentSessionPtyHostHostedSessionCliClientToHostMessage),
 			);
-			socket.write(encodeJsonControlMessageFrame(buildRequest(requestId)));
+			socket.write(encodeJsonControlMessageFrame(request));
 		});
 		socket.on("data", (chunk: Buffer) => {
 			let frames: ReturnType<AgentSessionPtyHostWireFrameDecoder["push"]>;
