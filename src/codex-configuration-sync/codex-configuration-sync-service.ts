@@ -77,6 +77,8 @@ import {
 	codexNativeTurnPermissionTranscriptFingerprintStillCurrent,
 	readCodexNativeTurnPermissionEvidence,
 } from "./codex-native-turn-permission-evidence";
+import { recoverPendingCodexSharedPluginInstallations } from "./codex-source-shared-plugin-installation-coordinator";
+import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "./codex-source-shared-plugin-installation-directories";
 
 type SessionTarget = { workspaceId: string; summary: RuntimeTaskSessionSummary };
 interface CodexConfigurationSyncServiceDependencies {
@@ -420,6 +422,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					binding.sourceHomeDirectoryPath,
 					binding.conversationStorageHomeDirectoryPath,
 					binding.sqliteHomeDirectoryPath,
+					...codexSourceSharedPluginInstallationIdentityDirectoryPaths(binding),
 				]),
 		]);
 		let preflightObservationProblem: string | null = null;
@@ -1635,6 +1638,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		scanning = (async () => {
 			await observe();
 			await recover();
+			void recoverPendingCodexSharedPluginInstallations(
+				Object.values((await readCodexConfigurationSyncStore()).writers).map((writer) => writer.binding),
+			);
 			if (!stopped) await refreshWatchers();
 			await publish();
 		})().finally(() => {
@@ -1826,6 +1832,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				preflightWriterBinding.sourceHomeDirectoryPath,
 				preflightWriterBinding.conversationStorageHomeDirectoryPath,
 				preflightWriterBinding.sqliteHomeDirectoryPath,
+				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(preflightWriterBinding),
 			]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			const requestDigest = configurationDigest(["resolve_target_conflict", input]);
