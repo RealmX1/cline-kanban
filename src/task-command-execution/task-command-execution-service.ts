@@ -12,8 +12,10 @@ import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-
 import {
 	type TaskCommandExecutionIdentityRequest,
 	type TaskCommandExecutionRecord,
+	type TaskCommandExecutionRecoveryObservationRegistrationRequest,
 	type TaskCommandExecutionSpecification,
 	type TaskCommandExecutionStartRequest,
+	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionStartRequestSchema,
 } from "../core/task-command-execution-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
@@ -72,6 +74,28 @@ export interface TaskCommandExecutionDependencies {
 }
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
+function clampedMaximumUnchangedRetries(recovery: Record<string, unknown> | null): number {
+	const declared = recovery?.maximum_unchanged_retries;
+	return typeof declared === "number" ? Math.max(0, Math.min(3, Math.floor(declared))) : 1;
+}
+
+function semanticResumeAttemptLimit(
+	includesEvidenceTransitionLaunch: boolean,
+	maximumUnchangedRetries: number,
+): number {
+	// 证据变化本身占一次派发；基线锚定只计随后的未变化重试。两者都随当前上限重算，并受三次总上限约束。
+	return includesEvidenceTransitionLaunch ? Math.min(3, 1 + maximumUnchangedRetries) : maximumUnchangedRetries;
+}
+
+function recoveryObservationConfigurationToken(record: TaskCommandExecutionRecord): string {
+	const registration = record.recoveryEvidenceObservationRegistration;
+	return JSON.stringify({
+		registrationId: registration?.registrationId ?? null,
+		command: registration?.command ?? record.specification.readOnlyRecoveryEvidenceObservationCommand ?? null,
+		mode: registration?.mode ?? record.specification.recoveryEvidenceObservationMode ?? null,
+	});
+}
+
 function canonicalTaskCommandExecutionMaterialJson(specification: TaskCommandExecutionSpecification): string {
 	const material: Record<string, unknown> = {
 		command: specification.command,
@@ -92,6 +116,8 @@ function canonicalTaskCommandExecutionMaterialJson(specification: TaskCommandExe
 	material.recoveryEvidencePaths = specification.recoveryEvidencePaths;
 	if (specification.readOnlyRecoveryEvidenceObservationCommand !== undefined)
 		material.readOnlyRecoveryEvidenceObservationCommand = specification.readOnlyRecoveryEvidenceObservationCommand;
+	if (specification.recoveryEvidenceObservationMode !== undefined)
+		material.recoveryEvidenceObservationMode = specification.recoveryEvidenceObservationMode;
 	return JSON.stringify(material);
 }
 interface TaskCommandExecutionRevocationRequest {
@@ -223,6 +249,44 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			throw new Error("异步核验期间所属执行已撤销或托管权变化");
 		return latest;
 	};
+	const registerRecoveryEvidenceObservation = async (
+		workspaceId: string,
+		raw: TaskCommandExecutionRecoveryObservationRegistrationRequest,
+	) => {
+		const input = taskCommandExecutionRecoveryObservationRegistrationRequestSchema.parse(raw);
+		const registered = await inspect(workspaceId, input);
+		return lockedFileSystem.withLock({ path: registered.revocationFile }, async () => {
+			const record = await assertOwnership(registered);
+			if (record.materialSha256 !== input.expectedMaterialSha256)
+				throw new Error("观察器登记必须绑定原执行材料摘要");
+			const registrationId = sha256(JSON.stringify(input));
+			if (record.recoveryEvidenceObservationRegistration) {
+				if (record.recoveryEvidenceObservationRegistration.registrationId !== registrationId)
+					throw new Error("已追加的观察器不能替换；保留原登记与撤销历史");
+				return record;
+			}
+			if (record.specification.readOnlyRecoveryEvidenceObservationCommand)
+				throw new Error("原执行已冻结观察器；不能借追加登记替换");
+			await assertOwnership(record);
+			return update(workspaceId, record.executionId, (value) => ({
+				...value,
+				recoveryEvidenceObservationRegistration: {
+					registrationId,
+					boundMaterialSha256: input.expectedMaterialSha256,
+					command: input.command,
+					mode: input.mode,
+					registeredAtEpochMs: Date.now(),
+					previousRecoveryEvidenceSha256: value.lastRecoveryEvidenceSha256,
+					previousContinuationRequestId:
+						typeof value.recovery?.continuation_request_id === "string"
+							? value.recovery.continuation_request_id
+							: null,
+				},
+				lastRecoveryEvidenceSha256: null,
+				recoveryEvidenceObservationStatus: "unknown",
+			}));
+		});
+	};
 	const releaseOwnedWait = async (record: TaskCommandExecutionRecord) => {
 		await deps.unpark(record);
 		return update(record.workspaceId, record.executionId, (value) => ({ ...value, parkOwned: false }));
@@ -297,6 +361,19 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 											? 0
 											: value.unchangedRecoveryAttemptCount + 1,
 									nextRecoveryAtEpochMs: Date.now() + 30_000,
+									...(value.recoveryEvidenceAttemptBudgets?.[recoveryEvidenceSha256]
+										? {
+												recoveryEvidenceAttemptBudgets: {
+													...value.recoveryEvidenceAttemptBudgets,
+													[recoveryEvidenceSha256]: {
+														...value.recoveryEvidenceAttemptBudgets[recoveryEvidenceSha256],
+														resumeAttemptsUsed:
+															value.recoveryEvidenceAttemptBudgets[recoveryEvidenceSha256]
+																.resumeAttemptsUsed + 1,
+													},
+												},
+											}
+										: {}),
 								}),
 						launchState: "launching",
 						launchAttemptCount: value.launchAttemptCount + 1,
@@ -689,10 +766,15 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 						await launch(record);
 						return;
 					}
-					const observationCommand = record.specification.readOnlyRecoveryEvidenceObservationCommand;
+					const observationRegistration = record.recoveryEvidenceObservationRegistration;
+					const observationCommand =
+						observationRegistration?.command ?? record.specification.readOnlyRecoveryEvidenceObservationCommand;
+					const semanticObservationOnly =
+						(observationRegistration?.mode ?? record.specification.recoveryEvidenceObservationMode) ===
+						"semantic_observation_only";
 					if (
 						observationCommand &&
-						record.lastRecoveryEvidenceSha256 !== null &&
+						(record.lastRecoveryEvidenceSha256 !== null || semanticObservationOnly) &&
 						Math.max(
 							record.nextRecoveryAtEpochMs ?? 0,
 							typeof recovery?.retry_not_before_epoch_ms === "number" ? recovery.retry_not_before_epoch_ms : 0,
@@ -713,7 +795,9 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					const producerPaths = Array.isArray(record.recovery?.evidence_paths)
 						? record.recovery.evidence_paths.filter((path): path is string => typeof path === "string")
 						: [];
-					for (const path of [...record.specification.recoveryEvidencePaths, ...producerPaths]) {
+					for (const path of semanticObservationOnly
+						? []
+						: [...record.specification.recoveryEvidencePaths, ...producerPaths]) {
 						try {
 							evidence.push(sha256(await readFile(path, "utf8")));
 						} catch {
@@ -741,32 +825,95 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 						}
 						await assertOwnership(record);
 						if (stopped) return;
+						if (semanticObservationOnly) {
+							if (!/^[a-f0-9]{64}$/u.test(semanticObservation)) {
+								await update(workspaceId, executionId, (value) => ({
+									...value,
+									recoveryEvidenceObservationStatus: "unknown",
+									nextRecoveryAtEpochMs: Date.now() + 30_000,
+								}));
+								return;
+							}
+							// 诊断及进度不属于恢复输入；生产方摘要独立覆盖真实语义。
+							evidence.length = 0;
+							if (record.recoveryEvidenceObservationStatus !== "known")
+								await update(workspaceId, executionId, (value) => ({
+									...value,
+									recoveryEvidenceObservationStatus: "known",
+								}));
+						}
 						evidence.push(semanticObservation);
 					}
 					const fingerprint = sha256(JSON.stringify(evidence));
 					const changed = record.lastRecoveryEvidenceSha256 !== fingerprint;
+					const maximumUnchangedRetries = clampedMaximumUnchangedRetries(recovery);
 					const notBefore =
 						typeof record.recovery?.retry_not_before_epoch_ms === "number"
 							? record.recovery.retry_not_before_epoch_ms
 							: null;
+					const continuationRequestId =
+						typeof recovery?.continuation_request_id === "string" ? recovery.continuation_request_id : null;
+					const continuationIdentityChangedSinceRegistration =
+						observationRegistration?.previousContinuationRequestId !== undefined &&
+						observationRegistration.previousContinuationRequestId !== continuationRequestId;
+					// 登记会清空指纹以改走语义观察。同一 continuation 已消费时，首次观察只继承剩余次数。
+					const rebindConsumedContinuation =
+						semanticObservationOnly &&
+						observationRegistration?.previousRecoveryEvidenceSha256 != null &&
+						record.lastRecoveryEvidenceSha256 === null &&
+						continuationRequestId !== null &&
+						!continuationIdentityChangedSinceRegistration;
 					if (
 						result &&
 						record.lastRecoveryEvidenceSha256 === null &&
-						typeof recovery?.continuation_request_id !== "string"
+						(continuationRequestId === null || rebindConsumedContinuation)
 					) {
 						await update(workspaceId, executionId, (value) => ({
 							...value,
 							lastRecoveryEvidenceSha256: fingerprint,
+							...(semanticObservationOnly
+								? {
+										recoveryEvidenceAttemptBudgets: {
+											...value.recoveryEvidenceAttemptBudgets,
+											[fingerprint]: value.recoveryEvidenceAttemptBudgets?.[fingerprint] ?? {
+												resumeAttemptsUsed: value.unchangedRecoveryAttemptCount,
+												maximumResumeAttempts: maximumUnchangedRetries,
+												includesEvidenceTransitionLaunch: false,
+											},
+										},
+									}
+								: {}),
 							nextRecoveryAtEpochMs: notBefore ?? Date.now() + 30_000,
 						}));
 						return;
 					}
 					if ((notBefore ?? record.nextRecoveryAtEpochMs ?? 0) > Date.now()) return;
-					const maximumUnchangedRetries =
-						typeof recovery?.maximum_unchanged_retries === "number"
-							? Math.max(0, Math.min(3, Math.floor(recovery.maximum_unchanged_retries)))
-							: 1;
-					if (!changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries) {
+					let semanticBudget = record.recoveryEvidenceAttemptBudgets?.[fingerprint];
+					if (semanticObservationOnly && semanticBudget) {
+						const effectiveMaximum = semanticResumeAttemptLimit(
+							semanticBudget.includesEvidenceTransitionLaunch,
+							maximumUnchangedRetries,
+						);
+						if (semanticBudget.maximumResumeAttempts !== effectiveMaximum) {
+							record = await update(workspaceId, executionId, (value) => {
+								const current = value.recoveryEvidenceAttemptBudgets?.[fingerprint];
+								if (!current || current.maximumResumeAttempts === effectiveMaximum) return value;
+								return {
+									...value,
+									recoveryEvidenceAttemptBudgets: {
+										...value.recoveryEvidenceAttemptBudgets,
+										[fingerprint]: { ...current, maximumResumeAttempts: effectiveMaximum },
+									},
+								};
+							});
+							semanticBudget = record.recoveryEvidenceAttemptBudgets?.[fingerprint];
+						}
+					}
+					if (
+						semanticObservationOnly
+							? semanticBudget && semanticBudget.resumeAttemptsUsed >= semanticBudget.maximumResumeAttempts
+							: !changed && record.unchangedRecoveryAttemptCount >= maximumUnchangedRetries
+					) {
 						if (observationCommand)
 							await update(workspaceId, executionId, (value) => ({
 								...value,
@@ -774,7 +921,30 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 							}));
 						return;
 					}
-					await launch(record, worker === "unknown" ? "producer_single_flight" : undefined, fingerprint);
+					if (semanticObservationOnly && !semanticBudget)
+						await update(workspaceId, executionId, (value) => ({
+							...value,
+							recoveryEvidenceAttemptBudgets: {
+								...value.recoveryEvidenceAttemptBudgets,
+								[fingerprint]: {
+									resumeAttemptsUsed: 0,
+									maximumResumeAttempts: semanticResumeAttemptLimit(true, maximumUnchangedRetries),
+									includesEvidenceTransitionLaunch: true,
+								},
+							},
+						}));
+					const observationConfigurationToken = recoveryObservationConfigurationToken(record);
+					// 旧扫描可能在观察器登记前就读过记录。派发前核对配置，避免诊断心跳绕过语义门禁。
+					const dispatched = await lockedFileSystem.withLock({ path: record.revocationFile }, async () => {
+						const latest = (await readTaskCommandExecutions(workspaceId)).find(
+							(item) => item.executionId === executionId,
+						);
+						if (!latest || recoveryObservationConfigurationToken(latest) !== observationConfigurationToken)
+							return false;
+						await launch(record, worker === "unknown" ? "producer_single_flight" : undefined, fingerprint);
+						return true;
+					});
+					if (!dispatched) return;
 					return;
 				})();
 				if (!nextNotice && !record.resultDelivery) return;
@@ -1112,6 +1282,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	return {
 		start,
 		inspect,
+		registerRecoveryEvidenceObservation,
 		cancel,
 		sweepExecution,
 		cancelForTask: (workspaceId: string, taskId: string) => cancelForTask(workspaceId, taskId),

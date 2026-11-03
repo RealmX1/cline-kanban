@@ -569,6 +569,7 @@ import {
 } from "../core/task-closure-contract";
 import {
 	taskCommandExecutionIdentityRequestSchema,
+	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionResponseSchema,
 	taskCommandExecutionStartRequestSchema,
 } from "../core/task-command-execution-contract";
@@ -1529,6 +1530,20 @@ export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEdi
 const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
 
 const runtimeApplicationTaskCommandExecutionProcedureRouter = t.router({
+	registerRecoveryEvidenceObservation: workspaceProcedure
+		.input(taskCommandExecutionRecoveryObservationRegistrationRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.registerRecoveryEvidenceObservation(
+					ctx.workspaceScope.workspaceId,
+					input,
+				),
+			};
+		}),
 	start: workspaceProcedure
 		.input(taskCommandExecutionStartRequestSchema)
 		.output(taskCommandExecutionResponseSchema)
