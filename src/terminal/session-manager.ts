@@ -48,6 +48,7 @@ import {
 	readCodexProfileAdoptionRetainedInput,
 	saveCodexProfileAdoptionRetainedInput,
 } from "../codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
+import { prepareCodexSharedPluginInstallationForNativeLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -6142,6 +6143,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							: null,
 					binary: request.binary,
 					environment: { ...process.env, ...request.env },
+					workingDirectory: request.cwd,
 				});
 				throwIfTaskSessionStartWasCancelled();
 				request = {
@@ -6200,8 +6202,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
 			throwIfTaskSessionStartWasCancelled();
-			if (codexConfigurationWriterBinding)
+			if (codexConfigurationWriterBinding) {
+				const preparedPluginInstallation = await prepareCodexSharedPluginInstallationForNativeLaunch({
+					binding: codexConfigurationWriterBinding,
+					binary: launch.binary ?? request.binary,
+					environment: { ...process.env, ...request.env, ...launch.env },
+					nativeLaunchArguments: launch.args,
+					workingDirectory: request.cwd,
+				});
+				launch.args = preparedPluginInstallation.arguments;
 				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
+			}
 			throwIfTaskSessionStartWasCancelled();
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
