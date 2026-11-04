@@ -48,6 +48,14 @@ function applyPatch(
 }
 
 describe("buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch", () => {
+	it("Codex effort 可独立覆盖、保留或清除，模型仍可继承默认", () => {
+		const initial = createCard({ terminalAgentModelOverrideSettings: undefined });
+		const selected = applyPatch(initial, { codexReasoningEffortOverride: "ultra" });
+		expect(selected.codexReasoningEffortOverride).toBe("ultra");
+		expect(selected.terminalAgentModelOverrideSettings).toBeUndefined();
+		expect(applyPatch(selected, { prompt: "新正文" }).codexReasoningEffortOverride).toBe("ultra");
+		expect(applyPatch(selected, { codexReasoningEffortOverride: null }).codexReasoningEffortOverride).toBeUndefined();
+	});
 	it("键缺省 = 保留卡片现值（含 updateTask 里非三态、漏传即复位的那些字段）", () => {
 		const renamed = applyPatch(createCard(), { title: "Renamed" });
 

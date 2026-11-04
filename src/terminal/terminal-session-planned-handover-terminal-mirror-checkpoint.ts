@@ -58,6 +58,7 @@ export async function capturePlannedHandoverTerminalMirrorCheckpoint(input: {
 					bytesHeldBackByTerminalProtocolFilter -
 					(snapshot.pendingUtf8InputByteLength ?? 0),
 			),
+			...(snapshot.terminalModesAreKnown === false ? { terminalModesAreKnown: false } : {}),
 		},
 	};
 }
@@ -69,7 +70,11 @@ export function resolvePlannedHandoverTerminalMirrorCheckpointUsableForAdoption(
 	outputEndByteOffset: number;
 }): PlannedHandoverTerminalMirrorCheckpoint | null {
 	const checkpoint = input.adoptionRecord?.plannedHandoverTerminalMirrorCheckpoint;
-	if (checkpoint === undefined) {
+	if (
+		checkpoint === undefined ||
+		checkpoint.terminalModesAreKnown === false ||
+		input.adoptionRecord?.rederivationInputs.terminalModesAreKnown === false
+	) {
 		return null;
 	}
 	if (

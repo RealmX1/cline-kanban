@@ -20,6 +20,7 @@ export function configurationTable(value: unknown): value is TomlTable {
 
 // 不共享认证、机器路径、原生身份或运行时注入；这些字段仍留在各自副本中。
 const privateConfigurationRootKeys = new Set([
+	"desktop",
 	"sqlite_home",
 	"log_dir",
 	"history",

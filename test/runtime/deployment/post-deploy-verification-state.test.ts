@@ -25,6 +25,7 @@ import {
 	setVerificationRunState,
 	updateTaskChecklist,
 } from "../../../src/deployment/post-deploy-verification-state";
+import { mutateVerificationExecutionAttempt } from "../../../src/deployment/verification-execution-attempt-store";
 import { createTempDir } from "../../utilities/temp-dir";
 
 // post-deploy-verification-state 的 state 文件路径 = join(getRuntimeHomePath(), ...) = join(homedir(), ".cline", "kanban", ...)，
@@ -301,7 +302,13 @@ describe.sequential("post-deploy-verification-state", () => {
 		});
 
 		const started = await setVerificationRunState(
-			{ deploymentId, taskId: "task-run", itemId: "authored:auto-1", startedAtIso: NOW_ISO },
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-run",
+				itemId: "authored:auto-1",
+				startedAtIso: NOW_ISO,
+			},
 			NOW_ISO,
 		);
 		expect(started.ok).toBe(true);
@@ -309,17 +316,74 @@ describe.sequential("post-deploy-verification-state", () => {
 
 		// 非自动脚本项拒绝。
 		const rejectedManual = await setVerificationRunState(
-			{ deploymentId, taskId: "task-run", itemId: "commit:x", startedAtIso: NOW_ISO },
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-run",
+				itemId: "commit:x",
+				startedAtIso: NOW_ISO,
+			},
 			NOW_ISO,
 		);
 		expect(rejectedManual.ok).toBe(false);
 
 		// 已 running 再次运行拒绝（并发护栏）。
 		const rejectedConcurrent = await setVerificationRunState(
-			{ deploymentId, taskId: "task-run", itemId: "authored:auto-1", startedAtIso: NOW_ISO },
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-run",
+				itemId: "authored:auto-1",
+				startedAtIso: NOW_ISO,
+			},
 			NOW_ISO,
 		);
 		expect(rejectedConcurrent.ok).toBe(false);
+	});
+
+	it("晚到结果不能覆盖已修改的验证定义", async () => {
+		const deploymentId = newDeploymentId();
+		writeStateToDisk({
+			deploymentGroups: [
+				buildGroup({
+					deploymentId,
+					tasks: [
+						buildTask({
+							taskId: "task-late-result",
+							checklist: [buildAutomatedScriptItem("authored:late-result")],
+						}),
+					],
+				}),
+			],
+		});
+		const started = await setVerificationRunState(
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-late-result",
+				itemId: "authored:late-result",
+				startedAtIso: NOW_ISO,
+			},
+			NOW_ISO,
+		);
+		const oldRun = started.task?.checklist[0]?.run;
+		if (!oldRun) throw new Error("验证项尚未进入 running");
+		const changedState = readStateFromDisk();
+		const script = changedState.deploymentGroups[0]?.tasks[0]?.checklist[0]?.script;
+		if (!script) throw new Error("测试缺少自动脚本");
+		script.timeoutMs += 1;
+		writeStateToDisk(changedState);
+		const applied = await applyVerificationRunResult(
+			{
+				deploymentId,
+				taskId: "task-late-result",
+				itemId: "authored:late-result",
+				run: { ...oldRun, status: "passed", exitCode: 0, finishedAtIso: NOW_ISO },
+			},
+			NOW_ISO,
+		);
+		expect(applied.ok).toBe(false);
+		expect(findTaskOnDisk(deploymentId, "task-late-result")?.checklist[0]?.checked).toBe(false);
 	});
 
 	it("applyVerificationRunResult：passed 置 checked=true，failed 置 checked=false", async () => {
@@ -333,35 +397,73 @@ describe.sequential("post-deploy-verification-state", () => {
 			],
 		});
 
-		await applyVerificationRunResult(
+		const admitted = await setVerificationRunState(
 			{
+				taskIncarnationCreatedAtEpochMs: 0,
 				deploymentId,
 				taskId: "task-apply",
 				itemId: "authored:auto-2",
-				run: {
-					status: "passed",
-					exitCode: 0,
-					startedAtIso: NOW_ISO,
-					finishedAtIso: NOW_ISO,
-					outputExcerpt: "ok",
-				},
+				startedAtIso: NOW_ISO,
 			},
 			NOW_ISO,
 		);
-		expect(findTaskOnDisk(deploymentId, "task-apply")?.checklist[0]?.checked).toBe(true);
+		const admittedRun = admitted.task?.checklist[0]?.run;
+		if (!admittedRun?.verificationExecutionAttemptId) throw new Error("缺少 attempt");
+		const passedRun = {
+			...admittedRun,
+			status: "passed" as const,
+			exitCode: 0,
+			finishedAtIso: NOW_ISO,
+			outputExcerpt: "ok",
+		};
+		await mutateVerificationExecutionAttempt(admittedRun.verificationExecutionAttemptId, (attempt) => {
+			attempt.launchStage = "terminal";
+			attempt.terminalRun = passedRun;
+		});
 
 		await applyVerificationRunResult(
 			{
 				deploymentId,
 				taskId: "task-apply",
 				itemId: "authored:auto-2",
-				run: {
-					status: "failed",
-					exitCode: 1,
-					startedAtIso: NOW_ISO,
-					finishedAtIso: NOW_ISO,
-					outputExcerpt: "boom",
-				},
+				run: passedRun,
+				currentTaskIncarnationCreatedAtEpochMs: 0,
+			},
+			NOW_ISO,
+		);
+		expect(findTaskOnDisk(deploymentId, "task-apply")?.checklist[0]?.checked).toBe(true);
+
+		const restarted = await setVerificationRunState(
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-apply",
+				itemId: "authored:auto-2",
+				startedAtIso: NOW_ISO,
+			},
+			NOW_ISO,
+		);
+		const restartedRun = restarted.task?.checklist[0]?.run;
+		if (!restartedRun?.verificationExecutionAttemptId) throw new Error("缺少新 attempt");
+		const failedRun = {
+			...restartedRun,
+			status: "failed" as const,
+			exitCode: 1,
+			finishedAtIso: NOW_ISO,
+			outputExcerpt: "boom",
+		};
+		await mutateVerificationExecutionAttempt(restartedRun.verificationExecutionAttemptId, (attempt) => {
+			attempt.launchStage = "terminal";
+			attempt.terminalRun = failedRun;
+		});
+
+		await applyVerificationRunResult(
+			{
+				deploymentId,
+				taskId: "task-apply",
+				itemId: "authored:auto-2",
+				run: failedRun,
+				currentTaskIncarnationCreatedAtEpochMs: 0,
 			},
 			NOW_ISO,
 		);
@@ -454,7 +556,13 @@ describe.sequential("post-deploy-verification-state", () => {
 		});
 
 		const restarted = await setVerificationRunState(
-			{ deploymentId, taskId: "task-rerun", itemId: "authored:auto-rerun", startedAtIso: NOW_ISO },
+			{
+				taskIncarnationCreatedAtEpochMs: 0,
+				deploymentId,
+				taskId: "task-rerun",
+				itemId: "authored:auto-rerun",
+				startedAtIso: NOW_ISO,
+			},
 			NOW_ISO,
 		);
 		expect(restarted.ok).toBe(true);

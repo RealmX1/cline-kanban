@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { getRuntimeAgentCatalogEntry } from "../../src/core/agent-catalog";
 import {
 	type RuntimeTaskSessionSummary,
 	runtimeStateStreamTaskSessionsMessageSchema,
@@ -104,6 +105,15 @@ const { randomUUID } = require('node:crypto');
 const agent = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write(agent + ' 2.1.200\n'); process.exit(0); }
+if (args.includes('--mode') && args.includes('rpc')) {
+ require('node:readline').createInterface({ input: process.stdin }).on('line', line => { const command = JSON.parse(line); if (command.type === 'get_state') { process.stdout.write(JSON.stringify({ id: command.id, type: 'response', command: 'get_state', success: true, data: { model: { provider: 'fixture', id: 'default-model' } } }) + '\n'); } });
+ return;
+}
+if (args.includes('app-server')) {
+ require('node:readline').createInterface({ input: process.stdin }).on('line', line => { const command = JSON.parse(line); if (command.id === undefined) return; const result = command.method === 'config/read' ? {config:{model:'fixture-default-model'}} : command.method === 'model/list' ? {data:[{model:'fixture-default-model',isDefault:true}]} : {}; process.stdout.write(JSON.stringify({ id: command.id, result }) + '\n'); });
+ return;
+}
+
 const sessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID;
 if (!sessionId) { process.stdout.write(agent + ' 2.1.200\n'); process.exit(0); }
 const isCollaborator = sessionId.startsWith('task-conversation-session-');
@@ -149,6 +159,7 @@ if (args.includes('acp')) {
    case 'session/fork': active = forkNative(params.sessionId); saveLaunch(active); reply(message.id, { sessionId: active.nativeSessionId }); break;
    case 'session/load': active = readNative(params.sessionId); saveLaunch(active); notify(params.sessionId, active.history[0]); reply(message.id, {}); break;
    case 'session/set_mode': active.mode = params.modeId; saveNative(active); reply(message.id, {}); break;
+   case 'session/set_config_option': if (params.configId === 'model') active.model = params.value; saveNative(active); saveLaunch(active); reply(message.id, { configOptions: [] }); break;
    case 'session/close': saveNative(active); reply(message.id, {}); break;
    case 'session/prompt':
     active.promptCount++; saveNative(active);
@@ -247,6 +258,8 @@ setInterval(() => {}, 1000);
 						packagedCliPath,
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						"协作会话隔离验收",
 						"--prompt",
@@ -403,20 +416,35 @@ setInterval(() => {}, 1000);
 					);
 					throw error;
 				});
-			expect(await page.locator("#task-conversation-session-role").inputValue()).toBe("task_collaborator");
-			await page.locator("#task-conversation-session-agent").selectOption(collaborationAgentId);
-			await page.locator("#task-conversation-session-role").selectOption(sessionRole);
+			expect(await page.locator("#creation-workbench-session-role").inputValue()).toBe("task_collaborator");
+			await page.getByRole("button", { name: /^Agent：/ }).click();
+			await page
+				.getByRole("group", { name: "Agent", exact: true })
+				.getByRole("button", {
+					name: `${getRuntimeAgentCatalogEntry(collaborationAgentId)?.label}${collaborationAgentId === mainAgentId ? " (default agent)" : ""}`,
+					exact: true,
+				})
+				.click();
+			await page.locator("#creation-workbench-session-role").selectOption(sessionRole);
+			if (collaborationAgentId === "omp")
+				await page.locator("#side-session-creation-transport").selectOption(sessionTransport);
+			await page.getByRole("button", { name: /^会话上下文/ }).click();
+			const contextControl = page.getByLabel("会话上下文", { exact: true });
 			if (explicitContextSource)
-				await page.locator("#task-conversation-context-source").selectOption(explicitContextSource);
+				await contextControl.selectOption(
+					explicitContextSource === "started_from_scratch" ? "fresh" : "current_main",
+				);
 			const expectedContextSource =
 				explicitContextSource ??
 				(mainAgentId === collaborationAgentId ? "forked_from_main_current_turn" : "started_from_scratch");
-			expect(await page.locator("#task-conversation-context-source").inputValue()).toBe(expectedContextSource);
+			expect(await contextControl.inputValue()).toBe(
+				expectedContextSource === "started_from_scratch" ? "fresh" : "current_main",
+			);
 			await page
-				.locator("#task-conversation-initial-question")
+				.locator("#creation-workbench-side-session-prompt")
 				.fill(withoutInitialUserMessage ? " \n\t " : "实现协作部分");
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-create-form.png") });
-			await page.getByRole("button", { name: "Create session", exact: true }).click();
+			await page.getByRole("button", { name: "创建会话", exact: true }).click();
 			await expect
 				.poll(
 					async () =>
@@ -488,7 +516,13 @@ setInterval(() => {}, 1000);
 				expect(sideLaunch.nativeSessionId).not.toBe(mainLaunch.nativeSessionId);
 				expect(sideLaunch.forkSourceNativeSessionId).toBe(mainLaunch.nativeSessionId);
 				expect(sideLaunch.history).toContain("主会话已有上下文");
-				if (sessionRole === "task_collaborator") expect(sideLaunch.model).toBe("source-model-after-switch");
+				expect(sideLaunch.model).toBe(
+					collaborationAgentId === "claude"
+						? "default"
+						: collaborationAgentId === "codex"
+							? "fixture-default-model"
+							: "fixture/default-model",
+				);
 			}
 			if (sessionTransport === "pty_terminal") {
 				// 写入证明只说明假进程已启动；等运行时完成启动后再发 hook，跨 agent 时身份才会归属正确。
@@ -838,6 +872,7 @@ setInterval(() => {}, 1000);
 					],
 				});
 				const request = {
+					startInPlanMode: false,
 					taskId,
 					sessionRole: "task_collaborator" as const,
 					contextSource: "creator" as const,
@@ -904,6 +939,8 @@ setInterval(() => {}, 1000);
 				};
 				const createdThroughCli = await runConversationSessionCli([
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--role",
 					"task_collaborator",
 					"--reason",

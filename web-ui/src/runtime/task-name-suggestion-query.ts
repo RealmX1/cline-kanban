@@ -5,14 +5,26 @@
 
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { RuntimeTaskNameSuggestionResponse } from "@/runtime/types";
+import type { BoardCard } from "@/types";
+
+export async function requestAutomaticTaskNameBackfill(workspaceId: string, card: BoardCard) {
+	return getRuntimeTrpcClient(workspaceId).runtime.requestAutomaticTaskNameBackfill.mutate({
+		taskId: card.id,
+		expectedTaskNameVersion: card.taskNameVersion ?? 0,
+		expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
+		expectedTitle: card.title,
+		expectedPrompt: card.prompt,
+	});
+}
 
 export async function suggestTaskNamesFromTaskDescription(
 	taskDescription: string,
 	abortSignal?: AbortSignal,
+	namingTarget?: "task" | "conversation_session",
 ): Promise<RuntimeTaskNameSuggestionResponse> {
 	const trpcClient = getRuntimeTrpcClient(null);
 	return await trpcClient.runtime.suggestTaskNamesFromTaskDescription.mutate(
-		{ taskDescription },
+		{ taskDescription, namingTarget },
 		{ signal: abortSignal },
 	);
 }

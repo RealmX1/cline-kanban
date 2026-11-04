@@ -6,11 +6,21 @@
 
 历史转录中的 writer home 先按物理路径识别，再核验持久绑定清单、历史目录身份及历史与写锁桥接；HOME 的软链或等价路径不会改变历史归属。summary 缺少历史目录字段时可从已核验的清单恢复；普通旧 home 仍以原生转录归属为准。仅有目录形状、清单身份不符或桥接被替换都不能取得历史桥接资格。
 
-共享默认保存于看板内部的 `configuration-sync-state.json`，权限为 `0600`。用户自己的全局 `config.toml` 始终作为来源，由其原所有者管理。独立历史 helper 与无状态 Codex 执行器也使用自己的配置副本，不能通过辅助进程刷新活会话。
+共享默认保存于看板内部的 `configuration-sync-state.json`，权限为 `0600`。外部配置只在首次初始化时一次性导入，此后由 Kanban 独立维护。独立历史 helper 与无状态 Codex 执行器也使用自己的配置副本，不能通过辅助进程刷新活会话。
+
+## 一次性初始化与外部设置边界
+
+每个来源在 `source-initialization-snapshots/<sourceIdentity 的摘要>/` 保存初始化清单、配置文件原文与捕获归属。清单先原子写入并同步，再构建可恢复的派生配置文件；来源状态保存 `configurationInitialization` 的路径、摘要与时间。初始化在清单提交后中断，重试仍使用同一清单，不重新导入变化后的外部内容。快照丢失、摘要或来源不符时保持未知，目录恢复后由启动或五秒补扫重验。
+
+已有来源优先使用经完整 writer 清单及目录身份核验的 Kanban 副本建立快照，随后覆盖为已接受的 profile 字段。新建、重启和辅助 writer 使用快照、profile 或核验后的父会话副本；历史存储目录也不会重新复制后来新增的外部配置。配置字段迁移不更改原 writer 清单与启动事实。
+
+外部 `config.toml`、`*.config.toml` 与 `hooks.json` 的设置变化不再登记审批或传播决定。`desktop.*` 不进入可共享、可编辑字段，所有 profile 的桌面设置及对应版本键均从当前投影移除。来源目录的身份仍须核验，外部配置文件内容及可读性不影响内部提案资格。认证、skills、插件目录和安装生命周期继续采用既有机制；可动态变化的内部或插件定义仍经过来源与摘要校验。
+
+旧外部及 desktop 记录以 `settingsIsolationArchivedAtMs` 归档。原始值、定义观测、已应用回执及失败历史保留；未执行完的目标保存取消前状态与原因后转为不适用。审批、共享冲突、目标冲突、同步和重启采用入口均拒绝重新激活这些记录，已接受的 Kanban 默认继续保留。
 
 ## Profile 与字段归属
 
-`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，侧会话默认继承 Task，可另选同来源 profile。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
+`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，新侧会话使用独立启动设置与默认 profile，可另选同来源 profile；恢复既有会话继续使用其冻结快照。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
 
 | 设置 | 会话中修改后的默认行为 | 范围 |
 | --- | --- | --- |
@@ -43,6 +53,8 @@ Codex CLI `0.165.0` 的插件 `hooks/list.currentHash` 为 `定义哈希/内容�
 
 双哈希目录兼容、验证及 Codex 原生 Git 元数据限制见 [实现与依赖边界](research/codex-plugin-hook-dual-hash-trust-implementation.md)。本仓库修复不改变 Codex 的插件内容指纹算法。
 
+Codex `0.166.0` 的新 writer 同源共享 `plugins` 与 `.tmp/marketplaces`，并以物理来源域协调原生更新，避免辅助进程将相同 revision 误作首次安装。未知能力与旧活进程保留兼容布局；双哈希批准不自动重签。目录绑定、跨 profile 中断恢复及原生验收见 [同源插件安装与原生更新协调](codex-source-shared-plugin-installation-and-native-update-coordination.md)。
+
 缺原进程端点的旧会话可从绑定转录取得等价完成证据：核验原生身份、工作目录、最新完整完成事件和文件读取期间稳定性，任何后续执行、用户消息或不完整记录均使证据失效。续接前再次核验转录、语义代际、输入序号和双路空输入框。证据不足保留具体恢复条件，继续其他会话，条件恢复后自动接续。
 
 停止原进程到新输入框就绪之间的新输入持久写入专用 `retained-terminal-input-during-profile-adoption`，只交给同一原生会话的新进程。投递前先登记提交状态；回执不明时按原生接受游标补证，不能盲目重复发送。启动失败或运行时重启后，从同一持久启动记录自动继续；跨字段共用三次启动上限，profile、原生二进制或来源证据改变后恢复资格。显式 Stop 持久取消后续自动启动，输入记录保留供后来明确续跑；界面显示保留字节与原因。
@@ -66,6 +78,21 @@ schemaVersion 3 从已经采用的共享字段建立兼容 profile，不同来�
 共享来源控制器的归属覆盖仍被 Hook 持有的引用，而不只覆盖当前订阅者：禁用 Hook 保留实例期间，最后一个订阅退出不会驱逐该 workspace 的所有者，新消费者与重新启用的消费者仍共享单飞及冻结身份。最后退出只取消本代请求、移除监听并清空内存快照；再次订阅从持久记录先补读恢复。注册表使用弱引用，实例不再被持有后可回收。
 
 冻结请求、workspace、观测指纹和已用重送次数保存在独立 localStorage 键 `kanban.codex-configuration-unconfirmed-source-observation-actions.v1`。刷新后先补读，耗尽预算后保留未知与「重新核验」入口，在线恢复、运行时流重连或页面重新可见时自动补读；普通重绘不重置重送额度。所有查询和 mutation 快照按 workspace 生命周期及单调 revision 接收，旧回执也不能清除新版本操作。初次读取失败时显示读取错误和恢复入口，不持续显示读取中。
+
+## 创建任务时选择 Reasoning Effort
+
+创建任务和 Backlog 编辑共用「模型与参数」中的推理强度选择器。每张新任务默认「沿用 Codex 配置」，连续创建下一张时也恢复继承；批量提交中的各张任务使用本批明确选择的档位。`codexReasoningEffortOverride?: string` 独立于模型覆盖，默认模型下也能单独选择，编辑补丁的 `null` 清除覆盖。字段贯通草稿、冻结创建提交、卡片水合和会话启动。
+
+档位来自本机 `codex debug models` 的 `supported_reasoning_levels`，保留 `max`、`ultra` 和未来原生值。按显式模型或所属 profile 的继承模型筛选；目录缺失时保留原值，最多三次退避重试，连接恢复、页面重新可见或手动重读可开启新一轮。只在目录确认不兼容时显示错误并阻止提交，不把未知当成不兼容。
+
+手选值进入既有 writer 的 `reasoning_effort` 局部例外，经 `model_reasoning_effort` 配置参数启动。相同任务选择重启时保留会话内后续修改，profile 对该字段的新决定仍按原规则生效。与继承不同的手选值在新主会话成功启动后进入现有限时反馈：持久 selection ID 和首次成功启动时间固定身份及十分钟期限，准备／spawn 失败不发布成功凭证。已有配置扫描链路在身份或目录恢复后补登记；确认才更新所属 profile 并广播，拒绝、过期和重复扫描均不重新提示。
+
+隔离真实 CLI 核验不调用模型：
+
+```sh
+KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \
+npm run test:guarded -- --project runtime-integration test/integration/codex-task-reasoning-effort-native.integration.test.ts
+```
 
 ## 新原生会话的权限继承
 
@@ -121,7 +148,11 @@ land/base 的阶段认领记录实际配置摘要、writer、启动共享版本�
 
 ## 配置反馈的来源与完整比较
 
-设置页与通知共用字段比较：标题保留完整字段路径或 Hook 的插件／文件来源、事件及变更类型；默认展示修改前、检测到的新值，共享冲突还展示冲突快照与当前共享值。目标冲突按字段对齐来源决定与目标自己的决定。权限反馈保存全部相关字段的旧值、新值及删除事实；旧记录未保存的关联旧值明确为未知。
+设置页与通知按同一 profile、同一字段归并待反馈项，完整权限组作为一个选择。服务端生成 `candidateFieldGroupKey` 和基于未脱敏、未截断完整字段及定义的 `completeCandidateValueDigest`；相同候选合并来源，不同值分别展示。到期、被替代或归档的来源退出当前候选，原始历史与版本各自保留。
+
+当前看板默认旁是「保留当前默认」，每个候选旁是「采用此值并广播」，手机中按钮仍留在对应值的区块内。保留默认处理当前展示的全部候选，不改会话局部选择；采用则复用 profile 更新与广播，收口同组旧建议。修改前进入来源历史，与当前默认完全相同的值合并展示。目标冲突的两个操作分别放在来源决定和目标决定旁。权限反馈保存全部相关字段的旧值、新值及删除事实；旧记录未保存的关联旧值明确为未知。
+
+采用操作固定已展示的原始记录、版本及当前默认摘要。同值来源暂不可核验时最多尝试三个已展示的等价来源，不自动切换到其他候选；版本变化、冲突或回执未知时补读并保留真实状态。多个不同候选的组须逐组明确选择，批量通过不会自动挑值。旧服务端未提供完整摘要时保留独立候选，不按展示文案推断相等。
 
 `getCodexConfigurationChangeDetails` 是只读 query，以 `changeId`、`expectedVersion` 和可选 `targetWriterId` 加载完整比较。目标必须属于该变更。服务端统一脱敏与生成文本，完整 Hook 指纹按需返回；没有采集过的 Hook 代码正文不补造。展开失败保留关键差异，连接恢复、页面重新可见或运行时重连时自动重验，也可手动重试。
 

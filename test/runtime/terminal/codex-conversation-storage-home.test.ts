@@ -1,8 +1,9 @@
 import type * as FileSystemPromises from "node:fs/promises";
 import { lstat, mkdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readCodexConfigurationSyncStore } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -69,7 +70,7 @@ describe("Codex 会话独立目录", () => {
 		expect(snapshot).toContain("example-mcp");
 	});
 	it.for(["config.toml", "review.config.toml"])(
-		"%s 的配置文件引用沿用原目录，角色文件内部相对路径不变",
+		"%s 的角色配置捕获内部副本，指令文件引用保留原基址",
 		async (sourceConfigurationFileName) => {
 			const original = join(fixture.path, ".codex");
 			await mkdir(join(original, "agents"), { recursive: true });
@@ -104,10 +105,24 @@ describe("Codex 会话独立目录", () => {
 				sqlite_home: managed,
 				agents: {
 					max_depth: 3,
-					worker: { description: "相对角色", config_file: absoluteRoleConfigurationPath },
-					reviewer: { description: "绝对角色", config_file: absoluteRoleConfigurationPath },
+					worker: {
+						description: "相对角色",
+						config_file: expect.stringContaining("source-initialization-snapshots"),
+					},
+					reviewer: {
+						description: "绝对角色",
+						config_file: expect.stringContaining("source-initialization-snapshots"),
+					},
 				},
 				mcp_servers: { example: { command: "example-mcp", args: ["relative-argument"] } },
+			});
+			const capturedRoles = snapshot.agents as {
+				worker: { config_file: string };
+				reviewer: { config_file: string };
+			};
+			expect(capturedRoles.worker.config_file).toBe(capturedRoles.reviewer.config_file);
+			expect(parse(await readFile(capturedRoles.worker.config_file, "utf8"))).toEqual({
+				model_instructions_file: join(original, "instructions", "model.md"),
 			});
 			for (const field of [
 				"model_instructions_file",
@@ -288,7 +303,10 @@ describe("Codex 会话独立目录", () => {
 			const snapshot = parse(await readFile(join(managed, configurationFileName), "utf8"));
 			expect(snapshot.hooks).toEqual({ state: expectedTrustStates });
 			expect(snapshot.profiles).toEqual({ review: { hooks: { state: expectedTrustStates } } });
-			expect(await readlink(join(managed, "hooks.json"))).toBe(join(original, "hooks.json"));
+			const source = Object.values((await readCodexConfigurationSyncStore()).sources)[0];
+			const snapshotFilePath = source?.configurationInitialization?.snapshotFilePath;
+			if (!snapshotFilePath) throw new Error("缺少持久初始化快照引用");
+			expect(await readlink(join(managed, "hooks.json"))).toBe(join(dirname(snapshotFilePath), "hooks.json"));
 			expect(await readFile(join(original, configurationFileName), "utf8")).toBe(sourceConfigurationText);
 			const otherSourceHomeDirectoryPath =
 				original === physicalSourceHomeDirectoryPath

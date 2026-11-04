@@ -142,6 +142,15 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 		process.exitCode = undefined;
 	});
 
+	it("task create 缺少 Plan 显式选择时零创建，预览也不能读取 UI Plan 偏好", async () => {
+		for (const flags of [[], ["--preview"]]) {
+			const result = await runKanbanTaskCommand(["create", "--prompt", "新工作", ...flags]);
+			expect(result.exitCode).toBe(1);
+			expect(result.output).toMatchObject({ ok: false, error: expect.stringContaining("--start-in-plan-mode") });
+			expect(harness.taskCardActionRequests).toHaveLength(0);
+		}
+	});
+
 	it("task delete：一次 permanentlyDeleteTaskCardsWithFullResourceCleanup，输出形状不变", async () => {
 		harness.responsesByProcedureName.permanentlyDeleteTaskCardsWithFullResourceCleanup = {
 			permanentlyDeletedTaskCards: [

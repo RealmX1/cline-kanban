@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 import {
-	inferCodexHomeDirectoryPathFromTranscriptPath,
 	resolveMigratedCodexConversationHome,
 	resolveRecordedCodexConversationHome,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
@@ -135,7 +134,11 @@ export async function prepareCodexMainSessionHandoverNativeForkWithPort(
 							excludeTurns: true,
 						}),
 					).thread;
-				const childHome = inferCodexHomeDirectoryPathFromTranscriptPath(forked.path);
+				// writer 的 sessions 是有身份清单的历史桥接，须核验真实归属后再比较。
+				const childHome = resolveRecordedCodexConversationHome({
+					transcriptPath: forked.path,
+					codexConversationStorageHomeDirectoryPath: input.codexConversationStorageHomeDirectoryPath,
+				});
 				if (
 					forked.id === input.sourceNativeSessionId ||
 					resolve(forked.cwd) !== resolve(input.workingDirectoryPath) ||
@@ -152,9 +155,7 @@ export async function prepareCodexMainSessionHandoverNativeForkWithPort(
 				attempt.childIdentity = {
 					nativeSessionId: forked.id,
 					transcriptPath: forked.path,
-					codexConversationStorageHomeDirectoryPath:
-						inferCodexHomeDirectoryPathFromTranscriptPath(forked.path) ??
-						input.codexConversationStorageHomeDirectoryPath,
+					codexConversationStorageHomeDirectoryPath: childHome,
 				};
 				await persist();
 			} catch (error) {

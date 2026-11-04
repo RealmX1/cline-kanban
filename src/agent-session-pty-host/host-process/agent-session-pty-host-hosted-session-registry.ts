@@ -418,11 +418,26 @@ export class AgentSessionPtyHostHostedSessionRegistry {
 			return { kind: "unknown_hosted_session" };
 		}
 		const catchUp = hostedSession.outputRingBuffer.readFromAbsoluteByteOffset(fromByteOffset);
+		const terminalModeReplayState = hostedSession.outputRingBuffer.readTerminalModeStateAtAbsoluteByteOffset(
+			catchUp.startByteOffset,
+		);
 		const outcome: AttachHostedSessionOutputStreamOutcome = {
 			kind: "attached",
 			catchUpStartByteOffset: catchUp.startByteOffset,
 			catchUpEndByteOffset: catchUp.startByteOffset + catchUp.bytes.byteLength,
 			overwrittenByteCountBeforeCatchUpStart: catchUp.overwrittenByteCountBeforeStart,
+			...(terminalModeReplayState !== undefined
+				? {
+						terminalModeCheckpoint: {
+							schemaVersion: 1,
+							hostedSessionKey,
+							pid: hostedSession.pid,
+							spawnedAtEpochMs: hostedSession.spawnedAtEpochMs,
+							outputByteOffset: catchUp.startByteOffset,
+							...terminalModeReplayState,
+						},
+					}
+				: {}),
 		};
 		for (
 			let chunkStartIndex = 0;

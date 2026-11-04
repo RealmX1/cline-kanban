@@ -58,6 +58,7 @@ export function TaskNameInputWithAiSuggestions({
 	taskDescription,
 	disabled = false,
 	preserveNameUntilSuggestionIsPicked = false,
+	namingTarget = "task",
 }: {
 	taskName: string;
 	onTaskNameChange: (taskName: string) => void;
@@ -65,6 +66,7 @@ export function TaskNameInputWithAiSuggestions({
 	taskDescription: string;
 	disabled?: boolean;
 	preserveNameUntilSuggestionIsPicked?: boolean;
+	namingTarget?: "task" | "conversation_session";
 }): ReactElement {
 	const taskNameInputId = useId();
 	const [suggestionRounds, setSuggestionRounds] = useState<TaskNameSuggestionRound[]>([]);
@@ -132,6 +134,7 @@ export function TaskNameInputWithAiSuggestions({
 				const response = await suggestTaskNamesFromTaskDescription(
 					taskDescriptionThisRoundWasNamedFrom,
 					controller.signal,
+					namingTarget,
 				);
 				if (!isThisRoundStillTheLiveSuggestionRequest()) {
 					return;
@@ -179,12 +182,13 @@ export function TaskNameInputWithAiSuggestions({
 		isSuggestionRequestInFlight,
 		taskDescription,
 		preserveNameUntilSuggestionIsPicked,
+		namingTarget,
 	]);
 
 	return (
 		<div className="mb-2.5">
 			<label htmlFor={taskNameInputId} className="text-[11px] text-text-secondary block mb-1">
-				任务名称（可选）
+				{namingTarget === "conversation_session" ? "会话名称（可选）" : "任务名称（可选）"}
 			</label>
 			<div className="flex items-center gap-1.5">
 				<input
@@ -193,7 +197,11 @@ export function TaskNameInputWithAiSuggestions({
 					value={taskName}
 					onChange={(event) => handleTypeTaskName(event.target.value)}
 					disabled={disabled}
-					placeholder={derivedTaskTitlePlaceholder || "Leave empty to name this task from the description"}
+					placeholder={
+						namingTarget === "conversation_session"
+							? "留空后根据首条消息命名"
+							: derivedTaskTitlePlaceholder || "Leave empty to name this task from the description"
+					}
 					className="flex-1 min-w-0 rounded-md border border-border-bright bg-surface-3 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none disabled:opacity-40"
 				/>
 				<Button
@@ -206,7 +214,13 @@ export function TaskNameInputWithAiSuggestions({
 					disabled={disabled || isSuggestionRequestInFlight || !hasTaskDescription}
 					title={hasTaskDescription ? "Suggest task names from the description" : "Write a task description first"}
 				>
-					{suggestionRounds.length === 0 ? "Suggest names" : "Suggest more"}
+					{namingTarget === "conversation_session"
+						? suggestionRounds.length === 0
+							? "推荐名称"
+							: "更多名称"
+						: suggestionRounds.length === 0
+							? "Suggest names"
+							: "Suggest more"}
 				</Button>
 			</div>
 

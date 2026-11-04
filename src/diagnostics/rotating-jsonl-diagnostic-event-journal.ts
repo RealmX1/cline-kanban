@@ -50,6 +50,7 @@ export type DiagnosticEventJournalChannel =
 	| "pty-session-exit"
 	| "codex-remote-conversation-bootstrap-confirmed"
 	| "task-session-auto-restart-scheduled"
+	| "task-session-abnormal-exit"
 	| "process-file-descriptor-count-sample"
 	// Kanban 每次调用外部模型 provider 的一条用量记录（用途角色、provider、模型、结果、耗时、token）。
 	// 与上面那些「排障绊线」不同，这一条是为**事后统计**而留的：哪些功能在烧钱、哪家 provider 在超时、

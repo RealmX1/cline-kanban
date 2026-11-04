@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
@@ -25,12 +25,14 @@ import {
 	preserveRuntimeOwnedMainSessionBindings,
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
+import { preserveTaskNameVersionsAgainstIncomingBoardSnapshot } from "../core/task-name-version";
 import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
 import { preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot } from "../core/task-sticker-entry-mutation";
 import {
 	measureDailyWorkProgressSynchronousStage,
 	readUtf8FileWithDailyWorkProgressCostObservation,
 } from "../diagnostics/daily-work-progress-collection-cost-recorder";
+import { logFileLockError, logFileLockWarning } from "../fs/lock-diagnostics-logger";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import {
 	assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot,
@@ -52,6 +54,19 @@ import {
 	logWorkspaceStatePostDeployVerificationDoneEntryGuardRevertedCards,
 	revertCardsNewlyEnteringDoneWithoutPostDeployVerificationClosure,
 } from "./workspace-board-save-state-post-deploy-verification-done-entry-guard-port";
+
+import {
+	createWorkspaceStateSnapshotCommit,
+	projectWorkspaceStateSnapshotCommitWithinLock,
+	readWorkspaceSnapshotFileText,
+	readWorkspaceStateSnapshotCommit,
+	readWorkspaceStateSnapshotReadFingerprint,
+	WORKSPACE_STATE_LEGACY_OBSERVATION_FILENAME,
+	type WorkspaceStateSnapshotCommit,
+	type WorkspaceStateSnapshotMeta,
+	workspaceStateSnapshotMetaSchema,
+	writeWorkspaceStateSnapshotCommitDurably,
+} from "./workspace-state-snapshot-storage";
 
 const RUNTIME_HOME_PARENT_DIR = ".cline";
 
@@ -96,15 +111,8 @@ interface WorkspaceIndexFile {
 	repoPathToId: Record<string, string>;
 }
 
-interface WorkspaceStateMeta {
-	revision: number;
-	updatedAt: number;
-}
-
-const workspaceStateMetaSchema = z.object({
-	revision: z.number().int().nonnegative(),
-	updatedAt: z.number(),
-});
+type WorkspaceStateMeta = WorkspaceStateSnapshotMeta;
+const workspaceStateMetaSchema = workspaceStateSnapshotMetaSchema;
 
 const workspaceIndexEntrySchema = z.object({
 	workspaceId: z.string().min(1, "Workspace ID cannot be empty."),
@@ -422,7 +430,7 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
-	preservePersistedMainSessionHandoverMetadata = false,
+	preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot = false,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
@@ -447,7 +455,20 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			}
 		}
 		if (
-			preservePersistedMainSessionHandoverMetadata &&
+			preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot &&
+			persistedSummary.codexNativeDirectInputReadinessReconciliation !== undefined &&
+			persistedSummary.agentId === reconciledSummary.agentId &&
+			persistedSummary.runtimeSessionIncarnationId === reconciledSummary.runtimeSessionIncarnationId
+		) {
+			// 补证预算属于运行时；旧 bundle 的整板保存不能删除预算或复活已清除的预算。
+			reconciledSummary = {
+				...reconciledSummary,
+				codexNativeDirectInputReadinessReconciliation:
+					persistedSummary.codexNativeDirectInputReadinessReconciliation,
+			};
+		}
+		if (
+			preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot &&
 			persistedSummary.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation
 		) {
 			// 旧 bundle 不认识新的角色与恢复快照；整板保存不能删除运行时已经确认的会话归属。
@@ -456,6 +477,21 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 				taskConversationSessionMetadata: persistedSummary.taskConversationSessionMetadata,
 			};
 		}
+		const persistedName = persistedSummary.taskConversationSessionMetadata;
+		if (
+			persistedName &&
+			(persistedName.conversationSessionNameVersion ?? 0) >
+				(reconciledSummary.taskConversationSessionMetadata?.conversationSessionNameVersion ?? 0)
+		)
+			reconciledSummary = {
+				...reconciledSummary,
+				taskConversationSessionMetadata: {
+					...(reconciledSummary.taskConversationSessionMetadata ?? persistedName),
+					conversationSessionName: persistedName.conversationSessionName,
+					conversationSessionNameVersion: persistedName.conversationSessionNameVersion,
+					conversationSessionNameSource: persistedName.conversationSessionNameSource,
+				},
+			};
 		if (reconciledSummary === incomingSummary) continue;
 		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
 		reconciledSessions[taskId] = reconciledSummary;
@@ -479,7 +515,11 @@ export async function loadWorkspaceBoardById(
 	workspaceId: string,
 	options: { requireCompleteRead?: boolean } = {},
 ): Promise<RuntimeBoardData> {
-	return await readWorkspaceBoard(workspaceId, options);
+	return await readConsistentWorkspaceStateProjection(
+		workspaceId,
+		() => readWorkspaceBoard(workspaceId, options),
+		(snapshot) => parseWorkspaceSnapshotBoard(workspaceId, snapshot, options),
+	);
 }
 
 // Stage 2 读时回填：对「三 facet 全缺」的旧盘 per-session 即时经 applySessionFacets 从 legacy
@@ -780,9 +820,9 @@ export async function loadWorkspaceContext(
 ): Promise<RuntimeWorkspaceContext> {
 	const repoPath = await resolveWorkspacePath(cwd);
 	const autoCreateIfMissing = options.autoCreateIfMissing ?? true;
-	if (!autoCreateIfMissing) {
-		const index = await readWorkspaceIndex();
-		const existingEntry = findWorkspaceEntry(index, repoPath);
+	const registeredEntry = findWorkspaceEntry(await readWorkspaceIndex(), repoPath);
+	if (registeredEntry || !autoCreateIfMissing) {
+		const existingEntry = registeredEntry;
 		if (!existingEntry) {
 			throw new Error(`Project ${repoPath} is not added to Kanban yet.`);
 		}
@@ -886,18 +926,14 @@ export async function readWorkspaceBoardByIdAndRunWithBoardLockHeld<T>(
 	const context = await loadWorkspaceContextById(workspaceId);
 	if (!context) throw new Error(`找不到项目 ${workspaceId}。`);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
-		const board = await readWorkspaceBoard(workspaceId);
-		const sessions = await readWorkspaceSessions(workspaceId);
-		const meta = await readWorkspaceMeta(workspaceId);
+		const { board, sessions, meta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId);
 		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(context, board, sessions, meta.revision);
 		return await readAndRunWithBoardLockHeld(board);
 	});
 }
 
 export async function loadPersistedWorkspaceStateById(workspaceId: string): Promise<PersistedWorkspaceStateById> {
-	const board = await readWorkspaceBoard(workspaceId);
-	const sessions = await readWorkspaceSessions(workspaceId);
-	const meta = await readWorkspaceMeta(workspaceId);
+	const { board, sessions, meta } = await readConsistentWorkspaceStateSnapshot(workspaceId);
 	return {
 		workspaceId,
 		statePath: getWorkspaceDirectoryPath(workspaceId),
@@ -907,17 +943,31 @@ export async function loadPersistedWorkspaceStateById(workspaceId: string): Prom
 	};
 }
 
-// 只读 sessions.json（不碰 board / meta）。给跨项目视图读未加载项目的会话用；调用方按下面的文件路径 stat
-// 做 mtime 缓存——这个文件单个可达数 MB，不能每次广播都重新解析。
 export function getPersistedWorkspaceSessionsFilePathById(workspaceId: string): string {
 	return getWorkspaceSessionsPath(workspaceId);
+}
+
+export async function getWorkspaceStateSnapshotReadFingerprintById(workspaceId: string): Promise<string> {
+	return await readWorkspaceStateSnapshotReadFingerprint(getWorkspaceDirectoryPath(workspaceId));
+}
+
+export async function loadPersistedWorkspaceSessionsJsonTextById(workspaceId: string): Promise<string | null> {
+	return await readConsistentWorkspaceStateProjection(
+		workspaceId,
+		() => readWorkspaceSnapshotFileText(getWorkspaceSessionsPath(workspaceId)),
+		(snapshot) => snapshot.sessionsJsonText,
+	);
 }
 
 export async function loadPersistedWorkspaceSessionsById(
 	workspaceId: string,
 	options: { requireCompleteRead?: boolean } = {},
 ): Promise<Record<string, RuntimeTaskSessionSummary>> {
-	return await readWorkspaceSessions(workspaceId, options);
+	return await readConsistentWorkspaceStateProjection(
+		workspaceId,
+		() => readWorkspaceSessions(workspaceId, options),
+		(snapshot) => parseWorkspaceSnapshotSessions(workspaceId, snapshot, options),
+	);
 }
 
 export async function savePersistedWorkspaceSessionsById(
@@ -929,23 +979,16 @@ export async function savePersistedWorkspaceSessionsById(
 	if (!parsedSessions.success) {
 		throw new Error(`Invalid workspace sessions payload. ${formatSchemaIssues(parsedSessions.error)}`);
 	}
-
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
-		const currentMeta = await readWorkspaceMeta(workspaceId);
-		if (currentMeta.revision !== expectedRevision) {
-			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
-		}
-		const nextRevision = currentMeta.revision + 1;
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), parsedSessions.data, {
-			lock: null,
-		});
-		await lockedFileSystem.writeJsonFileAtomic(
-			getWorkspaceMetaPath(workspaceId),
-			{
-				revision: nextRevision,
-				updatedAt: Date.now(),
-			} satisfies WorkspaceStateMeta,
-			{ lock: null },
+		const { board, meta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId);
+		if (meta.revision !== expectedRevision) throw new WorkspaceStateConflictError(expectedRevision, meta.revision);
+		const nextRevision = meta.revision + 1;
+		await commitWorkspaceStateSnapshotWithinLock(
+			workspaceId,
+			board,
+			parsedSessions.data,
+			{ revision: nextRevision, updatedAt: Date.now() },
+			{ boardJsonText: await readWorkspaceBoardFileRawText(workspaceId) },
 		);
 		return nextRevision;
 	});
@@ -964,8 +1007,7 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 	readCurrentSessionSummary: () => RuntimeTaskSessionSummary | null,
 ): Promise<AgentNativeConversationSessionIdentityPersistenceOutcome> {
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
-		const sessions = await readWorkspaceSessions(workspaceId);
-		const currentMeta = await readWorkspaceMeta(workspaceId);
+		const { board, sessions, meta: currentMeta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId);
 		// 取锁和读盘期间可能又收到 hook；此处才取当前 summary，不能保存排队前的旧快照。
 		const currentSummary = readCurrentSessionSummary();
 		if (!currentSummary || currentSummary.taskId !== taskId) {
@@ -991,18 +1033,22 @@ export async function persistRuntimeAgentNativeConversationSessionIdentityByWork
 		// 推 revision 会让所有客户端整板重水合、让在途的整板保存冲突，曾把浏览器里尚未落盘的新卡整张抹掉（cf427）。
 		// 迟到的陈旧快照仍拿不回旧水位：saveWorkspaceState 在同一把目录锁内按 observedAt 保留较新的盘上身份。
 		if (savedIdentity && isSameAgentNativeConversationSessionIdentity(savedIdentity, identity)) {
-			await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, {
-				lock: null,
-			});
+			await commitWorkspaceStateSnapshotWithinLock(
+				workspaceId,
+				board,
+				nextSessions,
+				{ ...currentMeta, updatedAt: Date.now() },
+				{ boardJsonText: await readWorkspaceBoardFileRawText(workspaceId) },
+			);
 			return "persisted_reconfirmed_identity_observation_time_without_revision_change";
 		}
-		// 先使旧快照的 revision 失效，再替换 sessions。后一步失败允许 revision 空增，重试仍会补存身份。
-		await lockedFileSystem.writeJsonFileAtomic(
-			getWorkspaceMetaPath(workspaceId),
-			{ revision: currentMeta.revision + 1, updatedAt: Date.now() } satisfies WorkspaceStateMeta,
-			{ lock: null },
+		await commitWorkspaceStateSnapshotWithinLock(
+			workspaceId,
+			board,
+			nextSessions,
+			{ revision: currentMeta.revision + 1, updatedAt: Date.now() },
+			{ boardJsonText: await readWorkspaceBoardFileRawText(workspaceId) },
 		);
-		await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(workspaceId), nextSessions, { lock: null });
 		getRegisteredWorkspaceBoardPersistenceFunnelTaskMutationEventCapture()?.recordAgentConversationSessionNativeIdentityPersistedWithoutBlocking(
 			{
 				workspaceId,
@@ -1032,13 +1078,12 @@ export async function loadWorkspaceState(
 	options: LoadWorkspaceContextOptions = {},
 ): Promise<RuntimeWorkspaceStateResponse> {
 	const context = await loadWorkspaceContext(cwd, options);
-	const board = await readWorkspaceBoard(context.workspaceId);
+	const { board, sessions: persistedSessions, meta } = await readConsistentWorkspaceStateSnapshot(context.workspaceId);
 	// 别的项目串写进来的会话不交给调用方（重启水合、整板快照、浏览器）；盘上的在下一次写入时自愈。
 	const sessions = removeTaskSessionSummariesOwnedByOtherWorkspacesFromWorkspaceSessions(
 		context,
-		await readWorkspaceSessions(context.workspaceId),
+		persistedSessions,
 	).sessionsWithoutSummariesOwnedByOtherWorkspaces;
-	const meta = await readWorkspaceMeta(context.workspaceId);
 	return toWorkspaceStateResponse(context, board, sessions, meta.revision);
 }
 
@@ -1050,7 +1095,11 @@ export async function saveWorkspaceState(
 	const parsedPayload = parseWorkspaceStateSavePayload(payload);
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
-		const currentMeta = await readWorkspaceMeta(context.workspaceId);
+		const {
+			board: persistedBoard,
+			sessions: persistedSessions,
+			meta: currentMeta,
+		} = await prepareWorkspaceStateSnapshotForWriteWithinLock(context.workspaceId);
 		const expectedRevision = parsedPayload.expectedRevision;
 		if (
 			typeof expectedRevision === "number" &&
@@ -1060,7 +1109,7 @@ export async function saveWorkspaceState(
 		) {
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
-		const persistedBoard = await readWorkspaceBoard(context.workspaceId);
+		parsedPayload.board = preserveTaskNameVersionsAgainstIncomingBoardSnapshot(persistedBoard, parsedPayload.board);
 		// 无版本的旧整板不能把客户端尚未见过的迁入卡当作删除；正式卡片动作在锁内改最新状态，不走此入口。
 		if (
 			expectedRevision === undefined &&
@@ -1071,7 +1120,6 @@ export async function saveWorkspaceState(
 			))
 		)
 			throw new WorkspaceStateConflictError(undefined, currentMeta.revision);
-		const persistedSessions = await readWorkspaceSessions(context.workspaceId);
 		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
 			context,
 			persistedBoard,
@@ -1171,9 +1219,11 @@ export async function mutateWorkspaceState<T>(
 ): Promise<RuntimeWorkspaceAtomicMutationResponse<T>> {
 	const context = await loadWorkspaceContext(cwd);
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(context.workspaceId), async () => {
-		const currentBoard = await readWorkspaceBoard(context.workspaceId);
-		const currentSessions = await readWorkspaceSessions(context.workspaceId);
-		const currentMeta = await readWorkspaceMeta(context.workspaceId);
+		const {
+			board: currentBoard,
+			sessions: currentSessions,
+			meta: currentMeta,
+		} = await prepareWorkspaceStateSnapshotForWriteWithinLock(context.workspaceId);
 		await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(
 			context,
 			currentBoard,
@@ -1252,6 +1302,8 @@ export async function mutateWorkspaceState<T>(
 }
 
 async function readWorkspaceBoardFileRawText(workspaceId: string): Promise<string | null> {
+	const committed = await readWorkspaceStateSnapshotCommit(getWorkspaceDirectoryPath(workspaceId), workspaceId);
+	if (committed) return committed.boardJsonText;
 	try {
 		return await readFile(getPersistedWorkspaceBoardFilePathById(workspaceId), "utf8");
 	} catch (error) {
@@ -1301,6 +1353,7 @@ export async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutati
 	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor;
 }): Promise<void> {
 	const { context } = input;
+	await recoverWorkspaceStateSnapshotProjectionWithinLock(context.workspaceId);
 	if (!input.taskMutationIntentWithResolvedActor.backlogTaskProjectTransfer)
 		await assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot(
 			context.workspaceId,
@@ -1324,19 +1377,12 @@ export async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutati
 			})
 		: null;
 
-	await lockedFileSystem.writeTextFileAtomic(
-		getPersistedWorkspaceBoardFilePathById(context.workspaceId),
-		serializedNextBoard,
-		{
-			lock: null,
-		},
+	await commitWorkspaceStateSnapshotWithinLock(
+		context.workspaceId,
+		input.nextBoard,
+		input.nextSessions,
+		input.nextMeta,
 	);
-	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceSessionsPath(context.workspaceId), input.nextSessions, {
-		lock: null,
-	});
-	await lockedFileSystem.writeJsonFileAtomic(getWorkspaceMetaPath(context.workspaceId), input.nextMeta, {
-		lock: null,
-	});
 
 	if (capture && pendingBatch) {
 		await capture.commitPendingTaskMutationEventsAfterBoardFileWrite({
@@ -1345,4 +1391,316 @@ export async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutati
 			boardRevision: input.nextMeta.revision,
 		});
 	}
+}
+
+function parseWorkspaceSnapshotBoard(
+	workspaceId: string,
+	snapshot: WorkspaceStateSnapshotCommit,
+	options: { requireCompleteRead?: boolean } = {},
+): RuntimeBoardData {
+	const rawBoard: unknown = JSON.parse(snapshot.boardJsonText);
+	if (options.requireCompleteRead && rawBoard === null)
+		throw new Error(`JSON 文件 ${getPersistedWorkspaceBoardFilePathById(workspaceId)} 的正文不能为 null。`);
+	return reconcileBoardColumns(
+		parsePersistedStateFile(
+			getPersistedWorkspaceBoardFilePathById(workspaceId),
+			BOARD_FILENAME,
+			rawBoard,
+			runtimeBoardDataSchema,
+			createEmptyBoard(),
+		),
+	);
+}
+
+function parseWorkspaceSnapshotSessions(
+	workspaceId: string,
+	snapshot: WorkspaceStateSnapshotCommit,
+	options: { requireCompleteRead?: boolean } = {},
+): Record<string, RuntimeTaskSessionSummary> {
+	const rawSessions: unknown = JSON.parse(snapshot.sessionsJsonText);
+	if (options.requireCompleteRead && rawSessions === null)
+		throw new Error(`JSON 文件 ${getWorkspaceSessionsPath(workspaceId)} 的正文不能为 null。`);
+	return backfillSessionFacets(
+		parsePersistedStateFile(
+			getWorkspaceSessionsPath(workspaceId),
+			SESSIONS_FILENAME,
+			rawSessions,
+			workspaceSessionsSchema,
+			{},
+		),
+	);
+}
+
+// 读取前后同时核对日志和 commitId；业务 revision 不变的身份观察也不能穿过这个围栏。
+async function readConsistentWorkspaceStateProjection<T>(
+	workspaceId: string,
+	readProjectionFiles: () => Promise<T>,
+	readCommittedProjection: (snapshot: WorkspaceStateSnapshotCommit) => T,
+): Promise<T> {
+	const directoryPath = getWorkspaceDirectoryPath(workspaceId);
+	for (let attempt = 0; attempt < 8; attempt += 1) {
+		const committedBefore = await readWorkspaceStateSnapshotCommit(directoryPath, workspaceId);
+		if (committedBefore) {
+			scheduleWorkspaceStateSnapshotProjectionRecovery(workspaceId, committedBefore);
+			return readCommittedProjection(committedBefore);
+		}
+		const before = await readWorkspaceMeta(workspaceId);
+		let projectionResult: { value: T } | { error: unknown };
+		try {
+			projectionResult = { value: await readProjectionFiles() };
+		} catch (error) {
+			projectionResult = { error };
+		}
+		const committedAfter = await readWorkspaceStateSnapshotCommit(directoryPath, workspaceId);
+		if (committedAfter) {
+			scheduleWorkspaceStateSnapshotProjectionRecovery(workspaceId, committedAfter);
+			return readCommittedProjection(committedAfter);
+		}
+		const after = await readWorkspaceMeta(workspaceId);
+		if (
+			before.workspaceStateSnapshotCommitId === after.workspaceStateSnapshotCommitId &&
+			before.revision === after.revision &&
+			before.updatedAt === after.updatedAt
+		) {
+			if ("error" in projectionResult) throw projectionResult.error;
+			return projectionResult.value;
+		}
+	}
+	throw new Error(`项目 ${workspaceId} 的快照持续变化，请重试读取。`);
+}
+
+async function readConsistentWorkspaceStateSnapshot(workspaceId: string) {
+	return await readConsistentWorkspaceStateProjection(
+		workspaceId,
+		async () => ({
+			board: await readWorkspaceBoard(workspaceId),
+			sessions: await readWorkspaceSessions(workspaceId),
+			meta: await readWorkspaceMeta(workspaceId),
+		}),
+		(snapshot) => ({
+			board: parseWorkspaceSnapshotBoard(workspaceId, snapshot),
+			sessions: parseWorkspaceSnapshotSessions(workspaceId, snapshot),
+			meta: snapshot.meta,
+		}),
+	);
+}
+
+const projectionRecoveryByDirectoryPath = new Map<
+	string,
+	{
+		commitId: string;
+		attempts: number;
+		timer?: NodeJS.Timeout;
+		recoveryAttemptPending?: boolean;
+		filesystemConditionObserver?: NodeJS.Timeout;
+		filesystemConditionProbePending?: boolean;
+	}
+>();
+const PROJECTION_RECOVERY_RETRY_DELAYS_MS = [1_000, 5_000, 15_000] as const;
+
+function clearWorkspaceStateSnapshotProjectionRecovery(directoryPath: string): void {
+	const recovery = projectionRecoveryByDirectoryPath.get(directoryPath);
+	if (recovery?.timer) clearTimeout(recovery.timer);
+	if (recovery?.filesystemConditionObserver) clearInterval(recovery.filesystemConditionObserver);
+	projectionRecoveryByDirectoryPath.delete(directoryPath);
+}
+
+function scheduleWorkspaceStateSnapshotProjectionRecovery(
+	workspaceId: string,
+	snapshot: WorkspaceStateSnapshotCommit,
+): void {
+	const directoryPath = getWorkspaceDirectoryPath(workspaceId);
+	let recovery = projectionRecoveryByDirectoryPath.get(directoryPath);
+	if (recovery?.commitId !== snapshot.workspaceStateSnapshotCommitId) {
+		clearWorkspaceStateSnapshotProjectionRecovery(directoryPath);
+		recovery = { commitId: snapshot.workspaceStateSnapshotCommitId, attempts: 0 };
+		projectionRecoveryByDirectoryPath.set(directoryPath, recovery);
+	}
+	if (
+		recovery.timer ||
+		recovery.recoveryAttemptPending ||
+		recovery.attempts >= PROJECTION_RECOVERY_RETRY_DELAYS_MS.length
+	)
+		return;
+	const lockRequest = getWorkspaceDirectoryLockRequest(workspaceId);
+	const currentRecovery = recovery;
+	currentRecovery.timer = setTimeout(() => {
+		currentRecovery.timer = undefined;
+		currentRecovery.attempts += 1;
+		currentRecovery.recoveryAttemptPending = true;
+		void lockedFileSystem
+			.withLock(lockRequest, async () => {
+				await recoverWorkspaceStateSnapshotProjectionWithinLock(workspaceId, directoryPath);
+			})
+			.catch(async (error: unknown) => {
+				currentRecovery.recoveryAttemptPending = false;
+				logFileLockWarning(
+					`snapshot-projection-recovery-deferred workspace=${workspaceId} attempt=${currentRecovery.attempts} error=${String(error)}`,
+				);
+				if (projectionRecoveryByDirectoryPath.get(directoryPath) !== currentRecovery) return;
+				if (currentRecovery.attempts < PROJECTION_RECOVERY_RETRY_DELAYS_MS.length) {
+					scheduleWorkspaceStateSnapshotProjectionRecovery(workspaceId, snapshot);
+					return;
+				}
+				const fingerprint = await readWorkspaceProjectionRecoveryFilesystemCondition(directoryPath, error);
+				if (projectionRecoveryByDirectoryPath.get(directoryPath) !== currentRecovery) return;
+				logFileLockWarning(
+					`snapshot-projection-awaiting-filesystem-change workspace=${workspaceId} commitId=${snapshot.workspaceStateSnapshotCommitId}`,
+				);
+				currentRecovery.filesystemConditionObserver = setInterval(() => {
+					if (currentRecovery.filesystemConditionProbePending) return;
+					currentRecovery.filesystemConditionProbePending = true;
+					void readWorkspaceProjectionRecoveryFilesystemCondition(directoryPath, error)
+						.then(async (observed) => {
+							if (projectionRecoveryByDirectoryPath.get(directoryPath) !== currentRecovery) return;
+							let previousLockContentionCleared = false;
+							if (isNodeErrorWithCode(error, "ELOCKED")) {
+								try {
+									// 内核锁释放不改变 JSON 时间戳；只做无等待资格观察，实际补投仍须重新持锁。
+									const release = await lockedFileSystem.acquireLock({ ...lockRequest, retries: 0 });
+									await release();
+									previousLockContentionCleared = true;
+								} catch (probeError) {
+									if (!isNodeErrorWithCode(probeError, "ELOCKED"))
+										logFileLockWarning(
+											`snapshot-projection-lock-observation-unavailable workspace=${workspaceId} error=${String(probeError)}`,
+										);
+								}
+							}
+							if (
+								projectionRecoveryByDirectoryPath.get(directoryPath) !== currentRecovery ||
+								(!previousLockContentionCleared && observed === fingerprint)
+							)
+								return;
+							clearInterval(currentRecovery.filesystemConditionObserver);
+							currentRecovery.filesystemConditionObserver = undefined;
+							currentRecovery.attempts = 0;
+							scheduleWorkspaceStateSnapshotProjectionRecovery(workspaceId, snapshot);
+						})
+						.finally(() => {
+							currentRecovery.filesystemConditionProbePending = false;
+						});
+				}, 15_000);
+				currentRecovery.filesystemConditionObserver.unref();
+			});
+	}, PROJECTION_RECOVERY_RETRY_DELAYS_MS[currentRecovery.attempts]);
+	currentRecovery.timer.unref();
+}
+
+// 预算耗尽后只观察条件，不再重复写入；锁可获取、权限、目标身份或（磁盘满时）可用空间变化才恢复重试。
+async function readWorkspaceProjectionRecoveryFilesystemCondition(
+	directoryPath: string,
+	failure: unknown,
+): Promise<string> {
+	const fingerprints = await Promise.all(
+		["", BOARD_FILENAME, SESSIONS_FILENAME, META_FILENAME].map(async (filename) => {
+			try {
+				const observed = await stat(filename ? join(directoryPath, filename) : directoryPath, { bigint: true });
+				return `${observed.dev}:${observed.ino}:${observed.mode}:${observed.ctimeNs}:${observed.mtimeNs}`;
+			} catch (error) {
+				return `unreadable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`;
+			}
+		}),
+	);
+	const failureCode = (failure as NodeJS.ErrnoException | null)?.code;
+	if (failureCode === "ENOSPC" || failureCode === "EDQUOT") {
+		try {
+			const filesystem = await statfs(directoryPath, { bigint: true });
+			fingerprints.push(`${filesystem.bavail}:${filesystem.ffree}`);
+		} catch (error) {
+			fingerprints.push(`filesystem-unreadable:${(error as NodeJS.ErrnoException).code ?? "unknown"}`);
+		}
+	}
+	return JSON.stringify(fingerprints);
+}
+
+// 失败仅延后本项目的后续写入；下一次写入会先重试，读到日志也会启动有界后台恢复。
+export async function recoverWorkspaceStateSnapshotProjectionWithinLock(
+	workspaceId: string,
+	directoryPath = getWorkspaceDirectoryPath(workspaceId),
+): Promise<void> {
+	const committed = await readWorkspaceStateSnapshotCommit(directoryPath, workspaceId);
+	if (committed) {
+		// 不能用不合法快照覆盖尚可观测的投影。
+		parseWorkspaceSnapshotBoard(workspaceId, committed);
+		parseWorkspaceSnapshotSessions(workspaceId, committed);
+		await projectWorkspaceStateSnapshotCommitWithinLock(directoryPath, committed);
+	}
+	clearWorkspaceStateSnapshotProjectionRecovery(directoryPath);
+}
+
+async function commitWorkspaceStateSnapshotWithinLock(
+	workspaceId: string,
+	board: RuntimeBoardData,
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+	meta: WorkspaceStateMeta,
+	preservedProjectionFileTexts?: { boardJsonText?: string | null; sessionsJsonText?: string | null },
+): Promise<void> {
+	const directoryPath = getWorkspaceDirectoryPath(workspaceId);
+	runtimeBoardDataSchema.parse(board);
+	workspaceSessionsSchema.parse(sessions);
+	const committed = createWorkspaceStateSnapshotCommit({
+		workspaceId,
+		// 会话写入不能重序列化未编辑的看板，否则会改变关系账本用来核对 pending 批次的字节指纹。
+		boardJsonText: preservedProjectionFileTexts?.boardJsonText ?? JSON.stringify(board, null, 2),
+		sessionsJsonText: preservedProjectionFileTexts?.sessionsJsonText ?? JSON.stringify(sessions, null, 2),
+		meta,
+	});
+	await writeWorkspaceStateSnapshotCommitDurably(directoryPath, committed);
+	try {
+		await projectWorkspaceStateSnapshotCommitWithinLock(directoryPath, committed);
+		clearWorkspaceStateSnapshotProjectionRecovery(directoryPath);
+	} catch (error) {
+		logFileLockError(
+			`snapshot-committed-projection-deferred workspace=${workspaceId} commitId=${committed.workspaceStateSnapshotCommitId} error=${String(error)}`,
+		);
+		scheduleWorkspaceStateSnapshotProjectionRecovery(workspaceId, committed);
+	}
+}
+
+// 首次迁移只记录当前观测，保留原始字节，不推断旧协议下三个文件曾属于同一次提交。
+export async function prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId: string) {
+	await recoverWorkspaceStateSnapshotProjectionWithinLock(workspaceId);
+	const directoryPath = getWorkspaceDirectoryPath(workspaceId);
+	const meta = await readWorkspaceMeta(workspaceId);
+	const board = await readWorkspaceBoard(workspaceId);
+	const sessions = await readWorkspaceSessions(workspaceId);
+	if (!meta.workspaceStateSnapshotCommitId) {
+		const [boardJsonText, sessionsJsonText, metaJsonText] = await Promise.all(
+			[BOARD_FILENAME, SESSIONS_FILENAME, META_FILENAME].map((filename) =>
+				readWorkspaceSnapshotFileText(join(directoryPath, filename)),
+			),
+		);
+		if (boardJsonText !== null || sessionsJsonText !== null || metaJsonText !== null) {
+			const observationPath = join(directoryPath, WORKSPACE_STATE_LEGACY_OBSERVATION_FILENAME);
+			if ((await readWorkspaceSnapshotFileText(observationPath)) === null) {
+				await lockedFileSystem.writeJsonFileAtomic(
+					observationPath,
+					{
+						schemaVersion: 1,
+						workspaceId,
+						observedAtEpochMs: Date.now(),
+						historicalSnapshotConsistency: "unverified",
+						boardJsonText,
+						sessionsJsonText,
+						metaJsonText,
+					},
+					{ lock: null, durable: true },
+				);
+			}
+			await commitWorkspaceStateSnapshotWithinLock(
+				workspaceId,
+				board,
+				sessions,
+				{
+					revision: meta.revision + 1,
+					updatedAt: Date.now(),
+				},
+				{ boardJsonText: boardJsonText ?? null, sessionsJsonText: sessionsJsonText ?? null },
+			);
+			await recoverWorkspaceStateSnapshotProjectionWithinLock(workspaceId);
+			return { board, sessions, meta: await readWorkspaceMeta(workspaceId) };
+		}
+	}
+	return { board, sessions, meta };
 }

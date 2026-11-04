@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepared = vi.hoisted(() => vi.fn());
@@ -19,6 +18,7 @@ import {
 	withCodexConversationStorageOperationLock,
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -31,6 +31,8 @@ beforeEach(async () => {
 	vi.stubEnv("CODEX_HOME", join(fixture.path, ".codex"));
 	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, ".codex"));
 	await mkdir(join(fixture.path, ".codex"));
+	vi.stubEnv("CODEX_HOME", join(fixture.path, ".codex"));
+	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, ".codex"));
 	prepared.mockReset();
 	prepared.mockImplementation(async (request) => ({ args: request.args, env: {} }));
 	spawned.mockReset();
@@ -109,6 +111,25 @@ function hydrateStoppedCodexSession(
 }
 
 describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
+	it("spawn 失败不发布成功启动的 effort 反馈凭证", async () => {
+		const manager = createManager();
+		spawned.mockImplementationOnce(() => {
+			throw new Error("隔离测试模拟 spawn 失败");
+		});
+		await expect(manager.startTaskSession({ ...request(), codexReasoningEffortOverride: "ultra" })).rejects.toThrow(
+			"spawn 失败",
+		);
+		expect(manager.getSummary(request().taskId)?.codexTaskReasoningEffortFeedbackLaunch).toBeUndefined();
+	});
+	it("任务 effort 贯通 writer 与 adapter，成功启动才在持久摘要记录反馈起点", async () => {
+		const manager = createManager();
+		const summary = await manager.startTaskSession({ ...request(), codexReasoningEffortOverride: "ultra" });
+		expect(prepared.mock.calls[0]?.[0].codexReasoningEffortOverride).toBe("ultra");
+		expect(summary.codexTaskReasoningEffortFeedbackLaunch).toMatchObject({
+			selectionId: expect.any(String),
+			startedAtMs: summary.startedAt,
+		});
+	});
 	it("新会话在专用目录启动，持久摘要记录实际目录且不继承 App 来源", async () => {
 		vi.stubEnv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_work_desktop");
 		const manager = createManager();
@@ -143,9 +164,11 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			await storeMutationMayFinish;
 		});
 		await storeMutationStarted;
-		const acquireLock = lockfile.lock;
-		const oldScheduleWaiter = acquireLock(getCodexConfigurationSyncDirectory(), {
-			realpath: false,
+		const acquireLock = lockedFileSystem.acquireLock.bind(lockedFileSystem);
+		const oldScheduleWaiter = acquireLock({
+			path: getCodexConfigurationSyncDirectory(),
+			type: "directory",
+			lockfilePath: `${getCodexConfigurationSyncDirectory()}.lock`,
 			retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
 		}).then(
 			async (release) => {
@@ -158,9 +181,9 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		const resumeWaiting = new Promise<void>((resolve) => {
 			markResumeWaiting = resolve;
 		});
-		vi.spyOn(lockfile, "lock").mockImplementation((path, options) => {
-			const waiting = acquireLock(path, options);
-			if (path === getCodexConfigurationSyncDirectory()) markResumeWaiting();
+		vi.spyOn(lockedFileSystem, "acquireLock").mockImplementation((lockRequest) => {
+			const waiting = acquireLock(lockRequest);
+			if (lockRequest.path === getCodexConfigurationSyncDirectory()) markResumeWaiting();
 			return waiting;
 		});
 		const resumeRequest = {
@@ -324,7 +347,7 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		);
 	});
 
-	it("专用目录预检失败时保留现有活体和原目录绑定", async () => {
+	it("专用目录转录暂缺时持久等待补证，保留现有活体和原目录绑定", async () => {
 		const manager = createManager();
 		await manager.startTaskSession(request());
 		manager.applyAgentNativeConversationSessionIdentity(request().taskId, {
@@ -334,9 +357,11 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			observedAt: 1,
 		});
 		const activeProcess = spawned.mock.results[0]?.value;
-		await expect(
-			manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true }),
-		).rejects.toThrow(nativeSessionId);
+		const waitingSummary = await manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true });
+		expect(waitingSummary.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(nativeSessionId);
+		expect(waitingSummary.taskConversationSessionNativeIdentityRecovery?.resumeRequestedAtMs).toEqual(
+			expect.any(Number),
+		);
 		expect(activeProcess.stop).not.toHaveBeenCalled();
 		expect(spawned).toHaveBeenCalledOnce();
 		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(

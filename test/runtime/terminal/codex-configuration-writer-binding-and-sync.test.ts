@@ -60,7 +60,6 @@ beforeEach(async () => {
 			hooks: { state: { [`${sourceHome}/hooks.json:stop:0:0`]: { trusted_hash: "fixture-hash", enabled: true } } },
 		}),
 	);
-	storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
 	services = [];
 	sessions = [];
 });
@@ -71,6 +70,7 @@ afterEach(async () => {
 });
 
 async function writer(sessionId: string, previousBinding?: CodexConfigurationWriterBinding) {
+	storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
 	const binding = await prepareCodexConfigurationWriterBinding({
 		purpose: "native_session",
 		storageHome,
@@ -687,7 +687,9 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		);
 		await rename(sourceHome, `${sourceHome}-original`);
 		await mkdir(sourceHome);
-		await expect(assertCodexConfigurationWriterBindingIdentity(replacement)).rejects.toThrow("已被替换");
+		await expect(assertCodexConfigurationWriterBindingIdentity(replacement)).rejects.toThrow(
+			/目录身份.*(?:已被替换|缺少可核验的原绑定证据)/,
+		);
 	});
 	it("局部模型选择持续到 profile 明确更新模型，其他字段不清除局部选择", async () => {
 		const first = await writer("first"),
@@ -887,7 +889,7 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			parse(await readFile(join(future.configurationHomeDirectoryPath, "review.config.toml"), "utf8")).model,
 		).toBe("profile-selected-model");
 	});
-	it("用户全局来源与内部默认的不同修改保留为冲突，而不是静默覆盖或丢弃", async () => {
+	it("用户全局修改退出审批，Kanban 内部已接受的默认继续用于未来会话", async () => {
 		const first = await writer("first");
 		const sync = service();
 		await changeConfiguration(first, (configuration) => {
@@ -900,8 +902,8 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		expect(
 			state.changes.find(
 				(change) => change.sourceWriterId.startsWith("user-source:") && change.fieldLabel.endsWith("model"),
-			)?.mergeStatus,
-		).toBe("conflict");
+			),
+		).toBeUndefined();
 		expect(
 			parse(await readFile(join((await writer("future")).configurationHomeDirectoryPath, "config.toml"), "utf8"))
 				.model,

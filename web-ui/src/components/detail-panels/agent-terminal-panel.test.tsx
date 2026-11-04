@@ -60,6 +60,15 @@ vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 	}),
 }));
 
+vi.mock("@/runtime/task-conversation-history-query", () => ({
+	fetchTaskConversationHistoryPage: async () => ({
+		availability: "available",
+		messages: [{ id: "native", role: "assistant", content: "终端画面之外的原生转录", createdAt: 1 }],
+		nextCursor: null,
+		notice: null,
+	}),
+}));
+
 vi.mock("@/hooks/use-is-mobile", () => ({
 	useIsMobile: () => mockUseIsMobile(),
 }));
@@ -212,7 +221,7 @@ describe("AgentTerminalPanel", () => {
 		expect(mockRefreshTerminal).toHaveBeenCalledTimes(1);
 	});
 
-	it("offers the transcript reader toggle on desktop too, not just on mobile", () => {
+	it("桌面阅读入口读取原生转录并保留终端与阅读组件", async () => {
 		mockUseIsMobile.mockReturnValue(false);
 		mockReadScrollbackTranscript.mockReturnValue([createTranscriptLogicalLine("earlier output", 0)]);
 
@@ -229,7 +238,7 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 
-		const toggle = container.querySelector<HTMLButtonElement>('[aria-label="Read the transcript as a document"]');
+		const toggle = container.querySelector<HTMLButtonElement>('[aria-label="以文档阅读会话记录"]');
 		expect(toggle).not.toBeNull();
 		expect(toggle?.getAttribute("aria-pressed")).toBe("false");
 
@@ -238,20 +247,37 @@ describe("AgentTerminalPanel", () => {
 		});
 
 		// 阅读视图叠加在 xterm 之上；xterm 容器仍留在 DOM 里（终端不卸载、PTY 继续跑）。
-		expect(container.querySelector('[aria-label="Filter transcript lines"]')).not.toBeNull();
+		expect(container.querySelector('[aria-label="搜索已加载记录"]')).not.toBeNull();
 		expect(container.querySelector(".kb-terminal-container")).not.toBeNull();
-		// 断言行数标签而非行内容：列表走 react-virtuoso，jsdom 里没有真实布局高度、算不出可视区，
-		// 因而 itemContent 一次都不会被调用、不渲染任何 item。行数标签同样证明 transcript 已从终端读到。
-		// 逐行渲染（含配色还原）由组件级测试 `terminal-scrollback-transcript-styled-line.test.tsx` 覆盖，
-		// 别在这里补断言 —— 在这一层它只会因为「压根没渲染」而恒真，是假绿灯。
-		expect(container.textContent).toContain("1 lines");
+		await act(async () => {});
+		expect(container.textContent).toContain("终端画面之外的原生转录");
+		expect(mockReadScrollbackTranscript).not.toHaveBeenCalled();
 
-		const backToTerminal = container.querySelector<HTMLButtonElement>('[aria-label="Back to the live terminal"]');
+		const backToTerminal = container.querySelector<HTMLButtonElement>('[aria-label="返回实时终端"]');
 		expect(backToTerminal?.getAttribute("aria-pressed")).toBe("true");
 		act(() => {
 			backToTerminal?.click();
 		});
-		expect(container.querySelector('[aria-label="Filter transcript lines"]')).toBeNull();
+		expect(
+			container
+				.querySelector("[data-task-conversation-transcript-document-reader]")
+				?.parentElement?.classList.contains("hidden"),
+		).toBe(true);
+	});
+
+	it("普通 shell 保留终端缓冲区阅读", () => {
+		mockReadScrollbackTranscript.mockReturnValue([createTranscriptLogicalLine("shell 输出", 0)]);
+		act(() =>
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel taskId="__detail_terminal__:task-1" workspaceId="workspace-1" summary={null} />
+				</TooltipProvider>,
+			),
+		);
+		act(() => container.querySelector<HTMLButtonElement>('[aria-label="以文档阅读会话记录"]')?.click());
+		expect(container.querySelector('[aria-label="筛选终端输出"]')).not.toBeNull();
+		expect(mockReadScrollbackTranscript).toHaveBeenCalled();
+		expect(container.querySelector("[data-task-conversation-transcript-document-reader]")).toBeNull();
 	});
 
 	it("快捷输入聚焦先关闭阅读覆盖层，再交给当前终端输入入口", () => {
@@ -269,11 +295,15 @@ describe("AgentTerminalPanel", () => {
 			);
 		});
 		act(() => {
-			container.querySelector<HTMLButtonElement>('[aria-label="Read the transcript as a document"]')?.click();
+			container.querySelector<HTMLButtonElement>('[aria-label="以文档阅读会话记录"]')?.click();
 		});
-		expect(container.querySelector('[aria-label="Filter transcript lines"]')).not.toBeNull();
+		expect(container.querySelector('[aria-label="搜索已加载记录"]')).not.toBeNull();
 		mockFocusTerminalInputAfterShortcutInsertion.mockImplementationOnce(() => {
-			expect(container.querySelector('[aria-label="Filter transcript lines"]')).toBeNull();
+			expect(
+				container
+					.querySelector("[data-task-conversation-transcript-document-reader]")
+					?.parentElement?.classList.contains("hidden"),
+			).toBe(true);
 			return true;
 		});
 		act(() => {

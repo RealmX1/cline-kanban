@@ -3,6 +3,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
 
+vi.mock(
+	"../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume",
+	async (importOriginal) => ({
+		...(await importOriginal()),
+		inspectCodexNativeConversationTranscriptBeforeResume: vi.fn(async () => ({
+			persistedTranscriptPath: "/isolated-codex-session/recorded-native-session.jsonl",
+		})),
+	}),
+);
+
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
 }));
@@ -40,8 +50,8 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 function startTaskSessionRequest() {
 	return {
 		taskId: "task-1",
-		agentId: "codex" as const,
-		binary: "codex",
+		agentId: "claude" as const,
+		binary: "claude",
 		args: [],
 		cwd: "/tmp/task-1",
 		prompt: "Fix the bug",
@@ -85,19 +95,33 @@ describe("auto-restart circuit breaker", () => {
 		try {
 			await manager.refreshTaskTerminal({
 				...startTaskSessionRequest(),
+				agentId: "codex",
+				binary: "codex",
 				prompt: "",
 				resumeFromTrash: true,
 				additionalAgentStartupArgumentsForThisRestart: additionalArguments,
 			});
+			manager.applyAgentNativeConversationSessionIdentity("task-1", {
+				sourceAgentId: "codex",
+				nativeSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+				transcriptPath: "/isolated-codex-session/recorded-native-session.jsonl",
+				observedAt: Date.now(),
+			});
 			additionalArguments[1] = "/mutated-by-caller";
 			await crashNewestIncarnationAndSettleBackoff(0);
-			expect(prepareAgentLaunchMock).toHaveBeenCalledTimes(2);
+			await vi.waitFor(() => expect(prepareAgentLaunchMock).toHaveBeenCalledTimes(2));
 			expect(prepareAgentLaunchMock.mock.calls.at(-1)?.[0].additionalAgentStartupArgumentsForThisRestart).toEqual([
 				"--cd",
 				"/explicit-restart",
 			]);
 			spawnedSessions.at(-1)?.triggerExit(0);
-			await manager.refreshTaskTerminal({ ...startTaskSessionRequest(), prompt: "", resumeFromTrash: true });
+			await manager.refreshTaskTerminal({
+				...startTaskSessionRequest(),
+				agentId: "codex",
+				binary: "codex",
+				prompt: "",
+				resumeFromTrash: true,
+			});
 			expect(
 				prepareAgentLaunchMock.mock.calls.at(-1)?.[0].additionalAgentStartupArgumentsForThisRestart,
 			).toBeUndefined();
@@ -113,6 +137,8 @@ describe("auto-restart circuit breaker", () => {
 			await expect(
 				manager.refreshTaskTerminal({
 					...startTaskSessionRequest(),
+					agentId: "codex",
+					binary: "codex",
 					additionalAgentStartupArgumentsForThisRestart: ["--cd"],
 				}),
 			).rejects.toThrow("缺少参数值");

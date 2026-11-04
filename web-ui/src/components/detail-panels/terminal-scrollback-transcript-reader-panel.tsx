@@ -21,22 +21,8 @@ interface TerminalScrollbackTranscriptReaderPanelProps {
 }
 
 /**
- * 把终端 scrollback 当作文档来读的只读视图。
- *
- * 与 xterm 的分工：xterm 是定宽字符网格，为「操作」而生 —— 输入、TUI 原生交互面、实时重绘；
- * 本视图为「阅读」而生 —— 逻辑行按屏宽软换行、系统原生长按选中、原生 DOM 滚动。读长 transcript
- * （尤其 agent 提问时需要回看完整 context）走这里，操作仍回 xterm。
- *
- * **配色与终端一致，不是纯文本 dump。** 提取层保留了每个字符的前景/背景色与字形属性，本视图
- * 逐 run 还原 —— agent TUI 靠颜色区分工具输出、diff 增删、消息类型与强调，丢掉颜色这些区别
- * 在视觉上就没了。底色也直接取终端主题色（各主题的终端色恒为深色，见 `use-theme.ts`），
- * 让 ANSI 色落在它本来预期的底上；本视图是 DOM 而非画布，不经浅色主题那层反相滤镜。
- *
- * 呈现形态：它不是独立 tab，而是叠加在同一个 AgentTerminalPanel 之上的显示模式，由面板头部的
- * 阅读模式 toggle 在「实时终端」与「本视图」之间切换 —— 用户看到本视图时人就在终端面板里，
- * 所以任何面向用户的文案都必须以「用头部 toggle 切回实时终端」作为出路，不得指向别处。
- *
- * 刻意做成手动刷新的快照而非实时流：阅读态本就该稳定，边读边跳会让人丢失位置。
+ * 普通 shell 的终端缓冲区阅读，保留字符样式并通过手动刷新更新快照。
+ * Agent 持久转录由 TaskConversationTranscriptDocumentReaderPanel 读取；两者均叠加在实时终端上。
  */
 export function TerminalScrollbackTranscriptReaderPanel({
 	taskId,
@@ -95,8 +81,8 @@ export function TerminalScrollbackTranscriptReaderPanel({
 						type="text"
 						value={filterQuery}
 						onChange={(event) => setFilterQuery(event.target.value)}
-						placeholder="Filter lines"
-						aria-label="Filter transcript lines"
+						placeholder="筛选终端输出"
+						aria-label="筛选终端输出"
 						data-mobile-focus-view-idle-collapse-suspension=""
 						className={cn(
 							"w-full rounded-md border border-border bg-surface-2 py-1 pl-7 pr-2 text-xs text-text-primary",
@@ -113,7 +99,7 @@ export function TerminalScrollbackTranscriptReaderPanel({
 					size={isMobile ? "md" : "sm"}
 					icon={<RotateCcw size={isMobile ? 16 : 12} />}
 					onClick={refreshTranscript}
-					aria-label="Reload transcript from the terminal"
+					aria-label="刷新终端输出"
 					className={cn(isMobile && MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 				/>
 			</div>
@@ -155,25 +141,18 @@ export function TerminalScrollbackTranscriptReaderPanel({
 
 function formatTranscriptLineCountLabel(visibleLineCount: number, totalLineCount: number): string {
 	if (visibleLineCount === totalLineCount) {
-		return `${totalLineCount} lines`;
+		return `${totalLineCount} 行`;
 	}
 	return `${visibleLineCount}/${totalLineCount}`;
 }
 
-/**
- * 空视图必须说清「为什么空」。尤其 alt-screen agent（Codex 等）在自己的备用屏缓冲区里原地
- * 重绘，历史由 TUI 自己持有、根本不进 scrollback —— 那是设计使然而非故障，不能只显示一句
- * 「没有内容」让人以为坏了。
- *
- * 出路一律是「用面板头部的 toggle 切回实时终端」：本视图是终端面板内的叠加层，用户此刻就在
- * 终端面板里，绝不能把他导向别的 tab 或别的位置。
- */
+/** 普通 shell 只提供终端缓冲区输出；agent 的持久转录由独立文档组件读取。 */
 function describeEmptyTranscriptReason(input: { isTerminalAttached: boolean; hasAnyLine: boolean }): string {
 	if (input.hasAnyLine) {
-		return "No lines match the current filter.";
+		return "没有符合筛选条件的终端输出。";
 	}
 	if (!input.isTerminalAttached) {
-		return "The live terminal behind this reading view has not connected yet, so there is no scrollback to read. Use the reader toggle in the panel header to go back to the live terminal, then return here once the session has produced output.";
+		return "终端尚未连接，暂时没有可读取的输出。连接并产生输出后可刷新。";
 	}
-	return "Nothing to read here yet. Agents that draw a full-screen interface (such as Claude Code or Codex) keep their history inside that interface rather than in terminal scrollback, so there is nothing for this reading view to show — use the reader toggle in the panel header to go back to the live terminal and scroll there instead.";
+	return "终端缓冲区尚无可读取的输出。可通过面板头部按钮返回实时终端。";
 }

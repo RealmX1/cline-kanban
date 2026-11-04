@@ -73,6 +73,26 @@ describe("跨浏览器 origin 共享的界面偏好 store", () => {
 	afterEach(() => {
 		resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
 	});
+	it("转录阅读可见度在保存期间立即生效，并在重新加载后恢复", async () => {
+		saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
+			taskConversationTranscriptDocumentVisibility: "conversation_and_tools",
+		});
+		expect(readEffectiveUserInterfacePreferenceValue("taskConversationTranscriptDocumentVisibility")).toBe(
+			"conversation_and_tools",
+		);
+		await vi.waitFor(() =>
+			expect(preferencesHeldByFakeServer.taskConversationTranscriptDocumentVisibility).toBe(
+				"conversation_and_tools",
+			),
+		);
+		resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForTests();
+		startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
+		await vi.waitFor(() =>
+			expect(readEffectiveUserInterfacePreferenceValue("taskConversationTranscriptDocumentVisibility")).toBe(
+				"conversation_and_tools",
+			),
+		);
+	});
 
 	describe("项目归属自动分析", () => {
 		it("未设置时默认关闭，成功保存后重新加载恢复全局选择", async () => {
