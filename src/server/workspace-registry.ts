@@ -32,6 +32,7 @@ import { projectVisualIdentityStore } from "../state/project-visual-identity-sto
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	getPersistedWorkspaceBoardFilePathById,
+	getWorkspaceStateSnapshotReadFingerprintById,
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
@@ -556,8 +557,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	}> => {
 		// 宽松读取可能把旧版 null 正文投影为空看板，严格查询不能继承这份兼容结果。
 		const boardReadCache = requireCompleteRead ? completeProjectSummaryBoardReadCache : projectSummaryBoardReadCache;
-		const board = await boardReadCache.read(getPersistedWorkspaceBoardFilePathById(workspaceId), () =>
-			loadWorkspaceBoardById(workspaceId, { requireCompleteRead }),
+		const board = await boardReadCache.read(
+			getPersistedWorkspaceBoardFilePathById(workspaceId),
+			() => loadWorkspaceBoardById(workspaceId, { requireCompleteRead }),
+			() => getWorkspaceStateSnapshotReadFingerprintById(workspaceId),
 		);
 		const terminalManager = getTerminalManagerForWorkspace(workspaceId);
 		let terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null = null;

@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import lockfile from "proper-lockfile";
 import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
@@ -16,6 +15,7 @@ import {
 	codexConfigurationTaskSourceSnapshotSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
+import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
@@ -398,8 +398,10 @@ export async function mutateCodexConfigurationSyncStore<T>(
 	const directory = getCodexConfigurationSyncDirectory();
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	if ((await lstat(directory)).isSymbolicLink()) throw new Error("Codex 配置绑定目录被替换，已保留现场。");
-	const release = await lockfile.lock(directory, {
-		realpath: false,
+	const release = await lockedFileSystem.acquireLock({
+		path: directory,
+		type: "directory",
+		lockfilePath: `${directory}.lock`,
 		retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
 	});
 	const pendingPath = join(directory, `${randomUUID()}.pending-configuration-sync-state.json`);

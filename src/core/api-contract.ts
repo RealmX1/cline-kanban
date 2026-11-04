@@ -6086,6 +6086,34 @@ export const runtimePostDeployVerificationRunSchema = z.object({
 	startedAtIso: z.string().nullable(),
 	finishedAtIso: z.string().nullable(),
 	outputExcerpt: z.string(),
+	verificationExecutionAttemptId: z.string().uuid().optional(),
+	postDeployVerificationTaskInstanceId: z.string().optional(),
+	taskIncarnationCreatedAtEpochMs: z.number().nonnegative().optional(),
+	verificationDefinitionFingerprint: z.string().optional(),
+	recoveryObservation: z
+		.object({
+			reason: z.enum([
+				"awaiting_exit_confirmation",
+				"legacy_execution_ownership_unknown",
+				"unchanged_evidence_budget_exhausted",
+			]),
+			message: z.string(),
+			unchangedEvidenceProbeCount: z.number().int().min(0).max(3),
+			nextActiveProbeAtEpochMs: z.number(),
+			unprovenProcessIdentities: z
+				.array(
+					z.object({
+						processPid: z.number().int().positive(),
+						processStartIdentity: z.string(),
+						nativeProcessGenerationIdentity: z.string().optional(),
+						originalParentProcessGenerationIdentity: z.string().optional(),
+						reason: z.string(),
+					}),
+				)
+				.optional(),
+			recoveryTriggers: z.array(z.string()).optional(),
+		})
+		.optional(),
 });
 export type RuntimePostDeployVerificationRun = z.infer<typeof runtimePostDeployVerificationRunSchema>;
 
@@ -6127,6 +6155,8 @@ export type RuntimePostDeployVerificationCleanup = z.infer<typeof runtimePostDep
 // kind=guided_manual、guidance/script/run/cleanup 全 null ⇒ 面板渲染成纯 checkbox，与全量重命名前零行为差异。
 export const runtimePostDeployVerificationChecklistItemSchema = z.object({
 	id: z.string(),
+	// 仅绑定自动清理的注册归属，不代表脚本资产内容已版本化。
+	authoredVerificationDefinitionRegistrationId: z.string().uuid().optional(),
 	label: z.string(),
 	checked: z.boolean(),
 	source: runtimePostDeployVerificationChecklistItemSourceSchema,
@@ -6272,6 +6302,9 @@ export type RuntimePostDeployVerificationPendingConfirmation = z.infer<
 
 export const runtimePostDeployVerificationTaskSchema = z.object({
 	taskId: z.string(),
+	// PDV 条目实例身份沿部署延续；删除后重建同 taskId 不复用该身份。
+	postDeployVerificationTaskInstanceId: z.string().optional(),
+	taskIncarnationCreatedAtEpochMs: z.number().nonnegative().optional(),
 	// 纳入本组时的列快照，仅作展示；入 Done 确认流按任务「当前列」分支，不看此快照（plan 1d）。
 	columnIdAtMatch: runtimeBoardColumnIdSchema,
 	matchedCommits: z.array(z.string()),
@@ -6331,6 +6364,7 @@ export type RuntimePostDeployVerificationState = z.infer<typeof runtimePostDeplo
 // 与部署组分离存储的原因：定义在「部署前」注册（此时尚无部署组），且需跨多次部署 seed 到各新组的新副本。
 export const runtimeAuthoredVerificationDefinitionSchema = z.object({
 	verificationId: z.string().uuid(),
+	authoredVerificationDefinitionRegistrationId: z.string().uuid().optional(),
 	workspaceId: z.string(),
 	taskId: z.string(),
 	kind: runtimePostDeployVerificationItemKindSchema,

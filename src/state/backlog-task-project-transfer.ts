@@ -20,6 +20,7 @@ import {
 	getWorkspaceDirectoryLockRequest,
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceContextById,
+	prepareWorkspaceStateSnapshotForWriteWithinLock,
 	reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock,
 	writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutationEvents,
 } from "./workspace-state";
@@ -56,6 +57,8 @@ async function completeTransferWithinWorkspaceLocks(receipt: TransferReceipt, re
 	const sourceContext = await loadWorkspaceContextById(receipt.sourceWorkspaceId);
 	const targetContext = await loadWorkspaceContextById(receipt.targetWorkspaceId);
 	if (!sourceContext || !targetContext) throw new Error("迁移项目尚未注册，等待恢复后重试。");
+	await prepareWorkspaceStateSnapshotForWriteWithinLock(receipt.sourceWorkspaceId);
+	await prepareWorkspaceStateSnapshotForWriteWithinLock(receipt.targetWorkspaceId);
 	const source = await loadPersistedWorkspaceStateById(receipt.sourceWorkspaceId);
 	const target = await loadPersistedWorkspaceStateById(receipt.targetWorkspaceId);
 	await reconcileTaskMutationEventLedgerWithPersistedBoardWithinBoardLock(

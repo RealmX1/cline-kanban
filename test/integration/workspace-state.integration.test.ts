@@ -179,7 +179,13 @@ describe.sequential("workspace-state integration", () => {
 			expect(firstSave.board.columns[0]?.cards[0]?.prompt).toBe("Task One");
 
 			const secondSave = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: createBoard("Task Two"),
+				board: {
+					...firstSave.board,
+					columns: firstSave.board.columns.map((column) => ({
+						...column,
+						cards: column.cards.map((card) => ({ ...card, title: "Task Two", prompt: "Task Two" })),
+					})),
+				},
 				sessions: {},
 				expectedRevision: firstSave.revision,
 			});
@@ -878,58 +884,75 @@ describe.sequential("原生会话身份的独立持久化", () => {
 		});
 	});
 
-	it.each(["lock", "meta.json", "sessions.json"])("%s 失败不确认，重复相同内存身份可补存", async (failurePoint) => {
-		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
-			const repo = createRepository(["native-identity-failure"]);
-			const context = await loadWorkspaceContext(repo.repositoryPath);
-			await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-				board: createBoard("identity"),
-				sessions: {},
-			});
-			const before = await loadPersistedWorkspaceStateById(context.workspaceId);
-			const summary = createNativeSummary(sessionKeys[1], nativeSessionIds[1]);
-			const originalWrite = lockedFileSystem.writeJsonFileAtomic.bind(lockedFileSystem);
-			const failure =
-				failurePoint === "lock"
-					? vi.spyOn(lockedFileSystem, "withLock").mockRejectedValueOnce(new Error("injected failure"))
-					: vi.spyOn(lockedFileSystem, "writeJsonFileAtomic").mockImplementation(async (path, value, options) => {
-							if (path.endsWith(failurePoint)) throw new Error("injected failure");
-							return originalWrite(path, value, options);
-						});
-			try {
-				await expect(
-					persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+	it.each(["lock", "workspace-state-snapshot-commit.json", "meta.json", "sessions.json"])(
+		"%s 故障按持久提交边界确认身份并幂等补存",
+		async (failurePoint) => {
+			await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {
+				const repo = createRepository(["native-identity-failure"]);
+				const context = await loadWorkspaceContext(repo.repositoryPath);
+				await saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+					board: createBoard("identity"),
+					sessions: {},
+				});
+				const before = await loadPersistedWorkspaceStateById(context.workspaceId);
+				const summary = createNativeSummary(sessionKeys[1], nativeSessionIds[1]);
+				const originalWrite = lockedFileSystem.writeTextFileAtomic.bind(lockedFileSystem);
+				const committedDespiteProjectionFailure = failurePoint === "meta.json" || failurePoint === "sessions.json";
+				const failure =
+					failurePoint === "lock"
+						? vi.spyOn(lockedFileSystem, "withLock").mockRejectedValueOnce(new Error("injected failure"))
+						: vi
+								.spyOn(lockedFileSystem, "writeTextFileAtomic")
+								.mockImplementation(async (path, value, options) => {
+									if (path.endsWith(failurePoint)) throw new Error("injected failure");
+									return originalWrite(path, value, options);
+								});
+				try {
+					const persistence = persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
+						context.workspaceId,
+						summary.taskId,
+						() => summary,
+					);
+					if (committedDespiteProjectionFailure) {
+						await expect(persistence).resolves.toBe(
+							"persisted_new_identity_and_invalidated_stale_snapshot_revision",
+						);
+					} else await expect(persistence).rejects.toThrow("injected failure");
+				} finally {
+					failure.mockRestore();
+				}
+				const afterFailure = await loadPersistedWorkspaceStateById(context.workspaceId);
+				if (committedDespiteProjectionFailure) {
+					expect(afterFailure.sessions[summary.taskId]?.agentNativeConversationSessionIdentity).toEqual(
+						summary.agentNativeConversationSessionIdentity,
+					);
+				} else expect(afterFailure.sessions).toEqual(before.sessions);
+				expect(afterFailure.revision).toBe(before.revision + (committedDespiteProjectionFailure ? 1 : 0));
+				expect(
+					await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
 						context.workspaceId,
 						summary.taskId,
 						() => summary,
 					),
-				).rejects.toThrow("injected failure");
-			} finally {
-				failure.mockRestore();
-			}
-			const afterFailure = await loadPersistedWorkspaceStateById(context.workspaceId);
-			expect(afterFailure.sessions).toEqual(before.sessions);
-			expect(afterFailure.revision).toBe(before.revision + (failurePoint === "sessions.json" ? 1 : 0));
-			expect(
-				await persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(
-					context.workspaceId,
-					summary.taskId,
-					() => summary,
-				),
-			).toBe("persisted_new_identity_and_invalidated_stale_snapshot_revision");
-			expect(
-				(await loadPersistedWorkspaceStateById(context.workspaceId)).sessions[summary.taskId]
-					.agentNativeConversationSessionIdentity,
-			).toEqual(summary.agentNativeConversationSessionIdentity);
-			await expect(
-				saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-					board: before.board,
-					sessions: before.sessions,
-					expectedRevision: before.revision,
-				}),
-			).rejects.toThrow("revision mismatch");
-		});
-	});
+				).toBe(
+					committedDespiteProjectionFailure
+						? "already_persisted_without_write"
+						: "persisted_new_identity_and_invalidated_stale_snapshot_revision",
+				);
+				expect(
+					(await loadPersistedWorkspaceStateById(context.workspaceId)).sessions[summary.taskId]
+						.agentNativeConversationSessionIdentity,
+				).toEqual(summary.agentNativeConversationSessionIdentity);
+				await expect(
+					saveWorkspaceState(repo.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+						board: before.board,
+						sessions: before.sessions,
+						expectedRevision: before.revision,
+					}),
+				).rejects.toThrow("revision mismatch");
+			});
+		},
+	);
 
 	it("同一身份的再次确认只推进 observedAt 水位，不推进 revision；之后的陈旧整板保存不会冲突也不回退水位", async () => {
 		await withIsolatedWorkspaceStateHome(async ({ createRepository }) => {

@@ -18,14 +18,14 @@ import {
 } from "../inter-work-unit-relation-ledger/post-deploy-verification-passed-observation-recording";
 import {
 	AUTHORED_VERIFICATION_ITEM_ID_PREFIX,
-	removeAuthoredVerificationDefinition,
+	cleanupAuthoredVerificationDefinitionAndAssets,
 } from "./authored-verification-definitions";
 import {
 	appendPostDeployVerificationDeferredNaturalUsageObservationRecords,
 	buildDeferredNaturalUsageObservationRecordId,
 	listPostDeployVerificationDeferredNaturalUsageObservationRecords,
 } from "./post-deploy-verification-deferred-natural-usage-observation-records";
-import { cleanupVerificationAssets, getVerificationAssetsDir } from "./verification-assets";
+import { getVerificationAssetsDir } from "./verification-assets";
 
 // Post-Deploy Verification「结案」的唯一写法：Web 面板确认、CLI 完成动词、taskCardAction 移入 Done 的门禁、runtime 对账补完
 // 都经这里写 postDeployVerificationClosure，再在状态锁外做副作用（账本、待观察记录、资产清理）。
@@ -307,16 +307,21 @@ async function runAutomaticVerificationAssetCleanupForClosedTask(
 		}
 		const verificationId = item.id.slice(AUTHORED_VERIFICATION_ITEM_ID_PREFIX.length);
 		try {
-			const cleanupResult = await cleanupVerificationAssets(verificationId);
+			const cleanupResult = await cleanupAuthoredVerificationDefinitionAndAssets(verificationId, nowIso, {
+				expectedAuthoredVerificationDefinitionRegistrationId:
+					item.authoredVerificationDefinitionRegistrationId ?? null,
+			});
 			// 越界护栏拒删（symlink 逃逸等）时资产仍在场：保留 pending 定义不注销，避免「资产残留却已注销定义」
 			// 且前端凭 taskVerified 假报已自动清理。already-absent / assets-root-missing / removed 均视为资产已不在场，正常注销。
-			if (cleanupResult.skippedReason === "out-of-bounds") {
+			if (
+				cleanupResult.skippedReason === "out-of-bounds" ||
+				cleanupResult.skippedReason === "awaiting-execution-exit-confirmation" ||
+				cleanupResult.skippedReason === "cleanup-request-invalidated"
+			) {
 				logDeploymentDiagnosticWarning(
-					`[post-deploy-verification-closure] 自动清理被越界护栏拒删，保留 pending 定义不注销 verificationId=${verificationId}`,
+					`[post-deploy-verification-closure] 自动清理未执行，保留验证定义与资产 verificationId=${verificationId} reason=${cleanupResult.skippedReason}`,
 				);
-				continue;
 			}
-			await removeAuthoredVerificationDefinition(verificationId, nowIso);
 		} catch (error) {
 			logDeploymentDiagnosticWarning(
 				`[post-deploy-verification-closure] 自动清理验证资产失败 verificationId=${verificationId}：${error instanceof Error ? error.message : String(error)}`,
