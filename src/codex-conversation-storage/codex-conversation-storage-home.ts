@@ -3,7 +3,6 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import lockfile from "proper-lockfile";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
 import { getCodexConfigurationSyncDirectory } from "../codex-configuration-sync/codex-configuration-sync-store";
@@ -242,8 +241,10 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	const release = await lockfile.lock(target, {
-		realpath: false,
+	const release = await lockedFileSystem.acquireLock({
+		path: target,
+		type: "directory",
+		lockfilePath: `${target}.lock`,
 		retries: { retries: 20, minTimeout: 25, maxTimeout: 100 },
 	});
 	try {
@@ -378,7 +379,7 @@ export async function withCodexConversationStorageOperationLock<T>(
 	const canonicalHome = await resolveCanonicalUserCodexHomeForManagedStorage(homeDirectoryPath);
 	const recordPath = getCodexConversationMigrationRecordPath(canonicalHome, nativeSessionId);
 	await mkdir(dirname(recordPath), { recursive: true, mode: 0o700 });
-	const release = await lockfile.lock(recordPath, { realpath: false });
+	const release = await lockedFileSystem.acquireLock({ path: recordPath, retries: 0 });
 	try {
 		return await operation();
 	} finally {

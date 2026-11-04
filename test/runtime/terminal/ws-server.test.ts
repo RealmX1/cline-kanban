@@ -453,6 +453,27 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		});
 	});
 
+	it.each(["io", "control"] as const)("%s 非法帧只关闭出错连接，其他连接仍能输入", async (socketRole) => {
+		const healthySocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=healthy-viewer`,
+		);
+		const invalidFrameSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/${socketRole}?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=invalid-frame-viewer`,
+		);
+		try {
+			invalidFrameSocket.socket.send("未掩码帧", { mask: false });
+			await waitForAssertion(() => expect(invalidFrameSocket.socket.readyState).toBe(WebSocket.CLOSED));
+			expect(healthySocket.socket.readyState).toBe(WebSocket.OPEN);
+			healthySocket.socket.send("故障后仍能输入");
+			await waitForAssertion(() =>
+				expect(terminalManager.writeInput).toHaveBeenCalledWith(TASK_ID, Buffer.from("故障后仍能输入")),
+			);
+		} finally {
+			await closeSocket(invalidFrameSocket.socket);
+			await closeSocket(healthySocket.socket);
+		}
+	});
+
 	it("无进程时丢弃鼠标报告但保留连接，恢复后同一连接可继续输入", async () => {
 		const ioSocket = await openQueuedWebSocket(
 			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=reclaimed-viewer`,

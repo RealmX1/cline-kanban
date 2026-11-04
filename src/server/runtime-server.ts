@@ -72,6 +72,7 @@ import {
 	listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 } from "../deployment/post-deploy-verification-done-entry-gate";
+import { startVerificationExecutionRecoveryLifecycle } from "../deployment/verification-execution-recovery";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
@@ -284,6 +285,8 @@ function readWorkspaceIdFromRequest(request: IncomingMessage, requestUrl: URL): 
 
 export async function createRuntimeServer(deps: CreateRuntimeServerDependencies): Promise<RuntimeServer> {
 	const webUiDir = getWebUiDir();
+	let verificationExecutionRecoveryLifecycle: ReturnType<typeof startVerificationExecutionRecoveryLifecycle> | null =
+		null;
 
 	try {
 		await readFile(join(webUiDir, "index.html"));
@@ -1743,9 +1746,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
 				loadBoardTasksForWorkspace: async (scope) => {
-					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const board = await loadWorkspaceBoardById(scope.workspaceId, { requireCompleteRead: true });
 					return board.columns.flatMap((column) =>
-						column.cards.map((card) => ({ taskId: card.id, columnId: column.id })),
+						column.cards.map((card) => ({
+							taskId: card.id,
+							columnId: column.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+						})),
 					);
 				},
 				// 确认框 agent response 按 agent 类型分源（plan Grilling #5）。
@@ -2106,11 +2113,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		let requestUrl: URL;
 		try {
 			requestUrl = new URL(request.url ?? "/", getKanbanRuntimeOrigin());
+			if (normalizeRequestPath(requestUrl.pathname) !== "/api/runtime/ws") {
+				return;
+			}
 		} catch {
 			socket.destroy();
-			return;
-		}
-		if (normalizeRequestPath(requestUrl.pathname) !== "/api/runtime/ws") {
 			return;
 		}
 		// ── Passcode gate for WebSocket upgrades (remote mode only) ──────────
@@ -2203,6 +2210,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
 		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			verificationExecutionRecoveryLifecycle?.stop() ?? Promise.resolve(),
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
 			taskEditorCreationSubmissionApi.close(),
@@ -2285,6 +2293,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskCommandExecutionApi.startRecovery();
+	verificationExecutionRecoveryLifecycle = startVerificationExecutionRecoveryLifecycle({
+		readCurrentTaskIncarnationCreatedAtEpochMs: async (workspaceId, taskId) => {
+			const board = await loadWorkspaceBoardById(workspaceId, { requireCompleteRead: true });
+			return board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId)?.createdAt ?? null;
+		},
+	});
 	taskMainSessionHandoverApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
