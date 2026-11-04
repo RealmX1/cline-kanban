@@ -1,7 +1,6 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
-import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import type { WebUiUserDecisionClientCharacteristics } from "@runtime-work-unit-relation-assertion-write-api-contract";
 import {
 	ArrowBigUp,
@@ -20,18 +19,15 @@ import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useSt
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
-import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
+import {
+	CreationWorkbenchContextControl,
+	CreationWorkbenchStartupSettings,
+} from "@/components/creation-workbench-startup-settings";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
-import {
-	TaskAgentModelPicker,
-	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
-	useTaskAgentModelPicker,
-} from "@/components/task-agent-model-picker";
-import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
-import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
+import type { TaskTerminalAgentModelOverrideSettingsChangeOptions } from "@/components/task-agent-model-picker";
 import { TaskConversationModeControl } from "@/components/task-conversation-mode-control";
 import {
 	type TaskCreationTargetProjectField,
@@ -84,6 +80,10 @@ import {
 	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
 	type TriggeringExplicitUserGestureEvent,
 } from "@/runtime/work-unit-relation-assertion-write-query";
+import {
+	closeSideSessionCreationWorkbench,
+	useSideSessionCreationWorkbenchTarget,
+} from "@/state/side-session-creation-workbench-store";
 import { startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
 import {
 	clearConfirmedPendingTaskEditorCreationSubmission,
@@ -395,6 +395,10 @@ export function TaskEditorDialog({
 	taskCreationTargetProjectField?: TaskCreationTargetProjectField;
 	postDeployVerificationFollowUpTaskCreationDraftSeed?: PostDeployVerificationFollowUpTaskCreationDraftSeed | null;
 }): ReactElement {
+	const sideSessionCreationTarget = useSideSessionCreationWorkbenchTarget();
+	useEffect(() => {
+		if (open) closeSideSessionCreationWorkbench();
+	}, [open]);
 	// 逐字输入下沉到这里，不再每次按键都经 `onPromptChange` 打到 `App` 根节点。
 	// 那条老路径会把 1566 行的 `App` 连同整棵卡片树一起重渲，是「在任务创建界面打字很卡」的主因。
 	const [promptDraft, setPromptDraft] = useState(prompt);
@@ -457,7 +461,7 @@ export function TaskEditorDialog({
 	const [taskPrompts, setTaskPrompts] = useState<string[]>([]);
 	const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 	const nextFocusIndexRef = useRef<number | null>(null);
-	const startInPlanModeId = useId();
+	const _startInPlanModeId = useId();
 	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
 	const automaticProjectAssignmentAnalysisId = useId();
@@ -465,36 +469,6 @@ export function TaskEditorDialog({
 		useTaskProjectAssignmentAutomaticAnalysisEnabledPreference();
 	const [primaryStartAction, setPrimaryStartAction] = useTaskCreateDialogPrimaryStartActionPreference();
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
-	const {
-		agentOptions,
-		clineProviderOptions,
-		clineModelOptions,
-		effectiveDefaultModelId,
-		providerModels,
-		isLoadingProviders,
-		isLoadingModels,
-		terminalAgentModelOptions,
-		terminalAgentDefaultModelId,
-		isLoadingTerminalAgentModels,
-		providerDefaultModels,
-	} = useTaskAgentModelPicker({
-		active: open,
-		workspaceId,
-		agentId,
-		clineSettings,
-		agents,
-		defaultAgentId,
-		defaultProviderId,
-		defaultModelId,
-	});
-
-	// 权限档位的能力标注要跟随「这张卡实际会用哪个 agent」：卡片没显式选就落到工作区默认 agent。
-	const effectiveTaskAgentPermissionModeAgentId = agentId ?? defaultAgentId ?? null;
-	const effectiveTaskAgentPermissionModeAgentLabel =
-		(effectiveTaskAgentPermissionModeAgentId === null
-			? null
-			: (agents?.find((agent) => agent.id === effectiveTaskAgentPermissionModeAgentId)?.label ??
-				getRuntimeAgentCatalogEntry(effectiveTaskAgentPermissionModeAgentId)?.label)) ?? "This agent";
 
 	// 只在「当前显示的正是被记住的那条 ref、且它确实偏离了仓库默认分支」时提示。两个条件都必要：
 	// 用户当次手动改过下拉框就不该再说是记住的；记忆值恰好等于默认分支时提示只是噪声。
@@ -947,6 +921,7 @@ export function TaskEditorDialog({
 						request: {
 							submissionId: createRandomUuidV4WithInsecureContextFallback(),
 							newTaskCard: allocatedCard,
+							suggestNameAfterCreation: !submittingTitle.trim(),
 							referenceRelationDrafts: promptOverride ? [] : draft.referenceRelationDrafts,
 							relationRevocations: promptOverride ? [] : draft.relationRevocations,
 							startAgentAfterCreation: action !== "create",
@@ -1573,115 +1548,23 @@ export function TaskEditorDialog({
 				</>
 			),
 		},
-		{
-			key: "plan_mode",
-			label: "Plan Mode",
-			summary: startInPlanMode ? "开启" : "关闭",
-			content: (
-				<>
-					<label
-						htmlFor={startInPlanModeId}
-						className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-					>
-						<RadixCheckbox.Root
-							id={startInPlanModeId}
-							checked={startInPlanMode}
-							onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
-							disabled={startInPlanModeDisabled}
-							className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
-						>
-							<RadixCheckbox.Indicator>
-								<Check size={10} className="text-white" />
-							</RadixCheckbox.Indicator>
-						</RadixCheckbox.Root>
-						Start in plan mode
-					</label>
-				</>
-			),
-		},
-		{
-			key: "permissions",
-			label: "Agent 权限",
-			summary:
-				effectiveTaskAgentPermissionModeAgentId === "codex" &&
-				codexConfigurationPermissionSelectionSource === "profile"
-					? "跟随 profile 完整权限"
-					: {
-							ask_for_every_tool_use: "每次询问",
-							auto_approve_file_edits_only: "允许编辑文件",
-							bypass_all_permission_prompts: "全部允许",
-						}[taskAgentPermissionMode],
-			content: (
-				<>
-					<div>
-						{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
-							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
-							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
-							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
-						<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
-						<TaskAgentPermissionModeControl
-							value={taskAgentPermissionMode}
-							selectionComesFromCodexProfile={
-								effectiveTaskAgentPermissionModeAgentId === "codex" &&
-								codexConfigurationPermissionSelectionSource === "profile"
-							}
-							onChange={(mode) => {
-								onTaskAgentPermissionModeChange(mode);
-								onCodexConfigurationPermissionSelectionSourceChange?.("task_local");
-							}}
-							selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
-							selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
-							startInPlanMode={startInPlanMode}
-							idPrefix="task-create-agent-permission-mode"
-						/>
-						{effectiveTaskAgentPermissionModeAgentId === "codex" &&
-							codexConfigurationPermissionSelectionSource === "profile" && (
-								<p className="mt-1 text-xs text-text-secondary">
-									当前使用 profile 的完整审批与沙箱设置；选择上方档位将改为此 Task 的局部权限。
-								</p>
-							)}
-					</div>
-				</>
-			),
-		},
 	];
 	const moreTaskEditorSettings = [
-		...(effectiveTaskAgentPermissionModeAgentId === "codex" && onCodexConfigurationProfileIdChange
-			? [
-					{
-						key: "codex_configuration_profile",
-						label: "Codex profile",
-						summary: codexConfigurationProfileId ? "已绑定" : "默认配置",
-						content: (
-							<CodexConfigurationProfileSelect
-								workspaceId={targetWorkspaceId}
-								value={codexConfigurationProfileId}
-								onChange={onCodexConfigurationProfileIdChange}
-								enabled={open}
-								automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
-								adoptDefaultProfilePermissions={codexConfigurationPermissionSelectionSource !== "task_local"}
-								onPermissionModeChange={(mode) => {
-									onTaskAgentPermissionModeChange(mode);
-									onCodexConfigurationPermissionSelectionSourceChange?.("profile");
-								}}
-							/>
-						),
-					},
-				]
-			: []),
 		{
 			key: "session_initialization",
 			label: "会话上下文",
 			content: (
 				<>
 					{mode === "single" && onTaskAgentSessionInitializationChange && onAgentIdChange ? (
-						<TaskAgentSessionInitializationControl
-							agentId={agentId}
-							defaultAgentId={defaultAgentId}
-							workspaceId={targetWorkspaceId}
-							value={taskAgentSessionInitialization}
-							onChange={onTaskAgentSessionInitializationChange}
-							onAgentIdChange={onAgentIdChange}
+						<CreationWorkbenchContextControl
+							nativeSessionInitialization={{
+								agentId,
+								defaultAgentId,
+								workspaceId: targetWorkspaceId,
+								value: taskAgentSessionInitialization,
+								onChange: onTaskAgentSessionInitializationChange,
+								onAgentIdChange,
+							}}
 						/>
 					) : null}
 				</>
@@ -1817,7 +1700,7 @@ export function TaskEditorDialog({
 	return (
 		<>
 			<TaskEditorFloatingWindow
-				open={open}
+				open={open && !sideSessionCreationTarget}
 				onOpenChange={handleDialogOpenChange}
 				title={dialogTitle}
 				onClickCapture={(event) => {
@@ -2019,55 +1902,37 @@ export function TaskEditorDialog({
 										</div>
 									)}
 								</div>
-								{onAgentIdChange && onClineSettingsChange ? (
-									<TaskAgentModelPicker
-										renderControls={({ agentSelection, modelSelection }) => (
-											<TaskEditorSettingGroup
-												title="常用设置"
-												settings={[
-													{
-														key: "agent",
-														label: "Agent",
-														summary: agentId ?? defaultAgentId ?? "默认",
-														content: agentSelection,
-													},
-													{
-														key: "model",
-														label: "模型与参数",
-														summary:
-															terminalAgentModelOverrideSettings?.modelId ??
-															effectiveDefaultModelId ??
-															"默认",
-														content: modelSelection,
-													},
-													...commonTaskEditorSettings,
-												]}
-											/>
-										)}
+								{
+									<CreationWorkbenchStartupSettings
+										active={open}
+										workspaceId={targetWorkspaceId}
 										agentId={agentId}
-										onAgentIdChange={onAgentIdChange}
+										onAgentIdChange={onAgentIdChange ?? (() => undefined)}
+										allowAgentSelection={Boolean(onAgentIdChange && onClineSettingsChange)}
 										clineSettings={clineSettings}
 										onClineSettingsChange={onClineSettingsChange}
 										terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
 										onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-										agentOptions={agentOptions}
-										clineProviderOptions={clineProviderOptions}
-										clineModelOptions={clineModelOptions}
-										terminalAgentModelOptions={terminalAgentModelOptions}
-										terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-										effectiveDefaultModelId={effectiveDefaultModelId}
-										providerModels={providerModels}
-										isLoadingProviders={isLoadingProviders}
-										isLoadingModels={isLoadingModels}
-										isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
+										agents={agents}
 										defaultAgentId={defaultAgentId}
 										defaultProviderId={defaultProviderId}
+										defaultModelId={defaultModelId}
 										defaultReasoningEffort={defaultReasoningEffort}
-										providerDefaultModels={providerDefaultModels}
+										startInPlanMode={startInPlanMode}
+										onStartInPlanModeChange={onStartInPlanModeChange}
+										startInPlanModeDisabled={startInPlanModeDisabled}
+										taskAgentPermissionMode={taskAgentPermissionMode}
+										onTaskAgentPermissionModeChange={onTaskAgentPermissionModeChange}
+										codexConfigurationProfileId={codexConfigurationProfileId}
+										onCodexConfigurationProfileIdChange={onCodexConfigurationProfileIdChange}
+										codexConfigurationPermissionSelectionSource={codexConfigurationPermissionSelectionSource}
+										onCodexConfigurationPermissionSelectionSourceChange={
+											onCodexConfigurationPermissionSelectionSourceChange
+										}
+										automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
+										additionalSettings={commonTaskEditorSettings}
 									/>
-								) : (
-									<TaskEditorSettingGroup title="常用设置" settings={commonTaskEditorSettings} />
-								)}
+								}
 							</div>
 							{mode === "single" && workspaceId ? (
 								<TaskEditorSettingGroup
@@ -2108,6 +1973,7 @@ export function TaskEditorDialog({
 									{ key: "plan_mode", label: "Plan Mode" },
 									{ key: "conversation_mode", label: "会话模式" },
 									{ key: "permissions", label: "Agent 权限" },
+									{ key: "codex_configuration_profile", label: "Codex profile" },
 									{ key: "auto_review_enabled", label: "自动评审" },
 									{ key: "auto_review_mode", label: "收尾方式" },
 									{ key: "relations", label: "关系建模" },

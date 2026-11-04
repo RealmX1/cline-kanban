@@ -34,6 +34,7 @@ import type {
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import { isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports } from "../core/codex-native-prompt-delivery-journal";
+import { resolveCreationStartupSettings } from "../core/creation-startup-settings";
 import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
@@ -149,6 +150,10 @@ import { loadAndAdvanceSharedTaskIndexingContext } from "../task-indexing-suppor
 import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
+import {
+	readCreationAgentDefaultModel,
+	readCreationAgentDefaultModelWithoutBlockingBacklogCard,
+} from "../terminal/creation-agent-default-model";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -1522,6 +1527,41 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
 	});
 	const taskEditorCreationSubmissionApi = createTaskEditorCreationSubmissionService({
+		resolveCreationSettings: async (scope, card) => {
+			const config = await deps.workspaceRegistry.loadScopedRuntimeConfig(scope);
+			const agentId = card.agentId ?? config.selectedAgentId;
+			const defaults = await readCreationAgentDefaultModelWithoutBlockingBacklogCard(
+				() =>
+					readCreationAgentDefaultModel(
+						agentId,
+						scope.workspacePath,
+						card.codexConfigurationProfileId,
+						card.terminalAgentModelOverrideSettings?.agentId === agentId
+							? card.terminalAgentModelOverrideSettings.modelId
+							: undefined,
+					),
+				{
+					codexConfigurationProfileId: card.codexConfigurationProfileId,
+					taskAgentSessionInitialization: card.taskAgentSessionInitialization,
+				},
+			);
+			return resolveCreationStartupSettings({
+				agentId,
+				agentSelectionSource: card.agentId ? "explicit_request" : "workspace_config_default",
+				startInPlanMode: card.startInPlanMode ?? config.newTaskStartInPlanModeByDefault,
+				taskAgentPermissionMode: card.taskAgentPermissionMode,
+				modelId:
+					card.terminalAgentModelOverrideSettings?.agentId === agentId
+						? card.terminalAgentModelOverrideSettings.modelId
+						: undefined,
+				defaultModelId: defaults.modelId,
+				codexConfigurationProfileId: card.codexConfigurationProfileId,
+				defaultCodexConfigurationProfileId: defaults.codexConfigurationProfileId,
+				codexConfigurationPermissionSelectionSource: card.codexConfigurationPermissionSelectionSource,
+				requestedAgentSessionTransport: card.ompAgentSessionTransport,
+				defaultSessionTransport: agentId === "omp" ? config.ompAgentSessionTransportForNewTasks : undefined,
+			});
+		},
 		findSession: findRuntimeSessionSummary,
 		resolveIdentity: async (workspaceId, card) => {
 			const { kanbanBoardCardIdentityCandidates } =

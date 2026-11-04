@@ -320,6 +320,8 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				contextSource:
 					input.contextSource === "started_from_scratch" ? ("fresh" as const) : ("current_main" as const),
 				initialMessage: input.initialUserQuestion.trim(),
+				startInPlanMode: false,
+				expectedTaskIncarnationCreatedAtEpochMs: input.task.createdAt,
 				creationReason: "用户在 Sessions 中创建侧会话",
 				creatorTaskConversationSessionId: resolveMainTaskConversationSessionId(input.task),
 				codexConfigurationProfileId: input.codexConfigurationProfileId,

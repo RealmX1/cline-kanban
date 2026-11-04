@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { TRPCError } from "@trpc/server";
 import type {
 	RuntimeBoardCard,
+	RuntimeCreationResolvedSettings,
 	RuntimeTaskCardActionStartAgentSessionResponse,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
@@ -21,6 +22,7 @@ import {
 	loadPersistedWorkspaceStateById,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
+import { requestAutomaticTaskNameBackfill } from "../task-name-suggestion/automatic-task-name-backfill";
 import type { RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import { assertWebUiUserDecisionRequestOrigin } from "../trpc/work-unit-relation-assertion-write-api";
 import {
@@ -40,6 +42,10 @@ export interface TaskEditorCreationIdentityLocation {
 	workspaceIdsUsedByTaskIncarnation?: string[];
 }
 interface TaskEditorCreationSubmissionServiceDependencies {
+	resolveCreationSettings?: (
+		scope: RuntimeTrpcWorkspaceScope,
+		card: RuntimeBoardCard,
+	) => Promise<RuntimeCreationResolvedSettings>;
 	findSession?: (workspaceId: string, conversationSessionId: string) => RuntimeTaskSessionSummary | null;
 	resolveIdentity: (workspaceId: string, card: RuntimeBoardCard) => Promise<TaskEditorCreationIdentityLocation | null>;
 	persistCard: (
@@ -226,16 +232,52 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 					if (!current.card) {
 						current = await assertEligible(record);
 						if (!record.acceptedUserAuthorization) throw new Error("旧草稿缺少创建授权，未重建原任务。");
+						if (!record.status.resolvedSettings && deps.resolveCreationSettings) {
+							record.status.resolvedSettings = await deps.resolveCreationSettings(
+								current.scope,
+								record.request.newTaskCard,
+							);
+							await persistRecord(record);
+							await assertEligible(record);
+						}
+						const settings = record.status.resolvedSettings;
+						const agentId = settings?.effectiveAgentId.value;
+						const cardWithFrozenStartupSettings = settings
+							? {
+									...record.request.newTaskCard,
+									agentId,
+									startInPlanMode: settings.startInPlanMode.value,
+									taskAgentPermissionMode: settings.effectiveTaskAgentPermissionMode.value,
+									codexConfigurationProfileId: settings.codexConfigurationProfileId.value ?? undefined,
+									ompAgentSessionTransport:
+										agentId === "omp"
+											? (settings.sessionTransport.value as "pty_terminal" | "acp_stdio_subprocess")
+											: undefined,
+									terminalAgentModelOverrideSettings:
+										settings.modelId.value &&
+										(agentId === "claude" ||
+											agentId === "codex" ||
+											agentId === "cursor" ||
+											agentId === "kimi" ||
+											agentId === "omp")
+											? { agentId, modelId: settings.modelId.value }
+											: undefined,
+								}
+							: record.request.newTaskCard;
 						record.status.phase = "saving_card";
 						await persistRecord(record);
 						await deps.persistCard(
 							current.scope,
-							record.request.newTaskCard,
+							cardWithFrozenStartupSettings,
 							record.acceptedUserAuthorization.requestOriginActorEvidence,
 						);
 					}
 					// 保存成功是历史事实，后续换世或删除只阻止执行，不能撤回保存确认。
 					record.status.cardPersisted = true;
+					if (record.request.suggestNameAfterCreation)
+						await requestAutomaticTaskNameBackfill(current.scope, record.request.newTaskCard).catch(() =>
+							deps.warn("自动命名登记未完成；创建继续，原任务名称保留。"),
+						);
 					await persistRecord(record);
 					await assertEligible(record);
 					if (!record.status.relationsCompleted) {

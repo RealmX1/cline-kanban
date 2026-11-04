@@ -20,7 +20,9 @@ TLDR 直接放在 XML 详情之前，不包进 XML 或代码围栏。摘要须�
   <task-startup-settings-selection-rules>
 ## 启动设置：核对实际默认，再决定是否覆盖
 
-创建或更新任务设置时，沿用符合用户意图的实际默认。startInPlanMode 的默认由 Settings 决定；create/preview 回执的 resolvedSettings 会给出实际值和来源。不要仅因“调查”或“只读检查”而关闭 Plan Mode。
+AI CLI 创建 Task、Peer 和 By the way 必须显式提供 `--start-in-plan-mode true` 或 `--start-in-plan-mode false`，遗漏时零创建；CLI 不读取界面的 Plan 偏好。创建界面的 Task Plan 默认值保留现有偏好，Peer 和 By the way 分别记忆，初始均关闭。
+
+创建或更新任务设置时，沿用符合用户意图的实际默认。create/preview 回执的 resolvedSettings 会给出实际值和来源。不要仅因“调查”或“只读检查”而关闭 Plan Mode。
 需要覆盖设置时，先核对实际值与用户要求，并说明对应依据；用户明确选择非 Plan Mode 时照常执行。此规则同时适用于创建时传参、创建后更新和启动前调整，不只检查 create。Plan 起步与工具权限是独立设置。
 </task-startup-settings-selection-rules>
 

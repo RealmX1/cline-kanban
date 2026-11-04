@@ -260,6 +260,7 @@ import {
 	runtimeArchiveExploratoryFindingResponseSchema,
 	runtimeAutomaticAgentFailureContinuationActionRequestSchema,
 	runtimeAutomaticAgentFailureContinuationActionResponseSchema,
+	runtimeAutomaticTaskNameBackfillRequestSchema,
 	runtimeAvailableAgentSessionsRequestSchema,
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClaimDailyWorkProgressCelebrationsRequestSchema,
@@ -442,6 +443,8 @@ import {
 	runtimeTaskConversationSessionGetResponseSchema,
 	runtimeTaskConversationSessionListRequestSchema,
 	runtimeTaskConversationSessionListResponseSchema,
+	runtimeTaskConversationSessionPreviewResponseSchema,
+	runtimeTaskConversationSessionRenameRequestSchema,
 	runtimeTaskConversationSessionReportRequestSchema,
 	runtimeTaskConversationSessionReportResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
@@ -786,11 +789,28 @@ export interface RuntimeTrpcContext {
 			evidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskSessionInputResponse>;
 
+		requestAutomaticTaskNameBackfill: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof runtimeAutomaticTaskNameBackfillRequestSchema>,
+		) => Promise<{ ok: boolean }>;
 		suggestTaskNamesFromTaskDescription: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTaskNameSuggestionRequest,
 			abortSignal?: AbortSignal,
 		) => Promise<RuntimeTaskNameSuggestionResponse>;
+		lookupTaskConversationSessionCreation: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionCreateRequest,
+		) => Promise<RuntimeTaskConversationSessionCreateResponse | null>;
+		previewTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionCreateRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof runtimeTaskConversationSessionPreviewResponseSchema>>;
+		renameTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof runtimeTaskConversationSessionRenameRequestSchema>,
+		) => Promise<RuntimeTaskSessionInputResponse>;
 		createTaskConversationSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationSessionCreateRequest,
@@ -2017,12 +2037,30 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 				),
 		),
 
+	requestAutomaticTaskNameBackfill: workspaceProcedure
+		.input(runtimeAutomaticTaskNameBackfillRequestSchema)
+		.output(z.object({ ok: z.boolean() }))
+		.mutation(({ ctx, input }) => ctx.runtimeApi.requestAutomaticTaskNameBackfill(ctx.workspaceScope, input)),
 	suggestTaskNamesFromTaskDescription: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeTaskNameSuggestionRequestSchema)
 		.output(runtimeTaskNameSuggestionResponseSchema)
 		.mutation(async ({ ctx, input, signal }) => {
 			return await ctx.runtimeApi.suggestTaskNamesFromTaskDescription(ctx.workspaceScope, input, signal);
 		}),
+	lookupTaskConversationSessionCreation: workspaceProcedure
+		.input(runtimeTaskConversationSessionCreateRequestSchema)
+		.output(runtimeTaskConversationSessionCreateResponseSchema.nullable())
+		.query(({ ctx, input }) => ctx.runtimeApi.lookupTaskConversationSessionCreation(ctx.workspaceScope, input)),
+	previewTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionCreateRequestSchema)
+		.output(runtimeTaskConversationSessionPreviewResponseSchema)
+		.query(({ ctx, input }) =>
+			ctx.runtimeApi.previewTaskConversationSession(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
+	renameTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionRenameRequestSchema)
+		.output(runtimeTaskSessionInputResponseSchema)
+		.mutation(({ ctx, input }) => ctx.runtimeApi.renameTaskConversationSession(ctx.workspaceScope, input)),
 	createTaskConversationSession: workspaceProcedure
 		.input(runtimeTaskConversationSessionCreateRequestSchema)
 		.output(runtimeTaskConversationSessionCreateResponseSchema)

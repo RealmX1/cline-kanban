@@ -208,7 +208,7 @@ export const runtimeAgentIdSchema = z.enum([
 export type RuntimeAgentId = z.infer<typeof runtimeAgentIdSchema>;
 // 哪些 terminal agent 有「模型选择器」这条通道：Kanban 能探测出它的模型目录、并在启动时把选中的
 // model id 传给 CLI。
-export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor", "kimi"]);
+export const runtimeTerminalAgentModelSelectionAgentIdSchema = z.enum(["claude", "codex", "cursor", "kimi", "omp"]);
 export type RuntimeTerminalAgentModelSelectionAgentId = z.infer<typeof runtimeTerminalAgentModelSelectionAgentIdSchema>;
 // 哪些 terminal agent 的历史会话能被按 session id 索引并续接/分叉。
 //
@@ -440,6 +440,7 @@ export const runtimeBoardCardSchema = z
 		taskMainSessionHandover: taskMainSessionHandoverRecordSchema.optional(),
 		independentTaskCreationProvenance: independentTaskCreationProvenanceSchema.optional(),
 		title: z.string().optional(),
+		taskNameVersion: z.number().int().nonnegative().optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
 		// 老卡片没有这个字段；读时不在这里补默认值，而是在启动任务处按当时的全局
@@ -699,6 +700,44 @@ export const runtimeTaskTurnCheckpointSchema = z.object({
 });
 export type RuntimeTaskTurnCheckpoint = z.infer<typeof runtimeTaskTurnCheckpointSchema>;
 
+// Task、Peer、By the way 共用请求设置；Plan 必须由本次创建者明确选择。
+export const runtimeCreationStartupSettingsRequestSchema = z.object({
+	startInPlanMode: z.boolean(),
+	modelId: runtimeTrimmedNonEmptyStringSchema.optional(),
+	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
+	codexConfigurationProfileId: z.string().min(1).optional(),
+	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
+	requestedAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
+});
+export type RuntimeCreationStartupSettingsRequest = z.infer<typeof runtimeCreationStartupSettingsRequestSchema>;
+
+export const runtimeCreationSettingSourceSchema = z.enum([
+	"workspace_config_default",
+	"explicit_request",
+	"built_in_default",
+	"agent_default_configuration",
+	"harness_permission_mapping",
+	"codex_profile",
+	"session_role_constraint",
+	"creator_session_agent",
+]);
+const creationResolvedSetting = <TValue extends z.ZodType>(value: TValue) =>
+	z.object({ value, source: runtimeCreationSettingSourceSchema });
+export const runtimeCreationResolvedSettingsSchema = z.object({
+	effectiveAgentId: creationResolvedSetting(runtimeAgentIdSchema),
+	startInPlanMode: creationResolvedSetting(z.boolean()),
+	requestedTaskAgentPermissionMode: creationResolvedSetting(runtimeTaskAgentPermissionModeSchema),
+	effectiveTaskAgentPermissionMode: creationResolvedSetting(runtimeTaskAgentPermissionModeSchema),
+	// profile 的完整沙箱与审批策略不一定能投影为三个档位；未知保持 null。
+	harnessPermissionMode: creationResolvedSetting(runtimeTaskAgentPermissionModeSchema.nullable()),
+	roleReadOnlyConstraint: creationResolvedSetting(z.boolean()),
+	modelId: creationResolvedSetting(z.string().nullable()),
+	codexConfigurationProfileId: creationResolvedSetting(z.string().nullable()),
+	sessionTransport: creationResolvedSetting(runtimeAgentSessionTransportSchema),
+});
+export type RuntimeCreationResolvedSettings = z.infer<typeof runtimeCreationResolvedSettingsSchema>;
+
 // 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
 export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
@@ -708,6 +747,7 @@ export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 	sessionTransport: runtimeAgentSessionTransportSchema,
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	clineSettings: runtimeTaskClineSettingsSchema.optional(),
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.optional(),
 });
 
 export const runtimeTaskConversationSessionMetadataSchema = z.object({
@@ -747,6 +787,9 @@ export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	defaultReportTargetTaskConversationSessionId: z.string().optional(),
 	creationReason: z.string().optional(),
 	creationRequestId: z.string().optional(),
+	conversationSessionName: z.string().trim().max(80).optional(),
+	conversationSessionNameVersion: z.number().int().nonnegative().optional(),
+	conversationSessionNameSource: z.enum(["explicit", "automatic"]).optional(),
 	parentTaskConversationSessionId: z.string().nullable(),
 	mainSessionOriginTurnNumber: z.number().int().nonnegative().nullable(),
 	mainSessionOriginUserMessagePreview: z.string().nullable(),
@@ -1645,8 +1688,17 @@ export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskR
 // （官方另有支持图像输入的型号，本条链路不走那条）。
 export const runtimeTaskNameSuggestionRequestSchema = z.object({
 	taskDescription: z.string(),
+	namingTarget: z.enum(["task", "conversation_session"]).optional(),
+	operationId: z.string().uuid().optional(),
 });
 export type RuntimeTaskNameSuggestionRequest = z.infer<typeof runtimeTaskNameSuggestionRequestSchema>;
+export const runtimeAutomaticTaskNameBackfillRequestSchema = z.object({
+	taskId: z.string(),
+	expectedTaskNameVersion: z.number().int().nonnegative(),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number(),
+	expectedTitle: z.string(),
+	expectedPrompt: z.string(),
+});
 
 // 「拿不到名字」是**正常返回**而不是错误：这条能力天生可缺席（没配密钥的机器上就是没有），
 // 把它做成 TRPC 错误会逼前端在 catch 里区分「真故障」与「本来就没配」。
@@ -1702,6 +1754,9 @@ export type RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionS
 // CLI 已在本进程解析完 effective settings（含 --expect-resolved-settings-fingerprint 校验）之后的建卡字段。
 // task id 由 runtime 在 board 锁内分配。
 export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema = z.object({
+	codexConfigurationProfileId: z.string().optional(),
+	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
+	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	title: z.string().optional(),
 	prompt: z.string(),
 	startInPlanMode: z.boolean(),
@@ -4312,6 +4367,8 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	newPeerSessionStartInPlanMode: z.boolean().nullable().optional(),
+	newByTheWaySessionStartInPlanMode: z.boolean().nullable().optional(),
 	// 创建、Backlog 保存和直接启动共享；旧配置缺失或 null 时均默认关闭。
 	taskProjectAssignmentAutomaticAnalysisEnabled: z.boolean().nullable().optional(),
 	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
@@ -4920,19 +4977,22 @@ export type RuntimeTaskConversationHistoryPageResponse = z.infer<
 	typeof runtimeTaskConversationHistoryPageResponseSchema
 >;
 
-export const runtimeTaskConversationSessionCreateRequestSchema = z.object({
+// EXPERIMENT_NODE: 本轮侧会话不接收独立探索模式；未来按用户需求和底层会话能力重新评估开放边界。
+export const runtimeTaskConversationSessionCreateRequestSchema = runtimeCreationStartupSettingsRequestSchema.extend({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().optional(),
 	idempotencyKey: z.string().trim().min(1).max(200),
 	sessionRole: z.enum(["by_the_way", "task_collaborator"]),
 	contextSource: z.enum(["creator", "current_main", "fresh"]).default("creator"),
 	agentId: runtimeAgentIdSchema.optional(),
 	initialMessage: z.string().max(1_000_000).default(""),
+	images: z.array(runtimeTaskImageSchema).optional(),
+	conversationSessionName: z.string().trim().max(80).optional(),
 	creationReason: z.string().trim().min(1).max(2000),
 	// 人工入口可显式选创建者；CLI 的来源由运行时从调用环境核对，不能冒用其他会话。
 	creatorTaskConversationSessionId: z.string().min(1).optional(),
 	cols: z.number().int().positive().optional(),
 	rows: z.number().int().positive().optional(),
-	codexConfigurationProfileId: z.string().min(1).optional(),
 });
 export type RuntimeTaskConversationSessionCreateRequest = z.infer<
 	typeof runtimeTaskConversationSessionCreateRequestSchema
@@ -4967,10 +5027,30 @@ export const runtimeTaskConversationSessionCreateResponseSchema = z.object({
 	idempotencyConflict: z.boolean().optional(),
 	creation: runtimeTaskConversationSessionCreationProgressSchema.nullable(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskConversationSessionCreateResponse = z.infer<
 	typeof runtimeTaskConversationSessionCreateResponseSchema
+>;
+
+export const runtimeTaskConversationSessionPreviewResponseSchema = z.object({
+	ok: z.boolean(),
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskConversationSessionPreviewResponse = z.infer<
+	typeof runtimeTaskConversationSessionPreviewResponseSchema
+>;
+export const runtimeTaskConversationSessionRenameRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number(),
+	taskConversationSessionId: z.string().min(1),
+	conversationSessionName: z.string().trim().min(1).max(80),
+	expectedNameVersion: z.number().int().nonnegative(),
+});
+export type RuntimeTaskConversationSessionRenameRequest = z.infer<
+	typeof runtimeTaskConversationSessionRenameRequestSchema
 >;
 
 export const runtimeTaskConversationSessionListRequestSchema = z.object({ taskId: z.string().min(1) });

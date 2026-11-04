@@ -142,6 +142,7 @@ async function fixture() {
 function request(overrides: Record<string, unknown> = {}) {
 	return runtimeTaskConversationSessionCreateRequestSchema.parse({
 		taskId: "host-task",
+		startInPlanMode: false,
 		sessionRole: "task_collaborator",
 		creationReason: "独立检查",
 		idempotencyKey: "same-creation",
@@ -151,14 +152,148 @@ function request(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Agent 侧会话创建与回报", () => {
-	it("旧会话缺少权限快照时沿用运行时默认，不自动放大为全放行", async () => {
+	it("恢复查询核验冻结内容并保留原创建者，不重新解析当前主会话", async () => {
+		const f = await fixture();
+		const frozen = request({ expectedTaskIncarnationCreatedAtEpochMs: 1 });
+		const created = await f.service.create(scope, frozen, human);
+		f.card.mainTaskConversationSessionId = "new-main";
+		expect((await f.service.lookupCreation(scope, frozen))?.creation?.requestId).toBe(created.creation?.requestId);
+		expect(await f.service.lookupCreation(scope, { ...frozen, initialMessage: "另一条正文" })).toMatchObject({
+			ok: false,
+			idempotencyConflict: true,
+		});
+		expect(f.startSession).toHaveBeenCalledTimes(1);
+	});
+	it("命名响应丢失跨重启只核对原结果；手改或 Stop 后不应用迟到结果", async () => {
+		const f = await fixture();
+		const suggestNames = vi.fn(async () => {
+			throw new Error("模型结果未知");
+		});
+		const compareAndSet = vi.fn(async () => true);
+		f.dependencies.suggestNames = suggestNames;
+		f.dependencies.compareAndSetSessionName = compareAndSet;
+		f.dependencies.readRecordedNameSuggestionResult = vi.fn(async () => null);
+		const created = await f.service.create(scope, request(), human);
+		await vi.waitFor(() => expect(suggestNames).toHaveBeenCalledTimes(1));
+		await f.service.close();
+		const restored = createTaskConversationSessionService(f.dependencies);
+		await restored.reconcile(scope);
+		expect(suggestNames).toHaveBeenCalledTimes(1);
+		expect(compareAndSet).not.toHaveBeenCalled();
+		const sessionId = created.creation?.taskConversationSessionId;
+		if (!sessionId) throw new Error("未取得会话身份");
+		await restored.recordExplicitStop(scope, sessionId);
+		f.dependencies.readRecordedNameSuggestionResult = async () => ({
+			status: "suggested",
+			suggestedTaskNames: ["迟到主题"],
+		});
+		await restored.reconcile(scope);
+		expect(compareAndSet).not.toHaveBeenCalled();
+		expect(suggestNames).toHaveBeenCalledTimes(1);
+	});
+	it("新建会话权限默认全部允许，不继承宿主临时选择", async () => {
 		const f = await fixture();
 		f.card.taskAgentPermissionMode = undefined;
 		f.dependencies.readDefaultTaskAgentPermissionMode = async () => "ask_for_every_tool_use";
 		const created = await f.service.create(scope, request(), human);
 		expect(created.ok).toBe(true);
-		expect(f.startSession.mock.calls[0]?.[1].taskAgentPermissionMode).toBe("ask_for_every_tool_use");
+		expect(f.startSession.mock.calls[0]?.[1].taskAgentPermissionMode).toBe("bypass_all_permission_prompts");
 	});
+	it("缺少 Plan 的调用在预留身份前失败，显式 false、Agent 默认模型与来源回执贯通 fork", async () => {
+		const f = await fixture();
+		const missing = request();
+		delete (missing as Partial<typeof missing>).startInPlanMode;
+		expect(await f.service.create(scope, missing, human)).toMatchObject({
+			ok: false,
+			creation: null,
+			error: expect.stringContaining("--start-in-plan-mode"),
+		});
+		expect(f.startSession).not.toHaveBeenCalled();
+		expect((await f.service.list(scope, "host-task")).creations).toHaveLength(0);
+		f.card.startInPlanMode = true;
+		f.dependencies.readCreationDefaults = async () => ({ modelId: "new-agent-default" });
+		const preview = await f.service.preview(scope, request(), human);
+		expect(preview).toMatchObject({
+			ok: true,
+			resolvedSettings: { modelId: { value: "new-agent-default", source: "agent_default_configuration" } },
+		});
+		expect(f.startSession).not.toHaveBeenCalled();
+		expect((await f.service.list(scope, "host-task")).creations).toHaveLength(0);
+		const created = await f.service.create(scope, request(), human);
+		expect(f.startSession.mock.calls[0]?.[1]).toMatchObject({
+			startInPlanMode: false,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+			terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "new-agent-default" },
+		});
+		f.dependencies.readCreationDefaults = async () => ({ modelId: "changed-later" });
+		const restored = createTaskConversationSessionService(f.dependencies);
+		const retried = await restored.create(scope, request(), human);
+		expect(retried.resolvedSettings).toEqual(created.resolvedSettings);
+		expect(f.startSession).toHaveBeenCalledTimes(1);
+	});
+
+	it("空会话只在首次真实输入被接受后命名，手改版本保护迟到结果", async () => {
+		const f = await fixture();
+		const suggestNames = vi.fn(async () => ({ status: "suggested" as const, suggestedTaskNames: ["自动主题"] }));
+		f.dependencies.suggestNames = suggestNames;
+		f.dependencies.compareAndSetSessionName = async (_scope, input, source) => {
+			const session = f.state.sessions[input.taskConversationSessionId];
+			const metadata = session?.taskConversationSessionMetadata;
+			if (!metadata || (metadata.conversationSessionNameVersion ?? 0) !== input.expectedNameVersion) return false;
+			session.taskConversationSessionMetadata = {
+				...metadata,
+				conversationSessionName: input.conversationSessionName,
+				conversationSessionNameVersion: input.expectedNameVersion + 1,
+				conversationSessionNameSource: source,
+			};
+			return true;
+		};
+		const created = await f.service.create(scope, request({ initialMessage: "" }), human);
+		await f.service.reconcile(scope);
+		expect(suggestNames).not.toHaveBeenCalled();
+		const session = f.state.sessions[created.creation?.taskConversationSessionId ?? ""];
+		if (!session?.taskConversationSessionMetadata) throw new Error("缺少侧会话");
+		session.taskConversationSessionMetadata.latestUserMessagePreview = "真实问题";
+		await f.service.reconcile(scope);
+		expect(suggestNames).not.toHaveBeenCalled();
+		session.agentConversationPromptSubmissionAcceptance = {
+			status: "accepted",
+			attemptedAtMs: 1001,
+			runtimeSessionIncarnationId: "new-session",
+		};
+		await f.service.reconcile(scope);
+		expect(suggestNames).toHaveBeenCalledTimes(1);
+		expect(session.taskConversationSessionMetadata.conversationSessionName).toBe("自动主题");
+		const renamed = await f.service.rename(scope, {
+			taskId: "host-task",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+			taskConversationSessionId: session.taskId,
+			expectedNameVersion: 1,
+			conversationSessionName: "人工主题",
+		});
+		expect(renamed.ok).toBe(true);
+		await createTaskConversationSessionService(f.dependencies).reconcile(scope);
+		expect(session.taskConversationSessionMetadata.conversationSessionName).toBe("人工主题");
+		expect(suggestNames).toHaveBeenCalledTimes(1);
+	});
+
+	it("By the way 的只读约束独立于显式全部允许与 Plan", async () => {
+		const f = await fixture();
+		const result = await f.service.create(
+			scope,
+			request({
+				sessionRole: "by_the_way",
+				startInPlanMode: true,
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+			}),
+			human,
+		);
+		expect(result.resolvedSettings).toMatchObject({
+			startInPlanMode: { value: true },
+			roleReadOnlyConstraint: { value: true, source: "session_role_constraint" },
+		});
+	});
+
 	it("并发相同请求只启动一次，重启后仍返回原会话；同 key 不同正文冲突", async () => {
 		const f = await fixture();
 		const results = await Promise.all([
@@ -578,7 +713,7 @@ describe("Agent 侧会话创建与回报", () => {
 		expect(f.startSession).toHaveBeenCalledTimes(1);
 	});
 
-	it("显式 Codex profile 采用 profile 权限，未选择时保留任务本地来源", async () => {
+	it("显式 Codex profile 采用 profile 权限，未选择时不继承宿主 profile", async () => {
 		const f = await fixture();
 		f.card.codexConfigurationProfileId = "card-profile";
 		f.card.codexConfigurationPermissionSelectionSource = "task_local";
@@ -595,7 +730,7 @@ describe("Agent 侧会话创建与回报", () => {
 		const inherited = await f.service.create(scope, request({ idempotencyKey: "inherited-profile" }), human);
 		expect(inherited.ok).toBe(true);
 		expect(f.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
-			codexConfigurationProfileId: "card-profile",
+			codexConfigurationProfileId: undefined,
 			codexConfigurationPermissionSelectionSource: "task_local",
 		});
 	});

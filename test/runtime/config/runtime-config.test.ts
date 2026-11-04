@@ -630,6 +630,8 @@ describe.sequential("runtime-config auto agent selection", () => {
 				expect(reloaded.selectedAgentId).toBe("codex");
 				expect(reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins).toEqual({
 					taskProjectAssignmentAutomaticAnalysisEnabled: null,
+					newPeerSessionStartInPlanMode: null,
+					newByTheWaySessionStartInPlanMode: null,
 					newTaskAutoReviewEnabled: true,
 					newTaskAutoReviewMode: null,
 					taskCreateDialogPrimaryStartAction: null,
