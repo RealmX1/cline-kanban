@@ -1224,6 +1224,7 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
 		taskNameVersion: 2,
 		codexConfigurationProfileId: "fixture-codex-profile",
+		codexReasoningEffortOverride: "ultra",
 		codexConfigurationPermissionSelectionSource: "profile",
 		taskClosureSummary: {
 			closureRequestId: "11111111-1111-4111-8111-111111111111",

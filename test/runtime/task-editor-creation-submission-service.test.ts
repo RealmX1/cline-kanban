@@ -6,7 +6,10 @@ import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-cli
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
 import { resolveCreationStartupSettings } from "../../src/core/creation-startup-settings";
-import type { TaskEditorCreationSubmissionRequest } from "../../src/core/task-editor-creation-submission-contract";
+import {
+	type TaskEditorCreationSubmissionRequest,
+	taskEditorCreationSubmissionRequestSchema,
+} from "../../src/core/task-editor-creation-submission-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import {
 	loadPersistedWorkspaceStateById,
@@ -205,6 +208,31 @@ async function scenario() {
 }
 
 describe("编辑器持久创建提交", { timeout: 30000 }, () => {
+	it("创建提交契约与持久卡片保留独立 Codex effort 和所属 profile", async () => {
+		const test = await scenario();
+		const request = test.request("eff01", false);
+		Object.assign(request.newTaskCard, {
+			agentId: "codex",
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+			codexConfigurationPermissionSelectionSource: "profile",
+		});
+		const parsed = taskEditorCreationSubmissionRequestSchema.parse(request);
+		expect(parsed.newTaskCard).toMatchObject({
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+			codexConfigurationPermissionSelectionSource: "profile",
+		});
+		await test.service.submit(test.source, parsed, evidence);
+		await test.service.settle();
+		const card = (await loadPersistedWorkspaceStateById(test.source.workspaceId)).board.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === "eff01");
+		expect(card).toMatchObject({
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+		});
+	});
 	it("默认模型与启动设置先持久冻结，建卡失败及新实例恢复不重新套用默认值", async () => {
 		const test = await scenario();
 		const defaults = vi.fn(async () =>

@@ -683,6 +683,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				settings?.codexConfigurationProfileId ??
 				summary.codexConfigurationProfileId ??
 				card.codexConfigurationProfileId,
+			codexReasoningEffortOverride: settings
+				? settings.codexReasoningEffortOverride
+				: card.codexReasoningEffortOverride,
 			codexConfigurationPermissionSelectionSource:
 				settings?.codexConfigurationPermissionSelectionSource ?? card.codexConfigurationPermissionSelectionSource,
 			requestedAgentSessionTransport:
@@ -775,6 +778,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					card.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 						? card.terminalAgentModelOverrideSettings
 						: undefined,
+				codexReasoningEffortOverride: card.codexReasoningEffortOverride,
 			},
 			// 刻意不复用 resume_reclaimed_…：那条走的是内存里还在的 restartRequest，本条是内存态已随进程
 			// 重启丢光、从 durable board 重新拼出来的。两者的成因与修法都不同，混记就白设这个枚举了。
@@ -1598,6 +1602,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						taskConversationSessionLaunchSettings: {
 							...taskConversationSessionMetadata.taskConversationSessionLaunchSettings,
 							codexConfigurationProfileId: body.codexConfigurationProfileId,
+							codexReasoningEffortOverride: body.codexReasoningEffortOverride,
 							codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
 							taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
 								body.taskAgentPermissionMode,
@@ -1919,6 +1924,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const summary = await terminalManager.startTaskSession(
 					{
 						codexConfigurationProfileId: body.codexConfigurationProfileId,
+						codexReasoningEffortOverride: body.codexReasoningEffortOverride,
 						codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
 						taskId: body.taskId,
 						beforeAgentProcessLaunch,
@@ -2232,6 +2238,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						sideSessionLaunchSettings?.codexConfigurationProfileId ??
 						currentSummary?.codexConfigurationProfileId ??
 						card.codexConfigurationProfileId,
+					codexReasoningEffortOverride: sideSessionLaunchSettings
+						? sideSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					codexConfigurationPermissionSelectionSource:
 						sideSessionLaunchSettings?.codexConfigurationPermissionSelectionSource ??
 						card.codexConfigurationPermissionSelectionSource,
@@ -4297,6 +4306,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					agentId,
 					taskAgentPermissionMode:
 						sideSessionLaunchSettings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
+					codexReasoningEffortOverride: sideSessionLaunchSettings
+						? sideSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					terminalAgentModelOverrideSettings: sideSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 					worktreeMode: card.worktreeMode,
 					requestedAgentSessionTransport: body.targetSessionTransport,

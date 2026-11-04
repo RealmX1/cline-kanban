@@ -152,6 +152,17 @@ function request(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Agent 侧会话创建与回报", () => {
+	it("新建侧会话沿用自己的默认配置，不继承宿主任务的推理覆盖", async () => {
+		const f = await fixture();
+		f.card.codexReasoningEffortOverride = "ultra";
+		const created = await f.service.create(scope, request(), human);
+		expect(created.ok).toBe(true);
+		const launch = f.startSession.mock.calls[0]?.[1];
+		expect(launch?.codexReasoningEffortOverride).toBeUndefined();
+		expect(
+			launch?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.codexReasoningEffortOverride,
+		).toBeUndefined();
+	});
 	it("恢复查询核验冻结内容并保留原创建者，不重新解析当前主会话", async () => {
 		const f = await fixture();
 		const frozen = request({ expectedTaskIncarnationCreatedAtEpochMs: 1 });

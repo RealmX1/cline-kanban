@@ -448,6 +448,7 @@ export const runtimeBoardCardSchema = z
 		// 因为 schema 层看不到 runtime config。
 		taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 		codexConfigurationProfileId: z.string().min(1).optional(),
+		codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 		codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
@@ -741,6 +742,7 @@ export type RuntimeCreationResolvedSettings = z.infer<typeof runtimeCreationReso
 // 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
 export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
+	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
 	startInPlanMode: z.boolean().optional(),
@@ -1509,6 +1511,9 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	codexEffectivePermissionMode: runtimeTaskAgentPermissionModeSchema.nullable().optional(),
+	codexTaskReasoningEffortFeedbackLaunch: z
+		.object({ selectionId: z.string().uuid(), startedAtMs: z.number() })
+		.optional(),
 	codexConfigurationProfileRetainedInputRecovery: z
 		.object({
 			retainedInputRecordPath: z.string(),
@@ -2125,6 +2130,7 @@ export type RuntimeTaskCardActionPermanentlyDeleteResponse = z.infer<
 // 具体值 = 改成该值。clineReasoningEffort 的 "default" = 显式回落默认推理档（保留空覆盖）。
 export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).nullable().optional(),
+	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().optional(),
 	prompt: z.string().optional(),
@@ -2157,6 +2163,7 @@ export type RuntimeKanbanCliTaskCardFieldUpdateRawInput = z.infer<
 // 否则卡片 schema 会从遗留 parentSessionId 重新派生出刚被清掉的初始化（与浏览器 updateTask 同语义）。
 export const runtimeTaskCardFieldValuePatchSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).nullable().optional(),
+	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().nullable().optional(),
 	prompt: z.string().optional(),
@@ -4511,6 +4518,7 @@ export type RuntimeTaskSessionStartOriginDeclaredByClient = z.infer<
 export const runtimeTaskSessionStartRequestSchema = z
 	.object({
 		codexConfigurationProfileId: z.string().min(1).optional(),
+		codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 		codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 		taskId: z.string(),
 		// 省略时 taskId 按任务入口跟随当前主绑定；显式传入时按会话寻址。
@@ -4589,6 +4597,10 @@ export const runtimeTerminalAgentModelSelectionGroupSchema = z.enum(["latest_tra
 export type RuntimeTerminalAgentModelSelectionGroup = z.infer<typeof runtimeTerminalAgentModelSelectionGroupSchema>;
 
 export const runtimeTerminalAgentModelSelectionOptionSchema = z.object({
+	supportedReasoningEfforts: z
+		.array(z.object({ effort: z.string().trim().min(1), description: z.string().optional() }))
+		.optional(),
+	defaultReasoningEffort: z.string().optional(),
 	modelId: z.string(),
 	label: z.string(),
 	description: z.string().optional(),
@@ -5387,6 +5399,7 @@ export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibr
 // 路径，把易膨胀数据塞进去等于把膨胀直接打在那条链上。
 export const runtimeTaskEditDraftSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
+	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	taskTitleOverride: z.string().optional(),
 	taskId: z.string(),

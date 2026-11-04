@@ -10,7 +10,7 @@
 
 ## Profile 与字段归属
 
-`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，侧会话默认继承 Task，可另选同来源 profile。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
+`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，新侧会话使用独立启动设置与默认 profile，可另选同来源 profile；恢复既有会话继续使用其冻结快照。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
 
 | 设置 | 会话中修改后的默认行为 | 范围 |
 | --- | --- | --- |
@@ -68,6 +68,21 @@ schemaVersion 3 从已经采用的共享字段建立兼容 profile，不同来�
 共享来源控制器的归属覆盖仍被 Hook 持有的引用，而不只覆盖当前订阅者：禁用 Hook 保留实例期间，最后一个订阅退出不会驱逐该 workspace 的所有者，新消费者与重新启用的消费者仍共享单飞及冻结身份。最后退出只取消本代请求、移除监听并清空内存快照；再次订阅从持久记录先补读恢复。注册表使用弱引用，实例不再被持有后可回收。
 
 冻结请求、workspace、观测指纹和已用重送次数保存在独立 localStorage 键 `kanban.codex-configuration-unconfirmed-source-observation-actions.v1`。刷新后先补读，耗尽预算后保留未知与「重新核验」入口，在线恢复、运行时流重连或页面重新可见时自动补读；普通重绘不重置重送额度。所有查询和 mutation 快照按 workspace 生命周期及单调 revision 接收，旧回执也不能清除新版本操作。初次读取失败时显示读取错误和恢复入口，不持续显示读取中。
+
+## 创建任务时选择 Reasoning Effort
+
+创建任务和 Backlog 编辑共用「模型与参数」中的推理强度选择器。每张新任务默认「沿用 Codex 配置」，连续创建下一张时也恢复继承；批量提交中的各张任务使用本批明确选择的档位。`codexReasoningEffortOverride?: string` 独立于模型覆盖，默认模型下也能单独选择，编辑补丁的 `null` 清除覆盖。字段贯通草稿、冻结创建提交、卡片水合和会话启动。
+
+档位来自本机 `codex debug models` 的 `supported_reasoning_levels`，保留 `max`、`ultra` 和未来原生值。按显式模型或所属 profile 的继承模型筛选；目录缺失时保留原值，最多三次退避重试，连接恢复、页面重新可见或手动重读可开启新一轮。只在目录确认不兼容时显示错误并阻止提交，不把未知当成不兼容。
+
+手选值进入既有 writer 的 `reasoning_effort` 局部例外，经 `model_reasoning_effort` 配置参数启动。相同任务选择重启时保留会话内后续修改，profile 对该字段的新决定仍按原规则生效。与继承不同的手选值在新主会话成功启动后进入现有限时反馈：持久 selection ID 和首次成功启动时间固定身份及十分钟期限，准备／spawn 失败不发布成功凭证。已有配置扫描链路在身份或目录恢复后补登记；确认才更新所属 profile 并广播，拒绝、过期和重复扫描均不重新提示。
+
+隔离真实 CLI 核验不调用模型：
+
+```sh
+KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \
+npm run test:guarded -- --project runtime-integration test/integration/codex-task-reasoning-effort-native.integration.test.ts
+```
 
 ## 新原生会话的权限继承
 

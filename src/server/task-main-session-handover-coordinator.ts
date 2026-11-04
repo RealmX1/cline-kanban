@@ -908,6 +908,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								// 与主绑定一起落盘，冷恢复不依赖首次 start 已经写入快照。
 								taskConversationSessionLaunchSettings: {
 									taskAgentPermissionMode,
+									...(current.codexReasoningEffortOverride
+										? { codexReasoningEffortOverride: current.codexReasoningEffortOverride }
+										: {}),
 									...(selectedRecord.destination.kind === "new_agent_session"
 										? { startInPlanMode: true }
 										: {}),
@@ -940,6 +943,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 								latest.sessions[source.taskId]?.taskConversationSessionMetadata
 									?.taskConversationSessionLaunchSettings ?? {
 									taskAgentPermissionMode,
+									...(current.codexReasoningEffortOverride
+										? { codexReasoningEffortOverride: current.codexReasoningEffortOverride }
+										: {}),
 									...(selectedRecord.destination.kind === "new_agent_session"
 										? { startInPlanMode: true }
 										: {}),
@@ -1150,6 +1156,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						taskAgentPermissionMode:
 							metadata.taskConversationSessionLaunchSettings?.taskAgentPermissionMode ??
 							card.taskAgentPermissionMode,
+						codexReasoningEffortOverride: metadata.taskConversationSessionLaunchSettings
+							? metadata.taskConversationSessionLaunchSettings.codexReasoningEffortOverride
+							: latestBeforeStart.codexReasoningEffortOverride,
 						terminalAgentModelOverrideSettings:
 							metadata.taskConversationSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 						resumePriorAgentConversationWithoutResendingPrompt:
@@ -1648,6 +1657,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 									resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
 										scopedRuntimeConfig.agentAutonomousModeEnabled,
 									),
+								...(current.codexReasoningEffortOverride
+									? { codexReasoningEffortOverride: current.codexReasoningEffortOverride }
+									: {}),
 								sessionTransport: "pty_terminal",
 							},
 						},

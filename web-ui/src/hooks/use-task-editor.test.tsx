@@ -342,6 +342,10 @@ interface HookSnapshot {
 	// 与 App 同算法：会被保存的 board 叠上在途卡片命令的 overlay（服务端命令的结果在广播回灌前只在这里可见）。
 	displayedBoard: BoardData;
 	isInlineTaskCreateOpen: boolean;
+	newTaskCodexReasoningEffortOverride: string | undefined;
+	setNewTaskCodexReasoningEffortOverride: (value: string | undefined) => void;
+	editTaskCodexReasoningEffortOverride: string | undefined;
+	setEditTaskCodexReasoningEffortOverride: (value: string | undefined) => void;
 	newTaskPrompt: string;
 	newTaskImages: TaskImage[];
 	newTaskStartInPlanMode: boolean;
@@ -462,6 +466,10 @@ function HookHarness({
 			displayedBoard,
 			isInlineTaskCreateOpen: editor.isInlineTaskCreateOpen,
 			newTaskPrompt: editor.newTaskPrompt,
+			newTaskCodexReasoningEffortOverride: editor.newTaskCodexReasoningEffortOverride,
+			setNewTaskCodexReasoningEffortOverride: editor.setNewTaskCodexReasoningEffortOverride,
+			editTaskCodexReasoningEffortOverride: editor.editTaskCodexReasoningEffortOverride,
+			setEditTaskCodexReasoningEffortOverride: editor.setEditTaskCodexReasoningEffortOverride,
 			newTaskImages: editor.newTaskImages,
 			newTaskStartInPlanMode: editor.newTaskStartInPlanMode,
 			newTaskBranchRef: editor.newTaskBranchRef,
@@ -692,6 +700,30 @@ describe("useTaskEditor", () => {
 				newBacklogTaskCardsCreatedFromWebUi: [expect.objectContaining({ id: createdTaskId, title: "Named" })],
 				boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
 			});
+		});
+
+		it("批量建卡保留本次 Codex effort，下次打开创建框重新沿用配置", async () => {
+			const captured = await renderCreateHarness();
+			await act(async () => {
+				requireSnapshot(captured.current).handleOpenCreateTask();
+				requireSnapshot(captured.current).setNewTaskCodexReasoningEffortOverride("ultra");
+			});
+			await act(async () => {
+				requireSnapshot(captured.current).handleCreateTasks(["任务一", "任务二"], { keepDialogOpen: true });
+			});
+			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith(
+				expect.objectContaining({
+					newBacklogTaskCardsCreatedFromWebUi: [
+						expect.objectContaining({ codexReasoningEffortOverride: "ultra" }),
+						expect.objectContaining({ codexReasoningEffortOverride: "ultra" }),
+					],
+				}),
+			);
+			expect(requireSnapshot(captured.current).newTaskCodexReasoningEffortOverride).toBeUndefined();
+			await act(async () => {
+				requireSnapshot(captured.current).handleOpenCreateTask();
+			});
+			expect(requireSnapshot(captured.current).newTaskCodexReasoningEffortOverride).toBeUndefined();
 		});
 
 		it("takes one runtime id per prompt when creating a batch", async () => {
@@ -1458,6 +1490,41 @@ describe("useTaskEditor", () => {
 		);
 	});
 
+	it.each(["max", undefined])("草稿中的 effort %s 恢复原选择或继承，不重新套入卡片旧覆盖", async (effort) => {
+		const task = createTask("task-1", "原任务", 1, { codexReasoningEffortOverride: "ultra" });
+		const draft: RuntimeTaskEditDraft = {
+			taskId: task.id,
+			prompt: "恢复的草稿",
+			images: [],
+			startInPlanMode: false,
+			autoReviewEnabled: false,
+			autoReviewMode: "commit",
+			branchRef: "main",
+			worktreeMode: "branch",
+			savedAt: 1000,
+			codexReasoningEffortOverride: effort,
+		};
+		window.localStorage.setItem(
+			LocalStorageKey.TaskEditDrafts,
+			JSON.stringify({ drafts: { [JSON.stringify(["project-1", task.id])]: draft } }),
+		);
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () => {
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		});
+		await act(async () => {
+			requireSnapshot(latestSnapshot).handleOpenEditTask(task);
+		});
+		expect(requireSnapshot(latestSnapshot).editTaskCodexReasoningEffortOverride).toBe(effort);
+	});
+
 	it("restores an autosaved edit draft when reopening the same task", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		const initialBoard = createBoard([createTask("task-1", "Initial prompt", 1)]);
@@ -1484,6 +1551,7 @@ describe("useTaskEditor", () => {
 		await act(async () => {
 			requireSnapshot(latestSnapshot).setEditTaskPrompt("Autosaved draft prompt");
 			requireSnapshot(latestSnapshot).setEditTaskName("[FIX]跨重开恢复名称");
+			requireSnapshot(latestSnapshot).setEditTaskCodexReasoningEffortOverride("ultra");
 		});
 		await settleTaskEditDraftPersistence();
 
@@ -1516,6 +1584,7 @@ describe("useTaskEditor", () => {
 
 		expect(requireSnapshot(latestSnapshot).editTaskPrompt).toBe("Autosaved draft prompt");
 		expect(requireSnapshot(latestSnapshot).editTaskName).toBe("[FIX]跨重开恢复名称");
+		expect(requireSnapshot(latestSnapshot).editTaskCodexReasoningEffortOverride).toBe("ultra");
 	});
 
 	it("clears the autosaved edit draft after saving", async () => {

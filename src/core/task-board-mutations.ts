@@ -36,6 +36,7 @@ export {
 
 export interface RuntimeCreateTaskInput {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskId?: string;
 	title?: string;
@@ -70,6 +71,7 @@ export interface RuntimeCreateTaskInput {
 
 export interface RuntimeUpdateTaskInput {
 	codexConfigurationProfileId?: string | null;
+	codexReasoningEffortOverride?: string | null;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local" | null;
 	title?: string;
 	prompt: string;
@@ -255,6 +257,9 @@ export function addTaskToColumn(
 		globalDefaultSessionTransportForNewTasks: input.ompAgentSessionTransportForNewTasks,
 	});
 	const task: RuntimeBoardCard = {
+		...(input.codexReasoningEffortOverride
+			? { codexReasoningEffortOverride: input.codexReasoningEffortOverride.trim() }
+			: {}),
 		...(input.codexConfigurationProfileId ? { codexConfigurationProfileId: input.codexConfigurationProfileId } : {}),
 		...(input.codexConfigurationPermissionSelectionSource
 			? { codexConfigurationPermissionSelectionSource: input.codexConfigurationPermissionSelectionSource }
@@ -616,6 +621,10 @@ export function updateTask(
 				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
+				codexReasoningEffortOverride:
+					input.codexReasoningEffortOverride === undefined
+						? card.codexReasoningEffortOverride
+						: input.codexReasoningEffortOverride?.trim() || undefined,
 				codexConfigurationProfileId:
 					input.codexConfigurationProfileId === undefined
 						? card.codexConfigurationProfileId

@@ -705,9 +705,11 @@ export default function App(): ReactElement {
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
 		newTaskCodexConfigurationProfileId,
+		newTaskCodexReasoningEffortOverride,
 		newTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationProfileId,
+		setNewTaskCodexReasoningEffortOverride,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
 		newTaskConversationMode,
@@ -739,9 +741,11 @@ export default function App(): ReactElement {
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
 		editTaskCodexConfigurationProfileId,
+		editTaskCodexReasoningEffortOverride,
 		editTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationProfileId,
+		setEditTaskCodexReasoningEffortOverride,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
 		editTaskConversationMode,
@@ -2288,6 +2292,12 @@ export default function App(): ReactElement {
 							editingTaskId
 								? setEditTaskCodexConfigurationPermissionSelectionSource
 								: setNewTaskCodexConfigurationPermissionSelectionSource
+						}
+						codexReasoningEffortOverride={
+							editingTaskId ? editTaskCodexReasoningEffortOverride : newTaskCodexReasoningEffortOverride
+						}
+						onCodexReasoningEffortOverrideChange={
+							editingTaskId ? setEditTaskCodexReasoningEffortOverride : setNewTaskCodexReasoningEffortOverride
 						}
 						codexConfigurationProfileId={
 							editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId

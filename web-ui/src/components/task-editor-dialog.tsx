@@ -122,6 +122,7 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  */
 export interface TaskCreateFormSnapshot {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
@@ -166,6 +167,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
 		current.codexConfigurationProfileId !== baseline.codexConfigurationProfileId ||
+		current.codexReasoningEffortOverride !== baseline.codexReasoningEffortOverride ||
 		current.codexConfigurationPermissionSelectionSource !== baseline.codexConfigurationPermissionSelectionSource ||
 		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
@@ -260,8 +262,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
 	codexConfigurationProfileId,
+	codexReasoningEffortOverride,
 	codexConfigurationPermissionSelectionSource,
 	onCodexConfigurationProfileIdChange,
+	onCodexReasoningEffortOverrideChange,
 	onCodexConfigurationPermissionSelectionSourceChange,
 	taskConversationMode,
 	onTaskConversationModeChange,
@@ -328,8 +332,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
+	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
 	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	taskConversationMode: RuntimeTaskConversationMode;
 	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
@@ -581,12 +587,13 @@ export function TaskEditorDialog({
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
 		setNewTaskName("");
 		onImagesChange([]);
+		onCodexReasoningEffortOverrideChange?.(undefined);
 		setMode("single");
 		setTaskPrompts([]);
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, propagatePromptDraft]);
+	}, [onImagesChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
 
 	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
 	const revealAndFocusRelations = useCallback(() => {
@@ -615,6 +622,8 @@ export function TaskEditorDialog({
 	}, [workspaceId, editingTaskId, open, selectableTargetProjectField]);
 	const targetWorkspaceId =
 		selectableTargetProjectField?.selectedTargetWorkspaceId ?? localSelectedTargetWorkspaceId ?? workspaceId;
+	const [codexReasoningEffortValidationError, setCodexReasoningEffortValidationError] = useState<string | null>(null);
+
 	const setSelectedTargetWorkspaceId = (nextWorkspaceId: string) => {
 		if (selectableTargetProjectField) selectableTargetProjectField.onSelectTargetWorkspaceId(nextWorkspaceId);
 		else setLocalSelectedTargetWorkspaceId(nextWorkspaceId);
@@ -670,6 +679,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -1330,6 +1340,7 @@ export function TaskEditorDialog({
 	const primaryActionDisabled =
 		!branchRef ||
 		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
+		Boolean(codexReasoningEffortValidationError) ||
 		isTaskCreationWaitingForRelationDraftHydration ||
 		isRelationAwareCreationInFlight;
 	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
@@ -1371,6 +1382,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -1774,6 +1786,7 @@ export function TaskEditorDialog({
 													startInPlanMode,
 													taskAgentPermissionMode,
 													codexConfigurationProfileId,
+													codexReasoningEffortOverride,
 													codexConfigurationPermissionSelectionSource,
 													autoReviewEnabled,
 													autoReviewMode,
@@ -1924,6 +1937,9 @@ export function TaskEditorDialog({
 										taskAgentPermissionMode={taskAgentPermissionMode}
 										onTaskAgentPermissionModeChange={onTaskAgentPermissionModeChange}
 										codexConfigurationProfileId={codexConfigurationProfileId}
+										codexReasoningEffortOverride={codexReasoningEffortOverride}
+										onCodexReasoningEffortOverrideChange={onCodexReasoningEffortOverrideChange}
+										onCodexReasoningEffortValidationErrorChange={setCodexReasoningEffortValidationError}
 										onCodexConfigurationProfileIdChange={onCodexConfigurationProfileIdChange}
 										codexConfigurationPermissionSelectionSource={codexConfigurationPermissionSelectionSource}
 										onCodexConfigurationPermissionSelectionSourceChange={
@@ -1934,6 +1950,11 @@ export function TaskEditorDialog({
 									/>
 								}
 							</div>
+							{codexReasoningEffortValidationError && (
+								<p role="alert" className="mt-2 text-xs text-status-red">
+									{codexReasoningEffortValidationError}
+								</p>
+							)}
 							{mode === "single" && workspaceId ? (
 								<TaskEditorSettingGroup
 									className="mt-5"
@@ -2019,6 +2040,7 @@ export function TaskEditorDialog({
 									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 									disabled={
 										!hasPromptDraftContent ||
+										Boolean(codexReasoningEffortValidationError) ||
 										!branchRef ||
 										isTaskCreationWaitingForRelationDraftHydration ||
 										isRelationAwareCreationInFlight
@@ -2038,6 +2060,7 @@ export function TaskEditorDialog({
 												onClick={() => handleRunSingleStartAction(primaryStartAction)}
 												disabled={
 													!hasPromptDraftContent ||
+													Boolean(codexReasoningEffortValidationError) ||
 													!branchRef ||
 													isTaskCreationWaitingForRelationDraftHydration ||
 													isRelationAwareCreationInFlight
@@ -2056,6 +2079,7 @@ export function TaskEditorDialog({
 														size="sm"
 														disabled={
 															!hasPromptDraftContent ||
+															Boolean(codexReasoningEffortValidationError) ||
 															!branchRef ||
 															isTaskCreationWaitingForRelationDraftHydration ||
 															isRelationAwareCreationInFlight
@@ -2121,7 +2145,9 @@ export function TaskEditorDialog({
 										variant="primary"
 										size="sm"
 										onClick={handleCreateAndStartAll}
-										disabled={validTaskCount === 0 || !branchRef}
+										disabled={
+											validTaskCount === 0 || !branchRef || Boolean(codexReasoningEffortValidationError)
+										}
 									>
 										<span className="inline-flex items-center">
 											Start {validTaskCount} {taskCountLabel}

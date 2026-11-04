@@ -31,6 +31,8 @@ beforeEach(async () => {
 	vi.stubEnv("CODEX_HOME", join(fixture.path, ".codex"));
 	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, ".codex"));
 	await mkdir(join(fixture.path, ".codex"));
+	vi.stubEnv("CODEX_HOME", join(fixture.path, ".codex"));
+	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, ".codex"));
 	prepared.mockReset();
 	prepared.mockImplementation(async (request) => ({ args: request.args, env: {} }));
 	spawned.mockReset();
@@ -109,6 +111,25 @@ function hydrateStoppedCodexSession(
 }
 
 describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
+	it("spawn 失败不发布成功启动的 effort 反馈凭证", async () => {
+		const manager = createManager();
+		spawned.mockImplementationOnce(() => {
+			throw new Error("隔离测试模拟 spawn 失败");
+		});
+		await expect(manager.startTaskSession({ ...request(), codexReasoningEffortOverride: "ultra" })).rejects.toThrow(
+			"spawn 失败",
+		);
+		expect(manager.getSummary(request().taskId)?.codexTaskReasoningEffortFeedbackLaunch).toBeUndefined();
+	});
+	it("任务 effort 贯通 writer 与 adapter，成功启动才在持久摘要记录反馈起点", async () => {
+		const manager = createManager();
+		const summary = await manager.startTaskSession({ ...request(), codexReasoningEffortOverride: "ultra" });
+		expect(prepared.mock.calls[0]?.[0].codexReasoningEffortOverride).toBe("ultra");
+		expect(summary.codexTaskReasoningEffortFeedbackLaunch).toMatchObject({
+			selectionId: expect.any(String),
+			startedAtMs: summary.startedAt,
+		});
+	});
 	it("新会话在专用目录启动，持久摘要记录实际目录且不继承 App 来源", async () => {
 		vi.stubEnv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_work_desktop");
 		const manager = createManager();

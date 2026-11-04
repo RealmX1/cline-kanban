@@ -18,6 +18,7 @@ import {
 	type CodexConfigurationWriterBinding,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
+import { resolveCodexNativeDefaultReasoningEffortForModel } from "../terminal/terminal-agent-model-selection";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -227,6 +228,10 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	nativeLaunchArguments?: string[];
 	codexConfigurationProfileId?: string;
 	sessionModelId?: string;
+	sessionReasoningEffortOverride?: string;
+	allowTaskReasoningEffortFeedback?: boolean;
+	/** profile 没有 model_reasoning_effort 时，模型目录给出的原生默认档。传入后不再探测目录。 */
+	nativeDefaultReasoningEffort?: string;
 	sessionPermissionMode?: string;
 	sessionPermissionSelectionSource?: "profile" | "task_local";
 }): Promise<CodexConfigurationWriterBinding> {
@@ -410,18 +415,26 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				},
 			};
 		}
+		const taskReasoningEffortSelectionChanged =
+			input.sessionReasoningEffortOverride !== previous?.taskReasoningEffortSelectionAtLaunch;
+		if (previous && taskReasoningEffortSelectionChanged) {
+			delete previous.localExceptionOverrides?.reasoning_effort;
+			delete selectedLocalExceptions.reasoning_effort;
+		}
+		const effortSelection = input.sessionReasoningEffortOverride ?? argumentSelections.effort;
 		if (
-			argumentSelections.effort &&
+			effortSelection &&
 			(!previous ||
+				taskReasoningEffortSelectionChanged ||
 				(canPreserveLegacyGroup("reasoning_effort") && !observedGroupChangedAfterLaunch("reasoning_effort")))
 		) {
 			const key = JSON.stringify(["config.toml", "model_reasoning_effort"]);
-			launchSelectionFields[key] = { value: argumentSelections.effort };
+			launchSelectionFields[key] = { value: effortSelection };
 			selectedLocalExceptions.reasoning_effort = {
 				profileVersionAtSelection: selectedProfile.version,
 				fields: {
 					...selectedLocalExceptions.reasoning_effort?.fields,
-					[key]: { value: argumentSelections.effort },
+					[key]: { value: effortSelection },
 				},
 			};
 		}
@@ -698,7 +711,56 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			mode: 0o600,
 			flag: "wx",
 		});
+		let taskReasoningEffortFeedbackSelection =
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			previous?.taskReasoningEffortFeedbackSelection?.effort === input.sessionReasoningEffortOverride &&
+			previous.taskReasoningEffortFeedbackSelection.profileId === selectedProfileId
+				? structuredClone(previous.taskReasoningEffortFeedbackSelection)
+				: undefined;
+		const profileReasoningEffort =
+			selectedProfile.fields[JSON.stringify(["config.toml", "model_reasoning_effort"])]?.value;
+		const profileModel = selectedProfile.fields[JSON.stringify(["config.toml", "model"])]?.value;
+		let inheritedReasoningEffort = typeof profileReasoningEffort === "string" ? profileReasoningEffort : undefined;
+		if (
+			inheritedReasoningEffort === undefined &&
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			!taskReasoningEffortFeedbackSelection
+		) {
+			try {
+				inheritedReasoningEffort =
+					input.nativeDefaultReasoningEffort ??
+					(await resolveCodexNativeDefaultReasoningEffortForModel(
+						input.sessionModelId ?? (typeof profileModel === "string" ? profileModel : undefined),
+					));
+			} catch {
+				inheritedReasoningEffort = input.nativeDefaultReasoningEffort;
+			}
+		}
+		if (
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			!taskReasoningEffortFeedbackSelection &&
+			inheritedReasoningEffort !== input.sessionReasoningEffortOverride
+		) {
+			taskReasoningEffortFeedbackSelection = {
+				selectionId: randomUUID(),
+				profileId: selectedProfileId,
+				profileVersionAtSelection: selectedProfile.version,
+				effort: input.sessionReasoningEffortOverride,
+				inheritedFields: structuredClone(
+					Object.fromEntries(
+						Object.entries(selectedProfile.fields).filter(
+							([key]) => codexConfigurationExceptionGroup(key) === "reasoning_effort",
+						),
+					),
+				),
+			};
+		}
 		store.writers[writerId] = {
+			taskReasoningEffortSelectionAtLaunch: input.sessionReasoningEffortOverride,
+			taskReasoningEffortFeedbackSelection,
 			taskModelSelectionAtLaunch: input.sessionModelId,
 			taskPermissionModeSelectionAtLaunch: input.sessionPermissionMode,
 			taskPermissionSelectionSourceAtLaunch: input.sessionPermissionSelectionSource,

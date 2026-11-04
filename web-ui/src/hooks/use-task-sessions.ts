@@ -251,6 +251,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					rows: geometry.rows,
 					agentId: task.agentId,
 					clineSettings: task.clineSettings,
+					codexReasoningEffortOverride: task.codexReasoningEffortOverride,
 					terminalAgentModelOverrideSettings: task.terminalAgentModelOverrideSettings,
 					...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
 					...(task.taskAgentSessionInitialization
