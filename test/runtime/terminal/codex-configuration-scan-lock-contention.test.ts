@@ -406,9 +406,9 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 				hooks: { state: { [`${hookPath}:stop:0:0`]: { trusted_hash: "fixture-hook-hash", enabled: true } } },
 			}),
 		);
-		await prepareWriter("observed-session");
+		const binding = await prepareWriter("observed-session");
 		const barrier = suspendNextConfigurationObservation("");
-		suspendedObservation.hookDefinitionPath = hookPath;
+		suspendedObservation.hookDefinitionPath = join(binding.configurationHomeDirectoryPath, "hooks.json");
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		const scanning = service.scan();
 		try {
@@ -525,13 +525,13 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		}
 	});
 
-	it.each(["source", "writer"] as const)("%s 读取挂起期间，另一任务仍能准备 resume", async (location) => {
+	it("writer 读取挂起期间，另一任务仍能准备 resume", async () => {
 		const binding = await prepareWriter("observed-session");
 		const independentSourceHome = join(fixture.path, "independent-source-home");
 		await mkdir(independentSourceHome);
 		await writeFile(join(independentSourceHome, "config.toml"), 'model="independent-model"\n');
 		const independentBinding = await prepareWriter("resuming-session", independentSourceHome);
-		const observedHome = location === "source" ? sourceHome : binding.configurationHomeDirectoryPath;
+		const observedHome = binding.configurationHomeDirectoryPath;
 		await writeFile(join(observedHome, "config.toml"), 'model="independent-observation"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		const barrier = suspendNextConfigurationObservation(observedHome);
@@ -563,45 +563,42 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		).toBe(true);
 	});
 
-	it.each(["source", "writer"] as const)(
-		"%s 的旧观察不覆盖并发 profile 决定，下一次补扫采用新观察",
-		async (location) => {
-			const binding = await prepareWriter("observed-session");
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
-			const observedHome = location === "source" ? sourceHome : binding.configurationHomeDirectoryPath;
-			const modelFieldKey = JSON.stringify(["config.toml", "model"]);
-			await writeFile(join(observedHome, "config.toml"), 'model="obsolete-observation"\n');
-			const barrier = suspendNextConfigurationObservation(observedHome);
-			const scanning = service.scan();
-			try {
-				await barrier.observationRead;
-				await assertCodexConfigurationStoreKernelWriteLockAvailable();
-				await mutateCodexConfigurationSyncStore((store) => {
-					const profileId = store.writers[binding.writerId].codexConfigurationProfileId;
-					if (!profileId) throw new Error("缺少合成 profile");
-					updateCodexConfigurationProfileFields(store, profileId, { [modelFieldKey]: { value: "new-decision" } });
-				});
-				await writeFile(join(observedHome, "config.toml"), 'model="fresh-observation"\n');
-			} finally {
-				barrier.releaseObservation();
-				await scanning;
-			}
-			try {
-				const store = await readCodexConfigurationSyncStore();
-				expect(store.changes.some((change) => change.value?.value === "obsolete-observation")).toBe(false);
-				expect(store.writers[binding.writerId].lastObservedFields[modelFieldKey].value).toBe("initial-model");
-				expect(store.profiles[binding.codexConfigurationProfileId ?? ""].fields[modelFieldKey].value).toBe(
-					"new-decision",
-				);
-				await service.scan();
-				expect(
-					(await readCodexConfigurationSyncStore()).changes.some(
-						(change) => change.value?.value === "fresh-observation",
-					),
-				).toBe(true);
-			} finally {
-				await service.close();
-			}
-		},
-	);
+	it("writer 的旧观察不覆盖并发 profile 决定，下一次补扫采用新观察", async () => {
+		const binding = await prepareWriter("observed-session");
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const observedHome = binding.configurationHomeDirectoryPath;
+		const modelFieldKey = JSON.stringify(["config.toml", "model"]);
+		await writeFile(join(observedHome, "config.toml"), 'model="obsolete-observation"\n');
+		const barrier = suspendNextConfigurationObservation(observedHome);
+		const scanning = service.scan();
+		try {
+			await barrier.observationRead;
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
+			await mutateCodexConfigurationSyncStore((store) => {
+				const profileId = store.writers[binding.writerId].codexConfigurationProfileId;
+				if (!profileId) throw new Error("缺少合成 profile");
+				updateCodexConfigurationProfileFields(store, profileId, { [modelFieldKey]: { value: "new-decision" } });
+			});
+			await writeFile(join(observedHome, "config.toml"), 'model="fresh-observation"\n');
+		} finally {
+			barrier.releaseObservation();
+			await scanning;
+		}
+		try {
+			const store = await readCodexConfigurationSyncStore();
+			expect(store.changes.some((change) => change.value?.value === "obsolete-observation")).toBe(false);
+			expect(store.writers[binding.writerId].lastObservedFields[modelFieldKey].value).toBe("initial-model");
+			expect(store.profiles[binding.codexConfigurationProfileId ?? ""].fields[modelFieldKey].value).toBe(
+				"new-decision",
+			);
+			await service.scan();
+			expect(
+				(await readCodexConfigurationSyncStore()).changes.some(
+					(change) => change.value?.value === "fresh-observation",
+				),
+			).toBe(true);
+		} finally {
+			await service.close();
+		}
+	});
 });

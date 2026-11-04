@@ -9,6 +9,7 @@ import {
 	configurationTable,
 	sameConfigurationField,
 } from "./codex-configuration-field-projection";
+import { isCodexDesktopConfigurationField } from "./codex-configuration-settings-isolation";
 import type {
 	CodexConfigurationSyncStore,
 	StoredCodexConfigurationChange,
@@ -151,6 +152,19 @@ export function expireCodexConfigurationProfileFeedbackSuggestions(
 	nowMs = Date.now(),
 ) {
 	for (const change of store.changes) {
+		const writerProfileId = store.writers[change.sourceWriterId]?.codexConfigurationProfileId;
+		if (
+			change.approvalStatus === "pending" &&
+			change.codexConfigurationProfileId &&
+			writerProfileId &&
+			writerProfileId !== change.codexConfigurationProfileId
+		) {
+			change.approvalStatus = "historical";
+			change.mergeStatus = "superseded";
+			change.acknowledgedAt = nowMs;
+			change.version = ++store.revision;
+			continue;
+		}
 		if (
 			change.approvalStatus !== "pending" ||
 			change.feedbackExpiresAtMs === undefined ||
@@ -177,6 +191,8 @@ export function updateCodexConfigurationProfileFields(
 ) {
 	const profile = store.profiles[profileId];
 	if (!profile) throw new Error("Codex profile 不存在。");
+	if (Object.keys(fields).some(isCodexDesktopConfigurationField))
+		throw new Error("desktop 设置不属于 Kanban 可共享或编辑的配置。");
 	for (const [fieldKey, value] of Object.entries(fields)) {
 		const previous = profile.fields[fieldKey];
 		const priorFieldVersion = profile.fieldVersions[fieldKey];

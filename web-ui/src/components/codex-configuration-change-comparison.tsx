@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import type { useCodexConfigurationChangeDetails } from "@/hooks/use-codex-configuration-change-details";
 import type { CodexConfigurationChange, CodexConfigurationSourceEvidence } from "@/runtime/types";
@@ -51,8 +52,12 @@ export function CodexConfigurationSourceEvidenceView({
 const changeKindLabels = { added: "新增", modified: "修改", deleted: "删除", unchanged: "未变化", unknown: "历史未知" };
 export function CodexConfigurationComparisonRows({
 	comparison,
+	detectedAction,
+	targetAction,
 }: {
 	comparison: NonNullable<CodexConfigurationChange["comparison"]>;
+	detectedAction?: ReactNode;
+	targetAction?: ReactNode;
 }) {
 	return (
 		<div
@@ -60,7 +65,7 @@ export function CodexConfigurationComparisonRows({
 			className="my-3 divide-y divide-border border-y border-border"
 			aria-label={comparison.targetWriterId ? "来源与目标决定比较" : "配置字段比较"}
 		>
-			{comparison.rows.map((row) => (
+			{comparison.rows.map((row, rowIndex) => (
 				<div key={`${row.fieldKey}:${row.label}`} className="py-2">
 					<p className="mt-0 mb-2 text-xs font-medium text-text-primary break-words">
 						{row.label} <span className="text-text-secondary">· {changeKindLabels[row.changeKind]}</span>
@@ -72,10 +77,15 @@ export function CodexConfigurationComparisonRows({
 									["目标自己的决定", row.target],
 								]
 							: [
-									["修改前", row.previous],
+									...(!row.previousMatchesSharedCurrent || !row.sharedCurrent
+										? [["修改前", row.previous]]
+										: []),
 									["检测到的新值", row.detected],
 									["冲突发生时的共享值", row.sharedAtConflict],
-									["当前共享默认值", row.sharedCurrent],
+									[
+										row.previousMatchesSharedCurrent ? "当前看板默认（同修改前）" : "当前共享默认值",
+										row.sharedCurrent,
+									],
 								]
 						).map(([label, value]) =>
 							value && typeof value !== "string" ? (
@@ -84,6 +94,12 @@ export function CodexConfigurationComparisonRows({
 									<dd className="m-0 whitespace-pre-wrap break-all font-mono text-xs leading-relaxed text-text-primary">
 										{value.text}
 									</dd>
+									{rowIndex === 0 &&
+										(label === "来源决定" || label === "检测到的新值"
+											? detectedAction
+											: label === "目标自己的决定"
+												? targetAction
+												: null)}
 								</div>
 							) : null,
 						)}

@@ -29,16 +29,20 @@ import {
 	sameConfigurationField,
 	setConfigurationField,
 } from "./codex-configuration-field-projection";
+import { mergeObservedCodexConfigurationWriter } from "./codex-configuration-incremental-merge";
 import {
-	mergeObservedCodexConfigurationWriter,
-	reconcileCodexConfigurationUserSourceFields,
-} from "./codex-configuration-incremental-merge";
+	ensureCodexConfigurationInitializationSnapshot,
+	readVerifiedCodexConfigurationInitializationSnapshot,
+	relocateCodexCapturedAgentConfigurationReferences,
+	removeCodexDesktopConfiguration,
+} from "./codex-configuration-initialization-snapshot";
 import {
 	codexConfigurationExceptionGroup,
 	ensureCodexConfigurationSourceProfile,
 	getCodexConfigurationWriterProfile,
 	reuseConfirmedCodexHookTrust,
 } from "./codex-configuration-profiles";
+import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
@@ -117,6 +121,15 @@ export async function resolveVerifiedCodexConfigurationSourceIdentity(
 		}
 	}
 	for (const sourceIdentity of registeredSourceIdentities) {
+		const source = store.sources[sourceIdentity];
+		if (source?.configurationInitialization && source.home === canonicalSourceHome) {
+			await readVerifiedCodexConfigurationInitializationSnapshot(
+				sourceIdentity,
+				canonicalSourceHome,
+				source.configurationInitialization,
+			);
+			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+		}
 		if (
 			Object.values(store.legacySessionProfileAdoptions ?? {}).some(
 				(adoption) => adoption.sourceIdentity === sourceIdentity,
@@ -331,24 +344,12 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		const onHookDefinitionObservationProblem = () => {
 			store.observationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
 		};
-		const sourceFileNames = [
-			"config.toml",
-			...(await readdir(sourceHome)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-		];
-		const userFields = await projectCodexConfigurationFields({
-			home: sourceHome,
-			sourceHome: canonicalSourceHome,
-			fileNames: sourceFileNames,
-			previousFields: store.sources[sourceIdentity]?.observedUserFields,
-			onHookDefinitionObservationProblem,
-		});
-		store.sources[sourceIdentity] ??= {
-			home: canonicalSourceHome,
-			version: store.revision,
-			fields: structuredClone(userFields),
-			observedUserFields: userFields,
-		};
-		reconcileCodexConfigurationUserSourceFields(store, sourceIdentity, userFields);
+		const initializationSnapshot = await ensureCodexConfigurationInitializationSnapshot(
+			store,
+			sourceIdentity,
+			canonicalSourceHome,
+		);
+		const sourceFileNames = initializationSnapshot.fileNames;
 		const previous = parent && store.writers[parent.writerId];
 		const sourceProfile = ensureCodexConfigurationSourceProfile(store, sourceIdentity);
 		const selectedProfileId =
@@ -492,7 +493,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		const writerDirectory = join(getCodexConfigurationSyncDirectory(), "writers", writerId);
 		await mkdir(join(writerDirectory, "configuration-home"), { recursive: true, mode: 0o700 });
 		const configurationHome = await realpath(join(writerDirectory, "configuration-home"));
-		const copyFrom = parent?.configurationHomeDirectoryPath ?? sourceHome;
+		const copyFrom = parent?.configurationHomeDirectoryPath ?? initializationSnapshot.directory;
 		const sharedFileNames = Object.keys(selectedProfile.fields).map((key) => configurationFieldAddress(key).fileName);
 		const fileNames = [
 			...new Set([
@@ -539,16 +540,18 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			}
 			const configuration = parse(text);
+			removeCodexDesktopConfiguration(configuration);
 			if (configuration.cli_auth_credentials_store === "keyring")
 				throw new Error("当前 Codex 认证使用 keyring，配置隔离尚未核验此认证归属。");
 			relocateCodexHookStateSourcePaths(configuration, await realpath(copyFrom), canonicalSourceHome);
 			if (!parent) {
 				const source = {
-					observedUserFields: store.sources[sourceIdentity].observedUserFields,
+					observedUserFields: initializationSnapshot.source.observedUserFields,
 					fields: selectedProfile.fields,
 				};
 				for (const fieldKey of new Set([
 					...Object.keys(source.observedUserFields),
+					...initializationSnapshot.fieldKeys,
 					...Object.keys(source.fields),
 				])) {
 					const address = configurationFieldAddress(fieldKey);
@@ -595,8 +598,9 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 					);
 					if (
 						!pendingTarget ||
+						isCodexConfigurationChangeExcludedFromSettingsSynchronization(change) ||
 						change.codexConfigurationProfileId ||
-						!sameConfigurationField(store.sources[sourceIdentity].fields[change.fieldKey], change.value)
+						!sameConfigurationField(initializationSnapshot.source.fields[change.fieldKey], change.value)
 					)
 						continue;
 					if (
@@ -611,6 +615,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 					if (address.fileName === fileName) setConfigurationField(configuration, address.keyPath, change.value);
 				}
 			}
+			removeCodexDesktopConfiguration(configuration);
 			configuration.sqlite_home = sqliteHome;
 			for (const [fieldKey, field] of Object.entries(launchSelectionFields)) {
 				const address = configurationFieldAddress(fieldKey);
@@ -620,6 +625,12 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				configuration,
 				await realpath(dirname(join(copyFrom, fileName))),
 			);
+			// 旧会话副本仍可能保留捕获前的引用；覆盖 profile 后再次绑定同一快照。
+			relocateCodexCapturedAgentConfigurationReferences(
+				configuration,
+				initializationSnapshot.directory,
+				initializationSnapshot.agentConfigurationFiles,
+			);
 			relocateCodexHookStateSourcePaths(configuration, canonicalSourceHome, await realpath(configurationHome));
 			await writeFile(join(configurationHome, fileName), stringify(configuration), { mode: 0o600, flag: "wx" });
 		}
@@ -627,7 +638,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			home: configurationHome,
 			sourceHome: canonicalSourceHome,
 			fileNames,
-			previousFields: previous?.lastObservedFields ?? store.sources[sourceIdentity].fields,
+			previousFields: previous?.lastObservedFields ?? initializationSnapshot.source.fields,
 			onHookDefinitionObservationProblem,
 		});
 		// 定义变化时移除过期信任；明确禁用仍保留，避免原生缺省重新启用。

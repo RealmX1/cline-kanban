@@ -20,6 +20,7 @@ import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
 import { migrateCodexConfigurationProfiles } from "./codex-configuration-profiles";
+import { migrateCodexConfigurationSettingsIsolation } from "./codex-configuration-settings-isolation";
 
 export interface StoredCodexConfigurationProfile {
 	profileId: string;
@@ -71,6 +72,12 @@ export interface StoredCodexConfigurationWriter {
 	retiredAt?: number;
 }
 export interface StoredCodexConfigurationSource {
+	configurationInitialization?: {
+		status: "snapshot_persisted";
+		snapshotFilePath: string;
+		snapshotDigest: string;
+		capturedAtMs: number;
+	};
 	fieldChangeIds?: Record<string, string>;
 	home: string;
 	version: number;
@@ -78,6 +85,7 @@ export interface StoredCodexConfigurationSource {
 	observedUserFields: CodexConfigurationFields;
 }
 export interface StoredCodexConfigurationChange {
+	settingsIsolationArchivedAtMs?: number;
 	taskReasoningEffortFeedbackSelectionId?: string;
 	modificationInitiator?: CodexConfigurationSourceEvidence["initiator"];
 	sharedConflictEvidence?: {
@@ -130,6 +138,7 @@ export interface StoredCodexConfigurationChange {
 			safeResumeSubmissionStartedAt?: number;
 			startupVerificationEvidenceFingerprint?: string;
 			conflictHistory?: Array<{ observedAt: number; value?: CodexConfigurationFieldValue; resolution?: string }>;
+			settingsIsolationCancellation?: { previousStatus: string; previousReason: string; cancelledAtMs: number };
 		}
 	>;
 }
@@ -227,6 +236,14 @@ const storeSchema = z.object({
 		z.string(),
 		z.object({
 			home: z.string(),
+			configurationInitialization: z
+				.object({
+					status: z.literal("snapshot_persisted"),
+					snapshotFilePath: z.string(),
+					snapshotDigest: z.string(),
+					capturedAtMs: z.number(),
+				})
+				.optional(),
 			version: z.number(),
 			fields: fieldsSchema,
 			observedUserFields: fieldsSchema,
@@ -291,6 +308,7 @@ const storeSchema = z.object({
 	changes: z.array(
 		z.object({
 			modificationInitiator: codexConfigurationSourceEvidenceSchema.shape.initiator.optional(),
+			settingsIsolationArchivedAtMs: z.number().optional(),
 			sharedConflictEvidence: z
 				.object({
 					fields: fieldsSchema,
@@ -338,6 +356,9 @@ const storeSchema = z.object({
 			acknowledgedAt: z.number().nullable(),
 			targets: z.array(
 				codexConfigurationPropagationTargetSchema.extend({
+					settingsIsolationCancellation: z
+						.object({ previousStatus: z.string(), previousReason: z.string(), cancelledAtMs: z.number() })
+						.optional(),
 					evidenceFingerprint: z.string().optional(),
 					writeSubmissionStartedAt: z.number().optional(),
 					expectedNativeVersion: z.string().optional(),
@@ -387,6 +408,7 @@ async function readCodexConfigurationSyncStoreWithPersistedContent(): Promise<{
 		const store = storeSchema.parse(JSON.parse(persistedSerializedContent));
 		migrateCodexConfigurationApprovalRecords(store);
 		migrateCodexConfigurationProfiles(store);
+		migrateCodexConfigurationSettingsIsolation(store);
 		return { store, persistedSerializedContent };
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

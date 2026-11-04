@@ -190,6 +190,7 @@ export const codexConfigurationComparisonRowSchema = z.object({
 	label: z.string(),
 	changeKind: z.enum(["added", "modified", "deleted", "unchanged", "unknown"]),
 	previous: codexConfigurationComparedValueSchema,
+	previousMatchesSharedCurrent: z.boolean().optional(),
 	detected: codexConfigurationComparedValueSchema,
 	sharedAtConflict: codexConfigurationComparedValueSchema.optional(),
 	sharedCurrent: codexConfigurationComparedValueSchema.optional(),
@@ -220,6 +221,9 @@ export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeCom
 export type CodexConfigurationChangeDetails = z.infer<typeof codexConfigurationChangeDetailsSchema>;
 
 export const codexConfigurationChangeSchema = z.object({
+	candidateFieldGroupKey: z.string().optional(),
+	completeCandidateValueDigest: z.string().optional(),
+	settingsIsolationArchivedAtMs: z.number().optional(),
 	changeId: z.string(),
 	version: z.number().int().positive(),
 	sourceWriterId: z.string(),
@@ -336,6 +340,7 @@ export const codexConfigurationBatchActionRequestSchema = z.object({
 		.array(
 			codexConfigurationChangeMutationRequestSchema.extend({
 				entryKind: z.enum(["settings_proposal", "source_observation"]),
+				expectedSharedValueDigest: z.string().min(1).optional(),
 			}),
 		)
 		.min(1)
