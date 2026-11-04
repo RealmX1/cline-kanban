@@ -339,14 +339,15 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	);
 }
 
-/** 等待自动恢复始终展开，紧邻 Running，供所有宿主共用。 */
+/** 等待自动恢复仅在有任务时显示，始终展开，紧邻 Running，供所有宿主共用。 */
 export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
 	sectionBlockPresentation,
 	sectionsModel,
 	renderRowInHostingScrollContainer,
 	sectionColumnScrollContainerBinding,
-}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
+}: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
 	const entries = sectionsModel.sections.automaticRecoveryWaitingEntries;
+	if (entries.length === 0) return null;
 	return (
 		<CrossProjectTaskSwitcherSectionFrame
 			testIdSuffix="waiting-automatic-recovery"
@@ -354,11 +355,7 @@ export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
 			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
 			header={<CrossProjectTaskSwitcherSectionTitle title="等待自动恢复" count={entries.length} />}
 		>
-			{entries.length ? (
-				entries.map((entry) => renderRowInHostingScrollContainer(entry, "waiting_automatic_recovery"))
-			) : (
-				<div className="px-2 py-1.5 text-xs text-text-secondary">当前没有等待自动恢复的任务。</div>
-			)}
+			{entries.map((entry) => renderRowInHostingScrollContainer(entry, "waiting_automatic_recovery"))}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }

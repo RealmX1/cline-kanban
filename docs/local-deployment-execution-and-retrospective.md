@@ -74,6 +74,8 @@ kanban task command-execution start --task-id "$DEPLOYMENT_TASK_ID" \
 
 所属规格的可选 `readOnlyRecoveryEvidenceObservationCommand` 是无 shell 的只读 argv，仍由通用恢复循环单飞采样，不另设调度器。观察命令在 15 秒内返回 `{ "evidenceSha256": "<64 位小写 SHA-256>" }`；失败、超时或坏输出归为同一稳定未知态。部署侧只摘要当前进程身份、绑定效果状态与未决命令原件，不把采样时间或 nonce 当作新证据。无变化预算耗尽后仍每 30 秒只读补证，只有真实语义变化才重新派发冻结执行器；Stop 中止在途采样并禁止后续观察。
 
+需要由生产方完整解释恢复输入时，显式选择 `recoveryEvidenceObservationMode: "semantic_observation_only"`，排除诊断文件重写对指纹的影响。未知观察保留原有预算；已消费证据的预算跨重启、跨不同证据往返保存。当前重试上限每次决策重读，不沿用首次见到该证据时的快照。旧所属执行的追加登记契约见 [通用命令托管](task-owned-command-execution-and-result-delivery.md)。
+
 ## 自动复盘与反馈材料
 
 每次结束或进入机器待证状态，自动生成绑定分析版本的 `retrospective-analysis-requests/<fingerprint>.json`。部署成功、失败、回滚和放弃都保留复盘路径。单次不可重复阶段异常、重复工作或跨次同阶段失败即可提示深入分析；无需先攒到数量阈值。

@@ -22,6 +22,23 @@ function captureGitRepositoryMutationCanarySnapshot(
 }
 
 describe("isolated Git test workspace fixture", () => {
+	it("Git Trace2 仅写入隔离 fixture 的专用目录，不能覆盖 Git 安全环境或逃逸输出路径", () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const environment = fixture.createIsolatedChildProcessEnvironment(
+			{},
+			{ gitTrace2EventOutputFileName: "native-installation-events.jsonl" },
+		);
+		expect(environment.GIT_TRACE2_EVENT).toBe(
+			join(fixture.fixtureRootDirectoryPath, "native-git-trace2-events", "native-installation-events.jsonl"),
+		);
+		expect(environment.GIT_ALLOW_PROTOCOL).toBe("file");
+		expect(() =>
+			fixture.createIsolatedChildProcessEnvironment({}, { gitTrace2EventOutputFileName: "../escaped.jsonl" }),
+		).toThrow();
+		expect(() =>
+			fixture.createIsolatedChildProcessEnvironment({ GIT_TRACE2_EVENT: "/unowned/trace.jsonl" }),
+		).toThrow();
+	});
 	it("ignores inherited Git repository redirection and leaves the sacrificial canary repository unchanged", () => {
 		const sacrificialCanaryFixture = createIsolatedGitTestWorkspaceFixture();
 		const sacrificialCanaryRepository = sacrificialCanaryFixture.createNonBareRepository({

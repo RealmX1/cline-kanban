@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
@@ -44,13 +44,14 @@ it.skipIf(!cli)(
 		expect(port).not.toBe(3484);
 		const environment = fixture.createIsolatedChildProcessEnvironment();
 		for (const key of Object.keys(environment))
-			if (/^(KANBAN_|ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|CURSOR_|GEMINI_|GOOGLE_|KIMI_)/u.test(key))
+			if (/^(KANBAN_|RVF_|ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|CURSOR_|GEMINI_|GOOGLE_|KIMI_)/u.test(key))
 				delete environment[key];
 		Object.assign(environment, {
 			PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
 			KANBAN_RUNTIME_PORT: String(port),
 			CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, ".codex"),
 			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, ".codex-sqlite"),
+			RVF_USER_LOCAL_DATA_ROOT: join(fixture.isolatedHomeDirectoryPath, ".rvf/user-local-data"),
 		});
 		const shutdownHook = resolve(import.meta.dirname, "shutdown-ipc-hook.cjs");
 		const artifacts = process.env.KANBAN_OWNED_COMMAND_EVIDENCE_DIRECTORY ?? fixture.fixtureRootDirectoryPath;
@@ -78,10 +79,18 @@ it.skipIf(!cli)(
 				task?: { id: string };
 				execution?: {
 					executionId: string;
+					materialSha256: string;
+					recoveryEvidenceObservationRegistration?: { command: string[]; boundMaterialSha256: string };
 					launchAttemptCount: number;
 					revokedAtEpochMs: number | null;
 					businessDisposition: string | null;
-					specification: { readOnlyRecoveryEvidenceObservationCommand?: string[] };
+					specification: {
+						readOnlyRecoveryEvidenceObservationCommand?: string[];
+						ownerSessionInterruptPolicy?: string;
+						continuationNoticesFile?: string;
+						producerExecutionRevocationFile?: string;
+						recoveryEvidenceObservationMode?: string;
+					};
 				};
 			};
 		};
@@ -179,7 +188,12 @@ it.skipIf(!cli)(
 				JSON.stringify({
 					command,
 					resumeCommand: command,
-					readOnlyRecoveryEvidenceObservationCommand,
+					ownerSessionInterruptPolicy: "preserve_execution",
+					continuationNoticesFile: join(fixture.fixtureRootDirectoryPath, "continuation-notices.json"),
+					producerExecutionRevocationFile: join(
+						fixture.fixtureRootDirectoryPath,
+						"producer-execution-revocation.json",
+					),
 					workingDirectory: project.repositoryPath,
 					resultFile,
 					materialSha256: "a".repeat(64),
@@ -203,11 +217,49 @@ it.skipIf(!cli)(
 			const second = await runCli(startArguments);
 			expect(first.execution?.executionId).toBe(second.execution?.executionId);
 			expect(second.execution?.launchAttemptCount).toBe(1);
-			expect(second.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toEqual(
-				readOnlyRecoveryEvidenceObservationCommand,
+			expect(second.execution?.specification.ownerSessionInterruptPolicy).toBe("preserve_execution");
+			expect(second.execution?.specification.continuationNoticesFile).toBe(
+				join(fixture.fixtureRootDirectoryPath, "continuation-notices.json"),
 			);
+			expect(second.execution?.specification.producerExecutionRevocationFile).toBe(
+				join(fixture.fixtureRootDirectoryPath, "producer-execution-revocation.json"),
+			);
+			expect(second.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toBeUndefined();
 			const executionId = first.execution?.executionId;
 			if (!executionId) throw new Error("所属执行未受理");
+			const registrationFile = join(
+				fixture.fixtureRootDirectoryPath,
+				"bound-recovery-observation-registration.json",
+			);
+			writeFileSync(
+				registrationFile,
+				JSON.stringify({
+					taskId,
+					executionId,
+					expectedMaterialSha256: first.execution?.materialSha256,
+					command: readOnlyRecoveryEvidenceObservationCommand,
+					mode: "semantic_observation_only",
+				}),
+			);
+			const registrationArguments = [
+				"task",
+				"command-execution",
+				"register-recovery-evidence-observation",
+				"--registration-file",
+				registrationFile,
+				"--project-path",
+				project.repositoryPath,
+			];
+			const attached = await runCli(registrationArguments);
+			const repeatedAttachment = await runCli(registrationArguments);
+			expect(attached.execution?.specification).toEqual(second.execution?.specification);
+			expect(attached.execution?.materialSha256).toBe(first.execution?.materialSha256);
+			expect(attached.execution?.recoveryEvidenceObservationRegistration?.command).toEqual(
+				readOnlyRecoveryEvidenceObservationCommand,
+			);
+			expect(repeatedAttachment.execution?.recoveryEvidenceObservationRegistration).toEqual(
+				attached.execution?.recoveryEvidenceObservationRegistration,
+			);
 			const cancelled = await runCli([
 				"task",
 				"command-execution",
@@ -236,12 +288,207 @@ it.skipIf(!cli)(
 			]);
 			expect(restored.execution?.businessDisposition).toBe("cancelled");
 			expect(restored.execution?.launchAttemptCount).toBe(1);
-			expect(restored.execution?.specification.readOnlyRecoveryEvidenceObservationCommand).toEqual(
+			expect(restored.execution?.recoveryEvidenceObservationRegistration?.command).toEqual(
 				readOnlyRecoveryEvidenceObservationCommand,
 			);
+			const producerEntrypoint = process.env.KANBAN_RVF_PRODUCER_ENTRYPOINT;
+			if (producerEntrypoint) {
+				const python = process.env.KANBAN_RVF_PRODUCER_PYTHON_EXECUTABLE ?? "python3";
+				const producerSource = resolve(dirname(producerEntrypoint), "../../../../..");
+				const producerRun = join(fixture.fixtureRootDirectoryPath, "paired-rvf-machine-evidence-run");
+				const roleProgram = join(fixture.fixtureRootDirectoryPath, "paired-machine-request-reviewer.py");
+				writeFileSync(
+					roleProgram,
+					[
+						"import json,os",
+						"from pathlib import Path",
+						"request=json.loads(Path(os.environ['RVF_ROLE_INPUT']).read_text())",
+						"pending='reviewer-2' in request['input_file'] and not request.get('reviewer_machine_evidence')",
+						"result={'status':'incomplete' if pending else 'completed','findings':[],'audit_summary':'独立隔离协议替身，未调用真实模型'}",
+						"if pending: result['requests']=[{'kind':'machine_evidence','binding':request['machine_evidence_request_binding'],'registered_command_references':[{'command_collection':'validation_commands','command_index':0}]}]",
+						"print(json.dumps(result,ensure_ascii=False))",
+					].join("\n"),
+				);
+				// 只暂停模型输入；真实生产方控制器、宿主命令和只读观察继续运行。
+				const ownerState = await scoped.workspace.getState.query();
+				const ownerSummary = ownerState.sessions[taskId];
+				if (!ownerSummary) throw new Error("隔离主会话身份丢失");
+				ownerState.sessions[taskId] = runtimeTaskSessionSummarySchema.parse({
+					...ownerSummary,
+					taskConversationSessionMetadata: {
+						workspaceTaskId: taskId,
+						taskConversationSessionRole: "main",
+						taskConversationSessionContextSource: "started_from_scratch",
+						taskAutomationSuspendedForMainSessionHandover: true,
+						parentTaskConversationSessionId: null,
+						mainSessionOriginTurnNumber: null,
+						mainSessionOriginUserMessagePreview: null,
+						latestUserMessagePreview: null,
+					},
+				});
+				await scoped.workspace.saveState.mutate({
+					board: ownerState.board,
+					sessions: ownerState.sessions,
+					expectedRevision: ownerState.revision,
+				});
+				writeFileSync(join(project.repositoryPath, "README.md"), "固定候选的宿主补证验收\n");
+				const settings = {
+					repository: project.repositoryPath,
+					run: producerRun,
+					roleProgram,
+					python,
+					taskId,
+					entrypoint: producerEntrypoint,
+					kanbanCli: cli,
+					source: producerSource,
+				};
+				const bootstrap = join(fixture.fixtureRootDirectoryPath, "paired-rvf-bootstrap.py");
+				writeFileSync(
+					bootstrap,
+					[
+						"import json,sys",
+						"from pathlib import Path",
+						`settings=json.loads(${JSON.stringify(JSON.stringify(settings))})`,
+						"sys.path.insert(0,settings['source'])",
+						"from core.task_snapshot_review.task_snapshot import create_snapshot",
+						"from core.task_snapshot_review.persistent_artifacts import write_json",
+						"from adapters.cline_kanban.owned_command_execution import start_managed_review",
+						"run=Path(settings['run'])",
+						"create_snapshot(Path(settings['repository']),base_ref='HEAD',scope_paths=['README.md'],requirements='跨仓宿主补证协议验收'.encode(),run_directory=run,execution_plan={'fix':False,'validation_commands':[[settings['python'],'-c',\"print('registered host proof')\"]]})",
+						"write_json(run/'reviewer-configurations.json',{'configurations':[{'command':[settings['python'],settings['roleProgram']],'output_format':'text'}]*2})",
+						"result=start_managed_review(run,settings['taskId'],project_path=Path(settings['repository']),kanban_cli=Path(settings['kanbanCli']),entrypoint=Path(settings['entrypoint']))",
+						"print(json.dumps(result,ensure_ascii=False))",
+					].join("\n"),
+				);
+				const producer = children.register(
+					spawn(python, [bootstrap], {
+						cwd: project.repositoryPath,
+						env: environment,
+						stdio: ["ignore", "pipe", "pipe"],
+					}),
+				);
+				let producerOutput = "";
+				producer.stdout?.on("data", (chunk) => {
+					producerOutput += String(chunk);
+				});
+				producer.stderr?.on("data", (chunk) => {
+					producerOutput += String(chunk);
+				});
+				if (!(await waitForChildProcessExit(producer, 45_000)) || producer.exitCode !== 0)
+					throw new Error(`真实 RVF 生产方登记失败：${producerOutput}`);
+				const resultPath = join(producerRun, "business-result.json");
+				try {
+					await expect
+						.poll(
+							() => {
+								try {
+									return JSON.parse(readFileSync(resultPath, "utf8")).status;
+								} catch {
+									return "pending";
+								}
+							},
+							{ timeout: 60_000, interval: 200 },
+						)
+						.toBe("ready_to_commit");
+				} catch (error) {
+					const diagnostics = join(artifacts, "paired-rvf-failure-originals");
+					mkdirSync(diagnostics, { recursive: true });
+					cpSync(producerRun, join(diagnostics, "run"), { recursive: true });
+					const ownedRoot = join(
+						fixture.isolatedHomeDirectoryPath,
+						".cline/kanban/workspaces",
+						workspaceId,
+						"task-command-executions",
+					);
+					if (existsSync(ownedRoot))
+						cpSync(ownedRoot, join(diagnostics, "owned-command-originals"), { recursive: true });
+					writeFileSync(join(diagnostics, "bootstrap-output.txt"), producerOutput);
+					const receipt = JSON.parse(
+						readFileSync(join(producerRun, "kanban-command-execution-start-receipt.json"), "utf8"),
+					);
+					await runCli([
+						"task",
+						"command-execution",
+						"cancel",
+						"--task-id",
+						taskId,
+						"--project-path",
+						project.repositoryPath,
+						"--execution-id",
+						JSON.parse(receipt.stdout).execution.executionId,
+					]);
+					throw error;
+				}
+				const producerReceipt = JSON.parse(
+					readFileSync(join(producerRun, "kanban-command-execution-start-receipt.json"), "utf8"),
+				);
+				const producerExecutionId = JSON.parse(producerReceipt.stdout).execution.executionId as string;
+				const pairedExecution = await runCli([
+					"task",
+					"command-execution",
+					"inspect",
+					"--task-id",
+					taskId,
+					"--project-path",
+					project.repositoryPath,
+					"--execution-id",
+					producerExecutionId,
+				]);
+				expect(pairedExecution.execution?.specification.recoveryEvidenceObservationMode).toBe(
+					"semantic_observation_only",
+				);
+				expect(
+					readdirSync(join(producerRun, "reviewer-1")).filter((name) => name.startsWith("attempt-")),
+				).toHaveLength(1);
+				expect(
+					readdirSync(join(producerRun, "reviewer-2")).filter((name) => name.startsWith("attempt-")),
+				).toHaveLength(2);
+				expect(
+					JSON.parse(readFileSync(join(producerRun, "reviewer-2/attempt-001/result.json"), "utf8")).status,
+				).toBe("incomplete");
+				writeFileSync(
+					join(artifacts, "paired-rvf-producer-consumer-receipts.json"),
+					JSON.stringify(
+						{
+							producerOutput,
+							pairedExecution,
+							result: JSON.parse(readFileSync(resultPath, "utf8")),
+							snapshot: JSON.parse(readFileSync(join(producerRun, "run.json"), "utf8")),
+						},
+						null,
+						2,
+					),
+				);
+				const pairedOriginals = join(artifacts, "paired-rvf-success-originals");
+				cpSync(producerRun, join(pairedOriginals, "run"), { recursive: true });
+				writeFileSync(
+					join(pairedOriginals, "archive-only-provenance.json"),
+					JSON.stringify(
+						{
+							purpose: "跨仓隔离协议验收原件，不是生产 run；reviewer 为 Python 协议替身，没有调用真实模型",
+							originalRunDirectory: producerRun,
+							executionId: producerExecutionId,
+							testedBeforeFixtureCleanup: true,
+						},
+						null,
+						2,
+					),
+				);
+				await runCli([
+					"task",
+					"command-execution",
+					"cancel",
+					"--task-id",
+					taskId,
+					"--project-path",
+					project.repositoryPath,
+					"--execution-id",
+					producerExecutionId,
+				]);
+			}
 			writeFileSync(
 				join(artifacts, "packaged-command-execution-receipts.json"),
-				JSON.stringify({ first, second, cancelled, restored }, null, 2),
+				JSON.stringify({ first, second, attached, repeatedAttachment, cancelled, restored }, null, 2),
 			);
 			const recordPath = join(
 				fixture.isolatedHomeDirectoryPath,

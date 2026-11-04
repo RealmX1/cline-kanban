@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
+import { prepareAuxiliaryCodexConfigurationLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import {
 	buildCodexConversationStorageEnvironment,
 	resolveMigratedCodexConversationHome,
@@ -51,8 +51,19 @@ export async function withCodexAppServerRequestConnection<T>(
 		...(home ? buildCodexConversationStorageEnvironment(home) : {}),
 	};
 	// 显式历史归属的运行时 helper 使用独立配置副本；原生隔离探针可直接持有其自行创建的测试 writer。
-	if (home) environment = await prepareAuxiliaryCodexConfigurationEnvironment(environment, input.workingDirectory);
-	const child = spawn(input.binary ?? "codex", [...(input.argumentsBeforeSubcommand ?? []), "app-server", "--stdio"], {
+	const binary = input.binary ?? "codex";
+	let nativeLaunchArguments = [...(input.argumentsBeforeSubcommand ?? []), "app-server", "--stdio"];
+	if (home) {
+		const launch = await prepareAuxiliaryCodexConfigurationLaunch({
+			environment,
+			cwd: input.workingDirectory,
+			binary,
+			nativeLaunchArguments,
+		});
+		environment = launch.environment;
+		nativeLaunchArguments = launch.nativeLaunchArguments;
+	}
+	const child = spawn(binary, nativeLaunchArguments, {
 		cwd: input.workingDirectory,
 		env: environment,
 		stdio: ["pipe", "pipe", "pipe"],
