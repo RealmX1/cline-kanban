@@ -235,7 +235,7 @@ describe("续接预检在任何销毁动作之前", () => {
 		expect(instance.getSummary(request().taskId)?.warningMessage).toContain("已在启动前停止");
 	});
 
-	it("刷新遇到坏 ID 时不停止现有 PTY，也不创建下一代", async () => {
+	it("刷新遇到可信 ID 的转录暂缺时等待补证，不停止现有 PTY 或创建下一代", async () => {
 		const instance = manager();
 		await instance.startTaskSession(request());
 		instance.applyAgentNativeConversationSessionIdentity(request().taskId, {
@@ -245,8 +245,10 @@ describe("续接预检在任何销毁动作之前", () => {
 			observedAt: 1,
 		});
 		const process = ptySessionSpawnMock.mock.results[0]?.value;
-		await expect(instance.refreshTaskTerminal({ ...request(), resumeFromTrash: true })).rejects.toThrow(
-			nativeSessionId,
+		const waitingSummary = await instance.refreshTaskTerminal({ ...request(), resumeFromTrash: true });
+		expect(waitingSummary.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(nativeSessionId);
+		expect(waitingSummary.taskConversationSessionNativeIdentityRecovery?.resumeRequestedAtMs).toEqual(
+			expect.any(Number),
 		);
 		expect(process.stop).not.toHaveBeenCalled();
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(1);

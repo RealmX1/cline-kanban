@@ -324,7 +324,7 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		);
 	});
 
-	it("专用目录预检失败时保留现有活体和原目录绑定", async () => {
+	it("专用目录转录暂缺时持久等待补证，保留现有活体和原目录绑定", async () => {
 		const manager = createManager();
 		await manager.startTaskSession(request());
 		manager.applyAgentNativeConversationSessionIdentity(request().taskId, {
@@ -334,9 +334,11 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			observedAt: 1,
 		});
 		const activeProcess = spawned.mock.results[0]?.value;
-		await expect(
-			manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true }),
-		).rejects.toThrow(nativeSessionId);
+		const waitingSummary = await manager.refreshTaskTerminal({ ...request(), env: undefined, resumeFromTrash: true });
+		expect(waitingSummary.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(nativeSessionId);
+		expect(waitingSummary.taskConversationSessionNativeIdentityRecovery?.resumeRequestedAtMs).toEqual(
+			expect.any(Number),
+		);
 		expect(activeProcess.stop).not.toHaveBeenCalled();
 		expect(spawned).toHaveBeenCalledOnce();
 		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(
