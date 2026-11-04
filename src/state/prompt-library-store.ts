@@ -452,6 +452,7 @@ export function applyWorkspacePromptLibraryMutation(
 	}
 	const located = locateEntry(snapshot, mutation.promptId);
 	if (located) {
+		if (mutation.leaveExistingPromptUnchanged) return snapshot;
 		// 已存在：只改正文，**不**动它当前所在的桶。换 scope 是另一条意图，混在改文里做会让
 		// 「两个标签页一个在改文、一个在换 scope」互相把对方的操作撤销掉。
 		if (located.entry.text === mutation.text) return snapshot;

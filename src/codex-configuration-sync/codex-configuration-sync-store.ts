@@ -15,7 +15,7 @@ import {
 	codexConfigurationTaskSourceSnapshotSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
-import { lockedFileSystem } from "../fs/locked-file-system";
+import { lockedFileSystem, releaseFilesystemKernelWriteLock } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
@@ -398,12 +398,15 @@ export async function mutateCodexConfigurationSyncStore<T>(
 	const directory = getCodexConfigurationSyncDirectory();
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	if ((await lstat(directory)).isSymbolicLink()) throw new Error("Codex 配置绑定目录被替换，已保留现场。");
-	const release = await lockedFileSystem.acquireLock({
-		path: directory,
-		type: "directory",
-		lockfilePath: `${directory}.lock`,
-		retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
-	});
+	const lockAcquisitionStartedAtMs = performance.now();
+	const lockfilePath = `${directory}.lock`;
+	const release = await lockedFileSystem
+		.acquireLock({ path: directory, type: "directory", lockfilePath })
+		.catch((error: unknown) => {
+			if (error instanceof Error)
+				error.message = `Codex 配置存储取锁失败：lockPath=${lockfilePath} phase=lock_acquisition waitedMs=${Math.round(performance.now() - lockAcquisitionStartedAtMs)}；${error.message}`;
+			throw error;
+		});
 	const pendingPath = join(directory, `${randomUUID()}.pending-configuration-sync-state.json`);
 	try {
 		const { store, persistedSerializedContent } = await readCodexConfigurationSyncStoreWithPersistedContent();
@@ -431,6 +434,7 @@ export async function mutateCodexConfigurationSyncStore<T>(
 		return result;
 	} finally {
 		await rm(pendingPath, { force: true });
-		await release();
+		// 与共享写入入口相同，释放失败只记诊断，不覆盖业务结果。
+		await releaseFilesystemKernelWriteLock(release, lockfilePath);
 	}
 }

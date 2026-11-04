@@ -58,7 +58,7 @@ export interface AcpTaskConnectionStartInput {
 	// 上下文接上了，而且这条新会话会顶掉「最近一条」，令之后切回 TUI 的 --continue 也接错。
 	resumePriorAgentConversationWithoutResendingPrompt?: boolean;
 	observedAgentNativeSessionId?: string;
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	beforeAgentProcessLaunch?: () => Promise<void>;
@@ -203,8 +203,8 @@ export class AcpClientConnectionRuntime {
 				cwd: input.cwd,
 				initializeResponse,
 				observedAgentNativeSessionId: input.observedAgentNativeSessionId,
-				taskConversationSessionMainContextForkSourceNativeSessionId:
-					input.taskConversationSessionMainContextForkSourceNativeSessionId,
+				taskConversationSessionContextForkSourceNativeSessionId:
+					input.taskConversationSessionContextForkSourceNativeSessionId,
 				revalidateTaskConversationSessionMainContextForkSource:
 					input.revalidateTaskConversationSessionMainContextForkSource,
 				revalidateExistingMainSessionHandoverTargetBeforeLaunch:
@@ -304,7 +304,7 @@ export class AcpClientConnectionRuntime {
 			taskId: string;
 			resumePriorAgentConversationWithoutResendingPrompt: boolean;
 			observedAgentNativeSessionId?: string;
-			taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+			taskConversationSessionContextForkSourceNativeSessionId?: string;
 			revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 			revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 		},
@@ -316,7 +316,7 @@ export class AcpClientConnectionRuntime {
 					? await this.loadAgentSessionById(connection, input, input.observedAgentNativeSessionId)
 					: await this.loadMostRecentAgentSessionForWorkingDirectory(connection, input);
 			}
-			const sourceSessionId = input.taskConversationSessionMainContextForkSourceNativeSessionId;
+			const sourceSessionId = input.taskConversationSessionContextForkSourceNativeSessionId;
 			if (sourceSessionId) {
 				if (!input.initializeResponse.agentCapabilities?.sessionCapabilities?.fork) {
 					throw new Error("当前 ACP Agent 未声明 session/fork 能力，无法复刻主会话。");

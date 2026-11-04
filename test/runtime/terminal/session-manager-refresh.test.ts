@@ -13,6 +13,7 @@ vi.mock("../../../src/terminal/pty-session.js", () => ({
 	},
 }));
 
+import { AgentSessionPtyHostUnreachableError } from "../../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 
 interface MockSpawnRequest {
@@ -123,7 +124,145 @@ describe("TerminalSessionManager refreshTaskTerminal", () => {
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
 		expect(summary.pid).toBe(222);
 		const bannerOutputs = onOutput.mock.calls.map((call) => call[0]?.toString("utf8") ?? "");
-		expect(bannerOutputs.some((text) => text.includes("[kanban] Refreshing terminal session"))).toBe(true);
+		expect(bannerOutputs.some((text) => text.includes("[kanban] 终端会话已重新启动。"))).toBe(true);
+	});
+
+	it.each([false, true])("宿主通信失败不能误报为 agent 二进制启动失败（无监听=%s）", async (noHostIsListening) => {
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: {
+				spawnHostedTerminalPtyProcess: async () => {
+					throw new AgentSessionPtyHostUnreachableError(
+						noHostIsListening ? "ENOENT: host socket" : "PTY host 请求超时",
+						noHostIsListening,
+					);
+				},
+			},
+		});
+		try {
+			await expect(
+				manager.startTaskSession({
+					taskId: "host-communication-failure",
+					agentId: "claude",
+					binary: "/isolated/node",
+					args: [],
+					cwd: "/isolated",
+					prompt: "",
+				}),
+			).rejects.toThrow("会话宿主通信失败");
+			expect(ptySessionSpawnMock).not.toHaveBeenCalled();
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it.each([
+		{
+			label: "宿主 Node 启动 ENOENT",
+			error: new Error("could not launch agent session pty host: spawn /isolated/host-node ENOENT"),
+			expectedDetail: "could not launch agent session pty host",
+		},
+		{
+			label: "包在 cause 里的宿主启动 ENOENT",
+			error: new Error("spawn /isolated/agent ENOENT", {
+				cause: new Error("could not launch agent session pty host: spawn /isolated/host-node ENOENT"),
+			}),
+			expectedDetail: "could not launch agent session pty host",
+		},
+		{
+			label: "宿主归属未知",
+			error: new Error("host 归属未知，拒绝降级后重复启动"),
+			expectedDetail: "host 归属未知，拒绝降级后重复启动",
+		},
+		{
+			label: "包在 cause 里的宿主不可达",
+			error: new Error("spawn /isolated/agent ENOENT", {
+				cause: new AgentSessionPtyHostUnreachableError("连接 host 超时：/isolated.sock", false),
+			}),
+			expectedDetail: "连接 host 超时",
+		},
+	])("$label 呈现为会话宿主通信失败，而不是 agent CLI 缺失", async ({ error, expectedDetail }) => {
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: {
+				spawnHostedTerminalPtyProcess: async () => {
+					throw error;
+				},
+			},
+		});
+		try {
+			const thrown = await manager
+				.startTaskSession({
+					taskId: "wrapped-host-failure",
+					agentId: "claude",
+					binary: "/isolated/agent",
+					args: [],
+					cwd: "/isolated",
+					prompt: "",
+				})
+				.catch((caught: unknown) => caught);
+			expect(thrown).toBeInstanceOf(Error);
+			expect(String(thrown)).toContain("会话宿主通信失败");
+			expect(String(thrown)).toContain(expectedDetail);
+			expect(String(thrown)).not.toContain("Command not found");
+			expect(String(thrown)).not.toContain('Failed to launch "/isolated/agent"');
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it("agent 二进制自身的 ENOENT 仍提示 CLI 未安装", async () => {
+		const manager = new TerminalSessionManager({
+			hostedTerminalPtyProcessSpawner: {
+				spawnHostedTerminalPtyProcess: async () => {
+					throw new Error("spawn /isolated/agent ENOENT");
+				},
+			},
+		});
+		try {
+			await expect(
+				manager.startTaskSession({
+					taskId: "agent-binary-missing",
+					agentId: "claude",
+					binary: "/isolated/agent",
+					args: [],
+					cwd: "/isolated",
+					prompt: "",
+				}),
+			).rejects.toThrow("Command not found");
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it("新一代启动失败时只显示失败原因，不追加重启完成提示", async () => {
+		const onOutput = vi.fn();
+		const manager = new TerminalSessionManager();
+		let originalSession: MockPtySession | undefined;
+		ptySessionSpawnMock.mockImplementationOnce((request: MockSpawnRequest) => {
+			originalSession = createMockPtySession(111, request);
+			originalSession.stop.mockImplementation(() => originalSession?.triggerExit(0));
+			return originalSession;
+		});
+		const request = {
+			taskId: "failed-refresh",
+			agentId: "claude" as const,
+			binary: "claude",
+			args: [],
+			cwd: "/isolated",
+			prompt: "",
+		};
+		manager.attach(request.taskId, { onOutput });
+		try {
+			await manager.startTaskSession(request);
+			ptySessionSpawnMock.mockImplementationOnce(() => {
+				throw new Error("隔离模拟：agent 无法启动");
+			});
+			await expect(manager.refreshTaskTerminal(request)).rejects.toThrow("隔离模拟：agent 无法启动");
+			const output = onOutput.mock.calls.map((call) => String(call[0])).join("");
+			expect(output).not.toContain("终端会话已重新启动");
+			expect(output).toContain("隔离模拟：agent 无法启动");
+		} finally {
+			manager.dispose();
+		}
 	});
 
 	it("does not consume the auto-restart budget when refresh is invoked", async () => {

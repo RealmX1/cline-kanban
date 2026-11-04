@@ -32,6 +32,19 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 
 满足上述授权后，默认重建／重链当前本地 CLI，再以保留状态的参数重启；源码修改不会自动更新运行中的 build。
 
+## 持久执行、恢复与独立复盘
+
+准备本次执行时读取仓库的 [执行与复盘合同](../../../docs/local-deployment-execution-and-retrospective.md)。候选构建中的 `local-deployment-execution.js` 提供冻结 manifest、阶段原件、补证核验和复盘请求；不要再手写一套发布监督者、恢复循环或 launchd 作业。旧材料仅经 `kanban deployment analyze --execution-directory <精确持久目录>` 只读分析，不重放部署。
+
+- 隔离构建和盘点仍可在部署确认前完成；没有确认时不得用虚构授权填写 manifest 或启动部署执行器。取得本次授权后绑定任务、候选完整 SHA、产物清单摘要、实际 Node、原实例 PID/启动身份和原话来源。
+- 保留绑定候选目录；发布时先复制到可删除的暂存副本，再执行移动式 promotion。不能清理掉恢复所需的候选原件。
+- 用 `initialize`、`prepare-owned-command` 生成持久记录与所属命令规格，再经既有 `kanban task command-execution start` 登记。规格固定同一执行的 command/resumeCommand；通用宿主负责重启接管、机器条件恢复、Stop 与结果交回。准备规格不等于已启动，登记受理不等于部署完成。
+- 每个命令意图先落盘。发布、重启、登记结果未知时先核验同一执行、候选与产物效果；后续动作前重新核对当前资格，不覆盖原失败或原接受事实。普通命令在相同补证下有界重试；条件真实变化后自动接续，不把机器缺口交给人补。
+- 部署登记使用 `deployment record --execution-directory <本次目录>`；同一次执行重试返回原回执，相同 commit 的另一次部署仍使用新 executionId。若丢失原统计，只汇报可证明事实与未知项，不用当前 PDV 清单重建历史计数。
+- 清理、评论或复盘材料准备失败分别记录；先核对正式登记与实际效果，不能把附属失败改写为部署失败，也不能因此重复发布或重启。正式 promotion CLI 会处理自己的空暂存目录，调用方不再另做一次 `rmdir`。
+- 主 Agent 收到所属执行结果后，**每次自动做轻量复盘**：成功经验、重复工作、成本、风险；单次严重异常或跨次复发即深入分析。先用 `freeze-independent-findings` 固化绑定版本的独立发现，再查询已有 Issues；没有问题也保存空 findings 的复盘结论。
+- 发现的性质、主要修复仓库、证据状态、采用状态及其与来源 Task 的范围关系分别记录。重复投递不增加独立支持，Affirmation 不自动表示采纳。GitHub 的既定策略为同根因追加新证据、必要时新建；共用消费者尚未接入时保留待投递原件，不把 RVF 作为部署依赖，不阻断已完成部署。
+
 ## Workflow
 
 1. Snapshot the current situation.
@@ -52,6 +65,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
    - **共享存储锁协议切换硬闸**：候选首次从 `proper-lockfile` 切换到 SQLite 内核锁，或回退到旧锁时，先按 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md` 运行 `scripts/verify-filesystem-lock-protocol-transition-preflight.ts`。隔离候选构建可以继续；在门禁放行前，不得替换共享产物、更新 CLI 链接或让任何 runtime/CLI/hook 载入新写入协议。清单绑定本次候选、runtime home 和真实退休写入者，覆盖仍可能启动旧 hook/CLI 的会话；只有 `ready_for_protocol_switch` 才切换。未知或存活仅延后切换，保留机器可重验的持久证据，不强杀会话；回退先完成全部待投影日志。实际切换前再次核验，不能消费过期回执。
    - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
    - Install dependencies using the repo's documented command.
+   - Git 依赖构建陈旧时，先核对 lockfile 的精确 commit。可从已有本地对象用 `git archive <精确 SHA>` 导出到持久隔离目录，再用服务所用 Node 构建，并只调整当前 task 的私有依赖映射；不要用依赖仓库的浮动 HEAD 或改写主仓库共享 `node_modules`。恢复回执保存来源 SHA、构建命令和隔离路径。
    - Build using the repo's production build command.
    - Link or install the CLI only after a successful build.
    - Confirm the executable path and version after link/install.
@@ -82,7 +96,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
      - 正向新增:`git log --oneline --no-decorate <OLD>..<NEW>` —— 列为「本次新投入使用的 N 个源 commit」。
      - 反向兜底:`git log --oneline --no-decorate <NEW>..<OLD>` —— 若非空说明发生回滚/分叉,标为「⚠️ M 个 commit 被回退」并如实给出方向,别只报单向。
    - 诚实覆盖三类边界:① OLD 为「无基线」→ 报「无基线(首次/不可知),仅列出本次 NEW 所在的源 commit」;② 正向与反向区间皆空 → 报「与上次部署为同一 commit,无新增」;③ 区间命令失败(OLD 已不在本 repo,git 报 `unknown revision`)→ 退化为直接给出 OLD/NEW 两个 SHA、不做区间。
-   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选,缺省按 source checkout 路径匹配已注册 workspace)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(新 uuid)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Post-Deploy Verification 组:按任务提交来历匹配本次 delta,把任务归入三区(本次上线 / 早先部署已上线待核对 / 未上线或无从归属),上一组未结案任务连同勾选进度延续进新组(机制见 `docs/post-deploy-verification.md`)。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、`tasksShippedInThisDeploymentCount` 与 `tasksShippedInThisDeployment` 明细、积压与未归属计数),并入本步汇报——**重点报「本次部署上线」的那几个任务**,积压只报计数。`tasksShippedInThisDeployment` 明细与 `tasksShippedInThisDeploymentCount` 同口径,只含本次上线、待核对的任务;提交也随本次上线、但建组时已在 Done 的任务是只读展示,不在明细里,只计入 `tasksAlreadyInDoneShownReadOnlyCount`。
+   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record --execution-directory <本次持久目录>`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选,缺省按 source checkout 路径匹配已注册 workspace)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(本次 executionId)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Post-Deploy Verification 组:按任务提交来历匹配本次 delta,把任务归入三区(本次上线 / 早先部署已上线待核对 / 未上线或无从归属),上一组未结案任务连同勾选进度延续进新组(机制见 `docs/post-deploy-verification.md`)。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、`tasksShippedInThisDeploymentCount` 与 `tasksShippedInThisDeployment` 明细、积压与未归属计数),并入本步汇报——**重点报「本次部署上线」的那几个任务**,积压只报计数。`tasksShippedInThisDeployment` 明细与 `tasksShippedInThisDeploymentCount` 同口径,只含本次上线、待核对的任务;提交也随本次上线、但建组时已在 Done 的任务是只读展示,不在明细里,只计入 `tasksAlreadyInDoneShownReadOnlyCount`。旧执行没有 execution directory 时仍可使用原入口，但不能据此声称具备新执行的幂等恢复证据。
    - 措辞锚在 runtime 语义:「现在运行的 build 反映了这些源 commit」,不要写成「源码集成了这些 commit」(那是 upstream-update skill 的语义)。
    - Post-Deploy Verification 只汇报 `record` 返回 JSON 里已有的字段:计数字段(`totalVerificationTaskCount`、`tasksShippedInThisDeploymentCount`、`tasksDeployedOnlyInEarlierDeploymentsAwaitingVerificationCount`、`tasksNotYetDeployedOrUnattributableCount`、`tasksCarriedForwardWithVerificationProgressCount`、`tasksAlreadyInDoneShownReadOnlyCount`、`authoredVerificationItemCount`)合成一行;`tasksShippedInThisDeployment` 里的任务逐个列出(只列 taskId 与匹配到的 commit,不展开验证项),条数应等于 `tasksShippedInThisDeploymentCount`。**不要**再跑 `kanban deployment verification-state`,也不要逐条列出积压任务或任何验证项——积压任务会随每次部署延续进新组,逐条列出动辄上百条。用户明确要求看明细时,才按需跑 `kanban deployment verification-state --active-only --project-path <repo>`,或请用户到 Web UI 的验证面板查看。
 

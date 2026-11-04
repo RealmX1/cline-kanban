@@ -6,7 +6,7 @@
 //      放过它 = 用户只是点开一张卡片，几小时前排的 prompt 就发出去了；
 //   ③ 可重试失败在同一轮里**不重投**——否则人正在框里打字时，兜底 sweep 会把他一次次让位到超时、三次判死；
 //   ④ 重启跨越的条目要等人确认之后才出队。
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -27,9 +27,11 @@ vi.mock("../../../src/state/workspace-state", () => ({
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));
 
-const { mutateWorkspaceQueuedTaskPromptDeliveries, readWorkspaceQueuedTaskPromptDeliverySnapshot } = await import(
-	"../../../src/state/queued-task-prompt-delivery-store"
-);
+const {
+	mutateWorkspaceQueuedTaskPromptDeliveries,
+	readWorkspaceQueuedTaskPromptDeliverySnapshot,
+	getWorkspaceQueuedTaskPromptDeliveriesPath,
+} = await import("../../../src/state/queued-task-prompt-delivery-store");
 const { createQueuedTaskPromptDeliveryDispatcher, QUEUED_TASK_PROMPT_DELIVERY_CHAT_MESSAGE_SOURCE } = await import(
 	"../../../src/server/queued-task-prompt-delivery-dispatcher"
 );
@@ -108,7 +110,12 @@ type DispatcherCustody = Parameters<
 >[0]["runtimeProcessInstanceCustody"];
 
 function createHarness(
-	options: { sendBehavior?: SendBehavior; hasPendingPtyDelivery?: () => boolean; custody?: DispatcherCustody } = {},
+	options: {
+		sendBehavior?: SendBehavior;
+		hasPendingPtyDelivery?: () => boolean;
+		custody?: DispatcherCustody;
+		reportExecutionAllowed?: () => Promise<boolean>;
+	} = {},
 ) {
 	let currentSummary: RuntimeTaskSessionSummary | null = null;
 	let sendBehavior = options.sendBehavior ?? deliveredImmediately;
@@ -118,6 +125,7 @@ function createHarness(
 	const onBroadcast: Array<(projected: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId) => void> = [];
 	let idempotencyKeyCounter = 0;
 	const dispatcher = createQueuedTaskPromptDeliveryDispatcher({
+		isTaskConversationSessionReportExecutionAllowed: options.reportExecutionAllowed,
 		getTaskSessionSummary: (_workspaceId, taskId) => (taskId === TASK_ID ? currentSummary : null),
 		hasPendingProgrammaticTaskChatInputDelivery: () => options.hasPendingPtyDelivery?.() ?? false,
 		resolveWorkspaceScope: (workspaceId) => ({ workspaceId, workspacePath: "/repo" }),
@@ -195,6 +203,43 @@ afterEach(async () => {
 });
 
 describe("queued-task-prompt-delivery-dispatcher — 一轮一条", () => {
+	it("回报排队后资格改变时保持 queued；资格恢复后自动出队", async () => {
+		let executionAllowed = false;
+		const harness = createHarness({ reportExecutionAllowed: async () => executionAllowed });
+		harness.setSummary(stoppedSummary(1));
+		const snapshot = await mutateWorkspaceQueuedTaskPromptDeliveries(
+			WORKSPACE_ID,
+			{
+				kind: "enqueue_prompt_for_delivery_after_current_turn",
+				taskId: TASK_ID,
+				queueEntryId: "report-qualification",
+				text: "回报",
+			},
+			Date.now(),
+		);
+		const entry = snapshot.entriesByTaskId[TASK_ID]?.[0];
+		if (!entry) throw new Error("缺少测试队列条目");
+		entry.taskConversationSessionReportOrigin = {
+			workspaceTaskId: TASK_ID,
+			taskIncarnationCreatedAt: 1,
+			sourceTaskConversationSessionId: "peer",
+			targetTaskConversationSessionId: TASK_ID,
+		};
+		await writeFile(getWorkspaceQueuedTaskPromptDeliveriesPath(WORKSPACE_ID), JSON.stringify(snapshot));
+		await harness.dispatcher.notifyQueueMutated(WORKSPACE_ID, TASK_ID, snapshot);
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends).toHaveLength(0);
+		expect(
+			(await readWorkspaceQueuedTaskPromptDeliverySnapshot(WORKSPACE_ID)).entriesByTaskId[TASK_ID]?.[0]
+				?.deliveryState,
+		).toBe("queued");
+		executionAllowed = true;
+		await harness.dispatcher.runFallbackSweep();
+		await harness.dispatcher.whenIdle();
+		expect(harness.sends).toHaveLength(1);
+		harness.dispatcher.stop();
+	});
+
 	it("agent 干活时排两条 → 停下只发第一条 → 下一轮停下再发第二条", async () => {
 		const harness = createHarness();
 		harness.observe(generatingSummary(1));

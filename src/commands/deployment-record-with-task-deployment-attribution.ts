@@ -10,6 +10,9 @@ import type {
 } from "../core/api-contract";
 import { materializeAuthoredVerificationItemsForWorkspaceTasks } from "../deployment/authored-verification-definitions";
 import { readDeployMarker } from "../deployment/deploy-marker";
+import { readLocalDeploymentExecution } from "../deployment/local-deployment-execution";
+import type { LocalDeploymentExecutionManifest } from "../deployment/local-deployment-execution-contract";
+import { recordBoundLocalDeploymentExecutionOnce } from "../deployment/local-deployment-execution-registration";
 import {
 	assemblePostDeployVerificationTaskForDeploymentGroup,
 	isPostDeployVerificationTaskAwaitingVerification,
@@ -24,7 +27,7 @@ import {
 	findTaskIdsWhoseCommitsAreIncludedInDeploymentDelta,
 } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { loadWorkspaceBoardById, loadWorkspaceContext } from "../state/workspace-state";
+import { getRuntimeHomePath, loadWorkspaceBoardById, loadWorkspaceContext } from "../state/workspace-state";
 import { runGit } from "../workspace/git-utils";
 
 // `kanban deployment record`：写部署标记、建本次部署的 Post-Deploy Verification 组。
@@ -56,13 +59,68 @@ function listRetainedDeploymentGroupsOfWorkspaceInAscendingOrder(
 		.sort((left, right) => Date.parse(left.deployedAtIso) - Date.parse(right.deployedAtIso));
 }
 
-export async function recordDeploymentWithTaskDeploymentAttribution(input: {
+interface RecordDeploymentWithTaskDeploymentAttributionInput {
 	cwd: string;
 	sourceCheckoutPath?: string;
 	newCommit?: string;
 	projectPath?: string;
+	executionDirectory?: string;
 	readPostDeployVerificationStateReadOnly: () => Promise<RuntimePostDeployVerificationState>;
-}): Promise<JsonRecord> {
+}
+
+export async function recordDeploymentWithTaskDeploymentAttribution(
+	input: RecordDeploymentWithTaskDeploymentAttributionInput,
+): Promise<JsonRecord> {
+	if (!input.executionDirectory) return await recordDeploymentFromValidatedSource(input);
+	const { manifest } = await readLocalDeploymentExecution(input.executionDirectory);
+	if (getRuntimeHomePath() !== manifest.runtimeIdentity.runtimeHomeDirectoryPath)
+		throw new Error("登记 runtime home 与本次执行绑定不一致");
+	if (input.projectPath) {
+		const target = await loadWorkspaceContext(resolveProjectInputPath(input.projectPath, input.cwd), {
+			autoCreateIfMissing: false,
+		});
+		if (target.workspaceId !== manifest.workspaceId) throw new Error("项目参数与部署执行绑定不一致");
+	}
+	const receipt = await recordBoundLocalDeploymentExecutionOnce({
+		executionDirectory: input.executionDirectory,
+		sourceCheckoutPath: input.sourceCheckoutPath
+			? resolveProjectInputPath(input.sourceCheckoutPath, input.cwd)
+			: undefined,
+		newCommit: input.newCommit,
+		record: async (manifest, requestedAtIso) =>
+			await recordDeploymentFromValidatedSource(
+				{
+					...input,
+					sourceCheckoutPath: manifest.sourceCheckoutPath,
+					newCommit: manifest.candidateSourceCommit,
+				},
+				{ manifest, requestedAtIso },
+			),
+	});
+	const existing = (await input.readPostDeployVerificationStateReadOnly()).deploymentGroups.find(
+		(group) => group.deploymentId === manifest.executionId,
+	);
+	if (existing) {
+		await createDeploymentGroup(
+			{
+				deploymentId: manifest.executionId,
+				workspaceId: manifest.workspaceId,
+				deployedSourceCommit: manifest.candidateSourceCommit,
+				previousDeployedSourceCommit: manifest.previousDeployedSourceCommit,
+				sourceCheckoutPath: manifest.sourceCheckoutPath,
+				packageVersion: KANBAN_PACKAGE_VERSION,
+				tasks: existing.tasks,
+			},
+			existing.deployedAtIso,
+		);
+	}
+	return receipt;
+}
+
+async function recordDeploymentFromValidatedSource(
+	input: RecordDeploymentWithTaskDeploymentAttributionInput,
+	boundExecution?: { manifest: LocalDeploymentExecutionManifest; requestedAtIso: string },
+): Promise<JsonRecord> {
 	const sourceCheckoutPath = input.sourceCheckoutPath
 		? resolveProjectInputPath(input.sourceCheckoutPath, input.cwd)
 		: input.cwd;
@@ -86,14 +144,52 @@ export async function recordDeploymentWithTaskDeploymentAttribution(input: {
 		);
 	}
 	const newSha = revParse.stdout.trim();
+	if (
+		boundExecution &&
+		(workspace.workspaceId !== boundExecution.manifest.workspaceId ||
+			newSha !== boundExecution.manifest.candidateSourceCommit)
+	) {
+		throw new Error("workspace 或候选与本次部署执行绑定不一致");
+	}
 	const previousMarker = await readDeployMarker();
-	const oldSha = previousMarker?.deployedSourceCommit ?? null;
-	const deploymentId = randomUUID();
-	const nowIso = new Date().toISOString();
+	const oldSha = boundExecution
+		? boundExecution.manifest.previousDeployedSourceCommit
+		: (previousMarker?.deployedSourceCommit ?? null);
+	const deploymentId = boundExecution?.manifest.executionId ?? randomUUID();
+	const nowIso = boundExecution?.requestedAtIso ?? new Date().toISOString();
 
 	// 先读 PDV 状态、再读看板（RVF-002）：两次读之间若有任务经门禁结案移入 Done，看板读到的是 Done、不会再按「等核对」延续；
 	// 反过来先读看板，就会拿已结案的旧状态配上过期的列，把它当新任务重新纳入。读之后才发生的结案由 createDeploymentGroup 锁内协调。
 	const state = await input.readPostDeployVerificationStateReadOnly();
+	if (boundExecution) {
+		const existing = state.deploymentGroups.find((group) => group.deploymentId === deploymentId);
+		if (existing) {
+			if (
+				existing.workspaceId !== workspace.workspaceId ||
+				existing.deployedSourceCommit !== newSha ||
+				existing.previousDeployedSourceCommit !== oldSha
+			) {
+				throw new Error("原部署登记身份已绑定不同事实");
+			}
+			// 登记已接受、原 CLI 响应丢失时仅恢复可证明事实；原统计快照缺失不能重算成历史原值。
+			return {
+				ok: true,
+				deploymentId,
+				workspaceId: workspace.workspaceId,
+				workspacePath: workspace.repoPath,
+				sourceCheckoutPath,
+				deployedSourceCommit: existing.deployedSourceCommit,
+				previousDeployedSourceCommit: existing.previousDeployedSourceCommit,
+				deployedAtIso: existing.deployedAtIso,
+				packageVersion: KANBAN_PACKAGE_VERSION,
+				registrationReceiptRecoveredFromPersistedGroup: true,
+				originalRegistrationStatistics: null,
+			};
+		}
+		if ((previousMarker?.deployedSourceCommit ?? null) !== oldSha) {
+			throw new Error("部署前驱已变化且原登记未查得；保留未知，不覆盖他人部署或另建一组");
+		}
+	}
 	const board = await loadWorkspaceBoardById(workspace.workspaceId);
 	const columnIdByTaskId = new Map<string, RuntimeBoardColumnId>();
 	for (const column of board.columns) {
@@ -216,6 +312,7 @@ export async function recordDeploymentWithTaskDeploymentAttribution(input: {
 			previousDeployedSourceCommit: oldSha,
 			sourceCheckoutPath,
 			packageVersion: KANBAN_PACKAGE_VERSION,
+			...(boundExecution ? { expectedCurrentDeployedSourceCommit: oldSha } : {}),
 			tasks: groupTasks,
 			previousActiveGroupDeploymentIdObservedByUnlockedPreReadByCarriedForwardTaskId,
 		},

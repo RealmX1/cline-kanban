@@ -843,7 +843,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 				prompt: "解释实现",
 				readOnlyQuestionSession: true,
 				forkLatestWorkingDirectorySession: true,
-				taskConversationSessionMainContextForkSourceNativeSessionId: mainNativeSessionId,
+				taskConversationSessionContextForkSourceNativeSessionId: mainNativeSessionId,
 			});
 			expect(launch.args).not.toContain("--last");
 			expect(launch.args).not.toContain("--continue");
@@ -874,7 +874,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 				cwd: "/tmp/task-worktree",
 				prompt: "执行新的工作",
 				taskAgentPermissionMode: "bypass_all_permission_prompts",
-				taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				taskConversationSessionContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
 				taskConversationSessionMetadata: {
 					workspaceTaskId: "task-1",
 					taskConversationSessionRole: "task_collaborator",
@@ -905,7 +905,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			prompt: "先规划新工作",
 			startInPlanMode: true,
 			taskAgentPermissionMode: "bypass_all_permission_prompts",
-			taskConversationSessionMainContextForkSourceNativeSessionId: "parent-native",
+			taskConversationSessionContextForkSourceNativeSessionId: "parent-native",
 		});
 		expect(launch.args).toContain("--fork");
 		expect(launch.args).toContain("parent-native");
@@ -926,7 +926,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 				prompt: "不能重投的首条消息",
 				startInPlanMode: true,
 				resumePriorAgentConversationWithoutResendingPrompt: true,
-				taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				taskConversationSessionContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
 				observedAgentNativeConversationSessionResumeAddressing: {
 					sourceAgentId: agentId,
 					sourceSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
@@ -997,7 +997,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 					cwd: isolatedHome,
 					prompt: "不能重投的首条消息",
 					startInPlanMode: true,
-					taskConversationSessionMainContextForkSourceNativeSessionId: parentNativeSessionId,
+					taskConversationSessionContextForkSourceNativeSessionId: parentNativeSessionId,
 					revalidateTaskConversationSessionMainContextForkSource: revalidateForkSource,
 					taskConversationSessionMetadata: {
 						workspaceTaskId: "parent-task",
@@ -1081,7 +1081,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 					args: [],
 					cwd: isolatedHome,
 					prompt: "不能重投的首条消息",
-					taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+					taskConversationSessionContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
 				});
 				if (identityState !== "missing") {
 					manager.applyAgentNativeConversationSessionIdentity("unobserved-fork-child", {
@@ -1128,7 +1128,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 						args: [],
 						cwd: "/tmp/worktree",
 						prompt: "新工作",
-						taskConversationSessionMainContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+						taskConversationSessionContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
 						revalidateTaskConversationSessionMainContextForkSource: async () => {
 							throw new Error("来源已变化");
 						},

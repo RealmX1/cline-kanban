@@ -86,6 +86,8 @@ export function describeTaskPromptDeliveryMessageType(projection: RuntimeQueuedT
 }
 
 const DISPATCH_BLOCK_REASON_WORDING: Record<QueuedTaskPromptDispatchBlockReason, string> = {
+	session_report_execution_qualification_pending:
+		"等待侧会话回报目标的任务执行资格；停止、结案、搁置或交接等待时不投递。",
 	awaiting_native_independent_user_turn_query_retry: "原生回合查询暂时失败，系统将在原截止时间内自动重试，尚未发送。",
 	task_main_session_handover_awaiting_user: "主会话正在交接或等待用户消息，排队投递已暂停。",
 	awaiting_human_reconfirmation_after_runtime_restart: "此消息在重启前排入，请确认保留或取消。",

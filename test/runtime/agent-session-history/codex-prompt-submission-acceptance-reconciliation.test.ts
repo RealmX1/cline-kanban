@@ -80,6 +80,186 @@ function persistVerificationThroughSchema(
 }
 
 describe("Codex 持久提交标记的只读接受补证", () => {
+	it("旧 hook 在 EOF 且耗尽重试后重新补证，保留折叠摘要的核验来源", async () => {
+		const prompt = "执行修复\r\n\t保留  缩进\n\n并验证";
+		const { summary } = await fixture([nativeUser("input", 90_000, prompt)]);
+		const candidate = summary.agentConversationPromptSubmissionAcceptance;
+		if (!candidate) throw new Error("缺少候选");
+		candidate.submissionSource = "harness_submit_hook";
+		candidate.submittedPromptSha256 = submittedPromptSha256(prompt.replace(/\s+/g, " "));
+		const exhausted = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 100_000,
+		});
+		if (!exhausted) throw new Error("缺少首次扫描");
+		persistVerificationThroughSchema(summary, {
+			...exhausted.verification,
+			nextCheckAtMs: null,
+			consecutiveUnchangedCheckCount: 4,
+		});
+		// 模拟升级前持久化的旧扫描：没有正文归一化标记。
+		const legacyVerification = summary.agentConversationPromptSubmissionAcceptance?.verification;
+		if (legacyVerification) Reflect.deleteProperty(legacyVerification, "submittedPromptTextNormalization");
+		const repaired = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 101_000,
+		});
+		expect(repaired?.accepted).toEqual({ eventId: "codex:native:turn:input", acceptedAtMs: attemptedAtMs + 90_000 });
+		expect(repaired?.verification).toMatchObject({ submittedPromptTextNormalization: "collapse_all_whitespace" });
+	});
+
+	it("旧 hook 迁移逐窗口扫描，schema 往返和扫描器重启后从已保存位置继续", async () => {
+		const prompt = "执行\n  后续步骤";
+		const { summary } = await fixture([{ type: "noise", text: "x".repeat(2000) }, nativeUser("input", 200, prompt)]);
+		const candidate = summary.agentConversationPromptSubmissionAcceptance;
+		if (!candidate) throw new Error("缺少候选");
+		Object.assign(candidate, {
+			submissionSource: "harness_submit_hook",
+			submittedPromptSha256: submittedPromptSha256("执行 后续步骤"),
+			verification: {
+				checkedAtMs: attemptedAtMs,
+				nextCheckAtMs: null,
+				consecutiveUnchangedCheckCount: 4,
+				reason: "no_matching_native_message",
+			},
+		});
+		const first = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 60_000,
+			maximumReadBytes: 512,
+		});
+		if (!first) throw new Error("迁移没有返回进度");
+		expect(first.accepted).toBeUndefined();
+		expect(first.verification.reason).toBe("scanning_native_transcript");
+		persistVerificationThroughSchema(summary, first.verification);
+		expect(summary.agentConversationPromptSubmissionAcceptance?.verification).toMatchObject({
+			submittedPromptTextNormalization: "collapse_all_whitespace",
+		});
+		let previousOffset = first.verification.transcriptCursor?.nextByteOffset ?? 0;
+		let accepted = false;
+		for (let attempt = 1; attempt <= 10; attempt += 1) {
+			const resumed = await reconcileCodexPromptSubmissionAcceptance({
+				summary,
+				observedAtMs: attemptedAtMs + 60_000 + attempt * 1000,
+				maximumReadBytes: 512,
+				force: true,
+			});
+			if (!resumed) throw new Error("重启后没有接续扫描");
+			const offset = resumed.verification.transcriptCursor?.nextByteOffset ?? 0;
+			expect(offset).toBeGreaterThan(previousOffset);
+			previousOffset = offset;
+			persistVerificationThroughSchema(summary, resumed.verification);
+			if (resumed.accepted) {
+				accepted = true;
+				break;
+			}
+		}
+		expect(accepted).toBe(true);
+	});
+	it("observer 自动唤醒耗尽的旧候选，中断后重启沿持久游标接续且不发布新输入", async () => {
+		const { summary } = await fixture([
+			{ type: "noise", text: "x".repeat(1600) },
+			nativeUser("input", 200, "执行\n\t步骤"),
+		]);
+		const candidate = summary.agentConversationPromptSubmissionAcceptance;
+		if (!candidate) throw new Error("缺少候选");
+		candidate.submissionSource = "harness_submit_hook";
+		candidate.submittedPromptSha256 = submittedPromptSha256("执行 步骤");
+		candidate.verification = {
+			checkedAtMs: attemptedAtMs,
+			nextCheckAtMs: null,
+			consecutiveUnchangedCheckCount: 4,
+			reason: "no_matching_native_message",
+		};
+		const onAccepted = vi.fn();
+		const offsets: number[] = [];
+		const createObserver = () =>
+			createNativeAgentConversationActivityObserver({
+				onAccepted,
+				cooldownMs: 0,
+				readNativeActivity: async (input) => ({
+					events: [],
+					cursor: null,
+					promptSubmissionAcceptanceReconciliation: input.shouldReconcilePromptSubmissionAcceptance
+						? await reconcileCodexPromptSubmissionAcceptance({
+								summary: input.summary,
+								observedAtMs: input.observedAtMs,
+								maximumReadBytes: 512,
+								force: input.forcePromptSubmissionAcceptanceReconciliation,
+							})
+						: null,
+				}),
+				onPromptSubmissionAcceptanceReconciliation(_sessionId, _workspaceId, result) {
+					persistVerificationThroughSchema(summary, result.verification);
+					offsets.push(result.verification.transcriptCursor?.nextByteOffset ?? 0);
+					if (result.accepted && summary.agentConversationPromptSubmissionAcceptance)
+						summary.agentConversationPromptSubmissionAcceptance.status = "accepted";
+				},
+			});
+		vi.useFakeTimers();
+		vi.setSystemTime(attemptedAtMs + 60_000);
+		let observer = createObserver();
+		try {
+			await observer.observeTaskSessionSummary("workspace", summary, () => summary);
+			expect(offsets.length).toBe(1);
+			observer.dispose();
+			observer = createObserver();
+			await observer.observeTaskSessionSummary("workspace", summary, () => summary);
+			expect(offsets[1]).toBeGreaterThan(offsets[0]);
+			for (
+				let attempt = 0;
+				attempt < 10 && summary.agentConversationPromptSubmissionAcceptance?.status !== "accepted";
+				attempt += 1
+			) {
+				await vi.advanceTimersByTimeAsync(1000);
+				await observer.observeTaskSessionSummary("workspace", summary, () => summary);
+			}
+			expect(summary.agentConversationPromptSubmissionAcceptance?.status).toBe("accepted");
+			expect(onAccepted).not.toHaveBeenCalled();
+		} finally {
+			observer.dispose();
+			vi.useRealTimers();
+		}
+	});
+	it("明确保留内部空白的新摘要不能借用旧折叠比较", async () => {
+		const { summary } = await fixture([nativeUser("input", 200, "执行\n\t步骤")]);
+		Object.assign(summary.agentConversationPromptSubmissionAcceptance ?? {}, {
+			submissionSource: "harness_submit_hook",
+			submittedPromptSha256: submittedPromptSha256("执行 步骤"),
+			submittedPromptTextNormalization: "preserve_internal_whitespace",
+		});
+		expect(
+			(await reconcileCodexPromptSubmissionAcceptance({ summary, observedAtMs: attemptedAtMs + 60_000 }))?.accepted,
+		).toBeUndefined();
+	});
+
+	it.each(["ambiguous", "wrong_directory", "wrong_thread", "older", "predecessor", "different_text", "programmatic"])(
+		"旧空白折叠摘要遇到 %s 保留未知",
+		async (scenario) => {
+			const message = nativeUser(
+				"input",
+				scenario === "older" ? -1 : 200,
+				scenario === "different_text" ? "另一条正文" : "执行\n  步骤",
+			);
+			if (scenario === "wrong_thread") message.payload.thread_id = "other";
+			const { summary } = await fixture(
+				scenario === "ambiguous" ? [message, nativeUser("collision", 300, "执行 步骤")] : [message],
+			);
+			const candidate = summary.agentConversationPromptSubmissionAcceptance;
+			if (!candidate) throw new Error("缺少候选");
+			candidate.submissionSource = scenario === "programmatic" ? "programmatic_submission" : "harness_submit_hook";
+			candidate.submittedPromptSha256 = submittedPromptSha256("执行 步骤");
+			if (scenario === "wrong_directory") summary.workspacePath = "/other";
+			if (scenario === "predecessor") candidate.predecessorAcceptedEventId = "codex:native:turn:input";
+			const result = await reconcileCodexPromptSubmissionAcceptance({
+				summary,
+				observedAtMs: attemptedAtMs + 60_000,
+			});
+			expect(result?.accepted).toBeUndefined();
+			if (scenario === "ambiguous") expect(result?.verification.reason).toBe("ambiguous_native_messages");
+		},
+	);
+
 	it("原生接受保留事件时间；旧标记仅有唯一且紧邻提交的记录才补证", async () => {
 		const { summary } = await fixture([nativeUser("old", -1), nativeUser("input")]);
 		const result = await reconcileCodexPromptSubmissionAcceptance({

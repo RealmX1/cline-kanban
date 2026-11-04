@@ -90,6 +90,12 @@ export function usePersistentTerminalSession({
 	const themeColors = useMemo(() => getTerminalThemeColors(themeId), [themeId]);
 	const containerRef = useRef<HTMLDivElement | null>(null);
 	const terminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
+	// 在途重启按终端对象和请求代际记账。切卡不能清掉这张表，否则切回来会再发一次，
+	// 而先返回的那次会按同一个终端对象把后一次的等待锁清掉。
+	const refreshRequestGenerationByTerminalRef = useRef(
+		new WeakMap<ReturnType<typeof ensurePersistentTerminal>, number>(),
+	);
+	const nextRefreshRequestGenerationRef = useRef(0);
 	const handledAgentEntryKeyboardFocusRequestKeyRef = useRef(agentEntryKeyboardFocusRequestKey);
 	const recentlyUnmountedTerminalRef = useRef<ReturnType<typeof ensurePersistentTerminal> | null>(null);
 	const callbackRef = useRef<{
@@ -132,6 +138,7 @@ export function usePersistentTerminalSession({
 
 	useEffect(() => {
 		if (!enabled) {
+			setIsRefreshing(false);
 			const previousSession = previousSessionRef.current;
 			if (previousSession) {
 				disposePersistentTerminal(previousSession.workspaceId, previousSession.taskId);
@@ -149,6 +156,7 @@ export function usePersistentTerminalSession({
 		}
 
 		if (!workspaceId) {
+			setIsRefreshing(false);
 			const previousSession = previousSessionRef.current;
 			if (previousSession) {
 				disposePersistentTerminal(previousSession.workspaceId, previousSession.taskId);
@@ -174,6 +182,10 @@ export function usePersistentTerminalSession({
 			previousSession.workspaceId === workspaceId &&
 			previousSession.taskId === taskId &&
 			previousSession.sessionStartedAt !== sessionStartedAt;
+		if (didSessionIdentityChange && !didSessionRestart) {
+			// 先按「当前面板还没挂上终端」收起等待。挂上后若该终端自己仍有在途请求，再恢复。
+			setIsRefreshing(false);
+		}
 		if (didSessionIdentityChange) {
 			getSearchCleanupTerminal()?.clearSearch();
 			resetTerminalSearchState();
@@ -192,9 +204,7 @@ export function usePersistentTerminalSession({
 			themeColors,
 		});
 		if (didSessionRestart) {
-			// User-initiated refresh sets a suppression flag so the existing scrollback
-			// (including the "[kanban] Refreshing terminal session..." banner) survives
-			// the PTY swap. Normal restarts (e.g., trash-resume drag) still reset.
+			// 显式重启保留原回滚与新一代的完成提示；其他换代仍重置画面并补读服务端快照。
 			if (!terminal.consumeRestartResetSuppression()) {
 				terminal.resetForSessionRestartAndRequestServerMirrorSnapshot();
 			}
@@ -205,6 +215,7 @@ export function usePersistentTerminalSession({
 			sessionStartedAt,
 		};
 		terminalRef.current = terminal;
+		setIsRefreshing(refreshRequestGenerationByTerminalRef.current.has(terminal));
 		recentlyUnmountedTerminalRef.current = null;
 		const unsubscribe = terminal.subscribe({
 			onConnectionReady: (connectedTaskId) => {
@@ -334,8 +345,19 @@ export function usePersistentTerminalSession({
 					throw new Error("终端尚未就绪，请稍后重试。");
 				return;
 			}
+			if (refreshRequestGenerationByTerminalRef.current.has(terminal)) {
+				if (additionalAgentStartupArgumentsForThisRestart !== undefined)
+					throw new Error("该会话的重启请求仍在等待响应，请勿重复提交。");
+				return;
+			}
+			const generation = nextRefreshRequestGenerationRef.current + 1;
+			nextRefreshRequestGenerationRef.current = generation;
+			refreshRequestGenerationByTerminalRef.current.set(terminal, generation);
 			setIsRefreshing(true);
 			setLastError(null);
+			const isThisRequestStillCurrent = () =>
+				refreshRequestGenerationByTerminalRef.current.get(terminal) === generation &&
+				terminalRef.current === terminal;
 			try {
 				const result = await terminal.refresh(
 					undefined,
@@ -345,15 +367,19 @@ export function usePersistentTerminalSession({
 				);
 				if (!result.ok) {
 					const message = result.error ?? "重启会话失败。";
-					setLastError(message);
+					if (isThisRequestStillCurrent()) setLastError(message);
 					if (additionalAgentStartupArgumentsForThisRestart !== undefined) throw new Error(message);
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
-				setLastError(message);
+				if (isThisRequestStillCurrent()) setLastError(message);
 				if (additionalAgentStartupArgumentsForThisRestart !== undefined) throw error;
 			} finally {
-				setIsRefreshing(false);
+				// 只结算这一代。切到别的任务，或同一终端上已有更新的请求时，不能清掉当前面板的等待。
+				if (refreshRequestGenerationByTerminalRef.current.get(terminal) === generation) {
+					refreshRequestGenerationByTerminalRef.current.delete(terminal);
+					if (terminalRef.current === terminal) setIsRefreshing(false);
+				}
 			}
 		},
 		[],

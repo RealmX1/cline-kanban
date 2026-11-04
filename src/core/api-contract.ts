@@ -724,7 +724,29 @@ export const runtimeTaskConversationSessionMetadataSchema = z.object({
 	// 持久历史事实：被提升过的协作会话在再次切主后仍是前主会话。
 	taskConversationSessionHasHeldMainResponsibility: z.boolean().optional(),
 	taskAutomationSuspendedForMainSessionHandover: z.boolean().optional(),
-	taskConversationSessionContextSource: z.enum(["main", "started_from_scratch", "forked_from_main_current_turn"]),
+	taskConversationSessionContextSource: z.enum([
+		"main",
+		"started_from_scratch",
+		"forked_from_main_current_turn",
+		"forked_from_conversation_session",
+	]),
+	// 新记录分别保存创建者、实际历史来源及默认回报目标，切主或重启不能改写这些事实。
+	creatorTaskConversationSessionId: z.string().optional(),
+	creatorNativeConversationSessionIdentity: z
+		.object({ sourceAgentId: z.string(), nativeSessionId: z.string(), transcriptPath: z.string().nullable() })
+		.optional(),
+	contextSourceTaskConversationSessionId: z.string().optional(),
+	contextSourceSelectionAtCreation: z.enum(["creator", "current_main", "fresh"]).optional(),
+	contextSourceNativeSessionIdentity: z
+		.object({
+			sourceAgentId: z.string(),
+			nativeSessionId: z.string(),
+			transcriptPath: z.string().nullable(),
+		})
+		.optional(),
+	defaultReportTargetTaskConversationSessionId: z.string().optional(),
+	creationReason: z.string().optional(),
+	creationRequestId: z.string().optional(),
 	parentTaskConversationSessionId: z.string().nullable(),
 	mainSessionOriginTurnNumber: z.number().int().nonnegative().nullable(),
 	mainSessionOriginUserMessagePreview: z.string().nullable(),
@@ -1238,6 +1260,12 @@ export type RuntimeLastAgentConversationPromptCacheReferenceObservation = z.infe
 	typeof runtimeLastAgentConversationPromptCacheReferenceObservationSchema
 >;
 
+export const runtimeSubmittedPromptTextNormalizationSchema = z.enum([
+	"preserve_internal_whitespace",
+	"collapse_all_whitespace",
+]);
+export type RuntimeSubmittedPromptTextNormalization = z.infer<typeof runtimeSubmittedPromptTextNormalizationSchema>;
+
 // pending/unconfirmed 只表达投递核验进度，不能代替 harness 已接受这一事实。
 export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object({
 	status: z.enum(["pending", "unconfirmed", "accepted"]),
@@ -1250,10 +1278,12 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 	acceptedByHistoricalReconciliation: z.boolean().optional(),
 	submissionSource: z.enum(["harness_submit_hook", "programmatic_submission"]).optional(),
 	submittedPromptSha256: z.string().optional(),
+	submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 	predecessorAcceptedEventId: z.string().optional(),
 	verification: z
 		.object({
 			checkedAtMs: z.number(),
+			submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 			nextCheckAtMs: z.number().nullable(),
 			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
 			reason: z.enum([
@@ -2959,6 +2989,7 @@ export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliv
 // 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
 // PTY 单飞槽），前端复算必然漂移。
 export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	"session_report_execution_qualification_pending",
 	"awaiting_native_independent_user_turn_query_retry",
 	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
 	"awaiting_human_reconfirmation_after_runtime_restart",
@@ -3033,7 +3064,15 @@ const nativeIndependentUserTurnQueryRecoverySchema = z.object({
 	recoveredAtEpochMs: z.number().nullable(),
 });
 
+export const taskConversationSessionReportDeliveryOriginSchema = z.object({
+	workspaceTaskId: z.string().min(1),
+	taskIncarnationCreatedAt: z.number(),
+	sourceTaskConversationSessionId: z.string().min(1),
+	targetTaskConversationSessionId: z.string().min(1),
+});
+
 export const queuedTaskPromptDeliveryEntrySchema = z.object({
+	taskConversationSessionReportOrigin: taskConversationSessionReportDeliveryOriginSchema.optional(),
 	// 旧条目缺省是等待队列，即时及启动消息不进入 idle 调度。
 	managedDelivery: managedTaskPromptDeliveryMetadataSchema.optional(),
 	// 新字段可选；旧 handed_to_transport 条目缺少零写入证明时，仍按未知处理。
@@ -3303,6 +3342,7 @@ export type RuntimeTaskPromptDeliveryQueueMutateResponse = z.infer<
 // 再入队——不让 CLI 先写账本：CLI 在两步之间被杀，就会留下一条没有队列条目、却也没人来收敛的 pending。
 // 收敛有界性：pending 必然在 agentIdleWaitDeadline + 终端投递最坏预算之内落终态。
 export const runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema = z.object({
+	taskConversationSessionReportOrigin: taskConversationSessionReportDeliveryOriginSchema.optional(),
 	taskId: z.string(),
 	text: z.string(),
 	source: z.string(),
@@ -4823,6 +4863,9 @@ export const runtimeTaskChatMessageSchema = z.object({
 	createdAt: z.number(),
 	meta: z
 		.object({
+			// 可信原生消息 ID；旧格式缺 ID 时用完整原生记录指纹，不能拿页内字节位置作发送幂等键。
+			nativeMessageIdentity: z.string().optional(),
+			nativeMessagePhase: z.string().optional(),
 			toolName: z.string().nullable().optional(),
 			hookEventName: z.string().nullable().optional(),
 			toolCallId: z.string().nullable().optional(),
@@ -4876,6 +4919,101 @@ export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
 export type RuntimeTaskConversationHistoryPageResponse = z.infer<
 	typeof runtimeTaskConversationHistoryPageResponseSchema
 >;
+
+export const runtimeTaskConversationSessionCreateRequestSchema = z.object({
+	taskId: z.string().min(1),
+	idempotencyKey: z.string().trim().min(1).max(200),
+	sessionRole: z.enum(["by_the_way", "task_collaborator"]),
+	contextSource: z.enum(["creator", "current_main", "fresh"]).default("creator"),
+	agentId: runtimeAgentIdSchema.optional(),
+	initialMessage: z.string().max(1_000_000).default(""),
+	creationReason: z.string().trim().min(1).max(2000),
+	// 人工入口可显式选创建者；CLI 的来源由运行时从调用环境核对，不能冒用其他会话。
+	creatorTaskConversationSessionId: z.string().min(1).optional(),
+	cols: z.number().int().positive().optional(),
+	rows: z.number().int().positive().optional(),
+	codexConfigurationProfileId: z.string().min(1).optional(),
+});
+export type RuntimeTaskConversationSessionCreateRequest = z.infer<
+	typeof runtimeTaskConversationSessionCreateRequestSchema
+>;
+
+export const runtimeTaskConversationSessionCreationProgressSchema = z.object({
+	requestId: z.string(),
+	taskId: z.string(),
+	taskIncarnationCreatedAt: z.number(),
+	taskConversationSessionId: z.string(),
+	creatorTaskConversationSessionId: z.string(),
+	contextSourceTaskConversationSessionId: z.string().nullable(),
+	createdAt: z.number(),
+	status: z.enum([
+		"reserved",
+		"launch_requested",
+		"started",
+		"awaiting_startup_evidence",
+		"execution_prohibited",
+		"failed",
+	]),
+	notice: z.string().nullable(),
+	unchangedEvidenceProbeCount: z.number().int().min(0).max(3),
+	nextEvidenceProbeAt: z.number().nullable(),
+});
+export type RuntimeTaskConversationSessionCreationProgress = z.infer<
+	typeof runtimeTaskConversationSessionCreationProgressSchema
+>;
+
+export const runtimeTaskConversationSessionCreateResponseSchema = z.object({
+	ok: z.boolean(),
+	idempotencyConflict: z.boolean().optional(),
+	creation: runtimeTaskConversationSessionCreationProgressSchema.nullable(),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskConversationSessionCreateResponse = z.infer<
+	typeof runtimeTaskConversationSessionCreateResponseSchema
+>;
+
+export const runtimeTaskConversationSessionListRequestSchema = z.object({ taskId: z.string().min(1) });
+export const runtimeTaskConversationSessionListResponseSchema = z.object({
+	sessions: z.array(runtimeTaskSessionSummarySchema),
+	creations: z.array(runtimeTaskConversationSessionCreationProgressSchema),
+});
+export type RuntimeTaskConversationSessionListResponse = z.infer<
+	typeof runtimeTaskConversationSessionListResponseSchema
+>;
+export const runtimeTaskConversationSessionGetRequestSchema = z.object({
+	taskId: z.string().min(1),
+	taskConversationSessionId: z.string().min(1),
+	cursor: z.string().max(4096).nullish(),
+});
+export type RuntimeTaskConversationSessionGetRequest = z.infer<typeof runtimeTaskConversationSessionGetRequestSchema>;
+export const runtimeTaskConversationSessionReportRequestSchema = z.object({
+	taskId: z.string().min(1),
+	idempotencyKey: z.string().trim().min(1).max(200),
+	targetTaskConversationSessionId: z.string().min(1).optional(),
+	text: z.string().trim().min(1).max(1_000_000),
+});
+export type RuntimeTaskConversationSessionReportRequest = z.infer<
+	typeof runtimeTaskConversationSessionReportRequestSchema
+>;
+export const runtimeTaskConversationSessionReportResponseSchema = z.object({
+	ok: z.boolean(),
+	reportId: z.string().nullable(),
+	sourceTaskConversationSessionId: z.string().nullable(),
+	targetTaskConversationSessionId: z.string().nullable(),
+	status: z.enum(["pending", "queued", "accepted", "failed", "execution_prohibited"]).nullable(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskConversationSessionReportResponse = z.infer<
+	typeof runtimeTaskConversationSessionReportResponseSchema
+>;
+export const runtimeTaskConversationSessionGetResponseSchema = z.object({
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	reports: z.array(runtimeTaskConversationSessionReportResponseSchema),
+	creation: runtimeTaskConversationSessionCreationProgressSchema.nullable(),
+	history: runtimeTaskConversationHistoryPageResponseSchema,
+});
+export type RuntimeTaskConversationSessionGetResponse = z.infer<typeof runtimeTaskConversationSessionGetResponseSchema>;
 
 export const runtimeTaskChatSendRequestSchema = z.object({
 	deliveryRequestId: z.string().min(1).optional(),
@@ -5081,6 +5219,8 @@ export const workspacePromptLibraryMutationSchema = z.discriminatedUnion("kind",
 			kind: z.literal("upsert_prompt"),
 			promptId: z.string(),
 			text: z.string(),
+			// 持久暂存操作重放只补建缺失条目，不覆盖用户后来编辑或移动的内容。
+			leaveExistingPromptUnchanged: z.boolean().optional(),
 			// 仅新建时生效；已存在的条目换桶请用 set_prompt_scope。
 			scope: promptLibraryScopeSchema,
 			// scope 为 task 时必填（由下面的 refine 强制），其余忽略。
@@ -5270,6 +5410,11 @@ export type RuntimeTaskEditDraftsMutateRequest = z.infer<typeof runtimeTaskEditD
 // 前端只负责拦下按键，不碰内容——同一份易随版本漂移的 TUI 画法知识只在服务端存一份。
 
 export const terminalInputBoxStashOutcomeSchema = z.enum([
+	"codex_draft_stash_capability_not_ready",
+	"codex_draft_stash_in_progress",
+	"codex_draft_stash_operation_not_found",
+	"codex_draft_export_failed",
+	"input_box_contains_unsupported_attachments",
 	// 正文已入库，Ctrl+S 已转发（框被 agent 自己清掉）。
 	"stashed_into_prompt_library",
 	// 正文**已经**入库（stashedPromptId 有效），但清框那一步没做成：写库跨文件锁与落盘期间，读框时
@@ -5310,6 +5455,7 @@ export type TerminalInputBoxStashOutcome = z.infer<typeof terminalInputBoxStashO
 
 export const runtimeTerminalInputBoxStashRequestSchema = z.object({
 	taskId: z.string(),
+	operationId: z.uuid().optional(),
 	// 省略即 task scope，与面板里「新建 prompt」的默认一致。
 	scope: promptLibraryScopeSchema.optional(),
 });
@@ -5317,6 +5463,9 @@ export type RuntimeTerminalInputBoxStashRequest = z.infer<typeof runtimeTerminal
 
 export const runtimeTerminalInputBoxStashResponseSchema = z.object({
 	ok: z.boolean(),
+	operationId: z.uuid().optional(),
+	// 只在持久证据已排除迟到捕获或补写时为 false；省略表示旧版响应，继续保守查询。
+	capturedDraftPromptSaveRecoveryPending: z.boolean().optional(),
 	outcome: terminalInputBoxStashOutcomeSchema,
 	stashedPromptId: z.string().nullable(),
 	// 只回字符数不回正文：正文最大可达粘贴留存上限（1 MiB），而调用方要的只是一句「存进去多少」。
@@ -5748,6 +5897,7 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// UserPromptSubmit 的 prompt 只在同步 hook 请求内短暂流转，用于区分真人输入与 harness 在恢复时
 	// 自动塞入的任务通知；普通诊断日志与 session summary 均不得记录它。
 	submittedPromptText: z.string().optional(),
+	submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
 	claudeNativeTaskListIdForPhaseGoalProjection: z.string().min(1).max(200).nullable().optional(),
 	// hook 是否从子代理内部触发（`kanban hooks` 从 hook stdin 的 `agent_id` 派生；Claude Code 只在子代理
 	// 内的事件上带它，主线程一律不带）。子代理的请求走自己的缓存前缀，不刷新主对话的 Cache warm 起点。

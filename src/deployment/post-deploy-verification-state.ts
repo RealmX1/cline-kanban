@@ -24,7 +24,7 @@ import { lockedFileSystem } from "../fs/locked-file-system";
 import type { PostDeployVerificationCompletionEvidence } from "../inter-work-unit-relation-ledger/post-deploy-verification-passed-observation-recording";
 import { getRuntimeHomePath } from "../state/workspace-state";
 import { materializeAuthoredVerificationItemsForWorkspaceTasks } from "./authored-verification-definitions";
-import { writeDeployMarker } from "./deploy-marker";
+import { readDeployMarker, writeDeployMarker } from "./deploy-marker";
 import {
 	applyPostDeployVerificationClosureToTaskWithinStateLock,
 	isChecklistOfPostDeployVerificationTaskFullyChecked,
@@ -417,6 +417,8 @@ export interface CreateDeploymentGroupInput {
 	previousDeployedSourceCommit: string | null;
 	sourceCheckoutPath: string;
 	packageVersion: string;
+	// 绑定执行在同一 state 锁内核对前驱，避免两个候选并发登记时覆盖后来部署。
+	expectedCurrentDeployedSourceCommit?: string | null;
 	// 调用方在 state 锁外组装好的任务条目；其中延续来的那些在锁内还会按旧副本的当前状态重新落定（见下）。
 	tasks: RuntimePostDeployVerificationTask[];
 	// 延续来的任务 → 调用方无锁预读时那份旧副本所在组的 deploymentId（RVF-002）。锁内沿延续链找到旧副本的当前状态，
@@ -447,6 +449,32 @@ export async function createDeploymentGroup(
 
 	return await lockedFileSystem.withLock(getPostDeployVerificationStateLockRequest(), async () => {
 		const state = await readPostDeployVerificationStateCorruptionTolerant(nowIso);
+		const existingGroup = state.deploymentGroups.find((group) => group.deploymentId === input.deploymentId);
+		if (existingGroup) {
+			if (
+				existingGroup.workspaceId !== input.workspaceId ||
+				existingGroup.deployedSourceCommit !== input.deployedSourceCommit ||
+				existingGroup.previousDeployedSourceCommit !== input.previousDeployedSourceCommit
+			) {
+				throw new Error("部署执行身份已绑定不同 workspace、候选或前驱，不能重复建组");
+			}
+			const existingMarker = { ...marker, deployedAtIso: existingGroup.deployedAtIso };
+			const currentMarker = await readDeployMarker();
+			// 折叠表示同 workspace 已有后来的登记。时间戳在时钟回拨时会把后来的组看成更旧，不能用来决定是否回写 marker。
+			if (
+				currentMarker?.deploymentId === existingGroup.deploymentId ||
+				(currentMarker === null && existingGroup.foldedAtIso === null)
+			) {
+				await writeDeployMarker(existingMarker, { lock: null });
+			}
+			return { group: existingGroup, marker: existingMarker };
+		}
+		if (
+			input.expectedCurrentDeployedSourceCommit !== undefined &&
+			((await readDeployMarker())?.deployedSourceCommit ?? null) !== input.expectedCurrentDeployedSourceCommit
+		) {
+			throw new Error("部署前驱已变化，不能覆盖其他执行的登记");
+		}
 		const tasksOfNewGroup: RuntimePostDeployVerificationTask[] = [];
 		for (const taskAssembledFromUnlockedPreRead of input.tasks) {
 			const previousActiveGroupDeploymentId =

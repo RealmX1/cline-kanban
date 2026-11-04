@@ -12,7 +12,8 @@ try {
 } catch (cause) {
 	throw new Error(
 		`通知档案原生依赖检查失败：${process.execPath} (${process.version}, ABI ${process.versions.modules})。` +
-			"请在此 checkout 使用实际启动服务的 Node 对应的 npm rebuild better-sqlite3，然后用同一 Node 重跑本检查；不得继续部署。",
+			"请用实际启动服务的 Node，在拥有这份 node_modules 的 checkout 执行 npm rebuild better-sqlite3，然后用同一 Node 重跑本检查。" +
+			"任务工作树的 node_modules 与主 checkout 及正在服务的 runtime 共用，不要用另一个 Node 在工作树里重编；不得继续部署。",
 		{ cause },
 	);
 } finally {

@@ -168,6 +168,17 @@ async function acquireNormalizedKernelWriteLock(request: NormalizedLockRequest):
 	};
 }
 
+export async function releaseFilesystemKernelWriteLock(
+	release: () => Promise<void>,
+	lockPath: string,
+): Promise<void> {
+	try {
+		await release();
+	} catch (error) {
+		logFileLockError(`release-failed path=${lockPath} error=${safeLockErrorMessage(error)}`);
+	}
+}
+
 async function readFileIfExists(path: string): Promise<string | null> {
 	try {
 		const content = await readUtf8FileWithDailyWorkProgressCostObservation(path);
@@ -238,13 +249,7 @@ export class LockedFileSystem {
 			return await operation();
 		} finally {
 			for (const acquired of acquiredLocks.reverse()) {
-				try {
-					await acquired.release();
-				} catch (error) {
-					logFileLockError(
-						`release-failed path=${acquired.canonicalLockPath} error=${safeLockErrorMessage(error)}`,
-					);
-				}
+				await releaseFilesystemKernelWriteLock(acquired.release, acquired.canonicalLockPath);
 			}
 		}
 	}

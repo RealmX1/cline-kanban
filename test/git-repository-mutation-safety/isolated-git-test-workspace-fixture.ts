@@ -41,7 +41,10 @@ export interface IsolatedGitTestWorkspaceFixture {
 	fixtureRootDirectoryPath: string;
 	isolatedHomeDirectoryPath: string;
 	ownedIntegrationProjectsDirectoryPath: string;
-	createIsolatedChildProcessEnvironment(environmentVariableOverrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
+	createIsolatedChildProcessEnvironment(
+		environmentVariableOverrides?: NodeJS.ProcessEnv,
+		observations?: { gitTrace2EventOutputFileName?: string },
+	): NodeJS.ProcessEnv;
 	createNonBareRepository(options: {
 		repositoryDirectoryName: string;
 		initialBranchName?: string;
@@ -416,7 +419,7 @@ export function createIsolatedGitTestWorkspaceFixture(
 		fixtureRootDirectoryPath,
 		isolatedHomeDirectoryPath,
 		ownedIntegrationProjectsDirectoryPath,
-		createIsolatedChildProcessEnvironment(environmentVariableOverrides = {}) {
+		createIsolatedChildProcessEnvironment(environmentVariableOverrides = {}, observations = {}) {
 			const environment = { ...isolatedGitEnvironment };
 			for (const [name, value] of Object.entries(environmentVariableOverrides)) {
 				if (name.toUpperCase().startsWith("GIT_") || ISOLATION_OWNED_ENVIRONMENT_VARIABLE_NAMES.has(name)) {
@@ -424,6 +427,16 @@ export function createIsolatedGitTestWorkspaceFixture(
 				}
 				if (value === undefined) delete environment[name];
 				else environment[name] = value;
+			}
+			if (observations.gitTrace2EventOutputFileName) {
+				assertSimpleDirectoryName(observations.gitTrace2EventOutputFileName, "Git Trace2 输出文件名");
+				const traceDirectory = join(fixtureRootDirectoryPath, "native-git-trace2-events");
+				assertPotentialPathInsideFixture(traceDirectory, "Git Trace2 输出目录");
+				mkdirSync(traceDirectory, { recursive: true });
+				environment.GIT_TRACE2_EVENT = assertPotentialPathInsideFixture(
+					join(traceDirectory, observations.gitTrace2EventOutputFileName),
+					"Git Trace2 输出文件",
+				);
 			}
 			return environment;
 		},

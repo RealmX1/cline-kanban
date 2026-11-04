@@ -58,7 +58,10 @@ import { PostDeployVerificationEntryNavigationButton } from "@/components/post-d
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 import { ProjectIcon } from "@/components/project-visual-identity";
-import { describePromptSubmissionAcceptance } from "@/components/prompt-submission-acceptance-description";
+import {
+	describePromptSubmissionAcceptance,
+	promptSubmissionAcceptanceLabel,
+} from "@/components/prompt-submission-acceptance-description";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
@@ -933,12 +936,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 				<span
 					role="status"
 					title={describePromptSubmissionAcceptance(sessionSummary.agentConversationPromptSubmissionAcceptance)}
-					className="inline-flex items-center gap-0.5 text-[10px] text-status-gold"
+					className="inline-flex items-center gap-0.5 text-[10px] text-text-secondary"
 				>
 					<Hourglass size={10} />
-					{sessionSummary.agentConversationPromptSubmissionAcceptance.status === "pending"
-						? "提交待确认"
-						: "尚未确认接受"}
+					{promptSubmissionAcceptanceLabel(sessionSummary.agentConversationPromptSubmissionAcceptance)}
 				</span>
 			) : null}
 			{sessionSummary?.codexConfigurationProfileRetainedInputRecovery && (

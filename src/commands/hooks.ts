@@ -101,6 +101,7 @@ interface HooksIngestArgs {
 	agentRaisedToolPermission?: RuntimeAgentRaisedToolPermissionPayload;
 	agentRaisedUserQuestionResolvedInAgentTerminal?: RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload;
 	submittedPromptText?: string;
+	submittedPromptTextNormalization?: RuntimeHookIngestRequest["submittedPromptTextNormalization"];
 	claudeNativeTaskListIdForPhaseGoalProjection?: string | null;
 	// hook stdin 带 `agent_id` ⇔ 事件从子代理内部触发（Claude Code 只在子代理内的事件上带它）。
 	hookEventFiredInsideSubagentContext?: boolean;
@@ -484,7 +485,10 @@ function parseHooksIngestArgs(
 		...(agentToolCallExecutionOutcome ? { agentToolCallExecutionOutcome } : {}),
 		...buildAgentRaisedDecisionPayloads(payload, metadata),
 		...(["userpromptsubmit", "beforeagent"].includes(metadata?.hookEventName?.trim().toLowerCase() ?? "") && payload
-			? { submittedPromptText: readStringField(payload, "prompt") ?? undefined }
+			? {
+					submittedPromptText: typeof payload.prompt === "string" ? payload.prompt : undefined,
+					submittedPromptTextNormalization: "preserve_internal_whitespace",
+				}
 			: {}),
 		...(payload &&
 		readStringField(payload, "agent_id") &&
@@ -752,6 +756,9 @@ function buildHookIngestRequest(
 			? { agentRaisedUserQuestionResolvedInAgentTerminal: args.agentRaisedUserQuestionResolvedInAgentTerminal }
 			: {}),
 		...(args.submittedPromptText !== undefined ? { submittedPromptText: args.submittedPromptText } : {}),
+		...(args.submittedPromptTextNormalization
+			? { submittedPromptTextNormalization: args.submittedPromptTextNormalization }
+			: {}),
 		...(args.hookEventFiredInsideSubagentContext
 			? { hookEventFiredInsideSubagentContext: args.hookEventFiredInsideSubagentContext }
 			: {}),

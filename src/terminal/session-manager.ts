@@ -21,16 +21,20 @@ import {
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
 
 import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync } from "node:fs";
 import { stat } from "node:fs/promises";
+import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import {
 	type CodexPromptSubmissionAcceptanceReconciliation,
 	reconcileCodexPromptSubmissionAcceptance,
+	requiresLegacyHookPromptTextNormalizationReconciliation,
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
+import { AgentSessionPtyHostUnreachableError } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
@@ -48,6 +52,7 @@ import {
 	readCodexProfileAdoptionRetainedInput,
 	saveCodexProfileAdoptionRetainedInput,
 } from "../codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
+import { prepareCodexSharedPluginInstallationForNativeLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -99,6 +104,7 @@ import type {
 	RuntimeLastConversationProgressObservation,
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
+	RuntimeSubmittedPromptTextNormalization,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationMode,
@@ -112,6 +118,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTerminalDeliveryContention,
 	RuntimeTaskTurnCheckpoint,
+	RuntimeTerminalInputBoxStashResponse,
 	TerminalDeliveryFailureReason,
 	TerminalDeliveryStatus,
 	TerminalInputBoxStashFidelity,
@@ -214,6 +221,21 @@ import {
 	mergeCodexAdditionalStartupArgumentsForRestart,
 } from "./codex-additional-startup-arguments-for-restart";
 import {
+	type CodexDraftStashEditorBridge,
+	getCodexDraftStashOperationDirectory,
+	prepareCodexDraftStashEditorBridge,
+	readCodexDraftEditorReservation,
+	readCodexDraftStashEditorBridge,
+	readCodexDraftStashJson,
+	releaseCodexDraftEditorReservation,
+	reserveCodexDraftEditorInvocation,
+	writeCodexDraftStashJsonDurably,
+} from "./codex-draft-stash-editor-bridge";
+import {
+	createCodexCapturedDraftPromptRecoveryCoordinator,
+	runCodexDraftStashOperation,
+} from "./codex-draft-stash-operation";
+import {
 	buildCodexModelCapacityErrorDetectionTurnIdentity,
 	createCodexModelCapacityErrorDetector,
 } from "./codex-model-capacity-error-detection";
@@ -266,6 +288,7 @@ import {
 	readSideSessionNativeIdentityFromOwnedCodexControl,
 	readSideSessionResumeRequestWaitingForNativeIdentity,
 } from "./side-session-native-identity-recovery";
+import type { StashTaskTerminalInputBoxIntoPromptLibraryRequest } from "./stash-task-terminal-input-box-into-prompt-library";
 import {
 	deriveTaskSessionAutoRestartDecision,
 	describeTaskSessionAutoRestartCircuitBreak,
@@ -798,7 +821,7 @@ export interface StartTaskSessionRequest {
 	projectPath?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
@@ -1176,7 +1199,34 @@ function cloneStartShellSessionRequest(request: StartShellSessionRequest): Start
 	};
 }
 
+function isAgentSessionPtyHostLaunchOrOwnershipMessage(message: string): boolean {
+	return (
+		message.includes("could not launch agent session pty host") ||
+		message.includes("agent session pty host did not start listening") ||
+		message.includes("host 归属未知，拒绝降级后重复启动")
+	);
+}
+
+// 宿主失败有时是直接的 UnreachableError，有时被包进普通 Error 或 cause。
+// 文案里的 ENOENT 属于宿主 Node / socket，不能再走 agent CLI 缺失那条分支。
+function agentSessionPtyHostCommunicationFailureMessage(error: unknown): string | null {
+	const seen = new Set<unknown>();
+	let current: unknown = error;
+	let hostLaunchOrOwnershipMessage: string | null = null;
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		if (current instanceof AgentSessionPtyHostUnreachableError) return current.message;
+		if (hostLaunchOrOwnershipMessage === null && isAgentSessionPtyHostLaunchOrOwnershipMessage(current.message)) {
+			hostLaunchOrOwnershipMessage = current.message;
+		}
+		current = current.cause;
+	}
+	return hostLaunchOrOwnershipMessage;
+}
+
 function formatSpawnFailure(binary: string, error: unknown): string {
+	const hostCommunicationFailureMessage = agentSessionPtyHostCommunicationFailureMessage(error);
+	if (hostCommunicationFailureMessage !== null) return `会话宿主通信失败：${hostCommunicationFailureMessage}`;
 	const message = error instanceof Error ? error.message : String(error);
 	const normalized = message.toLowerCase();
 	if (normalized.includes("posix_spawnp failed") || normalized.includes("enoent")) {
@@ -1186,6 +1236,8 @@ function formatSpawnFailure(binary: string, error: unknown): string {
 }
 
 function formatShellSpawnFailure(binary: string, error: unknown): string {
+	const hostCommunicationFailureMessage = agentSessionPtyHostCommunicationFailureMessage(error);
+	if (hostCommunicationFailureMessage !== null) return `会话宿主通信失败：${hostCommunicationFailureMessage}`;
 	const message = error instanceof Error ? error.message : String(error);
 	const normalized = message.toLowerCase();
 	if (normalized.includes("posix_spawnp failed") || normalized.includes("enoent")) {
@@ -1385,6 +1437,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		ActiveProcessState,
 		Promise<void>
 	>();
+	private readonly codexDraftStashRecoveryTaskIds = new Set<string>();
+	private readonly codexDraftStashRecoveryInFlightTaskIds = new Set<string>();
+	private readonly codexCapturedDraftPromptRecoveryCoordinator: ReturnType<
+		typeof createCodexCapturedDraftPromptRecoveryCoordinator
+	> | null;
 	private humanTerminalInputMutationSequenceNumber = 0;
 	private readonly terminalInputRetainedDuringCodexProfileReplacement = new Map<string, string>();
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
@@ -1409,7 +1466,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		AutomaticFailureContinuationAttemptResult
 	>();
 	private readonly connectionRetryEpisodeGenerationByActiveProcess = new WeakMap<ActiveProcessState, number>();
-	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {}
+	constructor(private readonly terminalSessionManagerOptions: TerminalSessionManagerOptions = {}) {
+		const workspaceId = terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+		this.codexCapturedDraftPromptRecoveryCoordinator = workspaceId
+			? createCodexCapturedDraftPromptRecoveryCoordinator(workspaceId)
+			: null;
+	}
 
 	private readonly entries = new Map<string, SessionEntry>();
 	private readonly startupDeliveryRegistrationFailureCountByActiveProcess = new WeakMap<ActiveProcessState, number>();
@@ -1528,8 +1590,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? { ...previous, resumeRequestedAtMs: previous.resumeRequestedAtMs ?? now() }
 					: {
 							runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: now(),
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -1864,7 +1925,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					!entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
 				);
 			},
-			softDeferralReason: () => this.automaticFailureContinuationModalDeferral(taskId),
+			softDeferralReason: () => this.automaticFailureContinuationSoftDeferral(taskId),
 			submit: (record) => this.submitAutomaticFailureContinuation(taskId, record),
 		});
 		this.automaticFailureContinuationCoordinators.set(taskId, coordinator);
@@ -2137,13 +2198,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 					),
 				summary: cloneSummary(entry.summary),
 				getCurrentSummary: () => (isCurrent() ? (this.entries.get(taskId)?.summary ?? null) : null),
-				readSoftDeferral: () => this.automaticFailureContinuationModalDeferral(taskId),
+				readSoftDeferral: () => this.automaticFailureContinuationSoftDeferral(taskId),
 				beforeSubmit: async () => {
 					await this.automaticFailureContinuationPersistence.get(taskId);
 					const currentEligibility =
 						await this.terminalSessionManagerOptions.readAutomaticFailureContinuationEligibility?.(taskId);
 					return (
 						isCurrent() &&
+						!this.isCodexDraftStashBlockingProgrammaticDelivery(taskId) &&
 						(!currentEligibility ||
 							(currentEligibility.eligible &&
 								currentEligibility.taskIncarnationCreatedAtEpochMs === record.taskIncarnationCreatedAtEpochMs &&
@@ -3104,6 +3166,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
 			return;
 		}
+		if (this.isCodexDraftStashBlockingProgrammaticDelivery(taskId)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, active);
+			return;
+		}
 		const readiness = await this.resolveInteractivePromptReadiness(entry, plan.requiresCodexStartupPromptReady);
 		// await 期间 session 可能已被替换/结束：复查同一 active 仍在。
 		const currentEntry = this.entries.get(taskId);
@@ -3119,6 +3185,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		if (automaticPasteSubmissionReceiptByActiveProcess.has(currentActive)) {
+			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
+			return;
+		}
+		if (this.isCodexDraftStashBlockingProgrammaticDelivery(taskId)) {
 			this.scheduleTaskChatInputDeliveryRecheck(plan, currentActive);
 			return;
 		}
@@ -3407,7 +3477,19 @@ export class TerminalSessionManager implements TerminalSessionService {
 				: {}),
 			isCurrent: bindingStillMatches,
 			beforeSubmit: async () => {
-				if (!bindingStillMatches() || active.lastUserInputAt !== capturedHumanInputAt) return false;
+				// 尚未提交的原生注入让暂存先完成；不得因这段短暂互斥把待发消息结算成失败。
+				while (
+					bindingStillMatches() &&
+					this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId) &&
+					now() < plan.deadlineAt
+				)
+					await new Promise<void>((resolve) => setTimeout(resolve, 50));
+				if (
+					!bindingStillMatches() ||
+					active.lastUserInputAt !== capturedHumanInputAt ||
+					this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
+				)
+					return false;
 				if (
 					plan.validateBeforeTerminalWrite &&
 					!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
@@ -3418,7 +3500,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 					))
 				)
 					return false;
-				return bindingStillMatches() && active.lastUserInputAt === capturedHumanInputAt;
+				return (
+					bindingStillMatches() &&
+					active.lastUserInputAt === capturedHumanInputAt &&
+					!this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
+				);
 			},
 			onRequestAttempted: async (_observation) => {
 				if (!bindingStillMatches()) return;
@@ -3814,6 +3900,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			onAutomaticFailureContinuationReceipt?: (outcome: TaskChatInputDeliveryOutcome) => void;
 		},
 	): Promise<boolean> {
+		if (this.isCodexDraftStashBlockingProgrammaticDelivery(taskId)) return false;
 		const entry = this.entries.get(taskId);
 		const workspaceId = entry?.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : undefined;
 		let automaticPasteSubmissionReceipt: PendingProgrammaticDeliveryReceipt | null = null;
@@ -4475,6 +4562,13 @@ export class TerminalSessionManager implements TerminalSessionService {
 			: null;
 	}
 
+	private automaticFailureContinuationSoftDeferral(taskId: string): string | null {
+		return (
+			this.automaticFailureContinuationModalDeferral(taskId) ??
+			(this.isCodexDraftStashBlockingProgrammaticDelivery(taskId) ? "codex_draft_stash_in_progress" : null)
+		);
+	}
+
 	private endActiveOutputReactionEpisode(
 		entry: SessionEntry,
 		taskId: string,
@@ -4846,6 +4940,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 			if (adoptsTaskAgentSession) {
 				this.processTaskAgentPtyOutputChunk(taskId, entry, chunk);
+				if (this.codexDraftStashRecoveryTaskIds.has(taskId)) void this.resumeCodexDraftStashRetainedInput(taskId);
 			} else {
 				this.processShellPtyOutputChunk(entry, chunk);
 			}
@@ -4999,6 +5094,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.agentOutputUtf8StreamDecoderByActiveProcess.set(active, kimiCatchUpOutputUtf8StreamDecoder);
 		}
 		entry.terminalStateMirror = terminalStateMirror;
+		void this.resumeCodexDraftStashRetainedInput(taskId);
 		// EXPERIMENT_NODE: 接管后的会话暂不恢复自动重启（restartRequest 跨重启持久化之后再恢复，计划 P5）。
 		entry.restartRequest = null;
 		entry.suppressAutoRestartOnExit = false;
@@ -5828,7 +5924,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const sourceNativeConversationSessionId = resumesExistingConversation
 			? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 			: (request.taskAgentSessionInitialization?.sourceSessionId ??
-				request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+				request.taskConversationSessionContextForkSourceNativeSessionId ??
 				request.parentSessionId);
 		if (
 			!this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions ||
@@ -5887,7 +5983,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const sourceId = resumesExistingConversation
 				? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 				: (request.taskAgentSessionInitialization?.sourceSessionId ??
-					request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+					request.taskConversationSessionContextForkSourceNativeSessionId ??
 					request.parentSessionId);
 			const environment = { ...process.env, ...request.env };
 			let storageHome =
@@ -6142,6 +6238,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							: null,
 					binary: request.binary,
 					environment: { ...process.env, ...request.env },
+					workingDirectory: request.cwd,
 				});
 				throwIfTaskSessionStartWasCancelled();
 				request = {
@@ -6182,8 +6279,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
-				taskConversationSessionMainContextForkSourceNativeSessionId:
-					request.taskConversationSessionMainContextForkSourceNativeSessionId,
+				taskConversationSessionContextForkSourceNativeSessionId:
+					request.taskConversationSessionContextForkSourceNativeSessionId,
 				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
 				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
 				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
@@ -6196,12 +6293,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way",
 				forkLatestWorkingDirectorySession:
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
-					"forked_from_main_current_turn",
+						"forked_from_main_current_turn" ||
+					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
+						"forked_from_conversation_session",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
 			throwIfTaskSessionStartWasCancelled();
-			if (codexConfigurationWriterBinding)
+			if (codexConfigurationWriterBinding) {
+				const preparedPluginInstallation = await prepareCodexSharedPluginInstallationForNativeLaunch({
+					binding: codexConfigurationWriterBinding,
+					binary: launch.binary ?? request.binary,
+					environment: { ...process.env, ...request.env, ...launch.env },
+					nativeLaunchArguments: launch.args,
+					workingDirectory: request.cwd,
+				});
+				launch.args = preparedPluginInstallation.arguments;
 				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
+			}
 			throwIfTaskSessionStartWasCancelled();
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
@@ -6256,7 +6364,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 						runtimeSessionIncarnationId,
 					})) ?? null;
 			}
+			if (request.agentId === "codex" && request.workspaceId && process.platform !== "win32") {
+				const editorBridge = await prepareCodexDraftStashEditorBridge({
+					workspaceId: request.workspaceId,
+					conversationSessionId: request.taskId,
+					runtimeSessionIncarnationId,
+					environment: env,
+				});
+				Object.assign(env, editorBridge.environmentOverrides);
+			}
 		} catch (error) {
+			await codexControlHost?.cleanup();
 			await launch.cleanup?.();
 			if (isTaskSessionStartCancelled()) {
 				terminalStateMirror.dispose();
@@ -6302,6 +6420,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}
 
 			this.processTaskAgentPtyOutputChunk(request.taskId, entry, chunk);
+			if (this.codexDraftStashRecoveryTaskIds.has(request.taskId))
+				void this.resumeCodexDraftStashRetainedInput(request.taskId);
 		};
 		// 必须紧贴 spawn 且位于它之前武装：Claude 子进程一启动就可能恢复后台 task notification，
 		// 继而同步触发 UserPromptSubmit hook。放在 prepareAgentLaunch 之后可避免 launch 准备失败留下假守卫；
@@ -6656,8 +6776,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				!entry.summary.agentNativeConversationSessionIdentity
 					? {
 							runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: null,
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -7328,7 +7447,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
-	writeInput(taskId: string, data: Buffer): RuntimeTaskSessionSummary | null {
+	writeInput(taskId: string, data: Buffer, codexDraftExportOperationId?: string): RuntimeTaskSessionSummary | null {
 		const entry = this.entries.get(taskId);
 		const isTerminalProtocolResponseOnly =
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: 终端协议必须识别 ESC/BEL 控制字符。
@@ -7364,6 +7483,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			entry.active.session.write(data);
 			return cloneSummary(entry.summary);
 		}
+		const editorBridge = this.readCodexDraftStashBridgeForTask(taskId);
+		if (codexDraftExportOperationId !== undefined) {
+			const reservation = editorBridge ? readCodexDraftEditorReservation(editorBridge) : null;
+			if (
+				reservation?.origin !== "stash" ||
+				reservation.operation.operationId !== codexDraftExportOperationId ||
+				data.length !== 1 ||
+				data[0] !== 0x07
+			)
+				throw new Error("草稿自动导出缺少匹配的输入漏斗令牌。");
+			entry.active.session.write(data);
+			return cloneSummary(entry.summary);
+		}
+		if (this.isCodexDraftStashBlockingTerminalInput(taskId)) {
+			// 前端会锁定输入；已在 WebSocket 路上的字节仍须持久保留，不能静默吞掉。
+			this.retainTerminalInputDuringCodexDraftStash(taskId, data);
+			return cloneSummary(entry.summary);
+		}
 		this.cancelRequestedSideSessionResumeWaitingForNativeIdentity(entry);
 		if (
 			entry.summary.agentId === "kimi" &&
@@ -7393,6 +7530,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			data,
 			entry.active.lastUserInputAt,
 		);
+		if (editorBridge && inputObservation.externalEditorShortcutObserved)
+			reserveCodexDraftEditorInvocation(editorBridge, { origin: "manual", invocationId: randomUUID() });
 		// 原始 Enter 只唤醒读取；空输入、菜单确认与换行不创建可见的提交候选。
 		if (inputObservation.submissionCarriageReturnObserved)
 			this.terminalSessionManagerOptions.onUserTerminalInputSubmissionObservedForSession?.(taskId);
@@ -7445,6 +7584,266 @@ export class TerminalSessionManager implements TerminalSessionService {
 		} else entry.active.session.write(data);
 		// 信任确认、菜单选择与换行都不是接受证据；侧会话预览只随原生接受的正文推进。
 		return cloneSummary(entry.summary);
+	}
+
+	private readCodexDraftStashBridgeForTask(taskId: string): CodexDraftStashEditorBridge | null {
+		const entry = this.entries.get(taskId);
+		if (entry?.summary.agentId !== "codex" || !entry.summary.runtimeSessionIncarnationId) return null;
+		const workspaceId =
+			(entry.restartRequest?.kind === "task" ? entry.restartRequest.request.workspaceId : null) ??
+			entry.summary.codexNativeSessionControlEndpoint?.workspaceId ??
+			this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+		return workspaceId
+			? readCodexDraftStashEditorBridge({
+					workspaceId,
+					conversationSessionId: taskId,
+					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+				})
+			: null;
+	}
+
+	private isCodexDraftStashBlockingProgrammaticDelivery(taskId: string): boolean {
+		return (
+			(this.entries.get(taskId)?.summary.agentId === "codex" &&
+				this.taskIdsWithTerminalInputBoxStashAttemptInFlight.has(taskId)) ||
+			this.isCodexDraftStashBlockingTerminalInput(taskId)
+		);
+	}
+
+	private isCodexDraftStashBlockingTerminalInput(taskId: string): boolean {
+		const bridge = this.readCodexDraftStashBridgeForTask(taskId);
+		const reservation = bridge ? readCodexDraftEditorReservation(bridge) : null;
+		if (reservation?.origin !== "stash") return false;
+		const operationDirectoryPath = getCodexDraftStashOperationDirectory(
+			bridge?.workspaceId ?? "",
+			reservation.operation.operationId,
+		);
+		const finished = readCodexDraftStashJson(join(operationDirectoryPath, "editor-finished.json")) as {
+			exitCode: number;
+		} | null;
+		return (
+			this.taskIdsWithTerminalInputBoxStashAttemptInFlight.has(taskId) ||
+			(finished !== null &&
+				!existsSync(
+					join(
+						operationDirectoryPath,
+						finished.exitCode === 0
+							? "input-box-clear-confirmed.json"
+							: "input-box-restored-after-editor-failure.json",
+					),
+				)) ||
+			Date.now() <= reservation.operation.writeDeadlineAtMs + 3_000
+		);
+	}
+
+	private retainTerminalInputDuringCodexDraftStash(taskId: string, data: Buffer): void {
+		const bridge = this.readCodexDraftStashBridgeForTask(taskId);
+		const reservation = bridge ? readCodexDraftEditorReservation(bridge) : null;
+		if (!bridge || reservation?.origin !== "stash") throw new Error("无法确认输入暂存归属。");
+		const path = join(
+			getCodexDraftStashOperationDirectory(bridge.workspaceId, reservation.operation.operationId),
+			"terminal-input-retained.bin",
+		);
+		const descriptor = openSync(path, "a", 0o600);
+		try {
+			appendFileSync(descriptor, data);
+			fsyncSync(descriptor);
+		} finally {
+			closeSync(descriptor);
+		}
+		this.codexDraftStashRecoveryTaskIds.add(taskId);
+	}
+
+	private requestCapturedCodexDraftPromptRecoveryOnce(operationDirectoryPath: string): void {
+		if (
+			!this.codexCapturedDraftPromptRecoveryCoordinator ||
+			!existsSync(join(operationDirectoryPath, "captured-draft.json")) ||
+			existsSync(join(operationDirectoryPath, "prompt-saved.json")) ||
+			existsSync(join(operationDirectoryPath, "captured-prompt-recovery-requested.json"))
+		)
+			return;
+		writeCodexDraftStashJsonDurably(join(operationDirectoryPath, "captured-prompt-recovery-requested.json"), {
+			requestedAtMs: Date.now(),
+		});
+		this.codexCapturedDraftPromptRecoveryCoordinator.recover();
+	}
+
+	private async resumeCodexDraftStashRetainedInput(taskId: string): Promise<void> {
+		if (
+			this.codexDraftStashRecoveryInFlightTaskIds.has(taskId) ||
+			this.taskIdsWithTerminalInputBoxStashAttemptInFlight.has(taskId)
+		)
+			return;
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active) return;
+		this.codexDraftStashRecoveryInFlightTaskIds.add(taskId);
+		try {
+			const bridge = this.readCodexDraftStashBridgeForTask(taskId);
+			if (!bridge) return;
+			const operation = readCodexDraftStashJson(join(bridge.directoryPath, "most-recent-stash-operation.json")) as {
+				operationId: string;
+			} | null;
+			if (!operation) return;
+			this.codexDraftStashRecoveryTaskIds.add(taskId);
+			const directoryPath = getCodexDraftStashOperationDirectory(bridge.workspaceId, operation.operationId);
+			const finished = readCodexDraftStashJson(join(directoryPath, "editor-finished.json")) as {
+				exitCode: number;
+				finishedAtMs: number;
+			} | null;
+			if (!finished) return;
+			this.requestCapturedCodexDraftPromptRecoveryOnce(directoryPath);
+			if (finished.exitCode === 0) {
+				if (!existsSync(join(directoryPath, "input-box-clear-confirmed.json"))) {
+					const snapshot = await entry.terminalStateMirror?.getScreenSnapshot({
+						includeDimmedTextColumnRanges: true,
+					});
+					if (entry.active !== active || !snapshot || readCodexTerminalComposerOccupancy(snapshot) !== "empty")
+						return;
+					writeCodexDraftStashJsonDurably(join(directoryPath, "input-box-clear-confirmed.json"), {
+						confirmedAtMs: Date.now(),
+					});
+					resetTerminalInputBoxOccupancyTrackerComposition(active.inputBoxOccupancyTracker);
+				}
+				releaseCodexDraftEditorReservation(bridge, operation.operationId);
+			}
+			if (finished.exitCode !== 0) {
+				if (!existsSync(join(directoryPath, "input-box-restored-after-editor-failure.json"))) {
+					const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+					if (
+						entry.active !== active ||
+						!snapshot ||
+						(entry.summary.lastOutputAt ?? 0) < finished.finishedAtMs ||
+						!snapshot.lines.some((line) => /^›(?: |$)/u.test(line.text)) ||
+						snapshot.lines.some((line) => line.text.includes("Save and close external editor"))
+					)
+						return;
+					writeCodexDraftStashJsonDurably(join(directoryPath, "input-box-restored-after-editor-failure.json"), {
+						confirmedAtMs: Date.now(),
+					});
+				}
+				releaseCodexDraftEditorReservation(bridge, operation.operationId);
+			}
+			const replayStartedPath = join(directoryPath, "terminal-input-replay-may-have-started.bin");
+			if (existsSync(replayStartedPath)) {
+				this.emitSummary(
+					updateSummary(entry, {
+						warningMessage: `暂存期间的输入仍有待核对的回放，原文保留于 ${replayStartedPath}`,
+					}),
+				);
+				return;
+			}
+			const retainedInputPath = join(directoryPath, "terminal-input-retained.bin");
+			if (existsSync(retainedInputPath)) {
+				// 先固定回放可能开始的边界；重启后不凭缺失回执重复写入用户按键。
+				renameSync(retainedInputPath, replayStartedPath);
+				const bytes = readFileSync(replayStartedPath);
+				this.writeInput(taskId, bytes);
+				await this.pendingUserTerminalWritesAfterStopByActiveProcess.get(active);
+				if (entry.active !== active) return;
+				renameSync(replayStartedPath, join(directoryPath, "terminal-input-replayed.bin"));
+			}
+			this.codexDraftStashRecoveryTaskIds.delete(taskId);
+		} catch (error) {
+			logTuiFreezeWarning(`Codex 暂存期间输入恢复待重验 taskId=${taskId} reason=${String(error)}`);
+		} finally {
+			this.codexDraftStashRecoveryInFlightTaskIds.delete(taskId);
+		}
+	}
+
+	async stashCodexTaskTerminalInputBoxIntoPromptLibrary(
+		request: StashTaskTerminalInputBoxIntoPromptLibraryRequest,
+	): Promise<RuntimeTerminalInputBoxStashResponse | null> {
+		const entry = this.entries.get(request.taskId);
+		if (entry?.summary.agentId !== "codex") return null;
+		const active = entry.active;
+		const bridge = this.readCodexDraftStashBridgeForTask(request.taskId);
+		const unavailable = (
+			outcome: "codex_draft_stash_capability_not_ready" | "input_box_contains_unsupported_attachments",
+			error: string,
+		) => ({
+			ok: false,
+			outcome,
+			stashedPromptId: null,
+			stashedTextCharacterCount: 0,
+			fidelity: null,
+			error,
+		});
+		if (
+			!active ||
+			!bridge ||
+			request.scope !== "task" ||
+			request.initiatedBy !== "human_pressed_stash_key_in_terminal"
+		)
+			return unavailable(
+				"codex_draft_stash_capability_not_ready",
+				"当前 Codex 会话尚未具备草稿暂存能力；新建或正常重启后生效，原稿保留。",
+			);
+		const facets = resolveSessionFacets(entry.summary);
+		if (
+			(facets.userTurnKind && MODAL_USER_DECISION_TURN_KINDS.has(facets.userTurnKind)) ||
+			active.submitConfirmTimer ||
+			this.pendingUserTerminalWritesAfterStopByActiveProcess.has(active)
+		)
+			return unavailable(
+				"codex_draft_stash_capability_not_ready",
+				"当前会话正在处理待答或输入提交，请稍后暂存；原稿保留。",
+			);
+		const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+		if (!snapshot || !snapshot.lines.some((line) => /^›(?: |$)/u.test(line.text)))
+			return unavailable("codex_draft_stash_capability_not_ready", "当前原生输入框尚未就绪，原稿保留。");
+		if (snapshot.lines.some((line) => /\[Image #\d+\]/u.test(line.text)))
+			return unavailable(
+				"input_box_contains_unsupported_attachments",
+				"当前草稿可能带有附件，尚不支持完整暂存；原稿保留。",
+			);
+		const operationId = request.operationId ?? randomUUID();
+		let outputSequenceNumberWhenClearWasAuthorized = active.ptyOutputChunkArrivalSequenceNumber;
+		const result = await runCodexDraftStashOperation({
+			bridge,
+			taskId: request.taskId,
+			operationId,
+			isCurrent: () => this.entries.get(request.taskId)?.active === active,
+			onClearAuthorized: () => {
+				outputSequenceNumberWhenClearWasAuthorized = active.ptyOutputChunkArrivalSequenceNumber;
+			},
+			triggerExport: () => {
+				this.writeInput(request.taskId, Buffer.from([0x07]), operationId);
+			},
+			confirmInputBoxEmpty: async () => {
+				if (
+					this.entries.get(request.taskId)?.active !== active ||
+					active.ptyOutputChunkArrivalSequenceNumber <= outputSequenceNumberWhenClearWasAuthorized
+				)
+					return false;
+				const currentSnapshot = await entry.terminalStateMirror?.getScreenSnapshot({
+					includeDimmedTextColumnRanges: true,
+				});
+				return currentSnapshot !== undefined && readCodexTerminalComposerOccupancy(currentSnapshot) === "empty";
+			},
+			confirmInputBoxRestoredAfterFailure: async () => {
+				if (this.entries.get(request.taskId)?.active !== active) return true;
+				const finished = readCodexDraftStashJson(
+					join(getCodexDraftStashOperationDirectory(bridge.workspaceId, operationId), "editor-finished.json"),
+				) as { finishedAtMs: number } | null;
+				const currentSnapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+				return (
+					finished !== null &&
+					(entry.summary.lastOutputAt ?? 0) >= finished.finishedAtMs &&
+					currentSnapshot !== undefined &&
+					currentSnapshot.lines.some((line) => /^›(?: |$)/u.test(line.text)) &&
+					!currentSnapshot.lines.some((line) => line.text.includes("Save and close external editor"))
+				);
+			},
+		});
+		if (this.entries.get(request.taskId)?.active === active && result.outcome === "stashed_into_prompt_library")
+			resetTerminalInputBoxOccupancyTrackerComposition(active.inputBoxOccupancyTracker);
+		this.codexDraftStashRecoveryTaskIds.add(request.taskId);
+		if (result.outcome === "prompt_library_write_failed")
+			this.requestCapturedCodexDraftPromptRecoveryOnce(
+				getCodexDraftStashOperationDirectory(bridge.workspaceId, operationId),
+			);
+		return result;
 	}
 
 	getTaskHumanTerminalInputMutationSequenceNumber(taskId: string): number | null {
@@ -7786,6 +8185,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		} finally {
 			// finally 而不是成功路径末尾：闸门泄漏一次，这个 task 此后再也暂存不了任何东西。
 			this.taskIdsWithTerminalInputBoxStashAttemptInFlight.delete(taskId);
+			void this.resumeCodexDraftStashRetainedInput(taskId);
 		}
 	}
 
@@ -7822,6 +8222,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		expectedTerminalSessionIncarnationToken: string,
 	): boolean {
 		const entry = this.entries.get(taskId);
+		// Codex 没有 Claude 的原生 stash；导出与清框必须走本代编辑器桥接。
+		if (entry?.summary.agentId === "codex") return false;
 		if (!entry?.active) {
 			return false;
 		}
@@ -8518,7 +8920,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	markAgentConversationPromptSubmissionPending(
 		taskId: string,
 		attemptedAtMs: number = now(),
-		context: { source: "harness_submit_hook" | "programmatic_submission"; submittedPromptText?: string } = {
+		context: {
+			source: "harness_submit_hook" | "programmatic_submission";
+			submittedPromptText?: string;
+			submittedPromptTextNormalization?: RuntimeSubmittedPromptTextNormalization;
+		} = {
 			source: "harness_submit_hook",
 		},
 	): RuntimeTaskSessionSummary | null {
@@ -8528,6 +8934,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!Number.isFinite(attemptedAtMs) || attemptedAtMs < (entry.summary.startedAt ?? 0))
 			return cloneSummary(entry.summary);
 		const current = entry.summary.agentConversationPromptSubmissionAcceptance;
+		const submittedPromptTextNormalization =
+			context.source === "harness_submit_hook"
+				? (context.submittedPromptTextNormalization ?? "collapse_all_whitespace")
+				: "preserve_internal_whitespace";
 		const receipt = entry.active?.programmaticDeliveryReceipt;
 		if (
 			current?.status !== "accepted" &&
@@ -8535,7 +8945,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			context.source === "harness_submit_hook" &&
 			receipt?.phase === "awaiting_submit_confirmation" &&
 			(context.submittedPromptText !== undefined
-				? submittedPromptSha256(context.submittedPromptText) === current.submittedPromptSha256
+				? submittedPromptSha256(context.submittedPromptText, submittedPromptTextNormalization) ===
+					submittedPromptSha256(receipt.promptText, submittedPromptTextNormalization)
 				: (entry.active?.lastUserInputAt ?? 0) < current.attemptedAtMs)
 		)
 			return cloneSummary(entry.summary);
@@ -8566,8 +8977,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 				attemptedAtMs,
 				submissionId: randomUUID(),
 				submissionSource: context.source,
+				submittedPromptTextNormalization,
 				...(context.submittedPromptText !== undefined
-					? { submittedPromptSha256: submittedPromptSha256(context.submittedPromptText) }
+					? {
+							submittedPromptSha256: submittedPromptSha256(
+								context.submittedPromptText,
+								submittedPromptTextNormalization,
+							),
+						}
 					: {}),
 				...(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 					? { nativeSessionId: entry.summary.agentNativeConversationSessionIdentity.nativeSessionId }
@@ -8731,13 +9148,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		)
 			return null;
 
-		const nativeInputMatchesPendingSubmission = !(
-			candidate &&
-			candidate.status !== "accepted" &&
-			candidate.submittedPromptSha256 &&
-			input.submittedPromptText !== undefined &&
-			submittedPromptSha256(input.submittedPromptText) !== candidate.submittedPromptSha256
-		);
+		// 有损摘要必须先扫描历史证明唯一，不能由单个实时事件冒领空白不同的输入。
+		const nativeInputMatchesPendingSubmission =
+			!(entry.summary.agentId === "codex" && requiresLegacyHookPromptTextNormalizationReconciliation(candidate)) &&
+			!(
+				candidate &&
+				candidate.status !== "accepted" &&
+				candidate.submittedPromptSha256 &&
+				(input.submittedPromptText === undefined ||
+					submittedPromptSha256(input.submittedPromptText) !== candidate.submittedPromptSha256)
+			);
 
 		const managedStartup = this.managedArgumentStartupDeliveryByTaskId.get(taskId);
 		if (
@@ -8841,7 +9261,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? previous
 					: {
 							...(previous && previous.status !== "accepted"
-								? { submissionId: previous.submissionId, submissionSource: previous.submissionSource }
+								? {
+										submissionId: previous.submissionId,
+										submissionSource: previous.submissionSource,
+										submittedPromptTextNormalization: previous.submittedPromptTextNormalization,
+									}
 								: {}),
 							status: "accepted",
 							attemptedAtMs:
@@ -9808,8 +10232,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// viewers reattaching via the control socket would receive a restore snapshot from
 		// the new mirror that never saw the banner.
 		const entry = this.entries.get(request.taskId);
-		if (entry) {
-			const banner = Buffer.from("\r\n[kanban] Refreshing terminal session...\r\n", "utf8");
+		if (
+			entry?.active &&
+			entry.summary.runtimeSessionIncarnationId !== summaryBeforeProcessStop?.runtimeSessionIncarnationId
+		) {
+			const banner = Buffer.from("\r\n[kanban] 终端会话已重新启动。\r\n", "utf8");
 			entry.terminalStateMirror?.applyOutput(banner);
 			for (const listener of entry.listeners.values()) {
 				listener.onOutput?.(banner);
@@ -10254,6 +10681,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	dispose(): void {
+		this.codexCapturedDraftPromptRecoveryCoordinator?.dispose();
 		for (const coordinator of this.automaticFailureContinuationCoordinators.values())
 			coordinator.suspendForRuntimeShutdown();
 		if (this.automaticFailureContinuationRestoreRetryTimer)
@@ -10466,7 +10894,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					const requestForRestart = cloneStartTaskSessionRequest(request);
-					if (requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId) {
+					if (requestForRestart.taskConversationSessionContextForkSourceNativeSessionId) {
 						if (
 							await this.deferSideSessionResumeWaitingForNativeIdentity(entry, {
 								...requestForRestart,
@@ -10479,7 +10907,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							!observedChildIdentity ||
 							observedChildIdentity.sourceAgentId !== requestForRestart.agentId ||
 							observedChildIdentity.nativeSessionId ===
-								requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId
+								requestForRestart.taskConversationSessionContextForkSourceNativeSessionId
 						) {
 							this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
 								entry,
