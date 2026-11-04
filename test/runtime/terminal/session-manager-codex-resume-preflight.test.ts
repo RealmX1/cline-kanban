@@ -125,7 +125,7 @@ describe("续接预检在任何销毁动作之前", () => {
 	});
 
 	it.each(["wrong-identity", "subagent", "corrupt-compression", "invalid-checksum"] as const)(
-		"刷新拒绝 %s 压缩转录，保留旧 PTY 与原身份",
+		"刷新遇到 %s 压缩转录时等待可信补证，保留旧 PTY 与原身份",
 		async (scenario) => {
 			const instance = manager();
 			await instance.startTaskSession(request());
@@ -141,10 +141,12 @@ describe("续接预检在任何销毁动作之前", () => {
 			const identity = { sourceAgentId: "codex" as const, nativeSessionId, transcriptPath, observedAt: 2 };
 			instance.applyAgentNativeConversationSessionIdentity(request().taskId, identity);
 			const oldProcess = ptySessionSpawnMock.mock.results[0]?.value;
-			await expect(instance.refreshTaskTerminal({ ...request(), resumeFromTrash: true })).rejects.toThrow(
-				nativeSessionId,
+			const waitingSummary = await instance.refreshTaskTerminal({ ...request(), resumeFromTrash: true });
+			expect(waitingSummary.taskConversationSessionNativeIdentityRecovery?.resumeRequestedAtMs).toEqual(
+				expect.any(Number),
 			);
 			expect(oldProcess.stop).not.toHaveBeenCalled();
+			expect(oldProcess.write).not.toHaveBeenCalled();
 			expect(ptySessionSpawnMock).toHaveBeenCalledOnce();
 			expect(instance.getSummary(request().taskId)).toMatchObject({
 				pid: 1234,
