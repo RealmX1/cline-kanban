@@ -158,7 +158,7 @@ for (const [width, height] of [
 		const initialAgent = (await agent.boundingBox())!;
 		const initialLeft = (await left.boundingBox())!;
 		await page.getByRole("button", { name: "新建会话", exact: true }).click();
-		await page.getByLabel("首条消息（可选）", { exact: true }).fill("隐藏后保留的会话草稿");
+		await page.getByPlaceholder("首条消息可留空，创建后再输入…", { exact: true }).fill("隐藏后保留的会话草稿");
 		await page.keyboard.press("Escape");
 		await page.getByRole("button", { name: "隐藏任务工作台", exact: true }).click();
 		await expect(workbench).toBeHidden();
@@ -170,10 +170,12 @@ for (const [width, height] of [
 		await page.keyboard.press(`${evidence.modifier}+Alt+b`);
 		await expect(workbench).toBeVisible();
 		await page.getByRole("button", { name: "新建会话", exact: true }).click();
-		await expect(page.getByLabel("首条消息（可选）", { exact: true })).toHaveValue("隐藏后保留的会话草稿");
+		const restoredSessionDraftInput = page.getByPlaceholder("首条消息可留空，创建后再输入…", { exact: true });
+		await expect(restoredSessionDraftInput).toHaveValue("隐藏后保留的会话草稿");
+		await restoredSessionDraftInput.focus();
 		await page.keyboard.press(`${evidence.modifier}+b`);
 		await expect(left).toBeVisible();
-		await page.getByRole("button", { name: "Close", exact: true }).click();
+		await page.getByRole("button", { name: "关闭任务编辑器", exact: true }).click();
 		await expect(page.getByRole("dialog")).toBeHidden();
 		await page.locator(".xterm-helper-textarea").focus();
 		const originalScrollTop = await page.locator(".kb-detail-task-list-scroll").evaluate((element) => {

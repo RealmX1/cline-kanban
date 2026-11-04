@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { CardDetailView } from "../src/components/card-detail-view";
 import { FocusViewCrossProjectTaskOpenInTransitShell } from "../src/components/detail-panels/focus-view-cross-project-task-open-in-transit-shell";
 import { ProjectNavigationPanel } from "../src/components/project-navigation-panel";
+import { SideSessionCreationWorkbench } from "../src/components/side-session-creation-workbench";
 import { TaskCommentsDialogProvider } from "../src/components/task-comments-dialog-provider";
 import { TopBar } from "../src/components/top-bar";
 import { TooltipProvider } from "../src/components/ui/tooltip";
@@ -281,6 +282,7 @@ function Harness() {
 						)}
 					</div>
 				</div>
+				<SideSessionCreationWorkbench />
 			</TaskCommentsDialogProvider>
 		</LayoutCustomizationsProvider>
 	);
