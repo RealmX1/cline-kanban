@@ -45,6 +45,22 @@ function submittedValuesMatching(card: BoardCard): TaskEditorSubmittedTaskCardFi
 }
 
 describe("buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor", () => {
+	it("effort 单独改变进入补丁，恢复继承发送 null", () => {
+		const card = seededTaskCard();
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submittedValuesMatching(card),
+				codexReasoningEffortOverride: "ultra",
+			}),
+		).toEqual({ codexReasoningEffortOverride: "ultra" });
+		const selected = seededTaskCard({ codexReasoningEffortOverride: "ultra" });
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(
+				selected,
+				submittedValuesMatching(selected),
+			),
+		).toEqual({ codexReasoningEffortOverride: null });
+	});
 	it("表单与铺表单时的卡片完全一致：patch 为空（标题也不发）", () => {
 		const card = seededTaskCard({ prompt: "  Do the thing  " });
 		expect(

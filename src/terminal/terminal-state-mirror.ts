@@ -1,5 +1,6 @@
 import serializeAddonModule from "@xterm/addon-serialize";
 import headlessTerminalModule from "@xterm/headless";
+import { HostedSessionTerminalModeStateTracker } from "../agent-session-pty-host/wire-protocol/hosted-session-terminal-mode-checkpoint";
 
 import type { TerminalScreenLineSnapshot, TerminalScreenSnapshot } from "./terminal-input-box-reader";
 
@@ -17,10 +18,13 @@ export interface TerminalRestoreSnapshot {
 	rows: number;
 	// 尚未形成码点的 UTF-8 尾字节不在序列化屏幕里，handover 必须从 host 重读它们。
 	pendingUtf8InputByteLength?: number;
+	// false 的屏幕仍可显示，但不能当作下一次接管的可信模式来源。
+	terminalModesAreKnown?: boolean;
 }
 
 interface TerminalStateMirrorOptions {
 	onInputResponse?: (data: string) => void;
+	onTerminalModesRecovered?: () => void;
 }
 
 export class TerminalStateMirror {
@@ -40,8 +44,13 @@ export class TerminalStateMirror {
 	private isSnapshotDirty = true;
 	private cachedSnapshot: TerminalRestoreSnapshot | null = null;
 	private pendingUtf8InputBytes = Buffer.alloc(0);
+	private terminalModeRecoveryTracker: HostedSessionTerminalModeStateTracker | null = null;
 
-	constructor(cols: number, rows: number, options: TerminalStateMirrorOptions = {}) {
+	constructor(
+		cols: number,
+		rows: number,
+		private readonly options: TerminalStateMirrorOptions = {},
+	) {
 		this.terminal = new Terminal({
 			allowProposedApi: true,
 			cols,
@@ -81,6 +90,9 @@ export class TerminalStateMirror {
 		this.enqueueOperation(
 			() =>
 				new Promise<void>((resolve) => {
+					this.terminalModeRecoveryTracker?.applyOutput(Buffer.from(chunkCopy));
+					const terminalModesRecovered = this.terminalModeRecoveryTracker?.terminalModesAreKnown === true;
+					if (terminalModesRecovered) this.terminalModeRecoveryTracker = null;
 					// 只检查最后四字节，保留与 xterm 增量解码器相同的未完成字符前缀；不读取 xterm 私有状态。
 					const decoderTail =
 						chunkCopy.length >= 4
@@ -99,10 +111,23 @@ export class TerminalStateMirror {
 					this.terminal.write(chunkCopy, () => {
 						// 写入「被应用」的时刻置 dirty（见类注释 (1)）。
 						this.isSnapshotDirty = true;
+						if (terminalModesRecovered) this.options.onTerminalModesRecovered?.();
 						resolve();
 					});
 				}),
 		);
+	}
+
+	get terminalModesAreKnown(): boolean {
+		return this.terminalModeRecoveryTracker === null;
+	}
+
+	markTerminalModesUnknownUntilReinitialized(): void {
+		this.enqueueOperation(() => {
+			this.terminalModeRecoveryTracker = new HostedSessionTerminalModeStateTracker();
+			this.terminalModeRecoveryTracker.markTerminalModesUnknown();
+			this.isSnapshotDirty = true;
+		});
 	}
 
 	resize(cols: number, rows: number): void {
@@ -215,6 +240,7 @@ export class TerminalStateMirror {
 			...(this.pendingUtf8InputBytes.byteLength > 0
 				? { pendingUtf8InputByteLength: this.pendingUtf8InputBytes.byteLength }
 				: {}),
+			...(!this.terminalModesAreKnown ? { terminalModesAreKnown: false } : {}),
 		};
 		this.cachedSnapshot = snapshot;
 		this.isSnapshotDirty = false;

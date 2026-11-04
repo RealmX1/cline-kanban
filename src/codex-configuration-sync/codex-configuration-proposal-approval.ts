@@ -1,5 +1,4 @@
-import { lstat, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { realpath } from "node:fs/promises";
 import { prepareCodexDirectoryVolumeObservations } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
 	captureCodexConfigurationConflictPresentationEvidence,
@@ -17,6 +16,7 @@ import {
 	expireCodexConfigurationProfileFeedbackSuggestions,
 	updateCodexConfigurationProfileFields,
 } from "./codex-configuration-profiles";
+import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
@@ -26,6 +26,7 @@ import {
 	assertCodexConfigurationWriterBindingIdentity,
 	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
+import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "./codex-source-shared-plugin-installation-directories";
 
 // 所选提案可能来自已退休 writer；不能把 observe 的活跃集合当作审批的卷资格集合。
 export async function prepareCodexConfigurationProposalIdentityVolumeObservations(changeIds: Iterable<string>) {
@@ -42,6 +43,7 @@ export async function prepareCodexConfigurationProposalIdentityVolumeObservation
 				binding.sourceHomeDirectoryPath,
 				binding.conversationStorageHomeDirectoryPath,
 				binding.sqliteHomeDirectoryPath,
+				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(binding),
 			])
 				paths.add(path);
 	}
@@ -59,6 +61,7 @@ export class CodexConfigurationApprovalError extends Error {
 
 export function isCodexConfigurationChangeApprovedForPropagation(change: StoredCodexConfigurationChange) {
 	return (
+		!isCodexConfigurationChangeExcludedFromSettingsSynchronization(change) &&
 		change.recordKind !== "source_observation" &&
 		(change.approvalStatus === "approved" || change.approvalStatus === "historical") &&
 		change.mergeStatus === "shared_default_updated"
@@ -88,10 +91,19 @@ export async function approveStoredCodexConfigurationProposal(
 	expectedSharedValueDigest?: string,
 ) {
 	expireCodexConfigurationProfileFeedbackSuggestions(store);
+	if (isCodexConfigurationChangeExcludedFromSettingsSynchronization(change))
+		throw new CodexConfigurationApprovalError("not_approvable", "外部配置与 desktop 设置已退出 Kanban 设置审批。");
 	if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
 		throw new CodexConfigurationApprovalError("not_approvable", "此记录不是待审批设置提案。");
 	const source = store.sources[change.sourceIdentity];
 	if (!source) throw new CodexConfigurationApprovalError("source_unverifiable", "配置来源绑定缺失，恢复后可重试。");
+	const sourceWriter = store.writers[change.sourceWriterId];
+	if (
+		change.codexConfigurationProfileId &&
+		sourceWriter &&
+		sourceWriter.codexConfigurationProfileId !== change.codexConfigurationProfileId
+	)
+		throw new CodexConfigurationApprovalError("stale_version", "来源会话已改选 profile，旧建议不能更新原 profile。");
 	const sharedFields = codexConfigurationChangeSharedFields(store, change) ?? source.fields;
 	const shared = sharedFields[change.fieldKey];
 	const feedbackFields = { ...(change.relatedFields ?? { [change.fieldKey]: change.value }) };
@@ -107,6 +119,8 @@ export async function approveStoredCodexConfigurationProposal(
 				!sameConfigurationField(sharedFields[fieldKey], change.sharedFieldsAtObservation?.[fieldKey]),
 		);
 	if (
+		(expectedSharedValueDigest !== undefined &&
+			currentCodexConfigurationSharedValueDigest(store, change) !== expectedSharedValueDigest) ||
 		relatedSharedFieldChanged ||
 		(!sameConfigurationField(shared, change.value) &&
 			(resolveSharedConflict
@@ -126,7 +140,6 @@ export async function approveStoredCodexConfigurationProposal(
 	let current: CodexConfigurationFields;
 	try {
 		await resolveVerifiedCodexConfigurationSourceIdentity(source.home, store, change.sourceIdentity);
-		if (!(await lstat(join(source.home, "config.toml"))).isFile()) throw new Error("来源身份或配置不可核验");
 		const writer = store.writers[change.sourceWriterId];
 		if (writer) await assertCodexConfigurationWriterBindingIdentity(writer.binding);
 		current = await projectCodexConfigurationFields({

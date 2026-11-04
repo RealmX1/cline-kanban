@@ -54,6 +54,34 @@ function hydrateOne(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSumma
 }
 
 describe("TerminalSessionManager.hydrateFromRecord 运行态对账", () => {
+	it("交接暂停时保留冻结的执行归属，WebSocket 陈旧会话恢复也不抹去目录", () => {
+		const persisted = createPersistedSummary({
+			taskConversationSessionMetadata: {
+				workspaceTaskId: "task-1",
+				taskConversationSessionRole: "main",
+				taskConversationSessionContextSource: "main",
+				parentTaskConversationSessionId: null,
+				mainSessionOriginTurnNumber: null,
+				mainSessionOriginUserMessagePreview: null,
+				latestUserMessagePreview: null,
+				taskAutomationSuspendedForMainSessionHandover: true,
+			},
+		});
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({ "task-1": persisted });
+		const hydrated = manager.getSummary("task-1");
+		expect(hydrated?.pid).toBeNull();
+		expect(hydrated?.workspacePath).toBe(persisted.workspacePath);
+		expect(hydrated?.startedAt).toBe(persisted.startedAt);
+		manager.hydrateFromRecord({
+			"task-1": { ...persisted, state: "awaiting_review", pid: null, reviewReason: "exit" },
+		});
+		const recovered = manager.recoverStaleSession("task-1");
+		expect(recovered?.workspacePath).toBe(persisted.workspacePath);
+		expect(recovered?.startedAt).toBe(persisted.startedAt);
+		expect(recovered?.pid).toBeNull();
+		expect(recovered && resolveSessionFacets(recovered).liveness).toBe("none");
+	});
 	it("声称 live 且 pid 已不存在的会话，重建时归零为 idle 并清空进程字段", () => {
 		tuiFreezeWarnings.length = 0;
 		const persisted = createPersistedSummary();

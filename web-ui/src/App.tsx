@@ -1,8 +1,4 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-// Main React composition root for the browser app.
-// Keep this file focused on wiring top-level hooks and surfaces together, and
-// push runtime-specific orchestration down into hooks and service modules.
-import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime-task-agent-permission-mode";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -39,6 +35,7 @@ import { PostDeployVerificationTaskClosureFormHost } from "@/components/post-dep
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
+import { SideSessionCreationWorkbench } from "@/components/side-session-creation-workbench";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
@@ -89,6 +86,7 @@ import { useExploratoryFindings } from "@/hooks/use-exploratory-findings";
 import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
@@ -119,6 +117,7 @@ import { useWorkspaceSync } from "@/hooks/use-workspace-sync";
 import { LayoutCustomizationsProvider } from "@/resize/layout-customizations";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
 import { useProjectNavigationLayout } from "@/resize/use-project-navigation-layout";
+import { useSidebarVisibilityLayout } from "@/resize/use-sidebar-visibility-layout";
 import {
 	getTaskAgentNavbarHint,
 	isTaskAgentSetupSatisfied,
@@ -160,6 +159,9 @@ export default function App(): ReactElement {
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const sidebarLayout = useProjectNavigationLayout();
+	const sidebarVisibility = useSidebarVisibilityLayout();
+	const isMobile = useIsMobile();
+	const [isFocusViewDiffExpanded, setIsFocusViewDiffExpanded] = useState(false);
 	const [isClearTrashDialogOpen, setIsClearTrashDialogOpen] = useState(false);
 	const [isGitHistoryOpen, setIsGitHistoryOpen] = useState(false);
 	// Exploratory findings 浏览器开关（蓝图 §G.2）：isGitHistoryOpen 同款形态——
@@ -708,9 +710,11 @@ export default function App(): ReactElement {
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
 		newTaskCodexConfigurationProfileId,
+		newTaskCodexReasoningEffortOverride,
 		newTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationProfileId,
+		setNewTaskCodexReasoningEffortOverride,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
 		newTaskConversationMode,
@@ -742,9 +746,11 @@ export default function App(): ReactElement {
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
 		editTaskCodexConfigurationProfileId,
+		editTaskCodexReasoningEffortOverride,
 		editTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationProfileId,
+		setEditTaskCodexReasoningEffortOverride,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
 		editTaskConversationMode,
@@ -812,9 +818,7 @@ export default function App(): ReactElement {
 		ompAgentSessionTransportForNewTasks: runtimeProjectConfig?.ompAgentSessionTransportForNewTasks ?? "pty_terminal",
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		// 全局那个旧开关如今只决定「新任务的默认权限档」，不再直接作用于会话启动。
-		newTaskAgentPermissionModeByDefault: resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
-			runtimeProjectConfig?.agentAutonomousModeEnabled ?? true,
-		),
+		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 		onTaskCardsCreatedInOtherProject: handleTaskCardsCreatedInOtherProject,
@@ -969,7 +973,10 @@ export default function App(): ReactElement {
 	// 这里只门控「首次启动」——已启动的会话由 useHomeAgentSession 内部按 workspace+taskId 记住，切走分段、
 	// 折叠侧边栏、进入任务详情、切换项目都不会停止它（侧边栏会话的对话内容零持久化，停掉即不可恢复）。
 	const isHomeSidebarAgentSectionCurrentlyVisible =
-		!selectedCard && !sidebarLayout.isCollapsed && homeSidebarSection === "agent";
+		!selectedCard &&
+		!sidebarLayout.isCollapsed &&
+		(isMobile || !sidebarVisibility.isHomeProjectSidebarHidden) &&
+		homeSidebarSection === "agent";
 	const homeSidebarAgentPanel = useHomeSidebarAgentPanel({
 		currentProjectId: projectRuntimeWorkspaceId,
 		hasNoProjects,
@@ -1396,30 +1403,6 @@ export default function App(): ReactElement {
 		onAssignProjectToNumericSlotGroupNumber: assignProjectToNumericSlotGroupNumber,
 	});
 
-	useAppHotkeys({
-		selectedCard,
-		isDetailTerminalOpen,
-		isHomeTerminalOpen: showHomeBottomTerminal,
-		isHomeGitHistoryOpen: !selectedCard && isGitHistoryOpen,
-		// Board Scope 下 c 打开带目标项目字段的建卡框（以前会悄悄建到当前项目）。
-		canUseCreateTaskShortcut:
-			!hasNoProjects && (projectRuntimeWorkspaceId !== null || isBoardScopeAllProjectsSelected),
-		canUseTaskSpotlightSearch: taskSpotlightSearch.canOpen,
-		handleToggleDetailTerminal,
-		handleToggleHomeTerminal,
-		handleToggleExpandDetailTerminal,
-		handleToggleExpandHomeTerminal: handleToggleExpandHomeTerminal,
-		handleOpenCreateTask: handleOpenCreateTaskInCurrentScope,
-		handleToggleTaskSpotlightSearch: taskSpotlightSearch.toggle,
-		handleOpenSettings,
-		handleToggleGitHistory,
-		handleCloseGitHistory,
-		onRequestStartAllReadyBacklogTasks: requestStartAllReadyBacklogTasksConfirmation,
-		handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: hasNoProjects
-			? null
-			: handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
-	});
-
 	useEffect(() => {
 		if (!pendingEditedTaskCardAgentSessionStart) {
 			return;
@@ -1629,6 +1612,56 @@ export default function App(): ReactElement {
 	// 否则一次跨项目打开会画出「旧详情 → 首页 / 看板 → 外壳 → 新详情」四个全屏状态。
 	const isFocusViewChromeShown =
 		selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit || taskLookupWorkbench.isOpen;
+	const canToggleFocusViewTaskSidebars = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
+	const handleToggleCurrentPageLeftSidebar = useCallback(() => {
+		if (isMobile) {
+			handleToggleSidebar();
+		} else if (isFocusViewChromeShown) {
+			sidebarVisibility.setFocusViewTaskListSidebarHidden(
+				isFocusViewDiffExpanded ? false : !sidebarVisibility.isFocusViewTaskListSidebarHidden,
+			);
+			setIsFocusViewDiffExpanded(false);
+		} else {
+			sidebarVisibility.setHomeProjectSidebarHidden(!sidebarVisibility.isHomeProjectSidebarHidden);
+		}
+	}, [isMobile, isFocusViewChromeShown, isFocusViewDiffExpanded, handleToggleSidebar, sidebarVisibility]);
+	const handleToggleFocusViewWorkbenchSidebar = useCallback(() => {
+		sidebarVisibility.setFocusViewWorkbenchSidebarHidden(!sidebarVisibility.isFocusViewWorkbenchSidebarHidden);
+		setIsFocusViewDiffExpanded(false);
+	}, [sidebarVisibility]);
+	useEffect(() => {
+		if (!isFocusViewChromeShown) setIsFocusViewDiffExpanded(false);
+	}, [isFocusViewChromeShown]);
+
+	useAppHotkeys({
+		selectedCard,
+		handleToggleCurrentPageLeftSidebar:
+			(isMobile && isFocusViewChromeShown) || (isFocusViewChromeShown && !canToggleFocusViewTaskSidebars)
+				? null
+				: handleToggleCurrentPageLeftSidebar,
+		handleToggleFocusViewWorkbenchSidebar:
+			!isMobile && canToggleFocusViewTaskSidebars ? handleToggleFocusViewWorkbenchSidebar : null,
+		isDetailTerminalOpen,
+		isHomeTerminalOpen: showHomeBottomTerminal,
+		isHomeGitHistoryOpen: !selectedCard && isGitHistoryOpen,
+		// Board Scope 下 c 打开带目标项目字段的建卡框（以前会悄悄建到当前项目）。
+		canUseCreateTaskShortcut:
+			!hasNoProjects && (projectRuntimeWorkspaceId !== null || isBoardScopeAllProjectsSelected),
+		canUseTaskSpotlightSearch: taskSpotlightSearch.canOpen,
+		handleToggleDetailTerminal,
+		handleToggleHomeTerminal,
+		handleToggleExpandDetailTerminal,
+		handleToggleExpandHomeTerminal: handleToggleExpandHomeTerminal,
+		handleOpenCreateTask: handleOpenCreateTaskInCurrentScope,
+		handleToggleTaskSpotlightSearch: taskSpotlightSearch.toggle,
+		handleOpenSettings,
+		handleToggleGitHistory,
+		handleCloseGitHistory,
+		onRequestStartAllReadyBacklogTasks: requestStartAllReadyBacklogTasksConfirmation,
+		handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: hasNoProjects
+			? null
+			: handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
+	});
 	// 详情页（含 agent 终端）真正渲染的那张卡：在途期间不渲染；board 装的还不是当前项目的数据时也不渲染——
 	// 快照到达那一帧 currentProjectId 已是新项目、board 仍是旧项目的，拿旧卡配新 workspaceId 挂终端会在新项目里
 	// 给同号任务建出一个幽灵终端，还可能把终端 LRU 里新项目已停放的热终端挤出去。
@@ -1727,6 +1760,10 @@ export default function App(): ReactElement {
 		<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectRecentlyActiveTaskSwitcherHost}>
 			<LayoutCustomizationsProvider
 				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
+				onResetSidebarVisibilityLayoutCustomizations={() => {
+					sidebarVisibility.resetSidebarVisibilityLayoutCustomizations();
+					setIsFocusViewDiffExpanded(false);
+				}}
 			>
 				<div
 					ref={mobileFocusViewControls.focusViewRootRef}
@@ -1757,6 +1794,7 @@ export default function App(): ReactElement {
 							sidebarWidth={sidebarLayout.sidebarWidth}
 							setExpandedSidebarWidth={sidebarLayout.setExpandedSidebarWidth}
 							isCollapsed={sidebarLayout.isCollapsed}
+							isDesktopSidebarHidden={sidebarVisibility.isHomeProjectSidebarHidden}
 							setSidebarCollapsed={sidebarLayout.setSidebarCollapsed}
 						/>
 					) : null}
@@ -1782,6 +1820,21 @@ export default function App(): ReactElement {
 										: undefined
 								}
 								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
+								onToggleCurrentPageLeftSidebar={
+									!isFocusViewChromeShown || canToggleFocusViewTaskSidebars
+										? handleToggleCurrentPageLeftSidebar
+										: undefined
+								}
+								isCurrentPageLeftSidebarHidden={
+									isFocusViewChromeShown
+										? sidebarVisibility.isFocusViewTaskListSidebarHidden || isFocusViewDiffExpanded
+										: sidebarVisibility.isHomeProjectSidebarHidden
+								}
+								currentPageLeftSidebarLabel={isFocusViewChromeShown ? "任务列表" : "项目栏"}
+								onToggleFocusViewWorkbenchSidebar={
+									canToggleFocusViewTaskSidebars ? handleToggleFocusViewWorkbenchSidebar : undefined
+								}
+								isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
 								projectSwitcher={topBarProjectSwitcherState}
 								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
 								onToggleTaskLookupWorkbench={
@@ -2093,6 +2146,7 @@ export default function App(): ReactElement {
 							{isFocusViewCrossProjectTaskOpenInTransit ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<FocusViewCrossProjectTaskOpenInTransitShell
+										isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
 										host={crossProjectRecentlyActiveTaskSwitcherHost}
 										targetProjectName={crossProjectTaskOpenInTransitTarget?.projectName ?? null}
 										targetTaskTitle={crossProjectTaskOpenInTransitTarget?.taskTitle ?? null}
@@ -2104,6 +2158,13 @@ export default function App(): ReactElement {
 							) : selectedCardRenderedInFocusView && detailSession ? (
 								<div className="absolute inset-0 flex min-h-0 min-w-0">
 									<CardDetailView
+										isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
+										isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
+										onFocusViewWorkbenchSidebarHiddenChange={
+											sidebarVisibility.setFocusViewWorkbenchSidebarHidden
+										}
+										isDiffExpanded={isFocusViewDiffExpanded}
+										onDiffExpandedChange={setIsFocusViewDiffExpanded}
 										taskLookupWorkbenchContent={taskLookupWorkbenchContent}
 										onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
 										mobileFocusViewControls={mobileFocusViewControls}
@@ -2293,6 +2354,12 @@ export default function App(): ReactElement {
 							editingTaskId
 								? setEditTaskCodexConfigurationPermissionSelectionSource
 								: setNewTaskCodexConfigurationPermissionSelectionSource
+						}
+						codexReasoningEffortOverride={
+							editingTaskId ? editTaskCodexReasoningEffortOverride : newTaskCodexReasoningEffortOverride
+						}
+						onCodexReasoningEffortOverrideChange={
+							editingTaskId ? setEditTaskCodexReasoningEffortOverride : setNewTaskCodexReasoningEffortOverride
 						}
 						codexConfigurationProfileId={
 							editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
@@ -2579,6 +2646,7 @@ export default function App(): ReactElement {
 			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
 				<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
 					{renderedApplicationView}
+					<SideSessionCreationWorkbench />
 				</PostDeployVerificationEntryNavigationHostProvider>
 			</TaskCommentsDialogProvider>
 		</ProjectVisualIdentityProvider>

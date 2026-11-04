@@ -33,6 +33,7 @@ import {
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement, Ref } from "react";
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { TaskConversationTranscriptDocumentReaderPanel } from "@/components/detail-panels/task-conversation-transcript-document-reader-panel";
 import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
 import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-panels/terminal-scrollback-transcript-reader-panel";
@@ -605,13 +606,13 @@ function TerminalTranscriptReaderToggleButton({
 	variant: "default" | "ghost";
 }): ReactElement {
 	return (
-		<Tooltip side="top" content={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}>
+		<Tooltip side="top" content={isOpen ? "返回实时终端" : "以文档阅读会话记录"}>
 			<Button
 				icon={isOpen ? <TerminalSquare size={iconSize} /> : <ScrollText size={iconSize} />}
 				variant={isOpen ? "primary" : variant}
 				size="sm"
 				onClick={onToggle}
-				aria-label={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}
+				aria-label={isOpen ? "返回实时终端" : "以文档阅读会话记录"}
 				aria-pressed={isOpen}
 			/>
 		</Tooltip>
@@ -907,6 +908,11 @@ function AgentTerminalPanelLayout({
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
+	const transcriptReaderIdentity = JSON.stringify([workspaceId, taskId]);
+	const [openedTranscriptReaderIdentity, setOpenedTranscriptReaderIdentity] = useState<string | null>(null);
+	useEffect(() => {
+		if (isTranscriptReaderOpen) setOpenedTranscriptReaderIdentity(transcriptReaderIdentity);
+	}, [isTranscriptReaderOpen, transcriptReaderIdentity]);
 	useImperativeHandle(
 		shortcutInputFocusHandleRef,
 		() => ({
@@ -1251,13 +1257,31 @@ function AgentTerminalPanelLayout({
 						onScrollToLatest={scrollTerminalToLatest}
 					/>
 				)}
-				{isTranscriptReaderOpen ? (
-					<div className="absolute inset-0 z-10 flex">
-						<TerminalScrollbackTranscriptReaderPanel
-							taskId={taskId}
-							isVisible
-							scrollContainerRef={readerScrollContainerRef}
-						/>
+				{isTranscriptReaderOpen || openedTranscriptReaderIdentity === transcriptReaderIdentity ? (
+					<div className={cn("absolute inset-0 z-10", isTranscriptReaderOpen ? "flex" : "hidden")}>
+						{isSyntheticShellSession ? (
+							<TerminalScrollbackTranscriptReaderPanel
+								taskId={taskId}
+								isVisible={isTranscriptReaderOpen}
+								scrollContainerRef={readerScrollContainerRef}
+							/>
+						) : (
+							<TaskConversationTranscriptDocumentReaderPanel
+								key={transcriptReaderIdentity}
+								workspaceId={workspaceId}
+								workspaceTaskId={summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId}
+								taskConversationSessionId={taskId}
+								nativeTranscriptBindingKey={JSON.stringify([
+									summary?.agentId,
+									summary?.workspacePath,
+									summary?.agentNativeConversationSessionIdentity?.sourceAgentId,
+									summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+									summary?.agentNativeConversationSessionIdentity?.transcriptPath,
+								])}
+								isVisible={isTranscriptReaderOpen}
+								scrollContainerRef={readerScrollContainerRef}
+							/>
+						)}
 					</div>
 				) : null}
 				{showEmptyTerminalRecoveryState ? (

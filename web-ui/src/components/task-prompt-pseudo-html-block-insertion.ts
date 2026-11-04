@@ -4,7 +4,7 @@
 // 让「插到哪、补几个换行、插完选中什么」这些容易出错的边界条件能被单测钉死，而不是靠点开对话框肉眼看。
 
 /** 块名允许的字符集之外的一切都会被丢掉；空白先折成下划线，避免 `<my block>` 这种破标签。 */
-const PSEUDO_HTML_BLOCK_NAME_DISALLOWED_CHARACTERS = /[^A-Za-z0-9_-]/gu;
+const PSEUDO_HTML_BLOCK_NAME_DISALLOWED_CHARACTERS = /[^\p{L}\p{M}\p{N}_-]/gu;
 
 /**
  * 把用户随手输入的块名归一成一个能直接写进尖括号的名字。

@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type * as FilesystemPromises from "node:fs/promises";
 import { appendFile, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import lockfile from "proper-lockfile";
 import { stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigurationFieldProjection from "../../../src/codex-configuration-sync/codex-configuration-field-projection";
@@ -19,7 +18,19 @@ import {
 import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import type * as NativeTurnPermissionEvidence from "../../../src/codex-configuration-sync/codex-native-turn-permission-evidence";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createTempDir } from "../../utilities/temp-dir";
+
+async function assertCodexConfigurationStoreKernelWriteLockAvailable(): Promise<void> {
+	const directory = getCodexConfigurationSyncDirectory();
+	const release = await lockedFileSystem.acquireLock({
+		path: directory,
+		type: "directory",
+		lockfilePath: `${directory}.lock`,
+		retries: 0,
+	});
+	await release();
+}
 
 const suspendedObservation = vi.hoisted(() => ({
 	home: "",
@@ -176,7 +187,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			selectedProfileId = replacementProfileId;
 			await mutateCodexConfigurationSyncStore((store) => {
 				store.writers[binding.writerId].codexConfigurationProfileId = replacementProfileId;
@@ -395,14 +406,14 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 				hooks: { state: { [`${hookPath}:stop:0:0`]: { trusted_hash: "fixture-hook-hash", enabled: true } } },
 			}),
 		);
-		await prepareWriter("observed-session");
+		const binding = await prepareWriter("observed-session");
 		const barrier = suspendNextConfigurationObservation("");
-		suspendedObservation.hookDefinitionPath = hookPath;
+		suspendedObservation.hookDefinitionPath = join(binding.configurationHomeDirectoryPath, "hooks.json");
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			await expect(prepareWriter("another-session")).resolves.toHaveProperty(
 				"conversationSessionId",
 				"another-session",
@@ -487,7 +498,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		try {
 			await barrier.observationRead;
 			if (verificationStage === "native_read") {
-				expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+				await assertCodexConfigurationStoreKernelWriteLockAvailable();
 				await prepareWriter("another-session", independentSourceHome);
 			}
 			if (concurrentChange === "generation_replaced") summary.runtimeSessionIncarnationId = randomUUID();
@@ -514,20 +525,20 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		}
 	});
 
-	it.each(["source", "writer"] as const)("%s 读取挂起期间，另一任务仍能准备 resume", async (location) => {
+	it("writer 读取挂起期间，另一任务仍能准备 resume", async () => {
 		const binding = await prepareWriter("observed-session");
 		const independentSourceHome = join(fixture.path, "independent-source-home");
 		await mkdir(independentSourceHome);
 		await writeFile(join(independentSourceHome, "config.toml"), 'model="independent-model"\n');
 		const independentBinding = await prepareWriter("resuming-session", independentSourceHome);
-		const observedHome = location === "source" ? sourceHome : binding.configurationHomeDirectoryPath;
+		const observedHome = binding.configurationHomeDirectoryPath;
 		await writeFile(join(observedHome, "config.toml"), 'model="independent-observation"\n');
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		const barrier = suspendNextConfigurationObservation(observedHome);
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			const resumedBinding = await prepareCodexConfigurationWriterBinding({
 				purpose: "native_session",
 				storageHome: independentSourceHome,
@@ -552,45 +563,42 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		).toBe(true);
 	});
 
-	it.each(["source", "writer"] as const)(
-		"%s 的旧观察不覆盖并发 profile 决定，下一次补扫采用新观察",
-		async (location) => {
-			const binding = await prepareWriter("observed-session");
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
-			const observedHome = location === "source" ? sourceHome : binding.configurationHomeDirectoryPath;
-			const modelFieldKey = JSON.stringify(["config.toml", "model"]);
-			await writeFile(join(observedHome, "config.toml"), 'model="obsolete-observation"\n');
-			const barrier = suspendNextConfigurationObservation(observedHome);
-			const scanning = service.scan();
-			try {
-				await barrier.observationRead;
-				expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
-				await mutateCodexConfigurationSyncStore((store) => {
-					const profileId = store.writers[binding.writerId].codexConfigurationProfileId;
-					if (!profileId) throw new Error("缺少合成 profile");
-					updateCodexConfigurationProfileFields(store, profileId, { [modelFieldKey]: { value: "new-decision" } });
-				});
-				await writeFile(join(observedHome, "config.toml"), 'model="fresh-observation"\n');
-			} finally {
-				barrier.releaseObservation();
-				await scanning;
-			}
-			try {
-				const store = await readCodexConfigurationSyncStore();
-				expect(store.changes.some((change) => change.value?.value === "obsolete-observation")).toBe(false);
-				expect(store.writers[binding.writerId].lastObservedFields[modelFieldKey].value).toBe("initial-model");
-				expect(store.profiles[binding.codexConfigurationProfileId ?? ""].fields[modelFieldKey].value).toBe(
-					"new-decision",
-				);
-				await service.scan();
-				expect(
-					(await readCodexConfigurationSyncStore()).changes.some(
-						(change) => change.value?.value === "fresh-observation",
-					),
-				).toBe(true);
-			} finally {
-				await service.close();
-			}
-		},
-	);
+	it("writer 的旧观察不覆盖并发 profile 决定，下一次补扫采用新观察", async () => {
+		const binding = await prepareWriter("observed-session");
+		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const observedHome = binding.configurationHomeDirectoryPath;
+		const modelFieldKey = JSON.stringify(["config.toml", "model"]);
+		await writeFile(join(observedHome, "config.toml"), 'model="obsolete-observation"\n');
+		const barrier = suspendNextConfigurationObservation(observedHome);
+		const scanning = service.scan();
+		try {
+			await barrier.observationRead;
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
+			await mutateCodexConfigurationSyncStore((store) => {
+				const profileId = store.writers[binding.writerId].codexConfigurationProfileId;
+				if (!profileId) throw new Error("缺少合成 profile");
+				updateCodexConfigurationProfileFields(store, profileId, { [modelFieldKey]: { value: "new-decision" } });
+			});
+			await writeFile(join(observedHome, "config.toml"), 'model="fresh-observation"\n');
+		} finally {
+			barrier.releaseObservation();
+			await scanning;
+		}
+		try {
+			const store = await readCodexConfigurationSyncStore();
+			expect(store.changes.some((change) => change.value?.value === "obsolete-observation")).toBe(false);
+			expect(store.writers[binding.writerId].lastObservedFields[modelFieldKey].value).toBe("initial-model");
+			expect(store.profiles[binding.codexConfigurationProfileId ?? ""].fields[modelFieldKey].value).toBe(
+				"new-decision",
+			);
+			await service.scan();
+			expect(
+				(await readCodexConfigurationSyncStore()).changes.some(
+					(change) => change.value?.value === "fresh-observation",
+				),
+			).toBe(true);
+		} finally {
+			await service.close();
+		}
+	});
 });

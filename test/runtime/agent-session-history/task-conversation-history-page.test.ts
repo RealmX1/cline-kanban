@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rename, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -70,6 +70,279 @@ function claudeMessage(uuid: string, parentUuid: string | null, role: "user" | "
 		message: { role, content },
 	};
 }
+
+describe("文档阅读的稳定转录快照", () => {
+	const messageRecord = (text: string) => ({
+		type: "response_item",
+		payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] },
+	});
+	async function snapshotFixture() {
+		const f = await fixture("codex", [
+			{ type: "session_meta", payload: { id: "native", source: "cli" } },
+			...Array.from({ length: 220 }, (_, index) => messageRecord(`记录 ${index}`)),
+		]);
+		return {
+			...f,
+			input: { ...f.input, request: { ...f.input.request, transcriptReadConsistency: "stable_snapshot" as const } },
+		};
+	}
+	it("允许追加与绑定观测时间更新，旧快照分页不会混入追加正文", async () => {
+		const f = await snapshotFixture();
+		const first = await loadTaskConversationHistoryPage(f.input);
+		await appendFile(f.path, `${JSON.stringify(messageRecord("快照之后的正文"))}\n`);
+		const identity = f.summary.agentNativeConversationSessionIdentity;
+		if (!identity) throw new Error("缺少测试原生身份");
+		identity.observedAt++;
+		const older = await loadTaskConversationHistoryPage({
+			...f.input,
+			request: { ...f.input.request, cursor: first.nextCursor },
+		});
+		expect(older.availability).toBe("available");
+		expect(older.messages.at(-1)?.content).toBe("记录 119");
+		const refreshed = await loadTaskConversationHistoryPage(f.input);
+		expect(refreshed.messages.at(-1)?.content).toBe("快照之后的正文");
+	});
+	it("未换行的尾记录只在完整落盘并刷新后进入快照", async () => {
+		const f = await snapshotFixture();
+		const tail = JSON.stringify(messageRecord("等待完整落盘"));
+		await appendFile(f.path, tail.slice(0, -4));
+		const first = await loadTaskConversationHistoryPage(f.input);
+		expect(first.availability).toBe("available");
+		expect(first.messages.at(-1)?.content).toBe("记录 219");
+		await appendFile(f.path, `${tail.slice(-4)}\n`);
+		const older = await loadTaskConversationHistoryPage({
+			...f.input,
+			request: { ...f.input.request, cursor: first.nextCursor },
+		});
+		expect(older.availability).toBe("available");
+		expect(older.messages.some((message) => message.content === "等待完整落盘")).toBe(false);
+		expect((await loadTaskConversationHistoryPage(f.input)).messages.at(-1)?.content).toBe("等待完整落盘");
+	});
+	it.each(["replace", "truncate", "rewrite"] as const)("拒绝 %s 后继续读取旧快照", async (mutation) => {
+		const f = await snapshotFixture();
+		const first = await loadTaskConversationHistoryPage(f.input);
+		const content = await readFile(f.path, "utf8");
+		if (mutation === "replace") {
+			await rename(f.path, `${f.path}.original`);
+			await writeFile(f.path, content);
+		} else if (mutation === "truncate") await truncate(f.path, 100);
+		else await writeFile(f.path, content.replace("记录 0", "改写 0"));
+		const older = await loadTaskConversationHistoryPage({
+			...f.input,
+			request: { ...f.input.request, cursor: first.nextCursor },
+		});
+		expect(older.availability).toBe("unavailable");
+		expect(older.messages).toEqual([]);
+	});
+	it("快照仍然核验原生身份和任务归属", async () => {
+		const f = await snapshotFixture();
+		const identity = f.summary.agentNativeConversationSessionIdentity;
+		if (!identity) throw new Error("缺少测试原生身份");
+		identity.nativeSessionId = "another-session";
+		expect((await loadTaskConversationHistoryPage(f.input)).notice).toContain("身份");
+	});
+	it.each(["", '{"type":"session_meta","payload":{"id":"another-session"'])(
+		"没有完整身份记录的快照不伪装成空会话：%s",
+		async (content) => {
+			const f = await snapshotFixture();
+			await writeFile(f.path, content);
+			const page = await loadTaskConversationHistoryPage(f.input);
+			expect(page.unavailabilityReason).toBe("identity_mismatch");
+			expect(page.availability).toBe("unavailable");
+			expect(page.messages).toEqual([]);
+		},
+	);
+	it.each(["missing", "missing-grandparent"] as const)("旧快照不纳入首次读取后出现的祖先：%s", async (scenario) => {
+		const lateParentPrefix = `${[{ type: "session_meta", payload: { id: "native" } }, messageRecord("迟到祖先正文")]
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`;
+		const historyBase = {
+			thread_id: "native",
+			end_byte_offset: Buffer.byteLength(lateParentPrefix),
+			end_ordinal_exclusive: 2,
+		};
+		const parentPrefix = `${[
+			{ type: "session_meta", payload: { id: "native", history_mode: "paginated", history_base: historyBase } },
+			messageRecord("已固定父段正文"),
+		]
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`;
+		const f = await fixture("codex", [
+			{
+				type: "session_meta",
+				payload: {
+					id: "native",
+					history_mode: "paginated",
+					history_base:
+						scenario === "missing"
+							? historyBase
+							: {
+									thread_id: "parent-segment",
+									end_byte_offset: Buffer.byteLength(parentPrefix),
+									end_ordinal_exclusive: 2,
+								},
+				},
+			},
+			...Array.from({ length: 101 }, (_, index) => messageRecord(`当前正文 ${index}`)),
+		]);
+		if (scenario === "missing-grandparent")
+			await writeFile(join(dirname(f.path), "rollout-native_parent-segment.jsonl"), parentPrefix);
+		const request = { ...f.input.request, transcriptReadConsistency: "stable_snapshot" as const };
+		const first = await loadTaskConversationHistoryPage({ ...f.input, request });
+		expect(first.nextCursor).not.toBeNull();
+		await writeFile(join(dirname(f.path), "rollout-native.jsonl"), lateParentPrefix);
+		async function collectPages(initialPage: typeof first) {
+			let page = initialPage;
+			const messages = [...page.messages];
+			for (let count = 0; page.nextCursor && count < 5; count++) {
+				page = await loadTaskConversationHistoryPage({
+					...f.input,
+					request: { ...request, cursor: page.nextCursor },
+				});
+				messages.unshift(...page.messages);
+			}
+			expect(page.nextCursor).toBeNull();
+			return { page, messages };
+		}
+		const original = await collectPages(first);
+		expect(original.page.availability).toBe("partially_available");
+		expect(original.messages.some((message) => message.content === "迟到祖先正文")).toBe(false);
+		if (scenario === "missing-grandparent") expect(original.messages[0]?.content).toBe("已固定父段正文");
+		const refreshed = await collectPages(await loadTaskConversationHistoryPage({ ...f.input, request }));
+		expect(refreshed.page.availability).toBe("available");
+		expect(refreshed.messages[0]?.content).toBe("迟到祖先正文");
+	});
+	it.each(["strict_revision", "stable_snapshot"] as const)(
+		"%s：fork 自已分段父会话时分别核验父原生身份与分段身份",
+		async (transcriptReadConsistency) => {
+			for (const parentNativeSessionId of ["source-session", "native"]) {
+				const parentPrefix = `${[
+					{ type: "session_meta", payload: { id: parentNativeSessionId, cwd: "/task-working-directory" } },
+					messageRecord("父分段正文"),
+				]
+					.map((record) => JSON.stringify(record))
+					.join("\n")}\n`;
+				const f = await fixture("codex", [
+					{
+						type: "session_meta",
+						payload: {
+							id: "native",
+							forked_from_id: "source-session",
+							history_mode: "paginated",
+							history_base: {
+								thread_id: "parent-segment",
+								end_byte_offset: Buffer.byteLength(parentPrefix),
+								end_ordinal_exclusive: 2,
+							},
+						},
+					},
+					messageRecord("子会话正文"),
+				]);
+				f.summary.workspacePath = "/task-working-directory";
+				const parentPath = join(dirname(f.path), `rollout-${parentNativeSessionId}_parent-segment.jsonl`);
+				await writeFile(parentPath, parentPrefix);
+				const request = { ...f.input.request, transcriptReadConsistency };
+				const first = await loadTaskConversationHistoryPage({ ...f.input, request });
+				expect(first.availability).toBe("available");
+				expect(first.nextCursor).not.toBeNull();
+				const parent = await loadTaskConversationHistoryPage({
+					...f.input,
+					request: { ...request, cursor: first.nextCursor },
+				});
+				expect(parent.availability).toBe("available");
+				expect(parent.messages.map((message) => message.content)).toEqual(["父分段正文"]);
+				await writeFile(parentPath, parentPrefix.replace(parentNativeSessionId, "wrong-native"));
+				expect(
+					(
+						await loadTaskConversationHistoryPage({
+							...f.input,
+							request: { ...request, cursor: first.nextCursor },
+						})
+					).availability,
+				).toBe("unavailable");
+				await writeFile(parentPath, parentPrefix.replace("/task-working-directory", "/another-task"));
+				expect(
+					(
+						await loadTaskConversationHistoryPage({
+							...f.input,
+							request: { ...request, cursor: first.nextCursor },
+						})
+					).availability,
+				).toBe("unavailable");
+				await writeFile(parentPath, parentPrefix);
+				const otherNativeSessionId = parentNativeSessionId === "native" ? "source-session" : "native";
+				await writeFile(
+					join(dirname(f.path), `rollout-${otherNativeSessionId}_parent-segment.jsonl`),
+					parentPrefix.replace(parentNativeSessionId, otherNativeSessionId),
+				);
+				expect((await loadTaskConversationHistoryPage({ ...f.input, request })).availability).toBe(
+					"partially_available",
+				);
+			}
+		},
+	);
+	it.each(["append", "rewrite"] as const)("首次打开固定 Codex 父段前缀，随后 %s 遵循快照边界", async (mutation) => {
+		const parentPrefix = `${[
+			{ type: "session_meta", payload: { id: "native", source: "cli" } },
+			messageRecord("固定父段正文"),
+		]
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`;
+		const f = await fixture("codex", [
+			{
+				type: "session_meta",
+				payload: {
+					id: "native",
+					history_mode: "paginated",
+					history_base: {
+						thread_id: "native",
+						end_byte_offset: Buffer.byteLength(parentPrefix),
+						end_ordinal_exclusive: 2,
+					},
+				},
+			},
+			messageRecord("当前分段正文"),
+		]);
+		const parentPath = join(dirname(f.path), "rollout-native.jsonl");
+		await writeFile(parentPath, parentPrefix);
+		const request = { ...f.input.request, transcriptReadConsistency: "stable_snapshot" as const };
+		const first = await loadTaskConversationHistoryPage({ ...f.input, request });
+		expect(first.availability).toBe("available");
+		expect(first.nextCursor).not.toBeNull();
+		if (mutation === "append") await appendFile(parentPath, `${JSON.stringify(messageRecord("父段追加正文"))}\n`);
+		else await writeFile(parentPath, parentPrefix.replace("固定父段正文", "改写父段正文"));
+		const older = await loadTaskConversationHistoryPage({
+			...f.input,
+			request: { ...request, cursor: first.nextCursor },
+		});
+		if (mutation === "append") {
+			expect(older.availability).toBe("available");
+			expect(older.messages.map((message) => message.content)).toEqual(["固定父段正文"]);
+		} else expect(older.unavailabilityReason).toBe("snapshot_invalid");
+	});
+	it("稳定快照不以运行实例内存消息替代持久转录", async () => {
+		const f = await snapshotFixture();
+		f.summary.agentNativeConversationSessionIdentity = undefined;
+		const page = await loadTaskConversationHistoryPage({
+			...f.input,
+			retainedMessages: [{ id: "memory", role: "assistant", content: "内存正文", createdAt: 1 }],
+		});
+		expect(page.unavailabilityReason).toBe("binding_pending");
+		expect(page.messages).toEqual([]);
+	});
+	it("会话摘要尚未落盘属于等待绑定，已存在摘要的会话 ID 则必须精确一致", async () => {
+		const f = await snapshotFixture();
+		const pending = await loadTaskConversationHistoryPage({ ...f.input, sessions: {} });
+		expect(pending.unavailabilityReason).toBe("binding_pending");
+		const mismatched = await loadTaskConversationHistoryPage({
+			...f.input,
+			request: { ...f.input.request, taskConversationSessionId: "mislabeled-session" },
+			sessions: { "mislabeled-session": f.summary },
+		});
+		expect(mismatched.unavailabilityReason).toBe("identity_mismatch");
+		expect(mismatched.messages).toEqual([]);
+	});
+});
 
 describe("Done 任务只读会话历史", () => {
 	it("原生消息身份不随转录插入或页内字节位置变化", async () => {

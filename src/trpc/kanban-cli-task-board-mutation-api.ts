@@ -11,6 +11,7 @@ import type {
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { mutateWorkspaceState } from "../state/workspace-state";
+import { requestAutomaticTaskNameBackfill } from "../task-name-suggestion/automatic-task-name-backfill";
 import type { RuntimeTrpcWorkspaceScope } from "./app-router";
 import { runPureTaskBoardMutationRejectingInvalidInputAsBadRequest } from "./task-card-action-api";
 
@@ -61,6 +62,9 @@ export async function applyKanbanCliTaskBoardMutation(
 					"backlog",
 					{
 						title: fieldValues.title,
+						codexConfigurationProfileId: fieldValues.codexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: fieldValues.codexConfigurationPermissionSelectionSource,
+						terminalAgentModelOverrideSettings: fieldValues.terminalAgentModelOverrideSettings,
 						prompt: fieldValues.prompt,
 						startInPlanMode: fieldValues.startInPlanMode,
 						ompAgentSessionTransportForNewTasks: fieldValues.ompAgentSessionTransportForNewTasks,
@@ -86,6 +90,9 @@ export async function applyKanbanCliTaskBoardMutation(
 		},
 	);
 	if (mutation.saved) {
+		// 命名失败不能撤回已经保存的卡片，也不能使调用方误判为创建失败。
+		if (!fieldValues.title?.trim())
+			await requestAutomaticTaskNameBackfill(workspaceScope, mutation.value).catch(() => undefined);
 		void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceScope.workspaceId, workspaceScope.workspacePath);
 		void deps.broadcastRuntimeProjectsUpdated(workspaceScope.workspaceId);
 	}

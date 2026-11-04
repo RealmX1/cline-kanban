@@ -60,6 +60,7 @@ export function TaskMainSessionHandoverAction({
 	const [showWaitChoice, setShowWaitChoice] = useState(false);
 	const requestId = useRef(createRandomUuidV4WithInsecureContextFallback());
 	const requestEpoch = useRef(0);
+	const submitRequestInFlightEpoch = useRef<number | null>(null);
 	const record = taskCard.taskMainSessionHandover;
 	const [recoveryAvailability, setRecoveryAvailability] =
 		useState<TaskMainSessionHandoverStatusResponse["recoveryAvailability"]>();
@@ -145,9 +146,20 @@ export function TaskMainSessionHandoverAction({
 	const inProgress =
 		record &&
 		["waiting_for_sessions_to_stop", "report_delivery_pending", "awaiting_user_message"].includes(record.status);
-	const targetIsBusy =
-		preview?.busyTaskConversationSessionIds.includes(preview.mainTaskConversationSessionId) ||
-		(target !== "new_codex_session" && preview?.busyTaskConversationSessionIds.includes(target));
+	const selectedBlockingSessions = preview
+		? (
+				preview.blockingConversationSessions ??
+				preview.busyTaskConversationSessionIds.map((id) => ({
+					taskConversationSessionId: id,
+					description: "状态待核验：等待确认会话是否可接任。",
+				}))
+			).filter(
+				(entry) =>
+					entry.taskConversationSessionId === preview.mainTaskConversationSessionId ||
+					entry.taskConversationSessionId === target,
+			)
+		: [];
+	const targetIsBusy = selectedBlockingSessions.length > 0;
 	async function openPreview() {
 		const epoch = ++requestEpoch.current;
 		setOpen(true);
@@ -170,8 +182,10 @@ export function TaskMainSessionHandoverAction({
 			if (requestEpoch.current === epoch) setBusy(false);
 		}
 	}
-	async function submit() {
-		if (!preview) return;
+	async function submit(
+		busySessionHandoverStrategy: "wait_until_ready" | "interrupt_blocking_sessions" = "wait_until_ready",
+	) {
+		if (!preview || busy || submitRequestInFlightEpoch.current === requestEpoch.current) return;
 		if (target !== "new_codex_session" && !selectedExistingPeer?.available) {
 			setError(selectedExistingPeer?.unavailableReason ?? "所选会话已不可用，请重新打开交接预览。");
 			return;
@@ -182,12 +196,14 @@ export function TaskMainSessionHandoverAction({
 			return;
 		}
 		setBusy(true);
+		submitRequestInFlightEpoch.current = epoch;
 		setError(null);
 		try {
 			await requestTaskMainSessionHandover(workspaceId, {
 				taskId: taskCard.id,
 				expectedMainTaskConversationSessionId: preview.mainTaskConversationSessionId,
 				requestId: requestId.current,
+				busySessionHandoverStrategy,
 				destination:
 					target === "new_codex_session"
 						? preview.targetAgentCapabilities
@@ -218,6 +234,7 @@ export function TaskMainSessionHandoverAction({
 		} catch (cause) {
 			if (requestEpoch.current === epoch) setError(cause instanceof Error ? cause.message : String(cause));
 		} finally {
+			if (submitRequestInFlightEpoch.current === epoch) submitRequestInFlightEpoch.current = null;
 			if (requestEpoch.current === epoch) setBusy(false);
 		}
 	}
@@ -272,7 +289,7 @@ export function TaskMainSessionHandoverAction({
 		(target !== "new_codex_session" && !selectedExistingPeer?.available) ||
 		(target === "new_codex_session" && selectedTargetCapabilities?.installationStatus === "not_installed");
 	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
-		onSubmit: submit,
+		onSubmit: () => submit(),
 		disabled: primaryActionDisabled,
 	});
 	if (!isSupportedHandoverSource && !record) return null;
@@ -283,7 +300,12 @@ export function TaskMainSessionHandoverAction({
 		>
 			{record && record.status !== "completed" && (
 				<div role="status" className="mb-2 space-y-1">
-					<p>{handoverStatusLabels[record.status]}</p>
+					<p>
+						{record.status === "waiting_for_sessions_to_stop" &&
+						record.busySessionHandoverStrategy === "interrupt_blocking_sessions"
+							? "正在中断阻塞会话，确认退出后自动交接。"
+							: handoverStatusLabels[record.status]}
+					</p>
 					{record.automaticRecovery?.classification === "waiting_for_machine_evidence" && (
 						<p>
 							系统正在补查机器证据（本轮 {record.automaticRecovery.attemptCount}/3 次）。
@@ -295,7 +317,11 @@ export function TaskMainSessionHandoverAction({
 					{record.automaticRecovery?.classification === "execution_prohibited" && (
 						<p>自动执行已停止：{record.automaticRecovery.reason}</p>
 					)}
-					{record.errorMessage && <p className="break-words text-status-red">{record.errorMessage}</p>}
+					{record.errorMessage &&
+						record.errorMessage !==
+							(record.automaticRecovery?.classification === "execution_prohibited"
+								? record.automaticRecovery.reason
+								: null) && <p className="break-words text-status-red">{record.errorMessage}</p>}
 					{(record.status === "waiting_for_sessions_to_stop" ||
 						(record.status === "failed" &&
 							mainSessionSummary.taskId === record.sourceTaskConversationSessionId)) && (
@@ -390,7 +416,7 @@ export function TaskMainSessionHandoverAction({
 				}}
 				contentClassName="max-w-2xl"
 			>
-				<DialogHeader title={showWaitChoice ? "等待会话停下后交接" : "交接主会话"} />
+				<DialogHeader title={showWaitChoice ? "选择交接方式" : "交接主会话"} />
 				<DialogBody className="space-y-4 overflow-y-auto">
 					{busy && !preview && <p role="status">正在读取交接材料…</p>}
 					{error && (
@@ -400,10 +426,27 @@ export function TaskMainSessionHandoverAction({
 					)}
 					{preview &&
 						(showWaitChoice ? (
-							<p>
-								原主会话或所选接任会话
-								仍在生成或等待未决交互处理。选择等待后，会在两者都可接任时自动交接；关闭浏览器后仍会继续等待。
-							</p>
+							<div className="space-y-3 text-sm">
+								<ul className="space-y-2">
+									{selectedBlockingSessions.map((entry) => (
+										<li key={entry.taskConversationSessionId} className="break-words">
+											<strong>
+												{entry.taskConversationSessionId === preview.mainTaskConversationSessionId
+													? "原主会话"
+													: "所选接任会话"}
+												（{entry.taskConversationSessionId}）
+											</strong>
+											<p>{entry.description}</p>
+										</li>
+									))}
+								</ul>
+								<p>选择等待后，双方可接任时自动交接；关闭浏览器后仍会继续。</p>
+								<p>强制交接会中断上述阻塞会话，确认退出后再切主。历史与文件保留。</p>
+								{target === "new_codex_session" &&
+									contextInheritanceMode === "fork_complete_native_conversation" && (
+										<p>完整复刻仍需可验证的完成边界。中断后若无法满足，需要改选全新上下文＋交接材料。</p>
+									)}
+							</div>
 						) : (
 							<>
 								<label className="block space-y-1 text-sm">
@@ -543,7 +586,7 @@ export function TaskMainSessionHandoverAction({
 							</>
 						))}
 				</DialogBody>
-				<DialogFooter>
+				<DialogFooter className="flex-wrap max-md:flex-col">
 					<Button variant="ghost" disabled={busy} onClick={() => setOpen(false)}>
 						{showWaitChoice ? "暂不交接" : "取消"}
 					</Button>
@@ -555,6 +598,15 @@ export function TaskMainSessionHandoverAction({
 					>
 						{showWaitChoice ? "等待两者都停下后自动交接" : "确认交接"}
 					</Button>
+					{showWaitChoice && (
+						<Button
+							variant="danger"
+							disabled={primaryActionDisabled}
+							onClick={() => void submit("interrupt_blocking_sessions")}
+						>
+							中断并强制交接
+						</Button>
+					)}
 				</DialogFooter>
 			</Dialog>
 		</div>

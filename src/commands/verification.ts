@@ -9,11 +9,12 @@ import type {
 import { parseAuthoredVerificationDefinitionInputFile } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import {
+	cleanupAuthoredVerificationDefinitionAndAssets,
 	listAuthoredVerificationDefinitions,
 	removeAuthoredVerificationDefinition,
 	upsertAuthoredVerificationDefinition,
 } from "../deployment/authored-verification-definitions";
-import { cleanupVerificationAssets, ensureVerificationAssetsDir } from "../deployment/verification-assets";
+import { ensureVerificationAssetsDir } from "../deployment/verification-assets";
 import { resolveProjectInputPath } from "../projects/project-path";
 import { loadWorkspaceContext } from "../state/workspace-state";
 import { printJson } from "./task";
@@ -205,14 +206,13 @@ async function unregisterVerification(input: { verificationId: string }): Promis
 // 手动触发某验证的资产清理（同护栏：只删 verifications 根目录下的真实路径）并注销其 pending 定义。
 async function cleanupVerification(input: { verificationId: string }): Promise<JsonRecord> {
 	const nowIso = new Date().toISOString();
-	const cleanup = await cleanupVerificationAssets(input.verificationId);
-	const definitionRemoved = await removeAuthoredVerificationDefinition(input.verificationId, nowIso);
+	const cleanup = await cleanupAuthoredVerificationDefinitionAndAssets(input.verificationId, nowIso);
 	return {
 		ok: true,
 		verificationId: input.verificationId,
 		assetsRemoved: cleanup.removed,
 		...(cleanup.skippedReason ? { assetsSkippedReason: cleanup.skippedReason } : {}),
-		definitionRemoved,
+		definitionRemoved: cleanup.definitionRemoved,
 	};
 }
 

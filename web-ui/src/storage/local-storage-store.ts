@@ -1,4 +1,6 @@
 export enum LocalStorageKey {
+	SideSessionCreationWorkbenchDrafts = "kanban.side-session-creation-workbench-drafts.v1",
+	SideSessionCreationWorkbenchUnreadableDraftRecoveryCopies = "kanban.side-session-creation-workbench-unreadable-draft-recovery-copies.v1",
 	CodexConfigurationChangeNoticeCollapsed = "codex-configuration-change-notice-collapsed",
 	CodexConfigurationUnconfirmedSourceObservationActions = "kanban.codex-configuration-unconfirmed-source-observation-actions.v1",
 	DailyWorkProgressSelectedWorkspace = "kanban.daily-work-progress-selected-workspace.v1",
@@ -55,6 +57,9 @@ export enum LocalStorageKey {
 	// 都会漏掉它。改名后由 legacy-local-storage-key-rename-migration.ts 在启动时把旧键搬过来。
 	ProjectNavigationPanelWidth = "kanban.project-navigation-panel-width",
 	ProjectNavigationPanelCollapsed = "kanban.project-navigation-panel-collapsed",
+	HomeProjectSidebarHidden = "kanban.home-project-sidebar-hidden.v1",
+	FocusViewTaskListSidebarHidden = "kanban.focus-view-task-list-sidebar-hidden.v1",
+	FocusViewWorkbenchSidebarHidden = "kanban.focus-view-workbench-sidebar-hidden.v1",
 	GitHistoryRefsPanelWidth = "kanban.git-history-refs-panel-width",
 	GitHistoryCommitsPanelWidth = "kanban.git-history-commits-panel-width",
 	GitDiffFileTreePanelRatio = "kanban.git-diff-file-tree-panel-ratio",
@@ -110,6 +115,9 @@ export const LAYOUT_CUSTOMIZATION_LOCAL_STORAGE_KEYS = [
 	LocalStorageKey.TaskWorkbenchSideBySideSlotWidthRatio,
 	LocalStorageKey.ProjectNavigationPanelWidth,
 	LocalStorageKey.ProjectNavigationPanelCollapsed,
+	LocalStorageKey.HomeProjectSidebarHidden,
+	LocalStorageKey.FocusViewTaskListSidebarHidden,
+	LocalStorageKey.FocusViewWorkbenchSidebarHidden,
 	LocalStorageKey.GitHistoryRefsPanelWidth,
 	LocalStorageKey.GitHistoryCommitsPanelWidth,
 	LocalStorageKey.GitDiffFileTreePanelRatio,

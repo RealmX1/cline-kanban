@@ -13,15 +13,18 @@ const LayoutCustomizationsContext = createContext<LayoutCustomizationsContextVal
 export function LayoutCustomizationsProvider({
 	children,
 	onResetBottomTerminalLayoutCustomizations,
+	onResetSidebarVisibilityLayoutCustomizations,
 }: {
 	children: ReactNode;
 	onResetBottomTerminalLayoutCustomizations: () => void;
+	onResetSidebarVisibilityLayoutCustomizations?: () => void;
 }): React.ReactElement {
 	const [layoutResetNonce, setLayoutResetNonce] = useState(0);
 
 	const resetLayoutCustomizations = useCallback(() => {
 		resetLayoutCustomizationLocalStorageItems();
 		onResetBottomTerminalLayoutCustomizations();
+		onResetSidebarVisibilityLayoutCustomizations?.();
 		setLayoutResetNonce((current) => current + 1);
 		showAppToast(
 			{
@@ -31,7 +34,7 @@ export function LayoutCustomizationsProvider({
 			},
 			"layout-reset",
 		);
-	}, [onResetBottomTerminalLayoutCustomizations]);
+	}, [onResetBottomTerminalLayoutCustomizations, onResetSidebarVisibilityLayoutCustomizations]);
 
 	const value = useMemo(
 		() => ({

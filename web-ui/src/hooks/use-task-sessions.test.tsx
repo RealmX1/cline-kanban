@@ -2,7 +2,10 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useTaskSessions } from "@/hooks/use-task-sessions";
-import { MIN_DETAIL_DIFF_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
+import {
+	loadDetailTaskCardsPanelRatioPreference,
+	MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
+} from "@/resize/use-card-detail-layout";
 import {
 	clampPanelWidthToWindow,
 	estimateColsForPanelWidth,
@@ -21,7 +24,8 @@ const PERSISTED_PANEL_WIDTH_PX = 720;
 // same way the hook does, so these assertions stay correct regardless of the
 // jsdom default window.innerWidth.
 function expectedStartPanelWidth(persistedWidthPx: number): number {
-	return clampPanelWidthToWindow(persistedWidthPx, MIN_DETAIL_DIFF_PANEL_WIDTH_PX, window.innerWidth);
+	const detailContentWidth = window.innerWidth * (1 - loadDetailTaskCardsPanelRatioPreference()) - 1;
+	return clampPanelWidthToWindow(persistedWidthPx, MIN_DETAIL_DIFF_PANEL_WIDTH_PX, detailContentWidth);
 }
 
 const startTaskSessionMutateMock = vi.hoisted(() => vi.fn());
@@ -695,7 +699,7 @@ describe("useTaskSessions", () => {
 			const windowDisplayableWidth = clampPanelWidthToWindow(
 				1400,
 				MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
-				NARROW_WINDOW_INNER_WIDTH,
+				NARROW_WINDOW_INNER_WIDTH * (1 - loadDetailTaskCardsPanelRatioPreference()) - 1,
 			);
 			const clampedCols = estimateColsForPanelWidth(windowDisplayableWidth);
 			expect(clampedCols).toBeLessThan(estimateColsForPanelWidth(1400));

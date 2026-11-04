@@ -21,6 +21,12 @@ import { doesConversationSessionBelongToTask } from "../core/task-main-conversat
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
 import { parseAcceptedKimiMainUserMessage } from "./kimi-native-conversation-activity-reader";
+import {
+	assertNativeTranscriptFilePrefixSnapshot,
+	captureNativeTranscriptFilePrefixSnapshot,
+	NativeTranscriptSnapshotInvalidError,
+	nativeTranscriptFilePrefixSnapshotSchema,
+} from "./native-transcript-file-prefix-snapshot";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 import { extractSubmittedUserPromptFromTranscriptRecord } from "./submitted-user-prompt-transcript-record-parser";
 import { resolveVerifiedAdditionalNativeConversationTranscriptPath } from "./verified-additional-native-conversation-transcript-location";
@@ -37,6 +43,16 @@ const historyCursorSchema = z.object({
 	newerEnvelope: z.object({ kind: z.string(), fingerprint: z.string() }).nullable(),
 	segmentThreadId: z.string().nullable(),
 	segmentRevision: z.string().nullable(),
+	stableSnapshotFiles: z
+		.array(
+			z.object({
+				segmentThreadId: z.string().nullable(),
+				filePrefix: nativeTranscriptFilePrefixSnapshotSchema,
+			}),
+		)
+		.min(1)
+		.max(32)
+		.optional(),
 });
 type HistoryCursor = z.infer<typeof historyCursorSchema>;
 const retainedMessagesCursorSchema = z.object({
@@ -58,8 +74,11 @@ function codexTranscriptSegmentSearchRoot(transcriptPath: string): string {
 	return dirname(transcriptPath);
 }
 
-function buildUnavailableTaskConversationHistoryPage(notice: string): RuntimeTaskConversationHistoryPageResponse {
-	return { availability: "unavailable", messages: [], nextCursor: null, notice };
+function buildUnavailableTaskConversationHistoryPage(
+	notice: string,
+	unavailabilityReason: RuntimeTaskConversationHistoryPageResponse["unavailabilityReason"] = "source_unavailable",
+): RuntimeTaskConversationHistoryPageResponse {
+	return { availability: "unavailable", messages: [], nextCursor: null, notice, unavailabilityReason };
 }
 
 function readNativeTranscriptContentText(value: unknown): string {
@@ -427,19 +446,28 @@ export async function loadTaskConversationHistoryPage(
 	input: LoadTaskConversationHistoryPageInput,
 ): Promise<RuntimeTaskConversationHistoryPageResponse> {
 	const { request, card, sessions } = input;
+	const retainedMessages =
+		request.transcriptReadConsistency === "stable_snapshot" ? undefined : input.retainedMessages;
 	let summary = sessions[request.taskConversationSessionId];
-	if (
-		!card ||
-		card.id !== request.workspaceTaskId ||
-		!summary ||
-		!doesConversationSessionBelongToTask(summary, card.id)
-	)
-		return buildUnavailableTaskConversationHistoryPage("找不到归属于此任务的会话历史。");
+	if (!card || card.id !== request.workspaceTaskId)
+		return buildUnavailableTaskConversationHistoryPage("找不到归属于此任务的会话历史。", "identity_mismatch");
+	if (!summary)
+		return buildUnavailableTaskConversationHistoryPage("等待此会话的持久摘要与原生转录绑定。", "binding_pending");
+	if (summary.taskId !== request.taskConversationSessionId || !doesConversationSessionBelongToTask(summary, card.id))
+		return buildUnavailableTaskConversationHistoryPage("找不到归属于此任务的会话历史。", "identity_mismatch");
+	if (!summary.agentId && request.transcriptReadConsistency === "stable_snapshot")
+		return buildUnavailableTaskConversationHistoryPage("等待此会话的 agent 身份与原生转录绑定。", "binding_pending");
 	if (request.cursor) {
 		try {
 			const cursor = JSON.parse(Buffer.from(request.cursor, "base64url").toString("utf8"));
-			if (retainedMessagesCursorSchema.safeParse(cursor).success)
-				return loadRetainedMessagesPage(request, summary, input.retainedMessages ?? []);
+			if (retainedMessagesCursorSchema.safeParse(cursor).success) {
+				if (request.transcriptReadConsistency === "stable_snapshot")
+					return buildUnavailableTaskConversationHistoryPage(
+						"文档阅读只读取持久转录，请刷新后重试。",
+						"snapshot_invalid",
+					);
+				return loadRetainedMessagesPage(request, summary, retainedMessages ?? []);
+			}
 		} catch {
 			return buildUnavailableTaskConversationHistoryPage("历史分页标记无效，请刷新后重试。");
 		}
@@ -449,7 +477,10 @@ export async function loadTaskConversationHistoryPage(
 		if (summary.agentId === "cursor" || summary.agentId === "kimi") {
 			const transcriptPath = await resolveVerifiedAdditionalNativeConversationTranscriptPath(summary);
 			if (!transcriptPath || !summary.agentNativeConversationSessionIdentity)
-				return buildUnavailableTaskConversationHistoryPage("等待此原生身份及工作目录的可信导出记录。");
+				return buildUnavailableTaskConversationHistoryPage(
+					"等待此原生身份及工作目录的可信导出记录。",
+					"binding_pending",
+				);
 			summary = {
 				...summary,
 				agentNativeConversationSessionIdentity: {
@@ -464,20 +495,23 @@ export async function loadTaskConversationHistoryPage(
 		);
 	}
 	const identity = summary.agentNativeConversationSessionIdentity;
+	if (identity && summary.agentId && identity.sourceAgentId !== summary.agentId)
+		return buildUnavailableTaskConversationHistoryPage("原生会话身份与当前 agent 不匹配。", "identity_mismatch");
 	if (
 		!identity?.transcriptPath ||
 		identity.sourceAgentId !== summary.agentId ||
 		!["claude", "codex", "omp", "cursor", "kimi"].includes(identity.sourceAgentId)
 	) {
-		if (input.retainedMessages?.length) {
+		if (retainedMessages?.length) {
 			try {
-				return loadRetainedMessagesPage(request, summary, input.retainedMessages);
+				return loadRetainedMessagesPage(request, summary, retainedMessages);
 			} catch {
 				return buildUnavailableTaskConversationHistoryPage("历史分页标记无效，请刷新后重试。");
 			}
 		}
 		return buildUnavailableTaskConversationHistoryPage(
 			"此会话缺少可读取的可信持久记录；任务工作台的其他信息仍然可用。",
+			"binding_pending",
 		);
 	}
 	let handle: FileHandle | null = null;
@@ -489,68 +523,156 @@ export async function loadTaskConversationHistoryPage(
 		} catch (error) {
 			if (
 				!request.cursor &&
-				input.retainedMessages?.length &&
+				retainedMessages?.length &&
 				error instanceof Error &&
 				"code" in error &&
 				error.code === "ENOENT"
 			)
-				return loadRetainedMessagesPage(request, summary, input.retainedMessages);
+				return loadRetainedMessagesPage(request, summary, retainedMessages);
 			throw error;
 		}
 		let metadata = await handle.stat();
 		if (!metadata.isFile()) return buildUnavailableTaskConversationHistoryPage("会话记录不是可读取的文件。");
 		const rootMetadata = metadata;
+		const usesStableSnapshot = request.transcriptReadConsistency === "stable_snapshot";
 		const sourceRevision = createHash("sha256")
 			.update(
-				JSON.stringify([
-					card.id,
-					summary.taskId,
-					identity,
-					metadata.dev,
-					metadata.ino,
-					metadata.size,
-					metadata.mtimeMs,
-				]),
+				JSON.stringify(
+					usesStableSnapshot
+						? [
+								card.id,
+								card.createdAt,
+								summary.taskId,
+								summary.workspacePath,
+								identity.sourceAgentId,
+								identity.nativeSessionId,
+								identity.transcriptPath,
+							]
+						: [card.id, summary.taskId, identity, metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs],
+				),
 			)
 			.digest("hex");
 		const decodedCursor = decodeTaskConversationHistoryCursor(request.cursor);
-		if (decodedCursor && decodedCursor.sourceRevision !== sourceRevision)
-			return buildUnavailableTaskConversationHistoryPage("会话记录已变化，请刷新后重新加载历史。");
+		if (
+			decodedCursor &&
+			(decodedCursor.sourceRevision !== sourceRevision ||
+				Boolean(decodedCursor.stableSnapshotFiles) !== usesStableSnapshot)
+		)
+			return buildUnavailableTaskConversationHistoryPage(
+				"会话记录已变化，请刷新后重新加载历史。",
+				"snapshot_invalid",
+			);
+		const stableSnapshotFiles = usesStableSnapshot
+			? (decodedCursor?.stableSnapshotFiles ?? [
+					{ segmentThreadId: null, filePrefix: await captureNativeTranscriptFilePrefixSnapshot(handle) },
+				])
+			: undefined;
+		const rootFilePrefix = stableSnapshotFiles?.find((entry) => entry.segmentThreadId === null)?.filePrefix;
+		if (usesStableSnapshot && !rootFilePrefix) throw new NativeTranscriptSnapshotInvalidError();
+		if (rootFilePrefix)
+			await assertNativeTranscriptFilePrefixSnapshot(handle, identity.transcriptPath, rootFilePrefix);
 		let segmentMetadata = await assertNativeTranscriptIdentity(handle, summary);
 		input.onVerifiedTranscriptSegment?.(identity.transcriptPath);
 		const cursor: HistoryCursor = decodedCursor ?? {
 			sourceRevision,
-			beforeByteOffset: metadata.size,
+			beforeByteOffset: rootFilePrefix?.endByteOffset ?? metadata.size,
 			branchTrackingEnabled: false,
 			expectedAncestorRecordId: null,
 			newerEnvelope: null,
 			segmentThreadId: null,
 			segmentRevision: null,
+			stableSnapshotFiles,
 		};
+		const verifiedSnapshotPaths = new Map<string | null, string>([[null, identity.transcriptPath]]);
 		const knownCodexSegmentPaths = new Map<string, string[]>();
-		const findParentSegment = async (threadId: string, nativeSessionId: string): Promise<string | null> => {
-			let paths = knownCodexSegmentPaths.get(nativeSessionId);
-			if (!paths) {
-				paths = await listKnownCodexTranscriptSegmentPaths(
-					codexTranscriptSegmentSearchRoot(identity.transcriptPath as string),
-					nativeSessionId,
-				);
-				knownCodexSegmentPaths.set(nativeSessionId, paths);
+		const findParentSegment = async (
+			threadId: string,
+			currentNativeSessionId: string,
+			currentSegmentMetadata: Record<string, unknown> | null,
+		): Promise<{ path: string; nativeSessionId: string } | null> => {
+			// 分段 ID 与原生 ID 是两条轴；只允许本会话及已核实元数据明确声明的 fork 父身份。
+			const nativeSessionIds = new Set([currentNativeSessionId]);
+			if (typeof currentSegmentMetadata?.forked_from_id === "string" && currentSegmentMetadata.forked_from_id)
+				nativeSessionIds.add(currentSegmentMetadata.forked_from_id);
+			const matching: { path: string; nativeSessionId: string }[] = [];
+			for (const nativeSessionId of nativeSessionIds) {
+				let paths = knownCodexSegmentPaths.get(nativeSessionId);
+				if (!paths) {
+					paths = await listKnownCodexTranscriptSegmentPaths(
+						codexTranscriptSegmentSearchRoot(identity.transcriptPath as string),
+						nativeSessionId,
+					);
+					knownCodexSegmentPaths.set(nativeSessionId, paths);
+				}
+				for (const path of paths)
+					if (
+						basename(path).endsWith(
+							threadId === nativeSessionId
+								? `-${nativeSessionId}.jsonl`
+								: `-${nativeSessionId}_${threadId}.jsonl`,
+						)
+					)
+						matching.push({ path, nativeSessionId });
 			}
-			const matching = paths.filter((path) =>
-				basename(path).endsWith(
-					threadId === nativeSessionId ? `-${nativeSessionId}.jsonl` : `${nativeSessionId}_${threadId}.jsonl`,
-				),
-			);
 			return matching.length === 1 ? (matching[0] ?? null) : null;
 		};
 		let selectedSegmentNativeSessionId = identity.nativeSessionId;
-		// 原生 fork 的 history_base 可以跨原生 ID；只沿当前已验证元数据明确声明的 forked_from_id。
-		const parentNativeSessionId = (threadId: string) =>
-			segmentMetadata?.forked_from_id === threadId ? threadId : selectedSegmentNativeSessionId;
+
+		// 首次打开就固定全部可核实的祖先前缀，不能等用户翻页时再采纳已改写的父段。
+		if (stableSnapshotFiles && identity.sourceAgentId === "codex") {
+			let ancestorMetadata = segmentMetadata;
+			let ancestorNativeSessionId = identity.nativeSessionId;
+			const ancestorPaths = new Set([identity.transcriptPath]);
+			while (ancestorMetadata?.history_mode === "paginated" && ancestorPaths.size < 32) {
+				const base = codexHistoryBaseSchema.safeParse(ancestorMetadata.history_base);
+				if (!base.success) break;
+				let snapshot = stableSnapshotFiles.find((entry) => entry.segmentThreadId === base.data.thread_id);
+				if (decodedCursor && !snapshot) break;
+				const parentSegment = await findParentSegment(
+					base.data.thread_id,
+					ancestorNativeSessionId,
+					ancestorMetadata,
+				);
+				if (!parentSegment || ancestorPaths.has(parentSegment.path)) break;
+				const { path: parentPath, nativeSessionId: expectedNativeSessionId } = parentSegment;
+				ancestorPaths.add(parentPath);
+				const ancestorHandle = await open(parentPath, "r");
+				try {
+					ancestorMetadata = await assertNativeTranscriptIdentity(
+						ancestorHandle,
+						summary,
+						expectedNativeSessionId,
+					);
+					if (
+						typeof ancestorMetadata?.cwd === "string" &&
+						summary.workspacePath &&
+						resolve(ancestorMetadata.cwd) !== resolve(summary.workspacePath)
+					)
+						throw new Error("父历史分段的工作目录归属不符。");
+					ancestorNativeSessionId = expectedNativeSessionId;
+					if (!snapshot) {
+						snapshot = {
+							segmentThreadId: base.data.thread_id,
+							filePrefix: await captureNativeTranscriptFilePrefixSnapshot(
+								ancestorHandle,
+								base.data.end_byte_offset,
+							),
+						};
+						stableSnapshotFiles.push(snapshot);
+					}
+					if (snapshot.filePrefix.endByteOffset !== base.data.end_byte_offset)
+						throw new NativeTranscriptSnapshotInvalidError();
+					await assertNativeTranscriptFilePrefixSnapshot(ancestorHandle, parentPath, snapshot.filePrefix);
+					verifiedSnapshotPaths.set(base.data.thread_id, parentPath);
+					input.onVerifiedTranscriptSegment?.(parentPath);
+				} finally {
+					await ancestorHandle.close();
+				}
+			}
+		}
 
 		let selectedSegmentThreadId: string | null = null;
-		let selectedSegmentEndByteOffset = metadata.size;
+		let selectedSegmentEndByteOffset = rootFilePrefix?.endByteOffset ?? metadata.size;
 		const visitedSegmentPaths = new Set([identity.transcriptPath]);
 		while (selectedSegmentThreadId !== cursor.segmentThreadId) {
 			const base = codexHistoryBaseSchema.safeParse(segmentMetadata?.history_base);
@@ -561,10 +683,14 @@ export async function loadTaskConversationHistoryPage(
 				visitedSegmentPaths.size >= 32
 			)
 				return buildUnavailableTaskConversationHistoryPage("更早的会话分段链无法核实，请刷新后重试。");
-			const expectedParentNativeSessionId = parentNativeSessionId(base.data.thread_id);
-			const parentPath = await findParentSegment(base.data.thread_id, expectedParentNativeSessionId);
-			if (!parentPath || visitedSegmentPaths.has(parentPath))
+			const parentSegment = await findParentSegment(
+				base.data.thread_id,
+				selectedSegmentNativeSessionId,
+				segmentMetadata,
+			);
+			if (!parentSegment || visitedSegmentPaths.has(parentSegment.path))
 				return buildUnavailableTaskConversationHistoryPage("更早的会话分段缺失或归属不唯一。");
+			const { path: parentPath, nativeSessionId: expectedParentNativeSessionId } = parentSegment;
 			visitedSegmentPaths.add(parentPath);
 			await handle.close();
 			handle = null;
@@ -587,6 +713,15 @@ export async function loadTaskConversationHistoryPage(
 			await handle.read(boundary, 0, 1, selectedSegmentEndByteOffset - 1);
 			if (boundary[0] !== 10)
 				return buildUnavailableTaskConversationHistoryPage("更早的会话分段截点不是完整记录边界。");
+			if (stableSnapshotFiles) {
+				const segmentSnapshot = stableSnapshotFiles.find(
+					(entry) => entry.segmentThreadId === selectedSegmentThreadId,
+				);
+				if (!segmentSnapshot || segmentSnapshot.filePrefix.endByteOffset !== selectedSegmentEndByteOffset)
+					throw new NativeTranscriptSnapshotInvalidError();
+				await assertNativeTranscriptFilePrefixSnapshot(handle, parentPath, segmentSnapshot.filePrefix);
+				verifiedSnapshotPaths.set(selectedSegmentThreadId, parentPath);
+			}
 		}
 		if (cursor.beforeByteOffset > selectedSegmentEndByteOffset)
 			return buildUnavailableTaskConversationHistoryPage("历史分页位置超过该分段的有效范围。");
@@ -595,7 +730,7 @@ export async function loadTaskConversationHistoryPage(
 				JSON.stringify([metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs, selectedSegmentEndByteOffset]),
 			)
 			.digest("hex");
-		if (cursor.segmentRevision !== null && cursor.segmentRevision !== segmentRevision)
+		if (!usesStableSnapshot && cursor.segmentRevision !== null && cursor.segmentRevision !== segmentRevision)
 			return buildUnavailableTaskConversationHistoryPage("更早的会话记录已变化，请刷新后重试。");
 		cursor.segmentRevision = segmentRevision;
 		const newestMessagesFirst: RuntimeTaskChatMessage[] = [];
@@ -659,10 +794,12 @@ export async function loadTaskConversationHistoryPage(
 			segmentMetadata.history_base != null
 		) {
 			const base = codexHistoryBaseSchema.safeParse(segmentMetadata.history_base);
-			const parentPath = base.success
-				? await findParentSegment(base.data.thread_id, parentNativeSessionId(base.data.thread_id))
-				: null;
-			if (base.success && parentPath && !visitedSegmentPaths.has(parentPath)) {
+			const parentSegment =
+				base.success &&
+				(!stableSnapshotFiles || stableSnapshotFiles.some((entry) => entry.segmentThreadId === base.data.thread_id))
+					? await findParentSegment(base.data.thread_id, selectedSegmentNativeSessionId, segmentMetadata)
+					: null;
+			if (base.success && parentSegment && !visitedSegmentPaths.has(parentSegment.path)) {
 				cursor.segmentThreadId = base.data.thread_id;
 				cursor.segmentRevision = null;
 				cursor.beforeByteOffset = base.data.end_byte_offset;
@@ -671,14 +808,25 @@ export async function loadTaskConversationHistoryPage(
 		const latestMetadata = await handle.stat();
 		const latestRootMetadata = await stat(identity.transcriptPath);
 		if (
-			latestMetadata.size !== metadata.size ||
-			latestMetadata.mtimeMs !== metadata.mtimeMs ||
-			latestRootMetadata.dev !== rootMetadata.dev ||
-			latestRootMetadata.ino !== rootMetadata.ino ||
-			latestRootMetadata.size !== rootMetadata.size ||
-			latestRootMetadata.mtimeMs !== rootMetadata.mtimeMs
+			!usesStableSnapshot &&
+			(latestMetadata.size !== metadata.size ||
+				latestMetadata.mtimeMs !== metadata.mtimeMs ||
+				latestRootMetadata.dev !== rootMetadata.dev ||
+				latestRootMetadata.ino !== rootMetadata.ino ||
+				latestRootMetadata.size !== rootMetadata.size ||
+				latestRootMetadata.mtimeMs !== rootMetadata.mtimeMs)
 		)
 			return buildUnavailableTaskConversationHistoryPage("会话记录读取期间发生变化，请刷新后重试。");
+		for (const snapshot of stableSnapshotFiles ?? []) {
+			const path = verifiedSnapshotPaths.get(snapshot.segmentThreadId);
+			if (!path) throw new NativeTranscriptSnapshotInvalidError();
+			const snapshotHandle = await open(path, "r");
+			try {
+				await assertNativeTranscriptFilePrefixSnapshot(snapshotHandle, path, snapshot.filePrefix);
+			} finally {
+				await snapshotHandle.close();
+			}
+		}
 		return {
 			availability: notice ? "partially_available" : "available",
 			messages: newestMessagesFirst.reverse(),
@@ -690,6 +838,11 @@ export async function loadTaskConversationHistoryPage(
 			error instanceof Error && !String(error.message).includes("ENOENT")
 				? error.message
 				: "会话记录不存在或已被移走。",
+			error instanceof NativeTranscriptSnapshotInvalidError
+				? "snapshot_invalid"
+				: error instanceof Error && /身份|归属/.test(error.message)
+					? "identity_mismatch"
+					: "source_unavailable",
 		);
 	} finally {
 		await handle?.close();

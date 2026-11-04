@@ -85,7 +85,7 @@ function installOwnedCodexSession(nativeSessionId = randomUUID()) {
 	};
 	const internals = manager as unknown as {
 		entries: Map<string, typeof entry>;
-		deferSideSessionResumeWaitingForNativeIdentity: () => Promise<boolean>;
+		deferTaskSessionResumeWaitingForNativeConversationIdentity: () => Promise<boolean>;
 		resolveTaskSessionRequestWithCodexConversationStorageHome: (
 			request: StartTaskSessionRequest,
 		) => Promise<StartTaskSessionRequest>;
@@ -107,7 +107,7 @@ function installOwnedCodexSession(nativeSessionId = randomUUID()) {
 		) => Promise<typeof summary>;
 	};
 	internals.entries.set(summary.taskId, entry);
-	vi.spyOn(internals, "deferSideSessionResumeWaitingForNativeIdentity").mockResolvedValue(false);
+	vi.spyOn(internals, "deferTaskSessionResumeWaitingForNativeConversationIdentity").mockResolvedValue(false);
 	vi.spyOn(internals, "resolveTaskSessionRequestWithCodexConversationStorageHome").mockImplementation(
 		async (request) => request,
 	);

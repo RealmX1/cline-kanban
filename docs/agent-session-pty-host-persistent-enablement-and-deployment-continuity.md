@@ -20,6 +20,20 @@ controller 请求和恢复用的只读查询到期后，先让已就绪的 socke
 
 待核对记录串行原子写入，并保存原 host PID 与 OS 启动身份。原 host 确证退出或 PID 已换代时，先追加持久解除证据，再清除当前阻塞；没有在途创建时，也可用同一原 host 的“原 key 不存在”响应补证。仍活着或身份不明的原进程不能据陈旧 socket 判作已退出。runtime 退出前等待在途创建与持久写入结束，再交还 controller 所有权。
 
+## 接管时的终端模式检查点
+
+host 的输出环形缓冲只有 2 MiB，长会话的全屏、鼠标、粘贴和焦点初始化序列可能已被覆盖。host 另外维护与保留起点对齐的模式状态：覆盖旧字节前先推进解析器；读取区间内的其他起点时，从该状态解析到请求位置。状态不会随输出淘汰，内存不随会话历史增长。
+
+`attach_hosted_session_output_stream_response.outcome.terminalModeCheckpoint` 是可选字段，不改变握手或 protocolVersion。host 在同一个同步 attach 操作中绑定 `hostedSessionKey`、PID、创建时间和实际 `catchUpStartByteOffset`；runtime 必须全部匹配才使用。不能把 listing 时的模式用于后来已发生覆盖的追赶区间。检查点还保留未完成控制序列和 UTF-8 字符的解析前缀，避免从半截 CSI 开始打印协议正文。
+
+恢复顺序是：可信完整屏幕检查点 → 实际重放起点的 host 模式检查点与原始输出 → 从偏移 0 开始的完整输出。完整屏幕没有覆盖缺口时继续优先保留屏幕与 scrollback；发生覆盖时先丢弃旧屏幕，再恢复实际起点的控制状态。历史终端查询始终不应答；尺寸调整仅触发重绘，不能证明模式已经恢复。普通 shell 不被强制切入全屏或鼠标跟踪。
+
+解析器覆盖全屏别名 47/1047/1049、互斥鼠标跟踪 9/1000/1002/1003、xterm 支持的坐标编码 1006/1016、粘贴 2004、焦点 1004、RIS 和 DECSTR。按 xterm 的 32 个主参数处理子参数与超限参数。前缀最多保存 512 字符；超长 CSI 转为模式未知，字符串正文不进入模式解析，也不无限保存。
+
+旧 host 不提供字段时，已有可信完整屏幕或完整输出仍可恢复；只有截断输出时，记录 `unknown_awaiting_native_initialization_or_checkpoint`。`terminalModesAreKnown: false` 随接管记录与屏幕检查点保留，后续 runtime 不能把这份屏幕升级为可信模式证据。原生 RIS 或五类模式的显式初始化补齐后自动重验，记录 `terminal-modes-recovered` 并发布更新；没有定时重放、重复输入或按 agent 名称猜测模式。重新接管取得有效 host 检查点也可恢复。
+
+这一层解决 host 截断输出丢失控制状态；浏览器如何应用恢复快照及鼠标编码的快照往返仍须分别验证，不能以其中一层通过代替另一层。
+
 ## 诊断
 
 `kanban diagnostics agent-session-pty-hosts --json` 和 `runtime.getAgentSessionPtyHostDiagnostics` 共享只读状态，包含配置来源、冻结的启动意图、当前实际模式、generation 就绪情况、runtime/host 启动身份、逐会话归属、pending spawn 与恢复进度。设置页通过现有 runtime state stream 接收失效通知，不承担后台编排。当前配置和启动快照分开显示，避免把“已保存、待重启”当作当前已切换。
@@ -41,3 +55,12 @@ CLI 无法取得所属 runtime 响应时只读历史快照与原生进程，明�
 受保护测试覆盖偏好优先级、并发保存、坏配置保留、关闭时接管、只读诊断不抢占、持久恢复预算、并发 runtime、回执丢失和真实 PTY。打包测试隔离 HOME/CODEX_HOME/CODEX_SQLITE_HOME 与固定端口，使用两份不同 build，浏览器核验设置保存/重开/待重启提示。独立 tmux socket 验证全新 tmux server 清空临时开关后仍恢复持久选择。
 
 真实 Codex CLI 使用隔离本地 Responses fixture，核对跨重启的原生身份、输入唯一性、输出和进程启动身份；该证据证明 CLI/PTY/协议集成，不等于外部模型服务的生产结果。生产安装、持久启动链实际激活和下一次授权 redeploy 的自然会话连续性另行注册部署后验证，不能由测试环境通过替代。
+
+终端模式的打包回归使用隔离 HOME/CODEX_HOME/CODEX_SQLITE_HOME、固定端口、真实 PTY 与确定性 agent TUI fixture，不访问模型。它在输出超过 2 MiB 后 SIGKILL runtime，确认原 agent PID 保留，接管后将真实 WebSocket 恢复快照交给 Playwright 的 xterm，检查滚轮报告能改变会话画面、输入框未污染、没有外层页面滚动，并以普通 shell 的历史滚动作对照。先按 `AGENTS.md` 隔离两处构建输出，使用与原生依赖 ABI 一致的 Node 构建，再运行：
+
+```sh
+PLAYWRIGHT_BROWSERS_PATH=/absolute/path/to/playwright-browser-cache \
+KANBAN_TERMINAL_MODE_CHECKPOINT_PACKAGED_RUNTIME_CLI_PATH=/absolute/isolated/dist/cli.js \
+npm run test:guarded -- --project runtime-integration \
+  test/integration/terminal-mode-checkpoint-packaged-runtime-restart-and-browser-wheel.integration.test.ts
+```

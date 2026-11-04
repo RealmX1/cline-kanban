@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { assertCodexConfigurationWriterBindingIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
+import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "../codex-configuration-sync/codex-source-shared-plugin-installation-directories";
 import {
 	prepareCodexDirectoryVolumeObservations,
 	runWithCodexDirectoryVolumeSystemQueriesDisabled,
@@ -72,6 +73,7 @@ export function recordKnownCodexConfigurationNativeRequest(input: {
 				writerBinding.sourceHomeDirectoryPath,
 				writerBinding.conversationStorageHomeDirectoryPath,
 				writerBinding.sqliteHomeDirectoryPath,
+				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(writerBinding),
 			]);
 			await runWithCodexDirectoryVolumeSystemQueriesDisabled(async () => {
 				await assertCodexConfigurationWriterBindingIdentity(writerBinding);

@@ -296,7 +296,7 @@ function pruneWorkspaceChangesCache(): void {
 
 async function readHeadFile(repoRoot: string, path: string): Promise<string | null> {
 	try {
-		return await getGitStdout(["show", `HEAD:${path}`], repoRoot);
+		return await getGitStdoutWithoutTrimming(["show", `HEAD:${path}`], repoRoot);
 	} catch {
 		return null;
 	}
@@ -304,7 +304,7 @@ async function readHeadFile(repoRoot: string, path: string): Promise<string | nu
 
 async function readFileAtRef(repoRoot: string, ref: string, path: string): Promise<string | null> {
 	try {
-		return await getGitStdout(["show", `${ref}:${path}`], repoRoot);
+		return await getGitStdoutWithoutTrimming(["show", `${ref}:${path}`], repoRoot);
 	} catch {
 		return null;
 	}
