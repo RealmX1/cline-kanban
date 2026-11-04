@@ -242,10 +242,12 @@ for (const initiallyMobile of [true, false]) {
 				await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).click();
 				await page.getByRole("button", { name: "可视化", exact: true }).click();
 			} else await page.getByLabel("工作台格位 2", { exact: true }).selectOption("task_visualizations");
-			await page.getByLabel("选择可视化", { exact: true }).selectOption(artifact.visualizationArtifactId);
+			// 面板进入前台会自动选择最新产物；再次 selectOption 会主动重载预览。
+			await expect(page.getByLabel("选择可视化", { exact: true })).toHaveValue(artifact.visualizationArtifactId);
 			const counter = page.frameLocator('iframe[title="交互图"]').locator("#counter");
 			await counter.click();
 			await expect(counter).toHaveText("1");
+			expect(evidence.contentLoads()).toBe(1);
 			await page.evaluate(() => {
 				const iframe = document.querySelector<HTMLIFrameElement>('iframe[title="交互图"]')!;
 				Object.assign(window, {
