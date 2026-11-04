@@ -1019,9 +1019,14 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				await expect
 					.poll(async () => (await restarted.getStatus(f.scope, { taskId: "task-1" })).record?.status)
 					.toBe("completed");
-				expect(
-					f.live[target.taskId].taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover,
-				).toBe(false);
+				// 完成记录落盘先于内存 metadata 发布，分别等待两个观察边界。
+				await expect
+					.poll(
+						() =>
+							f.live[target.taskId].taskConversationSessionMetadata
+								?.taskAutomationSuspendedForMainSessionHandover,
+					)
+					.toBe(false);
 				expect(f.sendTaskChatMessage).toHaveBeenCalledTimes(1);
 			} finally {
 				if (previousConfig === undefined) delete process.env.CURSOR_CONFIG_DIR;
