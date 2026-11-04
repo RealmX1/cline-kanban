@@ -15,6 +15,7 @@ import {
 /** 全 null / 全空字典：表示「服务端一条偏好都没有」，也是首次读取时的形态。 */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		taskConversationTranscriptDocumentVisibility: null,
 		taskProjectAssignmentAutomaticAnalysisEnabled: null,
 		taskEditorSettingPresentationBySettingKey: {},
 		newTaskAutoReviewEnabled: null,
@@ -70,6 +71,8 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		return parsed.success ? (parsed.data as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TField]) : null;
 	};
 	return {
+		taskConversationTranscriptDocumentVisibility:
+			parseNullableField("taskConversationTranscriptDocumentVisibility") ?? null,
 		taskProjectAssignmentAutomaticAnalysisEnabled:
 			parseNullableField("taskProjectAssignmentAutomaticAnalysisEnabled") ?? null,
 		taskEditorSettingPresentationBySettingKey: parseNullableField("taskEditorSettingPresentationBySettingKey") ?? {},
@@ -97,6 +100,7 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 	preferences: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		preferences.taskConversationTranscriptDocumentVisibility == null &&
 		preferences.taskProjectAssignmentAutomaticAnalysisEnabled == null &&
 		Object.keys(preferences.taskEditorSettingPresentationBySettingKey ?? {}).length === 0 &&
 		preferences.newTaskAutoReviewEnabled === null &&
@@ -128,6 +132,8 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 	right: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		(left.taskConversationTranscriptDocumentVisibility ?? null) ===
+			(right.taskConversationTranscriptDocumentVisibility ?? null) &&
 		(left.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) ===
 			(right.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) &&
 		areStringKeyedStringRecordsEqual(
@@ -201,6 +207,10 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 		return current;
 	}
 	const replaced: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = {
+		taskConversationTranscriptDocumentVisibility:
+			updates?.taskConversationTranscriptDocumentVisibility === undefined
+				? (current.taskConversationTranscriptDocumentVisibility ?? null)
+				: updates.taskConversationTranscriptDocumentVisibility,
 		taskProjectAssignmentAutomaticAnalysisEnabled:
 			updates?.taskProjectAssignmentAutomaticAnalysisEnabled === undefined
 				? (current.taskProjectAssignmentAutomaticAnalysisEnabled ?? null)

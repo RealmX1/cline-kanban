@@ -4312,6 +4312,10 @@ export type RuntimeTaskCreateDialogPrimaryStartAction = z.infer<typeof runtimeTa
 // 首次几乎同时迁移时，各自都基于空快照算出自己那半份；若迁移也走整份替换，后到的那次会在服务端锁内
 // 把前一次的条目整份覆盖掉，用户凭空少一半编组。把「并入」放到服务端锁内算，结果才与到达顺序无关。
 export const runtimeUserInterfacePreferencesSharedAcrossBrowserOriginsSchema = z.object({
+	taskConversationTranscriptDocumentVisibility: z
+		.enum(["conversation_only", "conversation_and_tools", "all_records"])
+		.nullable()
+		.optional(),
 	// 创建、Backlog 保存和直接启动共享；旧配置缺失或 null 时均默认关闭。
 	taskProjectAssignmentAutomaticAnalysisEnabled: z.boolean().nullable().optional(),
 	// 每次只提交变化的设置键，服务端在配置锁内逐键合并。
@@ -4907,7 +4911,8 @@ export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMess
 export const runtimeTaskConversationHistoryPageRequestSchema = z.object({
 	workspaceTaskId: z.string().min(1),
 	taskConversationSessionId: z.string().min(1),
-	cursor: z.string().max(4096).nullish(),
+	cursor: z.string().max(32768).nullish(),
+	transcriptReadConsistency: z.enum(["strict_revision", "stable_snapshot"]).optional(),
 });
 export type RuntimeTaskConversationHistoryPageRequest = z.infer<typeof runtimeTaskConversationHistoryPageRequestSchema>;
 export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
@@ -4915,6 +4920,9 @@ export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
 	messages: z.array(runtimeTaskChatMessageSchema),
 	nextCursor: z.string().nullable(),
 	notice: z.string().nullable(),
+	unavailabilityReason: z
+		.enum(["binding_pending", "source_unavailable", "identity_mismatch", "snapshot_invalid"])
+		.optional(),
 });
 export type RuntimeTaskConversationHistoryPageResponse = z.infer<
 	typeof runtimeTaskConversationHistoryPageResponseSchema

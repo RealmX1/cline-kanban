@@ -629,6 +629,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				const reloaded = await loadRuntimeConfig(tempProject);
 				expect(reloaded.selectedAgentId).toBe("codex");
 				expect(reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins).toEqual({
+					taskConversationTranscriptDocumentVisibility: null,
 					taskProjectAssignmentAutomaticAnalysisEnabled: null,
 					newTaskAutoReviewEnabled: true,
 					newTaskAutoReviewMode: null,
