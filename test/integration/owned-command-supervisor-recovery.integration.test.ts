@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
+import {
+	applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt,
+	observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt,
+} from "../../src/task-command-execution/task-command-execution-owner-session-interrupt-port";
 import {
 	createTaskCommandExecutionService,
 	type TaskCommandExecutionDependencies,
@@ -69,6 +73,92 @@ function createService() {
 }
 
 describe("独立监督进程跨 runtime 恢复", { timeout: 30_000 }, () => {
+	it("真实后台命令跨主回合打断和服务接管继续，两阶段精简交回后明确停止阻止迟到通知", async () => {
+		const { service, dependencies, deliver } = createService();
+		const noticesFile = join(directory, "continuation-notices.json");
+		const resultFile = join(directory, "business-result.json");
+		const releaseFile = join(directory, "release-final-result");
+		const invocationFile = join(directory, "invocations.txt");
+		const command = [
+			process.execPath,
+			"-e",
+			`
+const fs = require('node:fs');
+const noticeFile = ${JSON.stringify(noticesFile)};
+const findings = {noticeId:'reviewers-ready',stage:'reviewer_findings_available',text:'匿名发现摘要可供并行核对。'};
+fs.appendFileSync(${JSON.stringify(invocationFile)}, 'once');
+fs.writeFileSync(noticeFile, JSON.stringify({notices:[findings]}));
+const timer = setInterval(() => {
+  if (!fs.existsSync(${JSON.stringify(releaseFile)})) return;
+  clearInterval(timer);
+  const final = {noticeId:'final-revision-1',stage:'final_agent_review',text:'验真完成，审阅摘要：/持久目录/agent-review-summary.md'};
+  fs.writeFileSync(${JSON.stringify(resultFile)}, JSON.stringify({disposition:'agent_review_ready',validation:{commands:['完整验证脚本仅保留在机器原件']},agentContinuationNotice:final}));
+  fs.writeFileSync(noticeFile, JSON.stringify({notices:[findings,final]}));
+}, 50);
+`,
+		];
+		let record = await service.start("workspace", {
+			taskId: "task",
+			idempotencyKey: "interrupt-and-stage-results",
+			specification: {
+				command,
+				resumeCommand: command,
+				resultFile,
+				continuationNoticesFile: noticesFile,
+				ownerSessionInterruptPolicy: "preserve_execution",
+				workingDirectory: directory,
+				materialSha256: "d".repeat(64),
+				label: "RVF 并行后台交回",
+			},
+		});
+		const stopObserving = observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt(
+			service.handleOwnerSessionInterrupt,
+		);
+		const restarted = createTaskCommandExecutionService(dependencies);
+		try {
+			await vi.waitFor(async () => expect(JSON.parse(await readFile(noticesFile, "utf8")).notices).toHaveLength(1), {
+				timeout: 10_000,
+			});
+			await applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt("workspace", "session");
+			expect((await service.inspect("workspace", record)).revokedAtEpochMs).toBeNull();
+			service.stop();
+			await mutateTaskCommandExecutions("workspace", (records) => ({
+				records: records.map((item) => ({ ...item, custodianRuntimeProcessInstanceId: randomUUID() })),
+				result: undefined,
+			}));
+			await restarted.sweepExecution("workspace", record.executionId);
+			expect(deliver).toHaveBeenCalledTimes(1);
+			await writeFile(releaseFile, "继续生成最终结果");
+			await vi.waitFor(
+				async () => {
+					await restarted.sweepExecution("workspace", record.executionId);
+					record = await restarted.inspect("workspace", record);
+					expect(record.resultDelivery?.stage).toBe("final_agent_review");
+					expect(record.resultDelivery?.state).toBe("native_accepted");
+				},
+				{ timeout: 12_000 },
+			);
+			expect(deliver).toHaveBeenCalledTimes(2);
+			expect(record.resultDelivery?.text).not.toContain("完整验证脚本");
+			expect(record.resultDeliveryHistory).toHaveLength(1);
+			expect(await readFile(invocationFile, "utf8")).toBe("once");
+			await restarted.cancelForTask("workspace", "task");
+			await writeFile(
+				noticesFile,
+				JSON.stringify({
+					notices: [{ noticeId: "late-after-stop", stage: "final_agent_review", text: "不得投递" }],
+				}),
+			);
+			await restarted.sweepExecution("workspace", record.executionId);
+			expect(deliver).toHaveBeenCalledTimes(2);
+			expect((await restarted.inspect("workspace", record)).launchAttemptCount).toBe(1);
+		} finally {
+			stopObserving();
+			await restarted.cancel("workspace", record);
+			restarted.stop();
+			service.stop();
+		}
+	});
 	it("接管身份匹配的存活命令，快速结果只交回一次", async () => {
 		const { service, dependencies, deliver } = createService();
 		const resultFile = join(directory, "business-result.json");

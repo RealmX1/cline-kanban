@@ -189,6 +189,12 @@ async function verifyTaskLookupQueryFlows(page: Page, browserOrigin: string, isS
 	await page.getByRole("button", { name: "<trajectory>", exact: true }).click();
 	await expect(questionInput).toHaveValue("<trajectory>\n需要引用的执行轨迹\n</trajectory>");
 	await expect(questionInput).toBeFocused();
+	await questionInput.press("ControlOrMeta+A");
+	await page.getByRole("button", { name: "Insert block", exact: true }).click();
+	await page.getByPlaceholder("Block name...", { exact: true }).fill("补充说明");
+	await page.getByRole("button", { name: "Insert <补充说明> block", exact: true }).click();
+	await expect(questionInput).toHaveValue("<补充说明>\n<trajectory>\n需要引用的执行轨迹\n</trajectory>\n</补充说明>");
+	await expect(questionInput).toBeFocused();
 	const longQuestion = `直接发起新的查卡查询\n${"这是需要完整保留的查询条件。\n".repeat(12)}`.trim();
 	await questionInput.fill(longQuestion);
 	await page.getByRole("button", { name: "扩展编辑区", exact: true }).click();

@@ -71,6 +71,7 @@ import {
 import { AcpTaskSessionRegistry } from "./acp-task-session-registry";
 
 export interface StartAcpTaskSessionRequest {
+	modelId?: string;
 	taskId: string;
 	workspaceTaskId?: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
@@ -410,6 +411,7 @@ export class AcpTaskSessionService {
 						? resumeAddressing.taskAgentSessionInitialization.sourceSessionId
 						: undefined,
 				// 续跑重开一律不重放 plan 起步（理由见 StartAcpTaskSessionRequest 的字段注释）。
+				modelId: shouldResumeWithoutResendingPrompt ? undefined : request.modelId,
 				startInPlanMode: shouldResumeWithoutResendingPrompt ? false : request.startInPlanMode,
 				resumePriorAgentConversationWithoutResendingPrompt: shouldResumeWithoutResendingPrompt,
 				taskConversationSessionContextForkSourceNativeSessionId: isForkingMainContext

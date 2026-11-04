@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-client-connection-runtime";
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
+import { resolveCreationStartupSettings } from "../../src/core/creation-startup-settings";
 import {
 	type TaskEditorCreationSubmissionRequest,
 	taskEditorCreationSubmissionRequestSchema,
@@ -115,8 +116,13 @@ async function scenario() {
 		}
 		return null;
 	});
-	const makeService = () => {
+	const makeService = (
+		resolveCreationSettings?: Parameters<
+			typeof createTaskEditorCreationSubmissionService
+		>[0]["resolveCreationSettings"],
+	) => {
 		const service = createTaskEditorCreationSubmissionService({
+			resolveCreationSettings,
 			resolveIdentity,
 			persistCard: persist,
 			applyAcceptedRelations: applyRelations,
@@ -226,6 +232,38 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 			codexReasoningEffortOverride: "ultra",
 			codexConfigurationProfileId: "selected-profile",
 		});
+	});
+	it("默认模型与启动设置先持久冻结，建卡失败及新实例恢复不重新套用默认值", async () => {
+		const test = await scenario();
+		const defaults = vi.fn(async () =>
+			resolveCreationStartupSettings({
+				agentId: "codex",
+				startInPlanMode: false,
+				defaultModelId: "creation-default-model",
+				codexConfigurationProfileId: "explicit-profile",
+			}),
+		);
+		const service = test.makeService(defaults);
+		const input = test.request("new01", false);
+		input.newTaskCard.codexConfigurationProfileId = "explicit-profile";
+		test.persist.mockRejectedValueOnce(new Error("写盘暂不可用"));
+		await service.submit(test.source, input, evidence);
+		await service.settle();
+		expect(defaults).toHaveBeenCalledTimes(1);
+		expect(test.persist.mock.calls.at(-1)?.[1]).toMatchObject({
+			codexConfigurationProfileId: "explicit-profile",
+			startInPlanMode: false,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+			terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "creation-default-model" },
+		});
+		const record = await readTaskEditorCreationSubmission(test.source.workspaceId, input.submissionId);
+		expect(record?.request.newTaskCard.terminalAgentModelOverrideSettings).toBeUndefined();
+		expect(record?.status.resolvedSettings?.modelId.value).toBe("creation-default-model");
+		await service.close();
+		const restored = test.makeService(defaults);
+		await restored.submit(test.source, input, evidence);
+		await restored.settle();
+		expect(defaults).toHaveBeenCalledTimes(1);
 	});
 	it("A 的关系失败后，B 在另一项目独立建卡；重试不覆盖 A 的新字段", async () => {
 		const test = await scenario();

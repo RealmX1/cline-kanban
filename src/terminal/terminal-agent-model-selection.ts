@@ -322,7 +322,7 @@ type TerminalAgentModelCatalogProbeContract = AgentCliCapabilityProbeContract<
 // 是必须写代码的那一半——把两者放进同一张表，就不必为「加一个 agent」再复制一遍执行、超时与降级逻辑。
 // 表与解析器同文件，是因为表要引用解析器；执行器（driver）与产品线过滤器各自独立成文件。
 const TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS: Record<
-	Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi">,
+	Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi" | "omp">,
 	TerminalAgentModelCatalogProbeContract
 > = {
 	claude: {
@@ -374,7 +374,7 @@ export function selectCursorLaunchDefaultModelIdFromCatalog(
 }
 
 async function loadLatestGenerationTerminalAgentModelOptions(
-	agentId: Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi">,
+	agentId: Exclude<RuntimeTerminalAgentModelSelectionAgentId, "kimi" | "omp">,
 ): Promise<{ options: RuntimeTerminalAgentModelSelectionOption[]; warning?: string }> {
 	const outcome = await runAgentCliCapabilityProbe(TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS[agentId]);
 	if (!outcome.ok) {
@@ -429,6 +429,27 @@ function buildFallbackResponse(
 export async function getTerminalAgentModelSelectionOptions(
 	agentId: RuntimeTerminalAgentModelSelectionAgentId,
 ): Promise<RuntimeTerminalAgentModelSelectionOptionsResponse> {
+	if (agentId === "omp") {
+		const outcome = await runAgentCliCapabilityProbe({
+			probeId: "omp-model-catalog",
+			binary: "omp",
+			args: ["models", "--json", "--no-extensions"],
+			timeoutMs: 15_000,
+			maxBufferBytes: 4 * 1024 * 1024,
+			parseStdout: (stdout) => {
+				const parsed = JSON.parse(stdout) as { models: Array<{ id: string; name?: string; provider: string }> };
+				return deduplicateModelOptions(
+					parsed.models.map((model) => ({
+						modelId: `${model.provider}/${model.id}`,
+						label: model.name || model.id,
+					})),
+				);
+			},
+		});
+		return outcome.ok
+			? { agentId, defaultModelId: null, defaultLabel: "Agent 默认配置", options: outcome.value }
+			: buildFallbackResponse(agentId, outcome.warning);
+	}
 	if (agentId === "kimi") {
 		try {
 			const catalog = await loadRefreshedKimiManagedModelCatalog();

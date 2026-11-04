@@ -232,7 +232,8 @@ function normalizeTaskTerminalAgentModelOverrideSettings(
 		settings.agentId === "claude" ||
 		settings.agentId === "codex" ||
 		settings.agentId === "cursor" ||
-		settings.agentId === "kimi"
+		settings.agentId === "kimi" ||
+		settings.agentId === "omp"
 			? settings.agentId
 			: null;
 	const modelId = typeof settings.modelId === "string" ? settings.modelId.trim() : "";
@@ -260,6 +261,7 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	taskMainSessionHandover: true,
 	independentTaskCreationProvenance: true,
 	title: true,
+	taskNameVersion: true,
 	prompt: true,
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
@@ -408,6 +410,11 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			? { taskMainSessionHandover: taskMainSessionHandoverRecordSchema.parse(card.taskMainSessionHandover) }
 			: {}),
 		title,
+		...(typeof card.taskNameVersion === "number" &&
+		Number.isInteger(card.taskNameVersion) &&
+		card.taskNameVersion >= 0
+			? { taskNameVersion: card.taskNameVersion }
+			: {}),
 		prompt,
 		...(independentTaskCreationProvenanceSchema.safeParse(card.independentTaskCreationProvenance).success
 			? {

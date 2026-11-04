@@ -29,3 +29,19 @@
 持久现场记录、授权、测试、构建及部署恢复结果在 `~/.cline/kanban/cross-task-handoff-artifacts/task-e9106-codex-native-session-resume-recovery/`。部署、运行时验证及现场恢复必须按各自证据分别报告。
 
 本任务此前直接部署中断了其它活跃任务；这是独立的操作失误。部署请求与人工确认规则的修正由 `bdda6` 负责，本任务不修改其 skill 范围。上述 d55ee 恢复没有重新部署或重启服务。当前候选源码仍未提交、未落入 local main；运行实例包含候选补丁，不等于该补丁已经正式评审或集成。
+
+## 压缩转录兼容（2026-10-31，任务 42534）
+
+Codex 也会把原会话保存为 `.jsonl.zst`。任务保存的 `.jsonl` 路径失效时，应检查对应压缩文件及同一 UUID 的压缩恢复分片，不能直接判定历史缺失。
+
+预检通过 `zstd-stream` 的内嵌 libzstd 流式解压，只将元数据首行交给身份与主会话判定；首行后的输出直接丢弃，仍读到正常 EOF 以核验截断、声明大小和可选校验和，保留读取时限、打开时文件大小上限和文件关闭。该路径不依赖较新 Node 22 才提供的原生 Zstd API。原计划选择的 `fzstd` 缺少完整性核验，RVF 修复中的自写帧转换又误拒合法 RLE 和大回溯距离；通过隔离对照后改用库内流式实现，不在宿主重建压缩格式解析。枚举压缩文件需显式传入 `includeCompressedTranscripts`，现有正文读取者默认仍只接收 JSONL。
+
+压缩、原生解压或原子替换可能改变路径和 inode；预检最多重查一次，并跳过未变化的无效文件。补证仍只限已知 UUID，不放宽后台代理、存储目录和身份门禁。启动、刷新和已有自动补证链路共用此预检。
+
+真实恢复 `1a28f` 时先保存原压缩文件、校验值与任务摘要，再通过 `runtime.refreshTaskTerminal` 显式 `resume <原 UUID>`。若原生配置 `tui.resume_cwd="current"` 在受管连接下要求 `--cd`，只补回已核实的原任务目录。经当前 TUI 独享控制端点核对 UUID、cwd 和完整历史后，可按上文正式身份观察事件补记身份；不冒充 SessionStart、不发送用户消息。PTY host 超时后须先核验没有遗留活体，再有界重试。
+
+本次恢复核验为原 UUID、两个回合、49 个历史项和两条用户消息；源码兼容修复与运行实例恢复分别交付，未执行部署。持久证据位于 `~/.cline/kanban/cross-task-handoff-artifacts/task-42534-codex-compressed-transcript-resume/`。真实原生回归使用隔离 HOME、CODEX_HOME、CODEX_SQLITE_HOME 和合成历史：
+
+```bash
+KANBAN_CODEX_NATIVE_COMPRESSED_RESUME_TEST_BINARY=/path/to/codex npm run test:guarded -- --project runtime-integration test/integration/codex-native-compressed-transcript-resume.integration.test.ts
+```

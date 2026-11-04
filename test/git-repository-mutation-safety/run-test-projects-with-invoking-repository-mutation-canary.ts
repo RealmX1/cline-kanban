@@ -12,7 +12,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export type InvokingRepositoryMutationCategory =
@@ -276,6 +276,22 @@ function createIsolatedChildTestEnvironment(diagnosticDirectoryPath: string): No
 	};
 }
 
+// npm script 会把 node_modules/.bin 注入 PATH；直接用 node 启动 canary 时没有这一步。
+// 仍解析调用仓库里的本地可执行文件，避免 vitest 这类命令变成无输出的 ENOENT。
+function prependInvokingWorktreeNodeModuleBinaries(
+	environmentVariables: NodeJS.ProcessEnv,
+	invokingWorktreePath: string,
+): NodeJS.ProcessEnv {
+	const localBinaryDirectoryPath = join(invokingWorktreePath, "node_modules", ".bin");
+	if (!existsSync(localBinaryDirectoryPath)) return environmentVariables;
+	const currentPath = environmentVariables.PATH ?? "";
+	if (currentPath.split(delimiter).includes(localBinaryDirectoryPath)) return environmentVariables;
+	return {
+		...environmentVariables,
+		PATH: currentPath.length > 0 ? `${localBinaryDirectoryPath}${delimiter}${currentPath}` : localBinaryDirectoryPath,
+	};
+}
+
 function spawnCommandAndForwardTerminationSignals(options: {
 	command: string;
 	arguments: readonly string[];
@@ -353,9 +369,13 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 			command: options.command,
 			arguments: options.arguments ?? [],
 			workingDirectoryPath: before.invokingWorktreePath,
-			environmentVariables: createIsolatedChildTestEnvironment(diagnosticDirectoryPath),
+			environmentVariables: prependInvokingWorktreeNodeModuleBinaries(
+				createIsolatedChildTestEnvironment(diagnosticDirectoryPath),
+				before.invokingWorktreePath,
+			),
 		});
-	} catch {
+	} catch (error: unknown) {
+		process.stderr.write(`子测试命令无法启动：${error instanceof Error ? error.message : String(error)}\n`);
 		childCompletion = { exitCode: 1, signal: null };
 	}
 	let after: InvokingRepositoryEvidenceSnapshot | null = null;

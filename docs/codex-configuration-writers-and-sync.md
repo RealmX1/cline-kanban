@@ -43,6 +43,8 @@ Codex CLI `0.165.0` 的插件 `hooks/list.currentHash` 为 `定义哈希/内容�
 
 双哈希目录兼容、验证及 Codex 原生 Git 元数据限制见 [实现与依赖边界](research/codex-plugin-hook-dual-hash-trust-implementation.md)。本仓库修复不改变 Codex 的插件内容指纹算法。
 
+Codex `0.166.0` 的新 writer 同源共享 `plugins` 与 `.tmp/marketplaces`，并以物理来源域协调原生更新，避免辅助进程将相同 revision 误作首次安装。未知能力与旧活进程保留兼容布局；双哈希批准不自动重签。目录绑定、跨 profile 中断恢复及原生验收见 [同源插件安装与原生更新协调](codex-source-shared-plugin-installation-and-native-update-coordination.md)。
+
 缺原进程端点的旧会话可从绑定转录取得等价完成证据：核验原生身份、工作目录、最新完整完成事件和文件读取期间稳定性，任何后续执行、用户消息或不完整记录均使证据失效。续接前再次核验转录、语义代际、输入序号和双路空输入框。证据不足保留具体恢复条件，继续其他会话，条件恢复后自动接续。
 
 停止原进程到新输入框就绪之间的新输入持久写入专用 `retained-terminal-input-during-profile-adoption`，只交给同一原生会话的新进程。投递前先登记提交状态；回执不明时按原生接受游标补证，不能盲目重复发送。启动失败或运行时重启后，从同一持久启动记录自动继续；跨字段共用三次启动上限，profile、原生二进制或来源证据改变后恢复资格。显式 Stop 持久取消后续自动启动，输入记录保留供后来明确续跑；界面显示保留字节与原因。

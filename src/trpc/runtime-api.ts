@@ -16,7 +16,12 @@ import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/ta
 import { requestSessionOwnedBackgroundAgentExecutionCancellation } from "../state/session-owned-background-agent-executions";
 import { computeAssistantMessageProvenanceSha256 } from "../task-conversation-sessions/explicit-session-report";
 import { createTaskConversationSessionService } from "../task-conversation-sessions/task-conversation-session-service";
+import {
+	reconcileAutomaticTaskNameBackfills,
+	requestAutomaticTaskNameBackfill,
+} from "../task-name-suggestion/automatic-task-name-backfill";
 import { readCodexDraftStashOperationStatus } from "../terminal/codex-draft-stash-operation";
+import { readCreationAgentDefaultModel } from "../terminal/creation-agent-default-model";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -201,7 +206,10 @@ import {
 	mutateWorkspaceState,
 } from "../state/workspace-state";
 import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
-import { suggestTaskNamesFromTaskDescription } from "../task-name-suggestion/suggest-task-names-from-task-description";
+import {
+	readRecordedCreationNameSuggestionResult,
+	suggestTaskNamesFromTaskDescription,
+} from "../task-name-suggestion/suggest-task-names-from-task-description";
 import { buildRuntimeConfigResponse, resolveAgentCommand } from "../terminal/agent-registry";
 import { isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible } from "../terminal/agent-user-question-selector-dismissal-before-programmatic-answer-delivery";
 import type { TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../terminal/session-manager";
@@ -275,12 +283,18 @@ function resolveEffectiveTaskAgentPermissionMode(
 	);
 }
 
+export type TaskSessionStopRequestScope = "whole_task_session" | "current_agent_turn";
+
 export interface CreateRuntimeApiDependencies {
 	getActiveWorkspaceId: () => string | null;
 	getActiveRuntimeConfig?: () => RuntimeConfigState;
 	loadScopedRuntimeConfig: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeConfigState>;
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
-	onTaskSessionStopRequested?: (workspaceId: string, taskId: string) => Promise<void>;
+	onTaskSessionStopRequested?: (
+		workspaceId: string,
+		taskId: string,
+		stopRequestScope?: TaskSessionStopRequestScope,
+	) => Promise<void>;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
@@ -811,6 +825,69 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			() => false,
 		);
 	const conversationSessions = createTaskConversationSessionService({
+		readRecordedNameSuggestionResult: (basisText, operationId) =>
+			readRecordedCreationNameSuggestionResult({
+				taskDescription: basisText,
+				namingTarget: "conversation_session",
+				operationId,
+			}),
+		suggestNames: (basisText, operationId) =>
+			suggestTaskNamesFromTaskDescription({
+				taskDescription: basisText,
+				namingTarget: "conversation_session",
+				operationId,
+			}),
+		compareAndSetSessionName: async (scope, input, source) => {
+			const terminal = await deps.getScopedTerminalManager(scope);
+			const acp = await deps.getScopedAcpTaskSessionService(scope);
+			const result = await mutateWorkspaceState(
+				scope.workspacePath,
+				buildTaskMutationIntentForKanbanRuntimeSystemComponent(
+					"runtime_rename_conversation_session",
+					"task_collaboration_session_creation",
+				),
+				(state) => {
+					const card = findWorkspaceBoardCard(state.board, input.taskId);
+					const session =
+						acp.getSummary(input.taskConversationSessionId) ??
+						terminal.getSummary(input.taskConversationSessionId) ??
+						state.sessions[input.taskConversationSessionId];
+					const metadata = session?.taskConversationSessionMetadata;
+					if (
+						!card ||
+						card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs ||
+						!session ||
+						metadata?.workspaceTaskId !== card.id ||
+						(metadata.conversationSessionNameVersion ?? 0) !== input.expectedNameVersion
+					)
+						return { board: state.board, sessions: state.sessions, value: false };
+					const nextMetadata = {
+						...metadata,
+						conversationSessionName: input.conversationSessionName,
+						conversationSessionNameVersion: input.expectedNameVersion + 1,
+						conversationSessionNameSource: source,
+					};
+					const summary = acp.applyTaskConversationSessionMetadata(
+						input.taskConversationSessionId,
+						nextMetadata,
+					) ??
+						terminal.applyTaskConversationSessionMetadata(input.taskConversationSessionId, nextMetadata) ?? {
+							...session,
+							taskConversationSessionMetadata: nextMetadata,
+						};
+					return { board: state.board, sessions: { ...state.sessions, [session.taskId]: summary }, value: true };
+				},
+			);
+			if (result.value) await deps.broadcastRuntimeWorkspaceStateUpdated?.(scope.workspaceId, scope.workspacePath);
+			return result.value;
+		},
+		readCreationDefaults: async (scope, agentId, profileId, explicitModelId) => ({
+			...(await readCreationAgentDefaultModel(agentId, scope.workspacePath, profileId, explicitModelId)),
+			sessionTransport:
+				agentId === "omp"
+					? (await deps.loadScopedRuntimeConfig(scope)).ompAgentSessionTransportForNewTasks
+					: getRuntimeAgentSessionTransport(agentId),
+		}),
 		readDefaultTaskAgentPermissionMode: async (scope) =>
 			resolveEffectiveTaskAgentPermissionMode(
 				undefined,
@@ -959,11 +1036,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 	});
 	const runtimeApi: RuntimeTrpcContext["runtimeApi"] = {
+		lookupTaskConversationSessionCreation: (scope, input) => conversationSessions.lookupCreation(scope, input),
+		renameTaskConversationSession: (scope, input) => conversationSessions.rename(scope, input),
+		previewTaskConversationSession: (scope, input, evidence) => conversationSessions.preview(scope, input, evidence),
 		createTaskConversationSession: (scope, input, evidence) => conversationSessions.create(scope, input, evidence),
 		listTaskConversationSessions: (scope, input) => conversationSessions.list(scope, input.taskId),
 		getTaskConversationSession: (scope, input) => conversationSessions.get(scope, input),
 		reportTaskConversationSession: (scope, input, evidence) => conversationSessions.report(scope, input, evidence),
-		reconcileTaskConversationSessionOperations: () => conversationSessions.reconcileAll(),
+		reconcileTaskConversationSessionOperations: async () => {
+			await reconcileAutomaticTaskNameBackfills(deps.broadcastRuntimeWorkspaceStateUpdated);
+			await conversationSessions.reconcileAll();
+		},
 		closeTaskConversationSessionOperations: () => conversationSessions.close(),
 		isTaskConversationSessionReportExecutionAllowed: (scope, origin) =>
 			conversationSessions.isReportExecutionAllowed(scope, origin),
@@ -1076,6 +1159,20 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return { ok: true, summary: updated };
 		},
 
+		requestAutomaticTaskNameBackfill: async (scope, input) => {
+			const card = findWorkspaceBoardCard(await loadWorkspaceBoardById(scope.workspaceId), input.taskId);
+			if (
+				!card ||
+				card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs ||
+				(card.taskNameVersion ?? 0) !== input.expectedTaskNameVersion ||
+				card.title !== input.expectedTitle ||
+				card.prompt !== input.expectedPrompt
+			)
+				return { ok: false };
+			await requestAutomaticTaskNameBackfill(scope, card);
+			void reconcileAutomaticTaskNameBackfills(deps.broadcastRuntimeWorkspaceStateUpdated);
+			return { ok: true };
+		},
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input, abortSignal) => {
 			return await suggestTaskNamesFromTaskDescription(input, { abortSignal });
 		},
@@ -1446,7 +1543,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						};
 					}
 				}
-				if ((isTaskCollaborator || isByTheWaySession) && taskConversationSessionContextForkSourceNativeSessionId) {
+				if (
+					(isTaskCollaborator || isByTheWaySession) &&
+					taskConversationSessionContextForkSourceNativeSessionId &&
+					!taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.resolvedSettings
+				) {
 					// 复刻时不用客户端的陈旧模型覆盖；读取源会话，失败则让 harness 自己继承。
 					body.terminalAgentModelOverrideSettings = undefined;
 					if (effectiveAgentId === "claude") {
@@ -1497,6 +1598,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					taskConversationSessionMetadata = {
 						...taskConversationSessionMetadata,
 						taskConversationSessionLaunchSettings: {
+							...taskConversationSessionMetadata.taskConversationSessionLaunchSettings,
 							codexConfigurationProfileId: body.codexConfigurationProfileId,
 							codexReasoningEffortOverride: body.codexReasoningEffortOverride,
 							codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
@@ -1592,6 +1694,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						prompt: body.prompt,
 						taskTitle: body.taskTitle,
 						images: body.images,
+						modelId: body.terminalAgentModelOverrideSettings?.modelId,
 						permissionMode: resolveEffectiveTaskAgentPermissionMode(
 							body.taskAgentPermissionMode,
 							scopedRuntimeConfig.agentAutonomousModeEnabled,
@@ -3158,7 +3261,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		cancelTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatCancelRequest(input);
-				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId);
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId, "current_agent_turn");
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const acpSummary = await acpTaskSessionService.cancelTaskTurn(body.taskId);
 				if (acpSummary) {

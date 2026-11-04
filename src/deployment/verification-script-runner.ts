@@ -1,12 +1,24 @@
-import { spawn } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+import { z } from "zod";
 import type {
 	RuntimePostDeployVerificationChecklistItem,
 	RuntimePostDeployVerificationRun,
 } from "../core/api-contract";
 import { getKanbanRuntimeHost, getKanbanRuntimePort } from "../core/runtime-endpoint";
+import { launchOwnedCommandSupervisor } from "../task-command-execution/task-command-execution-supervisor";
 import { getVerificationAssetsDir } from "./verification-assets";
+import { waitWithinVerificationExecutionAbsoluteRpcDeadline } from "./verification-execution-absolute-rpc-deadline";
+import {
+	allocateVerificationExecutionAttempt,
+	mutateVerificationExecutionAttempt,
+	readVerificationExecutionAttempt,
+	type VerificationExecutionAttempt,
+	verificationExecutionAttemptCancellationPath,
+	verificationExecutionAttemptDirectory,
+} from "./verification-execution-attempt-store";
 
 // 脚本输出摘录上限（尾部截断）：面板展示 + 落盘 run.outputExcerpt，避免大输出撑爆 state 文件。
 const OUTPUT_EXCERPT_MAX_CHARS = 4000;
@@ -14,13 +26,6 @@ const OUTPUT_EXCERPT_MAX_CHARS = 4000;
 // 运行期输出缓冲上限：stdout/stderr 累积时即裁剪保留尾部（约 2× 摘录上限），
 // 防止高输出或卡到 timeout 的脚本在 live server 进程内无界占用内存；最终摘录仍由 tailExcerpt 截到摘录上限。
 const RUNNING_OUTPUT_BUFFER_MAX_CHARS = OUTPUT_EXCERPT_MAX_CHARS * 2;
-
-function capRunningOutputBufferTail(buffer: string): string {
-	if (buffer.length <= RUNNING_OUTPUT_BUFFER_MAX_CHARS) {
-		return buffer;
-	}
-	return buffer.slice(buffer.length - RUNNING_OUTPUT_BUFFER_MAX_CHARS);
-}
 
 function tailExcerpt(text: string): string {
 	if (text.length <= OUTPUT_EXCERPT_MAX_CHARS) {
@@ -67,120 +72,312 @@ async function resolveEntrypointPathInsideAssetsDir(
 	return { ok: true, resolvedEntrypointPath };
 }
 
-// 自动脚本运行结果（不含 running 中间态；running 由 state 模块的 setVerificationRunState 单独落盘）。
-export interface VerificationScriptRunOutcome {
-	status: "passed" | "failed" | "errored" | "timed_out";
-	exitCode: number | null;
-	outputExcerpt: string;
-	startedAtIso: string;
-	finishedAtIso: string;
+// 未确认退出仍使用公共 running 状态；恢复原因明确展示，不把超时意图冒充退出事实。
+export type VerificationScriptRunOutcome = Omit<RuntimePostDeployVerificationRun, "status"> & {
+	status: "running" | "passed" | "failed" | "errored" | "timed_out";
+};
+
+export const verificationSupervisorProgressSchema = z.object({
+	launchNonce: z.string(),
+	status: z.enum(["dispatch_committed", "running", "cancelling", "exited", "cancelled"]),
+	ownedProcesses: z.array(
+		z.object({
+			pid: z.number().int().positive(),
+			startAndCommand: z.string(),
+			nativeProcessGenerationIdentity: z.string().optional(),
+		}),
+	),
+	updatedAtEpochMs: z.number(),
+	outputTail: z.string().optional(),
+	timedOut: z.boolean().optional(),
+	nativeOwnershipUnproven: z.boolean().optional(),
+	kernelChildExitObservation: z.number().nullable().optional(),
+	linuxKernelContainmentVerified: z.boolean().optional(),
+	linuxKernelContainmentContinuityLost: z.boolean().optional(),
+	postScriptOwnershipRecoveryBudget: z
+		.object({
+			evidenceFingerprint: z.string(),
+			unchangedEvidenceProbeCount: z.number().int().min(0).max(3),
+			nextActiveProbeAtEpochMs: z.number(),
+		})
+		.optional(),
+	unprovenOwnershipProcesses: z
+		.array(
+			z.object({
+				pid: z.number().int().positive(),
+				parentProcessPid: z.number().optional(),
+				processStartIdentity: z.string(),
+				nativeProcessGenerationIdentity: z.string().optional(),
+				originalParentProcessGenerationIdentity: z.string().optional(),
+				reason: z.string(),
+			}),
+		)
+		.optional(),
+	returncode: z.number().nullable().optional(),
+	signal: z.string().nullable().optional(),
+	error: z.string().optional(),
+});
+
+export function buildVerificationExecutionRunSnapshot(
+	attempt: VerificationExecutionAttempt,
+	run: Pick<RuntimePostDeployVerificationRun, "status" | "exitCode" | "finishedAtIso" | "outputExcerpt">,
+): RuntimePostDeployVerificationRun {
+	return {
+		...run,
+		startedAtIso: attempt.startedAtIso,
+		verificationExecutionAttemptId: attempt.verificationExecutionAttemptId,
+		postDeployVerificationTaskInstanceId: attempt.postDeployVerificationTaskInstanceId,
+		...(attempt.taskIncarnationCreatedAtEpochMs === null
+			? {}
+			: { taskIncarnationCreatedAtEpochMs: attempt.taskIncarnationCreatedAtEpochMs }),
+		verificationDefinitionFingerprint: attempt.verificationDefinitionFingerprint,
+	};
 }
 
-// 在资产目录内 spawn 自动脚本并等待完成。cwd=assetsDir，注入 runtime 端点 + verificationId 供脚本回观察运行实例。
-// spawn 前先做 entrypoint 路径护栏（相对路径 + realpath 落在资产目录内），校验失败→errored 且不 spawn。
-// 退出码 0=passed，非 0=failed；超时 kill→timed_out；spawn/其它异常→errored。时间戳由调用方注入以保持可测。
+export async function readVerificationSupervisorProgress(attempt: VerificationExecutionAttempt) {
+	try {
+		const progress = verificationSupervisorProgressSchema.parse(
+			JSON.parse(
+				await readFile(
+					join(
+						verificationExecutionAttemptDirectory(attempt.verificationExecutionAttemptId),
+						`supervisor-progress-${attempt.verificationExecutionAttemptId}.json`,
+					),
+					"utf8",
+				),
+			),
+		);
+		return progress.launchNonce === attempt.verificationExecutionAttemptId ? progress : null;
+	} catch {
+		return null;
+	}
+}
+
+export async function readVerificationExecutionTerminalRun(
+	attempt: VerificationExecutionAttempt,
+	finishedAtIsoProvider = () => new Date().toISOString(),
+): Promise<RuntimePostDeployVerificationRun | null> {
+	if (attempt.terminalRun) return attempt.terminalRun;
+	let progress = await readVerificationSupervisorProgress(attempt);
+	if (!progress) {
+		try {
+			const aborted = z
+				.object({ launchNonce: z.string(), phase: z.literal("supervisor_spawn_not_invoked"), reason: z.string() })
+				.parse(
+					JSON.parse(
+						await readFile(
+							join(
+								verificationExecutionAttemptDirectory(attempt.verificationExecutionAttemptId),
+								`supervisor-launch-aborted-${attempt.verificationExecutionAttemptId}.json`,
+							),
+							"utf8",
+						),
+					),
+				);
+			if (aborted.launchNonce === attempt.verificationExecutionAttemptId)
+				progress = {
+					launchNonce: aborted.launchNonce,
+					status: "cancelled",
+					ownedProcesses: [],
+					updatedAtEpochMs: Date.now(),
+					timedOut: Date.now() >= attempt.deadlineAtEpochMs,
+					error: `监督进程未派发：${aborted.reason}`,
+				};
+		} catch {
+			/* 缺少明确的未派发原件时仍保留未知。 */
+		}
+	}
+	if (!progress || (progress.status !== "exited" && progress.status !== "cancelled")) return null;
+	const terminalProgress = progress;
+	return mutateVerificationExecutionAttempt(attempt.verificationExecutionAttemptId, (current) => {
+		if (current.terminalRun) return current.terminalRun;
+		const timedOut = terminalProgress.timedOut || current.cancellationIntent?.reason === "deadline_elapsed";
+		const run = buildVerificationExecutionRunSnapshot(current, {
+			status: timedOut
+				? "timed_out"
+				: current.cancellationIntent || terminalProgress.status === "cancelled" || terminalProgress.error
+					? "errored"
+					: terminalProgress.returncode === 0
+						? "passed"
+						: "failed",
+			exitCode: terminalProgress.returncode ?? null,
+			finishedAtIso: finishedAtIsoProvider(),
+			outputExcerpt: tailExcerpt(
+				`${terminalProgress.outputTail ?? ""}${terminalProgress.error ? `\n进程错误：${terminalProgress.error}` : ""}`,
+			),
+		});
+		current.launchStage = "terminal";
+		current.terminalRun = run;
+		return run;
+	});
+}
+
 export async function runVerificationScript(input: {
 	verificationId: string;
 	script: NonNullable<RuntimePostDeployVerificationChecklistItem["script"]>;
 	startedAtIso: string;
 	finishedAtIsoProvider: () => string;
+	executionAttempt?: VerificationExecutionAttempt;
+	validateBeforeDispatch?: () => Promise<void>;
 }): Promise<VerificationScriptRunOutcome> {
 	const { verificationId, script } = input;
-	const assetsDir = getVerificationAssetsDir(verificationId);
-	const command = script.interpreter === "node" ? "node" : "bash";
-
-	const entrypointCheck = await resolveEntrypointPathInsideAssetsDir(assetsDir, script.entrypoint);
-	if (!entrypointCheck.ok) {
-		return {
-			status: "errored",
-			exitCode: null,
-			outputExcerpt: `entrypoint 校验失败：${entrypointCheck.reason}`,
+	const attempt =
+		input.executionAttempt ??
+		(await allocateVerificationExecutionAttempt({
+			workspaceId: "standalone-verification",
+			deploymentId: "standalone-verification",
+			taskId: verificationId,
+			postDeployVerificationTaskInstanceId: randomUUID(),
+			itemId: verificationId,
+			verificationId,
+			verificationDefinitionFingerprint: "standalone-verification",
+			script,
 			startedAtIso: input.startedAtIso,
-			finishedAtIso: input.finishedAtIsoProvider(),
-		};
-	}
-
-	return await new Promise<VerificationScriptRunOutcome>((resolve) => {
-		let stdoutBuffer = "";
-		let stderrBuffer = "";
-		let settled = false;
-		let timedOut = false;
-
-		const finish = (outcome: Omit<VerificationScriptRunOutcome, "startedAtIso" | "finishedAtIso">): void => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			clearTimeout(timeoutHandle);
-			resolve({
-				...outcome,
-				startedAtIso: input.startedAtIso,
-				finishedAtIso: input.finishedAtIsoProvider(),
-			});
-		};
-
-		let child: ReturnType<typeof spawn>;
-		try {
-			child = spawn(command, [entrypointCheck.resolvedEntrypointPath], {
-				cwd: assetsDir,
-				env: {
-					...process.env,
-					KANBAN_RUNTIME_HOST: getKanbanRuntimeHost(),
-					KANBAN_RUNTIME_PORT: String(getKanbanRuntimePort()),
-					KANBAN_VERIFICATION_ID: verificationId,
-				},
-			});
-		} catch (error) {
-			finish({
-				status: "errored",
-				exitCode: null,
-				outputExcerpt: `spawn 失败：${error instanceof Error ? error.message : String(error)}`,
-			});
-			return;
-		}
-
-		const timeoutHandle = setTimeout(() => {
-			timedOut = true;
-			child.kill("SIGKILL");
-		}, script.timeoutMs);
-
-		child.stdout?.on("data", (chunk: Buffer) => {
-			stdoutBuffer = capRunningOutputBufferTail(stdoutBuffer + chunk.toString("utf8"));
-		});
-		child.stderr?.on("data", (chunk: Buffer) => {
-			stderrBuffer = capRunningOutputBufferTail(stderrBuffer + chunk.toString("utf8"));
-		});
-		child.on("error", (error) => {
-			finish({
-				status: "errored",
-				exitCode: null,
-				outputExcerpt: tailExcerpt(
-					`${stdoutBuffer}${stderrBuffer}\n进程错误：${error instanceof Error ? error.message : String(error)}`,
-				),
-			});
-		});
-		child.on("close", (code) => {
-			const combined = tailExcerpt(`${stdoutBuffer}${stderrBuffer}`);
-			if (timedOut) {
-				finish({ status: "timed_out", exitCode: code, outputExcerpt: combined });
-				return;
-			}
-			finish({
-				status: code === 0 ? "passed" : "failed",
-				exitCode: code,
-				outputExcerpt: combined,
-			});
-		});
+		}));
+	const recoverySnapshot = buildVerificationExecutionRecoveryRunSnapshot(attempt);
+	return waitWithinVerificationExecutionAbsoluteRpcDeadline({
+		deadlineAtEpochMs: attempt.deadlineAtEpochMs,
+		operation: launchAndObserveVerificationScript(input, attempt, (progress) => {
+			recoverySnapshot.outputExcerpt = tailExcerpt(progress.outputTail ?? "");
+			if (progress.unprovenOwnershipProcesses?.length && recoverySnapshot.recoveryObservation)
+				recoverySnapshot.recoveryObservation = {
+					...recoverySnapshot.recoveryObservation,
+					message: `正在核验退出：原生归属未证 PID ${progress.unprovenOwnershipProcesses
+						.slice(0, 5)
+						.map((entry) => entry.pid)
+						.join("、")}；身份、终结原件或开机代际变化后自动补证`,
+					unprovenProcessIdentities: progress.unprovenOwnershipProcesses
+						.slice(0, 10)
+						.map(({ pid, ...identity }) => ({ processPid: pid, ...identity })),
+					recoveryTriggers: [
+						"terminal_receipt_changed",
+						"owned_or_unproven_process_generation_changed",
+						"system_boot_identity_changed",
+					],
+				};
+		}),
+		recoverySnapshot: () => recoverySnapshot,
 	});
 }
 
-// 把运行结果转成落盘的 run 快照。
-export function toRunSnapshot(outcome: VerificationScriptRunOutcome): RuntimePostDeployVerificationRun {
+export function buildVerificationExecutionRecoveryRunSnapshot(
+	attempt: VerificationExecutionAttempt,
+): VerificationScriptRunOutcome {
 	return {
-		status: outcome.status,
-		exitCode: outcome.exitCode,
-		startedAtIso: outcome.startedAtIso,
-		finishedAtIso: outcome.finishedAtIso,
-		outputExcerpt: outcome.outputExcerpt,
+		...buildVerificationExecutionRunSnapshot(attempt, {
+			status: "running",
+			exitCode: null,
+			finishedAtIso: null,
+			outputExcerpt: "",
+		}),
+		status: "running",
+		recoveryObservation: {
+			reason: "awaiting_exit_confirmation",
+			message: `正在核验退出：attempt ${attempt.verificationExecutionAttemptId} 尚未取得终结原件，确认前禁止重跑`,
+			unchangedEvidenceProbeCount: attempt.recoveryBudget.unchangedEvidenceProbeCount,
+			nextActiveProbeAtEpochMs: attempt.recoveryBudget.nextActiveProbeAtEpochMs,
+		},
 	};
+}
+
+async function launchAndObserveVerificationScript(
+	input: Parameters<typeof runVerificationScript>[0],
+	attempt: VerificationExecutionAttempt,
+	observeOutputTail: (progress: z.infer<typeof verificationSupervisorProgressSchema>) => void,
+): Promise<VerificationScriptRunOutcome> {
+	const { verificationId, script } = input;
+	const assetsDir = getVerificationAssetsDir(verificationId);
+	const entrypointCheck = await resolveEntrypointPathInsideAssetsDir(assetsDir, script.entrypoint);
+	if (!entrypointCheck.ok) {
+		return mutateVerificationExecutionAttempt(attempt.verificationExecutionAttemptId, (current) => {
+			const run = buildVerificationExecutionRunSnapshot(current, {
+				status: "errored",
+				exitCode: null,
+				outputExcerpt: `entrypoint 校验失败：${entrypointCheck.reason}`,
+				finishedAtIso: input.finishedAtIsoProvider(),
+			});
+			current.launchStage = "terminal";
+			current.terminalRun = run;
+			return run as VerificationScriptRunOutcome;
+		});
+	}
+	let launchError = "";
+	try {
+		await launchOwnedCommandSupervisor(
+			{
+				workspaceId: attempt.workspaceId,
+				executionId: attempt.verificationExecutionAttemptId,
+				launchNonce: attempt.verificationExecutionAttemptId,
+				launchAttemptCount: 1,
+				revocationFile: verificationExecutionAttemptCancellationPath(attempt.verificationExecutionAttemptId),
+				specification: {
+					command: [
+						script.interpreter === "node" ? process.execPath : "bash",
+						entrypointCheck.resolvedEntrypointPath,
+					],
+					resumeCommand: [],
+					workingDirectory: assetsDir,
+				},
+			},
+			async () => {
+				await input.validateBeforeDispatch?.();
+				await mutateVerificationExecutionAttempt(attempt.verificationExecutionAttemptId, (current) => {
+					if (
+						current.cancellationIntent ||
+						current.launchStage === "terminal" ||
+						Date.now() >= current.deadlineAtEpochMs
+					)
+						throw new Error("执行已取消或结束");
+					current.launchStage = "launch_committed";
+				});
+			},
+			{
+				artifactDirectory: verificationExecutionAttemptDirectory(attempt.verificationExecutionAttemptId),
+				deadlineAtEpochMs: attempt.deadlineAtEpochMs,
+				preventRedispatch: true,
+				superviseProcessGroup: true,
+				outputTailMaxChars: RUNNING_OUTPUT_BUFFER_MAX_CHARS,
+				environment: {
+					KANBAN_RUNTIME_HOST: getKanbanRuntimeHost(),
+					KANBAN_RUNTIME_PORT: String(getKanbanRuntimePort()),
+					KANBAN_VERIFICATION_ID: verificationId,
+					KANBAN_VERIFICATION_EXECUTION_ATTEMPT_ID: attempt.verificationExecutionAttemptId,
+				},
+			},
+		);
+	} catch (error) {
+		launchError = error instanceof Error ? error.message : String(error);
+	}
+	// RPC 只观察原回执，清理预算耗尽后交回 running；监督者及 deadline 不依赖这个等待者。
+	while (Date.now() < attempt.deadlineAtEpochMs + 5_000) {
+		const observedProgress = await readVerificationSupervisorProgress(attempt);
+		if (observedProgress) observeOutputTail(observedProgress);
+		const run = await readVerificationExecutionTerminalRun(
+			await readVerificationExecutionAttempt(attempt.verificationExecutionAttemptId),
+			input.finishedAtIsoProvider,
+		);
+		if (run) return run as VerificationScriptRunOutcome;
+		if (launchError) break;
+		await delay(Math.min(100, Math.max(1, attempt.deadlineAtEpochMs + 5_000 - Date.now())));
+	}
+	const progress = await readVerificationSupervisorProgress(attempt);
+	return {
+		...buildVerificationExecutionRunSnapshot(attempt, {
+			status: "running",
+			exitCode: null,
+			finishedAtIso: null,
+			outputExcerpt: tailExcerpt(progress?.outputTail ?? ""),
+		}),
+		status: "running",
+		recoveryObservation: {
+			reason: "awaiting_exit_confirmation",
+			message: `正在核验退出${launchError ? `：${launchError}` : "，确认前禁止重跑"}`,
+			unchangedEvidenceProbeCount: attempt.recoveryBudget.unchangedEvidenceProbeCount,
+			nextActiveProbeAtEpochMs: attempt.recoveryBudget.nextActiveProbeAtEpochMs,
+		},
+	};
+}
+
+export function toRunSnapshot(outcome: VerificationScriptRunOutcome): RuntimePostDeployVerificationRun {
+	return { ...outcome };
 }

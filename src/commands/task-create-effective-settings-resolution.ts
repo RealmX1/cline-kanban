@@ -1,8 +1,8 @@
 // `kanban task create` 的「实际会生效的设置」解析：把请求参数、工作区配置与仓库现状合成一份
 // 逐字段带来源的回执，外加告警与一枚指纹。
 //
-// 为什么需要它：这条命令是非交互的纯 JSON 接口，调用方（多数是 agent）传个 `--prompt` 就建卡，
-// 而 base ref、实际会跑哪个 agent、权限档、plan 起步、worktree 模式统统由服务端默认值静默决定。
+// 为什么需要它：这条命令是非交互的纯 JSON 接口，调用方（多数是 agent）提交正文与显式 Plan 选择后建卡，
+// 而 base ref、实际会跑哪个 agent、权限档与 worktree 模式仍可能来自默认值。
 // 把这些默认值连同「它们各自从哪来」一起回传，是这条命令唯一能让调用方发现「默认值不是我以为的
 // 那个」的通道——`--preview` 让它在建卡**之前**可见，真实建卡响应里同样带一份让它在**之后**可见。
 //
@@ -13,6 +13,8 @@ import type { RuntimeConfigState } from "../config/runtime-config";
 import { getRuntimeAgentCatalogEntry, getRuntimeAgentSessionTransport } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
+	RuntimeCreationResolvedSettings,
 	RuntimeGitRepositoryInfo,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -22,9 +24,10 @@ import type {
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
 import {
-	resolveTaskAgentPermissionModeForAgent,
-	resolveTaskAgentPermissionModeFromLegacyAutonomousFlag,
-} from "../core/task-agent-permission-mode";
+	assertCreationPlanModeWasExplicitlySelected,
+	resolveCreationStartupSettings,
+} from "../core/creation-startup-settings";
+import { resolveTaskAgentPermissionModeForAgent } from "../core/task-agent-permission-mode";
 import { resolveTaskCreateBaseRef, type TaskCreateBaseRefResolution } from "../core/task-create-base-ref-resolution";
 import {
 	deriveTaskCreateWarnings,
@@ -33,6 +36,10 @@ import {
 } from "../core/task-create-warning-derivation";
 import { resolveTaskTitle } from "../core/task-title";
 import { isBinaryAvailableOnPath } from "../terminal/command-discovery";
+import {
+	readCreationAgentDefaultModel,
+	readCreationAgentDefaultModelWithoutBlockingBacklogCard,
+} from "../terminal/creation-agent-default-model";
 import { runGit } from "../workspace/git-utils";
 
 /** 某个生效值究竟从哪来的。 */
@@ -58,6 +65,9 @@ export interface TaskCreateResolvedSetting<TValue> {
 }
 
 export interface TaskCreateRequestedSettings {
+	modelId?: string;
+	codexConfigurationProfileId?: string;
+	requestedAgentSessionTransport?: RuntimeAgentSessionTransport;
 	title?: string | undefined;
 	prompt: string;
 	baseRef?: string | undefined;
@@ -73,7 +83,7 @@ export interface TaskCreateRequestedSettings {
 	prepFilePath?: string | undefined;
 }
 
-export interface TaskCreateResolvedSettings {
+export interface TaskCreateResolvedSettings extends RuntimeCreationResolvedSettings {
 	workspaceRepoPath: TaskCreateResolvedSetting<string>;
 	/** 项目尚未注册进 Kanban 时为 null（只可能出现在 `--preview` 路径上）。 */
 	workspaceId: TaskCreateResolvedSetting<string | null>;
@@ -81,12 +91,6 @@ export interface TaskCreateResolvedSettings {
 	title: TaskCreateResolvedSetting<string>;
 	baseRef: TaskCreateResolvedSetting<string>;
 	worktreeMode: TaskCreateResolvedSetting<RuntimeTaskWorktreeMode>;
-	startInPlanMode: TaskCreateResolvedSetting<boolean>;
-	/** 调用方请求的档位（缺省时来自工作区配置）。实际施加的档位见 effectiveTaskAgentPermissionMode。 */
-	requestedTaskAgentPermissionMode: TaskCreateResolvedSetting<RuntimeTaskAgentPermissionMode>;
-	/** 该 agent 表达不出请求档位时会与上面那条不同——差异本身由告警说明。 */
-	effectiveTaskAgentPermissionMode: TaskCreateResolvedSetting<RuntimeTaskAgentPermissionMode>;
-	effectiveAgentId: TaskCreateResolvedSetting<RuntimeAgentId>;
 	clineSettings: TaskCreateResolvedSetting<RuntimeTaskClineSettings | null>;
 	taskAgentSessionInitialization: TaskCreateResolvedSetting<RuntimeTaskAgentSessionInitialization | null>;
 	parentSessionId: TaskCreateResolvedSetting<string | null>;
@@ -211,6 +215,7 @@ export async function resolveTaskCreateEffectiveSettings(
 	input: TaskCreateEffectiveSettingsResolutionInput,
 ): Promise<TaskCreateEffectiveSettingsResolution> {
 	const { requested, runtimeConfig, repositoryGitInfo } = input;
+	assertCreationPlanModeWasExplicitlySelected(requested.startInPlanMode);
 
 	const rememberedBaseRefForProject = input.workspaceId
 		? (runtimeConfig.userInterfacePreferencesSharedAcrossBrowserOrigins.mostRecentlyUsedTaskCreateBaseRefByProjectId[
@@ -224,14 +229,43 @@ export async function resolveTaskCreateEffectiveSettings(
 	});
 
 	const effectiveAgentId = requested.agentId ?? runtimeConfig.selectedAgentId;
-	const requestedPermissionMode =
-		requested.taskAgentPermissionMode ??
-		resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(runtimeConfig.agentAutonomousModeEnabled);
+	const requestedPermissionMode = requested.taskAgentPermissionMode ?? "bypass_all_permission_prompts";
 	const resolvedPermissionMode = resolveTaskAgentPermissionModeForAgent(effectiveAgentId, requestedPermissionMode);
-	const startInPlanMode = requested.startInPlanMode ?? runtimeConfig.newTaskStartInPlanModeByDefault;
+	if (requested.modelId && !["claude", "codex", "cursor", "kimi", "omp"].includes(effectiveAgentId))
+		throw new Error("所选 Agent 暂不支持单次模型覆盖。");
+	const defaultModel = await readCreationAgentDefaultModelWithoutBlockingBacklogCard(
+		() =>
+			readCreationAgentDefaultModel(
+				effectiveAgentId,
+				input.workspaceRepoPath,
+				requested.codexConfigurationProfileId,
+				requested.modelId,
+			),
+		{
+			codexConfigurationProfileId: requested.codexConfigurationProfileId,
+			taskAgentSessionInitialization: requested.taskAgentSessionInitialization,
+		},
+	);
+	const startupSettings = resolveCreationStartupSettings({
+		agentId: effectiveAgentId,
+		startInPlanMode: requested.startInPlanMode,
+		agentSelectionSource: requested.agentId ? "explicit_request" : "workspace_config_default",
+		taskAgentPermissionMode: requested.taskAgentPermissionMode,
+		modelId: requested.modelId,
+		defaultCodexConfigurationProfileId: defaultModel.codexConfigurationProfileId,
+		defaultModelId: defaultModel.modelId,
+		codexConfigurationProfileId: requested.codexConfigurationProfileId,
+		codexConfigurationPermissionSelectionSource:
+			requested.codexConfigurationProfileId && !requested.taskAgentPermissionMode ? "profile" : "task_local",
+		requestedAgentSessionTransport: requested.requestedAgentSessionTransport,
+		defaultSessionTransport:
+			effectiveAgentId === "omp" ? runtimeConfig.ompAgentSessionTransportForNewTasks : undefined,
+	});
+	const startInPlanMode = startupSettings.startInPlanMode.value;
 	const worktreeMode = requested.worktreeMode ?? "branch";
 
 	const resolvedSettings: TaskCreateResolvedSettings = {
+		...startupSettings,
 		workspaceRepoPath: {
 			value: input.workspaceRepoPath,
 			source: input.wasProjectPathExplicitlyRequested ? "explicit_flag" : "derived_from_invocation_context",
@@ -254,26 +288,6 @@ export async function resolveTaskCreateEffectiveSettings(
 		worktreeMode: {
 			value: worktreeMode,
 			source: requested.worktreeMode === undefined ? "built_in_default" : "explicit_flag",
-		},
-		startInPlanMode: {
-			value: startInPlanMode,
-			source: requested.startInPlanMode === undefined ? "workspace_config_default" : "explicit_flag",
-		},
-		requestedTaskAgentPermissionMode: {
-			value: requestedPermissionMode,
-			source: requested.taskAgentPermissionMode === undefined ? "workspace_config_default" : "explicit_flag",
-		},
-		effectiveTaskAgentPermissionMode: {
-			value: resolvedPermissionMode.effectivePermissionMode,
-			source: resolvedPermissionMode.degradedBecauseAgentCannotExpressRequestedMode
-				? "built_in_default"
-				: requested.taskAgentPermissionMode === undefined
-					? "workspace_config_default"
-					: "explicit_flag",
-		},
-		effectiveAgentId: {
-			value: effectiveAgentId,
-			source: requested.agentId === undefined ? "workspace_config_default" : "explicit_flag",
 		},
 		clineSettings: {
 			value: requested.clineSettings ?? null,

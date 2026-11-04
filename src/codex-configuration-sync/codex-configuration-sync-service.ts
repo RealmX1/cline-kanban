@@ -73,7 +73,13 @@ import {
 	assertCodexConfigurationWriterBindingIdentity,
 	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
-import { readCodexNativeTurnPermissionEvidence } from "./codex-native-turn-permission-evidence";
+import {
+	codexNativeTurnPermissionTranscriptFingerprintOf,
+	codexNativeTurnPermissionTranscriptFingerprintStillCurrent,
+	readCodexNativeTurnPermissionEvidence,
+} from "./codex-native-turn-permission-evidence";
+import { recoverPendingCodexSharedPluginInstallations } from "./codex-source-shared-plugin-installation-coordinator";
+import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "./codex-source-shared-plugin-installation-directories";
 
 type SessionTarget = { workspaceId: string; summary: RuntimeTaskSessionSummary };
 interface CodexConfigurationSyncServiceDependencies {
@@ -107,6 +113,24 @@ interface CodexConfigurationSyncServiceDependencies {
 		summary: RuntimeTaskSessionSummary,
 		operation: (port: CodexAppServerRequestPort) => Promise<T>,
 	) => Promise<T>;
+}
+
+function codexConfigurationSourceObservationDecisionFingerprint(
+	store: CodexConfigurationSyncStore,
+	sourceIdentity: string,
+) {
+	return configurationDigest({
+		source: store.sources[sourceIdentity],
+		profiles: Object.values(store.profiles).filter((profile) => profile.sourceIdentity === sourceIdentity),
+		hookTrustDecisions: Object.values(store.hookTrustDecisions).filter(
+			(decision) => decision.sourceIdentity === sourceIdentity,
+		),
+		writers: Object.values(store.writers).filter((writer) => writer.binding.sourceIdentity === sourceIdentity),
+		changes: store.changes.filter((change) => change.sourceIdentity === sourceIdentity),
+		legacySessionProfileAdoptions: Object.values(store.legacySessionProfileAdoptions).filter(
+			(adoption) => adoption.sourceIdentity === sourceIdentity,
+		),
+	});
 }
 
 function publicState(
@@ -374,13 +398,6 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await refreshTaskSourceContext();
 		const hasUnavailableProfileBinding = await reconcileSessionProfileBindings();
 		const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
-		let taskProfileObservationProblem = hasUnavailableProfileBinding;
-		const taskProfileObservations = await deps.listTaskProfileBindings?.().catch(() => {
-			taskProfileObservationProblem = true;
-			return undefined;
-		});
-		taskProfileObservationProblem ||= (taskProfileObservations?.unavailableWorkspaceCount ?? 0) > 0;
-		const requestedTaskProfileBindings = taskProfileObservations?.bindings ?? [];
 		await Promise.allSettled(
 			deps
 				.listSessions()
@@ -406,10 +423,208 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					binding.sourceHomeDirectoryPath,
 					binding.conversationStorageHomeDirectoryPath,
 					binding.sqliteHomeDirectoryPath,
+					...codexSourceSharedPluginInstallationIdentityDirectoryPaths(binding),
 				]),
 		]);
+		let preflightObservationProblem: string | null = null;
+		const legacySessionSourceObservations = new Map<
+			string,
+			{
+				summary: RuntimeTaskSessionSummary;
+				sourceHome: string;
+				sourceIdentity: string;
+				fields: CodexConfigurationFields;
+			}
+		>();
+		for (const { workspaceId, summary } of deps.listSessions()) {
+			if (
+				summary.agentId !== "codex" ||
+				summary.codexConfigurationWriterBinding ||
+				!summary.agentNativeConversationSessionIdentity?.nativeSessionId ||
+				!summary.codexConversationStorageHomeDirectoryPath
+			)
+				continue;
+			const observedSummary = structuredClone(summary);
+			try {
+				const sourceHome = await realpath(
+					await resolveCanonicalUserCodexHomeForManagedStorage(summary.codexConversationStorageHomeDirectoryPath),
+				);
+				const sourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
+					sourceHome,
+					preflightStoreSnapshot,
+				);
+				const fields =
+					preflightStoreSnapshot.sources[sourceIdentity]?.fields ??
+					(await projectCodexConfigurationFields({
+						home: sourceHome,
+						sourceHome,
+						fileNames: [
+							"config.toml",
+							...(await readdir(sourceHome)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
+						],
+						onHookDefinitionObservationProblem: () => {
+							preflightObservationProblem = "旧会话部分 hook 定义暂不可核验，保留未知信任。";
+						},
+					}));
+				legacySessionSourceObservations.set(JSON.stringify([workspaceId, summary.taskId]), {
+					summary: observedSummary,
+					sourceHome,
+					sourceIdentity,
+					fields,
+				});
+			} catch {
+				preflightObservationProblem = "部分旧会话配置来源暂不可核验，保留现场；来源恢复后自动重验。";
+			}
+		}
+		const sourceFieldObservations = new Map<string, CodexConfigurationFields>();
+		for (const [sourceIdentity, source] of Object.entries(preflightStoreSnapshot.sources)) {
+			try {
+				await resolveVerifiedCodexConfigurationSourceIdentity(source.home, preflightStoreSnapshot, sourceIdentity);
+				const fields = await projectCodexConfigurationFields({
+					home: source.home,
+					sourceHome: source.home,
+					fileNames: [
+						"config.toml",
+						...(await readdir(source.home)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
+					],
+					previousFields: source.observedUserFields,
+					onHookDefinitionObservationProblem: () => {
+						preflightObservationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
+					},
+				});
+				sourceFieldObservations.set(sourceIdentity, fields);
+			} catch {
+				preflightObservationProblem = "部分配置来源暂不可读；恢复原目录后将自动补扫。";
+			}
+		}
+		const writerFieldObservations = new Map<
+			string,
+			{
+				fileNames: string[];
+				observed: CodexConfigurationFields;
+				unavailableObservedHookFieldKeys: Set<string>;
+				observedNativePermissionChange: boolean;
+				configurationChangedAtMs: number | undefined;
+				ownerSummary: RuntimeTaskSessionSummary | undefined;
+				nativePermissionEvidence: CodexConfigurationFields | null;
+			}
+		>();
+		for (const writer of Object.values(preflightStoreSnapshot.writers)) {
+			if (writer.binding.purpose !== "native_session" || writer.retiredAt) continue;
+			try {
+				await assertCodexConfigurationWriterBindingIdentity(writer.binding);
+				const fileNames = [
+					...new Set([
+						...writer.fileNames,
+						...(await readdir(writer.binding.configurationHomeDirectoryPath)).filter((name) =>
+							/^[\w.-]+\.config\.toml$/.test(name),
+						),
+					]),
+				];
+				const unavailableObservedHookFieldKeys = new Set<string>();
+				const observed = await projectCodexConfigurationFields({
+					home: writer.binding.configurationHomeDirectoryPath,
+					sourceHome: await realpath(writer.binding.sourceHomeDirectoryPath),
+					fileNames,
+					previousFields: writer.lastObservedFields,
+					onHookDefinitionObservationProblem: (fieldKey) => {
+						unavailableObservedHookFieldKeys.add(fieldKey);
+						preflightObservationProblem = "部分会话 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
+					},
+				});
+				const observedNativePermissionChange = [
+					...new Set([...Object.keys(observed), ...Object.keys(writer.lastObservedFields)]),
+				].some(
+					(key) =>
+						codexConfigurationExceptionGroup(key) === "permissions" &&
+						!sameConfigurationField(writer.lastObservedFields[key], observed[key]) &&
+						!preflightStoreSnapshot.changes.some(
+							(change) =>
+								change.fieldKey === key &&
+								sameConfigurationField(change.value, observed[key]) &&
+								change.targets.some(
+									(target) => target.writerId === writer.binding.writerId && target.writeSubmissionStartedAt,
+								),
+						),
+				);
+				const configurationChangedAtMs = observedNativePermissionChange
+					? (await stat(join(writer.binding.configurationHomeDirectoryPath, "config.toml"))).mtimeMs
+					: writer.pendingNativePermissionVerificationAtMs;
+				const ownerSummary = structuredClone(
+					deps
+						.listSessions()
+						.find(
+							(item) =>
+								item.workspaceId === writer.binding.workspaceId &&
+								item.summary.taskId === writer.binding.conversationSessionId,
+						)?.summary,
+				);
+				const nativePermissionEvidence =
+					ownerSummary &&
+					deps.onWriterPermissionsObserved &&
+					(configurationChangedAtMs !== undefined || ownerSummary.codexEffectivePermissionMode === null)
+						? await readCodexNativeTurnPermissionEvidence({
+								summary: ownerSummary,
+								configurationChangedAtMs: Math.max(configurationChangedAtMs ?? 0, ownerSummary.startedAt ?? 0),
+								selectedFields: observed,
+							})
+						: null;
+				writerFieldObservations.set(writer.binding.writerId, {
+					fileNames,
+					observed,
+					unavailableObservedHookFieldKeys,
+					observedNativePermissionChange,
+					configurationChangedAtMs,
+					ownerSummary,
+					nativePermissionEvidence,
+				});
+			} catch {
+				preflightObservationProblem = "部分会话配置暂不可读或归属发生变化；保留决定，原归属恢复后自动补扫。";
+			}
+		}
+		const sourceDecisionFingerprints = new Map(
+			[
+				...new Set([
+					...Object.keys(preflightStoreSnapshot.sources),
+					...Array.from(legacySessionSourceObservations.values(), (observation) => observation.sourceIdentity),
+				]),
+			].map((sourceIdentity) => [
+				sourceIdentity,
+				codexConfigurationSourceObservationDecisionFingerprint(preflightStoreSnapshot, sourceIdentity),
+			]),
+		);
+		let taskProfileObservationProblem = hasUnavailableProfileBinding;
+		const taskProfileObservations = await deps.listTaskProfileBindings?.().catch(() => {
+			taskProfileObservationProblem = true;
+			return undefined;
+		});
+		taskProfileObservationProblem ||= (taskProfileObservations?.unavailableWorkspaceCount ?? 0) > 0;
+		const requestedTaskProfileBindings = taskProfileObservations?.bindings ?? [];
 		const observationPersistenceOptions = { skipUnchangedObservationPersistence: true };
 		await mutateCodexConfigurationSyncStore(async (store) => {
+			// 取锁等待期间卡片可能改选 profile，且该变化不写配置存储，来源指纹不会失效。
+			// 锁内重读当前绑定后再合并；重读失败则丢弃锁外快照，交给既有五秒补扫，避免把旧 profile 写回。
+			let taskProfileBindingsToApply = requestedTaskProfileBindings;
+			if (deps.listTaskProfileBindings) {
+				try {
+					const freshTaskProfileObservations = await deps.listTaskProfileBindings();
+					taskProfileBindingsToApply = freshTaskProfileObservations.bindings;
+					taskProfileObservationProblem =
+						hasUnavailableProfileBinding || freshTaskProfileObservations.unavailableWorkspaceCount > 0;
+				} catch {
+					taskProfileObservationProblem = true;
+					taskProfileBindingsToApply = [];
+				}
+			}
+			// 只比较本来源的决定；其他来源的并发写入不作废本项观察。失效项由既有五秒补扫重新取证。
+			const unchangedSourceIdentities = new Set(
+				Array.from(sourceDecisionFingerprints)
+					.filter(
+						([sourceIdentity, fingerprint]) =>
+							codexConfigurationSourceObservationDecisionFingerprint(store, sourceIdentity) === fingerprint,
+					)
+					.map(([sourceIdentity]) => sourceIdentity),
+			);
 			expireCodexConfigurationProfileFeedbackSuggestions(store);
 			for (const [writerId, task] of Object.entries(taskSourceContext?.writerTasks ?? {})) {
 				const writer = store.writers[writerId];
@@ -434,7 +649,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			}
 			let problem: string | null = taskProfileObservationProblem
 				? "部分 Task profile 绑定暂不可读，保留现有归属，恢复后自动补证。"
-				: null;
+				: preflightObservationProblem;
 			for (const { workspaceId, summary } of deps.listSessions()) {
 				if (summary.agentId !== "codex") continue;
 				const key = JSON.stringify([workspaceId, summary.taskId]);
@@ -453,21 +668,21 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					continue;
 				}
 				try {
-					const sourceHome = await realpath(await resolveCanonicalUserCodexHomeForManagedStorage(historyHome));
-					const sourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(sourceHome, store);
+					const observation = legacySessionSourceObservations.get(key);
+					if (!observation) continue;
+					if (
+						!unchangedSourceIdentities.has(observation.sourceIdentity) ||
+						observation.summary.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
+						observation.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== nativeSessionId ||
+						observation.summary.codexConversationStorageHomeDirectoryPath !== historyHome
+					) {
+						problem = "配置观察期间来源或会话已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
+						continue;
+					}
+					const { sourceHome, sourceIdentity, fields } = observation;
+					if ((await resolveVerifiedCodexConfigurationSourceIdentity(sourceHome, store)) !== sourceIdentity)
+						throw new Error("旧会话配置来源身份已变化。");
 					if (!store.sources[sourceIdentity]) {
-						const fileNames = [
-							"config.toml",
-							...(await readdir(sourceHome)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-						];
-						const fields = await projectCodexConfigurationFields({
-							home: sourceHome,
-							sourceHome,
-							fileNames,
-							onHookDefinitionObservationProblem: () => {
-								problem = "旧会话部分 hook 定义暂不可核验，保留未知信任。";
-							},
-						});
 						store.sources[sourceIdentity] = {
 							home: sourceHome,
 							version: store.revision,
@@ -477,7 +692,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					}
 					const compatible = ensureCodexConfigurationSourceProfile(store, sourceIdentity);
 					const requested =
-						requestedTaskProfileBindings.find(
+						taskProfileBindingsToApply.find(
 							(binding) =>
 								binding.workspaceId === workspaceId && binding.conversationSessionId === summary.taskId,
 						)?.profileId ?? summary.codexConfigurationProfileId;
@@ -504,7 +719,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					problem = "部分旧会话配置来源暂不可核验，保留现场；来源恢复后自动重验。";
 				}
 			}
-			for (const requested of requestedTaskProfileBindings) {
+			for (const requested of taskProfileBindingsToApply) {
 				const session = deps
 					.listSessions()
 					.find(
@@ -515,6 +730,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				const writer = store.writers[session?.summary.codexConfigurationWriterBinding?.writerId ?? ""];
 				if (
 					!writer ||
+					!unchangedSourceIdentities.has(writer.binding.sourceIdentity) ||
 					writer.pendingSessionProfileBinding ||
 					writer.codexConfigurationProfileId === requested.profileId
 				)
@@ -530,31 +746,32 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				writer.pendingSessionProfileBinding = requested;
 			}
 			for (const [sourceIdentity, source] of Object.entries(store.sources)) {
+				const observed = sourceFieldObservations.get(sourceIdentity);
+				if (!observed) continue;
+				if (!unchangedSourceIdentities.has(sourceIdentity)) {
+					problem = "配置观察期间来源已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
+					continue;
+				}
 				try {
 					await resolveVerifiedCodexConfigurationSourceIdentity(source.home, store, sourceIdentity);
-					const fileNames = [
-						"config.toml",
-						...(await readdir(source.home)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-					];
-					reconcileCodexConfigurationUserSourceFields(
-						store,
-						sourceIdentity,
-						await projectCodexConfigurationFields({
-							home: source.home,
-							sourceHome: source.home,
-							fileNames,
-							previousFields: source.observedUserFields,
-							onHookDefinitionObservationProblem: () => {
-								problem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
-							},
-						}),
-					);
+					reconcileCodexConfigurationUserSourceFields(store, sourceIdentity, observed);
 				} catch {
 					problem = "部分配置来源暂不可读；恢复原目录后将自动补扫。";
 				}
 			}
 			for (const writer of Object.values(store.writers)) {
 				if (writer.binding.purpose !== "native_session" || writer.retiredAt) continue;
+				const observation = writerFieldObservations.get(writer.binding.writerId);
+				if (!observation) continue;
+				const preflightWriter = preflightStoreSnapshot.writers[writer.binding.writerId];
+				if (
+					!unchangedSourceIdentities.has(writer.binding.sourceIdentity) ||
+					writer.codexConfigurationProfileId !== preflightWriter.codexConfigurationProfileId ||
+					!isDeepStrictEqual(writer.pendingSessionProfileBinding, preflightWriter.pendingSessionProfileBinding)
+				) {
+					problem = "配置观察期间会话决定已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
+					continue;
+				}
 				try {
 					await assertCodexConfigurationWriterBindingIdentity(writer.binding);
 					const feedback = writer.taskReasoningEffortFeedbackSelection;
@@ -600,25 +817,39 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							expireCodexConfigurationProfileFeedbackSuggestions(store);
 						}
 					}
-					writer.fileNames = [
-						...new Set([
-							...writer.fileNames,
-							...(await readdir(writer.binding.configurationHomeDirectoryPath)).filter((name) =>
-								/^[\w.-]+\.config\.toml$/.test(name),
-							),
-						]),
-					];
-					const unavailableObservedHookFieldKeys = new Set<string>();
-					const observed = await projectCodexConfigurationFields({
-						home: writer.binding.configurationHomeDirectoryPath,
-						sourceHome: await realpath(writer.binding.sourceHomeDirectoryPath),
-						fileNames: writer.fileNames,
-						previousFields: writer.lastObservedFields,
-						onHookDefinitionObservationProblem: (fieldKey) => {
-							unavailableObservedHookFieldKeys.add(fieldKey);
-							problem = "部分会话 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
-						},
-					});
+					const { observed, unavailableObservedHookFieldKeys, observedNativePermissionChange, ownerSummary } =
+						observation;
+					const transcriptPath = ownerSummary?.agentNativeConversationSessionIdentity?.transcriptPath;
+					const transcriptFingerprint = observation.nativePermissionEvidence
+						? codexNativeTurnPermissionTranscriptFingerprintOf(observation.nativePermissionEvidence)
+						: null;
+					const nativePermissionTranscriptStillCurrent =
+						typeof transcriptPath === "string" &&
+						transcriptFingerprint !== null &&
+						(await codexNativeTurnPermissionTranscriptFingerprintStillCurrent(
+							transcriptPath,
+							transcriptFingerprint,
+						));
+					// 所有异步复核完成后再取当前归属，避免转录 stat 等待期间会话已换代。
+					const currentOwnerSummary = deps
+						.listSessions()
+						.find(
+							(item) =>
+								item.workspaceId === writer.binding.workspaceId &&
+								item.summary.taskId === writer.binding.conversationSessionId,
+						)?.summary;
+					const permissionObservationStillOwnedByCurrentSession =
+						ownerSummary &&
+						currentOwnerSummary &&
+						currentOwnerSummary.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+						currentOwnerSummary.runtimeSessionIncarnationId === ownerSummary.runtimeSessionIncarnationId &&
+						currentOwnerSummary.workspacePath === ownerSummary.workspacePath &&
+						currentOwnerSummary.startedAt === ownerSummary.startedAt &&
+						isDeepStrictEqual(
+							currentOwnerSummary.agentNativeConversationSessionIdentity,
+							ownerSummary.agentNativeConversationSessionIdentity,
+						);
+					writer.fileNames = observation.fileNames;
 					// 丢失回执后的保存结果属于已登记操作，不伪装成目标用户的新决定或新通知。
 					for (const change of store.changes) {
 						const pendingTarget = change.targets.find(
@@ -640,81 +871,55 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							}
 						}
 					}
-					const observedNativePermissionChange = [
-						...new Set([...Object.keys(observed), ...Object.keys(writer.lastObservedFields)]),
-					].some(
-						(key) =>
-							codexConfigurationExceptionGroup(key) === "permissions" &&
-							!sameConfigurationField(writer.lastObservedFields[key], observed[key]) &&
-							!store.changes.some(
-								(change) =>
-									change.fieldKey === key &&
-									sameConfigurationField(change.value, observed[key]) &&
-									change.targets.some(
-										(target) =>
-											target.writerId === writer.binding.writerId && target.writeSubmissionStartedAt,
-									),
-							),
-					);
 					mergeObservedCodexConfigurationWriter(store, writer, observed);
 					if (
 						observedNativePermissionChange &&
 						writer.binding.workspaceId &&
 						writer.binding.conversationSessionId
 					) {
-						writer.pendingNativePermissionVerificationAtMs = (
-							await stat(join(writer.binding.configurationHomeDirectoryPath, "config.toml"))
-						).mtimeMs;
-						deps.onWriterPermissionsObserved?.(
-							writer.binding.workspaceId,
-							writer.binding.conversationSessionId,
-							null,
-						);
+						writer.pendingNativePermissionVerificationAtMs = observation.configurationChangedAtMs;
+						if (permissionObservationStillOwnedByCurrentSession)
+							deps.onWriterPermissionsObserved?.(
+								writer.binding.workspaceId,
+								writer.binding.conversationSessionId,
+								null,
+							);
 						store.revision++;
 					}
-					const ownerSummary = deps
-						.listSessions()
-						.find(
-							(item) =>
-								item.workspaceId === writer.binding.workspaceId &&
-								item.summary.taskId === writer.binding.conversationSessionId,
-						)?.summary;
 					if (
+						permissionObservationStillOwnedByCurrentSession &&
 						ownerSummary &&
+						currentOwnerSummary &&
 						deps.onWriterPermissionsObserved &&
-						(writer.pendingNativePermissionVerificationAtMs !== undefined ||
-							ownerSummary.codexEffectivePermissionMode === null)
+						observation.nativePermissionEvidence
 					) {
-						const actual = await readCodexNativeTurnPermissionEvidence({
-							summary: ownerSummary,
-							configurationChangedAtMs: Math.max(
-								writer.pendingNativePermissionVerificationAtMs ?? 0,
-								ownerSummary.startedAt ?? 0,
-							),
-							selectedFields: observed,
-						});
-						const currentSummary = deps
-							.listSessions()
-							.find(
-								(item) =>
-									item.workspaceId === writer.binding.workspaceId &&
-									item.summary.taskId === writer.binding.conversationSessionId,
-							)?.summary;
-						if (
-							actual &&
-							currentSummary &&
-							currentSummary?.runtimeSessionIncarnationId === ownerSummary.runtimeSessionIncarnationId &&
-							currentSummary.agentNativeConversationSessionIdentity?.nativeSessionId ===
-								ownerSummary.agentNativeConversationSessionIdentity?.nativeSessionId
-						) {
+						const actual = observation.nativePermissionEvidence;
+						if (!nativePermissionTranscriptStillCurrent) {
+							// 锁外读到的权限已经落后于转录。不发布旧证据，也不清掉待核验，下一轮五秒补扫重新取证。
+							const retainedVerificationAtMs =
+								writer.pendingNativePermissionVerificationAtMs ??
+								observation.configurationChangedAtMs ??
+								ownerSummary.startedAt ??
+								0;
+							if (writer.pendingNativePermissionVerificationAtMs !== retainedVerificationAtMs) {
+								writer.pendingNativePermissionVerificationAtMs = retainedVerificationAtMs;
+								store.revision++;
+							}
+							problem = "配置观察期间原生权限证据已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
+						} else {
 							delete writer.pendingNativePermissionVerificationAtMs;
-							deps.onWriterPermissionsObserved(writer.binding.workspaceId ?? "", ownerSummary.taskId, actual);
+							deps.onWriterPermissionsObserved(
+								writer.binding.workspaceId ?? "",
+								currentOwnerSummary.taskId,
+								actual,
+							);
 							store.revision++;
 						}
 					}
 					if (
-						ownerSummary?.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
-						resolveSessionFacets(ownerSummary).liveness === "exited"
+						currentOwnerSummary?.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+						currentOwnerSummary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
+						resolveSessionFacets(currentOwnerSummary).liveness === "exited"
 					)
 						writer.retiredAt = Date.now();
 				} catch {
@@ -1477,6 +1682,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		scanning = (async () => {
 			await observe();
 			await recover();
+			void recoverPendingCodexSharedPluginInstallations(
+				Object.values((await readCodexConfigurationSyncStore()).writers).map((writer) => writer.binding),
+			);
 			if (!stopped) await refreshWatchers();
 			await publish();
 		})().finally(() => {
@@ -1668,6 +1876,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				preflightWriterBinding.sourceHomeDirectoryPath,
 				preflightWriterBinding.conversationStorageHomeDirectoryPath,
 				preflightWriterBinding.sqliteHomeDirectoryPath,
+				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(preflightWriterBinding),
 			]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			const requestDigest = configurationDigest(["resolve_target_conflict", input]);

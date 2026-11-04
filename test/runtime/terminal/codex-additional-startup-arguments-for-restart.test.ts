@@ -4,9 +4,50 @@ import {
 	hasExplicitCodexConversationSelectionForRestart,
 	hasExplicitCodexRemoteConnectionForRestart,
 	mergeCodexAdditionalStartupArgumentsForRestart,
+	removeCodexConversationSelectionAndPromptFromStartupArguments,
 } from "../../../src/terminal/codex-additional-startup-arguments-for-restart";
 
 describe("Codex 单次重启参数合并", () => {
+	it.each([
+		["--", "历史首条需求"],
+		["--", "resume", "old-id", "old-prompt"],
+		["--image", "/isolated/first.png", "/isolated/second.png"],
+		["--image=/isolated/first.png"],
+		["-i", "/isolated/first.png"],
+		["-i/isolated/first.png"],
+	])("自动恢复不重放终止符后的正文或启动图片：%j", (...initialContentArguments) => {
+		expect(
+			removeCodexConversationSelectionAndPromptFromStartupArguments([
+				"--model",
+				"retained-model",
+				...initialContentArguments,
+			]),
+		).toEqual(["--model", "retained-model"]);
+	});
+	it("自动恢复移除旧会话选择和正文，保留模型、目录与未知选项后缀", () => {
+		expect(
+			removeCodexConversationSelectionAndPromptFromStartupArguments([
+				"--model",
+				"retained-model",
+				"--cd",
+				"/task",
+				"resume",
+				"old-native-id",
+				"--all",
+				"--last",
+				"旧启动正文",
+			]),
+		).toEqual(["--model", "retained-model", "--cd", "/task"]);
+		expect(
+			removeCodexConversationSelectionAndPromptFromStartupArguments([
+				"fork",
+				"old-parent",
+				"--future-option",
+				"resume",
+				"opaque-value",
+			]),
+		).toEqual(["--future-option", "resume", "opaque-value"]);
+	});
 	it.each([
 		["--future-option", "resume", "--another-option", "fork"],
 		["--future-option", "--last"],

@@ -10,6 +10,19 @@ describe("normalizePseudoHtmlBlockName", () => {
 		expect(normalizePseudoHtmlBlockName("trajectory")).toBe("trajectory");
 	});
 
+	it.each([
+		["问题", "问题"],
+		["問題", "問題"],
+		["𠮷", "𠮷"],
+		["中文block_2-v1", "中文block_2-v1"],
+		["  预期   结果  ", "预期_结果"],
+		["<问题/>", "问题"],
+		["Cafe\u0301", "Cafe\u0301"],
+		["任务２", "任务２"],
+	])("保留 Unicode 块名并沿用清洗规则：%s", (rawName, expectedName) => {
+		expect(normalizePseudoHtmlBlockName(rawName)).toBe(expectedName);
+	});
+
 	it("folds interior whitespace into underscores", () => {
 		expect(normalizePseudoHtmlBlockName("  expected   output ")).toBe("expected_output");
 	});
@@ -25,6 +38,18 @@ describe("normalizePseudoHtmlBlockName", () => {
 });
 
 describe("buildTaskPromptWithPseudoHtmlBlockInserted", () => {
+	it("插入中文块并将光标放到块内", () => {
+		const result = buildTaskPromptWithPseudoHtmlBlockInserted({
+			promptValue: "",
+			selectionStart: 0,
+			selectionEnd: 0,
+			blockName: "问题",
+		});
+		expect(result.nextPromptValue).toBe("<问题>\n\n</问题>");
+		expect(result.nextSelectionStart).toBe("<问题>\n".length);
+		expect(result.nextSelectionEnd).toBe(result.nextSelectionStart);
+	});
+
 	it("inserts an empty block into an empty prompt and puts the caret inside it", () => {
 		const result = buildTaskPromptWithPseudoHtmlBlockInserted({
 			promptValue: "",

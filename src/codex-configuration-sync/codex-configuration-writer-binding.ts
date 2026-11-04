@@ -8,7 +8,6 @@ import { parse, stringify } from "smol-toml";
 import {
 	preserveCodexConfigurationSourceFileResolution,
 	resolveCanonicalUserCodexHomeForManagedStorage,
-	resolveUserCodexHomeDirectoryPath,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import {
 	type CodexDirectoryIdentityExpectation,
@@ -46,6 +45,11 @@ import {
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "./codex-configuration-sync-store";
+import {
+	assertCodexSourceSharedPluginInstallationDirectoriesBinding,
+	linkCodexSourceSharedPluginInstallationDirectories,
+	prepareCodexSourceSharedPluginInstallationDirectoriesBinding,
+} from "./codex-source-shared-plugin-installation-directories";
 
 const execFileAsync = promisify(execFile);
 export async function codexDirectoryIdentity(path: string, expectation?: CodexDirectoryIdentityExpectation) {
@@ -152,6 +156,7 @@ export async function assertCodexConfigurationWriterBindingIdentity(binding: Cod
 			boundAtMs: binding.createdAt,
 			legacyBindingManifestPath: manifestPath,
 		});
+	await assertCodexSourceSharedPluginInstallationDirectoriesBinding(binding);
 }
 
 function readCodexLaunchExceptionSelections(arguments_: string[], fields: CodexConfigurationFields) {
@@ -219,6 +224,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	previousBinding?: CodexConfigurationWriterBinding | null;
 	binary?: string;
 	environment?: NodeJS.ProcessEnv;
+	workingDirectory?: string;
 	nativeLaunchArguments?: string[];
 	codexConfigurationProfileId?: string;
 	sessionModelId?: string;
@@ -252,11 +258,11 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	if (input.binary)
 		try {
 			const environment = input.environment ?? process.env;
-			for (const candidate of isAbsolute(input.binary)
+			for (const candidate of isAbsolute(input.binary) || input.binary.includes("/")
 				? [input.binary]
 				: (environment.PATH ?? "").split(delimiter).map((directory) => join(directory, input.binary ?? "codex"))) {
 				try {
-					nativeExecutableRealPath = await realpath(candidate);
+					nativeExecutableRealPath = await realpath(resolve(input.workingDirectory ?? process.cwd(), candidate));
 					const metadata = await lstat(nativeExecutableRealPath, { bigint: true });
 					nativeExecutableIdentityDigest = configurationDigest([
 						nativeExecutableRealPath,
@@ -273,6 +279,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			nativeBinaryVersion = (
 				await execFileAsync(input.binary, ["--version"], {
 					env: input.environment,
+					cwd: input.workingDirectory,
 					timeout: 3_000,
 					maxBuffer: 4_096,
 				})
@@ -280,6 +287,26 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		} catch {
 			/* 未核验版本不声明原生重载。 */
 		}
+	const preflightSourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
+		preflightSourceHome,
+		preflightStoreSnapshot,
+		preflightParentBinding?.sourceIdentity,
+	);
+	const sourceSharedPluginInstallationDirectoriesBinding =
+		nativeBinaryVersion === "codex-cli 0.166.0" && nativeExecutableRealPath && nativeExecutableIdentityDigest
+			? await prepareCodexSourceSharedPluginInstallationDirectoriesBinding({
+					sourceHome: preflightSourceHome,
+					existingBindings: Object.values(preflightStoreSnapshot.writers)
+						.filter((writer) => writer.binding.sourceIdentity === preflightSourceIdentity)
+						.map((writer) => writer.binding),
+					nativeCapabilityEvidence: {
+						nativeBinaryVersion,
+						nativeExecutableRealPath,
+						nativeExecutableIdentityDigest,
+						observedAtMs: Date.now(),
+					},
+				})
+			: undefined;
 	// 锁外预取只提供观察；下方持锁后重新选择 parent，并完整重核验当前归属。
 	return mutateCodexConfigurationSyncStore(async (store) => {
 		const parent =
@@ -299,6 +326,8 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			parent?.sourceIdentity,
 		);
 		const canonicalSourceHome = await realpath(sourceHome);
+		if (sourceIdentity !== preflightSourceIdentity || canonicalSourceHome !== (await realpath(preflightSourceHome)))
+			throw new Error("Codex 插件来源在锁外预取后已变化，等待来源稳定后自动重试。");
 		const onHookDefinitionObservationProblem = () => {
 			store.observationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
 		};
@@ -485,17 +514,15 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			}
 			await linkVerifiedDirectoryBridge(join(historyHome, name), join(configurationHome, name), false);
 		}
-		for (const name of [
-			"auth.json",
-			".credentials.json",
-			"AGENTS.md",
-			"skills",
-			"plugins",
-			"rules",
-			"prompts",
-			"marketplaces",
-		])
+		for (const name of ["auth.json", ".credentials.json", "AGENTS.md", "skills", "rules", "prompts", "marketplaces"])
 			await linkVerifiedDirectoryBridge(join(sourceHome, name), join(configurationHome, name), false);
+		if (sourceSharedPluginInstallationDirectoriesBinding)
+			await linkCodexSourceSharedPluginInstallationDirectories(
+				sourceHome,
+				configurationHome,
+				sourceSharedPluginInstallationDirectoriesBinding,
+			);
+		else await linkVerifiedDirectoryBridge(join(sourceHome, "plugins"), join(configurationHome, "plugins"), false);
 		try {
 			await writeFile(join(configurationHome, "hooks.json"), await readFile(join(copyFrom, "hooks.json")), {
 				mode: 0o600,
@@ -663,6 +690,16 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			sqliteHomeDirectoryPath: sqliteHome,
 			sourceHomeDirectoryPath: sourceHome,
 			sourceIdentity,
+			...(sourceSharedPluginInstallationDirectoriesBinding
+				? { sourceSharedPluginInstallationDirectoriesBinding }
+				: {
+						sourceSharedPluginInstallationDirectoriesCompatibilityObservation: {
+							status: "unverified_native_capability",
+							nativeBinaryVersion,
+							nativeExecutableRealPath,
+							automaticRecheckCondition: "next_native_process_generation",
+						},
+					}),
 			storageDirectoryIdentity: await codexDirectoryIdentity(historyHome),
 			sqliteDirectoryIdentity: await codexDirectoryIdentity(sqliteHome),
 			launchConfigurationDigest: configurationDigest(baseline),
@@ -761,17 +798,6 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 
 export function buildCodexConfigurationWriterEnvironment(binding: CodexConfigurationWriterBinding) {
 	return { CODEX_HOME: binding.configurationHomeDirectoryPath, CODEX_SQLITE_HOME: binding.sqliteHomeDirectoryPath };
-}
-
-export async function prepareAuxiliaryCodexConfigurationEnvironment(environment: NodeJS.ProcessEnv, cwd: string) {
-	const home = resolveUserCodexHomeDirectoryPath(environment, cwd);
-	const binding = await prepareCodexConfigurationWriterBinding({
-		purpose: "auxiliary_process",
-		storageHome: home,
-		sqliteHome: environment.CODEX_SQLITE_HOME,
-		runtimeSessionIncarnationId: randomUUID(),
-	});
-	return { ...environment, ...buildCodexConfigurationWriterEnvironment(binding) };
 }
 
 export async function recordCodexConfigurationWriterLaunchArguments(

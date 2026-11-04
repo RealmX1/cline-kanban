@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
+import { isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
+import { doesAgentSupportSessionTransport } from "../core/agent-session-transport-selection";
 import type {
 	QueuedTaskPromptDeliveryEntry,
+	RuntimeAgentId,
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequest,
 	RuntimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponse,
+	RuntimeAgentSessionTransport,
 	RuntimeBoardData,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskConversationHistoryPageRequest,
@@ -14,12 +17,19 @@ import type {
 	RuntimeTaskConversationSessionGetRequest,
 	RuntimeTaskConversationSessionGetResponse,
 	RuntimeTaskConversationSessionListResponse,
+	RuntimeTaskConversationSessionPreviewResponse,
+	RuntimeTaskConversationSessionRenameRequest,
 	RuntimeTaskConversationSessionReportRequest,
 	RuntimeTaskConversationSessionReportResponse,
+	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
+import {
+	assertCreationPlanModeWasExplicitlySelected,
+	resolveCreationStartupSettings,
+} from "../core/creation-startup-settings";
 import {
 	isAgentAwaitingModalUserDecision,
 	resolveSessionFacets,
@@ -55,6 +65,26 @@ import {
 
 export interface TaskConversationSessionServiceDependencies {
 	storageRootDirectoryPath?: string;
+	suggestNames?(basisText: string, operationId: string): Promise<RuntimeTaskNameSuggestionResponse>;
+	readRecordedNameSuggestionResult?(
+		basisText: string,
+		operationId: string,
+	): Promise<RuntimeTaskNameSuggestionResponse | null>;
+	compareAndSetSessionName?(
+		scope: TaskConversationSessionWorkspaceScope,
+		input: RuntimeTaskConversationSessionRenameRequest,
+		source: "explicit" | "automatic",
+	): Promise<boolean>;
+	readCreationDefaults?(
+		scope: TaskConversationSessionWorkspaceScope,
+		agentId: RuntimeAgentId,
+		codexConfigurationProfileId?: string,
+		explicitModelId?: string,
+	): Promise<{
+		modelId: string | null;
+		sessionTransport?: RuntimeAgentSessionTransport;
+		codexConfigurationProfileId?: string;
+	}>;
 	readDefaultTaskAgentPermissionMode?(
 		scope: TaskConversationSessionWorkspaceScope,
 	): Promise<RuntimeTaskAgentPermissionMode>;
@@ -105,6 +135,43 @@ class TaskConversationSessionIdempotencyConflictError extends Error {
 	constructor(readonly creation: RuntimeTaskConversationSessionCreateResponse["creation"]) {
 		super("相同幂等键已用于不同的会话创建内容。");
 	}
+}
+
+function creationRequestFingerprint(input: RuntimeTaskConversationSessionCreateRequest, creatorId: string) {
+	return createHash("sha256")
+		.update(
+			JSON.stringify({ ...input, creatorTaskConversationSessionId: creatorId, cols: undefined, rows: undefined }),
+		)
+		.digest("hex");
+}
+
+function resolveCreationContextSource(
+	input: RuntimeTaskConversationSessionCreateRequest,
+	card: NonNullable<ReturnType<typeof findCard>>,
+	sessions: Record<string, RuntimeTaskSessionSummary>,
+	agentId: RuntimeAgentId,
+	creatorId: string,
+) {
+	const sourceId =
+		input.contextSource === "fresh"
+			? null
+			: input.contextSource === "current_main"
+				? resolveMainTaskConversationSessionId(card)
+				: creatorId;
+	const source = sourceId ? requireSession(sessions, sourceId, input.taskId) : null;
+	if (source) {
+		const selection = resolveTaskConversationSessionMainContextForkSelection({
+			sessionRole: "task_collaborator",
+			workspaceTaskId: input.taskId,
+			launchAgentId: agentId,
+			mainSessionSummary: source,
+			mainSessionWorkingDirectoryPath: source.workspacePath,
+			existingTaskConversationSessionSummaries: Object.values(sessions),
+		});
+		if (selection.forkRejectionReason)
+			throw new Error(selection.forkRejectionReason.replaceAll("主会话", "来源会话"));
+	}
+	return { sourceId, source };
 }
 
 function sessionStartupFailed(
@@ -210,8 +277,194 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 	const operations = createTaskConversationSessionOperationStore(deps.storageRootDirectoryPath);
 	const now = deps.now ?? Date.now;
 	const launchesInFlight = new Set<string>();
+	const namingInFlight = new Set<string>();
 	const reconciliationsInFlight = new Map<string, Promise<void>>();
 	let closed = false;
+	const resolveStartupSettings = async (
+		scope: TaskConversationSessionWorkspaceScope,
+		input: RuntimeTaskConversationSessionCreateRequest,
+		agentId: RuntimeAgentId,
+	) => {
+		assertCreationPlanModeWasExplicitlySelected(input.startInPlanMode);
+		if (
+			input.modelId &&
+			input.terminalAgentModelOverrideSettings &&
+			input.modelId !== input.terminalAgentModelOverrideSettings.modelId
+		)
+			throw new Error("两项模型覆盖相互冲突，未预留或创建会话。");
+		if (
+			(input.modelId || input.terminalAgentModelOverrideSettings) &&
+			!["claude", "codex", "cursor", "kimi", "omp"].includes(agentId)
+		)
+			throw new Error("所选 Agent 暂不支持单次模型覆盖。");
+		if (input.terminalAgentModelOverrideSettings && input.terminalAgentModelOverrideSettings.agentId !== agentId)
+			throw new Error("模型选择的 Agent 与本次会话不一致。");
+		const defaults = await deps.readCreationDefaults?.(
+			scope,
+			agentId,
+			input.codexConfigurationProfileId,
+			input.modelId ?? input.terminalAgentModelOverrideSettings?.modelId,
+		);
+		const settings = resolveCreationStartupSettings({
+			...input,
+			codexConfigurationPermissionSelectionSource:
+				input.codexConfigurationPermissionSelectionSource ??
+				(input.codexConfigurationProfileId && input.taskAgentPermissionMode === undefined
+					? "profile"
+					: "task_local"),
+			agentId,
+			agentSelectionSource: input.agentId ? "explicit_request" : "creator_session_agent",
+			modelId: input.modelId ?? input.terminalAgentModelOverrideSettings?.modelId,
+			defaultModelId: defaults?.modelId,
+			defaultSessionTransport: defaults?.sessionTransport,
+			codexConfigurationProfileId: input.codexConfigurationProfileId,
+			defaultCodexConfigurationProfileId: defaults?.codexConfigurationProfileId,
+		});
+		if (!doesAgentSupportSessionTransport(agentId, settings.sessionTransport.value))
+			throw new Error("所选 Agent 不支持该会话通道。");
+		return settings;
+	};
+	const reconcileName = async (
+		scope: TaskConversationSessionWorkspaceScope,
+		record: TaskConversationSessionCreationRecord,
+	) => {
+		if (
+			closed ||
+			!deps.suggestNames ||
+			!deps.compareAndSetSessionName ||
+			namingInFlight.has(record.progress.requestId)
+		)
+			return;
+		const naming = record.nameSuggestion;
+		if (!naming || ["completed", "unavailable"].includes(naming.status)) return;
+		namingInFlight.add(record.progress.requestId);
+		try {
+			const stopped = (await operations.read(scope)).explicitlyStoppedSessionIds;
+			if (
+				stopped.includes(record.progress.taskConversationSessionId) ||
+				stopped.includes(record.progress.creatorTaskConversationSessionId) ||
+				stopped.includes(record.progress.taskId)
+			)
+				return;
+			if (naming.status === "request_may_have_started") {
+				const original = naming.basisText
+					? await deps.readRecordedNameSuggestionResult?.(naming.basisText, naming.operationId)
+					: null;
+				if (!original) return;
+				const name = original.status === "suggested" ? original.suggestedTaskNames[0] : undefined;
+				await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current) {
+						current.status = name ? "result_available" : "unavailable";
+						current.suggestedName = name;
+						current.notice = undefined;
+					}
+				});
+				naming.status = name ? "result_available" : "unavailable";
+				naming.suggestedName = name;
+				if (!name) return;
+			}
+			const state = await deps.readState(scope);
+			const card = findCard(state.board, record.progress.taskId);
+			const session = state.sessions[record.progress.taskConversationSessionId];
+			if (
+				!card ||
+				card.createdAt !== record.progress.taskIncarnationCreatedAt ||
+				!session ||
+				session.taskConversationSessionMetadata?.creationRequestId !== record.progress.requestId
+			)
+				return;
+			const metadata = session.taskConversationSessionMetadata;
+			if (
+				(metadata.conversationSessionNameVersion ?? 0) !== naming.expectedNameVersion ||
+				metadata.conversationSessionNameSource === "explicit"
+			) {
+				await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current) current.status = "completed";
+				});
+				return;
+			}
+			if (naming.status === "waiting_for_real_input") {
+				const acceptance = session.agentConversationPromptSubmissionAcceptance;
+				const text = metadata.latestUserMessagePreview?.trim();
+				if (!text || acceptance?.status !== "accepted" || acceptance.attemptedAtMs < record.progress.createdAt)
+					return;
+				await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current?.status === "waiting_for_real_input") {
+						current.basisText = text;
+						current.status = "ready";
+					}
+				});
+				naming.basisText = text;
+				naming.status = "ready";
+			}
+			if (naming.status === "ready" && naming.basisText) {
+				const claimed = await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current?.status !== "ready" || current.basisText !== naming.basisText) return false;
+					current.status = "request_may_have_started";
+					current.notice = "命名调用结果未知时只等待原结果，不自动重复付费。";
+					return true;
+				});
+				if (!claimed) return;
+				const response = await deps.suggestNames(naming.basisText, naming.operationId);
+				const suggestedName = response.status === "suggested" ? response.suggestedTaskNames[0] : undefined;
+				await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current) {
+						current.status = suggestedName ? "result_available" : "unavailable";
+						current.suggestedName = suggestedName;
+						current.notice = undefined;
+					}
+				});
+				naming.suggestedName = suggestedName;
+				if (!suggestedName) return;
+			}
+			if (naming.suggestedName) {
+				const stoppedNow = (await operations.read(scope)).explicitlyStoppedSessionIds;
+				if (
+					closed ||
+					[
+						record.progress.taskConversationSessionId,
+						record.progress.creatorTaskConversationSessionId,
+						record.progress.taskId,
+					].some((id) => stoppedNow.includes(id))
+				)
+					return;
+				await deps.compareAndSetSessionName(
+					scope,
+					{
+						taskId: record.progress.taskId,
+						expectedTaskIncarnationCreatedAtEpochMs: record.progress.taskIncarnationCreatedAt,
+						taskConversationSessionId: record.progress.taskConversationSessionId,
+						expectedNameVersion: naming.expectedNameVersion,
+						conversationSessionName: naming.suggestedName,
+					},
+					"automatic",
+				);
+				await operations.update(scope, (store) => {
+					const current = store.creations.find(
+						(entry) => entry.progress.requestId === record.progress.requestId,
+					)?.nameSuggestion;
+					if (current) current.status = "completed";
+				});
+			}
+		} finally {
+			namingInFlight.delete(record.progress.requestId);
+		}
+	};
 	const assertNotStopped = (store: TaskConversationSessionOperationStore, sessionId: string) => {
 		if (store.explicitlyStoppedSessionIds.includes(sessionId))
 			throw new TaskConversationSessionExecutionProhibitedError("显式 Stop 仍禁止自动执行。");
@@ -613,6 +866,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 		if (existing) return existing;
 		const work = (async () => {
 			let store = await operations.read(scope);
+			for (const creation of store.creations) await reconcileName(scope, creation).catch(() => undefined);
 			for (const creation of store.creations) {
 				try {
 					if (closed) return;
@@ -795,6 +1049,89 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 
 	return {
 		reconcile,
+		async lookupCreation(
+			scope: TaskConversationSessionWorkspaceScope,
+			input: RuntimeTaskConversationSessionCreateRequest,
+		): Promise<RuntimeTaskConversationSessionCreateResponse | null> {
+			const state = await deps.readState(scope);
+			const card = findCard(state.board, input.taskId);
+			if (!card || card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs)
+				throw new Error("宿主任务不存在或已换代。");
+			const record = (await operations.read(scope)).creations.find(
+				(entry) =>
+					entry.progress.taskId === card.id &&
+					entry.progress.taskIncarnationCreatedAt === card.createdAt &&
+					entry.idempotencyKey === input.idempotencyKey,
+			);
+			if (
+				record &&
+				((input.creatorTaskConversationSessionId &&
+					input.creatorTaskConversationSessionId !== record.progress.creatorTaskConversationSessionId) ||
+					creationRequestFingerprint(input, record.progress.creatorTaskConversationSessionId) !==
+						record.requestFingerprint)
+			)
+				return {
+					ok: false,
+					idempotencyConflict: true,
+					creation: record.progress,
+					summary: null,
+					error: "相同幂等键已用于不同的会话创建内容。",
+				};
+			return record
+				? {
+						ok: true,
+						creation: record.progress,
+						summary: state.sessions[record.progress.taskConversationSessionId] ?? null,
+						resolvedSettings:
+							record.launchRequest.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+								?.resolvedSettings,
+					}
+				: null;
+		},
+		async rename(scope: TaskConversationSessionWorkspaceScope, input: RuntimeTaskConversationSessionRenameRequest) {
+			try {
+				const renamed = await deps.compareAndSetSessionName?.(scope, input, "explicit");
+				return {
+					ok: renamed === true,
+					summary: null,
+					...(renamed ? {} : { error: "会话归属或名称版本已变化，请刷新后重试。" }),
+				};
+			} catch (error) {
+				return { ok: false, summary: null, error: String(error) };
+			}
+		},
+		async preview(
+			scope: TaskConversationSessionWorkspaceScope,
+			input: RuntimeTaskConversationSessionCreateRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		): Promise<RuntimeTaskConversationSessionPreviewResponse> {
+			try {
+				const state = await deps.readState(scope);
+				const card = assertTaskAllowsExecution(
+					state.board,
+					input.taskId,
+					input.expectedTaskIncarnationCreatedAtEpochMs,
+				);
+				const creatorId = resolveCreatorSessionId(
+					input,
+					evidence,
+					state.sessions,
+					resolveMainTaskConversationSessionId(card),
+					scope.workspaceId,
+				);
+				const creator = requireSession(state.sessions, creatorId, input.taskId);
+				if (creator.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
+					throw new Error("By the way 保持只读，不能创建可执行会话。");
+				const agentId = input.agentId ?? creator.agentId;
+				if (!agentId || !isRuntimeAgentLaunchSupported(agentId)) throw new Error("所选 Agent 不支持启动。");
+				if (input.sessionRole === "by_the_way" && !["claude", "codex"].includes(agentId))
+					throw new Error("所选 Agent 不支持只读 By the way。");
+				resolveCreationContextSource(input, card, state.sessions, agentId, creatorId);
+				return { ok: true, resolvedSettings: await resolveStartupSettings(scope, input, agentId) };
+			} catch (error) {
+				return { ok: false, resolvedSettings: null, error: error instanceof Error ? error.message : String(error) };
+			}
+		},
 		async isReportExecutionAllowed(
 			scope: TaskConversationSessionWorkspaceScope,
 			origin: NonNullable<QueuedTaskPromptDeliveryEntry["taskConversationSessionReportOrigin"]>,
@@ -871,10 +1208,16 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 			evidence: KanbanRequestOriginActorEvidence,
 		): Promise<RuntimeTaskConversationSessionCreateResponse> {
 			try {
+				assertCreationPlanModeWasExplicitlySelected(input.startInPlanMode);
 				if (closed) throw new Error("运行时正在关闭，暂不创建会话。");
 				const state = await deps.readState(scope);
 				const card = findCard(state.board, input.taskId);
 				if (!card) throw new Error("任务不存在。");
+				if (
+					input.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+					card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs
+				)
+					throw new Error("宿主任务已换代，原草稿不能创建到新任务。");
 				const creatorId = resolveCreatorSessionId(
 					input,
 					evidence,
@@ -885,16 +1228,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				const creator = requireSession(state.sessions, creatorId, input.taskId);
 				if (creator.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
 					throw new Error("By the way 保持只读，不能创建可执行会话。");
-				const fingerprint = createHash("sha256")
-					.update(
-						JSON.stringify({
-							...input,
-							creatorTaskConversationSessionId: creatorId,
-							cols: undefined,
-							rows: undefined,
-						}),
-					)
-					.digest("hex");
+				const fingerprint = creationRequestFingerprint(input, creatorId);
 				const existing = (await operations.read(scope)).creations.find(
 					(entry) =>
 						entry.progress.taskId === input.taskId &&
@@ -914,6 +1248,9 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 						ok: true,
 						creation: existing.progress,
 						summary: state.sessions[existing.progress.taskConversationSessionId] ?? null,
+						resolvedSettings:
+							existing.launchRequest.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+								?.resolvedSettings,
 					};
 				}
 				assertTaskAllowsExecution(state.board, input.taskId);
@@ -921,67 +1258,50 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				if (!agentId || !isRuntimeAgentLaunchSupported(agentId)) throw new Error("所选 Agent 不支持启动。");
 				if (input.sessionRole === "by_the_way" && !["claude", "codex"].includes(agentId))
 					throw new Error("所选 Agent 不支持只读 By the way。");
-				const sourceId =
-					input.contextSource === "fresh"
-						? null
-						: input.contextSource === "current_main"
-							? resolveMainTaskConversationSessionId(card)
-							: creatorId;
-				const source = sourceId ? requireSession(state.sessions, sourceId, input.taskId) : null;
-				if (source) {
-					const selection = resolveTaskConversationSessionMainContextForkSelection({
-						sessionRole: "task_collaborator",
-						workspaceTaskId: input.taskId,
-						launchAgentId: agentId,
-						mainSessionSummary: source,
-						mainSessionWorkingDirectoryPath: source.workspacePath,
-						existingTaskConversationSessionSummaries: Object.values(state.sessions),
-					});
-					if (selection.forkRejectionReason)
-						throw new Error(selection.forkRejectionReason.replaceAll("主会话", "来源会话"));
-				}
+				const { sourceId, source } = resolveCreationContextSource(input, card, state.sessions, agentId, creatorId);
 				const createdAt = now();
 				const requestId = randomUUID();
 				const sessionId = `task-conversation-session-${randomUUID()}`;
-				const settings = creator.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
-				const inheritedTaskAgentPermissionMode =
-					settings?.taskAgentPermissionMode ??
-					creator.codexEffectivePermissionMode ??
-					card.taskAgentPermissionMode ??
-					(await deps.readDefaultTaskAgentPermissionMode?.(scope)) ??
-					"ask_for_every_tool_use";
-				const explicitCodexConfigurationProfileId = input.codexConfigurationProfileId;
-				const codexConfigurationProfileId =
-					explicitCodexConfigurationProfileId ??
-					settings?.codexConfigurationProfileId ??
-					creator.codexConfigurationProfileId ??
-					card.codexConfigurationProfileId;
-				const codexConfigurationPermissionSelectionSource = explicitCodexConfigurationProfileId
-					? "profile"
-					: (settings?.codexConfigurationPermissionSelectionSource ??
-						card.codexConfigurationPermissionSelectionSource);
-				const codexReasoningEffortOverride =
-					settings?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride;
+				const resolvedSettings = await resolveStartupSettings(scope, input, agentId);
+				const taskAgentPermissionMode = resolvedSettings.effectiveTaskAgentPermissionMode.value;
+				const codexConfigurationProfileId = resolvedSettings.codexConfigurationProfileId.value ?? undefined;
+				const codexConfigurationPermissionSelectionSource =
+					input.codexConfigurationPermissionSelectionSource ??
+					(input.codexConfigurationProfileId && input.taskAgentPermissionMode === undefined
+						? "profile"
+						: "task_local");
+				const terminalAgentModelOverrideSettings =
+					resolvedSettings.modelId.value && ["claude", "codex", "cursor", "kimi", "omp"].includes(agentId)
+						? {
+								agentId: agentId as "claude" | "codex" | "cursor" | "kimi" | "omp",
+								modelId: resolvedSettings.modelId.value,
+							}
+						: undefined;
 				const mainSessionId = resolveMainTaskConversationSessionId(card);
 				const launchRequest: RuntimeTaskSessionStartRequest = {
 					taskId: sessionId,
 					workspaceTaskId: card.id,
 					agentId,
 					prompt: input.initialMessage,
+					images: input.images,
+					terminalAgentModelOverrideSettings,
 					taskTitle:
-						input.initialMessage.slice(0, 80) || (input.sessionRole === "by_the_way" ? "By the way" : "协作会话"),
+						input.conversationSessionName ||
+						input.initialMessage.slice(0, 80) ||
+						(input.sessionRole === "by_the_way" ? "By the way" : "协作会话"),
 					baseRef: card.baseRef,
 					worktreeMode: card.worktreeMode,
 					cols: input.cols ?? 100,
 					rows: input.rows ?? 30,
-					taskAgentPermissionMode: inheritedTaskAgentPermissionMode,
-					startInPlanMode: settings?.startInPlanMode ?? card.startInPlanMode,
+					taskAgentPermissionMode,
+					startInPlanMode: input.startInPlanMode,
 					codexConfigurationProfileId,
 					codexConfigurationPermissionSelectionSource,
-					codexReasoningEffortOverride,
-					requestedAgentSessionTransport:
-						source?.sessionTransport ?? getRuntimeAgentCatalogEntry(agentId)?.sessionTransport,
+					requestedAgentSessionTransport: resolvedSettings.sessionTransport.value,
 					taskConversationSessionMetadata: {
+						conversationSessionName: input.conversationSessionName || undefined,
+						conversationSessionNameVersion: input.conversationSessionName ? 1 : 0,
+						conversationSessionNameSource: input.conversationSessionName ? "explicit" : undefined,
 						workspaceTaskId: card.id,
 						sideSessionCreatedAt: createdAt,
 						taskConversationSessionRole: input.sessionRole,
@@ -1019,13 +1339,11 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 						taskConversationSessionLaunchSettings: {
 							codexConfigurationProfileId,
 							codexConfigurationPermissionSelectionSource,
-							codexReasoningEffortOverride,
-							taskAgentPermissionMode: inheritedTaskAgentPermissionMode,
-							startInPlanMode: settings?.startInPlanMode ?? card.startInPlanMode,
-							sessionTransport:
-								source?.sessionTransport ??
-								getRuntimeAgentCatalogEntry(agentId)?.sessionTransport ??
-								"pty_terminal",
+							taskAgentPermissionMode,
+							startInPlanMode: input.startInPlanMode,
+							sessionTransport: resolvedSettings.sessionTransport.value,
+							terminalAgentModelOverrideSettings,
+							resolvedSettings,
 						},
 					},
 				};
@@ -1061,12 +1379,21 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 						launchRequest,
 						launchOwnerRuntimeProcessInstanceId: null,
 						processLaunchMayHaveStarted: false,
+						nameSuggestion: input.conversationSessionName
+							? undefined
+							: {
+									operationId: randomUUID(),
+									basisText: input.initialMessage.trim() || null,
+									expectedNameVersion: 0,
+									status: input.initialMessage.trim() ? "ready" : "waiting_for_real_input",
+								},
 						recoveryEvidence: emptyTaskConversationSessionRecoveryEvidence(),
 					};
 					store.creations.push(record);
 					return record;
 				});
 				await launch(scope, record);
+				void reconcileName(scope, record).catch(() => undefined);
 				const progress =
 					(await operations.read(scope)).creations.find(
 						(entry) => entry.progress.requestId === record.progress.requestId,
@@ -1075,6 +1402,9 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 					ok: true,
 					creation: progress,
 					summary: (await deps.readState(scope)).sessions[progress.taskConversationSessionId] ?? null,
+					resolvedSettings:
+						record.launchRequest.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+							?.resolvedSettings,
 				};
 			} catch (error) {
 				if (error instanceof TaskConversationSessionIdempotencyConflictError)

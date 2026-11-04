@@ -1,8 +1,15 @@
-import { mkdirSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, truncateSync, unlinkSync, writeFileSync } from "node:fs";
 import * as fileSystemPromises from "node:fs/promises";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { inspectCodexNativeConversationTranscriptBeforeResume } from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import {
+	inspectCodexNativeConversationTranscriptBeforeResume,
+	listKnownCodexTranscriptSegmentPaths,
+} from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import {
+	compressedCodexTranscriptFixtureBytes,
+	compressedCodexTranscriptFixtureNativeSessionId,
+} from "../../utilities/codex-native-resume-compressed-transcript-fixtures";
 import { createTempDir } from "../../utilities/temp-dir";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -13,6 +20,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 const directories: Array<ReturnType<typeof createTempDir>> = [];
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.mocked(fileSystemPromises.open).mockReset();
 	for (const directory of directories.splice(0)) directory.cleanup();
 });
 
@@ -23,6 +31,289 @@ function isolatedCodexHome() {
 }
 
 describe("Codex 原生转录续接预检", () => {
+	it.each([
+		{ scenario: "valid-rle-frame", accepted: true },
+		{ scenario: "invalid-checksum", accepted: false },
+		{ scenario: "valid-long-distance-metadata", accepted: true },
+	] as const)("完整压缩流的帧边界校验：$scenario", async ({ scenario, accepted }) => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes(scenario));
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: accepted ? transcriptPath : null });
+	});
+	it.each(["saved-compressed-path", "saved-uncompressed-path", "discovery", "recovery-segment"])(
+		"识别压缩转录及旧路径：%s",
+		async (scenario) => {
+			const home = isolatedCodexHome();
+			const sessions = join(home, "sessions", "2026", "10", "23");
+			mkdirSync(sessions, { recursive: true });
+			const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+			const uncompressedPath = join(sessions, `rollout-${nativeSessionId}.jsonl`);
+			const transcriptPath =
+				scenario === "recovery-segment"
+					? join(sessions, `rollout-${nativeSessionId}_recovered.jsonl.zst`)
+					: `${uncompressedPath}.zst`;
+			writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes());
+			expect(
+				await inspectCodexNativeConversationTranscriptBeforeResume({
+					nativeSessionId,
+					transcriptPath:
+						scenario === "saved-compressed-path"
+							? transcriptPath
+							: scenario === "saved-uncompressed-path"
+								? uncompressedPath
+								: null,
+					environmentOverrides: { CODEX_HOME: home },
+				}),
+			).toMatchObject({ persistedTranscriptPath: transcriptPath });
+			// 正文读取者不因预检支持压缩文件而收到不兼容的输入。
+			expect(await listKnownCodexTranscriptSegmentPaths(join(home, "sessions"), nativeSessionId)).toEqual([]);
+		},
+	);
+
+	it("流式解压大体积中文首行并释放文件", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const transcriptPath = join(
+			home,
+			"sessions",
+			`rollout-${compressedCodexTranscriptFixtureNativeSessionId}.jsonl.zst`,
+		);
+		writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes("large-chinese-metadata"));
+		const handle = await fileSystemPromises.open(transcriptPath, "r");
+		vi.mocked(fileSystemPromises.open).mockResolvedValueOnce(handle);
+		const readSpy = vi.spyOn(handle, "read");
+		const closeSpy = vi.spyOn(handle, "close");
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId: compressedCodexTranscriptFixtureNativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: transcriptPath });
+		expect(readSpy).toHaveBeenCalledExactlyOnceWith(
+			expect.any(Buffer),
+			0,
+			compressedCodexTranscriptFixtureBytes("large-chinese-metadata").length,
+			0,
+		);
+		expect(closeSpy).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		"wrong-identity",
+		"wrong-session-id",
+		"subagent",
+		"internal",
+		"memory_consolidation",
+		"guardian_review",
+		"malformed-tail",
+		"missing-newline",
+		"metadata-on-second-line",
+		"corrupt-compression",
+		"truncated-compression",
+		"outside-home",
+	] as const)("压缩转录仍拒绝 %s", async (scenario) => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(
+			scenario === "outside-home" ? home : join(home, "sessions"),
+			`rollout-${nativeSessionId}.jsonl.zst`,
+		);
+		const bytes =
+			scenario === "corrupt-compression"
+				? Buffer.from("损坏的 Zstandard 数据")
+				: scenario === "truncated-compression"
+					? compressedCodexTranscriptFixtureBytes().subarray(0, 12)
+					: compressedCodexTranscriptFixtureBytes(scenario === "outside-home" ? "persistent-main" : scenario);
+		writeFileSync(transcriptPath, bytes);
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: null });
+	});
+
+	it("完整多块帧可续接，但首行后截断的同帧不能作为证据", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		for (const [scenario, expectedPath] of [
+			["valid-multi-block", transcriptPath],
+			["truncated-after-metadata-block", null],
+		] as const) {
+			writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes(scenario));
+			expect(
+				await inspectCodexNativeConversationTranscriptBeforeResume({
+					nativeSessionId,
+					transcriptPath,
+					environmentOverrides: { CODEX_HOME: home },
+				}),
+			).toMatchObject({ persistedTranscriptPath: expectedPath });
+		}
+	});
+
+	it("拒绝声明内容大小与实际输出不一致的压缩帧", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		const bytes = compressedCodexTranscriptFixtureBytes();
+		bytes[5] += 1;
+		writeFileSync(transcriptPath, bytes);
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: null });
+	});
+
+	it("single-segment 帧窗口不随虚假内容大小分配", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		const bytes = compressedCodexTranscriptFixtureBytes("large-chinese-metadata");
+		bytes.writeUInt32LE(64 * 1024 * 1024, 5);
+		writeFileSync(transcriptPath, bytes);
+		const arrayBuffersBefore = process.memoryUsage().arrayBuffers;
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: null });
+		expect(process.memoryUsage().arrayBuffers - arrayBuffersBefore).toBeLessThan(16 * 1024 * 1024);
+	});
+
+	it("正常 EOF 收尾可解压不足 18 字节的合法末帧", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes("short-final-frame"));
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: transcriptPath });
+	});
+
+	it("压缩转录解压超时仍关闭文件，不把部分身份当作成功", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const transcriptPath = join(
+			home,
+			"sessions",
+			`rollout-${compressedCodexTranscriptFixtureNativeSessionId}.jsonl.zst`,
+		);
+		writeFileSync(transcriptPath, compressedCodexTranscriptFixtureBytes("large-chinese-metadata"));
+		const handle = await fileSystemPromises.open(transcriptPath, "r");
+		vi.mocked(fileSystemPromises.open).mockResolvedValueOnce(handle);
+		const readSpy = vi.spyOn(handle, "read");
+		const closeSpy = vi.spyOn(handle, "close");
+		vi.spyOn(performance, "now").mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(3_000);
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId: compressedCodexTranscriptFixtureNativeSessionId,
+				transcriptPath,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: null });
+		expect(readSpy).toHaveBeenCalledOnce();
+		expect(closeSpy).toHaveBeenCalledOnce();
+	});
+
+	it.each(["compress", "decompress"])("枚举后发生 %s 文件切换，只按同一 UUID 重查", async (scenario) => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const uncompressedPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl`);
+		const compressedPath = `${uncompressedPath}.zst`;
+		const originalPath = scenario === "compress" ? uncompressedPath : compressedPath;
+		const replacementPath = scenario === "compress" ? compressedPath : uncompressedPath;
+		const metadataLine = `${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`;
+		writeFileSync(originalPath, scenario === "compress" ? metadataLine : compressedCodexTranscriptFixtureBytes());
+		const originalOpen = fileSystemPromises.open;
+		vi.mocked(fileSystemPromises.open).mockImplementationOnce(async (...args) => {
+			writeFileSync(
+				replacementPath,
+				scenario === "compress" ? compressedCodexTranscriptFixtureBytes() : metadataLine,
+			);
+			unlinkSync(originalPath);
+			return originalOpen(...args);
+		});
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath: null,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: replacementPath });
+	});
+
+	it("损坏压缩文件在读取期间被原子替换后可补证，但不会无限重试", async () => {
+		const home = isolatedCodexHome();
+		mkdirSync(join(home, "sessions"));
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		const transcriptPath = join(home, "sessions", `rollout-${nativeSessionId}.jsonl.zst`);
+		writeFileSync(transcriptPath, "损坏压缩数据");
+		const handle = await fileSystemPromises.open(transcriptPath, "r");
+		const originalRead = handle.read.bind(handle);
+		vi.spyOn(handle, "read").mockImplementationOnce(async (...args: Parameters<typeof handle.read>) => {
+			const result = await originalRead(...args);
+			const replacementPath = `${transcriptPath}.replacement`;
+			writeFileSync(replacementPath, compressedCodexTranscriptFixtureBytes());
+			renameSync(replacementPath, transcriptPath);
+			return result;
+		});
+		vi.mocked(fileSystemPromises.open).mockClear();
+		vi.mocked(fileSystemPromises.open).mockResolvedValueOnce(handle);
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath: null,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: transcriptPath });
+		expect(fileSystemPromises.open).toHaveBeenCalledTimes(2);
+	});
+
+	it("重查一次后仍无有效压缩证据即返回，未变化的损坏文件只读取一次", async () => {
+		const home = isolatedCodexHome();
+		const sessions = join(home, "sessions");
+		mkdirSync(sessions);
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
+		writeFileSync(join(sessions, `rollout-${nativeSessionId}.jsonl.zst`), "损坏压缩数据");
+		const readdirSpy = vi.spyOn(fileSystemPromises, "readdir");
+		expect(
+			await inspectCodexNativeConversationTranscriptBeforeResume({
+				nativeSessionId,
+				transcriptPath: null,
+				environmentOverrides: { CODEX_HOME: home },
+			}),
+		).toMatchObject({ persistedTranscriptPath: null });
+		expect(readdirSpy).toHaveBeenCalledTimes(2);
+		expect(fileSystemPromises.open).toHaveBeenCalledOnce();
+	});
+
 	it.each([false, true])("相对 CODEX_HOME 按 agent 启动 cwd 解析（已保存路径=%s）", async (hasSavedPath) => {
 		const home = isolatedCodexHome();
 		const agentExecutionWorkingDirectoryPath = join(home, "agent-working-directory");

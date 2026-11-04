@@ -12,6 +12,7 @@ import type {
 } from "../../../src/core/api-contract";
 import {
 	listAuthoredVerificationDefinitions,
+	materializeAuthoredVerificationItemsForTask,
 	upsertAuthoredVerificationDefinition,
 } from "../../../src/deployment/authored-verification-definitions";
 import { listPostDeployVerificationDeferredNaturalUsageObservationRecords } from "../../../src/deployment/post-deploy-verification-deferred-natural-usage-observation-records";
@@ -254,20 +255,11 @@ describe.sequential("Post-Deploy Verification 移入 Done 门禁与结案", () =
 				NOW_ISO,
 			);
 		}
-		const automaticCleanup = { mode: "automatic" as const, assetsDir: null, manualSteps: [] };
-		writeActiveGroup([
-			buildTask("t1", [
-				buildItem("authored:checked", true),
-				buildItem(`authored:${deferredVerificationId}`, false, {
-					kind: "automated_script",
-					cleanup: automaticCleanup,
-				}),
-				buildItem(`authored:${tediousVerificationId}`, false, {
-					kind: "automated_script",
-					cleanup: automaticCleanup,
-				}),
-			]),
-		]);
+		const registeredItems = await materializeAuthoredVerificationItemsForTask(WORKSPACE_ID, "t1", NOW_ISO);
+		const deferredItem = registeredItems.find((item) => item.id === `authored:${deferredVerificationId}`);
+		const tediousItem = registeredItems.find((item) => item.id === `authored:${tediousVerificationId}`);
+		if (!deferredItem || !tediousItem) throw new Error("缺少实际注册的验证项");
+		writeActiveGroup([buildTask("t1", [buildItem("authored:checked", true), deferredItem, tediousItem])]);
 
 		const authorized = await authorizePostDeployVerificationDoneEntryBeforeMovingTaskCardIntoDone({
 			workspaceId: WORKSPACE_ID,

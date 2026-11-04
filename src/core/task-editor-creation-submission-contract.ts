@@ -4,6 +4,7 @@ import {
 	type RuntimeBoardCard,
 	runtimeAgentTerminalGeometryForTaskSessionSpawnSchema,
 	runtimeBoardCardSchema,
+	runtimeCreationResolvedSettingsSchema,
 } from "./api-contract";
 import {
 	type WebUiUserDecisionClientCharacteristics,
@@ -22,6 +23,7 @@ export interface TaskEditorCreationSubmissionRequest {
 	referenceRelationDrafts: ReferenceRelationModelingDraft[];
 	relationRevocations: z.infer<typeof referenceRelationModelingRevocationSchema>[];
 	startAgentAfterCreation: boolean;
+	suggestNameAfterCreation?: boolean;
 	agentTerminalGeometryForTaskSessionSpawn?: RuntimeAgentTerminalGeometryForTaskSessionSpawn;
 	webUiUserDecisionClientCharacteristics: WebUiUserDecisionClientCharacteristics;
 }
@@ -56,11 +58,13 @@ export const taskEditorCreationSubmissionRequestSchema: z.ZodType<TaskEditorCrea
 	referenceRelationDrafts: z.array(referenceRelationModelingDraftSchema).max(50),
 	relationRevocations: z.array(referenceRelationModelingRevocationSchema).max(50),
 	startAgentAfterCreation: z.boolean(),
+	suggestNameAfterCreation: z.boolean().optional(),
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
 	webUiUserDecisionClientCharacteristics: webUiUserDecisionClientCharacteristicsSchema,
 });
 
 export const taskEditorCreationSubmissionStatusSchema = z.object({
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.optional(),
 	submissionId: z.string().uuid(),
 	workspaceId: z.string(),
 	taskId: z.string(),

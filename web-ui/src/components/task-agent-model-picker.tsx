@@ -128,6 +128,8 @@ export interface UseTaskAgentModelPickerInput {
 	clineSettings?: RuntimeTaskClineSettings;
 	/** Agent definitions from runtimeConfig.agents — carries `installed` for grey-out of not-installed agents. */
 	agents?: RuntimeAgentDefinition[];
+	/** 给出时，选择器只展示这些 Agent。缺省仍使用完整可启动目录。 */
+	selectableAgentIds?: readonly RuntimeAgentId[];
 	/** The default agent ID from runtimeConfig.selectedAgentId — used to build the first option label */
 	defaultAgentId?: RuntimeAgentId | null;
 	/** The default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
@@ -161,7 +163,9 @@ export interface TaskTerminalAgentModelOverrideSettingsChangeOptions {
 function isTerminalAgentModelSelectionAgentId(
 	agentId: RuntimeAgentId | null | undefined,
 ): agentId is RuntimeTerminalAgentModelSelectionAgentId {
-	return agentId === "claude" || agentId === "codex" || agentId === "cursor" || agentId === "kimi";
+	return (
+		agentId === "claude" || agentId === "codex" || agentId === "cursor" || agentId === "kimi" || agentId === "omp"
+	);
 }
 
 function getFallbackTerminalAgentDefaultModelOption(agentId: RuntimeTerminalAgentModelSelectionAgentId): {
@@ -191,6 +195,7 @@ export function useTaskAgentModelPicker({
 	agentId,
 	clineSettings,
 	agents,
+	selectableAgentIds,
 	defaultAgentId,
 	defaultProviderId,
 	defaultModelId,
@@ -442,7 +447,10 @@ export function useTaskAgentModelPicker({
 	}, [active, effectiveAgentId, effectiveProviderId, workspaceId]);
 
 	const agentOptions = useMemo<TaskAgentPickerAgentOption[]>(() => {
-		const catalog = getRuntimeLaunchSupportedAgentCatalog();
+		const selectableAgentIdSet = selectableAgentIds ? new Set(selectableAgentIds) : null;
+		const catalog = getRuntimeLaunchSupportedAgentCatalog().filter(
+			(agent) => !selectableAgentIdSet || selectableAgentIdSet.has(agent.id),
+		);
 		const installedByAgentId = new Map(
 			(agents ?? EMPTY_AGENT_DEFINITIONS).map((agent) => [agent.id, agent.installed]),
 		);
@@ -464,7 +472,7 @@ export function useTaskAgentModelPicker({
 				.filter((agent) => agent.id !== defaultAgentId)
 				.map((agent) => ({ value: agent.id, label: agent.label, installed: resolveInstalled(agent.id) })),
 		];
-	}, [agents, defaultAgentId]);
+	}, [agents, defaultAgentId, selectableAgentIds]);
 
 	const clineProviderOptions = useMemo(() => {
 		let firstLabel = "Default";
