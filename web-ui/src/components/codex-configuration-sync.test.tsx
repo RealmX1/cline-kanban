@@ -121,7 +121,103 @@ afterEach(async () => {
 	vi.useRealTimers();
 });
 
+function setTargetComparisonFixture(targetWriterId: string, expectedTargetValueDigest: string) {
+	state.changes[0]!.targetComparisons = {
+		[targetWriterId]: {
+			targetWriterId,
+			expectedSharedValueDigest: "shared-default",
+			expectedTargetValueDigest,
+			rows: [
+				{
+					fieldKey: "hook",
+					label: "hook",
+					changeKind: "modified",
+					previous: { state: "present", text: "旧默认" },
+					detected: { state: "present", text: "来源值" },
+					target: { state: "present", text: "目标值" },
+				},
+			],
+		},
+	};
+}
+
 describe("Codex 配置同步提示和设置", () => {
+	it("归档的旧外部记录只展示历史事实，不显示同步动作或正在广播的文案", async () => {
+		state.changes[0] = {
+			...state.changes[0]!,
+			recordKind: "historical_record",
+			codexConfigurationProfileId: "profile-a",
+			profileName: "工作配置",
+			settingsIsolationArchivedAtMs: 1,
+			acknowledgedAt: 1,
+		};
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		expect(container.textContent).toContain("此记录已退出设置同步");
+		expect(container.textContent).not.toContain("正在自动广播");
+		expect(button("同步设置")).toBeUndefined();
+	});
+	it("同 profile 同字段合成一项，同值合并来源，不同值各有贴值按钮，保留默认绑定全部展示成员", async () => {
+		const original = state.changes[0]!;
+		state.changes = ["B", "B", "C"].map((value, index) => ({
+			...original,
+			changeId: `choice-${index}`,
+			version: index + 1,
+			codexConfigurationProfileId: "profile-a",
+			profileName: "工作配置",
+			fieldKey: '["config.toml","model"]',
+			fieldLabel: "config.toml · model",
+			candidateFieldGroupKey: "profile-a:model",
+			completeCandidateValueDigest: value,
+			approvalStatus: "pending",
+			mergeStatus: "pending_approval",
+			feedbackExpiresAtMs: Date.now() + 600_000,
+			sourceConversationSessionId: `会话 ${index}`,
+			comparison: {
+				expectedSharedValueDigest: "default-A",
+				rows: [
+					{
+						fieldKey: "model",
+						label: "model",
+						changeKind: "modified",
+						previous: { state: "present", text: '"A"' },
+						detected: { state: "present", text: `"${value}"` },
+						sharedCurrent: { state: "present", text: '"A"' },
+						previousMatchesSharedCurrent: true,
+					},
+				],
+			},
+		}));
+		queries.batch.mockImplementation(async (request) => ({
+			state,
+			results: request.items.map((item: { changeId: string }) => ({
+				changeId: item.changeId,
+				status: "applied",
+				message: "已保存",
+			})),
+		}));
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		expect(container.textContent).toContain("设置待反馈 · 1");
+		expect(
+			container.querySelectorAll('[data-verification-anchor="codex-configuration-proposal-group"]'),
+		).toHaveLength(1);
+		const candidates = container.querySelectorAll('[data-configuration-value-choice="candidate"]');
+		expect(candidates).toHaveLength(2);
+		expect(candidates[0]?.textContent).toContain('"B"');
+		expect(candidates[0]?.textContent).toContain("采用此值并广播");
+		expect(container.textContent).toContain("2 个来源");
+		expect(container.querySelector('[data-configuration-value-choice="current"]')?.textContent).toContain('"A"');
+		await act(async () => button("保留当前默认").click());
+		expect(queries.batch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				action: "reject",
+				items: state.changes.map((change) =>
+					expect.objectContaining({ changeId: change.changeId, expectedVersion: change.version }),
+				),
+			}),
+			expect.anything(),
+		);
+	});
+
 	it("默认直显任务归属与冲突值，展开失败可重试，操作绑定展示的共享值", async () => {
 		const change = state.changes[0]!;
 		change.fieldLabel = "config.toml · ponytail@ponytail:hooks/hooks.json · Hook subagent_start:0:0";
@@ -817,6 +913,7 @@ describe("Codex 配置同步提示和设置", () => {
 				...(status === "conflict" ? { conflictingTargetValueDigest: "expected-target-digest" } : {}),
 			}),
 		);
+		setTargetComparisonFixture("writer-3", "expected-target-digest");
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 		await flush();
 		for (const label of ["已应用", "待重载", "待下次启动", "冲突", "不适用"])
@@ -863,6 +960,7 @@ describe("Codex 配置同步提示和设置", () => {
 				conflictingTargetValueDigest: "target-value-digest",
 			},
 		];
+		setTargetComparisonFixture("target-writer", "target-value-digest");
 		state.changes.push({
 			...state.changes[0]!,
 			changeId: "target-local-conflict",

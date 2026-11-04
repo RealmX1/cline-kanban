@@ -6,11 +6,20 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import lockfile from "proper-lockfile";
 import { parse, stringify, type TomlTable } from "smol-toml";
 import { z } from "zod";
-import { getCodexConfigurationSyncDirectory } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { ensureCodexConfigurationInitializationSnapshot } from "../codex-configuration-sync/codex-configuration-initialization-snapshot";
+import {
+	getCodexConfigurationSyncDirectory,
+	mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncStore,
+} from "../codex-configuration-sync/codex-configuration-sync-store";
+import { resolveVerifiedCodexConfigurationSourceIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import { codexConfigurationWriterBindingSchema } from "../core/codex-configuration-sync-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
-import { resolveCodexPersistentDirectoryIdentity } from "./codex-persistent-directory-identity";
+import {
+	prepareCodexDirectoryVolumeObservations,
+	resolveCodexPersistentDirectoryIdentity,
+} from "./codex-persistent-directory-identity";
 import { preserveCodexHookTrustDuringConfigurationRefresh } from "./preserve-codex-hook-trust-during-configuration-refresh";
 
 export function resolveUserCodexHomeDirectoryPath(environment: NodeJS.ProcessEnv = process.env, cwd = process.cwd()) {
@@ -259,9 +268,47 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 		}
 		if (savedSource && savedSource !== resolve(sourceHomeDirectoryPath))
 			throw new Error("看板 Codex 专用目录绑定了另一套用户配置；保留原绑定，不能混用账号。");
+		let initialConfigurationSourceHome = sourceHomeDirectoryPath;
+		if (!savedSource) {
+			await mkdir(sourceHomeDirectoryPath, { recursive: true, mode: 0o700 });
+			sourceNativeHookSourceHomeDirectoryPath = await realpath(sourceHomeDirectoryPath);
+			const store = await readCodexConfigurationSyncStore();
+			const knownSourceIdentity = Object.entries(store.sources).find(
+				([, source]) => source.home === sourceNativeHookSourceHomeDirectoryPath,
+			)?.[0];
+			await prepareCodexDirectoryVolumeObservations([
+				sourceHomeDirectoryPath,
+				...Object.values(store.writers)
+					.filter((writer) => writer.binding.sourceIdentity === knownSourceIdentity)
+					.flatMap(({ binding }) => [
+						binding.sourceHomeDirectoryPath,
+						binding.conversationStorageHomeDirectoryPath,
+						binding.sqliteHomeDirectoryPath,
+					]),
+			]);
+			const sourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
+				sourceHomeDirectoryPath,
+				store,
+				knownSourceIdentity,
+			);
+			initialConfigurationSourceHome = (
+				await mutateCodexConfigurationSyncStore(async (current) => {
+					if (
+						(await resolveVerifiedCodexConfigurationSourceIdentity(sourceHomeDirectoryPath, current)) !==
+						sourceIdentity
+					)
+						throw new Error("Codex 初始化来源已变化，等待目录恢复稳定后自动重试。");
+					return ensureCodexConfigurationInitializationSnapshot(
+						current,
+						sourceIdentity,
+						sourceNativeHookSourceHomeDirectoryPath,
+					);
+				})
+			).directory;
+		}
 		let sourceEntries: string[] = [];
 		try {
-			sourceEntries = await readdir(sourceHomeDirectoryPath);
+			if (!savedSource) sourceEntries = await readdir(initialConfigurationSourceHome);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 		}
@@ -272,12 +319,18 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 			"skills",
 			"plugins",
 			"rules",
-			"hooks.json",
 			"prompts",
 			"marketplaces",
 		])
 			await linkExistingSharedCodexConfigurationEntry(join(sourceHomeDirectoryPath, name), join(target, name));
-		const configurationFileNames = ["config.toml", ...sourceEntries.filter((name) => name.endsWith(".config.toml"))];
+		if (!savedSource)
+			await linkExistingSharedCodexConfigurationEntry(
+				join(initialConfigurationSourceHome, "hooks.json"),
+				join(target, "hooks.json"),
+			);
+		const configurationFileNames = savedSource
+			? []
+			: ["config.toml", ...sourceEntries.filter((name) => name.endsWith(".config.toml"))];
 		// 原生来源键先规范化 home，再附加文件名；不能规范化共享文件软链本身或扩大账号绑定范围。
 		const relocatedHookSourceFilePaths = new Map(
 			[...configurationFileNames, ...(sourceEntries.includes("hooks.json") ? ["hooks.json"] : [])].map((name) => [
@@ -287,7 +340,7 @@ export async function prepareManagedCodexConversationStorageHome(sourceHomeDirec
 		);
 		for (const configurationFileName of configurationFileNames)
 			await refreshManagedCodexConfigurationSnapshot({
-				sourceConfigurationPath: join(sourceHomeDirectoryPath, configurationFileName),
+				sourceConfigurationPath: join(initialConfigurationSourceHome, configurationFileName),
 				targetHomeDirectoryPath: target,
 				configurationFileName,
 				relocatedHookSourceFilePaths,
