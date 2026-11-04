@@ -3,7 +3,9 @@
 // 用途：runtime 不在（重启窗口）时 host 照常读 PTY、把输出攒在这里；新 runtime 接管时从它记得的偏移
 // （或缓冲起点）续流。满了就覆盖最旧的字节，并让读取方知道丢了多少，绝不阻塞 agent。
 //
-// 本文件属于 host 进程的依赖闭包：只允许 import `node:*`。
+// 本文件属于 host 进程的依赖闭包：只允许 import `node:*` 与 wire-protocol。
+
+import { HostedSessionTerminalModeStateTracker } from "../wire-protocol/hosted-session-terminal-mode-checkpoint";
 
 // EXPERIMENT_NODE: 每会话 2 MiB 是「重启窗口内 TUI 全屏重绘几轮」的估计，未实测；太小会让崩溃路径的追赶重放缺头，太大则 30 个会话占 60 MiB。
 export const HOSTED_SESSION_OUTPUT_RING_BUFFER_DEFAULT_CAPACITY_BYTES = 2 * 1024 * 1024;
@@ -20,6 +22,8 @@ export class HostedSessionOutputRingBufferWithAbsoluteByteOffsets {
 	private readonly storage: Buffer;
 	// 下一个写入字节的绝对偏移，也就是迄今写入的总字节数。
 	private totalWrittenByteCount = 0;
+	// 只解析即将被覆盖的字节；状态永久对齐保留起点，不随旧输出一起丢失。
+	private readonly terminalModeStateAtRetainedStart = new HostedSessionTerminalModeStateTracker();
 
 	constructor(private readonly capacityByteLength: number = HOSTED_SESSION_OUTPUT_RING_BUFFER_DEFAULT_CAPACITY_BYTES) {
 		if (!Number.isInteger(capacityByteLength) || capacityByteLength <= 0) {
@@ -39,6 +43,12 @@ export class HostedSessionOutputRingBufferWithAbsoluteByteOffsets {
 	// 返回本段首字节的绝对偏移。
 	append(bytes: Buffer): number {
 		const startByteOffset = this.totalWrittenByteCount;
+		const nextRetainedStart = Math.max(0, startByteOffset + bytes.length - this.capacityByteLength);
+		this.consumeRetainedBytes(this.retainedStartByteOffset, Math.min(startByteOffset, nextRetainedStart), (chunk) =>
+			this.terminalModeStateAtRetainedStart.applyOutput(chunk),
+		);
+		if (nextRetainedStart > startByteOffset)
+			this.terminalModeStateAtRetainedStart.applyOutput(bytes.subarray(0, nextRetainedStart - startByteOffset));
 		// 超过容量的一段只留尾部；偏移照常按全长推进。
 		const retainedBytes =
 			bytes.byteLength > this.capacityByteLength
@@ -56,6 +66,22 @@ export class HostedSessionOutputRingBufferWithAbsoluteByteOffsets {
 		}
 		this.totalWrittenByteCount += bytes.byteLength;
 		return startByteOffset;
+	}
+
+	readTerminalModeStateAtAbsoluteByteOffset(outputByteOffset: number) {
+		if (outputByteOffset < this.retainedStartByteOffset || outputByteOffset > this.endByteOffset) return undefined;
+		const tracker = this.terminalModeStateAtRetainedStart.clone();
+		this.consumeRetainedBytes(this.retainedStartByteOffset, outputByteOffset, (chunk) => tracker.applyOutput(chunk));
+		return tracker.readReplayState();
+	}
+
+	private consumeRetainedBytes(start: number, end: number, consume: (bytes: Buffer) => void): void {
+		while (start < end) {
+			const position = start % this.capacityByteLength;
+			const length = Math.min(this.capacityByteLength - position, end - start);
+			consume(this.storage.subarray(position, position + length));
+			start += length;
+		}
 	}
 
 	readFromAbsoluteByteOffset(requestedStartByteOffset: number): HostedSessionOutputRingBufferReadResult {

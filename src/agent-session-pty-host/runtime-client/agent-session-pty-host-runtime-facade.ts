@@ -30,6 +30,7 @@ import type {
 	AgentSessionPtyHostHostedSessionListing,
 	SpawnHostedSessionOutcome,
 } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
+import { readHostedSessionTerminalModeCheckpointForReplay } from "../wire-protocol/hosted-session-terminal-mode-checkpoint";
 import {
 	type CurrentBuildAgentSessionPtyHostDescriptor,
 	resolveCurrentBuildAgentSessionPtyHostDescriptor,
@@ -1033,6 +1034,16 @@ export class AgentSessionPtyHostRuntimeFacade {
 						if (!callbacks.onCatchUpOutputGap) throw new Error("checkpoint 追赶输出存在缺口，但没有恢复处理函数");
 						await callbacks.onCatchUpOutputGap();
 					}
+					await callbacks.onCatchUpOutputStart?.({
+						startByteOffset: attachOutcome.catchUpStartByteOffset,
+						terminalModeReplayState: readHostedSessionTerminalModeCheckpointForReplay({
+							checkpoint: attachOutcome.terminalModeCheckpoint,
+							hostedSessionKey: listing.hostedSessionKey,
+							pid: listing.pid,
+							spawnedAtEpochMs: listing.spawnedAtEpochMs,
+							outputByteOffset: attachOutcome.catchUpStartByteOffset,
+						}),
+					});
 					handle = new HostedTerminalPtyProcessHandleOverAgentSessionPtyHost(
 						link.connection,
 						listing.hostedSessionKey,

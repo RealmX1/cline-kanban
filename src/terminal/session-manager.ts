@@ -35,6 +35,7 @@ import {
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import { AgentSessionPtyHostUnreachableError } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
+import { serializeHostedSessionTerminalModes } from "../agent-session-pty-host/wire-protocol/hosted-session-terminal-mode-checkpoint";
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
@@ -4947,11 +4948,21 @@ export class TerminalSessionManager implements TerminalSessionService {
 			retainedOutputStartByteOffset: adoptionCandidate.retainedOutputStartByteOffset,
 			outputEndByteOffset: adoptionCandidate.outputEndByteOffset,
 		});
+		let terminalModeRestoreSource = plannedHandoverTerminalMirrorCheckpoint
+			? "planned_handover_checkpoint"
+			: "unknown";
 		// 追赶字节是历史输出：mirror 照常吃下以还原屏幕，但其中的终端查询（DA / CPR / OSC10/11）绝不能再应答给 agent。
 		// mirror 的写入是异步排队的，所以应答开关要等追赶字节全部应用完才打开。
 		let terminalStateMirrorMayAnswerTerminalQueries = false;
 		const createAdoptedTerminalStateMirror = (cols: number, rows: number) =>
 			new TerminalStateMirror(cols, rows, {
+				onTerminalModesRecovered: () => {
+					terminalModeRestoreSource = "native_mode_initialization";
+					logTuiFreezeWarning(
+						`[hosted-session-adoption] terminal-modes-recovered taskId=${taskId} source=${terminalModeRestoreSource}`,
+					);
+					if (adoptedSessionInstalled) this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
+				},
 				onInputResponse: (data) => {
 					if (!terminalStateMirrorMayAnswerTerminalQueries || !entry.active || this.hasLiveOutputListener(entry)) {
 						return;
@@ -5022,6 +5033,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 					terminalStateMirror.dispose();
 					terminalStateMirror = createAdoptedTerminalStateMirror(adoptionCandidate.cols, adoptionCandidate.rows);
 					plannedHandoverTerminalMirrorCheckpoint = null;
+				},
+				onCatchUpOutputStart: ({ startByteOffset, terminalModeReplayState }) => {
+					if (plannedHandoverTerminalMirrorCheckpoint !== null) return;
+					if (terminalModeReplayState !== undefined) {
+						terminalStateMirror.applyOutput(
+							serializeHostedSessionTerminalModes(terminalModeReplayState.terminalModes),
+						);
+						const continuation = filterTerminalProtocolOutput(
+							catchUpTerminalProtocolFilter,
+							Buffer.from(terminalModeReplayState.parserContinuationHex, "hex"),
+							{},
+						);
+						if (continuation.length > 0) terminalStateMirror.applyOutput(continuation);
+						terminalModeRestoreSource = "host_terminal_mode_checkpoint";
+					} else if (startByteOffset === 0) {
+						terminalModeRestoreSource = "complete_output_replay";
+					} else {
+						terminalStateMirror.markTerminalModesUnknownUntilReinitialized();
+						terminalModeRestoreSource = "unknown_awaiting_native_initialization_or_checkpoint";
+					}
 				},
 				onCatchUpOutput: (bytes) => {
 					const filteredCatchUpBytes = filterTerminalProtocolOutput(catchUpTerminalProtocolFilter, bytes, {});
@@ -5095,7 +5126,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 					: (carriedFields?.workspaceTrustBuffer ?? null),
 			cols: adoptionCandidate.cols,
 			rows: adoptionCandidate.rows,
-			terminalProtocolFilter: createTerminalProtocolFilterState(terminalProtocolFilterOptions),
+			// 追赶末尾的未完成序列必须由实时输出续接。
+			terminalProtocolFilter: catchUpTerminalProtocolFilter,
 			onSessionCleanup: adoptedCodexControlHostCleanup,
 			deferredStartupPromptText: carriedFields?.deferredStartupPromptText ?? null,
 			detectOutputTransition: outputTransitionDetection.detectOutputTransition ?? null,
@@ -5153,7 +5185,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.emitSummary(entry.summary);
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
 		logTuiFreezeWarning(
-			`[hosted-session-adoption] adopted taskId=${taskId} pid=${adoptionCandidate.pid} kind=${adoptionCandidate.hostedSessionKind} summarySource=${summaryChoice.summarySource} adoptionRecord=${parsedAdoptionRecord.kind} screenRestoredFrom=${plannedHandoverTerminalMirrorCheckpoint !== null ? "planned_handover_checkpoint" : "output_ring_buffer_replay"}`,
+			`[hosted-session-adoption] adopted taskId=${taskId} pid=${adoptionCandidate.pid} kind=${adoptionCandidate.hostedSessionKind} summarySource=${summaryChoice.summarySource} adoptionRecord=${parsedAdoptionRecord.kind} screenRestoredFrom=${plannedHandoverTerminalMirrorCheckpoint !== null ? "planned_handover_checkpoint" : "output_ring_buffer_replay"} terminalModesRestoredFrom=${terminalModeRestoreSource}`,
 		);
 		for (const chunk of liveOutputChunksArrivedBeforeInstall.splice(0)) {
 			handleAdoptedLiveOutput(chunk);
@@ -10576,6 +10608,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					summary,
 					active,
 					recordedAtEpochMs: now(),
+					terminalModesAreKnown: entry.terminalStateMirror?.terminalModesAreKnown,
 					...(checkpointCapture.kind === "captured"
 						? { plannedHandoverTerminalMirrorCheckpoint: checkpointCapture.checkpoint }
 						: {}),
@@ -11211,7 +11244,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return;
 		}
 		active.session.publishTerminalSessionAdoptionRecordForRuntimeRestart(
-			buildTerminalSessionAdoptionRecord({ summary: cloneSummary(entry.summary), active, recordedAtEpochMs: now() }),
+			buildTerminalSessionAdoptionRecord({
+				summary: cloneSummary(entry.summary),
+				active,
+				recordedAtEpochMs: now(),
+				terminalModesAreKnown: entry.terminalStateMirror?.terminalModesAreKnown,
+			}),
 		);
 	}
 }
