@@ -67,6 +67,21 @@ schemaVersion 3 从已经采用的共享字段建立兼容 profile，不同来�
 
 冻结请求、workspace、观测指纹和已用重送次数保存在独立 localStorage 键 `kanban.codex-configuration-unconfirmed-source-observation-actions.v1`。刷新后先补读，耗尽预算后保留未知与「重新核验」入口，在线恢复、运行时流重连或页面重新可见时自动补读；普通重绘不重置重送额度。所有查询和 mutation 快照按 workspace 生命周期及单调 revision 接收，旧回执也不能清除新版本操作。初次读取失败时显示读取错误和恢复入口，不持续显示读取中。
 
+## 创建任务时选择 Reasoning Effort
+
+创建任务和 Backlog 编辑共用「模型与参数」中的推理强度选择器。每张新任务默认「沿用 Codex 配置」，连续创建下一张时也恢复继承；批量提交中的各张任务使用本批明确选择的档位。`codexReasoningEffortOverride?: string` 独立于模型覆盖，默认模型下也能单独选择，编辑补丁的 `null` 清除覆盖。字段贯通草稿、冻结创建提交、卡片水合和会话启动。
+
+档位来自本机 `codex debug models` 的 `supported_reasoning_levels`，保留 `max`、`ultra` 和未来原生值。按显式模型或所属 profile 的继承模型筛选；目录缺失时保留原值，最多三次退避重试，连接恢复、页面重新可见或手动重读可开启新一轮。只在目录确认不兼容时显示错误并阻止提交，不把未知当成不兼容。
+
+手选值进入既有 writer 的 `reasoning_effort` 局部例外，经 `model_reasoning_effort` 配置参数启动。相同任务选择重启时保留会话内后续修改，profile 对该字段的新决定仍按原规则生效。与继承不同的手选值在新主会话成功启动后进入现有限时反馈：持久 selection ID 和首次成功启动时间固定身份及十分钟期限，准备／spawn 失败不发布成功凭证。已有配置扫描链路在身份或目录恢复后补登记；确认才更新所属 profile 并广播，拒绝、过期和重复扫描均不重新提示。
+
+隔离真实 CLI 核验不调用模型：
+
+```sh
+KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY=/absolute/path/to/codex \
+npm run test:guarded -- --project runtime-integration test/integration/codex-task-reasoning-effort-native.integration.test.ts
+```
+
 ## 新原生会话的权限继承
 
 本任务实施期间，用户报告多个会话从 Full Access 变为 Ask for Approval，以及看板仍显示 Full Access、原生操作却需要审批。现场账本没有权限字段被传播的记录；当前实施会话的原生 ID 与启动核验的 ID 不同，新会话首个回合是 `on-request + workspace-write`。

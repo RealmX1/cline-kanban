@@ -21,6 +21,7 @@ import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
 import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
+import { CodexTaskReasoningEffortSelect } from "@/components/codex-task-reasoning-effort-select";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
@@ -53,7 +54,9 @@ import { TaskWorktreeModeControl } from "@/components/task-worktree-mode-control
 import { Button } from "@/components/ui/button";
 import { DialogBody, DialogFooter } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
+import { resolveCodexTaskReasoningEffortSelection } from "@/hooks/codex-task-reasoning-effort-selection";
 import type { TaskEditDraft } from "@/hooks/task-edit-drafts";
+import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
@@ -122,6 +125,7 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  */
 export interface TaskCreateFormSnapshot {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
@@ -166,6 +170,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
 		current.codexConfigurationProfileId !== baseline.codexConfigurationProfileId ||
+		current.codexReasoningEffortOverride !== baseline.codexReasoningEffortOverride ||
 		current.codexConfigurationPermissionSelectionSource !== baseline.codexConfigurationPermissionSelectionSource ||
 		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
@@ -260,8 +265,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
 	codexConfigurationProfileId,
+	codexReasoningEffortOverride,
 	codexConfigurationPermissionSelectionSource,
 	onCodexConfigurationProfileIdChange,
+	onCodexReasoningEffortOverrideChange,
 	onCodexConfigurationPermissionSelectionSourceChange,
 	taskConversationMode,
 	onTaskConversationModeChange,
@@ -328,8 +335,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
+	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
 	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	taskConversationMode: RuntimeTaskConversationMode;
 	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
@@ -477,6 +486,9 @@ export function TaskEditorDialog({
 		terminalAgentDefaultModelId,
 		isLoadingTerminalAgentModels,
 		providerDefaultModels,
+		terminalAgentModelCatalog,
+		terminalAgentModelCatalogWarning,
+		retryTerminalAgentModelCatalog,
 	} = useTaskAgentModelPicker({
 		active: open,
 		workspaceId,
@@ -607,12 +619,13 @@ export function TaskEditorDialog({
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
 		setNewTaskName("");
 		onImagesChange([]);
+		onCodexReasoningEffortOverrideChange?.(undefined);
 		setMode("single");
 		setTaskPrompts([]);
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, propagatePromptDraft]);
+	}, [onImagesChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
 
 	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
 	const revealAndFocusRelations = useCallback(() => {
@@ -641,6 +654,28 @@ export function TaskEditorDialog({
 	}, [workspaceId, editingTaskId, open, selectableTargetProjectField]);
 	const targetWorkspaceId =
 		selectableTargetProjectField?.selectedTargetWorkspaceId ?? localSelectedTargetWorkspaceId ?? workspaceId;
+	const codexConfiguration = useCodexConfigurationSync(
+		targetWorkspaceId,
+		open && effectiveTaskAgentPermissionModeAgentId === "codex",
+	);
+	const codexReasoningEffortSelection = resolveCodexTaskReasoningEffortSelection({
+		profile: codexConfiguration.state?.profiles?.find(
+			(profile) =>
+				profile.profileId ===
+				(codexConfigurationProfileId ?? codexConfiguration.state?.defaultCodexConfigurationProfileId),
+		),
+		explicitModelId:
+			terminalAgentModelOverrideSettings?.agentId === "codex"
+				? terminalAgentModelOverrideSettings.modelId
+				: undefined,
+		override: codexReasoningEffortOverride,
+		catalog: terminalAgentModelCatalog,
+		catalogWarning: terminalAgentModelCatalogWarning,
+		catalogIsLoading: isLoadingTerminalAgentModels,
+	});
+	const codexReasoningEffortValidationError =
+		effectiveTaskAgentPermissionModeAgentId === "codex" ? codexReasoningEffortSelection.validationError : null;
+
 	const setSelectedTargetWorkspaceId = (nextWorkspaceId: string) => {
 		if (selectableTargetProjectField) selectableTargetProjectField.onSelectTargetWorkspaceId(nextWorkspaceId);
 		else setLocalSelectedTargetWorkspaceId(nextWorkspaceId);
@@ -696,6 +731,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -1355,6 +1391,7 @@ export function TaskEditorDialog({
 	const primaryActionDisabled =
 		!branchRef ||
 		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
+		Boolean(codexReasoningEffortValidationError) ||
 		isTaskCreationWaitingForRelationDraftHydration ||
 		isRelationAwareCreationInFlight;
 	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
@@ -1396,6 +1433,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -1891,6 +1929,7 @@ export function TaskEditorDialog({
 													startInPlanMode,
 													taskAgentPermissionMode,
 													codexConfigurationProfileId,
+													codexReasoningEffortOverride,
 													codexConfigurationPermissionSelectionSource,
 													autoReviewEnabled,
 													autoReviewMode,
@@ -2034,11 +2073,21 @@ export function TaskEditorDialog({
 													{
 														key: "model",
 														label: "模型与参数",
-														summary:
-															terminalAgentModelOverrideSettings?.modelId ??
-															effectiveDefaultModelId ??
-															"默认",
-														content: modelSelection,
+														summary: `${terminalAgentModelOverrideSettings?.modelId ?? effectiveDefaultModelId ?? "默认"}${effectiveTaskAgentPermissionModeAgentId === "codex" ? ` · 推理：${codexReasoningEffortOverride ?? "沿用 Codex 配置"}${codexReasoningEffortValidationError ? "（不兼容）" : ""}` : ""}`,
+														content: (
+															<>
+																{modelSelection}
+																{effectiveTaskAgentPermissionModeAgentId === "codex" &&
+																	onCodexReasoningEffortOverrideChange && (
+																		<CodexTaskReasoningEffortSelect
+																			value={codexReasoningEffortOverride}
+																			onChange={onCodexReasoningEffortOverrideChange}
+																			selection={codexReasoningEffortSelection}
+																			onRetry={retryTerminalAgentModelCatalog}
+																		/>
+																	)}
+															</>
+														),
 													},
 													...commonTaskEditorSettings,
 												]}
@@ -2069,6 +2118,11 @@ export function TaskEditorDialog({
 									<TaskEditorSettingGroup title="常用设置" settings={commonTaskEditorSettings} />
 								)}
 							</div>
+							{codexReasoningEffortValidationError && (
+								<p role="alert" className="mt-2 text-xs text-status-red">
+									{codexReasoningEffortValidationError}
+								</p>
+							)}
 							{mode === "single" && workspaceId ? (
 								<TaskEditorSettingGroup
 									className="mt-5"
@@ -2153,6 +2207,7 @@ export function TaskEditorDialog({
 									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
 									disabled={
 										!hasPromptDraftContent ||
+										Boolean(codexReasoningEffortValidationError) ||
 										!branchRef ||
 										isTaskCreationWaitingForRelationDraftHydration ||
 										isRelationAwareCreationInFlight
@@ -2172,6 +2227,7 @@ export function TaskEditorDialog({
 												onClick={() => handleRunSingleStartAction(primaryStartAction)}
 												disabled={
 													!hasPromptDraftContent ||
+													Boolean(codexReasoningEffortValidationError) ||
 													!branchRef ||
 													isTaskCreationWaitingForRelationDraftHydration ||
 													isRelationAwareCreationInFlight
@@ -2190,6 +2246,7 @@ export function TaskEditorDialog({
 														size="sm"
 														disabled={
 															!hasPromptDraftContent ||
+															Boolean(codexReasoningEffortValidationError) ||
 															!branchRef ||
 															isTaskCreationWaitingForRelationDraftHydration ||
 															isRelationAwareCreationInFlight
@@ -2255,7 +2312,9 @@ export function TaskEditorDialog({
 										variant="primary"
 										size="sm"
 										onClick={handleCreateAndStartAll}
-										disabled={validTaskCount === 0 || !branchRef}
+										disabled={
+											validTaskCount === 0 || !branchRef || Boolean(codexReasoningEffortValidationError)
+										}
 									>
 										<span className="inline-flex items-center">
 											Start {validTaskCount} {taskCountLabel}

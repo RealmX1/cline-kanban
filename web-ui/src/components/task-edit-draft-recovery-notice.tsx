@@ -59,6 +59,7 @@ function areFormValuesEqual(left: TaskEditDraftComparableValues, right: TaskEdit
 			right.taskTitleOverride === undefined ||
 			left.taskTitleOverride === right.taskTitleOverride) &&
 		left.prompt === right.prompt &&
+		left.codexReasoningEffortOverride === right.codexReasoningEffortOverride &&
 		areTaskImagesEqual(left.images, right.images) &&
 		areSettingsEqual(left, right)
 	);

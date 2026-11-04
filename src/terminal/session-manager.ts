@@ -791,6 +791,7 @@ export interface StartTaskSessionRequest {
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	taskId: string;
 	automaticFailureContinuationEpisodeId?: string;
 	workspaceTaskId?: string;
@@ -6196,6 +6197,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		const runtimeSessionIncarnationId = randomUUID();
 		let codexConfigurationWriterBinding: CodexConfigurationWriterBinding | null = null;
+		let codexTaskReasoningEffortFeedbackSelectionId: string | undefined;
 		let codexConfigurationProfileLaunchFields: CodexConfigurationFields | undefined;
 		const codexConversationStorageHomeDirectoryPath =
 			request.agentId === "codex" ? request.env?.CODEX_HOME : undefined;
@@ -6221,6 +6223,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 						request.terminalAgentModelOverrideSettings?.agentId === "codex"
 							? request.terminalAgentModelOverrideSettings.modelId
 							: undefined,
+					sessionReasoningEffortOverride: request.codexReasoningEffortOverride,
+					allowTaskReasoningEffortFeedback:
+						!taskConversationSessionMetadataForLaunch ||
+						taskConversationSessionMetadataForLaunch.taskConversationSessionRole === "main",
 					sessionPermissionMode: request.taskAgentPermissionMode,
 					sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
 					codexConfigurationProfileId:
@@ -6243,9 +6249,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 					...request,
 					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
 				};
-				codexConfigurationProfileLaunchFields = (await readCodexConfigurationSyncStore()).writers[
+				const preparedCodexWriter = (await readCodexConfigurationSyncStore()).writers[
 					codexConfigurationWriterBinding.writerId
-				]?.launchBaselineFields;
+				];
+				codexConfigurationProfileLaunchFields = preparedCodexWriter?.launchBaselineFields;
+				codexTaskReasoningEffortFeedbackSelectionId =
+					preparedCodexWriter?.taskReasoningEffortFeedbackSelection?.selectionId;
 				const effectiveModel =
 					codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model"])]?.value;
 				if (typeof effectiveModel === "string")
@@ -6295,6 +6304,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
 						"forked_from_conversation_session",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
+				codexReasoningEffortOverride: request.codexReasoningEffortOverride,
 			});
 			throwIfTaskSessionStartWasCancelled();
 			if (codexConfigurationWriterBinding)
@@ -6773,6 +6783,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 						}
 					: null,
 			codexConfigurationWriterBinding,
+			codexTaskReasoningEffortFeedbackLaunch: codexTaskReasoningEffortFeedbackSelectionId
+				? {
+						selectionId: codexTaskReasoningEffortFeedbackSelectionId,
+						startedAtMs:
+							entry.summary.codexTaskReasoningEffortFeedbackLaunch?.selectionId ===
+							codexTaskReasoningEffortFeedbackSelectionId
+								? entry.summary.codexTaskReasoningEffortFeedbackLaunch.startedAtMs
+								: startedAt,
+					}
+				: undefined,
 			...(request.agentId === "codex"
 				? { codexConfigurationProfileAutomaticProcessReplacementCancelled: false }
 				: {}),

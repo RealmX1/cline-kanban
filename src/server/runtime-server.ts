@@ -1241,6 +1241,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					workspaceTaskId: record.taskId,
 					prompt: "",
 					baseRef: card.baseRef ?? "main",
+					codexReasoningEffortOverride:
+						summary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+							?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride,
 					resumePriorAgentConversationWithoutResendingPrompt: true,
 				});
 				summary = restored.summary;

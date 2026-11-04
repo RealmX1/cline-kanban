@@ -18,6 +18,7 @@ import {
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
+import { subscribeCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import {
 	fetchClineProviderCatalog,
 	fetchClineProviderModels,
@@ -36,6 +37,7 @@ import type {
 	RuntimeTerminalAgentModelSelectionGroup,
 	RuntimeTerminalAgentModelSelectionOptionsResponse,
 } from "@/runtime/types";
+import { subscribeToTaskVisualizationBrowserEvents } from "@/stores/task-visualization-browser-bridge";
 
 /** One agent icon-button option. `installed` gates grey-out: only `false` greys out (click opens install guide). */
 export interface TaskAgentPickerAgentOption {
@@ -135,6 +137,9 @@ export interface UseTaskAgentModelPickerInput {
 }
 
 export interface UseTaskAgentModelPickerResult {
+	terminalAgentModelCatalog: RuntimeTerminalAgentModelSelectionOptionsResponse | null;
+	terminalAgentModelCatalogWarning: string | null;
+	retryTerminalAgentModelCatalog: () => void;
 	agentOptions: TaskAgentPickerAgentOption[];
 	clineProviderOptions: Array<{ value: string; label: string }>;
 	clineModelOptions: Array<{ value: string; label: string }>;
@@ -197,6 +202,14 @@ export function useTaskAgentModelPicker({
 	const [isLoadingProviders, setIsLoadingProviders] = useState(false);
 	const [isLoadingModels, setIsLoadingModels] = useState(false);
 	const [isLoadingTerminalAgentModels, setIsLoadingTerminalAgentModels] = useState(false);
+	const [terminalAgentModelCatalog, setTerminalAgentModelCatalog] =
+		useState<RuntimeTerminalAgentModelSelectionOptionsResponse | null>(null);
+	const [terminalAgentModelCatalogWarning, setTerminalAgentModelCatalogWarning] = useState<string | null>(null);
+	const [terminalAgentModelCatalogRetryGeneration, setTerminalAgentModelCatalogRetryGeneration] = useState(0);
+	const retryTerminalAgentModelCatalog = useCallback(
+		() => setTerminalAgentModelCatalogRetryGeneration((generation) => generation + 1),
+		[],
+	);
 
 	// Derive the effective agent: explicit override takes precedence, then the global default
 	const effectiveAgentId = agentId ?? defaultAgentId ?? null;
@@ -236,6 +249,8 @@ export function useTaskAgentModelPicker({
 
 	useEffect(() => {
 		if (!active || !isTerminalAgentModelSelectionAgentId(effectiveAgentId)) {
+			setTerminalAgentModelCatalog(null);
+			setTerminalAgentModelCatalogWarning(null);
 			setTerminalAgentModelOptions([]);
 			setTerminalAgentDefaultModelId(null);
 			setIsLoadingTerminalAgentModels(false);
@@ -247,6 +262,7 @@ export function useTaskAgentModelPicker({
 
 		// Response → {default option + explicit options} transform, shared by cache-seed and fetch-success.
 		const applyResponse = (response: RuntimeTerminalAgentModelSelectionOptionsResponse) => {
+			setTerminalAgentModelCatalog(response);
 			const defaultOption: TaskAgentPickerTerminalModelOption = {
 				value: "",
 				label: response.defaultLabel || fallbackDefaultOption.label,
@@ -255,7 +271,14 @@ export function useTaskAgentModelPicker({
 			const explicitOptions = response.options
 				.filter((option) => option.modelId.trim().length > 0)
 				// Kimi 的空值表示自动跟随；同名的具体版本仍须可独立固定。
-				.filter((option) => effectiveAgentId === "kimi" || option.modelId !== response.defaultModelId)
+				// Codex 的 defaultModelId 只用来识别原生默认模型的推理档位。Default 芯片仍表示不传 --model，
+				// 所以同名模型必须留在列表里，允许单独钉死。
+				.filter(
+					(option) =>
+						effectiveAgentId === "kimi" ||
+						effectiveAgentId === "codex" ||
+						option.modelId !== response.defaultModelId,
+				)
 				.map<TaskAgentPickerTerminalModelOption>((option) => ({
 					value: option.modelId,
 					label: option.label || option.modelId,
@@ -281,44 +304,104 @@ export function useTaskAgentModelPicker({
 		if (cached) {
 			applyResponse(cached);
 		} else {
+			setTerminalAgentModelCatalog(null);
 			setTerminalAgentModelOptions([fallbackDefaultOption]);
 			setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
 		}
 		setIsLoadingTerminalAgentModels(true);
-		void fetchTerminalAgentModelSelectionOptions(workspaceId, effectiveAgentId)
-			.then((response) => {
-				if (cancelled) {
-					return;
-				}
-				// 后端 CLI 探测失败会 resolve 成带 warning 的 fallback 响应（列表退化为单条 Default），而非 reject——
-				// 因此下面的 .catch 对这类最常见失败永不触发。这种降级结果绝不能写回 localStorage，否则一次
-				// `claude --help` 抖动就把好端端的 opus/sonnet/haiku/fable 列表污染成单条 Default 并跨会话持久化。
-				// 已有可用缓存时保留旧列表、不覆盖显示；仅真实成功响应才 apply + 落盘。
-				if (response.warning) {
-					if (!cached) {
-						applyResponse(response);
+		setTerminalAgentModelCatalogWarning(null);
+		let recoveryTimer: ReturnType<typeof setTimeout> | undefined;
+		let recoveryAttemptCount = 0;
+		let catalogRequestInFlight = false;
+		const scheduleRecovery = () => {
+			if (effectiveAgentId === "codex" && recoveryAttemptCount < 3) {
+				recoveryTimer = setTimeout(
+					() => {
+						recoveryAttemptCount++;
+						requestCatalog();
+					},
+					2_000 * 2 ** recoveryAttemptCount,
+				);
+			}
+		};
+		const requestCatalog = () => {
+			if (cancelled || catalogRequestInFlight) return;
+			catalogRequestInFlight = true;
+			setIsLoadingTerminalAgentModels(true);
+			void fetchTerminalAgentModelSelectionOptions(workspaceId, effectiveAgentId)
+				.then((response) => {
+					if (cancelled) {
+						return;
 					}
-					return;
-				}
-				applyResponse(response);
-				writeTaskAgentModelListCache(cacheKey, response);
-			})
-			.catch(() => {
-				if (cancelled || cached) {
-					return; // Keep the cached list on failure rather than clearing it.
-				}
-				setTerminalAgentModelOptions([fallbackDefaultOption]);
-				setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
-			})
-			.finally(() => {
-				if (!cancelled) {
-					setIsLoadingTerminalAgentModels(false);
-				}
-			});
+					// 后端 CLI 探测失败会 resolve 成带 warning 的 fallback 响应（列表退化为单条 Default），而非 reject——
+					// 因此下面的 .catch 对这类最常见失败永不触发。这种降级结果绝不能写回 localStorage，否则一次
+					// `claude --help` 抖动就把好端端的 opus/sonnet/haiku/fable 列表污染成单条 Default 并跨会话持久化。
+					// 已有可用缓存时保留旧列表、不覆盖显示；仅真实成功响应才 apply + 落盘。
+					if (response.warning) {
+						setTerminalAgentModelCatalogWarning(response.warning);
+						scheduleRecovery();
+						if (!cached) {
+							applyResponse(response);
+						}
+						return;
+					}
+					applyResponse(response);
+					setTerminalAgentModelCatalogWarning(null);
+					writeTaskAgentModelListCache(cacheKey, response);
+				})
+				.catch(() => {
+					if (!cancelled) {
+						setTerminalAgentModelCatalogWarning("模型目录暂不可读");
+						scheduleRecovery();
+					}
+					if (cancelled || cached) {
+						return; // Keep the cached list on failure rather than clearing it.
+					}
+					setTerminalAgentModelOptions([fallbackDefaultOption]);
+					setTerminalAgentDefaultModelId(fallbackDefaultOption.defaultModelId);
+				})
+				.finally(() => {
+					catalogRequestInFlight = false;
+					if (!cancelled) {
+						setIsLoadingTerminalAgentModels(false);
+					}
+				});
+		};
+		requestCatalog();
+		const recoverAfterConnectionRestored = () => {
+			recoveryAttemptCount = 0;
+			clearTimeout(recoveryTimer);
+			requestCatalog();
+		};
+		const recoverWhenVisible = () => {
+			if (document.visibilityState === "visible") recoverAfterConnectionRestored();
+		};
+		const unsubscribeRuntimeReconnected =
+			effectiveAgentId === "codex"
+				? subscribeCodexConfigurationSyncUpdated((reason) => {
+						if (reason === "runtime_reconnected") recoverAfterConnectionRestored();
+					})
+				: undefined;
+		const unsubscribeStreamReconnected =
+			effectiveAgentId === "codex"
+				? subscribeToTaskVisualizationBrowserEvents((event) => {
+						if (event.type === "stream_reconnected" && event.workspaceId === workspaceId)
+							recoverAfterConnectionRestored();
+					})
+				: undefined;
+		if (effectiveAgentId === "codex") {
+			window.addEventListener("online", recoverAfterConnectionRestored);
+			document.addEventListener("visibilitychange", recoverWhenVisible);
+		}
 		return () => {
 			cancelled = true;
+			clearTimeout(recoveryTimer);
+			unsubscribeRuntimeReconnected?.();
+			unsubscribeStreamReconnected?.();
+			window.removeEventListener("online", recoverAfterConnectionRestored);
+			document.removeEventListener("visibilitychange", recoverWhenVisible);
 		};
-	}, [active, effectiveAgentId, workspaceId]);
+	}, [active, effectiveAgentId, workspaceId, terminalAgentModelCatalogRetryGeneration]);
 
 	// Derive the effective provider: explicit override takes precedence, then the global default
 	const clineProviderId = clineSettings?.providerId;
@@ -434,6 +517,9 @@ export function useTaskAgentModelPicker({
 	}, [providerModels, effectiveDefaultModelId]);
 
 	return {
+		terminalAgentModelCatalog,
+		terminalAgentModelCatalogWarning,
+		retryTerminalAgentModelCatalog,
 		agentOptions,
 		clineProviderOptions,
 		clineModelOptions,
@@ -705,7 +791,10 @@ export function TaskAgentModelPicker({
 	const selectedTerminalAgentModelId =
 		isTerminalAgentModelSelectionAgentId(effectiveAgentId) &&
 		terminalAgentModelOverrideSettings?.agentId === effectiveAgentId &&
-		(effectiveAgentId === "kimi" || terminalAgentModelOverrideSettings.modelId !== terminalAgentDefaultModelId)
+		// Codex 的 defaultModelId 是原生默认模型，只用于推理档位；与 Kimi 一样，同名钉选不能被收成 Default。
+		(effectiveAgentId === "kimi" ||
+			effectiveAgentId === "codex" ||
+			terminalAgentModelOverrideSettings.modelId !== terminalAgentDefaultModelId)
 			? terminalAgentModelOverrideSettings.modelId
 			: "";
 

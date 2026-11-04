@@ -31,6 +31,8 @@ function deduplicateModelOptions(
 			label: option.label.trim() || modelId,
 			...(option.description ? { description: option.description } : {}),
 			...(option.isCurrent ? { isCurrent: true } : {}),
+			...(option.supportedReasoningEfforts ? { supportedReasoningEfforts: option.supportedReasoningEfforts } : {}),
+			...(option.defaultReasoningEffort ? { defaultReasoningEffort: option.defaultReasoningEffort } : {}),
 			// 逐字段重建，所以每个新增字段都必须在这里显式透传，否则会被静默吃掉。
 			// 分档缺省补 `latest_tracking_alias`（codex / cursor 的解析本来就不产出该字段），
 			// 让「本模块产出的每个 option 都带分档」成为一条不变量：前端据此把「有 option 却无一条
@@ -44,7 +46,13 @@ function deduplicateModelOptions(
 
 export function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentModelSelectionOption[] {
 	const parsed = JSON.parse(stdout) as {
-		models?: Array<{ slug?: unknown; display_name?: unknown; visibility?: unknown }>;
+		models?: Array<{
+			slug?: unknown;
+			display_name?: unknown;
+			visibility?: unknown;
+			supported_reasoning_levels?: unknown;
+			default_reasoning_level?: unknown;
+		}>;
 	};
 	const models = Array.isArray(parsed.models) ? parsed.models : [];
 	return deduplicateModelOptions(
@@ -56,9 +64,79 @@ export function parseCodexModelCatalog(stdout: string): RuntimeTerminalAgentMode
 			}
 			const displayName = typeof model.display_name === "string" ? model.display_name.trim() : "";
 			const label = displayName || modelId;
-			return [{ modelId, label }];
+			const supportedReasoningEfforts = Array.isArray(model.supported_reasoning_levels)
+				? model.supported_reasoning_levels.flatMap((level: unknown) => {
+						if (
+							!level ||
+							typeof level !== "object" ||
+							!("effort" in level) ||
+							typeof level.effort !== "string" ||
+							!level.effort.trim()
+						)
+							return [];
+						return [
+							{
+								effort: level.effort.trim(),
+								...("description" in level && typeof level.description === "string"
+									? { description: level.description }
+									: {}),
+							},
+						];
+					})
+				: undefined;
+			return [
+				{
+					modelId,
+					label,
+					...(supportedReasoningEfforts ? { supportedReasoningEfforts } : {}),
+					...(typeof model.default_reasoning_level === "string"
+						? { defaultReasoningEffort: model.default_reasoning_level }
+						: {}),
+				},
+			];
 		}),
 	);
+}
+
+/**
+ * Codex 未写 `model` 时的原生默认：目录按 priority 升序后，第一个 `visibility=list` 的模型。
+ * 与 Codex `mark_default_by_picker_visibility` 一致，不把当前解析结果写进展示文案。
+ */
+export function selectCodexNativeDefaultModelId(stdout: string): string | null {
+	const parsed = JSON.parse(stdout) as { models?: unknown };
+	const models = Array.isArray(parsed.models) ? parsed.models : [];
+	const visible = models.flatMap((model) => {
+		if (!model || typeof model !== "object") return [];
+		const record = model as { slug?: unknown; visibility?: unknown; priority?: unknown };
+		const modelId = typeof record.slug === "string" ? record.slug.trim() : "";
+		const visibility = typeof record.visibility === "string" ? record.visibility.trim() : "";
+		if (!modelId || visibility !== "list") return [];
+		const priority =
+			typeof record.priority === "number" && Number.isFinite(record.priority)
+				? record.priority
+				: Number.POSITIVE_INFINITY;
+		return [{ modelId, priority }];
+	});
+	visible.sort((left, right) => left.priority - right.priority || left.modelId.localeCompare(right.modelId));
+	return visible[0]?.modelId ?? null;
+}
+
+export function buildCodexModelSelectionOptionsFromCatalogStdout(stdout: string): {
+	options: RuntimeTerminalAgentModelSelectionOption[];
+	defaultModelId: string | null;
+} {
+	const parsedOptions = parseCodexModelCatalog(stdout);
+	const filtered = filterTerminalAgentModelOptionsToLatestProductLineGeneration("codex", parsedOptions);
+	const nativeDefaultModelId = selectCodexNativeDefaultModelId(stdout);
+	const nativeDefault = parsedOptions.find((option) => option.modelId === nativeDefaultModelId);
+	const options =
+		nativeDefault && !filtered.some((option) => option.modelId === nativeDefault.modelId)
+			? [nativeDefault, ...filtered]
+			: filtered;
+	return {
+		options,
+		defaultModelId: options.some((option) => option.modelId === nativeDefaultModelId) ? nativeDefaultModelId : null,
+	};
 }
 
 // ponytail: Claude Code CLI 没有可编程的模型目录（没有 `claude models` 子命令，`--help` 的
@@ -372,6 +450,14 @@ export async function getTerminalAgentModelSelectionOptions(
 			return buildFallbackResponse(agentId, error instanceof Error ? error.message : "Kimi 默认模型选择失败。");
 		}
 	}
+	if (agentId === "codex") {
+		const outcome = await runAgentCliCapabilityProbe({
+			...TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS.codex,
+			parseStdout: buildCodexModelSelectionOptionsFromCatalogStdout,
+		});
+		if (!outcome.ok) return buildFallbackResponse(agentId, outcome.warning);
+		return { agentId, defaultLabel: "Default", ...outcome.value };
+	}
 	const { options, warning } = await loadLatestGenerationTerminalAgentModelOptions(agentId);
 	if (warning !== undefined) {
 		return buildFallbackResponse(agentId, warning);
@@ -389,4 +475,15 @@ export async function getTerminalAgentModelSelectionOptions(
 		defaultLabel: buildCursorDefaultModelLabel(options, defaultModelId),
 		options,
 	};
+}
+
+/** profile 未写 effort 时，用显式模型或原生默认模型的 default_reasoning_level 作为继承值。目录失败则未知。 */
+export async function resolveCodexNativeDefaultReasoningEffortForModel(
+	modelId: string | undefined,
+): Promise<string | undefined> {
+	const catalog = await getTerminalAgentModelSelectionOptions("codex");
+	if (catalog.warning) return undefined;
+	const effectiveModelId = modelId ?? catalog.defaultModelId ?? undefined;
+	if (!effectiveModelId) return undefined;
+	return catalog.options.find((option) => option.modelId === effectiveModelId)?.defaultReasoningEffort;
 }

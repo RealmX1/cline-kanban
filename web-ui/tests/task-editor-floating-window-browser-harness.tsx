@@ -5,6 +5,7 @@ import { TaskEditorDialog } from "../src/components/task-editor-dialog";
 import { TaskProjectAssignmentPreflightHost } from "../src/components/task-project-assignment-preflight-host";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins } from "../src/runtime/user-interface-preferences-shared-across-browser-origins-store";
+import type { RuntimeTaskTerminalAgentModelOverrideSettings } from "../src/runtime/types";
 import "../src/styles/globals.css";
 
 startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
@@ -13,6 +14,8 @@ function Harness() {
 	const [prompt,setPrompt] = useState("实现任务编辑器的共享草稿与非模态交互");
 	const [plan,setPlan] = useState(true);
 	const [backgroundClicks,setBackgroundClicks] = useState(0);
+	const [reasoningEffort, setReasoningEffort] = useState<string | undefined>();
+	const [modelOverride, setModelOverride] = useState<RuntimeTaskTerminalAgentModelOverrideSettings | undefined>();
 	return <TooltipProvider><main className="min-h-[1800px] p-4 text-text-primary">
 		<button type="button" className="fixed bottom-2 left-2 rounded bg-surface-3 p-3" onClick={() => setBackgroundClicks((value) => value+1)}>操作背景 {backgroundClicks}</button>
 		<input aria-label="背景输入" className="fixed bottom-2 right-2 w-36 bg-surface-3 p-3" />
@@ -20,6 +23,8 @@ function Harness() {
 		<TaskProjectAssignmentPreflightHost />
 		<Toaster />
 		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateAndStart={() => null} onCreateStartAndOpen={() => null} onCreateMultiple={() => []}
+			codexReasoningEffortOverride={reasoningEffort} onCodexReasoningEffortOverrideChange={setReasoningEffort}
+			terminalAgentModelOverrideSettings={modelOverride} onTerminalAgentModelOverrideSettingsChange={setModelOverride}
 			startInPlanMode={plan} onStartInPlanModeChange={setPlan} taskAgentPermissionMode="ask_for_every_tool_use" onTaskAgentPermissionModeChange={() => {}}
 			taskConversationMode="operational" onTaskConversationModeChange={() => {}} autoReviewEnabled={false} onAutoReviewEnabledChange={() => {}} autoReviewMode="commit" onAutoReviewModeChange={() => {}}
 			taskEditorMode={new URLSearchParams(location.search).get("mode") === "edit" ? "edit" : "create"} editingTaskId={new URLSearchParams(location.search).get("mode") === "edit" ? "ed150" : null}

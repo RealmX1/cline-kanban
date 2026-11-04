@@ -5,7 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-client-connection-runtime";
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
-import type { TaskEditorCreationSubmissionRequest } from "../../src/core/task-editor-creation-submission-contract";
+import {
+	type TaskEditorCreationSubmissionRequest,
+	taskEditorCreationSubmissionRequestSchema,
+} from "../../src/core/task-editor-creation-submission-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import {
 	loadPersistedWorkspaceStateById,
@@ -199,6 +202,31 @@ async function scenario() {
 }
 
 describe("编辑器持久创建提交", { timeout: 30000 }, () => {
+	it("创建提交契约与持久卡片保留独立 Codex effort 和所属 profile", async () => {
+		const test = await scenario();
+		const request = test.request("eff01", false);
+		Object.assign(request.newTaskCard, {
+			agentId: "codex",
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+			codexConfigurationPermissionSelectionSource: "profile",
+		});
+		const parsed = taskEditorCreationSubmissionRequestSchema.parse(request);
+		expect(parsed.newTaskCard).toMatchObject({
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+			codexConfigurationPermissionSelectionSource: "profile",
+		});
+		await test.service.submit(test.source, parsed, evidence);
+		await test.service.settle();
+		const card = (await loadPersistedWorkspaceStateById(test.source.workspaceId)).board.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === "eff01");
+		expect(card).toMatchObject({
+			codexReasoningEffortOverride: "ultra",
+			codexConfigurationProfileId: "selected-profile",
+		});
+	});
 	it("A 的关系失败后，B 在另一项目独立建卡；重试不覆盖 A 的新字段", async () => {
 		const test = await scenario();
 		test.applyRelations.mockRejectedValue(new Error("账本暂不可用"));

@@ -31,6 +31,16 @@ export interface StoredCodexConfigurationProfile {
 }
 
 export interface StoredCodexConfigurationWriter {
+	taskReasoningEffortSelectionAtLaunch?: string;
+	taskReasoningEffortFeedbackSelection?: {
+		selectionId: string;
+		profileId: string;
+		profileVersionAtSelection: number;
+		effort: string;
+		inheritedFields: CodexConfigurationFields;
+		registeredChangeId?: string;
+		supersededAtMs?: number;
+	};
 	sourceTaskSnapshot?: CodexConfigurationTaskSourceSnapshot;
 	legacyLaunchExceptionSelectionAtMigration?: { profileId: string; profileVersion: number };
 	pendingNativePermissionVerificationAtMs?: number;
@@ -68,6 +78,7 @@ export interface StoredCodexConfigurationSource {
 	observedUserFields: CodexConfigurationFields;
 }
 export interface StoredCodexConfigurationChange {
+	taskReasoningEffortFeedbackSelectionId?: string;
 	modificationInitiator?: CodexConfigurationSourceEvidence["initiator"];
 	sharedConflictEvidence?: {
 		fields: CodexConfigurationFields;
@@ -238,6 +249,18 @@ const storeSchema = z.object({
 				.object({ profileId: z.string(), profileVersion: z.number() })
 				.optional(),
 			pendingNativePermissionVerificationAtMs: z.number().optional(),
+			taskReasoningEffortSelectionAtLaunch: z.string().optional(),
+			taskReasoningEffortFeedbackSelection: z
+				.object({
+					selectionId: z.string().uuid(),
+					profileId: z.string(),
+					profileVersionAtSelection: z.number(),
+					effort: z.string(),
+					inheritedFields: fieldsSchema,
+					registeredChangeId: z.string().optional(),
+					supersededAtMs: z.number().optional(),
+				})
+				.optional(),
 			taskModelSelectionAtLaunch: z.string().optional(),
 			taskPermissionModeSelectionAtLaunch: z.string().optional(),
 			taskPermissionSelectionSourceAtLaunch: z.string().optional(),
@@ -280,6 +303,7 @@ const storeSchema = z.object({
 			sharedFieldsAtObservation: fieldsSchema.optional(),
 			sharedFieldVersionsAtObservation: z.record(z.string(), z.number()).optional(),
 			sharedChangeIdsAtObservation: z.record(z.string(), z.string()).optional(),
+			taskReasoningEffortFeedbackSelectionId: z.string().uuid().optional(),
 			changeId: z.string(),
 			version: z.number(),
 			sourceWriterId: z.string(),

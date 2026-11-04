@@ -960,6 +960,8 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 					? "profile"
 					: (settings?.codexConfigurationPermissionSelectionSource ??
 						card.codexConfigurationPermissionSelectionSource);
+				const codexReasoningEffortOverride =
+					settings?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride;
 				const mainSessionId = resolveMainTaskConversationSessionId(card);
 				const launchRequest: RuntimeTaskSessionStartRequest = {
 					taskId: sessionId,
@@ -976,6 +978,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 					startInPlanMode: settings?.startInPlanMode ?? card.startInPlanMode,
 					codexConfigurationProfileId,
 					codexConfigurationPermissionSelectionSource,
+					codexReasoningEffortOverride,
 					requestedAgentSessionTransport:
 						source?.sessionTransport ?? getRuntimeAgentCatalogEntry(agentId)?.sessionTransport,
 					taskConversationSessionMetadata: {
@@ -1016,6 +1019,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 						taskConversationSessionLaunchSettings: {
 							codexConfigurationProfileId,
 							codexConfigurationPermissionSelectionSource,
+							codexReasoningEffortOverride,
 							taskAgentPermissionMode: inheritedTaskAgentPermissionMode,
 							startInPlanMode: settings?.startInPlanMode ?? card.startInPlanMode,
 							sessionTransport:

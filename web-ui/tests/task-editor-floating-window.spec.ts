@@ -22,12 +22,18 @@ async function mountEditorHarness(page: Page) {
 
 async function openEditorHarness(
 	page: Page,
-	options: { failAutomaticAnalysisPreferenceSaves?: boolean; mode?: "create" | "edit" } = {},
+	options: {
+		failAutomaticAnalysisPreferenceSaves?: boolean;
+		mode?: "create" | "edit";
+		failFirstModelCatalogRead?: boolean;
+	} = {},
 ) {
 	const observations = {
 		analysisRequestCount: 0,
 		savedAutomaticAnalysisChoices: [] as boolean[],
 		lastSavedRelationDrafts: [] as unknown[],
+		modelCatalogReadCount: 0,
+		remainingModelCatalogFailures: options.failFirstModelCatalogRead ? 1 : 0,
 	};
 	await page.addInitScript(() => {
 		Object.defineProperty(navigator, "clipboard", {
@@ -76,6 +82,72 @@ async function openEditorHarness(
 						},
 					};
 				value = { userInterfacePreferencesSharedAcrossBrowserOrigins: preferences };
+			} else if (name === "runtime.getTerminalAgentModelSelectionOptions") {
+				observations.modelCatalogReadCount++;
+				const failThisModelCatalogRead = observations.remainingModelCatalogFailures > 0;
+				if (failThisModelCatalogRead) observations.remainingModelCatalogFailures--;
+				value = failThisModelCatalogRead
+					? {
+							agentId: "codex",
+							defaultModelId: null,
+							defaultLabel: "默认",
+							options: [],
+							warning: "目录读取暂时失败",
+						}
+					: {
+							agentId: "codex",
+							defaultModelId: null,
+							defaultLabel: "默认",
+							options: [
+								{
+									modelId: "fixture-model",
+									label: "默认模型",
+									supportedReasoningEfforts: [{ effort: "high" }, { effort: "max" }, { effort: "ultra" }],
+									defaultReasoningEffort: "high",
+									modelSelectionGroup: "latest_tracking_alias",
+								},
+								{
+									modelId: "limited-model",
+									label: "受限模型",
+									supportedReasoningEfforts: [{ effort: "low" }],
+									modelSelectionGroup: "latest_tracking_alias",
+								},
+							],
+						};
+			} else if (name === "runtime.getCodexConfigurationSyncState") {
+				value = {
+					revision: 1,
+					changes: [],
+					sourceObservations: [],
+					observationProblem: null,
+					defaultCodexConfigurationProfileId: "fixture-profile",
+					profiles: [
+						{
+							profileId: "fixture-profile",
+							name: "默认配置",
+							sourceIdentity: "source",
+							version: 1,
+							fields: [
+								{
+									fieldKey: JSON.stringify(["config.toml", "model"]),
+									fieldLabel: "model",
+									value: "fixture-model",
+									valueSummary: "fixture-model",
+									version: 1,
+									exceptionGroup: "model",
+								},
+								{
+									fieldKey: JSON.stringify(["config.toml", "model_reasoning_effort"]),
+									fieldLabel: "effort",
+									value: "high",
+									valueSummary: "high",
+									version: 1,
+									exceptionGroup: "reasoning_effort",
+								},
+							],
+						},
+					],
+				};
 			} else if (name === "workUnit.resolveKanbanBoardCardIdentityByBareTaskId")
 				value = {
 					kanbanBoardCardIdentityCandidates: [
@@ -120,7 +192,7 @@ async function openEditorHarness(
 			}
 			return { result: { data: value } };
 		});
-		await route.fulfill({ json: results });
+		await route.fulfill({ json: url.searchParams.get("batch") === "1" ? results : results[0] });
 	});
 	await page.route("**/isolated-task-editor-floating-window*", (route) =>
 		route.fulfill({
@@ -132,6 +204,53 @@ async function openEditorHarness(
 	await mountEditorHarness(page);
 	return observations;
 }
+
+for (const mode of ["create", "edit"] as const) {
+	test(`${mode} 共用推理强度选择，默认模型可独立设置并显示不兼容错误`, async ({ page }) => {
+		await page.setViewportSize({ width: 1100, height: 1000 });
+		await openEditorHarness(page, { mode });
+		await page.getByRole("button", { name: /模型与参数：/ }).click();
+		const effort = page.getByLabel("推理强度", { exact: true });
+		await expect(effort).toHaveValue("");
+		await expect(effort.locator("option").first()).toHaveText("沿用 Codex 配置（high）");
+		await effort.selectOption("ultra");
+		await page.getByRole("button", { name: "收起模型与参数", exact: true }).click();
+		await expect(page.getByRole("button", { name: /模型与参数：.*推理：ultra/ })).toBeVisible();
+		await page.getByRole("button", { name: /模型与参数：/ }).click();
+		await expect(effort).toHaveValue("ultra");
+		await page.getByRole("button", { name: "受限模型", exact: true }).click();
+		await expect(page.getByRole("alert")).toContainText("不支持推理强度 ultra");
+		await expect(
+			page.getByRole("button", { name: mode === "create" ? "创建任务" : "保存更改", exact: true }),
+		).toBeDisabled();
+		await effort.selectOption("low");
+		await expect(page.getByRole("alert")).toHaveCount(0);
+		await effort.selectOption("");
+		await expect(effort).toHaveValue("");
+		await page.screenshot({ path: test.info().outputPath(`codex-effort-${mode}.png`) });
+	});
+}
+
+test("目录读取失败后自动重验，手机上可选 max 和 ultra", async ({ page }) => {
+	await page.setViewportSize({ width: 390, height: 844 });
+	const observations = await openEditorHarness(page, { failFirstModelCatalogRead: true });
+	await page.getByRole("button", { name: /模型与参数：/ }).click();
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
+	await expect.poll(() => observations.modelCatalogReadCount).toBeGreaterThan(1);
+	const effort = page.getByLabel("推理强度", { exact: true });
+	await effort.selectOption("max");
+	await effort.selectOption("ultra");
+	await expect(effort).toHaveValue("ultra");
+	observations.remainingModelCatalogFailures = 1;
+	await page.evaluate(() => window.dispatchEvent(new Event("online")));
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
+	await expect(effort).toHaveValue("ultra");
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toHaveCount(0);
+	await expect(effort).toHaveValue("ultra");
+	await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+	await effort.scrollIntoViewIfNeeded();
+	await page.screenshot({ path: test.info().outputPath("codex-effort-mobile.png") });
+});
 
 test("自动归属开关默认关闭，手动分析可用，键盘切换后刷新恢复全局偏好", async ({ page }) => {
 	await page.setViewportSize({ width: 1440, height: 1000 });

@@ -151,6 +151,17 @@ function request(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Agent 侧会话创建与回报", () => {
+	it("侧会话首次启动保存任务卡片上的推理档位", async () => {
+		const f = await fixture();
+		f.card.codexReasoningEffortOverride = "ultra";
+		const created = await f.service.create(scope, request(), human);
+		expect(created.ok).toBe(true);
+		const launch = f.startSession.mock.calls[0]?.[1];
+		expect(launch?.codexReasoningEffortOverride).toBe("ultra");
+		expect(
+			launch?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.codexReasoningEffortOverride,
+		).toBe("ultra");
+	});
 	it("旧会话缺少权限快照时沿用运行时默认，不自动放大为全放行", async () => {
 		const f = await fixture();
 		f.card.taskAgentPermissionMode = undefined;

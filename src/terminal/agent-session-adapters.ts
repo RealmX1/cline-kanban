@@ -73,6 +73,7 @@ import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-select
 
 export interface AgentAdapterLaunchInput {
 	codexConfigurationProfileLaunchFields?: CodexConfigurationFields;
+	codexReasoningEffortOverride?: string;
 	taskId: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
@@ -1664,10 +1665,13 @@ const codexAdapter: AgentSessionAdapter = {
 		if (profilePermissionArguments) codexArgs = profilePermissionArguments;
 		const profileReasoningEffort =
 			input.codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model_reasoning_effort"])];
-		if (profileReasoningEffort)
+		const selectedReasoningEffort = input.codexConfigurationProfileLaunchFields
+			? profileReasoningEffort?.value
+			: input.codexReasoningEffortOverride;
+		if (selectedReasoningEffort !== undefined)
 			codexArgs.push(
 				"-c",
-				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(profileReasoningEffort.value)}`,
+				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(selectedReasoningEffort)}`,
 			);
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;

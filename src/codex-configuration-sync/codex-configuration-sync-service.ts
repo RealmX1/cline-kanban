@@ -52,6 +52,7 @@ import {
 	enqueueCodexConfigurationProfileAdoptionForWriter,
 	ensureCodexConfigurationSourceProfile,
 	expireCodexConfigurationProfileFeedbackSuggestions,
+	recordCodexConfigurationExceptionFeedbackSuggestion,
 	updateCodexConfigurationProfileFields,
 } from "./codex-configuration-profiles";
 import {
@@ -556,6 +557,49 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				if (writer.binding.purpose !== "native_session" || writer.retiredAt) continue;
 				try {
 					await assertCodexConfigurationWriterBindingIdentity(writer.binding);
+					const feedback = writer.taskReasoningEffortFeedbackSelection;
+					if (feedback && !feedback.registeredChangeId && !feedback.supersededAtMs) {
+						const effortFieldKey = JSON.stringify(["config.toml", "model_reasoning_effort"]);
+						if (
+							writer.launchBaselineFields[effortFieldKey]?.value !== feedback.effort ||
+							Object.entries(store.profiles[feedback.profileId]?.fieldVersions ?? {}).some(
+								([key, version]) =>
+									codexConfigurationExceptionGroup(key) === "reasoning_effort" &&
+									version > feedback.profileVersionAtSelection,
+							) ||
+							store.profiles[feedback.profileId]?.fields[effortFieldKey]?.value === feedback.effort
+						) {
+							feedback.supersededAtMs = Date.now();
+							store.revision++;
+						}
+						const launchedSession = deps
+							.listSessions()
+							.find(
+								({ workspaceId, summary }) =>
+									workspaceId === writer.binding.workspaceId &&
+									summary.taskId === writer.binding.conversationSessionId &&
+									summary.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+									summary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
+									summary.codexTaskReasoningEffortFeedbackLaunch?.selectionId === feedback.selectionId &&
+									(summary.exitCode === null || summary.exitCode === 0),
+							);
+						const launch = launchedSession?.summary.codexTaskReasoningEffortFeedbackLaunch;
+						if (launch && !feedback.supersededAtMs && feedback.profileId === writer.codexConfigurationProfileId) {
+							const change = recordCodexConfigurationExceptionFeedbackSuggestion(
+								store,
+								writer,
+								"reasoning_effort",
+								writer.launchBaselineFields,
+								{
+									selectionId: feedback.selectionId,
+									observedAtMs: launch.startedAtMs,
+									previousFields: feedback.inheritedFields,
+								},
+							);
+							if (change) feedback.registeredChangeId = change.changeId;
+							expireCodexConfigurationProfileFeedbackSuggestions(store);
+						}
+					}
 					writer.fileNames = [
 						...new Set([
 							...writer.fileNames,

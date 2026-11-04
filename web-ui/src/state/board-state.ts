@@ -43,6 +43,7 @@ import {
 
 export interface TaskDraft {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	title?: string;
 	prompt: string;
@@ -263,6 +264,7 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
 	codexConfigurationProfileId: true,
+	codexReasoningEffortOverride: true,
 	codexConfigurationPermissionSelectionSource: true,
 	autoReviewEnabled: true,
 	autoReviewMode: true,
@@ -416,6 +418,9 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			: {}),
 		startInPlanMode: typeof card.startInPlanMode === "boolean" ? card.startInPlanMode : false,
 		...(taskAgentPermissionMode !== undefined ? { taskAgentPermissionMode } : {}),
+		...(typeof card.codexReasoningEffortOverride === "string" && card.codexReasoningEffortOverride.trim()
+			? { codexReasoningEffortOverride: card.codexReasoningEffortOverride.trim() }
+			: {}),
 		...(typeof card.codexConfigurationProfileId === "string" && card.codexConfigurationProfileId
 			? { codexConfigurationProfileId: card.codexConfigurationProfileId }
 			: {}),
@@ -563,6 +568,7 @@ export function addTaskToColumnWithResult(
 			startInPlanMode: draft.startInPlanMode,
 			taskAgentPermissionMode: draft.taskAgentPermissionMode,
 			codexConfigurationProfileId: draft.codexConfigurationProfileId,
+			codexReasoningEffortOverride: draft.codexReasoningEffortOverride,
 			codexConfigurationPermissionSelectionSource: draft.codexConfigurationPermissionSelectionSource,
 			autoReviewEnabled: draft.autoReviewEnabled,
 			autoReviewMode: draft.autoReviewMode,
@@ -839,6 +845,9 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				taskAgentPermissionMode: shouldUpdateTaskAgentPermissionMode
 					? draft.taskAgentPermissionMode
 					: card.taskAgentPermissionMode,
+				codexReasoningEffortOverride: Object.hasOwn(draft, "codexReasoningEffortOverride")
+					? draft.codexReasoningEffortOverride
+					: card.codexReasoningEffortOverride,
 				codexConfigurationProfileId: Object.hasOwn(draft, "codexConfigurationProfileId")
 					? draft.codexConfigurationProfileId
 					: card.codexConfigurationProfileId,
@@ -904,6 +913,7 @@ export function updateTaskTitle(
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
 		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
+		codexReasoningEffortOverride: selection.card.codexReasoningEffortOverride,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -936,6 +946,7 @@ export function applyTaskDetailClineSettingsSelection(
 		agentId: settings.agentId,
 		clineSettings: settings.clineSettings ?? undefined,
 		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
+		codexReasoningEffortOverride: selection.card.codexReasoningEffortOverride,
 		baseRef: selection.card.baseRef,
 	});
 }
@@ -995,6 +1006,7 @@ export function disableTaskAutoReview(board: BoardData, taskId: string): { board
 		agentId: selection.card.agentId,
 		clineSettings: selection.card.clineSettings,
 		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
+		codexReasoningEffortOverride: selection.card.codexReasoningEffortOverride,
 		baseRef: selection.card.baseRef,
 	});
 }
