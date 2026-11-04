@@ -294,6 +294,7 @@ import {
 	type TaskSessionAutoRestartCircuitBreakReason,
 } from "./task-session-auto-restart-policy";
 import {
+	areTaskConversationSessionMetadataEqualForNativeIdentityRecovery,
 	persistTaskSessionResumeRequestWaitingForNativeConversationIdentity,
 	readTaskSessionNativeConversationIdentityEvidenceFingerprint,
 	readTaskSessionNativeConversationIdentityFromOwnedCodexControl,
@@ -9783,18 +9784,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (JSON.stringify(entry.summary.taskConversationSessionMetadata) === JSON.stringify(metadata))
 			return cloneSummary(entry.summary);
 		// 名称回填不改变恢复身份，不能取消正在等待原生身份的启动。
-		const withoutName = (value: typeof metadata) =>
-			value
-				? {
-						...value,
-						conversationSessionName: undefined,
-						conversationSessionNameVersion: undefined,
-						conversationSessionNameSource: undefined,
-					}
-				: value;
 		if (
-			JSON.stringify(withoutName(metadata)) !==
-			JSON.stringify(withoutName(entry.summary.taskConversationSessionMetadata))
+			!areTaskConversationSessionMetadataEqualForNativeIdentityRecovery(
+				metadata,
+				entry.summary.taskConversationSessionMetadata,
+			)
 		)
 			this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		if (entry.restartRequest?.kind === "task") {

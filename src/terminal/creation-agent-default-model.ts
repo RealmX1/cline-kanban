@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { z } from "zod";
 import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
-import { prepareAuxiliaryCodexConfigurationEnvironment } from "../codex-configuration-sync/codex-configuration-writer-binding";
+import { resolveUserCodexHomeDirectoryPath } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeAgentId } from "../core/api-contract";
 import { getTerminalAgentModelSelectionOptions } from "./terminal-agent-model-selection";
@@ -74,19 +74,25 @@ export async function readCreationAgentDefaultModel(
 		if (explicitModelId) return { modelId: explicitModelId, codexConfigurationProfileId: profileId };
 		const profileModel = profile?.fields[JSON.stringify(["config.toml", "model"])]?.value;
 		if (typeof profileModel === "string") return { modelId: profileModel, codexConfigurationProfileId: profileId };
-		const environment = await prepareAuxiliaryCodexConfigurationEnvironment(process.env, workingDirectory);
-		const modelId = await withCodexAppServerRequestConnection({ workingDirectory, environment }, async (port) => {
-			const config = z
-				.object({ config: z.looseObject({ model: z.string().nullish() }) })
-				.parse(await port.request("config/read", { includeLayers: false, cwd: workingDirectory }));
-			if (config.config.model) return config.config.model;
-			const models = z
-				.object({ data: z.array(z.object({ model: z.string(), isDefault: z.boolean() })) })
-				.parse(await port.request("model/list", {}));
-			const selected = models.data.find((model) => model.isDefault);
-			if (!selected) throw new Error("Codex 默认模型暂不可核验，保留创建草稿。");
-			return selected.model;
-		});
+		const modelId = await withCodexAppServerRequestConnection(
+			{
+				workingDirectory,
+				environment: process.env,
+				codexConversationStorageHomeDirectoryPath: resolveUserCodexHomeDirectoryPath(process.env, workingDirectory),
+			},
+			async (port) => {
+				const config = z
+					.object({ config: z.looseObject({ model: z.string().nullish() }) })
+					.parse(await port.request("config/read", { includeLayers: false, cwd: workingDirectory }));
+				if (config.config.model) return config.config.model;
+				const models = z
+					.object({ data: z.array(z.object({ model: z.string(), isDefault: z.boolean() })) })
+					.parse(await port.request("model/list", {}));
+				const selected = models.data.find((model) => model.isDefault);
+				if (!selected) throw new Error("Codex 默认模型暂不可核验，保留创建草稿。");
+				return selected.model;
+			},
+		);
 		return { modelId, codexConfigurationProfileId: profileId };
 	}
 	if (explicitModelId) return { modelId: explicitModelId };

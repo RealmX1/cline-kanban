@@ -1098,6 +1098,89 @@ describe("任务会话的原生身份补证恢复", () => {
 		expect(restarted.spawn).toHaveBeenCalledOnce();
 	});
 
+	it.each(
+		(["claude", "codex"] as const).flatMap((agentId) =>
+			(["task_collaborator", "by_the_way"] as const).map((role) => ({ agentId, role })),
+		),
+	)("$agentId 的 $role 等待身份期间改名，保留宿主归属并只按子身份恢复一次", async ({ agentId, role }) => {
+		const summary = { ...createAwaitingIdentitySummary(), agentId };
+		const metadata = summary.taskConversationSessionMetadata;
+		if (!metadata) throw new Error("缺少隔离侧会话 metadata");
+		summary.taskConversationSessionMetadata = { ...metadata, taskConversationSessionRole: role };
+		const { manager, spawn } = createManager(summary);
+		await manager.refreshTaskTerminal({ ...resumeRequest(summary), workspaceTaskId: undefined });
+		await advanceRecovery(manager);
+		expect(spawn).not.toHaveBeenCalled();
+		const renamedMetadata = {
+			...summary.taskConversationSessionMetadata,
+			conversationSessionName: "排查创建设置",
+			conversationSessionNameVersion: 1,
+			conversationSessionNameSource: "automatic" as const,
+		};
+		manager.applyTaskConversationSessionMetadata(summary.taskId, renamedMetadata);
+		const renamedSummary = manager.getSummary(summary.taskId);
+		if (!renamedSummary) throw new Error("缺少改名后的侧会话摘要");
+		const durableResume = await readTaskSessionResumeRequestWaitingForNativeConversationIdentity(renamedSummary);
+		expect(durableResume).toEqual(
+			expect.objectContaining({
+				workspaceTaskId: "host-task",
+				taskConversationSessionMetadata: renamedMetadata,
+				prompt: "",
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+			}),
+		);
+		expect(
+			(
+				await readTaskSessionResumeRequestWaitingForNativeConversationIdentity(renamedSummary, {
+					rebuildAutomaticRecoveryMetadataForWorkspaceTaskId: "host-task",
+				})
+			)?.taskConversationSessionMetadata,
+		).toEqual(renamedMetadata);
+		expect(
+			await readTaskSessionResumeRequestWaitingForNativeConversationIdentity({
+				...renamedSummary,
+				taskConversationSessionMetadata: { ...renamedMetadata, workspaceTaskId: "another-host" },
+			}),
+		).toBeNull();
+		expect(
+			await readTaskSessionResumeRequestWaitingForNativeConversationIdentity({
+				...renamedSummary,
+				taskConversationSessionMetadata: { ...renamedMetadata, latestUserMessagePreview: "已接受的新输入" },
+			}),
+		).toBeNull();
+		let transcriptPath: string | null = null;
+		if (agentId === "codex") {
+			const sessionsDirectory = join(isolatedHome, ".codex", "sessions");
+			await mkdir(sessionsDirectory, { recursive: true });
+			transcriptPath = join(sessionsDirectory, `rollout-${childId}.jsonl`);
+			await writeFile(
+				transcriptPath,
+				`${JSON.stringify({ type: "session_meta", payload: { id: childId, source: "cli" } })}\n`,
+			);
+		}
+		manager.applyAgentNativeConversationSessionIdentity(summary.taskId, {
+			sourceAgentId: agentId,
+			nativeSessionId: childId,
+			transcriptPath,
+			observedAt: Date.now(),
+		});
+		await advanceRecovery(manager);
+		await advanceRecovery(manager);
+		expect(spawn).toHaveBeenCalledOnce();
+		expect(prepareLaunch).toHaveBeenCalledWith(
+			expect.objectContaining({
+				prompt: "",
+				startInPlanMode: undefined,
+				taskConversationSessionMetadata: renamedMetadata,
+				observedAgentNativeConversationSessionResumeAddressing: expect.objectContaining({
+					sourceSessionId: childId,
+				}),
+			}),
+		);
+		expect(manager.getSummary(summary.taskId)?.taskConversationSessionMetadata).toEqual(renamedMetadata);
+		expect(spawn.mock.calls[0]?.[0].env.KANBAN_TASK_ID).toBe("host-task");
+	});
+
 	it("会话责任或启动快照变化后，迟到身份只补证，不执行旧恢复请求", async () => {
 		const summary = createAwaitingIdentitySummary();
 		const { manager, spawn } = createManager(summary);

@@ -76,6 +76,22 @@ export async function persistTaskSessionResumeRequestWaitingForNativeConversatio
 	await writeFile(path, JSON.stringify(record), { mode: 0o600 });
 }
 
+export function areTaskConversationSessionMetadataEqualForNativeIdentityRecovery(
+	left: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
+	right: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
+): boolean {
+	const withoutConversationSessionName = (metadata: typeof left) =>
+		metadata
+			? {
+					...metadata,
+					conversationSessionName: undefined,
+					conversationSessionNameVersion: undefined,
+					conversationSessionNameSource: undefined,
+				}
+			: metadata;
+	return isDeepStrictEqual(withoutConversationSessionName(left), withoutConversationSessionName(right));
+}
+
 export async function readTaskSessionResumeRequestWaitingForNativeConversationIdentity(
 	summary: RuntimeTaskSessionSummary,
 	options?: { rebuildAutomaticRecoveryMetadataForWorkspaceTaskId: string },
@@ -84,30 +100,36 @@ export async function readTaskSessionResumeRequestWaitingForNativeConversationId
 		const record = persistedResumeRequestSchema.parse(
 			JSON.parse(await readFile(recoveryRequestPath(summary), "utf8")),
 		);
+		const persistedRequestWorkspaceTaskId =
+			record.request.workspaceTaskId ??
+			record.request.taskConversationSessionMetadata?.workspaceTaskId ??
+			record.request.taskId;
 		if (
 			record.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
 			record.request.taskId !== summary.taskId ||
 			record.request.agentId !== summary.agentId ||
 			resolve(record.request.cwd) !== resolve(summary.workspacePath ?? "") ||
 			(!options &&
-				(record.request.workspaceTaskId ??
-					record.request.taskConversationSessionMetadata?.workspaceTaskId ??
-					record.request.taskId) !== (summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId))
+				persistedRequestWorkspaceTaskId !==
+					(summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId))
 		)
 			return null;
-		if (
-			options &&
-			(record.request.workspaceTaskId ??
-				record.request.taskConversationSessionMetadata?.workspaceTaskId ??
-				record.request.taskId) !== options.rebuildAutomaticRecoveryMetadataForWorkspaceTaskId
-		)
+		if (options && persistedRequestWorkspaceTaskId !== options.rebuildAutomaticRecoveryMetadataForWorkspaceTaskId)
 			return null;
-		if (
-			!options &&
-			!isDeepStrictEqual(record.request.taskConversationSessionMetadata, summary.taskConversationSessionMetadata)
-		)
-			return null;
-		return { ...record.request, prompt: "", resumePriorAgentConversationWithoutResendingPrompt: true };
+		const metadataMatchesForRecovery = areTaskConversationSessionMetadataEqualForNativeIdentityRecovery(
+			record.request.taskConversationSessionMetadata,
+			summary.taskConversationSessionMetadata,
+		);
+		if (!options && !metadataMatchesForRecovery) return null;
+		return {
+			...record.request,
+			workspaceTaskId: persistedRequestWorkspaceTaskId,
+			taskConversationSessionMetadata: metadataMatchesForRecovery
+				? summary.taskConversationSessionMetadata
+				: record.request.taskConversationSessionMetadata,
+			prompt: "",
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+		};
 	} catch {
 		return null;
 	}
