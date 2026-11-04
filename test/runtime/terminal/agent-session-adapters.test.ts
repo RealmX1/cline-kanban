@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RUNTIME_AGENT_CATALOG } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { resolveCreationStartupSettings } from "../../../src/core/creation-startup-settings";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import {
 	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
@@ -894,6 +895,47 @@ describe("prepareAgentLaunch hook strategies", () => {
 		},
 	);
 
+	it.each(["claude", "codex", "omp"] as const)(
+		"共享工作台新建 %s fork 实际采用所选模型并保留精确来源",
+		async (agentId) => {
+			setupTempHome();
+			const settings = resolveCreationStartupSettings({
+				agentId,
+				startInPlanMode: false,
+				modelId: "selected-agent-model",
+			});
+			const launch = await prepareAgentLaunch({
+				taskId: "new-workbench-child",
+				agentId,
+				binary: agentId,
+				args: ["--model", "source-old-model"],
+				cwd: "/tmp/task-worktree",
+				prompt: "首轮必须使用新模型",
+				taskAgentPermissionMode: "bypass_all_permission_prompts",
+				terminalAgentModelOverrideSettings: { agentId, modelId: "selected-agent-model" },
+				taskConversationSessionContextForkSourceNativeSessionId: "11111111-2222-4333-8444-555555555555",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: "host",
+					taskConversationSessionRole: "task_collaborator",
+					taskConversationSessionContextSource: "forked_from_conversation_session",
+					parentTaskConversationSessionId: "main",
+					mainSessionOriginTurnNumber: 1,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: "新输入",
+					taskConversationSessionLaunchSettings: {
+						taskAgentPermissionMode: "bypass_all_permission_prompts",
+						startInPlanMode: false,
+						sessionTransport: "pty_terminal",
+						resolvedSettings: settings,
+					},
+				},
+			});
+			expect(launch.args[launch.args.indexOf("--model") + 1]).toBe("selected-agent-model");
+			expect(launch.args).not.toContain("source-old-model");
+			expect(launch.args).toContain("11111111-2222-4333-8444-555555555555");
+		},
+	);
+
 	it("OMP 协作 fork 的 Plan 起步携带仅对子会话生效的原生模式落盘扩展", async () => {
 		setupTempHome();
 		const launch = await prepareAgentLaunch({
@@ -1304,11 +1346,29 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).not.toContain("--dangerously-skip-permissions");
-		expect(launch.args).toContain("--permission-mode");
-		expect(launch.args).toContain("plan");
+		expect(launch.args).not.toContain("--permission-mode");
+		expect(launch.args).not.toContain("plan");
 		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
 		expect(launch.args).toContain("--continue");
 		expect(launch.args).toContain("--fork-session");
+	});
+
+	it("opens Claude By the way in plan only when Plan was explicitly requested", async () => {
+		setupTempHome();
+		const launch = await prepareAgentLaunch({
+			taskId: "task-conversation-session-claude-plan",
+			agentId: "claude",
+			binary: "claude",
+			args: ["--dangerously-skip-permissions"],
+			cwd: "/tmp/task-worktree",
+			prompt: "Explain this module",
+			readOnlyQuestionSession: true,
+			startInPlanMode: true,
+		});
+
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
+		expect(launch.args[launch.args.indexOf("--permission-mode") + 1]).toBe("plan");
+		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
 	});
 
 	it("keeps Claude By the way sessions read-only when autonomous mode is enabled", async () => {
@@ -1325,8 +1385,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		});
 
 		expect(launch.args).not.toContain("--dangerously-skip-permissions");
-		expect(launch.args).toContain("--permission-mode");
-		expect(launch.args).toContain("plan");
+		expect(launch.args).not.toContain("--permission-mode");
 		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
 	});
 
@@ -3180,8 +3239,9 @@ describe("observed agent native conversation session resume addressing", () => {
 		});
 
 		expect(launch.args[launch.args.indexOf("--resume") + 1]).toBe(OBSERVED_NATIVE_SESSION_ID);
-		expect(launch.args).toContain("--permission-mode");
-		expect(launch.args).toContain("plan");
+		expect(launch.args).not.toContain("--permission-mode");
+		expect(launch.args).toContain("Read,Glob,Grep,WebSearch,WebFetch");
+		expect(launch.args).not.toContain("--dangerously-skip-permissions");
 	});
 
 	it("resumes Codex by the observed session id instead of `resume --last`", async () => {

@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { runtimeCreationResolvedSettingsSchema } from "../../src/core/api-contract";
 
 import {
 	createIsolatedGitTestWorkspaceFixture,
@@ -97,7 +98,15 @@ function createCliChildProcessEnvironmentWithPinnedTimeouts(
 	gitFixture: IsolatedGitTestWorkspaceFixture,
 	environmentVariableOverrides: NodeJS.ProcessEnv,
 ): NodeJS.ProcessEnv {
+	// 宿主会话、PTY controller 与真实命名凭据不能进入隔离 CLI；否则「不可达」会误判成宿主正在重启。
+	const ambientKanbanContextRemoved: NodeJS.ProcessEnv = {};
+	for (const name of Object.keys(process.env))
+		if (name.startsWith("KANBAN_")) ambientKanbanContextRemoved[name] = undefined;
 	return gitFixture.createIsolatedChildProcessEnvironment({
+		...ambientKanbanContextRemoved,
+		AGENT_CONVERSATION_EXPLORATION_WORK_BRANCH_JOB: undefined,
+		CODEX_HOME: join(gitFixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"),
+		CODEX_SQLITE_HOME: join(gitFixture.isolatedHomeDirectoryPath, "isolated-codex-storage"),
 		...INHERITED_CLI_TIMEOUT_ENVIRONMENT_VARIABLES_REMOVED,
 		...environmentVariableOverrides,
 	});
@@ -531,6 +540,8 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--prompt",
 						"Add a demo banner component to the homepage that displays a welcome message and current weather summary",
 						"--project-path",
@@ -640,7 +651,16 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 				]) {
 					const created = await runCliCommandAndCollectOutput({
 						testContext,
-						args: ["task", "create", "--prompt", prompt, "--project-path", projectPath],
+						args: [
+							"task",
+							"create",
+							"--start-in-plan-mode",
+							"false",
+							"--prompt",
+							prompt,
+							"--project-path",
+							projectPath,
+						],
 						cwd: projectPath,
 						env,
 					});
@@ -748,6 +768,8 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						"Look me up by ID",
 						"--prompt",
@@ -830,6 +852,8 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--prompt",
 						"Create a task that inherits workspace reasoning",
 						"--project-path",
@@ -854,6 +878,8 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--prompt",
 						"Create a task that uses model default reasoning",
 						"--project-path",
@@ -958,6 +984,8 @@ describe("CLI subprocess exit guarantees", { timeout: CLI_SUBPROCESS_EXIT_GUARAN
 						args: [
 							"task",
 							"create",
+							"--start-in-plan-mode",
+							"false",
 							"--prompt",
 							`Create CLI list-all fixture task ${index + 1}`,
 							"--project-path",
@@ -1357,6 +1385,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 				args: [
 					"task",
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--preview",
 					"--prompt",
 					"Add a demo banner component to the homepage",
@@ -1381,6 +1411,7 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 			};
 			expect(previewPayload.ok).toBe(true);
 			expect(previewPayload.preview).toBe(true);
+			expect(() => runtimeCreationResolvedSettingsSchema.parse(previewPayload.resolvedSettings)).not.toThrow();
 			expect(previewPayload.taskCreated).toBe(false);
 			expect(previewPayload.resolvedSettingsFingerprint).toMatch(/^[0-9a-f]{32}$/u);
 			expect(previewPayload.resolvedSettings.baseRef?.value).toBe("main");
@@ -1431,6 +1462,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 				args: [
 					"task",
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--preview",
 					"--prompt",
 					"First task in a brand new project",
@@ -1459,6 +1492,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--prompt",
 						"First task in a brand new project",
 						"--project-path",
@@ -1509,6 +1544,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 				args: [
 					"task",
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--preview",
 					"--prompt",
 					"Run this on the SDK agent",
@@ -1558,7 +1595,16 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 			try {
 				const created = await runCliCommandAndCollectOutput({
 					testContext,
-					args: ["task", "create", "--prompt", "Ship the pagination endpoint", "--project-path", projectPath],
+					args: [
+						"task",
+						"create",
+						"--start-in-plan-mode",
+						"false",
+						"--prompt",
+						"Ship the pagination endpoint",
+						"--project-path",
+						projectPath,
+					],
 					cwd: projectPath,
 					env,
 					exitTwoTierDeadline: HEAVY_MODULE_GRAPH_COMMAND_STYLE_CLI_EXIT_FROM_SPAWN_TWO_TIER_DEADLINE,
@@ -1585,6 +1631,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 					args: [
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--prompt",
 						"This one must not be created",
 						"--project-path",

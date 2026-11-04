@@ -127,6 +127,8 @@ it.skipIf(!cli)(
 			const created = await runCli([
 				"task",
 				"create",
+				"--start-in-plan-mode",
+				"false",
 				"--title",
 				"所属执行隔离验证",
 				"--prompt",

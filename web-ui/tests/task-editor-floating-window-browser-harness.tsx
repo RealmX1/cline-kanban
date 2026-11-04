@@ -1,3 +1,6 @@
+import { SideSessionCreationWorkbench } from "../src/components/side-session-creation-workbench";
+import { TaskConversationSessionsPanel } from "../src/components/detail-panels/task-conversation-sessions-panel";
+import type { RuntimeTaskSessionSummary } from "../src/runtime/types";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster } from "sonner";
@@ -8,6 +11,8 @@ import { startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins } from "
 import "../src/styles/globals.css";
 
 startLoadingUserInterfacePreferencesSharedAcrossBrowserOrigins();
+const hostTask = { id: "abcde", title: "固定宿主任务", prompt: "宿主任务正文", startInPlanMode: true, baseRef: "main", createdAt: 1, updatedAt: 1 };
+const mainSession = { taskId: "abcde", agentId: "codex", workspacePath: "/isolated/project-a/task", startedAt: 1, updatedAt: 1, pid: 1, state: "awaiting_review", turnOwner: "user", userTurnKind: "review", liveness: "live", lastOutputAt: null, reviewReason: null, exitCode: null, agentNativeConversationSessionIdentity: { sourceAgentId: "codex", nativeSessionId: "main-native", transcriptPath: null, observedAt: 1 } } as RuntimeTaskSessionSummary;
 function Harness() {
 	const [open,setOpen] = useState(true);
 	const [prompt,setPrompt] = useState("实现任务编辑器的共享草稿与非模态交互");
@@ -17,6 +22,8 @@ function Harness() {
 		<button type="button" className="fixed bottom-2 left-2 rounded bg-surface-3 p-3" onClick={() => setBackgroundClicks((value) => value+1)}>操作背景 {backgroundClicks}</button>
 		<input aria-label="背景输入" className="fixed bottom-2 right-2 w-36 bg-surface-3 p-3" />
 		{!open ? <button type="button" onClick={() => setOpen(true)}>重新打开编辑器</button> : null}
+		<div className="fixed left-2 top-2 w-64"><TaskConversationSessionsPanel workspaceId="isolated-task-editor-project" taskCard={hostTask} workspaceTaskId="abcde" mainSessionSummary={mainSession} mainSessionUserMessagePreview="宿主任务正文" mainSessionOriginalPromptCard={hostTask} effectiveAgentId="codex" taskSessions={{ abcde: mainSession }} selectedTaskConversationSessionId="abcde" onSelectTaskConversationSession={() => undefined} onCreateTaskConversationSession={async () => ({ ok: true })} /></div>
+		<SideSessionCreationWorkbench />
 		<TaskProjectAssignmentPreflightHost />
 		<Toaster />
 		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateAndStart={() => null} onCreateStartAndOpen={() => null} onCreateMultiple={() => []}

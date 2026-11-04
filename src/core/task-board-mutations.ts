@@ -625,6 +625,8 @@ export function updateTask(
 						? card.codexConfigurationPermissionSelectionSource
 						: (input.codexConfigurationPermissionSelectionSource ?? undefined),
 				title: resolveTaskTitle(input.title, prompt),
+				taskNameVersion:
+					(card.taskNameVersion ?? 0) + (resolveTaskTitle(input.title, prompt) !== card.title ? 1 : 0),
 				prompt,
 				startInPlanMode: Boolean(input.startInPlanMode),
 				// 三态：undefined 原样保留卡片现值（**包括「字段缺失」本身**）、null 复位到默认档、其余按传入值。

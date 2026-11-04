@@ -25,6 +25,7 @@ import {
 	preserveRuntimeOwnedMainSessionBindings,
 	projectTaskConversationSessionsForMainSessionBinding,
 } from "../core/task-main-conversation-session-binding";
+import { preserveTaskNameVersionsAgainstIncomingBoardSnapshot } from "../core/task-name-version";
 import { preservePersistedTaskShelvingAgainstIncomingBoardSnapshot } from "../core/task-shelving-state";
 import { preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot } from "../core/task-sticker-entry-mutation";
 import {
@@ -463,6 +464,21 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 				taskConversationSessionMetadata: persistedSummary.taskConversationSessionMetadata,
 			};
 		}
+		const persistedName = persistedSummary.taskConversationSessionMetadata;
+		if (
+			persistedName &&
+			(persistedName.conversationSessionNameVersion ?? 0) >
+				(reconciledSummary.taskConversationSessionMetadata?.conversationSessionNameVersion ?? 0)
+		)
+			reconciledSummary = {
+				...reconciledSummary,
+				taskConversationSessionMetadata: {
+					...(reconciledSummary.taskConversationSessionMetadata ?? persistedName),
+					conversationSessionName: persistedName.conversationSessionName,
+					conversationSessionNameVersion: persistedName.conversationSessionNameVersion,
+					conversationSessionNameSource: persistedName.conversationSessionNameSource,
+				},
+			};
 		if (reconciledSummary === incomingSummary) continue;
 		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
 		reconciledSessions[taskId] = reconciledSummary;
@@ -1080,6 +1096,7 @@ export async function saveWorkspaceState(
 		) {
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
+		parsedPayload.board = preserveTaskNameVersionsAgainstIncomingBoardSnapshot(persistedBoard, parsedPayload.board);
 		// 无版本的旧整板不能把客户端尚未见过的迁入卡当作删除；正式卡片动作在锁内改最新状态，不走此入口。
 		if (
 			expectedRevision === undefined &&
