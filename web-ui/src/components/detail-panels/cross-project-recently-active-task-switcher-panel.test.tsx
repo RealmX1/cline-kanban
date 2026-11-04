@@ -373,6 +373,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		renderEntries("live");
 		expect(rowTaskIds(section("running"))).toEqual(["retrying", "other"]);
 		expect(section("running").textContent).not.toContain("重连中");
+		expect(
+			container.querySelector('[data-testid="cross-project-task-switcher-section-waiting-automatic-recovery"]'),
+		).toBeNull();
 	});
 
 	it("主 Agent 真实处理推导的缓存参考在药丸提示中保留明确的请求时间估计来源", () => {

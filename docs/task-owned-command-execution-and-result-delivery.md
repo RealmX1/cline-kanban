@@ -6,6 +6,10 @@
 
 启动 specification 包含 `command`、`resumeCommand`、可选 `cancelCommand`、`workingDirectory`、`resultFile`、`materialSha256`、`label` 与可选 `recoveryEvidencePaths`。命令为 argv 数组，不经 shell 拼装。工作目录必须是该任务的真实工作树；持久记录保存目录实体、task incarnation、原主会话与原生身份、材料摘要、监督进程 nonce、恢复动作及结果 ID。
 
+生产方可冻结 `readOnlyRecoveryEvidenceObservationCommand` 并选择 `recoveryEvidenceObservationMode: "semantic_observation_only"`。此模式只消费观察命令返回的 `evidenceSha256`，诊断文件全文散列不参与恢复资格；观察不可用时持久保存 unknown、原预算和下次轻量观察时间。按每份证据保存已用预算，进程重启或 A→B→A 均不重新领取 A 的机会。每次决策重读当前 `maximum_unchanged_retries`：上限下降会停掉尚未发生的恢复，上升只补剩余次数，已用次数不清零，同一证据仍最多三次。异步观察后仍检查撤销、任务/目录身份与托管归属。派发前重新核对观察器登记；已经读到旧记录的扫描发现登记变化后，不得再按诊断内容派发。
+
+旧执行可用 `task command-execution register-recovery-evidence-observation --registration-file <持久JSON>` 追加观察器。JSON 包含 `taskId`、`executionId`、`expectedMaterialSha256`、`command` 和 `mode: "semantic_observation_only"`；材料摘要取原执行的 inspect 回执。登记保留原 specification、执行身份、撤销及预算，同一登记幂等，拒绝替换不同观察器或恢复已撤销执行。登记前已经消费的同一 `continuation_request_id`，首次语义观察只继承剩余次数，不重新发放。该入口不替换业务命令，也不授予新业务执行权限。
+
 业务工具的结果文件发布 `disposition`：`agent_review_ready` 或 `agent_judgment_required` 才形成一次逻辑结果；`machine_evidence_pending` 只更新进度与 `recovery`，`cancelled` 撤销执行。退出码 0 只证明本地进程退出，不能推导业务完成。恢复结构保留 missing evidence、等价来源、证据路径、触发条件、已登记动作与重试上限；未变化证据不会无限派发。
 
 结果正文和稳定 ID 先持久化，再登记统一 managed delivery 与原生发送意图。执行记录区分 `known_not_submitted`、`submission_unknown` 与 `native_accepted`。写入可能发生前先保存未知标记；重启优先读取持久回执与原生历史，只有证明未提交才允许同 ID 重试。逻辑结果和实际投递尝试分别计数。旧托管者或旧 attempt 的迟到回执不能结算当前尝试；普通人工队列的重启确认规则保持原有语义。

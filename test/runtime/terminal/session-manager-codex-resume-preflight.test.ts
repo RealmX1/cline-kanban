@@ -9,6 +9,7 @@ vi.mock("../../../src/terminal/pty-session.js", () => ({ PtySession: { spawn: pt
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
+import { compressedCodexTranscriptFixtureBytes } from "../../utilities/codex-native-resume-compressed-transcript-fixtures";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let directory: ReturnType<typeof createTempDir>;
@@ -89,6 +90,68 @@ afterEach(() => {
 });
 
 describe("续接预检在任何销毁动作之前", () => {
+	it.each(["start", "refresh"])("%s 从已压缩的原始路径续接同一身份，不重投 Prompt", async (operation) => {
+		const instance = manager();
+		const resumeRequest = { ...request(), prompt: "不得重新投递的原始 Prompt" };
+		if (operation === "refresh") await instance.startTaskSession(request());
+		else hydrate(instance);
+		const sessions = join(directory.path, "sessions");
+		mkdirSync(sessions);
+		const savedPath = join(sessions, `rollout-${nativeSessionId}.jsonl`);
+		writeFileSync(`${savedPath}.zst`, compressedCodexTranscriptFixtureBytes());
+		instance.applyAgentNativeConversationSessionIdentity(resumeRequest.taskId, {
+			sourceAgentId: "codex",
+			nativeSessionId,
+			transcriptPath: savedPath,
+			observedAt: 2,
+		});
+		if (operation === "refresh") await instance.refreshTaskTerminal({ ...resumeRequest, resumeFromTrash: true });
+		else
+			await instance.startTaskSession({
+				...resumeRequest,
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+			});
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(operation === "refresh" ? 2 : 1);
+		expect(prepareAgentLaunchMock.mock.calls.at(-1)?.[0]).toMatchObject({
+			...(operation === "refresh"
+				? { resumeFromTrash: true }
+				: { resumePriorAgentConversationWithoutResendingPrompt: true }),
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceSessionId: nativeSessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+		});
+		expect(ptySessionSpawnMock.mock.results.at(-1)?.value.write).not.toHaveBeenCalled();
+	});
+
+	it.each(["wrong-identity", "subagent", "corrupt-compression", "invalid-checksum"] as const)(
+		"刷新拒绝 %s 压缩转录，保留旧 PTY 与原身份",
+		async (scenario) => {
+			const instance = manager();
+			await instance.startTaskSession(request());
+			const sessions = join(directory.path, "sessions");
+			mkdirSync(sessions);
+			const transcriptPath = join(sessions, `rollout-${nativeSessionId}.jsonl.zst`);
+			writeFileSync(
+				transcriptPath,
+				scenario === "corrupt-compression"
+					? Buffer.from("损坏数据")
+					: compressedCodexTranscriptFixtureBytes(scenario),
+			);
+			const identity = { sourceAgentId: "codex" as const, nativeSessionId, transcriptPath, observedAt: 2 };
+			instance.applyAgentNativeConversationSessionIdentity(request().taskId, identity);
+			const oldProcess = ptySessionSpawnMock.mock.results[0]?.value;
+			await expect(instance.refreshTaskTerminal({ ...request(), resumeFromTrash: true })).rejects.toThrow(
+				nativeSessionId,
+			);
+			expect(oldProcess.stop).not.toHaveBeenCalled();
+			expect(ptySessionSpawnMock).toHaveBeenCalledOnce();
+			expect(instance.getSummary(request().taskId)).toMatchObject({
+				pid: 1234,
+				agentNativeConversationSessionIdentity: identity,
+			});
+		},
+	);
 	it.each([["resume", "explicit-native-id"], ["fork", "explicit-native-id"], ["--last"]])(
 		"显式选择 %j 由原生核验，不拿旧本地转录拦截或冒认身份",
 		async (...additionalAgentStartupArgumentsForThisRestart) => {

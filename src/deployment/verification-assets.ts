@@ -2,6 +2,10 @@ import { access, mkdir, realpath, rm } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import { getRuntimeHomePath } from "../state/workspace-state";
+import {
+	cancelVerificationExecutionsForVerificationId,
+	withVerificationExecutionAdmissionLock,
+} from "./verification-execution-attempt-store";
 
 // per-verification 资产根目录：~/.cline/kanban/verifications/。每个验证定义拥有 <root>/<verificationId>/ 一个子目录，
 // 存放脚本入口、fixture 等。放在 runtime home（而非 repo）：repo 干净、且能扛住任务 worktree 完成后被 trash 删除。
@@ -48,6 +52,30 @@ export interface CleanupVerificationAssetsResult {
 // per-verification 清理护栏（plan Stage 5）：只删「解析 real path 后确实落在 verifications 根目录之下」的资产目录。
 // 越界（symlink 逃逸 / verificationId 含 ../ 等）一律拒删并 warn；目录已不存在视为幂等成功（no-op）。
 export async function cleanupVerificationAssets(verificationId: string): Promise<CleanupVerificationAssetsResult> {
+	return withVerificationExecutionAdmissionLock(() =>
+		cleanupVerificationAssetsWithinExecutionAdmissionLock(verificationId),
+	);
+}
+
+export async function cleanupVerificationAssetsWithinExecutionAdmissionLock(
+	verificationId: string,
+): Promise<CleanupVerificationAssetsResult> {
+	if (
+		await cancelVerificationExecutionsForVerificationId(
+			verificationId,
+			"verification_assets_cleanup_requested",
+			new Date().toISOString(),
+			true,
+		)
+	) {
+		return { removed: false, skippedReason: "awaiting-execution-exit-confirmation" };
+	}
+	return cleanupVerificationAssetsAfterConfirmedExecutionsExited(verificationId);
+}
+
+async function cleanupVerificationAssetsAfterConfirmedExecutionsExited(
+	verificationId: string,
+): Promise<CleanupVerificationAssetsResult> {
 	const root = getVerificationAssetsRoot();
 	let resolvedRoot: string;
 	try {

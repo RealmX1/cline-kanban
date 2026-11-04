@@ -26,6 +26,7 @@ import {
 	assertCodexConfigurationWriterBindingIdentity,
 	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
+import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "./codex-source-shared-plugin-installation-directories";
 
 // 所选提案可能来自已退休 writer；不能把 observe 的活跃集合当作审批的卷资格集合。
 export async function prepareCodexConfigurationProposalIdentityVolumeObservations(changeIds: Iterable<string>) {
@@ -42,6 +43,7 @@ export async function prepareCodexConfigurationProposalIdentityVolumeObservation
 				binding.sourceHomeDirectoryPath,
 				binding.conversationStorageHomeDirectoryPath,
 				binding.sqliteHomeDirectoryPath,
+				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(binding),
 			])
 				paths.add(path);
 	}

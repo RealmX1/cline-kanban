@@ -16,8 +16,12 @@ export const taskCommandExecutionSpecificationSchema = z
 		label: z.string().min(1),
 		recoveryEvidencePaths: z.array(z.string()).default([]),
 		readOnlyRecoveryEvidenceObservationCommand: commandArgumentsSchema.optional(),
+		recoveryEvidenceObservationMode: z.enum(["semantic_observation_only"]).optional(),
 	})
-	.strict();
+	.strict()
+	.refine((value) => !value.recoveryEvidenceObservationMode || !!value.readOnlyRecoveryEvidenceObservationCommand, {
+		message: "语义观察优先模式必须登记只读观察命令",
+	});
 export type TaskCommandExecutionSpecification = z.infer<typeof taskCommandExecutionSpecificationSchema>;
 export const taskCommandExecutionStartRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -30,6 +34,17 @@ export const taskCommandExecutionIdentityRequestSchema = z.object({
 });
 export type TaskCommandExecutionStartRequest = z.input<typeof taskCommandExecutionStartRequestSchema>;
 export type TaskCommandExecutionIdentityRequest = z.infer<typeof taskCommandExecutionIdentityRequestSchema>;
+export const taskCommandExecutionRecoveryObservationRegistrationRequestSchema =
+	taskCommandExecutionIdentityRequestSchema
+		.extend({
+			expectedMaterialSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+			command: commandArgumentsSchema,
+			mode: z.literal("semantic_observation_only"),
+		})
+		.strict();
+export type TaskCommandExecutionRecoveryObservationRegistrationRequest = z.infer<
+	typeof taskCommandExecutionRecoveryObservationRegistrationRequestSchema
+>;
 
 export const taskCommandExecutionContinuationNoticeSchema = z
 	.object({
@@ -105,6 +120,28 @@ export const taskCommandExecutionRecordSchema = z.object({
 	progress: z.record(z.string(), z.unknown()).nullable(),
 	recovery: z.record(z.string(), z.unknown()).nullable(),
 	lastRecoveryEvidenceSha256: z.string().nullable(),
+	recoveryEvidenceObservationStatus: z.enum(["known", "unknown"]).optional(),
+	recoveryEvidenceAttemptBudgets: z
+		.record(
+			z.string(),
+			z.object({
+				resumeAttemptsUsed: z.number().int().nonnegative(),
+				maximumResumeAttempts: z.number().int().nonnegative(),
+				includesEvidenceTransitionLaunch: z.boolean().default(false),
+			}),
+		)
+		.optional(),
+	recoveryEvidenceObservationRegistration: z
+		.object({
+			registrationId: z.string(),
+			boundMaterialSha256: z.string(),
+			command: commandArgumentsSchema,
+			mode: z.literal("semantic_observation_only"),
+			registeredAtEpochMs: z.number(),
+			previousRecoveryEvidenceSha256: z.string().nullable(),
+			previousContinuationRequestId: z.string().nullable().optional(),
+		})
+		.optional(),
 	unchangedRecoveryAttemptCount: z.number(),
 	nextRecoveryAtEpochMs: z.number().nullable(),
 	parkOwned: z.boolean(),

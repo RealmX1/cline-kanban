@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import * as recoveryObservation from "../../../src/task-command-execution/read-only-task-command-execution-recovery-evidence-observation";
 import * as continuationNotices from "../../../src/task-command-execution/task-command-execution-continuation-notices";
 import {
 	createTaskCommandExecutionService,
@@ -860,6 +861,371 @@ describe("所属执行与一次逻辑交回", () => {
 		} finally {
 			clock.mockRestore();
 		}
+	});
+
+	it("语义观察优先时千次心跳和进程重启不补发预算，未知观察保持原预算", async () => {
+		const first = fixture();
+		first.inspectWorker.mockResolvedValue("exited");
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		const heartbeatFile = join(directory, "controller-heartbeat.json");
+		const record = await first.service.start("workspace", {
+			...first.request,
+			specification: {
+				...first.request.specification,
+				recoveryEvidenceObservationMode: "semantic_observation_only",
+				readOnlyRecoveryEvidenceObservationCommand: [process.execPath, "-e", ""],
+				recoveryEvidencePaths: [heartbeatFile],
+			},
+		});
+		const pending = {
+			disposition: "machine_evidence_pending",
+			recovery: { action: "resume_same_run", maximum_unchanged_retries: 0 },
+		};
+		await writeFile(first.request.specification.resultFile, JSON.stringify(pending));
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await first.service.sweepExecution("workspace", record.executionId);
+			for (let heartbeat = 0; heartbeat < 1000; heartbeat++) {
+				await writeFile(heartbeatFile, JSON.stringify({ last_observed_at: heartbeat }));
+				now += 30_001;
+				await first.service.sweepExecution("workspace", record.executionId);
+			}
+			expect(first.launch).toHaveBeenCalledTimes(1);
+			const saved = await first.service.inspect("workspace", record);
+			first.service.stop();
+			const resumed = fixture();
+			resumed.inspectWorker.mockResolvedValue("exited");
+			semanticObservation.mockResolvedValue("read_only_observation_unavailable");
+			now += 30_001;
+			await resumed.service.sweepExecution("workspace", record.executionId);
+			const unknown = await resumed.service.inspect("workspace", record);
+			expect(unknown.lastRecoveryEvidenceSha256).toBe(saved.lastRecoveryEvidenceSha256);
+			expect(unknown.unchangedRecoveryAttemptCount).toBe(saved.unchangedRecoveryAttemptCount);
+			expect(unknown.recoveryEvidenceObservationStatus).toBe("unknown");
+			semanticObservation.mockResolvedValue("c".repeat(64));
+			now += 30_001;
+			await resumed.service.sweepExecution("workspace", record.executionId);
+			expect(resumed.launch).toHaveBeenCalledTimes(1);
+			semanticObservation.mockResolvedValue("b".repeat(64));
+			now += 30_001;
+			await resumed.service.sweepExecution("workspace", record.executionId);
+			expect(resumed.launch).toHaveBeenCalledTimes(1);
+			now += 30_001;
+			await resumed.service.sweepExecution("workspace", record.executionId);
+			expect(resumed.launch).toHaveBeenCalledTimes(1);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	}, 120_000);
+
+	it("语义观察按当前重试上限收放同一证据的剩余次数，不沿用首次快照", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		const record = await service.start("workspace", {
+			...request,
+			specification: {
+				...request.specification,
+				recoveryEvidenceObservationMode: "semantic_observation_only",
+				readOnlyRecoveryEvidenceObservationCommand: [process.execPath, "-e", ""],
+			},
+		});
+		const pending = (maximumUnchangedRetries: number) => ({
+			disposition: "machine_evidence_pending",
+			recovery: { action: "resume_same_run", maximum_unchanged_retries: maximumUnchangedRetries },
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(3)));
+			await service.sweepExecution("workspace", record.executionId);
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(0)));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			const lowered = Object.values(
+				(await service.inspect("workspace", record)).recoveryEvidenceAttemptBudgets ?? {},
+			);
+			expect(lowered).toEqual([
+				{ resumeAttemptsUsed: 1, maximumResumeAttempts: 0, includesEvidenceTransitionLaunch: false },
+			]);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	});
+
+	it("语义观察把上限从 0 调高后补发尚未使用的次数", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		const record = await service.start("workspace", {
+			...request,
+			specification: {
+				...request.specification,
+				recoveryEvidenceObservationMode: "semantic_observation_only",
+				readOnlyRecoveryEvidenceObservationCommand: [process.execPath, "-e", ""],
+			},
+		});
+		const pending = (maximumUnchangedRetries: number) => ({
+			disposition: "machine_evidence_pending",
+			recovery: { action: "resume_same_run", maximum_unchanged_retries: maximumUnchangedRetries },
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(0)));
+			await service.sweepExecution("workspace", record.executionId);
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(1);
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(1)));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	});
+
+	it("新语义证据在上限降到 0 后不再使用登记时多出来的次数，事后调高才补剩余次数", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		const record = await service.start("workspace", {
+			...request,
+			specification: {
+				...request.specification,
+				recoveryEvidenceObservationMode: "semantic_observation_only",
+				readOnlyRecoveryEvidenceObservationCommand: [process.execPath, "-e", ""],
+			},
+		});
+		const pending = (maximumUnchangedRetries: number) => ({
+			disposition: "machine_evidence_pending",
+			recovery: { action: "resume_same_run", maximum_unchanged_retries: maximumUnchangedRetries },
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(1)));
+			await service.sweepExecution("workspace", record.executionId);
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			semanticObservation.mockResolvedValue("c".repeat(64));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(3);
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(0)));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(3);
+			const transition = Object.values(
+				(await service.inspect("workspace", record)).recoveryEvidenceAttemptBudgets ?? {},
+			).find((budget) => budget.includesEvidenceTransitionLaunch);
+			expect(transition).toEqual({
+				resumeAttemptsUsed: 1,
+				maximumResumeAttempts: 1,
+				includesEvidenceTransitionLaunch: true,
+			});
+			await writeFile(request.specification.resultFile, JSON.stringify(pending(1)));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(4);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	});
+
+	it("已消费的 continuation 在追加观察器后不重新领取恢复次数", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const record = await service.start("workspace", request);
+		const pending = (continuationRequestId: string) => ({
+			disposition: "machine_evidence_pending",
+			recovery: {
+				action: "resume_same_run",
+				continuation_request_id: continuationRequestId,
+				maximum_unchanged_retries: 0,
+			},
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		try {
+			await writeFile(request.specification.resultFile, JSON.stringify(pending("same-pending-request")));
+			await service.sweepExecution("workspace", record.executionId);
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			await service.registerRecoveryEvidenceObservation("workspace", {
+				taskId: record.taskId,
+				executionId: record.executionId,
+				expectedMaterialSha256: record.materialSha256,
+				command: [process.execPath, "-e", ""],
+				mode: "semantic_observation_only",
+			});
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			const bound = await service.inspect("workspace", record);
+			expect(bound.launchAttemptCount).toBe(2);
+			expect(Object.values(bound.recoveryEvidenceAttemptBudgets ?? {})).toEqual([
+				{ resumeAttemptsUsed: 0, maximumResumeAttempts: 0, includesEvidenceTransitionLaunch: false },
+			]);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	});
+
+	it("追加观察器时 continuation 已换成新请求，仍允许一次语义恢复", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const record = await service.start("workspace", request);
+		const pending = (continuationRequestId: string) => ({
+			disposition: "machine_evidence_pending",
+			recovery: {
+				action: "resume_same_run",
+				continuation_request_id: continuationRequestId,
+				maximum_unchanged_retries: 0,
+			},
+		});
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const semanticObservation = vi
+			.spyOn(recoveryObservation, "readOnlyTaskCommandExecutionRecoveryEvidenceObservation")
+			.mockResolvedValue("b".repeat(64));
+		try {
+			await writeFile(request.specification.resultFile, JSON.stringify(pending("request-a")));
+			await service.sweepExecution("workspace", record.executionId);
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(2);
+			await service.registerRecoveryEvidenceObservation("workspace", {
+				taskId: record.taskId,
+				executionId: record.executionId,
+				expectedMaterialSha256: record.materialSha256,
+				command: [process.execPath, "-e", ""],
+				mode: "semantic_observation_only",
+			});
+			await writeFile(request.specification.resultFile, JSON.stringify(pending("request-b")));
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(3);
+		} finally {
+			clock.mockRestore();
+			semanticObservation.mockRestore();
+		}
+	});
+
+	it("已读到旧记录的扫描在观察器登记后不再按诊断心跳派发", async () => {
+		const { service, request, launch, inspectWorker } = fixture();
+		inspectWorker.mockResolvedValue("exited");
+		const diagnostic = join(directory, "diagnostic-heartbeat.json");
+		await writeFile(diagnostic, "heartbeat-0");
+		const record = await service.start("workspace", {
+			...request,
+			specification: { ...request.specification, recoveryEvidencePaths: [diagnostic] },
+		});
+		await writeFile(
+			request.specification.resultFile,
+			JSON.stringify({
+				disposition: "machine_evidence_pending",
+				recovery: { action: "resume_same_run", maximum_unchanged_retries: 0 },
+			}),
+		);
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(1);
+			let releaseInspection: () => void = () => undefined;
+			const inspectionBlocked = new Promise<void>((resolve) => {
+				releaseInspection = () => resolve();
+			});
+			let reportInspectionEntered: () => void = () => undefined;
+			const inspectionEntered = new Promise<void>((resolve) => {
+				reportInspectionEntered = () => resolve();
+			});
+			let alreadyBlocked = false;
+			inspectWorker.mockImplementation(async () => {
+				if (!alreadyBlocked) {
+					alreadyBlocked = true;
+					reportInspectionEntered();
+					await inspectionBlocked;
+				}
+				return "exited";
+			});
+			await writeFile(diagnostic, "heartbeat-1");
+			now += 30_001;
+			const inFlight = service.sweepExecution("workspace", record.executionId);
+			await inspectionEntered;
+			await service.registerRecoveryEvidenceObservation("workspace", {
+				taskId: record.taskId,
+				executionId: record.executionId,
+				expectedMaterialSha256: record.materialSha256,
+				command: [process.execPath, "-e", "process.exitCode=2"],
+				mode: "semantic_observation_only",
+			});
+			releaseInspection();
+			await inFlight;
+			const afterStaleSweep = await service.inspect("workspace", record);
+			expect(afterStaleSweep.launchAttemptCount).toBe(1);
+			expect(afterStaleSweep.recoveryEvidenceObservationStatus).toBe("unknown");
+			now += 30_001;
+			await service.sweepExecution("workspace", record.executionId);
+			expect(launch).toHaveBeenCalledTimes(1);
+			expect((await service.inspect("workspace", record)).recoveryEvidenceObservationStatus).toBe("unknown");
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("旧执行只追加绑定原材料的观察器，保留 spec、预算和撤销", async () => {
+		const { service, request } = fixture();
+		const record = await service.start("workspace", request);
+		const registration = {
+			taskId: record.taskId,
+			executionId: record.executionId,
+			expectedMaterialSha256: record.materialSha256,
+			command: [process.execPath, "-e", ""],
+			mode: "semantic_observation_only" as const,
+		};
+		await expect(
+			service.registerRecoveryEvidenceObservation("workspace", {
+				...registration,
+				expectedMaterialSha256: "b".repeat(64),
+			}),
+		).rejects.toThrow("材料摘要");
+		const attached = await service.registerRecoveryEvidenceObservation("workspace", registration);
+		expect(attached.specification).toEqual(record.specification);
+		expect(attached.materialSha256).toBe(record.materialSha256);
+		expect(attached.launchAttemptCount).toBe(record.launchAttemptCount);
+		expect(attached.unchangedRecoveryAttemptCount).toBe(record.unchangedRecoveryAttemptCount);
+		expect(
+			(await service.registerRecoveryEvidenceObservation("workspace", registration))
+				.recoveryEvidenceObservationRegistration,
+		).toEqual(attached.recoveryEvidenceObservationRegistration);
+		await service.cancel("workspace", record);
+		await expect(service.registerRecoveryEvidenceObservation("workspace", registration)).rejects.toThrow("撤销");
 	});
 
 	it.each(["semantic_change", "changing_failure_text"])(

@@ -1,21 +1,10 @@
 import { isCodexPermissionConfigurationOverrideArgument } from "../codex-native-session-control-host/codex-remote-conversation-launch-plan";
 import type { RuntimeTaskAgentPermissionMode } from "../core/api-contract";
-import {
-	type CodexConfigurationFields,
-	configurationFieldAddress,
-	configurationTable,
-} from "./codex-configuration-field-projection";
+import { type CodexConfigurationFields, configurationFieldAddress } from "./codex-configuration-field-projection";
 import { codexConfigurationExceptionGroup } from "./codex-configuration-profiles";
+import { formatCodexConfigurationOverrideTomlValue } from "./codex-native-configuration-override-toml-value";
 
-export function formatCodexConfigurationOverrideTomlValue(value: unknown): string {
-	if (Array.isArray(value)) return `[${value.map(formatCodexConfigurationOverrideTomlValue).join(", ")}]`;
-	if (configurationTable(value))
-		return `{ ${Object.entries(value)
-			.map(([key, child]) => `${JSON.stringify(key)} = ${formatCodexConfigurationOverrideTomlValue(child)}`)
-			.join(", ")} }`;
-	if (["string", "number", "boolean"].includes(typeof value)) return JSON.stringify(value);
-	throw new Error("Codex 配置覆盖不是可序列化的 TOML 值。");
-}
+export { formatCodexConfigurationOverrideTomlValue } from "./codex-native-configuration-override-toml-value";
 
 export function codexConfigurationPermissionMode(
 	fields: CodexConfigurationFields,

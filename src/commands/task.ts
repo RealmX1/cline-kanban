@@ -62,7 +62,10 @@ import {
 	type TaskClosureRequest,
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
-import { taskCommandExecutionSpecificationSchema } from "../core/task-command-execution-contract";
+import {
+	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
+	taskCommandExecutionSpecificationSchema,
+} from "../core/task-command-execution-contract";
 import {
 	resolveMainTaskConversationSessionSummary,
 	resolveTaskChatMessageTargetConversationSessionSummary,
@@ -1985,6 +1988,22 @@ export function registerTaskCommand(program: Command): void {
 		run: runTaskCommand,
 	});
 	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
+	commandExecution
+		.command("register-recovery-evidence-observation")
+		.requiredOption("--registration-file <path>", "绑定精确执行及原材料摘要的只读观察器 JSON。")
+		.option("--project-path <path>", "项目主仓库路径。")
+		.action(async (options: { registrationFile: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const workspaceId = await ensureRuntimeWorkspace(
+					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+				);
+				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.registerRecoveryEvidenceObservation.mutate(
+					taskCommandExecutionRecoveryObservationRegistrationRequestSchema.parse(
+						JSON.parse(await readFile(options.registrationFile, "utf8")),
+					),
+				);
+			});
+		});
 	commandExecution
 		.command("start")
 		.requiredOption("--task-id <id>", "任务 ID。")
