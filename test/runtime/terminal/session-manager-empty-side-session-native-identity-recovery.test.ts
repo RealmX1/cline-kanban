@@ -13,6 +13,10 @@ import {
 import type * as IdentityRecovery from "../../../src/terminal/side-session-native-identity-recovery";
 import { readSideSessionResumeRequestWaitingForNativeIdentity } from "../../../src/terminal/side-session-native-identity-recovery";
 import type { HostedTerminalPtyProcessSpawnRequest } from "../../../src/terminal/terminal-pty-process-handle";
+import {
+	compressedCodexTranscriptFixtureBytes,
+	compressedCodexTranscriptFixtureNativeSessionId,
+} from "../../utilities/codex-native-resume-compressed-transcript-fixtures";
 
 const prepareLaunch = vi.hoisted(() => vi.fn());
 const readOwnedIdentity = vi.hoisted(() => vi.fn());
@@ -283,14 +287,19 @@ describe("空侧会话的原生身份补证恢复", () => {
 		});
 	});
 
-	it.each(["missing_codex_home", "user_codex_home", "old_configuration_codex_home"] as const)(
-		"旧恢复请求环境为 %s，托管转录迟到仍解锁预算并只按子身份恢复一次",
-		async (storedEnvironmentKind) => {
+	it.each(
+		(["missing_codex_home", "user_codex_home", "old_configuration_codex_home"] as const).flatMap(
+			(storedEnvironmentKind) => [false, true].map((compressed) => ({ storedEnvironmentKind, compressed })),
+		),
+	)(
+		"旧恢复请求环境为 $storedEnvironmentKind，压缩=$compressed：托管转录迟到仍解锁预算且只恢复一次",
+		async ({ storedEnvironmentKind, compressed }) => {
 			vi.useFakeTimers();
 			vi.setSystemTime(1_000_000);
 			const userCodexHome = join(isolatedHome, ".codex");
 			const managedStorageHome = await prepareManagedCodexConversationStorageHome(userCodexHome);
-			const transcriptPath = join(managedStorageHome, "sessions", `rollout-${childId}.jsonl`);
+			const childNativeSessionId = compressed ? compressedCodexTranscriptFixtureNativeSessionId : childId;
+			const transcriptPath = join(managedStorageHome, "sessions", `rollout-${childNativeSessionId}.jsonl`);
 			const summary: RuntimeTaskSessionSummary = {
 				...createAwaitingIdentitySummary(),
 				agentId: "codex",
@@ -321,7 +330,7 @@ describe("空侧会话的原生身份补证恢复", () => {
 			expect(storedRequest?.env).toEqual(request.env);
 			manager.applyAgentNativeConversationSessionIdentity(summary.taskId, {
 				sourceAgentId: "codex",
-				nativeSessionId: childId,
+				nativeSessionId: childNativeSessionId,
 				transcriptPath,
 				observedAt: Date.now(),
 			});
@@ -337,8 +346,10 @@ describe("空侧会话的原生身份补证恢复", () => {
 			expect(spawn).not.toHaveBeenCalled();
 			await mkdir(join(managedStorageHome, "sessions"), { recursive: true });
 			await writeFile(
-				transcriptPath,
-				`${JSON.stringify({ type: "session_meta", payload: { id: childId, source: "cli" } })}\n`,
+				compressed ? `${transcriptPath}.zst` : transcriptPath,
+				compressed
+					? compressedCodexTranscriptFixtureBytes()
+					: `${JSON.stringify({ type: "session_meta", payload: { id: childNativeSessionId, source: "cli" } })}\n`,
 			);
 			await advanceRecovery(manager);
 			await advanceRecovery(manager);
@@ -351,13 +362,13 @@ describe("空侧会话的原生身份补证恢复", () => {
 					taskAgentPermissionMode: "ask_for_every_tool_use",
 					terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "retained-side-session-model" },
 					observedAgentNativeConversationSessionResumeAddressing: expect.objectContaining({
-						sourceSessionId: childId,
+						sourceSessionId: childNativeSessionId,
 					}),
 				}),
 			);
 			expect(manager.getSummary(summary.taskId)?.codexConversationStorageHomeDirectoryPath).toBe(managedStorageHome);
 			expect(manager.getSummary(summary.taskId)?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
-				childId,
+				childNativeSessionId,
 			);
 		},
 	);
