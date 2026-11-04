@@ -1448,7 +1448,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// 加性可选：Cline / ACP 会话与旧盘数据缺它 ⇒ undefined；同一活体内 harness 换了 session id
 	// （--fork-session / 续接）时整体替换，只保留最新观测。
 	agentNativeConversationSessionIdentity: runtimeAgentNativeConversationSessionIdentitySchema.nullable().optional(),
-	// 空侧会话的身份补证与等待恢复。预算跨重启保留；证据变化或可信 hook 到达后自动重验。
+	// Codex 主会话与空侧会话的身份补证及等待恢复。预算跨重启保留；证据变化或可信 hook 后自动重验。
 	taskConversationSessionNativeIdentityRecovery: z
 		.object({
 			runtimeSessionIncarnationId: z.string().min(1),

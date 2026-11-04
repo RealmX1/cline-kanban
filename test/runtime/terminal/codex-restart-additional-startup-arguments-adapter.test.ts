@@ -1,5 +1,6 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { prepareAgentLaunch } from "../../../src/terminal/agent-session-adapters";
+import { removeCodexConversationSelectionAndPromptFromStartupArguments } from "../../../src/terminal/codex-additional-startup-arguments-for-restart";
 import { createTempDir } from "../../utilities/temp-dir";
 
 const home = createTempDir("kanban-codex-restart-arguments-");
@@ -7,6 +8,40 @@ afterEach(() => vi.unstubAllEnvs());
 afterAll(() => home.cleanup());
 
 describe("Codex adapter 的单次重启参数优先级", () => {
+	it.each([
+		["--", "历史首条需求"],
+		["--", "resume", "old-id", "历史首条需求"],
+		["--image", "/isolated/first.png"],
+	])("自动恢复清理启动内容后，真实 adapter 仅续接当前身份：%j", async (...initialContentArguments) => {
+		vi.stubEnv("HOME", home.path);
+		vi.stubEnv("CODEX_HOME", home.path);
+		vi.stubEnv("CODEX_SQLITE_HOME", home.path);
+		const launch = await prepareAgentLaunch({
+			taskId: "isolated-sanitized-recovery",
+			agentId: "codex",
+			args: [],
+			cwd: home.path,
+			prompt: "",
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+			observedAgentNativeConversationSessionResumeAddressing: {
+				sourceAgentId: "codex",
+				sourceSessionId: "bound-id",
+				sourceSessionReuseMode: "resume_existing_session",
+			},
+			additionalAgentStartupArgumentsForThisRestart: removeCodexConversationSelectionAndPromptFromStartupArguments([
+				"--model=retained-model",
+				"--sandbox=read-only",
+				...initialContentArguments,
+			]),
+		});
+		expect(launch.args).toEqual(
+			expect.arrayContaining(["resume", "bound-id", "--model=retained-model", "--sandbox=read-only"]),
+		);
+		for (const initialContentArgument of initialContentArguments)
+			if (initialContentArgument !== "resume") expect(launch.args).not.toContain(initialContentArgument);
+		expect(launch.args.filter((argument) => argument === "resume")).toHaveLength(1);
+		expect(launch.deferredStartupPromptText ?? null).toBeNull();
+	});
 	it("本次补传覆盖 profile 生成的模型、完整权限和推理配置，不修改 profile", async () => {
 		vi.stubEnv("HOME", home.path);
 		vi.stubEnv("CODEX_HOME", home.path);

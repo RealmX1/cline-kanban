@@ -1,7 +1,18 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as CodexTranscriptInspection from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
+
+vi.mock(
+	"../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume",
+	async (importOriginal) => ({
+		...(await importOriginal<typeof CodexTranscriptInspection>()),
+		inspectCodexNativeConversationTranscriptBeforeResume: vi.fn(async () => ({
+			persistedTranscriptPath: "/isolated-fixture/native-session.jsonl",
+		})),
+	}),
+);
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	prepareAgentLaunch: prepareAgentLaunchMock,
@@ -40,6 +51,10 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 }
 
 describe("superseded pty exit guard", () => {
+	const managers: TerminalSessionManager[] = [];
+	afterEach(() => {
+		for (const manager of managers.splice(0)) manager.dispose();
+	});
 	beforeEach(() => {
 		prepareAgentLaunchMock.mockReset();
 		ptySessionSpawnMock.mockReset();
@@ -64,6 +79,7 @@ describe("superseded pty exit guard", () => {
 		const spawnedSessions = spawnRecorder();
 		const listener = { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() };
 		const manager = new TerminalSessionManager();
+		managers.push(manager);
 		manager.attach("task-1", listener);
 
 		await manager.startTaskSession({
@@ -92,6 +108,13 @@ describe("superseded pty exit guard", () => {
 		});
 		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(2);
 		expect(manager.getSummary("task-1")?.pid).toBe(101);
+		// 本用例核验换代闩；Codex 合法续接同时需要真实观测身份，缺证等待由独立用例覆盖。
+		manager.applyAgentNativeConversationSessionIdentity("task-1", {
+			sourceAgentId: "codex",
+			nativeSessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+			transcriptPath: null,
+			observedAt: Date.now(),
+		});
 		listener.onExit.mockClear();
 
 		// 上一代终于死了。它的退出事件读到的是**新代**的 active——没有身份守卫的话，这一下会把刚起来的
@@ -117,6 +140,7 @@ describe("superseded pty exit guard", () => {
 		const spawnedSessions = spawnRecorder();
 		const listener = { onState: vi.fn(), onOutput: vi.fn(), onExit: vi.fn() };
 		const manager = new TerminalSessionManager();
+		managers.push(manager);
 		manager.attach("task-shell", listener);
 
 		await manager.startShellSession({ taskId: "task-shell", cwd: "/tmp/task-shell", binary: "bash" });

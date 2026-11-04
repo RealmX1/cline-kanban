@@ -975,6 +975,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 			if (agentId === "codex") {
 				const codexHomeDirectoryPath = join(isolatedHome, ".codex");
 				vi.stubEnv("CODEX_HOME", codexHomeDirectoryPath);
+				vi.stubEnv("CODEX_SQLITE_HOME", codexHomeDirectoryPath);
 				const codexSessionsDirectoryPath = join(codexHomeDirectoryPath, "sessions");
 				mkdirSync(codexSessionsDirectoryPath, { recursive: true });
 				childNativeConversationTranscriptPath = join(
@@ -1098,7 +1099,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 				spawnRequests[0].onExit({ exitCode: 1 });
 				await vi.waitFor(() => {
 					expect(manager.getSummary("unobserved-fork-child")?.warningMessage).toContain(
-						"尚未记录独立子会话原生 ID",
+						agentId === "codex" ? "等待本会话的原生身份或转录" : "尚未记录独立子会话原生 ID",
 					);
 				});
 				await vi.advanceTimersByTimeAsync(60_000);

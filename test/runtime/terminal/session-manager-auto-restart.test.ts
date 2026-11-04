@@ -223,7 +223,7 @@ describe("TerminalSessionManager auto-restart", () => {
 		}));
 	});
 
-	it("restarts an attached agent session after it exits", async () => {
+	it("已挂接的 Claude 会话退出后仍按原有策略自动重启", async () => {
 		const spawnedSessions: Array<ReturnType<typeof createMockPtySession>> = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {
 			const session = createMockPtySession(spawnedSessions.length === 0 ? 111 : 222, request);
@@ -240,8 +240,8 @@ describe("TerminalSessionManager auto-restart", () => {
 
 		await manager.startTaskSession({
 			taskId: "task-1",
-			agentId: "codex",
-			binary: "codex",
+			agentId: "claude",
+			binary: "claude",
 			args: [],
 			cwd: "/tmp/task-1",
 			prompt: "Fix the bug",
