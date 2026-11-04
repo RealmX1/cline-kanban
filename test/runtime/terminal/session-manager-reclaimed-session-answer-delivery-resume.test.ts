@@ -3,10 +3,22 @@
 // 拿它当「会话可投递」的证据会得出假结论，随后 submitTaskChatInputWhenReady 必然返回 null、答案永远送不出去。
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type * as CodexTranscriptInspection from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "../../../src/core/api-contract";
+import { createTempDir } from "../../utilities/temp-dir";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 const ptySessionSpawnMock = vi.hoisted(() => vi.fn());
+vi.mock(
+	"../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume",
+	async (importOriginal) => ({
+		...(await importOriginal<typeof CodexTranscriptInspection>()),
+		inspectCodexNativeConversationTranscriptBeforeResume: vi.fn(async () => ({
+			persistedTranscriptPath: "/isolated-reclaimed-answer-delivery/sessions/fixture.jsonl",
+			codexSessionsDirectoryPath: "/isolated-reclaimed-answer-delivery/sessions",
+		})),
+	}),
+);
 
 vi.mock("../../../src/terminal/agent-session-adapters.js", () => ({
 	BRACKETED_PASTE_TRAILING_SUBMIT_CARRIAGE_RETURN: "\r",
@@ -51,6 +63,8 @@ function createMockPtySession(pid: number, request: MockSpawnRequest) {
 }
 
 const ORIGINAL_TASK_PROMPT = "Fix the bug";
+const RECLAIMED_CODEX_NATIVE_SESSION_ID = "11111111-2222-4333-8444-555555555555";
+let isolatedAnswerDeliveryHome: ReturnType<typeof createTempDir>;
 
 function createPersistedPendingUserDecisionSummary(
 	taskId: string,
@@ -72,6 +86,12 @@ function createPersistedPendingUserDecisionSummary(
 		turnOwner: "user",
 		liveness: "exited",
 		userTurnKind,
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex",
+			nativeSessionId: RECLAIMED_CODEX_NATIVE_SESSION_ID,
+			transcriptPath: null,
+			observedAt: Date.now(),
+		},
 	};
 }
 
@@ -83,6 +103,12 @@ async function startTaskSessionOn(manager: TerminalSessionManager, taskId: strin
 		args: [],
 		cwd: "/tmp/reclaimed-answer-delivery",
 		prompt: ORIGINAL_TASK_PROMPT,
+	});
+	manager.applyAgentNativeConversationSessionIdentity(taskId, {
+		sourceAgentId: "codex",
+		nativeSessionId: RECLAIMED_CODEX_NATIVE_SESSION_ID,
+		transcriptPath: null,
+		observedAt: Date.now(),
 	});
 }
 
@@ -99,6 +125,10 @@ async function startClaudeTaskSessionOn(manager: TerminalSessionManager, taskId:
 
 describe("TerminalSessionManager 回收后为待答决策答案投递恢复会话", () => {
 	beforeEach(() => {
+		isolatedAnswerDeliveryHome = createTempDir("kanban-reclaimed-answer-delivery-");
+		vi.stubEnv("HOME", isolatedAnswerDeliveryHome.path);
+		vi.stubEnv("CODEX_HOME", isolatedAnswerDeliveryHome.path);
+		vi.stubEnv("CODEX_SQLITE_HOME", isolatedAnswerDeliveryHome.path);
 		vi.useFakeTimers();
 		prepareAgentLaunchMock.mockReset();
 		ptySessionSpawnMock.mockReset();
@@ -114,6 +144,8 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.unstubAllEnvs();
+		isolatedAnswerDeliveryHome.cleanup();
 	});
 
 	it("回收后 summary 仍在但投递无处可写，恢复之后才重新可投", async () => {

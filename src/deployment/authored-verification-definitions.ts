@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	RuntimeAuthoredVerificationDefinition,
 	RuntimeAuthoredVerificationDefinitionsFile,
@@ -10,7 +12,18 @@ import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagno
 import type { LockRequest } from "../fs/locked-file-system";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/workspace-state";
-import { verificationAssetsDirExists } from "./verification-assets";
+import {
+	type CleanupVerificationAssetsResult,
+	cleanupVerificationAssetsWithinExecutionAdmissionLock,
+	verificationAssetsDirExists,
+} from "./verification-assets";
+import {
+	cancelVerificationExecutionsForVerificationId,
+	listVerificationExecutionAttempts,
+	mutateVerificationExecutionAttempt,
+	readVerificationExecutionAttempt,
+	withVerificationExecutionAdmissionLock,
+} from "./verification-execution-attempt-store";
 
 // ~/.cline/kanban/authored-verification-definitions.json —— agent 注册的部署后验证定义的 pending 存储（plan Stage 2）。
 // 与 post-deploy-verification-state.json 分离：定义在「部署前」注册（此时无部署组），record/reconcile 时才 materialize 进组。
@@ -65,16 +78,21 @@ async function readAuthoredVerificationDefinitionsCorruptionTolerant(
 // 通用 read-modify-write 骨架：全程持锁；mutator 就地改 file 并返回结果。
 async function mutateAuthoredVerificationDefinitions<ResultType>(
 	nowIso: string,
-	mutator: (file: RuntimeAuthoredVerificationDefinitionsFile) => ResultType,
+	mutator: (file: RuntimeAuthoredVerificationDefinitionsFile) => ResultType | Promise<ResultType>,
 ): Promise<ResultType> {
 	// 确保 runtime home 目录存在再加锁：首次注册时该目录可能尚未建（proper-lockfile 需父目录在场才能落锁文件）。
 	await mkdir(getRuntimeHomePath(), { recursive: true });
-	return await lockedFileSystem.withLock(getAuthoredVerificationDefinitionsLockRequest(), async () => {
-		const file = await readAuthoredVerificationDefinitionsCorruptionTolerant(nowIso);
-		const result = mutator(file);
-		await lockedFileSystem.writeJsonFileAtomic(getAuthoredVerificationDefinitionsPath(), file, { lock: null });
-		return result;
-	});
+	return await lockedFileSystem.withLock(getAuthoredVerificationDefinitionsLockRequest(), async () =>
+		withVerificationExecutionAdmissionLock(async () => {
+			const file = await readAuthoredVerificationDefinitionsCorruptionTolerant(nowIso);
+			const result = await mutator(file);
+			await lockedFileSystem.writeJsonFileAtomic(getAuthoredVerificationDefinitionsPath(), file, {
+				lock: null,
+				durable: true,
+			});
+			return result;
+		}),
+	);
 }
 
 // 按 verificationId upsert 一条定义（已存在则整体替换，用于 rvf-reopen / 多轮重注册幂等）。
@@ -82,13 +100,85 @@ export async function upsertAuthoredVerificationDefinition(
 	definition: RuntimeAuthoredVerificationDefinition,
 	nowIso: string,
 ): Promise<void> {
-	await mutateAuthoredVerificationDefinitions(nowIso, (file) => {
-		const existingIndex = file.definitions.findIndex((entry) => entry.verificationId === definition.verificationId);
-		if (existingIndex >= 0) {
-			file.definitions[existingIndex] = definition;
-		} else {
-			file.definitions.push(definition);
+	await mutateAuthoredVerificationDefinitions(nowIso, async (file) => {
+		// 每次显式注册都界定新的资产使用意图；旧清理请求不能跨这条边界作用到新资产。
+		for (const attempt of await listVerificationExecutionAttempts()) {
+			if (attempt.verificationId === definition.verificationId && attempt.assetsCleanupPending) {
+				await mutateVerificationExecutionAttempt(attempt.verificationExecutionAttemptId, (current) => {
+					current.assetsCleanupPending = false;
+				});
+			}
 		}
+		const existingIndex = file.definitions.findIndex((entry) => entry.verificationId === definition.verificationId);
+		const previous = file.definitions[existingIndex];
+		if (
+			!previous ||
+			!isDeepStrictEqual(
+				{ kind: previous.kind, script: previous.script, guidance: previous.guidance },
+				{ kind: definition.kind, script: definition.script, guidance: definition.guidance },
+			)
+		) {
+			await cancelVerificationExecutionsForVerificationId(
+				definition.verificationId,
+				"verification_definition_replaced",
+				nowIso,
+			);
+		}
+		const registeredDefinition = { ...definition, authoredVerificationDefinitionRegistrationId: randomUUID() };
+		if (existingIndex >= 0) {
+			file.definitions[existingIndex] = registeredDefinition;
+		} else {
+			file.definitions.push(registeredDefinition);
+		}
+	});
+}
+
+export async function cleanupAuthoredVerificationDefinitionAndAssets(
+	verificationId: string,
+	nowIso: string,
+	expectedCleanupOwnership?: {
+		expectedPendingCleanupAttemptId?: string;
+		expectedAuthoredVerificationDefinitionRegistrationId?: string | null;
+	},
+): Promise<CleanupVerificationAssetsResult & { definitionRemoved: boolean }> {
+	return mutateAuthoredVerificationDefinitions(nowIso, async (file) => {
+		const expectedRegistrationId = expectedCleanupOwnership?.expectedAuthoredVerificationDefinitionRegistrationId;
+		if (expectedRegistrationId !== undefined) {
+			const definition = file.definitions.find((entry) => entry.verificationId === verificationId);
+			if (
+				!expectedRegistrationId ||
+				definition?.authoredVerificationDefinitionRegistrationId !== expectedRegistrationId
+			)
+				return { removed: false, skippedReason: "cleanup-request-invalidated", definitionRemoved: false };
+		}
+		if (expectedCleanupOwnership?.expectedPendingCleanupAttemptId) {
+			const owner = await readVerificationExecutionAttempt(expectedCleanupOwnership.expectedPendingCleanupAttemptId);
+			if (
+				!owner.assetsCleanupPending ||
+				owner.launchStage !== "terminal" ||
+				owner.verificationId !== verificationId
+			) {
+				return { removed: false, skippedReason: "cleanup-request-invalidated", definitionRemoved: false };
+			}
+		}
+		const cleanup = await cleanupVerificationAssetsWithinExecutionAdmissionLock(verificationId);
+		if (
+			!cleanup.removed &&
+			cleanup.skippedReason !== "already-absent" &&
+			cleanup.skippedReason !== "assets-root-missing"
+		) {
+			return { ...cleanup, definitionRemoved: false };
+		}
+		const before = file.definitions.length;
+		file.definitions = file.definitions.filter((definition) => definition.verificationId !== verificationId);
+		for (const attempt of await listVerificationExecutionAttempts()) {
+			if (attempt.verificationId === verificationId && attempt.assetsCleanupPending) {
+				await mutateVerificationExecutionAttempt(attempt.verificationExecutionAttemptId, (current) => {
+					current.assetsCleanupPending = false;
+				});
+			}
+		}
+		return { ...cleanup, definitionRemoved: file.definitions.length < before };
 	});
 }
 
@@ -110,7 +200,8 @@ export async function listAuthoredVerificationDefinitions(
 
 // 删除一条 pending 定义（不影响已 seed 进历史组的 item）。返回是否命中。
 export async function removeAuthoredVerificationDefinition(verificationId: string, nowIso: string): Promise<boolean> {
-	return await mutateAuthoredVerificationDefinitions(nowIso, (file) => {
+	return await mutateAuthoredVerificationDefinitions(nowIso, async (file) => {
+		await cancelVerificationExecutionsForVerificationId(verificationId, "verification_definition_removed", nowIso);
 		const before = file.definitions.length;
 		file.definitions = file.definitions.filter((entry) => entry.verificationId !== verificationId);
 		return file.definitions.length < before;
@@ -127,7 +218,10 @@ export async function materializeAuthoredVerificationItemsForTask(
 	taskId: string,
 	nowIso: string,
 ): Promise<RuntimePostDeployVerificationChecklistItem[]> {
-	const definitions = await listAuthoredVerificationDefinitions({ workspaceId, taskId }, nowIso);
+	const definitions = await listAuthoredDefinitionsWithCleanupOwnershipForMaterialization(
+		{ workspaceId, taskId },
+		nowIso,
+	);
 	return await materializeAuthoredVerificationDefinitionsIntoChecklistItems(definitions);
 }
 
@@ -139,9 +233,9 @@ export async function materializeAuthoredVerificationItemsForWorkspaceTasks(
 	nowIso: string,
 ): Promise<Map<string, RuntimePostDeployVerificationChecklistItem[]>> {
 	const wantedTaskIds = new Set(taskIds);
-	const definitions = (await listAuthoredVerificationDefinitions({ workspaceId }, nowIso)).filter((definition) =>
-		wantedTaskIds.has(definition.taskId),
-	);
+	const definitions = (
+		await listAuthoredDefinitionsWithCleanupOwnershipForMaterialization({ workspaceId }, nowIso)
+	).filter((definition) => wantedTaskIds.has(definition.taskId));
 	const itemsByTaskId = new Map<string, RuntimePostDeployVerificationChecklistItem[]>(
 		taskIds.map((taskId) => [taskId, []]),
 	);
@@ -154,6 +248,25 @@ export async function materializeAuthoredVerificationItemsForWorkspaceTasks(
 		);
 	}
 	return itemsByTaskId;
+}
+
+// 只为旧定义建立当前清理归属基线；旧核对快照不会被追认。迁移完成后的热路径仍只读。
+async function listAuthoredDefinitionsWithCleanupOwnershipForMaterialization(
+	filter: { workspaceId: string; taskId?: string },
+	nowIso: string,
+): Promise<RuntimeAuthoredVerificationDefinition[]> {
+	const definitions = await listAuthoredVerificationDefinitions(filter, nowIso);
+	if (definitions.every((definition) => definition.authoredVerificationDefinitionRegistrationId)) return definitions;
+	return mutateAuthoredVerificationDefinitions(nowIso, (file) => {
+		const currentDefinitions = file.definitions.filter(
+			(definition) =>
+				definition.workspaceId === filter.workspaceId &&
+				(filter.taskId === undefined || definition.taskId === filter.taskId),
+		);
+		for (const definition of currentDefinitions)
+			definition.authoredVerificationDefinitionRegistrationId ??= randomUUID();
+		return currentDefinitions;
+	});
 }
 
 async function materializeAuthoredVerificationDefinitionsIntoChecklistItems(
@@ -169,6 +282,7 @@ async function materializeAuthoredVerificationDefinitionsIntoChecklistItems(
 		}
 		items.push({
 			id: `${AUTHORED_VERIFICATION_ITEM_ID_PREFIX}${definition.verificationId}`,
+			authoredVerificationDefinitionRegistrationId: definition.authoredVerificationDefinitionRegistrationId,
 			label: definition.label,
 			checked: false,
 			source: "authored",

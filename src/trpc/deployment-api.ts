@@ -52,10 +52,18 @@ import {
 	setPendingConfirmation,
 	setVerificationRunState,
 	updateTaskChecklist,
+	validateVerificationExecutionAttemptForDispatch,
 } from "../deployment/post-deploy-verification-state";
 import { summarizeWorkspacesHavingPostDeployVerificationDeploymentGroupsFromStateSnapshot } from "../deployment/post-deploy-verification-workspaces-having-deployment-groups-summarization";
 import { computeTaskDeploymentAttributionsAgainstDeployment } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
-import { runVerificationScript, toRunSnapshot } from "../deployment/verification-script-runner";
+import { waitWithinVerificationExecutionAbsoluteRpcDeadline } from "../deployment/verification-execution-absolute-rpc-deadline";
+import { verificationExecutionDefinitionFingerprint } from "../deployment/verification-execution-definition-fingerprint";
+import { reconcileVerificationExecutionAttempts } from "../deployment/verification-execution-recovery";
+import {
+	buildVerificationExecutionRecoveryRunSnapshot,
+	runVerificationScript,
+	toRunSnapshot,
+} from "../deployment/verification-script-runner";
 import { logDeploymentDiagnosticWarning } from "../diagnostics/deployment-diagnostics-logger";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
@@ -182,6 +190,15 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			input: RuntimeGetPostDeployVerificationStateRequest,
 		): Promise<RuntimeGetPostDeployVerificationStateResponse> => {
 			const nowIso = new Date().toISOString();
+			await reconcileVerificationExecutionAttempts(scope.workspaceId, {
+				readCurrentTaskIncarnationCreatedAtEpochMs: async (workspaceId, taskId) => {
+					if (workspaceId !== scope.workspaceId) return null;
+					const task = (await deps.loadBoardTasksForWorkspace(scope)).find((entry) => entry.taskId === taskId);
+					if (task && task.taskIncarnationCreatedAtEpochMs === undefined)
+						throw new Error("当前任务实例 createdAt 暂不可读");
+					return task?.taskIncarnationCreatedAtEpochMs ?? null;
+				},
+			});
 			// active 组选取顺带触发 state 模块的损坏隔离 + 过期 token GC（读时经 mutate 骨架）。
 			const activeGroup = await getActiveGroup(scope.workspaceId, nowIso);
 			const boardTasks = await deps.loadBoardTasksForWorkspace(scope);
@@ -236,43 +253,106 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeRunPostDeployVerificationItemRequest,
 		): Promise<RuntimeRunPostDeployVerificationItemResponse> => {
+			const requestReceivedAtEpochMs = Date.now();
 			// workspace 归属校验（与 requestVerificationComplete/confirmVerificationComplete 同形）：run 会 spawn 执行
 			// agent 编写的脚本，风险远高于勾选 checkbox，跨 workspace 的 deploymentId 一律在置 running 前拒绝、不触发脚本。
-			const snapshot = await readPostDeployVerificationStateSnapshot();
+			// 尚未读到定义时，最多用清理预算完成只读查找；迟到查找不携带任何派发动作。
+			const snapshot =
+				await waitWithinVerificationExecutionAbsoluteRpcDeadline<RuntimePostDeployVerificationState | null>({
+					deadlineAtEpochMs: requestReceivedAtEpochMs,
+					operation: readPostDeployVerificationStateSnapshot(),
+					recoverySnapshot: () => null,
+				});
+			if (!snapshot) return { ok: false, task: null, error: "验证定义读取尚未完成，未受理或派发脚本，可稍后重试" };
 			const group = snapshot.deploymentGroups.find((entry) => entry.deploymentId === input.deploymentId);
 			if (!group || group.workspaceId !== scope.workspaceId) {
 				return { ok: false, task: null, error: `部署组未找到：deploymentId=${input.deploymentId}` };
 			}
-			const startedAtIso = new Date().toISOString();
-			// 置 running 并取回目标项的 script（并发护栏在此判定：已 running 则拒绝）。
-			const started = await setVerificationRunState(
-				{ deploymentId: input.deploymentId, taskId: input.taskId, itemId: input.itemId, startedAtIso },
-				startedAtIso,
-			);
-			if (!started.ok || started.task === null) {
-				return { ok: false, task: started.task, error: started.error ?? "无法开始运行验证脚本" };
-			}
-			const item = started.task.checklist.find((entry) => entry.id === input.itemId);
-			if (!item || item.script === null) {
-				return { ok: false, task: started.task, error: `验证项缺少脚本：${input.itemId}` };
-			}
+			const requestedItem = group.tasks
+				.find((task) => task.taskId === input.taskId)
+				?.checklist.find((item) => item.id === input.itemId);
+			if (!requestedItem?.script) return { ok: false, task: null, error: "验证项缺少脚本" };
+			const requestDeadlineAtEpochMs = requestReceivedAtEpochMs + requestedItem.script.timeoutMs;
+			let requestRecoveryResponse: RuntimeRunPostDeployVerificationItemResponse = {
+				ok: false,
+				task: null,
+				error: "脚本受理尚未完成；超过截止后不再派发，已有执行由恢复器补证",
+			};
+			return waitWithinVerificationExecutionAbsoluteRpcDeadline<RuntimeRunPostDeployVerificationItemResponse>({
+				deadlineAtEpochMs: requestDeadlineAtEpochMs,
+				recoverySnapshot: () => requestRecoveryResponse,
+				operation: (async () => {
+					const readCurrentTaskIncarnation = async () =>
+						(await deps.loadBoardTasksForWorkspace(scope)).find((entry) => entry.taskId === input.taskId)
+							?.taskIncarnationCreatedAtEpochMs;
+					const taskIncarnationCreatedAtEpochMs = await readCurrentTaskIncarnation();
+					if (taskIncarnationCreatedAtEpochMs === undefined)
+						return { ok: false, task: null, error: "当前任务实例 createdAt 暂不可核验，未派发脚本" };
+					const startedAtIso = new Date().toISOString();
+					// 置 running 并取回目标项的 script（并发护栏在此判定：已 running 则拒绝）。
+					const started = await setVerificationRunState(
+						{
+							deploymentId: input.deploymentId,
+							taskId: input.taskId,
+							itemId: input.itemId,
+							startedAtIso,
+							workspaceId: scope.workspaceId,
+							taskIncarnationCreatedAtEpochMs,
+							executionDeadlineAtEpochMs: requestDeadlineAtEpochMs,
+							expectedVerificationDefinitionFingerprint:
+								verificationExecutionDefinitionFingerprint(requestedItem),
+						},
+						startedAtIso,
+					);
+					if (!started.ok || started.task === null) {
+						return { ok: false, task: started.task, error: started.error ?? "无法开始运行验证脚本" };
+					}
+					const item = started.task.checklist.find((entry) => entry.id === input.itemId);
+					if (!item || item.script === null) {
+						return { ok: false, task: started.task, error: `验证项缺少脚本：${input.itemId}` };
+					}
+					const attemptId = item.run?.verificationExecutionAttemptId;
+					if (!attemptId) return { ok: false, task: started.task, error: "缺少持久执行 attempt，不能派发脚本" };
 
-			const outcome = await runVerificationScript({
-				verificationId: item.id.startsWith("authored:") ? item.id.slice("authored:".length) : item.id,
-				script: item.script,
-				startedAtIso,
-				finishedAtIsoProvider: () => new Date().toISOString(),
+					const attempt = started.executionAttempt;
+					if (!attempt) return { ok: false, task: started.task, error: "持久执行 attempt 受理材料不可用" };
+					const script = item.script;
+					const recoveryTask = structuredClone(started.task);
+					const recoveryItem = recoveryTask.checklist.find((entry) => entry.id === input.itemId);
+					if (recoveryItem) recoveryItem.run = buildVerificationExecutionRecoveryRunSnapshot(attempt);
+					requestRecoveryResponse = { ok: true, task: recoveryTask };
+					return waitWithinVerificationExecutionAbsoluteRpcDeadline<RuntimeRunPostDeployVerificationItemResponse>({
+						deadlineAtEpochMs: attempt.deadlineAtEpochMs,
+						recoverySnapshot: () => ({ ok: true, task: recoveryTask }),
+						operation: (async () => {
+							const outcome = await runVerificationScript({
+								verificationId: item.id.startsWith("authored:") ? item.id.slice("authored:".length) : item.id,
+								script,
+								startedAtIso,
+								finishedAtIsoProvider: () => new Date().toISOString(),
+								executionAttempt: attempt,
+								validateBeforeDispatch: async () =>
+									validateVerificationExecutionAttemptForDispatch(
+										attemptId,
+										async () => (await readCurrentTaskIncarnation()) ?? null,
+									),
+							});
+							const applied = await applyVerificationRunResult(
+								{
+									deploymentId: input.deploymentId,
+									taskId: input.taskId,
+									itemId: input.itemId,
+									run: toRunSnapshot(outcome),
+									readCurrentTaskIncarnationCreatedAtEpochMs: async () =>
+										(await readCurrentTaskIncarnation()) ?? null,
+								},
+								new Date().toISOString(),
+							);
+							return { ok: applied.ok, task: applied.task, error: applied.error };
+						})(),
+					});
+				})(),
 			});
-			const applied = await applyVerificationRunResult(
-				{
-					deploymentId: input.deploymentId,
-					taskId: input.taskId,
-					itemId: input.itemId,
-					run: toRunSnapshot(outcome),
-				},
-				new Date().toISOString(),
-			);
-			return { ok: applied.ok, task: applied.task, error: applied.error };
 		},
 
 		requestVerificationComplete: async (

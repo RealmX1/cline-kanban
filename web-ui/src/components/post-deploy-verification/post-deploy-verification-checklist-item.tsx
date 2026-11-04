@@ -112,6 +112,8 @@ function AutomatedScriptItem({
 	const status = item.run?.status ?? "not_run";
 	const badge = runStatusBadge(status);
 	const isRunning = status === "running";
+	const recoveryObservation = item.run?.recoveryObservation;
+	if (isRunning && recoveryObservation) badge.label = "正在核验退出";
 	const hasRun = item.run !== null && status !== "not_run";
 	const outputExcerpt = item.run?.outputExcerpt ?? "";
 
@@ -164,6 +166,11 @@ function AutomatedScriptItem({
 			</div>
 
 			{/* 输出摘录：运行过就可展开 */}
+			{isRunning && recoveryObservation ? (
+				<p className="m-0 mt-1 pl-5 text-[10px] text-status-orange" role="status">
+					{recoveryObservation.message}
+				</p>
+			) : null}
 			{hasRun && outputExcerpt.length > 0 ? (
 				<div className="mt-1">
 					<button

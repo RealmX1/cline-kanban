@@ -199,6 +199,8 @@ setInterval(() => {}, 1000);
 						packagedCliPath,
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						"协作会话隔离验收",
 						"--prompt",

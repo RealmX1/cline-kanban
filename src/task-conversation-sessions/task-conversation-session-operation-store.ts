@@ -25,6 +25,23 @@ const creationRecordSchema = z.object({
 	launchRequest: runtimeTaskSessionStartRequestSchema,
 	launchOwnerRuntimeProcessInstanceId: z.string().nullable(),
 	processLaunchMayHaveStarted: z.boolean().default(true),
+	nameSuggestion: z
+		.object({
+			operationId: z.string().uuid(),
+			basisText: z.string().nullable(),
+			expectedNameVersion: z.number().int().nonnegative(),
+			status: z.enum([
+				"waiting_for_real_input",
+				"ready",
+				"request_may_have_started",
+				"result_available",
+				"completed",
+				"unavailable",
+			]),
+			suggestedName: z.string().optional(),
+			notice: z.string().optional(),
+		})
+		.optional(),
 	recoveryEvidence: recoveryEvidenceSchema,
 });
 export type TaskConversationSessionCreationRecord = z.infer<typeof creationRecordSchema>;

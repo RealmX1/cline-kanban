@@ -271,7 +271,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			await service.close();
 		}
 	});
-	it("source-only 提案只核验来源资格，退休 writer 的坏历史桥接和不可用 SQLite 卷不制造额外审批", async () => {
+	it("外部设置变化不生成审批，退休 writer 的坏历史桥接和不可用 SQLite 卷不影响来源隔离", async () => {
 		remount.secondaryVolumeRootPath = join(fixture.path, "unavailable-retired-sqlite-volume");
 		await mkdir(remount.secondaryVolumeRootPath);
 		const binding = await prepareCodexConfigurationWriterBinding({
@@ -292,29 +292,14 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		try {
 			await service.scan();
 			const state = await service.getState();
-			const proposal = state.changes.find(
-				(change) => change.sourceWriterId.startsWith("user-source:") && change.approvalStatus === "pending",
-			);
-			if (!proposal) throw new Error("缺少全局来源提案");
-			const result = await service.batchAction({
-				action: "approve",
-				items: [
-					{
-						entryKind: "settings_proposal",
-						changeId: proposal.changeId,
-						expectedVersion: proposal.version,
-						idempotencyKey: randomUUID(),
-					},
-				],
-			});
-			expect(result.results[0]?.status).toBe("applied");
-			expect(result.state.sourceObservations).toHaveLength(0);
+			expect(state.changes).toHaveLength(0);
+			expect(state.sourceObservations).toHaveLength(0);
 			expect(remount.secondaryVolumeQueryCount).toBe(queriesBeforeSourceChange);
 			expect(
 				(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[
 					JSON.stringify(["config.toml", "model"])
 				].value,
-			).toBe("global-source-approved-choice");
+			).toBe("fixture-model");
 		} finally {
 			await service.close();
 		}
@@ -656,7 +641,7 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 				await writeFile(join(sourceHome, "config.toml"), 'model="replacement"\n');
 			}
 			remount.device -= 4n;
-			await expect(createWriter()).rejects.toThrow(/来源.*原绑定证据/);
+			await expect(createWriter()).rejects.toThrow(/原绑定证据/);
 			expect(Object.keys((await readCodexConfigurationSyncStore()).sources)).toEqual([binding.sourceIdentity]);
 		},
 	);

@@ -32,7 +32,7 @@ PTY 的空启动不进入响应回合，启动横幅和历史重播不产生新�
 
 创建时将有效权限、Plan 起步设置、实际 transport 与会话专属模型配置保存在 metadata 的 `taskConversationSessionLaunchSettings` 中。从全新上下文创建时使用所选 Agent 的默认模型。Claude、Codex、OMP 在选择相同 Agent 且主会话已有可靠原生 ID 时默认复刻当前主会话，也可手动选择全新上下文；已有协作会话或 By the way 不阻止再次创建协作 fork。不同 Agent、身份未就绪或不支持 fork 时禁用复刻并显示原因。
 
-协作 fork 按当前主责任绑定及精确原生 ID 寻址，不使用 cwd-latest；提交期间主绑定或原生身份变化时拒绝陈旧请求。模型跟随源原生会话当前持久化状态，不用卡片旧模型或新会话默认模型覆盖；按子身份冷恢复时继续沿用自身模型，显式模型覆盖仍优先；Claude 复用按 ID 的模型探针，Codex/OMP 沿用原生 fork 继承。OMP 默认沿用主会话的 TUI/ACP 通道。
+协作 fork 按当前主责任绑定及精确原生 ID 寻址，不使用 cwd-latest；提交期间主绑定或原生身份变化时拒绝陈旧请求。通过共享工作台新建的 fork 使用所选 Agent 当前默认模型，显式模型覆盖优先，来源历史与模型选择分开；旧创建记录继续保留历史继承语义；按子身份冷恢复时继续沿用自身模型，显式模型覆盖仍优先；Claude 复用按 ID 的模型探针，Codex/OMP 沿用原生 fork 继承。OMP 默认沿用主会话的 TUI/ACP 通道。
 
 OMP TUI 的 `plan.defaultOnStartup` 只对空白历史生效，ACP `set_mode` 也只改内存。TUI fork 使用 `--fork <source-id>`；需要 Plan 起步时加载会话专属的托管扩展，在原生模式恢复之前为独立子身份追加 `mode_change` 并 `flush`。扩展使用已核对的原生 `SessionManager` 方法；若后续 OMP 的只读上下文不再暴露这些方法，则明确退出，避免静默投递可写首条消息。ACP fork 核对握手能力，再以返回的新 ID 重播历史并设置本次连接的 Plan 状态；重播沿用恢复守卫，不推进本轮产出时间戳。
 
@@ -57,7 +57,7 @@ ACP 冷恢复后的活体摘要同时覆盖整板首帧和增量推流，避免�
 当前主 Agent 和可写 peer 按工作分流参考自行判断是否创建只读 By the way 或可写 peer。先 `task conversation-session list/get` 核对已有会话，优先复用；需要时 `create`，创建后继续工作。系统不自动等待、催收或将普通回答回灌主线。
 
 ```sh
-kanban task conversation-session create --task-id <Task ID> --role task_collaborator --reason '独立核对恢复边界' --message '检查既有实现并按需回报' --idempotency-key <稳定请求键> --project-path <主仓库>
+kanban task conversation-session create --task-id <Task ID> --role task_collaborator --start-in-plan-mode false --reason '独立核对恢复边界' --message '检查既有实现并按需回报' --idempotency-key <稳定请求键> --project-path <主仓库>
 kanban task conversation-session list --task-id <Task ID> --project-path <主仓库>
 kanban task conversation-session get --task-id <Task ID> --session-id <会话 ID> --project-path <主仓库>
 kanban task conversation-session report --task-id <Task ID> --message '检查结论' --idempotency-key <稳定回报键> --project-path <主仓库>
@@ -153,3 +153,15 @@ Backlog 的门禁在服务端，卡片启动、直接 runtime 启动及首次建
 
 
 `test/integration/task-main-session-handover-native-codex.integration.test.ts` 使用真实 Codex 和隔离本地模型，验证两种上下文、Plan 首轮、完整原生接受证据、冷恢复及真人继续；设置 `KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY` 与上述打包 CLI 路径启用，可用 `KANBAN_MAIN_SESSION_HANDOVER_NATIVE_EVIDENCE_DIRECTORY` 保存原生分段与结果。不会访问外部模型或用户凭据。
+
+## 共享创建工作台与启动回执
+
+Task、Backlog 编辑、Peer 与 By the way 共用非模态浮窗、名称候选、附件正文、Agent／模型／Plan／权限／profile 控件和设置显示偏好。侧会话固定完整宿主身份和工作目录，不显示任务分支、关系、工作树与自动评审；暂不开放独立探索模式。
+
+新建默认全部允许，By the way 另有持续只读角色限制。Peer 和 By the way 的 Plan 偏好独立保存，初始关闭；它们不继承宿主临时模型或 profile。`create` 和 `--preview` 返回 `resolvedSettings` 及来源，分别说明请求权限、Harness 映射、profile 和角色限制。模型选择实际到达 PTY argv 或 ACP `session/set_config_option`，先于首条 prompt；恢复继续使用自身原生身份和快照。
+
+CLI `task create` 与 `task conversation-session create` 必须显式传 `--start-in-plan-mode true|false`；侧会话还支持 `--model`、`--profile`、`--task-agent-permission-mode`、`--transport`、`--name` 和无创建副作用的 `--preview`。`conversation-session rename` 按宿主 incarnation、会话 ID 和名称版本更新主题名，不修改宿主标题。
+
+草稿和冻结提交按项目、宿主 incarnation、角色及草稿身份持久保存。请求发送前保存幂等键；刷新或响应丢失先查原创建记录，再在确证未受理时提交相同冻结请求。明确未创建的失败允许修正，未知启动保持原身份。背景导航不改变目标。
+
+未命名的非空会话在运行时异步命名；空会话等待首次实际接受且有正文的输入，继承历史与 Plan 初始化不构成命名依据。名称版本保护手改和迟到结果。Task 自动命名也由持久运行时记录负责；模型结果先独立落盘，重启补证原结果，不重复付费。缺少原结果时保持未知，保留推导名称，不阻塞创建。

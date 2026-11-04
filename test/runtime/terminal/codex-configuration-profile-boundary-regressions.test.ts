@@ -288,33 +288,35 @@ describe("Codex profile 跨代与配置边界回归", () => {
 		}
 	});
 	it.each(["model", "hide_agent_reasoning"])(
-		"明确批准全局来源的 %s 后，新会话采用兼容 profile 的获批值",
+		"Kanban 内部 %s 按既有机制更新 profile，未来会话采用新值",
 		async (fieldName) => {
-			await writer();
-			const path = join(sourceHome, "config.toml");
+			const binding = await writer();
+			const path = join(binding.configurationHomeDirectoryPath, "config.toml");
 			const value = fieldName === "model" ? "approved-global-model" : true;
 			await writeFile(path, stringify({ ...parse(await readFile(path, "utf8")), [fieldName]: value }));
 			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 			try {
 				await service.scan();
 				const state = await service.getState();
-				const proposal = requireDefinedTestFixtureValue(
-					state.changes.find(
-						(change) => change.sourceWriterId.startsWith("user-source:") && change.approvalStatus === "pending",
-					),
-				);
-				const result = await service.batchAction({
-					action: "approve",
-					items: [
-						{
-							entryKind: "settings_proposal",
-							changeId: proposal.changeId,
-							expectedVersion: proposal.version,
-							idempotencyKey: randomUUID(),
-						},
-					],
-				});
-				expect(result.results[0].status).toBe("applied");
+				if (fieldName === "model") {
+					const proposal = requireDefinedTestFixtureValue(
+						state.changes.find(
+							(change) => change.sourceWriterId === binding.writerId && change.approvalStatus === "pending",
+						),
+					);
+					const result = await service.batchAction({
+						action: "approve",
+						items: [
+							{
+								entryKind: "settings_proposal",
+								changeId: proposal.changeId,
+								expectedVersion: proposal.version,
+								idempotencyKey: randomUUID(),
+							},
+						],
+					});
+					expect(result.results[0].status).toBe("applied");
+				}
 				const future = await writer();
 				expect(
 					parse(await readFile(join(future.configurationHomeDirectoryPath, "config.toml"), "utf8"))[fieldName],

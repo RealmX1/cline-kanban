@@ -50,6 +50,7 @@ export function buildTaskSessionStartRequestFromBoardCard(
 			: {}),
 		agentId: taskCard.agentId,
 		clineSettings: taskCard.clineSettings,
+		codexReasoningEffortOverride: taskCard.codexReasoningEffortOverride,
 		terminalAgentModelOverrideSettings: taskCard.terminalAgentModelOverrideSettings,
 		...(taskCard.parentSessionId ? { parentSessionId: taskCard.parentSessionId } : {}),
 		...(taskCard.taskAgentSessionInitialization

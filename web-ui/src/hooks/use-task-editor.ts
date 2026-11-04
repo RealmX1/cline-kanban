@@ -1,4 +1,3 @@
-import { isKanbanCursorAgentModelId } from "@runtime-agent-catalog";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "@runtime-task-agent-permission-mode";
 import { deriveTaskTitleFromPrompt, resolveTaskTitle } from "@runtime-task-title";
 import type { Dispatch, SetStateAction } from "react";
@@ -24,15 +23,12 @@ import {
 	takeRuntimeAllocatedTaskIdsForNewWebUiTaskCards,
 } from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
 import { fetchRuntimeConfig } from "@/runtime/runtime-config-query";
-import {
-	transferNeverStartedBacklogTaskToProjectInWorkspace,
-	updateTaskCardFieldValuesInWorkspace,
-} from "@/runtime/task-card-action-query";
+import { transferNeverStartedBacklogTaskToProjectInWorkspace } from "@/runtime/task-card-action-query";
 import {
 	hasWorkspaceTaskEditDraftServerSnapshotSupersededBrowserLocalStorageMirror,
 	subscribeToTaskEditDraftStore,
 } from "@/runtime/task-edit-draft-store";
-import { suggestTaskNamesFromTaskDescription } from "@/runtime/task-name-suggestion-query";
+import { requestAutomaticTaskNameBackfill } from "@/runtime/task-name-suggestion-query";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
@@ -42,7 +38,6 @@ import type {
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
-	RuntimeTerminalAgentModelSelectionAgentId,
 } from "@/runtime/types";
 import {
 	useNewTaskAutoReviewEnabledPreference,
@@ -122,57 +117,7 @@ function takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlo
 	return null;
 }
 
-function isTerminalAgentModelSelectionAgentId(
-	agentId: RuntimeAgentId | null | undefined,
-): agentId is RuntimeTerminalAgentModelSelectionAgentId {
-	return agentId === "claude" || agentId === "codex" || agentId === "cursor" || agentId === "kimi";
-}
-
-function getTaskCreateTerminalAgentModelSelectionStorageKey(
-	projectId: string | null,
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
-): string {
-	return JSON.stringify([projectId ?? "global", agentId]);
-}
-
 // 命令式读取（不在 React 渲染里），所以直接问外部 store 拿生效值：服务端优先、回落本地镜像。
-function readRememberedTaskCreateTerminalAgentModelSelection(
-	projectId: string | null,
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
-): string | undefined {
-	const selections =
-		readEffectiveUserInterfacePreferenceValue("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {};
-	return selections[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)];
-}
-
-function resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(
-	projectId: string | null,
-	agentId: RuntimeAgentId | null | undefined,
-): RuntimeTaskTerminalAgentModelOverrideSettings | undefined {
-	if (!isTerminalAgentModelSelectionAgentId(agentId)) {
-		return undefined;
-	}
-	const rememberedModelId = readRememberedTaskCreateTerminalAgentModelSelection(projectId, agentId);
-	if (agentId === "cursor" && rememberedModelId && !isKanbanCursorAgentModelId(rememberedModelId)) {
-		return undefined;
-	}
-	return rememberedModelId ? { agentId, modelId: rememberedModelId } : undefined;
-}
-
-function writeRememberedTaskCreateTerminalAgentModelSelection(
-	projectId: string | null,
-	agentId: RuntimeTerminalAgentModelSelectionAgentId,
-	modelId: string,
-): void {
-	const currentSelections =
-		readEffectiveUserInterfacePreferenceValue("taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey") ?? {};
-	saveUserInterfacePreferencesSharedAcrossBrowserOrigins({
-		taskCreateTerminalAgentModelSelectionsByProjectAndAgentKey: {
-			...currentSelections,
-			[getTaskCreateTerminalAgentModelSelectionStorageKey(projectId, agentId)]: modelId.trim(),
-		},
-	});
-}
 
 function readMostRecentlyUsedTaskCreateBaseRefForProject(projectId: string): string | null {
 	return (
@@ -204,13 +149,6 @@ function writeMostRecentlyUsedTaskCreateBaseRefForProject(projectId: string | nu
 			[projectId]: trimmedBaseRef,
 		},
 	});
-}
-
-function isSameTerminalAgentModelOverrideSettings(
-	left: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
-	right: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
-): boolean {
-	return (left?.agentId ?? null) === (right?.agentId ?? null) && (left?.modelId ?? null) === (right?.modelId ?? null);
 }
 
 interface TaskCreateTerminalAgentModelOverrideSettingsChangeOptions {
@@ -269,33 +207,19 @@ const TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS = 400;
 async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 	workspaceId: string,
 	taskId: string,
-	prompt: string,
-	priorTitle: string,
-	alreadyPersistedCard?: BoardCard,
+	_prompt: string,
+	_priorTitle: string,
+	createdCard?: BoardCard,
 ): Promise<void> {
+	if (!createdCard) return;
 	try {
-		// 在第一个 await 前捕获落盘请求；成功后登记会移除，但这次回填仍须等待该请求。
-		const [suggestion, persistenceOutcome] = await Promise.all([
-			suggestTaskNamesFromTaskDescription(prompt),
-			alreadyPersistedCard
-				? Promise.resolve({ ok: true })
-				: waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({ workspaceId, taskId }),
-		]);
-		if (!persistenceOutcome.ok) return;
-		const title = suggestion.status === "suggested" ? suggestion.suggestedTaskNames[0] : undefined;
-		if (!title) return;
-		// 后台回填由服务端 CAS 保护，不占交互命令锁，否则会丢回填或反向拒绝正常启动。
-		await updateTaskCardFieldValuesInWorkspace(workspaceId, {
+		const outcome = await waitForAlreadyRequestedNewTaskCardRuntimePersistenceWithoutRetrying({
+			workspaceId,
 			taskId,
-			...(alreadyPersistedCard ? { expectedTaskIncarnationCreatedAtEpochMs: alreadyPersistedCard.createdAt } : {}),
-			taskCardFieldUpdate: {
-				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
-				taskCardFieldValuePatch: { title },
-			},
-			expectedTaskTitleAndPromptForAiNameBackfill: { title: priorTitle, prompt },
 		});
+		if (outcome.ok) await requestAutomaticTaskNameBackfill(workspaceId, createdCard);
 	} catch {
-		/* 起名失败保留描述推导名称。 */
+		/* 保留推导名称，运行时持久创建记录继续接续。 */
 	}
 }
 
@@ -317,7 +241,9 @@ export interface UseTaskEditorResult {
 		SetStateAction<"profile" | "task_local" | undefined>
 	>;
 	newTaskCodexConfigurationProfileId: string | undefined;
+	newTaskCodexReasoningEffortOverride: string | undefined;
 	setNewTaskCodexConfigurationProfileId: Dispatch<SetStateAction<string | undefined>>;
+	setNewTaskCodexReasoningEffortOverride: Dispatch<SetStateAction<string | undefined>>;
 	newTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setNewTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	newTaskConversationMode: RuntimeTaskConversationMode;
@@ -353,7 +279,9 @@ export interface UseTaskEditorResult {
 		SetStateAction<"profile" | "task_local" | undefined>
 	>;
 	editTaskCodexConfigurationProfileId: string | undefined;
+	editTaskCodexReasoningEffortOverride: string | undefined;
 	setEditTaskCodexConfigurationProfileId: Dispatch<SetStateAction<string | undefined>>;
+	setEditTaskCodexReasoningEffortOverride: Dispatch<SetStateAction<string | undefined>>;
 	editTaskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	setEditTaskAgentPermissionMode: Dispatch<SetStateAction<RuntimeTaskAgentPermissionMode>>;
 	editTaskConversationMode: RuntimeTaskConversationMode;
@@ -459,9 +387,13 @@ export function useTaskEditor({
 	const [newTaskCodexConfigurationPermissionSelectionSource, setNewTaskCodexConfigurationPermissionSelectionSource] =
 		useState<"profile" | "task_local" | undefined>();
 	const [newTaskCodexConfigurationProfileId, setNewTaskCodexConfigurationProfileId] = useState<string | undefined>();
+	const [newTaskCodexReasoningEffortOverride, setNewTaskCodexReasoningEffortOverride] = useState<string | undefined>();
 	const [editTaskCodexConfigurationPermissionSelectionSource, setEditTaskCodexConfigurationPermissionSelectionSource] =
 		useState<"profile" | "task_local" | undefined>();
 	const [editTaskCodexConfigurationProfileId, setEditTaskCodexConfigurationProfileId] = useState<string | undefined>();
+	const [editTaskCodexReasoningEffortOverride, setEditTaskCodexReasoningEffortOverride] = useState<
+		string | undefined
+	>();
 	const [newTaskName, setNewTaskName] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
@@ -588,36 +520,12 @@ export function useTaskEditor({
 			? taskCreationTargetWorkspaceIdPinnedInBoardScope
 			: null;
 
-	// 建卡框里挑的终端模型按**建卡目标项目**记住（单项目范围下目标就是当前项目）：读取侧（打开 / 切换目标、
-	// 按目标项目回填的 effect）都按目标项目读，写入若记到当前项目名下，既污染当前项目的偏好、目标项目下次也记不住。
-	// 必须声明在 taskCreationTargetWorkspaceId 之后：依赖数组在渲染时求值，提前引用会撞上 const 的暂时性死区。
-	const rememberNewTaskTerminalAgentModelOverrideSettings = useCallback(
+	const updateNewTaskTerminalAgentModelOverrideSettings = useCallback(
 		(
-			nextSettings:
-				| RuntimeTaskTerminalAgentModelOverrideSettings
-				| undefined
-				| ((
-						current: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
-				  ) => RuntimeTaskTerminalAgentModelOverrideSettings | undefined),
-			options?: TaskCreateTerminalAgentModelOverrideSettingsChangeOptions,
-		) => {
-			setNewTaskTerminalAgentModelOverrideSettings((currentSettings) => {
-				const resolvedSettings = typeof nextSettings === "function" ? nextSettings(currentSettings) : nextSettings;
-				const effectiveAgentId = resolvedSettings?.agentId ?? newTaskAgentId ?? taskCreationDefaultAgentId;
-				if (
-					options?.rememberSelectionForFutureCreateTasks !== false &&
-					isTerminalAgentModelSelectionAgentId(effectiveAgentId)
-				) {
-					writeRememberedTaskCreateTerminalAgentModelSelection(
-						taskCreationTargetWorkspaceId,
-						effectiveAgentId,
-						resolvedSettings?.modelId ?? "",
-					);
-				}
-				return resolvedSettings;
-			});
-		},
-		[taskCreationTargetWorkspaceId, newTaskAgentId, taskCreationDefaultAgentId],
+			nextSettings: SetStateAction<RuntimeTaskTerminalAgentModelOverrideSettings | undefined>,
+			_options?: TaskCreateTerminalAgentModelOverrideSettingsChangeOptions,
+		) => setNewTaskTerminalAgentModelOverrideSettings(nextSettings),
+		[],
 	);
 
 	const { gitRepositoryInfoOfOtherProject: gitRepositoryInfoOfTaskCreationTargetOtherProject } =
@@ -658,6 +566,7 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexReasoningEffortOverride(undefined);
 		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 	}, [isInlineTaskCreateOpen, newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault]);
 
@@ -693,12 +602,8 @@ export function useTaskEditor({
 			return;
 		}
 		const effectiveAgentId = newTaskAgentId ?? taskCreationDefaultAgentId;
-		const nextSettings = resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(
-			taskCreationTargetWorkspaceId,
-			effectiveAgentId,
-		);
 		setNewTaskTerminalAgentModelOverrideSettings((currentSettings) =>
-			isSameTerminalAgentModelOverrideSettings(currentSettings, nextSettings) ? currentSettings : nextSettings,
+			currentSettings?.agentId === effectiveAgentId ? currentSettings : undefined,
 		);
 	}, [isInlineTaskCreateOpen, taskCreationTargetWorkspaceId, newTaskAgentId, taskCreationDefaultAgentId]);
 
@@ -743,6 +648,7 @@ export function useTaskEditor({
 		taskConversationMode: editTaskConversationMode,
 		taskAgentPermissionMode: editTaskAgentPermissionMode,
 		codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+		codexReasoningEffortOverride: editTaskCodexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 		autoReviewEnabled: editTaskAutoReviewEnabled,
 		autoReviewMode: editTaskAutoReviewMode,
@@ -819,6 +725,7 @@ export function useTaskEditor({
 			setEditTaskStartInPlanMode(false);
 			setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 			setEditTaskCodexConfigurationProfileId(undefined);
+			setEditTaskCodexReasoningEffortOverride(undefined);
 			setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 			setEditTaskConversationMode("operational");
 			setEditTaskAutoReviewEnabled(false);
@@ -861,6 +768,7 @@ export function useTaskEditor({
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
 				codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+				codexReasoningEffortOverride: editTaskCodexReasoningEffortOverride,
 				codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
@@ -889,6 +797,7 @@ export function useTaskEditor({
 			editTaskAgentId,
 			editTaskCodexConfigurationPermissionSelectionSource,
 			editTaskCodexConfigurationProfileId,
+			editTaskCodexReasoningEffortOverride,
 			editTaskAgentPermissionMode,
 			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
@@ -934,6 +843,7 @@ export function useTaskEditor({
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
 						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
@@ -974,6 +884,7 @@ export function useTaskEditor({
 			newTaskStartInPlanMode,
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
+			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
 			newTaskConversationMode,
 			newTaskAutoReviewEnabled,
@@ -1010,13 +921,12 @@ export function useTaskEditor({
 		}
 		setNewTaskAgentId(undefined);
 		setNewTaskClineSettings(undefined);
-		setNewTaskTerminalAgentModelOverrideSettings(
-			resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, selectedAgentId),
-		);
+		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexReasoningEffortOverride(undefined);
 		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(currentProjectId);
@@ -1081,6 +991,7 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexReasoningEffortOverride(undefined);
 		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskConversationMode("operational");
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
@@ -1105,6 +1016,9 @@ export function useTaskEditor({
 					: [],
 			startInPlanMode: savedDraft?.startInPlanMode ?? task.startInPlanMode,
 			codexConfigurationProfileId: savedDraft?.codexConfigurationProfileId ?? task.codexConfigurationProfileId,
+			codexReasoningEffortOverride: savedDraft
+				? savedDraft.codexReasoningEffortOverride
+				: task.codexReasoningEffortOverride,
 			codexConfigurationPermissionSelectionSource:
 				savedDraft?.codexConfigurationPermissionSelectionSource ?? task.codexConfigurationPermissionSelectionSource,
 			taskConversationMode: savedDraft?.taskConversationMode ?? task.taskConversationMode ?? "operational",
@@ -1135,6 +1049,7 @@ export function useTaskEditor({
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
 			setEditTaskCodexConfigurationProfileId(formValues.codexConfigurationProfileId);
+			setEditTaskCodexReasoningEffortOverride(formValues.codexReasoningEffortOverride);
 			setEditTaskCodexConfigurationPermissionSelectionSource(formValues.codexConfigurationPermissionSelectionSource);
 			setEditTaskAgentPermissionMode(formValues.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
 			setEditTaskConversationMode(formValues.taskConversationMode ?? "operational");
@@ -1318,6 +1233,7 @@ export function useTaskEditor({
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 		setEditTaskCodexConfigurationProfileId(undefined);
+		setEditTaskCodexReasoningEffortOverride(undefined);
 		setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
@@ -1373,6 +1289,7 @@ export function useTaskEditor({
 				startInPlanMode: editTaskStartInPlanMode,
 				taskAgentPermissionMode: editTaskAgentPermissionMode,
 				codexConfigurationProfileId: editTaskCodexConfigurationProfileId,
+				codexReasoningEffortOverride: editTaskCodexReasoningEffortOverride,
 				codexConfigurationPermissionSelectionSource: editTaskCodexConfigurationPermissionSelectionSource,
 				taskConversationMode: editTaskConversationMode,
 				autoReviewEnabled: editTaskAutoReviewEnabled,
@@ -1410,6 +1327,7 @@ export function useTaskEditor({
 					startInPlanMode: submitted.startInPlanMode,
 					taskAgentPermissionMode: submitted.taskAgentPermissionMode,
 					codexConfigurationProfileId: submitted.codexConfigurationProfileId,
+					codexReasoningEffortOverride: submitted.codexReasoningEffortOverride,
 					codexConfigurationPermissionSelectionSource: submitted.codexConfigurationPermissionSelectionSource,
 					taskConversationMode: submitted.taskConversationMode,
 					autoReviewEnabled: submitted.autoReviewEnabled,
@@ -1481,6 +1399,7 @@ export function useTaskEditor({
 								savedTaskId,
 								submitted.prompt,
 								resolveTaskTitle(undefined, submitted.prompt),
+								taskCardSnapshotAfterFieldSave,
 							);
 						}
 						return true;
@@ -1531,6 +1450,7 @@ export function useTaskEditor({
 				setEditTaskStartInPlanMode(false);
 				setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 				setEditTaskCodexConfigurationProfileId(undefined);
+				setEditTaskCodexReasoningEffortOverride(undefined);
 				setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 				setEditTaskConversationMode("operational");
 				setEditTaskAutoReviewEnabled(false);
@@ -1554,6 +1474,7 @@ export function useTaskEditor({
 			editTaskAgentId,
 			editTaskCodexConfigurationPermissionSelectionSource,
 			editTaskCodexConfigurationProfileId,
+			editTaskCodexReasoningEffortOverride,
 			editTaskAgentPermissionMode,
 			editTaskConversationMode,
 			editTaskAutoReviewEnabled,
@@ -1645,18 +1566,18 @@ export function useTaskEditor({
 	 *   - fire-and-forget：起名要往外发一次网络请求，让建卡等它回来会把「点一下就出卡」变成「转两秒」；
 	 *   - 失败全静默：标题保持正则推导值，用户什么都不会丢，弹提示只会打断建卡节奏；
 	 *   - 服务端同时比对标题与描述：用户手改过、或 agent 已经改过名的卡不该被顶掉。
-	 * shortcut: 起名与回填随浏览器页面存活；需要刷新或关闭页面后继续时再移交 runtime。
+	 * 命名调用与回填由运行时持久记录负责，关闭页面不会取消已受理的命名。
 	 */
 	const backfillSuggestedTaskTitleForCreatedTask = useCallback(
-		(taskId: string, prompt: string, priorTitle: string) => {
+		(taskId: string, prompt: string, priorTitle: string, card: BoardCard) => {
 			if (currentProjectId)
-				void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(currentProjectId, taskId, prompt, priorTitle);
+				void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(currentProjectId, taskId, prompt, priorTitle, card);
 		},
 		[currentProjectId],
 	);
 	const backfillSuggestedTaskTitleForTaskCardCreatedInOtherProject = useCallback(
-		(workspaceId: string, taskId: string, prompt: string, priorTitle: string) => {
-			void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(workspaceId, taskId, prompt, priorTitle);
+		(workspaceId: string, taskId: string, prompt: string, priorTitle: string, card: BoardCard) => {
+			void backfillSuggestedTaskTitleWithRuntimeCompareAndSet(workspaceId, taskId, prompt, priorTitle, card);
 		},
 		[],
 	);
@@ -1693,6 +1614,7 @@ export function useTaskEditor({
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
 						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
@@ -1734,6 +1656,7 @@ export function useTaskEditor({
 			newTaskAgentId,
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
+			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
 			newTaskAgentSessionInitialization,
 			newTaskAutoReviewEnabled,
@@ -1789,11 +1712,12 @@ export function useTaskEditor({
 	// 往其他项目建卡后的表单复位：与本页建卡同一套规则（见 handleCreateTask 末尾的注释），记住的终端模型按目标项目取；
 	// Create more（keepDialogOpen）保留用户选的目标项目。
 	const resetNewTaskFormAfterTaskCardsCreatedInOtherProject = useCallback(
-		(workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
+		(_workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
 			if (options?.preserveFormUntilCreationConfirmed) return;
 			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
+			setNewTaskCodexReasoningEffortOverride(undefined);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
@@ -1803,9 +1727,7 @@ export function useTaskEditor({
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
-			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(workspaceId, taskCreationDefaultAgentId),
-			);
+			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
 				setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
@@ -1815,6 +1737,7 @@ export function useTaskEditor({
 		[
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
+			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -1876,6 +1799,9 @@ export function useTaskEditor({
 						ompAgentSessionTransportForNewTasks,
 						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
+						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
+						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskAgentSessionInitialization: newTaskAgentSessionInitialization,
 						worktreeMode: newTaskWorktreeMode,
 					},
@@ -1900,6 +1826,7 @@ export function useTaskEditor({
 						createdTaskCard.id,
 						prompt,
 						createdTaskCard.title,
+						createdTaskCard,
 					);
 				}
 				trackTaskCreated({
@@ -1928,6 +1855,7 @@ export function useTaskEditor({
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
 					codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+					codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
 					codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 					taskConversationMode: newTaskConversationMode,
 					autoReviewEnabled: newTaskAutoReviewEnabled,
@@ -1962,7 +1890,7 @@ export function useTaskEditor({
 				});
 			}
 			if (!explicitTaskName) {
-				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title);
+				backfillSuggestedTaskTitleForCreatedTask(created.task.id, prompt, created.task.title, created.task);
 			}
 			writeMostRecentlyUsedTaskCreateBaseRefForProject(currentProjectId, baseRef);
 			trackTaskCreated({
@@ -1975,6 +1903,7 @@ export function useTaskEditor({
 			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
+			setNewTaskCodexReasoningEffortOverride(undefined);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
@@ -1989,9 +1918,7 @@ export function useTaskEditor({
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
-			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, taskCreationDefaultAgentId),
-			);
+			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
 				setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
@@ -2025,6 +1952,7 @@ export function useTaskEditor({
 			newTaskPrompt,
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
+			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -2124,6 +2052,7 @@ export function useTaskEditor({
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
+						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
 						codexConfigurationPermissionSelectionSource: newTaskCodexConfigurationPermissionSelectionSource,
 						taskConversationMode: newTaskConversationMode,
 						autoReviewEnabled: newTaskAutoReviewEnabled,
@@ -2173,6 +2102,7 @@ export function useTaskEditor({
 			setNewTaskName("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
+			setNewTaskCodexReasoningEffortOverride(undefined);
 			setNewTaskStartInPlanMode(options?.keepDialogOpen ? newTaskStartInPlanMode : newTaskStartInPlanModeByDefault);
 			setNewTaskAgentPermissionMode(
 				options?.keepDialogOpen ? newTaskAgentPermissionMode : newTaskAgentPermissionModeByDefault,
@@ -2187,9 +2117,7 @@ export function useTaskEditor({
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
 			setNewTaskClineSettings(undefined);
-			setNewTaskTerminalAgentModelOverrideSettings(
-				resolveRememberedTaskCreateTerminalAgentModelOverrideSettings(currentProjectId, taskCreationDefaultAgentId),
-			);
+			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
 				setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
@@ -2216,6 +2144,7 @@ export function useTaskEditor({
 			ompAgentSessionTransportForNewTasks,
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
+			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
@@ -2295,6 +2224,7 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
 		setNewTaskAgentPermissionMode(newTaskAgentPermissionModeByDefault);
 		setNewTaskCodexConfigurationProfileId(undefined);
+		setNewTaskCodexReasoningEffortOverride(undefined);
 		setNewTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setNewTaskConversationMode("operational");
 
@@ -2302,6 +2232,7 @@ export function useTaskEditor({
 		setEditTaskStartInPlanMode(false);
 		setEditTaskAgentPermissionMode(DEFAULT_TASK_AGENT_PERMISSION_MODE);
 		setEditTaskCodexConfigurationProfileId(undefined);
+		setEditTaskCodexReasoningEffortOverride(undefined);
 		setEditTaskCodexConfigurationPermissionSelectionSource(undefined);
 		setEditTaskConversationMode("operational");
 		setEditTaskAutoReviewEnabled(false);
@@ -2341,6 +2272,7 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode(values.startInPlanMode);
 		setNewTaskAgentPermissionMode(values.taskAgentPermissionMode ?? newTaskAgentPermissionModeByDefault);
 		setNewTaskCodexConfigurationProfileId(values.codexConfigurationProfileId);
+		setNewTaskCodexReasoningEffortOverride(values.codexReasoningEffortOverride);
 		setNewTaskCodexConfigurationPermissionSelectionSource(values.codexConfigurationPermissionSelectionSource);
 		setNewTaskConversationMode(values.taskConversationMode ?? "operational");
 		setNewTaskAutoReviewEnabled(values.autoReviewEnabled);
@@ -2384,9 +2316,11 @@ export function useTaskEditor({
 		setNewTaskStartInPlanMode,
 		newTaskCodexConfigurationPermissionSelectionSource,
 		newTaskCodexConfigurationProfileId,
+		newTaskCodexReasoningEffortOverride,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
 		setNewTaskCodexConfigurationProfileId,
+		setNewTaskCodexReasoningEffortOverride,
 		setNewTaskCodexConfigurationPermissionSelectionSource,
 		newTaskConversationMode,
 		setNewTaskConversationMode,
@@ -2404,7 +2338,7 @@ export function useTaskEditor({
 		newTaskClineSettings,
 		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
-		setNewTaskTerminalAgentModelOverrideSettings: rememberNewTaskTerminalAgentModelOverrideSettings,
+		setNewTaskTerminalAgentModelOverrideSettings: updateNewTaskTerminalAgentModelOverrideSettings,
 		newTaskAgentSessionInitialization,
 		setNewTaskAgentSessionInitialization,
 		editingTaskId,
@@ -2418,9 +2352,11 @@ export function useTaskEditor({
 		setEditTaskStartInPlanMode,
 		editTaskCodexConfigurationPermissionSelectionSource,
 		editTaskCodexConfigurationProfileId,
+		editTaskCodexReasoningEffortOverride,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
 		setEditTaskCodexConfigurationProfileId,
+		setEditTaskCodexReasoningEffortOverride,
 		setEditTaskCodexConfigurationPermissionSelectionSource,
 		editTaskConversationMode,
 		setEditTaskConversationMode,

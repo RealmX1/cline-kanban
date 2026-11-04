@@ -133,6 +133,8 @@ it.skipIf(process.env.KANBAN_RUN_CODEX_DRAFT_STASH_REAL_BROWSER_CHECK !== "1" ||
 		const { task } = await runCli([
 			"task",
 			"create",
+			"--start-in-plan-mode",
+			"false",
 			"--title",
 			"隔离 Codex 草稿暂存",
 			"--prompt",

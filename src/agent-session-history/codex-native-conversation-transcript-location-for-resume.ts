@@ -1,14 +1,19 @@
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 // stream-json 的 CommonJS 导出挂在函数对象上，原生 ESM 不能静态识别其 parser 命名导出。
 import streamJson from "stream-json";
+import { decompressStream } from "zstd-stream";
 import { countDailyWorkProgressCollectionCost } from "../diagnostics/daily-work-progress-collection-cost-recorder";
 
 // 只枚举文件名；正文读取严格限定到已知原生 ID，不按 cwd 或更新时间猜对话。
-export async function listKnownCodexTranscriptSegmentPaths(root: string, sessionId: string): Promise<string[]> {
+export async function listKnownCodexTranscriptSegmentPaths(
+	root: string,
+	sessionId: string,
+	options: { includeCompressedTranscripts?: boolean } = {},
+): Promise<string[]> {
 	const paths: string[] = [];
 	const directories = [root];
 	while (directories.length > 0) {
@@ -18,11 +23,16 @@ export async function listKnownCodexTranscriptSegmentPaths(root: string, session
 			countDailyWorkProgressCollectionCost("codex_directory_enumerations");
 			for (const entry of await readdir(directory, { withFileTypes: true })) {
 				const path = join(directory, entry.name);
+				// 正文读取者默认只接收 JSONL；只有能够解压的预检显式启用压缩文件。
+				const transcriptName =
+					options.includeCompressedTranscripts && entry.name.endsWith(".jsonl.zst")
+						? entry.name.slice(0, -4)
+						: entry.name;
 				if (entry.isDirectory()) directories.push(path);
 				else if (
 					entry.isFile() &&
-					(entry.name.endsWith(`${sessionId}.jsonl`) ||
-						(entry.name.includes(`${sessionId}_`) && entry.name.endsWith(".jsonl")))
+					(transcriptName.endsWith(`${sessionId}.jsonl`) ||
+						(transcriptName.includes(`${sessionId}_`) && transcriptName.endsWith(".jsonl")))
 				)
 					paths.push(path);
 			}
@@ -121,37 +131,118 @@ async function transcriptEstablishesRequestedCodexConversation(
 ): Promise<boolean> {
 	try {
 		const handle = await open(path, "r");
+		let transcriptFileChunks: AsyncGenerator<Buffer, void, unknown> | null = null;
 		try {
 			const file = await handle.stat();
 			if (!file.isFile()) return false;
-			const metadataInspectionDeadline = performance.now() + 3_000;
+			const transcriptInspectionDeadline = performance.now() + 3_000;
 			let foundMetadataLineTerminator = false;
-			async function* readMetadataLineChunks() {
+			const metadataLineComplete = new Error("Codex 元数据首行读取完成");
+			const transcriptIsZstandardCompressed = path.endsWith(".jsonl.zst");
+			const assertWithinInspectionDeadline = () => {
+				if (performance.now() >= transcriptInspectionDeadline) throw new Error("Codex 元数据预检超时");
+			};
+			const forwardMetadataLineChunk = (chunk: Uint8Array) => {
+				assertWithinInspectionDeadline();
+				if (foundMetadataLineTerminator) return;
+				const newline = chunk.indexOf(10);
+				metadataLineStream.push(Buffer.from(chunk.subarray(0, newline < 0 ? chunk.length : newline)));
+				if (newline >= 0) {
+					foundMetadataLineTerminator = true;
+					if (!transcriptIsZstandardCompressed) throw metadataLineComplete;
+				}
+			};
+			const metadataLineStream = new Transform({
+				transform(chunk: Uint8Array, _encoding, callback) {
+					try {
+						forwardMetadataLineChunk(chunk);
+						callback();
+					} catch (error) {
+						callback(error === metadataLineComplete ? null : (error as Error));
+					}
+				},
+			});
+			async function* readTranscriptFileChunksWithinInspectionBudget() {
 				// 以打开时的文件大小封顶，避免不断追加、缺少换行的文件拖住预检。
 				for (let position = 0; position < file.size; ) {
-					if (performance.now() >= metadataInspectionDeadline) throw new Error("Codex 元数据预检超时");
+					assertWithinInspectionDeadline();
 					const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, file.size - position));
 					const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
 					if (bytesRead === 0) return;
 					position += bytesRead;
-					const newline = buffer.subarray(0, bytesRead).indexOf(10);
-					yield buffer.subarray(0, newline < 0 ? bytesRead : newline);
-					if (newline >= 0) {
-						foundMetadataLineTerminator = true;
-						return;
-					}
+					yield buffer.subarray(0, bytesRead);
+					if (foundMetadataLineTerminator && !transcriptIsZstandardCompressed) return;
 				}
 			}
 			const identityInspector = createCodexMetadataIdentityTokenInspector(nativeSessionId);
+			const fileChunks = readTranscriptFileChunksWithinInspectionBudget();
+			transcriptFileChunks = fileChunks;
+			let compressedInputCancelled = false;
+			// Node 22.0 的 Readable.toWeb 在取消时可能重复关闭 controller；直接交接迭代器。
+			const compressedInput = transcriptIsZstandardCompressed
+				? new ReadableStream<Uint8Array>(
+						{
+							async pull(controller) {
+								try {
+									const { done, value } = await fileChunks.next();
+									if (compressedInputCancelled) return;
+									if (done) controller.close();
+									else controller.enqueue(value);
+								} catch (error) {
+									if (!compressedInputCancelled) controller.error(error);
+								}
+							},
+							async cancel() {
+								compressedInputCancelled = true;
+								await fileChunks.return();
+							},
+						},
+						{ highWaterMark: 0 },
+					)
+				: null;
+			// JSON 只消费首行；压缩流继续流式核验完整性，损坏的正文不能放行销毁旧 PTY。
+			async function* readDecodedTranscriptChunks() {
+				if (!compressedInput) {
+					yield* fileChunks;
+					return;
+				}
+				const decodedStream = await decompressStream(compressedInput, { highWaterMark: 64 * 1024 });
+				const reader = decodedStream.getReader();
+				try {
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) return;
+						yield value;
+					}
+				} finally {
+					try {
+						await reader.cancel();
+					} finally {
+						reader.releaseLock();
+					}
+				}
+			}
 			await pipeline(
-				Readable.from(readMetadataLineChunks()),
+				Readable.from(readDecodedTranscriptChunks()),
+				metadataLineStream,
 				streamJson.parser({ packValues: false }),
-				async (tokens) => {
-					for await (const token of tokens) identityInspector.inspect(token);
-				},
+				// 同步消费 token，避免单块压缩数据展开后积压大体积元数据字符串。
+				new Writable({
+					objectMode: true,
+					write(token, _encoding, callback) {
+						try {
+							assertWithinInspectionDeadline();
+							identityInspector.inspect(token);
+							callback();
+						} catch (error) {
+							callback(error as Error);
+						}
+					},
+				}),
 			);
 			return foundMetadataLineTerminator && identityInspector.matches();
 		} finally {
+			await transcriptFileChunks?.return();
 			await handle.close();
 		}
 	} catch {
@@ -178,15 +269,38 @@ export async function inspectCodexNativeConversationTranscriptBeforeResume(input
 			pathRelativeToStore !== ".." && !pathRelativeToStore.startsWith(`..${sep}`) && !isAbsolute(pathRelativeToStore)
 		);
 	};
-	if (
-		input.transcriptPath &&
-		isWithinEffectiveCodexStore(input.transcriptPath) &&
-		(await transcriptEstablishesRequestedCodexConversation(input.transcriptPath, input.nativeSessionId))
-	)
-		return { persistedTranscriptPath: input.transcriptPath, codexSessionsDirectoryPath: root };
-	for (const path of await listKnownCodexTranscriptSegmentPaths(root, input.nativeSessionId)) {
-		if (await transcriptEstablishesRequestedCodexConversation(path, input.nativeSessionId))
-			return { persistedTranscriptPath: path, codexSessionsDirectoryPath: root };
+	const inspectedFileVersions = new Set<string>();
+	const inspectCandidate = async (path: string): Promise<boolean> => {
+		if (!isWithinEffectiveCodexStore(path)) return false;
+		try {
+			const before = await stat(path);
+			const version = `${path}:${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`;
+			if (inspectedFileVersions.has(version)) return false;
+			inspectedFileVersions.add(version);
+			if (!(await transcriptEstablishesRequestedCodexConversation(path, input.nativeSessionId))) return false;
+			const after = await stat(path);
+			return before.dev === after.dev && before.ino === after.ino;
+		} catch {
+			return false;
+		}
+	};
+	const savedPath = input.transcriptPath;
+	const savedPathCounterpart = savedPath?.endsWith(".jsonl")
+		? `${savedPath}.zst`
+		: savedPath?.endsWith(".jsonl.zst")
+			? savedPath.slice(0, -4)
+			: null;
+	// 压缩与原生解压可能换掉文件名或 inode；只重查一次，且不重复读取未变化的无效文件。
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		for (const path of [savedPath, savedPathCounterpart]) {
+			if (path && (await inspectCandidate(path)))
+				return { persistedTranscriptPath: path, codexSessionsDirectoryPath: root };
+		}
+		for (const path of await listKnownCodexTranscriptSegmentPaths(root, input.nativeSessionId, {
+			includeCompressedTranscripts: true,
+		})) {
+			if (await inspectCandidate(path)) return { persistedTranscriptPath: path, codexSessionsDirectoryPath: root };
+		}
 	}
 	return { persistedTranscriptPath: null, codexSessionsDirectoryPath: root };
 }

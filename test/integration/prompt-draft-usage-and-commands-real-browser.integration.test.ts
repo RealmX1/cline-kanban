@@ -95,6 +95,8 @@ it.skipIf(!runBrowserCheck)(
 						cliPath,
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						name,
 						"--prompt",

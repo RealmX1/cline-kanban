@@ -46,6 +46,7 @@ function readAgentSessionUpdatedAtMs(session: { updatedAt?: unknown }): number {
 }
 
 export interface AcpTaskConnectionStartInput {
+	modelId?: string;
 	taskId: string;
 	agentId: RuntimeAgentId;
 	// 必须是绝对路径：ACP 的 session/new 要求绝对 cwd，omp 会直接拒收相对路径。
@@ -251,6 +252,15 @@ export class AcpClientConnectionRuntime {
 				},
 				disposedByKanban: false,
 			};
+
+			if (input.modelId) {
+				// fork/load 会重建来源模型；在首条 prompt 前显式应用本次模型，并由原生服务持久化。
+				await connection.agent.request(ACP_AGENT_METHODS.session_set_config_option, {
+					sessionId: newSessionResponse.sessionId,
+					configId: "model",
+					value: input.modelId,
+				});
+			}
 
 			if (input.startInPlanMode && launchDefinition.planModeSessionModeId) {
 				// plan 起步与权限档正交：这里只切开局的 session mode，权限档已经由启动旗标独立表达。

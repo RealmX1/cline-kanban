@@ -151,44 +151,6 @@ export function mergeObservedCodexConfigurationWriter(
 	writer.lastObservedFields = observed;
 }
 
-// 全局来源也只登记提案；已有默认值必须等看板审批，绝不写回全局文件。
-export function reconcileCodexConfigurationUserSourceFields(
-	store: CodexConfigurationSyncStore,
-	sourceIdentity: string,
-	current: CodexConfigurationFields,
-) {
-	const source = store.sources[sourceIdentity];
-	if (!source) return;
-	for (const key of new Set([...Object.keys(source.observedUserFields), ...Object.keys(current)])) {
-		if (sameConfigurationField(current[key], source.observedUserFields[key])) continue;
-		const shared = source.fields[key];
-		const conflict =
-			!sameConfigurationField(shared, source.observedUserFields[key]) &&
-			!sameConfigurationField(shared, current[key]);
-		store.revision++;
-		const change = {
-			changeId: randomUUID(),
-			version: store.revision,
-			sourceWriterId: `user-source:${sourceIdentity}`,
-			sourceIdentity,
-			fieldKey: key,
-			previous: source.observedUserFields[key],
-			value: current[key],
-			sharedValueAtProposal: shared,
-			sharedValueAtConflict: conflict ? shared : undefined,
-			mergeStatus: conflict ? ("conflict" as const) : ("pending_approval" as const),
-			recordKind: "settings_proposal" as const,
-			approvalStatus: "pending" as const,
-			decidedAt: null,
-			observedAt: Date.now(),
-			acknowledgedAt: null,
-			targets: [],
-		};
-		registerObservedChange(store, change);
-	}
-	source.observedUserFields = current;
-}
-
 function registerObservedChange(
 	store: CodexConfigurationSyncStore,
 	change: CodexConfigurationSyncStore["changes"][number],

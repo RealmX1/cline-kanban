@@ -142,7 +142,7 @@ describe("相同设置提案审批不制造冲突", () => {
 
 	it.each([
 		{ defect: "stale_expected_version", expectedStatus: "stale_version", fieldKind: "model" },
-		{ defect: "unreadable_user_source", expectedStatus: "source_unverifiable", fieldKind: "model" },
+		{ defect: "unverifiable_source_directory", expectedStatus: "source_unverifiable", fieldKind: "model" },
 		{ defect: "unreadable_writer", expectedStatus: "source_unverifiable", fieldKind: "model" },
 		{ defect: "changed_local_value", expectedStatus: "stale_version", fieldKind: "model" },
 	] as const)("例外反馈仍核验 $defect，不能把失效建议广播", async ({ defect, expectedStatus, fieldKind }) => {
@@ -150,7 +150,7 @@ describe("相同设置提案审批不制造冲突", () => {
 		const secondItem = { ...items[1] };
 		let unavailableFilePath: string | undefined;
 		if (defect === "stale_expected_version") secondItem.expectedVersion++;
-		if (defect === "unreadable_user_source") unavailableFilePath = join(sourceHome, "config.toml");
+		if (defect === "unverifiable_source_directory") unavailableFilePath = sourceHome;
 		if (defect === "unreadable_writer")
 			unavailableFilePath = join(second.configurationHomeDirectoryPath, "config.toml");
 		if (unavailableFilePath) await rename(unavailableFilePath, `${unavailableFilePath}.unavailable`);
