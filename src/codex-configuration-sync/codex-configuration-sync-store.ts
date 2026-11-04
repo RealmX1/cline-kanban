@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import lockfile from "proper-lockfile";
 import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
@@ -16,12 +15,7 @@ import {
 	codexConfigurationTaskSourceSnapshotSchema,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
-import {
-	createDefaultNonThrowingLockCompromiseHandler,
-	DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
-	DEFAULT_LOCK_STALE_MS,
-	releaseAdvisoryFileLock,
-} from "../fs/locked-file-system";
+import { lockedFileSystem, releaseFilesystemKernelWriteLock } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./codex-configuration-field-projection";
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
@@ -38,6 +32,16 @@ export interface StoredCodexConfigurationProfile {
 }
 
 export interface StoredCodexConfigurationWriter {
+	taskReasoningEffortSelectionAtLaunch?: string;
+	taskReasoningEffortFeedbackSelection?: {
+		selectionId: string;
+		profileId: string;
+		profileVersionAtSelection: number;
+		effort: string;
+		inheritedFields: CodexConfigurationFields;
+		registeredChangeId?: string;
+		supersededAtMs?: number;
+	};
 	sourceTaskSnapshot?: CodexConfigurationTaskSourceSnapshot;
 	legacyLaunchExceptionSelectionAtMigration?: { profileId: string; profileVersion: number };
 	pendingNativePermissionVerificationAtMs?: number;
@@ -82,6 +86,7 @@ export interface StoredCodexConfigurationSource {
 }
 export interface StoredCodexConfigurationChange {
 	settingsIsolationArchivedAtMs?: number;
+	taskReasoningEffortFeedbackSelectionId?: string;
 	modificationInitiator?: CodexConfigurationSourceEvidence["initiator"];
 	sharedConflictEvidence?: {
 		fields: CodexConfigurationFields;
@@ -261,6 +266,18 @@ const storeSchema = z.object({
 				.object({ profileId: z.string(), profileVersion: z.number() })
 				.optional(),
 			pendingNativePermissionVerificationAtMs: z.number().optional(),
+			taskReasoningEffortSelectionAtLaunch: z.string().optional(),
+			taskReasoningEffortFeedbackSelection: z
+				.object({
+					selectionId: z.string().uuid(),
+					profileId: z.string(),
+					profileVersionAtSelection: z.number(),
+					effort: z.string(),
+					inheritedFields: fieldsSchema,
+					registeredChangeId: z.string().optional(),
+					supersededAtMs: z.number().optional(),
+				})
+				.optional(),
 			taskModelSelectionAtLaunch: z.string().optional(),
 			taskPermissionModeSelectionAtLaunch: z.string().optional(),
 			taskPermissionSelectionSourceAtLaunch: z.string().optional(),
@@ -304,6 +321,7 @@ const storeSchema = z.object({
 			sharedFieldsAtObservation: fieldsSchema.optional(),
 			sharedFieldVersionsAtObservation: z.record(z.string(), z.number()).optional(),
 			sharedChangeIdsAtObservation: z.record(z.string(), z.string()).optional(),
+			taskReasoningEffortFeedbackSelectionId: z.string().uuid().optional(),
 			changeId: z.string(),
 			version: z.number(),
 			sourceWriterId: z.string(),
@@ -428,14 +446,8 @@ export async function mutateCodexConfigurationSyncStore<T>(
 	if ((await lstat(directory)).isSymbolicLink()) throw new Error("Codex 配置绑定目录被替换，已保留现场。");
 	const lockAcquisitionStartedAtMs = performance.now();
 	const lockfilePath = `${directory}.lock`;
-	const release = await lockfile
-		.lock(directory, {
-			realpath: false,
-			stale: DEFAULT_LOCK_STALE_MS,
-			retries: DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
-			// 与统一锁封装相同：失效回调不得抛出，否则定时器里的默认 throw 会杀掉整个运行时。
-			onCompromised: createDefaultNonThrowingLockCompromiseHandler(lockfilePath),
-		})
+	const release = await lockedFileSystem
+		.acquireLock({ path: directory, type: "directory", lockfilePath })
 		.catch((error: unknown) => {
 			if (error instanceof Error)
 				error.message = `Codex 配置存储取锁失败：lockPath=${lockfilePath} phase=lock_acquisition waitedMs=${Math.round(performance.now() - lockAcquisitionStartedAtMs)}；${error.message}`;
@@ -468,7 +480,7 @@ export async function mutateCodexConfigurationSyncStore<T>(
 		return result;
 	} finally {
 		await rm(pendingPath, { force: true });
-		// compromise 之后 release 会以 ERELEASED 拒绝；吞掉该良性失败，避免已完成的配置写或 resume 被这次善后拖失败。
-		await releaseAdvisoryFileLock(release, lockfilePath);
+		// 与共享写入入口相同，释放失败只记诊断，不覆盖业务结果。
+		await releaseFilesystemKernelWriteLock(release, lockfilePath);
 	}
 }

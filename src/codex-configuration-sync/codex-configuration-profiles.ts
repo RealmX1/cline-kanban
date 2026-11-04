@@ -311,7 +311,13 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 	writer: StoredCodexConfigurationWriter,
 	group: "model" | "reasoning_effort" | "permissions",
 	observed: CodexConfigurationFields,
+	launchFeedback?: { selectionId: string; observedAtMs: number; previousFields: CodexConfigurationFields },
 ) {
+	const existing =
+		launchFeedback &&
+		store.changes.find((change) => change.taskReasoningEffortFeedbackSelectionId === launchFeedback.selectionId);
+	if (existing) return existing;
+	const previousFields = launchFeedback?.previousFields ?? writer.lastObservedFields;
 	const profile = getCodexConfigurationWriterProfile(store, writer);
 	supersedeFeedbackSuggestions(store, (change) => {
 		const previousBinding = store.writers[change.sourceWriterId]?.binding;
@@ -327,33 +333,34 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 		);
 	});
 	const fieldKeys = [
-		...new Set([...Object.keys(writer.lastObservedFields), ...Object.keys(observed), ...Object.keys(profile.fields)]),
+		...new Set([...Object.keys(previousFields), ...Object.keys(observed), ...Object.keys(profile.fields)]),
 	].filter((key) => codexConfigurationExceptionGroup(key) === group);
 	const fieldKey =
-		fieldKeys.find((key) => !sameConfigurationField(writer.lastObservedFields[key], observed[key])) ?? fieldKeys[0];
+		fieldKeys.find((key) => !sameConfigurationField(previousFields[key], observed[key])) ?? fieldKeys[0];
 	if (!fieldKey) return;
 	const fields = Object.fromEntries(
 		Object.entries(observed)
 			.filter(([key]) => fieldKeys.includes(key))
 			.map(([key, field]) => [key, structuredClone(field)]),
 	);
-	writer.localExceptionOverrides ??= {};
 	const deletedFieldKeys = fieldKeys.filter((key) => observed[key] === undefined);
-	writer.localExceptionOverrides[group] = { profileVersionAtSelection: profile.version, fields, deletedFieldKeys };
-	const observedAt = Date.now();
+	if (!launchFeedback) {
+		writer.localExceptionOverrides ??= {};
+		writer.localExceptionOverrides[group] = { profileVersionAtSelection: profile.version, fields, deletedFieldKeys };
+	}
+	const observedAt = launchFeedback?.observedAtMs ?? Date.now();
 	const change: StoredCodexConfigurationChange = {
+		taskReasoningEffortFeedbackSelectionId: launchFeedback?.selectionId,
 		changeId: randomUUID(),
 		version: ++store.revision,
 		sourceWriterId: writer.binding.writerId,
 		sourceIdentity: writer.binding.sourceIdentity,
 		codexConfigurationProfileId: profile.profileId,
 		fieldKey,
-		previous: writer.lastObservedFields[fieldKey],
+		previous: previousFields[fieldKey],
 		sourceTaskSnapshot: writer.sourceTaskSnapshot,
 		relatedPreviousFields: structuredClone(
-			Object.fromEntries(
-				fieldKeys.flatMap((key) => (writer.lastObservedFields[key] ? [[key, writer.lastObservedFields[key]]] : [])),
-			),
+			Object.fromEntries(fieldKeys.flatMap((key) => (previousFields[key] ? [[key, previousFields[key]]] : []))),
 		),
 		value: observed[fieldKey],
 		relatedFields: Object.fromEntries(fieldKeys.map((key) => [key, observed[key]])),
@@ -372,6 +379,7 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 	};
 	captureCodexConfigurationChangePresentationEvidence(store, change);
 	store.changes.push(change);
+	return change;
 }
 
 function hookTrustDecisionIdentity(sourceIdentity: string, hookSourceKey: string, definitionDigest: string) {

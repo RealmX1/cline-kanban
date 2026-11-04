@@ -312,6 +312,23 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		tempHome.cleanup();
 	});
 
+	it("状态流非法帧只关闭出错连接，其他连接仍收到广播", async () => {
+		const invalidFrameClient = await openQueuedRuntimeSocket(harness.streamUrl);
+		await waitForRuntimeMessage(invalidFrameClient, (message) => message.type === "snapshot");
+		try {
+			invalidFrameClient.socket.send("未掩码帧", { mask: false });
+			await vi.waitFor(() => expect(invalidFrameClient.socket.readyState).toBe(WebSocket.CLOSED), {
+				timeout: RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+			});
+			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+			const message = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
+			expect(message.projects).toHaveLength(1);
+			expect(client.socket.readyState).toBe(WebSocket.OPEN);
+		} finally {
+			invalidFrameClient.socket.terminate();
+		}
+	});
+
 	it("无内容变化时不重发 projects_updated", async () => {
 		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 		const first = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);

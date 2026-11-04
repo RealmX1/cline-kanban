@@ -3,18 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// sessions.json 落在 ~/.cline/kanban/workspaces/<id>/ 之下，路径由 workspace-state 解析。测试把解析点
-// 重定向到临时目录，而不是去动 homedir()（与 exploratory-findings-store 测试同一手法）。
-const testRuntimeHome = { path: "" };
-vi.mock("../../../src/state/workspace-state", () => ({
-	getPersistedWorkspaceSessionsFilePathById: (workspaceId: string) =>
-		join(testRuntimeHome.path, "workspaces", workspaceId, "sessions.json"),
-}));
+const testRuntimeHome = vi.hoisted(() => ({ path: "" }));
+vi.mock("../../../src/state/runtime-home-path", () => ({ getRuntimeHomePath: () => testRuntimeHome.path }));
 
-const {
-	loadWorkspaceAgentConversationProgressObservedAtByTaskId,
+import {
 	loadWorkspaceAgentConversationProgressAndOwnershipSnapshot,
-} = await import("../../../src/state/workspace-agent-conversation-progress-observed-at-reader");
+	loadWorkspaceAgentConversationProgressObservedAtByTaskId,
+} from "../../../src/state/workspace-agent-conversation-progress-observed-at-reader";
 
 // 读取器按 workspaceId 做模块级缓存：每个用例用自己的 id，免得上一个用例的缓存串进来。
 let WORKSPACE_ID = "";
@@ -173,8 +168,8 @@ describe("loadWorkspaceAgentConversationProgressObservedAtByTaskId", () => {
 		await expect(loadWorkspaceAgentConversationProgressObservedAtByTaskId(WORKSPACE_ID)).rejects.toThrow();
 	});
 
-	it("reuses the previous parse while the file's mtime and size are unchanged, and re-reads once either moves", async () => {
-		// 缓存命中的直证：内容换了、字节数与 mtime 却被刻意钉成原样 → 仍返回旧解析结果（没有重新读盘）。
+	it("内容变化即使保留 mtime 和尺寸，也按 ctime 重新读取", async () => {
+		// 旧 mtime 缓存的反例：同尺寸重写并恢复 mtime，ctime 仍能使新内容可见。
 		const firstContents = JSON.stringify({
 			"task-a": {
 				lastConversationProgressObservation: { observedAtMs: 111, evidenceKind: "persisted_agent_transcript" },
@@ -198,7 +193,7 @@ describe("loadWorkspaceAgentConversationProgressObservedAtByTaskId", () => {
 		await writeSessionsFile(sameSizeContents);
 		await utimes(sessionsFilePath(), originalModifiedAt, originalModifiedAt);
 		await expect(loadWorkspaceAgentConversationProgressObservedAtByTaskId(WORKSPACE_ID)).resolves.toEqual(
-			new Map([["task-a", 111]]),
+			new Map([["task-a", 999]]),
 		);
 
 		// mtime 一动就重读。

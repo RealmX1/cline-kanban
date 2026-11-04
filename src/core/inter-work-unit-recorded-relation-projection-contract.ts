@@ -119,6 +119,7 @@ export const TASK_CARD_FIELD_NAMES_PROJECTED_AS_EXECUTION_CONFIGURATION_CHANGE =
 	"clineModelId",
 	"clineReasoningEffort",
 	"terminalAgentModelOverrideSettings",
+	"codexReasoningEffortOverride",
 	"baseRef",
 	"startInPlanMode",
 	"taskAgentPermissionMode",

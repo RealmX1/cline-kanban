@@ -193,6 +193,8 @@ setInterval(() => {}, 1000);
 				[
 					"task",
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--title",
 					title,
 					"--prompt",

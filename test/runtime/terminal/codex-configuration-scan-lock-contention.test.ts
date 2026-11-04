@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import type * as FilesystemPromises from "node:fs/promises";
 import { appendFile, mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import lockfile from "proper-lockfile";
 import { stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as ConfigurationFieldProjection from "../../../src/codex-configuration-sync/codex-configuration-field-projection";
@@ -19,7 +18,19 @@ import {
 import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import type * as NativeTurnPermissionEvidence from "../../../src/codex-configuration-sync/codex-native-turn-permission-evidence";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createTempDir } from "../../utilities/temp-dir";
+
+async function assertCodexConfigurationStoreKernelWriteLockAvailable(): Promise<void> {
+	const directory = getCodexConfigurationSyncDirectory();
+	const release = await lockedFileSystem.acquireLock({
+		path: directory,
+		type: "directory",
+		lockfilePath: `${directory}.lock`,
+		retries: 0,
+	});
+	await release();
+}
 
 const suspendedObservation = vi.hoisted(() => ({
 	home: "",
@@ -176,7 +187,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			selectedProfileId = replacementProfileId;
 			await mutateCodexConfigurationSyncStore((store) => {
 				store.writers[binding.writerId].codexConfigurationProfileId = replacementProfileId;
@@ -402,7 +413,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			await expect(prepareWriter("another-session")).resolves.toHaveProperty(
 				"conversationSessionId",
 				"another-session",
@@ -487,7 +498,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		try {
 			await barrier.observationRead;
 			if (verificationStage === "native_read") {
-				expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+				await assertCodexConfigurationStoreKernelWriteLockAvailable();
 				await prepareWriter("another-session", independentSourceHome);
 			}
 			if (concurrentChange === "generation_replaced") summary.runtimeSessionIncarnationId = randomUUID();
@@ -527,7 +538,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			const resumedBinding = await prepareCodexConfigurationWriterBinding({
 				purpose: "native_session",
 				storageHome: independentSourceHome,
@@ -562,7 +573,7 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
-			expect(await lockfile.check(getCodexConfigurationSyncDirectory(), { realpath: false })).toBe(false);
+			await assertCodexConfigurationStoreKernelWriteLockAvailable();
 			await mutateCodexConfigurationSyncStore((store) => {
 				const profileId = store.writers[binding.writerId].codexConfigurationProfileId;
 				if (!profileId) throw new Error("缺少合成 profile");

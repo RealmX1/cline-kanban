@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeTerminalAgentModelSelectionOption } from "../../../src/core/api-contract";
 import { isKanbanCursorAgentModelId } from "../../../src/core/cursor-agent-models";
 import {
+	buildCodexModelSelectionOptionsFromCatalogStdout,
 	isClaudeCodeCuratedTerminalAgentModelSelectionOptionId,
 	isClaudeCodeLatestTrackingAliasModelSelectionOptionId,
 	isClaudeCodePhaseSwitchingCompositeModelSelectionOptionId,
@@ -10,6 +11,7 @@ import {
 	parseCodexModelCatalog,
 	parseCursorModelList,
 	resolveClaudeLaunchModelIdentityForObservedTranscriptModelIdentity,
+	selectCodexNativeDefaultModelId,
 	selectCursorLaunchDefaultModelIdFromCatalog,
 } from "../../../src/terminal/terminal-agent-model-selection";
 
@@ -17,6 +19,33 @@ import {
 const CLAUDE_HELP_STDOUT = `  --model <model>  Model for the current session. e.g. 'sonnet', 'opus', or 'mythos'.`;
 
 describe("terminal agent model selection", () => {
+	it("保留 Codex 目录的原生推理档位，包括 max、ultra 和未来档位", () => {
+		const options = parseCodexModelCatalog(
+			JSON.stringify({
+				models: [
+					{
+						slug: "codex-fixture",
+						supported_reasoning_levels: [
+							{ effort: "max", description: "最大" },
+							{ effort: "ultra", description: "超高" },
+							{ effort: "future", description: "未来档位" },
+							{ effort: "" },
+							{ effort: 42 },
+						],
+						default_reasoning_level: "max",
+					},
+				],
+			}),
+		);
+		expect(options[0]).toMatchObject({
+			supportedReasoningEfforts: [
+				{ effort: "max", description: "最大" },
+				{ effort: "ultra", description: "超高" },
+				{ effort: "future", description: "未来档位" },
+			],
+			defaultReasoningEffort: "max",
+		});
+	});
 	it("labels latest-tracking Claude aliases without a version number so they can never go stale", () => {
 		const options = parseClaudeHelpModelAliases(CLAUDE_HELP_STDOUT);
 		const byModelId = new Map(options.map((option) => [option.modelId, option]));
@@ -60,6 +89,33 @@ describe("terminal agent model selection", () => {
 		// would silently drop the grouping and collapse the picker back to a single tier.
 		expect(options.every((option) => option.modelSelectionGroup !== undefined)).toBe(true);
 		expect(options.some((option) => option.modelSelectionGroup === "pinned_version")).toBe(true);
+	});
+
+	it("把 priority 最小的可见模型当作 Codex 原生默认，隐藏模型不参与", () => {
+		const stdout = JSON.stringify({
+			models: [
+				{ slug: "listed-later", visibility: "list", priority: 5 },
+				{ slug: "hidden-first", visibility: "hide", priority: 0 },
+				{
+					slug: "native-default",
+					visibility: "list",
+					priority: 1,
+					supported_reasoning_levels: [{ effort: "high" }, { effort: "ultra" }],
+					default_reasoning_level: "high",
+				},
+			],
+		});
+		expect(selectCodexNativeDefaultModelId(stdout)).toBe("native-default");
+		expect(buildCodexModelSelectionOptionsFromCatalogStdout(stdout)).toMatchObject({
+			defaultModelId: "native-default",
+			options: [
+				expect.objectContaining({ modelId: "listed-later" }),
+				expect.objectContaining({
+					modelId: "native-default",
+					defaultReasoningEffort: "high",
+				}),
+			],
+		});
 	});
 
 	it("excludes hidden Codex catalog models from coding agent model options", () => {

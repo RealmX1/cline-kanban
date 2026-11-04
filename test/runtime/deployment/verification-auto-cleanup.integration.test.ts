@@ -10,6 +10,7 @@ import type {
 } from "../../../src/core/api-contract";
 import {
 	listAuthoredVerificationDefinitions,
+	materializeAuthoredVerificationItemsForTask,
 	upsertAuthoredVerificationDefinition,
 } from "../../../src/deployment/authored-verification-definitions";
 import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
@@ -64,6 +65,26 @@ describe.sequential("verification 自动清理触发（markTaskVerified）", () 
 			cleanup: fields.cleanup ?? { mode: "manual", assetsDir: null, manualSteps: [] },
 			createdAtIso: NOW_ISO,
 		};
+	}
+
+	async function persistFixtureWithCurrentAuthoredRegistrationIdentities(state: RuntimePostDeployVerificationState) {
+		for (const group of state.deploymentGroups) {
+			for (const task of group.tasks) {
+				const authoredItems = await materializeAuthoredVerificationItemsForTask(
+					group.workspaceId,
+					task.taskId,
+					NOW_ISO,
+				);
+				for (const item of task.checklist) {
+					item.authoredVerificationDefinitionRegistrationId = authoredItems.find(
+						(authored) => authored.id === item.id,
+					)?.authoredVerificationDefinitionRegistrationId;
+				}
+			}
+		}
+		const statePath = getPostDeployVerificationStatePath();
+		mkdirSync(dirname(statePath), { recursive: true });
+		writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
 	}
 
 	it("automatic 项资产被删 + 定义被注销；manual 项资产与定义均保留", async () => {
@@ -144,9 +165,7 @@ describe.sequential("verification 自动清理触发（markTaskVerified）", () 
 				},
 			],
 		};
-		const statePath = getPostDeployVerificationStatePath();
-		mkdirSync(dirname(statePath), { recursive: true });
-		writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+		await persistFixtureWithCurrentAuthoredRegistrationIdentities(state);
 
 		const result = await markTaskVerified(deploymentId, taskId, NOW_ISO);
 		expect(result.ok).toBe(true);
@@ -221,9 +240,7 @@ describe.sequential("verification 自动清理触发（markTaskVerified）", () 
 				},
 			],
 		};
-		const statePath = getPostDeployVerificationStatePath();
-		mkdirSync(dirname(statePath), { recursive: true });
-		writeFileSync(statePath, JSON.stringify(state, null, 2), "utf8");
+		await persistFixtureWithCurrentAuthoredRegistrationIdentities(state);
 
 		// 核对完成本身成功（清理失败/拒删绝不回滚核对）。
 		const result = await markTaskVerified(deploymentId, taskId, NOW_ISO);

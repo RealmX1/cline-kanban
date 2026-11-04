@@ -1076,6 +1076,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
+		client.on("error", () => client.terminate());
 		client.on("close", () => {
 			taskVisualizationArtifactService?.forgetBrowserClient(client);
 			cleanupRuntimeStateClient(client);

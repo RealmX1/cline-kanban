@@ -15,6 +15,8 @@ import {
 /** 全 null / 全空字典：表示「服务端一条偏好都没有」，也是首次读取时的形态。 */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		newPeerSessionStartInPlanMode: null,
+		newByTheWaySessionStartInPlanMode: null,
 		taskProjectAssignmentAutomaticAnalysisEnabled: null,
 		taskEditorSettingPresentationBySettingKey: {},
 		newTaskAutoReviewEnabled: null,
@@ -70,6 +72,8 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		return parsed.success ? (parsed.data as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TField]) : null;
 	};
 	return {
+		newPeerSessionStartInPlanMode: parseNullableField("newPeerSessionStartInPlanMode") ?? null,
+		newByTheWaySessionStartInPlanMode: parseNullableField("newByTheWaySessionStartInPlanMode") ?? null,
 		taskProjectAssignmentAutomaticAnalysisEnabled:
 			parseNullableField("taskProjectAssignmentAutomaticAnalysisEnabled") ?? null,
 		taskEditorSettingPresentationBySettingKey: parseNullableField("taskEditorSettingPresentationBySettingKey") ?? {},
@@ -97,6 +101,8 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 	preferences: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		preferences.newPeerSessionStartInPlanMode == null &&
+		preferences.newByTheWaySessionStartInPlanMode == null &&
 		preferences.taskProjectAssignmentAutomaticAnalysisEnabled == null &&
 		Object.keys(preferences.taskEditorSettingPresentationBySettingKey ?? {}).length === 0 &&
 		preferences.newTaskAutoReviewEnabled === null &&
@@ -128,6 +134,8 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 	right: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		(left.newPeerSessionStartInPlanMode ?? null) === (right.newPeerSessionStartInPlanMode ?? null) &&
+		(left.newByTheWaySessionStartInPlanMode ?? null) === (right.newByTheWaySessionStartInPlanMode ?? null) &&
 		(left.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) ===
 			(right.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) &&
 		areStringKeyedStringRecordsEqual(
@@ -201,6 +209,14 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 		return current;
 	}
 	const replaced: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = {
+		newByTheWaySessionStartInPlanMode:
+			updates?.newByTheWaySessionStartInPlanMode === undefined
+				? (current.newByTheWaySessionStartInPlanMode ?? null)
+				: updates.newByTheWaySessionStartInPlanMode,
+		newPeerSessionStartInPlanMode:
+			updates?.newPeerSessionStartInPlanMode === undefined
+				? (current.newPeerSessionStartInPlanMode ?? null)
+				: updates.newPeerSessionStartInPlanMode,
 		taskProjectAssignmentAutomaticAnalysisEnabled:
 			updates?.taskProjectAssignmentAutomaticAnalysisEnabled === undefined
 				? (current.taskProjectAssignmentAutomaticAnalysisEnabled ?? null)

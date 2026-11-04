@@ -1,8 +1,4 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-// Main React composition root for the browser app.
-// Keep this file focused on wiring top-level hooks and surfaces together, and
-// push runtime-specific orchestration down into hooks and service modules.
-import { resolveTaskAgentPermissionModeFromLegacyAutonomousFlag } from "@runtime-task-agent-permission-mode";
 import { FolderOpen } from "lucide-react";
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -39,6 +35,7 @@ import { PostDeployVerificationTaskClosureFormHost } from "@/components/post-dep
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { ProjectVisualIdentityProvider } from "@/components/project-visual-identity";
 import { RuntimeSettingsDialog, type RuntimeSettingsSection } from "@/components/runtime-settings-dialog";
+import { SideSessionCreationWorkbench } from "@/components/side-session-creation-workbench";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import { StartAllReadyBacklogTasksConfirmDialog } from "@/components/start-all-ready-backlog-tasks-confirm-dialog";
 import { StartupOnboardingDialog } from "@/components/startup-onboarding-dialog";
@@ -708,9 +705,11 @@ export default function App(): ReactElement {
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
 		newTaskCodexConfigurationProfileId,
+		newTaskCodexReasoningEffortOverride,
 		newTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationPermissionSelectionSource,
 		setNewTaskCodexConfigurationProfileId,
+		setNewTaskCodexReasoningEffortOverride,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
 		newTaskConversationMode,
@@ -742,9 +741,11 @@ export default function App(): ReactElement {
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
 		editTaskCodexConfigurationProfileId,
+		editTaskCodexReasoningEffortOverride,
 		editTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationPermissionSelectionSource,
 		setEditTaskCodexConfigurationProfileId,
+		setEditTaskCodexReasoningEffortOverride,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
 		editTaskConversationMode,
@@ -812,9 +813,7 @@ export default function App(): ReactElement {
 		ompAgentSessionTransportForNewTasks: runtimeProjectConfig?.ompAgentSessionTransportForNewTasks ?? "pty_terminal",
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		// 全局那个旧开关如今只决定「新任务的默认权限档」，不再直接作用于会话启动。
-		newTaskAgentPermissionModeByDefault: resolveTaskAgentPermissionModeFromLegacyAutonomousFlag(
-			runtimeProjectConfig?.agentAutonomousModeEnabled ?? true,
-		),
+		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
 		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 		onTaskCardsCreatedInOtherProject: handleTaskCardsCreatedInOtherProject,
@@ -2294,6 +2293,12 @@ export default function App(): ReactElement {
 								? setEditTaskCodexConfigurationPermissionSelectionSource
 								: setNewTaskCodexConfigurationPermissionSelectionSource
 						}
+						codexReasoningEffortOverride={
+							editingTaskId ? editTaskCodexReasoningEffortOverride : newTaskCodexReasoningEffortOverride
+						}
+						onCodexReasoningEffortOverrideChange={
+							editingTaskId ? setEditTaskCodexReasoningEffortOverride : setNewTaskCodexReasoningEffortOverride
+						}
 						codexConfigurationProfileId={
 							editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
 						}
@@ -2579,6 +2584,7 @@ export default function App(): ReactElement {
 			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
 				<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
 					{renderedApplicationView}
+					<SideSessionCreationWorkbench />
 				</PostDeployVerificationEntryNavigationHostProvider>
 			</TaskCommentsDialogProvider>
 		</ProjectVisualIdentityProvider>

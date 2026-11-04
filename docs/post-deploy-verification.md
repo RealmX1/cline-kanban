@@ -151,3 +151,5 @@ kanban task done --task-id <id> --closure-reasons-file reasons.json   # [{checkl
 taskId 只在项目内唯一，所以「读浏览器里的 board」的判据必须同时比对 `projectIdOwningHydratedBoard`，只比 `currentProjectId` 会在过渡窗口里把另一个项目的同号卡当成条目。
 
 快照模式的移列（`web-ui/src/state/post-deploy-verification-panel-completion-move-into-done-for-workspace-board-not-hydrated-in-browser.ts`）先在服务端用 `taskCardAction.readTaskCardWithBoardColumn` 复检卡片所在列：快照最多旧 30 秒，而 token 按发放时的列算确认项，卡已漂移就不能用旧确认项推进 Done。复检通过后调用的仍是同一个 `taskCardAction.moveTaskCardIntoDone…` 门禁主路径。
+
+自动脚本的持久 attempt、独立监督、退出证明与无浏览器恢复接线见 [脚本执行监督与恢复](post-deploy-verification-script-execution-attempt-supervision.md)。公共状态保持兼容，未确认退出仍显示 `running` 和“正在核验退出”。

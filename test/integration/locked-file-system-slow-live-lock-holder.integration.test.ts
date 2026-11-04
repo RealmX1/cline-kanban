@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { LockedFileSystem } from "../../src/fs/locked-file-system";
 import { createTempDir } from "../utilities/temp-dir";
 
-// 真实 proper-lockfile（不 mock）：一个**活着但慢**的持有者持锁 7s——高负载下 worktree setup 锁 / index
+// 真实 SQLite 内核锁（不 mock）：一个**活着但慢**的持有者持锁 7s——高负载下 worktree setup 锁 / index
 // 锁的真实形状——等待方用默认重试应当等到它释放，而不是在 ~5s 时抛 ELOCKED。
 // 同一场景里并排跑一个显式套用旧重试配置（200×25ms≈5s）的等待方，证明这个场景确实能区分新旧两种配置。
 //
