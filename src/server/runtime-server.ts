@@ -1246,14 +1246,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				const board = await loadWorkspaceBoardById(record.workspaceId);
 				const card = board.columns.flatMap((column) => column.cards).find((item) => item.id === record.taskId);
 				if (!card) throw new Error("原任务已不存在");
+				const originatingSessionLaunchSettings =
+					summary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 				const restored = await runtimeApi.startTaskSession(scope, {
 					taskId: record.originatingConversationSessionId,
 					workspaceTaskId: record.taskId,
 					prompt: "",
 					baseRef: card.baseRef ?? "main",
-					codexReasoningEffortOverride:
-						summary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
-							?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride,
+					codexReasoningEffortOverride: originatingSessionLaunchSettings
+						? originatingSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					resumePriorAgentConversationWithoutResendingPrompt: true,
 				});
 				summary = restored.summary;

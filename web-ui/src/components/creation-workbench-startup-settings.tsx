@@ -2,13 +2,16 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { Check } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
-import { useId } from "react";
+import { useEffect, useId } from "react";
 import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
+import { CodexTaskReasoningEffortSelect } from "@/components/codex-task-reasoning-effort-select";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
 import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
 import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
 import { type TaskEditorSetting, TaskEditorSettingGroup } from "@/components/task-editor-setting-groups";
 import { NativeSelect } from "@/components/ui/native-select";
+import { resolveCodexTaskReasoningEffortSelection } from "@/hooks/codex-task-reasoning-effort-selection";
+import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import type { RuntimeTaskAgentPermissionMode } from "@/runtime/types";
 
 type AgentModelPickerProps = ComponentProps<typeof TaskAgentModelPicker>;
@@ -33,6 +36,9 @@ export interface CreationWorkbenchStartupSettingsProps
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
+	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
+	onCodexReasoningEffortValidationErrorChange?: (value: string | null) => void;
 	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
@@ -57,6 +63,33 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 	});
 	const planCheckboxId = useId();
 	const agentId = props.agentId ?? props.defaultAgentId ?? null;
+	const codexConfiguration = useCodexConfigurationSync(
+		props.workspaceId,
+		props.active && agentId === "codex" && Boolean(props.onCodexReasoningEffortOverrideChange),
+	);
+	const codexReasoningEffortSelection = resolveCodexTaskReasoningEffortSelection({
+		profile: codexConfiguration.state?.profiles?.find(
+			(profile) =>
+				profile.profileId ===
+				(props.codexConfigurationProfileId ?? codexConfiguration.state?.defaultCodexConfigurationProfileId),
+		),
+		explicitModelId:
+			props.terminalAgentModelOverrideSettings?.agentId === "codex"
+				? props.terminalAgentModelOverrideSettings.modelId
+				: undefined,
+		override: props.codexReasoningEffortOverride,
+		catalog: picker.terminalAgentModelCatalog,
+		catalogWarning: picker.terminalAgentModelCatalogWarning,
+		catalogIsLoading: picker.isLoadingTerminalAgentModels,
+	});
+	const codexReasoningEffortValidationError =
+		agentId === "codex" && props.onCodexReasoningEffortOverrideChange
+			? codexReasoningEffortSelection.validationError
+			: null;
+	const reportCodexReasoningEffortValidationError = props.onCodexReasoningEffortValidationErrorChange;
+	useEffect(() => {
+		reportCodexReasoningEffortValidationError?.(codexReasoningEffortValidationError);
+	}, [codexReasoningEffortValidationError, reportCodexReasoningEffortValidationError]);
 	const settings: TaskEditorSetting[] = [
 		{
 			key: "plan_mode",
@@ -153,8 +186,20 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 									{
 										key: "model",
 										label: "模型与参数",
-										summary: props.terminalAgentModelOverrideSettings?.modelId ?? "Agent 默认配置",
-										content: modelSelection,
+										summary: `${props.terminalAgentModelOverrideSettings?.modelId ?? "Agent 默认配置"}${agentId === "codex" && props.onCodexReasoningEffortOverrideChange ? ` · 推理：${props.codexReasoningEffortOverride ?? "沿用 Codex 配置"}${codexReasoningEffortValidationError ? "（不兼容）" : ""}` : ""}`,
+										content: (
+											<>
+												{modelSelection}
+												{agentId === "codex" && props.onCodexReasoningEffortOverrideChange && (
+													<CodexTaskReasoningEffortSelect
+														value={props.codexReasoningEffortOverride}
+														onChange={props.onCodexReasoningEffortOverrideChange}
+														selection={codexReasoningEffortSelection}
+														onRetry={picker.retryTerminalAgentModelCatalog}
+													/>
+												)}
+											</>
+										),
 									},
 								]),
 						...settings,

@@ -1156,9 +1156,9 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 						taskAgentPermissionMode:
 							metadata.taskConversationSessionLaunchSettings?.taskAgentPermissionMode ??
 							card.taskAgentPermissionMode,
-						codexReasoningEffortOverride:
-							metadata.taskConversationSessionLaunchSettings?.codexReasoningEffortOverride ??
-							latestBeforeStart.codexReasoningEffortOverride,
+						codexReasoningEffortOverride: metadata.taskConversationSessionLaunchSettings
+							? metadata.taskConversationSessionLaunchSettings.codexReasoningEffortOverride
+							: latestBeforeStart.codexReasoningEffortOverride,
 						terminalAgentModelOverrideSettings:
 							metadata.taskConversationSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 						resumePriorAgentConversationWithoutResendingPrompt:

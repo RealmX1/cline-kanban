@@ -683,7 +683,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				settings?.codexConfigurationProfileId ??
 				summary.codexConfigurationProfileId ??
 				card.codexConfigurationProfileId,
-			codexReasoningEffortOverride: settings?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride,
+			codexReasoningEffortOverride: settings
+				? settings.codexReasoningEffortOverride
+				: card.codexReasoningEffortOverride,
 			codexConfigurationPermissionSelectionSource:
 				settings?.codexConfigurationPermissionSelectionSource ?? card.codexConfigurationPermissionSelectionSource,
 			requestedAgentSessionTransport:
@@ -2236,8 +2238,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						sideSessionLaunchSettings?.codexConfigurationProfileId ??
 						currentSummary?.codexConfigurationProfileId ??
 						card.codexConfigurationProfileId,
-					codexReasoningEffortOverride:
-						sideSessionLaunchSettings?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride,
+					codexReasoningEffortOverride: sideSessionLaunchSettings
+						? sideSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					codexConfigurationPermissionSelectionSource:
 						sideSessionLaunchSettings?.codexConfigurationPermissionSelectionSource ??
 						card.codexConfigurationPermissionSelectionSource,
@@ -4303,8 +4306,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					agentId,
 					taskAgentPermissionMode:
 						sideSessionLaunchSettings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
-					codexReasoningEffortOverride:
-						sideSessionLaunchSettings?.codexReasoningEffortOverride ?? card.codexReasoningEffortOverride,
+					codexReasoningEffortOverride: sideSessionLaunchSettings
+						? sideSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					terminalAgentModelOverrideSettings: sideSessionLaunchSettings?.terminalAgentModelOverrideSettings,
 					worktreeMode: card.worktreeMode,
 					requestedAgentSessionTransport: body.targetSessionTransport,

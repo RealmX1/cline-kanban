@@ -10,7 +10,7 @@
 
 ## Profile 与字段归属
 
-`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，侧会话默认继承 Task，可另选同来源 profile。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
+`CodexConfigurationProfile` 是看板内具名、持久的配置集合；Task 与主、侧会话分别保存 `codexConfigurationProfileId`。创建和编辑 Task 共用选择器，新侧会话使用独立启动设置与默认 profile，可另选同来源 profile；恢复既有会话继续使用其冻结快照。设置页支持复制创建、重命名、默认选择、按字段修改及当前会话重新绑定。profile 不改变认证、历史目录或 SQLite 归属，不回写普通 Codex 的全局配置。
 
 | 设置 | 会话中修改后的默认行为 | 范围 |
 | --- | --- | --- |
