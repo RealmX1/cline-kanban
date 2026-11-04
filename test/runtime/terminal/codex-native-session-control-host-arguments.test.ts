@@ -1,10 +1,43 @@
-import { describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
 	inspectCodexNativeSessionControlHostArguments,
 	prepareCodexNativeSessionControlHostLaunch,
+	resolveConfiguredCodexNativeControlSocketPath,
 } from "../../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
+import { getRuntimeHomePath } from "../../../src/state/runtime-home-path";
 
 describe("Codex 独享控制宿主的配置与原生 argv 边界", () => {
+	it("固定私有路径按 workspace 与会话联合绑定，缺失或越界时不回落到共享 daemon", () => {
+		vi.stubEnv("HOME", "/private/tmp/kanban-native-control-home");
+		onTestFinished(() => {
+			vi.unstubAllEnvs();
+		});
+		const identity = { workspaceId: "workspace-a", conversationSessionId: "task-main" };
+		const socket = join(getRuntimeHomePath(), "native-control/0123456789abcdef/rpc.sock");
+		expect(resolveConfiguredCodexNativeControlSocketPath({ ...identity, environment: {} })).toBeNull();
+		const environment = {
+			KANBAN_CODEX_SESSION_CONTROL_SOCKET_PATHS_BY_SCOPED_SESSION_KEY: JSON.stringify({
+				[JSON.stringify([identity.workspaceId, identity.conversationSessionId])]: socket,
+			}),
+		};
+		expect(resolveConfiguredCodexNativeControlSocketPath({ ...identity, environment })).toBe(socket);
+		expect(() =>
+			resolveConfiguredCodexNativeControlSocketPath({ ...identity, workspaceId: "workspace-b", environment }),
+		).toThrow("缺少已准备");
+		expect(() =>
+			resolveConfiguredCodexNativeControlSocketPath({
+				...identity,
+				environment: {
+					KANBAN_CODEX_SESSION_CONTROL_SOCKET_PATHS_BY_SCOPED_SESSION_KEY: JSON.stringify({
+						[JSON.stringify([identity.workspaceId, identity.conversationSessionId])]:
+							"/private/tmp/foreign-daemon.sock",
+					}),
+				},
+			}),
+		).toThrow("独立会话目录");
+	});
+
 	it("未知补传参数交给原生 CLI，避免中间宿主重排其未知值", async () => {
 		const additionalAgentStartupArgumentsForThisRestart = [
 			"--future-native-option",

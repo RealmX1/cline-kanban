@@ -198,6 +198,8 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 		const created = await command([
 			"task",
 			"create",
+			"--start-in-plan-mode",
+			"false",
 			"--title",
 			"隔离 CLI 输出回归",
 			"--prompt",

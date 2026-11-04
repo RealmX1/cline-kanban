@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -302,6 +302,25 @@ describe.sequential("invoking repository mutation canary", () => {
 			expect(result.mutationCategories).toContain("git-directory-identity");
 			expect(result.diagnosticReportPath).not.toBeNull();
 			expect(existsSync(result.diagnosticReportPath ?? "")).toBe(true);
+		} finally {
+			gitFixture.cleanup();
+		}
+	});
+
+	it("直接启动时解析调用仓库 node_modules/.bin 中的命令", async () => {
+		const { gitFixture, repository } = createCommittedCanaryRepository("local-node-module-binary-repository");
+		try {
+			const localBinaryDirectoryPath = join(repository.repositoryPath, "node_modules", ".bin");
+			mkdirSync(localBinaryDirectoryPath, { recursive: true });
+			const localBinaryPath = join(localBinaryDirectoryPath, "local-bin-probe");
+			writeFileSync(localBinaryPath, "#!/bin/sh\nexit 0\n", "utf8");
+			chmodSync(localBinaryPath, 0o755);
+			const result = await runCommandWithInvokingRepositoryMutationCanary({
+				invokingDirectoryPath: repository.repositoryPath,
+				command: "local-bin-probe",
+			});
+			expect(result.exitCode).toBe(0);
+			expect(result.mutationCategories).toEqual([]);
 		} finally {
 			gitFixture.cleanup();
 		}

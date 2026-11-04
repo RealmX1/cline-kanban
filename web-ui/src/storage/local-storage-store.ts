@@ -1,4 +1,6 @@
 export enum LocalStorageKey {
+	SideSessionCreationWorkbenchDrafts = "kanban.side-session-creation-workbench-drafts.v1",
+	SideSessionCreationWorkbenchUnreadableDraftRecoveryCopies = "kanban.side-session-creation-workbench-unreadable-draft-recovery-copies.v1",
 	CodexConfigurationChangeNoticeCollapsed = "codex-configuration-change-notice-collapsed",
 	CodexConfigurationUnconfirmedSourceObservationActions = "kanban.codex-configuration-unconfirmed-source-observation-actions.v1",
 	DailyWorkProgressSelectedWorkspace = "kanban.daily-work-progress-selected-workspace.v1",

@@ -274,6 +274,8 @@ async function readCurrentCodexNativeActivity(
 		...(executionReadFailure ? { codexNativeAgentTurnExecutionReadFailure: executionReadFailure } : {}),
 		...(isCodexNeedsInputNativeReconciliationCandidate(summary) &&
 		execution?.threadStatus === "idle" &&
+		execution.executionStatus === "finished" &&
+		execution.activeFlags.length === 0 &&
 		execution.canAcceptDirectInput === true
 			? {
 					codexNativeDirectInputReadiness: {

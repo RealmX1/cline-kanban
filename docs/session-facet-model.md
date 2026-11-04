@@ -80,6 +80,21 @@ legacy `state` 字段只是纯派生投影 `projectLegacyState(facets)`（`src/c
 （`session-manager.ts` `runTaskChatInputDeliveryAttempt`，:1642）与排队 prompt 出队门控共用
 同一份集合——两处各持一份副本，迟早有一份漂移出「review 又被算进去」的同一个 bug。
 
+## 原生待输入补证
+
+`liveness=live` 只证明进程存活；`turnOwner=user, userTurnKind=review` 表示普通待审，允许下一条程序化输入。
+`question / permission / plan_review` 是明确待答；`needs_input` 是仍需核验的兜底分类，在核验前继续阻止程序化输入。
+历史完成记录只能证明历史回合，不能单独证明当前进程空闲。
+
+Codex 复用本代原生控制面的执行观测：同一工作区、会话、原生身份、PID 和进程代际，且 `idle`、无 active flags、
+`executionStatus=finished`、`canAcceptDirectInput=true` 时，只把残留 `needs_input` 校正为 `review`。明确待答不走此路径。
+比较的是语义快照；PTY 重绘的 `updatedAt / lastOutputAt` 不废弃证明，新输入、回合、hook、身份或目录变化仍废弃旧证明。
+
+`codexNativeDirectInputReadinessReconciliation` 在原生查询前保存预算与恢复条件，同一证据先补证三次，间隔至少 15 秒。
+随后保留未知态，每分钟探测一次端点响应；文件元数据、原生历史或语义证据变化可提前触发重验。
+探测进度独立于浏览器持久化，重绘和 observer 重启均不重置快速补证预算；旧耗尽记录按最后尝试时间恢复低频探测。
+校正沿共享 facet 漏斗写入，交接、Queue、peer 回报、草稿暂存因此读取同一分类，不制造输入、回合、历史交棒时间或新通知。
+
 ## 新增存储字段的 grep 完备性门
 
 每个新增存储型 summary 字段的 Stage，都必须跑一遍 grep 完备性检查：扫描所有

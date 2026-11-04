@@ -215,6 +215,30 @@ function comparedFieldKeys(change: StoredCodexConfigurationChange) {
 	].sort();
 }
 
+export function completeCodexConfigurationCandidateValueDigest(change: StoredCodexConfigurationChange) {
+	const canonicalValue = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(canonicalValue);
+		if (!configurationTable(value)) return value;
+		return Object.fromEntries(
+			Object.keys(value)
+				.sort()
+				.map((key) => [key, canonicalValue(value[key])]),
+		);
+	};
+	return configurationDigest(
+		canonicalValue(
+			Object.fromEntries(
+				comparedFieldKeys(change).map((key) => [
+					key,
+					change.relatedDeletedFieldKeys?.includes(key)
+						? null
+						: ((key === change.fieldKey ? change.value : change.relatedFields?.[key]) ?? null),
+				]),
+			),
+		),
+	);
+}
+
 export function currentCodexConfigurationSharedValueDigest(
 	store: CodexConfigurationSyncStore,
 	change: StoredCodexConfigurationChange,
@@ -331,6 +355,9 @@ export function describeCodexConfigurationChange(
 									: "modified",
 				previous: before,
 				detected: after,
+				sharedCurrent: read(sharedCurrent, sharedFields !== undefined),
+				previousMatchesSharedCurrent: sameConfigurationField(previous, sharedCurrent),
+				sharedOrigin: sharedValueOrigin(store, change, fieldKey, context),
 				...(change.mergeStatus === "conflict" || change.sharedValueAtConflict
 					? {
 							sharedAtConflict: read(
@@ -361,6 +388,13 @@ export function describeCodexConfigurationChange(
 					Boolean(detected?.definitionDigest),
 					true,
 					"definitionDigest",
+				),
+				sharedCurrent: comparedValue(
+					sharedCurrent?.definitionDigest,
+					Boolean(sharedCurrent?.definitionDigest),
+					true,
+					"definitionDigest",
+					sharedFields !== undefined,
 				),
 				...(change.mergeStatus === "conflict"
 					? {

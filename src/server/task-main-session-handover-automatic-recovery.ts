@@ -8,12 +8,24 @@ import {
 	resolveRecordedCodexConversationHome,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import { resolveSessionFacets } from "../core/session-activity";
 import type {
 	TaskMainSessionHandoverRecord,
 	TaskMainSessionHandoverReportAcceptanceProbe,
 } from "../core/task-main-session-handover-contract";
 
 type AutomaticRecovery = NonNullable<TaskMainSessionHandoverRecord["automaticRecovery"]>;
+
+export function isOriginalHandoverInterruptionProcessConfirmedAbsent(pid: number | null): boolean {
+	if (pid === null) return false;
+	try {
+		process.kill(pid, 0);
+		return false;
+	} catch (error) {
+		// PID 存在或不可读只能保留未知；ESRCH 才证明原 PID 已不再占用。
+		return (error as NodeJS.ErrnoException).code === "ESRCH";
+	}
+}
 export async function fingerprintTaskMainSessionHandoverRecoveryEvidence(input: {
 	record: TaskMainSessionHandoverRecord;
 	source?: RuntimeTaskSessionSummary;
@@ -22,6 +34,10 @@ export async function fingerprintTaskMainSessionHandoverRecoveryEvidence(input: 
 	const probe = input.record.reportAcceptanceProbe;
 	// 游标和访问记录是查询自身的进度，不能成为重置恢复预算的外部证据。
 	const descriptions: unknown[] = [
+		input.record.blockingSessionInterruptionRequests?.map((entry) => [
+			entry.pid,
+			isOriginalHandoverInterruptionProcessConfirmedAbsent(entry.pid),
+		]),
 		probe && {
 			targetAgentId: probe.targetAgentId,
 			nativeSessionId: probe.nativeSessionId,
@@ -58,7 +74,15 @@ export async function fingerprintTaskMainSessionHandoverRecoveryEvidence(input: 
 			migratedHome,
 			summary?.runtimeSessionIncarnationId,
 			summary?.codexNativeSessionControlEndpoint,
+			summary?.pid,
+			summary?.startedAt,
+			summary ? resolveSessionFacets(summary) : null,
 		]);
+		const socketPath = summary?.codexNativeSessionControlEndpoint?.socketPath;
+		if (socketPath) {
+			const metadata = await stat(socketPath).catch(() => null);
+			descriptions.push([socketPath, metadata?.dev, metadata?.ino, metadata?.mtimeMs]);
+		}
 	}
 	const preparedNativeForkEvidencePaths: string[] = [];
 	if (input.record.nativeForkPreparationReceiptPath) {
@@ -137,7 +161,7 @@ export function beginTaskMainSessionHandoverMachineEvidenceAttempt(input: {
 			? (input.previous?.reportAcceptanceScanVisitedCursorPairs ?? [])
 			: [],
 		nextAttemptAt: attemptCount < 3 ? input.now + 15_000 : null,
-		recheckCondition: "原生历史、存储迁移记录、控制端点或固定准备凭据变化后自动重验；不重复发送汇报。",
+		recheckCondition: "会话退出、原生历史、存储迁移记录、控制端点或固定准备凭据变化后自动重验；不重复发送汇报。",
 	};
 }
 

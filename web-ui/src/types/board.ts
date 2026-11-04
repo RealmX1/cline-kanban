@@ -89,7 +89,9 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 }
 
 export interface BoardCard {
+	taskNameVersion?: number;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	id: string;
 	mainTaskConversationSessionId?: string;

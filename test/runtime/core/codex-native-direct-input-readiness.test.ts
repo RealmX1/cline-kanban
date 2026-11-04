@@ -56,7 +56,6 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 		expect(canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, before, observation)).toBe(false);
 	});
 	it.each([
-		{ updatedAt: 201 },
 		{ pid: 13 },
 		{ pid: null },
 		{ startedAt: 101 },
@@ -64,6 +63,8 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 		{ agentId: "claude" as const },
 		{ lastHookAt: 200 },
 		{ agentResponseGenerationTurnSequence: 2 },
+		{ agentResponseGenerationTurnStarted: { startedAt: 250, turnSequence: 1 } },
+		{ workspacePath: "/another-workspace" },
 		{
 			agentConversationPromptSubmissionAcceptance: {
 				status: "pending" as const,
@@ -78,6 +79,16 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 		expect(
 			canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, { ...before, ...patch }, observation),
 		).toBe(false);
+	});
+	it("连续 PTY 重绘与等值 hook 反序列化不使同一回合证明失效", () => {
+		const before = summary();
+		expect(
+			canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
+				before,
+				{ ...before, updatedAt: 900, lastOutputAt: 900 },
+				observation,
+			),
+		).toBe(true);
 	});
 	it.each(["native_id", "transcript", "endpoint", "missing_endpoint"])("查询期间 %s 改变时丢弃旧观测", (change) => {
 		const before = summary();

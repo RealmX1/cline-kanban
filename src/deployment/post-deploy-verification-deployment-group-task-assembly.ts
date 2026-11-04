@@ -117,13 +117,16 @@ export function mergeAuthoredChecklistItemsAndReconcileGenericManualSmokeTestIte
 		if (existing) {
 			if (doesAuthoredRedefinitionInvalidatePriorCheckEvidence(existing, authoredItem)) {
 				existing.checked = false;
-				existing.run = null;
+				// 运行中保留归属供取消与退出核验；终结后清掉旧定义的占用，不复用其结果。
+				if (existing.run?.status !== "running") existing.run = null;
 			}
 			existing.label = authoredItem.label;
 			existing.kind = authoredItem.kind;
 			existing.guidance = authoredItem.guidance;
 			existing.script = authoredItem.script;
 			existing.cleanup = authoredItem.cleanup;
+			existing.authoredVerificationDefinitionRegistrationId =
+				authoredItem.authoredVerificationDefinitionRegistrationId;
 			continue;
 		}
 		checklist.push(structuredClone(authoredItem));
@@ -146,6 +149,7 @@ export function mergeAuthoredChecklistItemsAndReconcileGenericManualSmokeTestIte
 
 export interface AssemblePostDeployVerificationTaskForDeploymentGroupInput {
 	taskId: string;
+	taskIncarnationCreatedAtEpochMs?: number;
 	columnIdAtMatch: RuntimeBoardColumnId;
 	inclusionReason: RuntimePostDeployVerificationInclusionReason;
 	deploymentId: string;
@@ -185,6 +189,16 @@ export function assemblePostDeployVerificationTaskForDeploymentGroup(
 		appendedAuthoredItemCount,
 		task: {
 			taskId: input.taskId,
+			...((carried ? carried.taskIncarnationCreatedAtEpochMs : input.taskIncarnationCreatedAtEpochMs) === undefined
+				? {}
+				: {
+						taskIncarnationCreatedAtEpochMs: carried
+							? carried.taskIncarnationCreatedAtEpochMs
+							: input.taskIncarnationCreatedAtEpochMs,
+					}),
+			...(carried?.postDeployVerificationTaskInstanceId
+				? { postDeployVerificationTaskInstanceId: carried.postDeployVerificationTaskInstanceId }
+				: {}),
 			columnIdAtMatch: input.columnIdAtMatch,
 			matchedCommits:
 				attribution?.taskDeploymentAttribution.matchedDeployedCommitsInThisDeploymentDelta.map(
@@ -295,6 +309,10 @@ export function reconcileCarriedForwardDeploymentGroupTaskAgainstPreviousCopyWit
 			"carried_forward_with_previous_copy_current_progress_and_in_flight_closure",
 		task: {
 			...assembled,
+			taskIncarnationCreatedAtEpochMs: previous.taskIncarnationCreatedAtEpochMs,
+			...(previous.postDeployVerificationTaskInstanceId
+				? { postDeployVerificationTaskInstanceId: previous.postDeployVerificationTaskInstanceId }
+				: {}),
 			checklist,
 			pendingConfirmation: structuredClone(previous.pendingConfirmation),
 			doneEntryClosureAuthorizationInFlight: structuredClone(previous.doneEntryClosureAuthorizationInFlight),

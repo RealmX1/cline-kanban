@@ -2,8 +2,13 @@ import { act, type ReactElement, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TaskAgentModelPicker, type UseTaskAgentModelPickerResult } from "@/components/task-agent-model-picker";
+import {
+	TaskAgentModelPicker,
+	type UseTaskAgentModelPickerResult,
+	useTaskAgentModelPicker,
+} from "@/components/task-agent-model-picker";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import type {
 	RuntimeAgentId,
 	RuntimeClineProviderCatalogItem,
@@ -11,6 +16,7 @@ import type {
 	RuntimeTaskClineSettings,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 } from "@/runtime/types";
+import { notifyTaskVisualizationStreamReconnected } from "@/stores/task-visualization-browser-bridge";
 
 const fetchClineProviderCatalogMock = vi.hoisted(() => vi.fn());
 const fetchClineProviderModelsMock = vi.hoisted(() => vi.fn());
@@ -1135,6 +1141,32 @@ describe("Kimi 固定当前默认版本的展示", () => {
 	});
 });
 
+describe("Codex 钉选与原生默认同名的模型", () => {
+	it("已钉选的同名模型不被显示成不传 --model 的 Default", async () => {
+		await act(async () =>
+			renderWithTooltipProvider(
+				<TaskAgentModelPicker
+					agentId="codex"
+					onAgentIdChange={() => {}}
+					terminalAgentModelOverrideSettings={{ agentId: "codex", modelId: "gpt-5.4" }}
+					terminalAgentDefaultModelId="gpt-5.4"
+					terminalAgentModelOptions={[
+						{ value: "", label: "Default", modelSelectionGroup: "latest_tracking_alias" },
+						{ value: "gpt-5.4", label: "GPT-5.4", modelSelectionGroup: "latest_tracking_alias" },
+					]}
+					agentOptions={[]}
+					clineProviderOptions={[]}
+					clineModelOptions={[]}
+					isLoadingProviders={false}
+					isLoadingModels={false}
+				/>,
+			),
+		);
+		expect(findButtonByAriaLabel("GPT-5.4")?.getAttribute("aria-pressed")).toBe("true");
+		expect(findButtonByAriaLabel("Default")?.getAttribute("aria-pressed")).toBe("false");
+	});
+});
+
 describe("TaskAgentModelPicker – pinned model version group", () => {
 	const CLAUDE_TERMINAL_MODEL_OPTIONS = [
 		{ value: "", label: "Default", modelSelectionGroup: "latest_tracking_alias" as const },
@@ -1445,5 +1477,67 @@ describe("TaskAgentModelPicker – inherited default reasoning effort", () => {
 
 		expect(container.textContent).toContain("GPT-5.3 Codex");
 		expect(container.textContent).not.toContain("GPT-5.3 Codex (High)");
+	});
+});
+
+describe("Codex 模型目录在运行时重连后重验", () => {
+	it("三次重试耗尽后，运行时或可视化流重连会再次读取目录", async () => {
+		vi.useFakeTimers();
+		const unavailable = {
+			agentId: "codex" as const,
+			defaultModelId: null,
+			defaultLabel: "Default",
+			options: [],
+			warning: "目录暂不可读",
+		};
+		const available = {
+			agentId: "codex" as const,
+			defaultModelId: "native-default",
+			defaultLabel: "Default",
+			options: [
+				{
+					modelId: "native-default",
+					label: "原生模型",
+					supportedReasoningEfforts: [{ effort: "ultra" }],
+					modelSelectionGroup: "latest_tracking_alias" as const,
+				},
+			],
+		};
+		fetchTerminalAgentModelSelectionOptionsMock.mockClear();
+		fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue(unavailable);
+		let latest: UseTaskAgentModelPickerResult | undefined;
+		function Harness() {
+			latest = useTaskAgentModelPicker({
+				active: true,
+				workspaceId: "reviewer-workspace",
+				agentId: "codex",
+			});
+			return null;
+		}
+		try {
+			await act(async () => {
+				root.render(<Harness />);
+			});
+			for (const duration of [2_000, 4_000, 8_000]) {
+				await act(async () => {
+					await vi.advanceTimersByTimeAsync(duration);
+				});
+			}
+			expect(fetchTerminalAgentModelSelectionOptionsMock).toHaveBeenCalledTimes(4);
+			fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue(available);
+			await act(async () => {
+				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
+			});
+			expect(fetchTerminalAgentModelSelectionOptionsMock).toHaveBeenCalledTimes(5);
+			expect(latest?.terminalAgentModelCatalogWarning).toBeNull();
+			fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue(unavailable);
+			await act(async () => {
+				notifyTaskVisualizationStreamReconnected("reviewer-workspace");
+			});
+			expect(fetchTerminalAgentModelSelectionOptionsMock).toHaveBeenCalledTimes(6);
+			expect(latest?.terminalAgentModelCatalogWarning).toBe(unavailable.warning);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

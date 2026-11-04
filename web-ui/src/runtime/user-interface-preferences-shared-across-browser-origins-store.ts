@@ -56,6 +56,8 @@ export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHI
 	{
 		taskProjectAssignmentAutomaticAnalysisEnabled: null,
 		taskEditorSettingPresentationBySettingKey: {},
+		newPeerSessionStartInPlanMode: null,
+		newByTheWaySessionStartInPlanMode: null,
 		newTaskAutoReviewEnabled: null,
 		newTaskAutoReviewMode: null,
 		taskCreateDialogPrimaryStartAction: null,
@@ -134,6 +136,8 @@ const BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD: Record<
 	taskProjectAssignmentAutomaticAnalysisEnabled:
 		PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	taskEditorSettingPresentationBySettingKey: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
+	newPeerSessionStartInPlanMode: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
+	newByTheWaySessionStartInPlanMode: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	newTaskAutoReviewEnabled: defineMirrorCodec<"newTaskAutoReviewEnabled">({
 		localStorageMirrorKey: LocalStorageKey.TaskAutoReviewEnabled,
 		// 升级前是 useBooleanLocalStorageValue：serializer 为 String(value)、deserializer 为 value === "true"。
@@ -263,6 +267,11 @@ export function subscribeToUserInterfacePreferencesSharedAcrossBrowserOrigins(li
 
 export function getUserInterfacePreferencesSharedAcrossBrowserOriginsStoreState(): UserInterfacePreferencesSharedAcrossBrowserOriginsStoreState {
 	return storeState;
+}
+
+/** 服务端偏好尚未到达时为 false。纯服务端字段在此之前不能把回退值当成用户的选择。 */
+export function haveUserInterfacePreferencesLoadedFromServer(): boolean {
+	return storeState.preferencesLoadedFromServer !== null;
 }
 
 /**

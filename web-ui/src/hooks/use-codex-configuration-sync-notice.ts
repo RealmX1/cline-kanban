@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { groupCodexConfigurationFeedbackSuggestions } from "@/hooks/codex-configuration-feedback-suggestion-groups";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import { WORKSPACE_NOTICE_AUTOMATIC_EXPANSION_DURATION_MS } from "@/hooks/workspace-notice-automatic-expansion-duration";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
@@ -28,7 +29,7 @@ export function useCodexConfigurationSyncNotice({
 				change.acknowledgedAt === null &&
 				(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
 		) ?? [];
-	const pendingApprovalCount = settingsReminders.filter((change) => change.approvalStatus === "pending").length;
+	const pendingApprovalCount = groupCodexConfigurationFeedbackSuggestions(settingsReminders).length;
 	const sourceUpdateCount =
 		controller.state?.sourceObservations.filter((observation) => observation.acknowledgedAt === null).length ?? 0;
 	const hasReminders = settingsReminders.length + sourceUpdateCount > 0;

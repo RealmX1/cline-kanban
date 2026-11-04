@@ -53,6 +53,7 @@ interface CodexStartupArgumentSegment {
 	overrideKeys: string[];
 	permissionOverrideKey?: string;
 	isPositional?: boolean;
+	isStartupImageAttachment?: boolean;
 	selectsConversation?: boolean;
 	requiresNativeCliParsing?: boolean;
 }
@@ -106,6 +107,7 @@ function segmentCodexStartupArguments(arguments_: readonly string[]): CodexStart
 				// 点路径保持按键覆盖，但仍需移除会压过整个审批配置的旗标。
 				permissionOverrideKey: configurationKey?.startsWith("approval_policy.") ? "approval" : undefined,
 				requiresNativeCliParsing: canonicalName === "image",
+				isStartupImageAttachment: canonicalName === "image",
 			});
 		} else {
 			const flag = argument === "-h" ? "--help" : argument === "-V" ? "--version" : argument;
@@ -133,6 +135,20 @@ function segmentCodexStartupArguments(arguments_: readonly string[]): CodexStart
 
 export function hasExplicitCodexConversationSelectionForRestart(arguments_: readonly string[]): boolean {
 	return segmentCodexStartupArguments(arguments_).some((segment) => segment.selectsConversation);
+}
+
+// 自动恢复只使用当前观测身份，不能重放旧 resume/fork 目标或启动正文；未知后缀仍交给原生 CLI。
+export function removeCodexConversationSelectionAndPromptFromStartupArguments(arguments_: readonly string[]): string[] {
+	return segmentCodexStartupArguments(arguments_)
+		.filter(
+			(segment) =>
+				!segment.selectsConversation &&
+				!segment.isPositional &&
+				!segment.isStartupImageAttachment &&
+				segment.arguments[0] !== "--all" &&
+				segment.arguments[0] !== "--",
+		)
+		.flatMap((segment) => segment.arguments);
 }
 
 export function hasExplicitCodexRemoteConnectionForRestart(arguments_: readonly string[]): boolean {

@@ -1,3 +1,4 @@
+import type * as FileSystemPromises from "node:fs/promises";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,16 @@ import type { TaskCommandExecutionRecord } from "../../../src/core/task-command-
 import { inspectOwnedCommandSupervisor } from "../../../src/task-command-execution/task-command-execution-supervisor";
 
 const machine = vi.hoisted(() => ({ directory: "", boot: "same-boot", liveDescendant: false, unreadable: false }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof FileSystemPromises>();
+	return {
+		...actual,
+		readFile: (...arguments_: Parameters<typeof actual.readFile>) =>
+			arguments_[0] === "/proc/sys/kernel/random/boot_id"
+				? Promise.resolve(machine.boot)
+				: actual.readFile(...arguments_),
+	};
+});
 vi.mock("../../../src/task-command-execution/task-command-execution-store", () => ({
 	taskCommandExecutionArtifactDirectory: () => machine.directory,
 }));
