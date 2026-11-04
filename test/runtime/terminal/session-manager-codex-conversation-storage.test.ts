@@ -1,6 +1,5 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepared = vi.hoisted(() => vi.fn());
@@ -19,6 +18,7 @@ import {
 	withCodexConversationStorageOperationLock,
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -143,9 +143,11 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			await storeMutationMayFinish;
 		});
 		await storeMutationStarted;
-		const acquireLock = lockfile.lock;
-		const oldScheduleWaiter = acquireLock(getCodexConfigurationSyncDirectory(), {
-			realpath: false,
+		const acquireLock = lockedFileSystem.acquireLock.bind(lockedFileSystem);
+		const oldScheduleWaiter = acquireLock({
+			path: getCodexConfigurationSyncDirectory(),
+			type: "directory",
+			lockfilePath: `${getCodexConfigurationSyncDirectory()}.lock`,
 			retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
 		}).then(
 			async (release) => {
@@ -158,9 +160,9 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		const resumeWaiting = new Promise<void>((resolve) => {
 			markResumeWaiting = resolve;
 		});
-		vi.spyOn(lockfile, "lock").mockImplementation((path, options) => {
-			const waiting = acquireLock(path, options);
-			if (path === getCodexConfigurationSyncDirectory()) markResumeWaiting();
+		vi.spyOn(lockedFileSystem, "acquireLock").mockImplementation((lockRequest) => {
+			const waiting = acquireLock(lockRequest);
+			if (lockRequest.path === getCodexConfigurationSyncDirectory()) markResumeWaiting();
 			return waiting;
 		});
 		const resumeRequest = {

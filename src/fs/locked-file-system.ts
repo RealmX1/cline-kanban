@@ -168,10 +168,7 @@ async function acquireNormalizedKernelWriteLock(request: NormalizedLockRequest):
 	};
 }
 
-export async function releaseFilesystemKernelWriteLock(
-	release: () => Promise<void>,
-	lockPath: string,
-): Promise<void> {
+export async function releaseFilesystemKernelWriteLock(release: () => Promise<void>, lockPath: string): Promise<void> {
 	try {
 		await release();
 	} catch (error) {
