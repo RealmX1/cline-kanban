@@ -4,10 +4,11 @@ import { useHotkeys } from "react-hotkeys-hook";
 import { isBoardOrFocusedTaskProjectScopeToggleKeyboardEvent } from "@/components/top-bar-project-switcher/board-or-focused-task-project-scope-toggle-hotkey-descriptor";
 import type { CardSelection } from "@/types";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
+import { isMacPlatform } from "@/utils/platform";
 import { useDocumentEvent } from "@/utils/react-use";
 
 function isEventInsideDialog(target: EventTarget | null): boolean {
-	return target instanceof Element && target.closest("[role='dialog']") !== null;
+	return target instanceof Element && target.closest("[role='dialog'], [role='alertdialog'], dialog") !== null;
 }
 
 function isEventInsideTaskSpotlightSearchDialog(target: EventTarget | null): boolean {
@@ -31,6 +32,8 @@ interface UseAppHotkeysInput {
 	handleToggleGitHistory: () => void;
 	handleCloseGitHistory: () => void;
 	onRequestStartAllReadyBacklogTasks: () => void;
+	handleToggleCurrentPageLeftSidebar?: (() => void) | null;
+	handleToggleFocusViewWorkbenchSidebar?: (() => void) | null;
 	// null = 当前没有可切的范围（没有项目、或项目不可用）。
 	handleToggleBetweenBoardScopeAndFocusedTaskProjectScope: (() => void) | null;
 }
@@ -52,8 +55,35 @@ export function useAppHotkeys({
 	handleToggleGitHistory,
 	handleCloseGitHistory,
 	onRequestStartAllReadyBacklogTasks,
+	handleToggleCurrentPageLeftSidebar,
+	handleToggleFocusViewWorkbenchSidebar,
 	handleToggleBetweenBoardScopeAndFocusedTaskProjectScope,
 }: UseAppHotkeysInput): void {
+	const handleSidebarOrStartAllTasksKeydown = useCallback(
+		(event: KeyboardEvent) => {
+			if (
+				event.defaultPrevented ||
+				isEventInsideDialog(event.target) ||
+				isKeyboardEventEmittedDuringImeComposition(event) ||
+				event.code !== "KeyB" ||
+				!(isMacPlatform ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey) ||
+				(event.shiftKey && event.altKey)
+			)
+				return;
+			const action = event.shiftKey
+				? onRequestStartAllReadyBacklogTasks
+				: event.altKey
+					? handleToggleFocusViewWorkbenchSidebar
+					: handleToggleCurrentPageLeftSidebar;
+			if (!action) return;
+			// 捕获阶段先于终端处理；长按继续拦截，但只触发一次。
+			event.preventDefault();
+			event.stopPropagation();
+			if (!event.repeat) action();
+		},
+		[handleToggleCurrentPageLeftSidebar, handleToggleFocusViewWorkbenchSidebar, onRequestStartAllReadyBacklogTasks],
+	);
+	useDocumentEvent("keydown", handleSidebarOrStartAllTasksKeydown, true);
 	const handleBoardOrFocusedTaskProjectScopeToggleKeydown = useCallback(
 		(event: KeyboardEvent) => {
 			if (
@@ -97,17 +127,6 @@ export function useAppHotkeys({
 			preventDefault: true,
 		},
 		[handleToggleDetailTerminal, handleToggleHomeTerminal, selectedCard],
-	);
-
-	useHotkeys(
-		"mod+b",
-		onRequestStartAllReadyBacklogTasks,
-		{
-			enableOnContentEditable: false,
-			enableOnFormTags: false,
-			preventDefault: true,
-		},
-		[onRequestStartAllReadyBacklogTasks],
 	);
 
 	useHotkeys(

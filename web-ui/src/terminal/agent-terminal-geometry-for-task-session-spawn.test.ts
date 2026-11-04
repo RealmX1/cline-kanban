@@ -43,7 +43,7 @@ describe("后台启动任务的终端尺寸", () => {
 	});
 
 	it.each([
-		[769, 46],
+		[769, 26],
 		[1440, 60],
 	])("桌面视口 %ipx 保留持久化面板宽度与 diff 面板限制", (viewportWidth, expectedColumns) => {
 		vi.stubGlobal("innerWidth", viewportWidth);
@@ -58,6 +58,29 @@ describe("后台启动任务的终端尺寸", () => {
 		vi.stubGlobal("innerWidth", 1080);
 		vi.stubGlobal("innerHeight", 1920);
 		expect(resolveAgentTerminalGeometryForTaskSessionSpawn(taskId)).toEqual({ cols: 102, rows: 69 });
+	});
+	it.each([
+		[false, false, "agent_above_workbench_below", 102, 69],
+		[true, false, "agent_above_workbench_below", 130, 69],
+		[false, true, "agent_above_workbench_below", 102, 117],
+		[true, true, "agent_above_workbench_below", 130, 117],
+		[true, true, "agent_left_workbench_right", 130, 117],
+	] as const)(
+		"左栏隐藏=%s、工作台隐藏=%s、布局=%s 时按释放的空间估算",
+		(leftHidden, workbenchHidden, arrangement, cols, rows) => {
+			vi.stubGlobal("innerWidth", 1080);
+			vi.stubGlobal("innerHeight", 1920);
+			localStorage.setItem(LocalStorageKey.FocusViewTaskListSidebarHidden, String(leftHidden));
+			localStorage.setItem(LocalStorageKey.FocusViewWorkbenchSidebarHidden, String(workbenchHidden));
+			localStorage.setItem(LocalStorageKey.FocusViewDesktopPanelArrangementPreference, arrangement);
+			expect(resolveAgentTerminalGeometryForTaskSessionSpawn(taskId)).toEqual({ cols, rows });
+		},
+	);
+	it("手机后台启动不读取桌面侧栏显隐偏好", () => {
+		vi.stubGlobal("innerWidth", 390);
+		localStorage.setItem(LocalStorageKey.FocusViewTaskListSidebarHidden, "true");
+		localStorage.setItem(LocalStorageKey.FocusViewWorkbenchSidebarHidden, "true");
+		expect(resolveAgentTerminalGeometryForTaskSessionSpawn(taskId)).toEqual({ cols: 43, rows: 53 });
 	});
 	it.each([
 		["手机", true, "automatic"],

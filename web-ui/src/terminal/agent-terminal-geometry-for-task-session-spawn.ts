@@ -4,6 +4,11 @@ import {
 	resolveFocusViewDesktopPanelArrangement,
 } from "@/resize/focus-view-desktop-panel-arrangement";
 import { clampBetween, readPersistedResizeNumber } from "@/resize/resize-persistence";
+import { loadBooleanResizePreference } from "@/resize/resize-preferences";
+import {
+	FOCUS_VIEW_TASK_LIST_SIDEBAR_HIDDEN_PREFERENCE,
+	FOCUS_VIEW_WORKBENCH_SIDEBAR_HIDDEN_PREFERENCE,
+} from "@/resize/sidebar-visibility-preferences";
 import {
 	loadDetailTaskCardsPanelRatioPreference,
 	MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
@@ -29,6 +34,11 @@ export function resolveAgentTerminalGeometryForTaskSessionSpawn(taskId: string):
 	if (measuredTerminalGeometry) return measuredTerminalGeometry;
 
 	const isMobile = matchesMobileViewportNow();
+	const isTaskListSidebarHidden = loadBooleanResizePreference(FOCUS_VIEW_TASK_LIST_SIDEBAR_HIDDEN_PREFERENCE);
+	const isWorkbenchSidebarHidden = loadBooleanResizePreference(FOCUS_VIEW_WORKBENCH_SIDEBAR_HIDDEN_PREFERENCE);
+	const estimatedDetailContentWidth = isTaskListSidebarHidden
+		? window.innerWidth
+		: window.innerWidth * (1 - loadDetailTaskCardsPanelRatioPreference()) - 1;
 	const isStackedDesktop =
 		!isMobile &&
 		resolveFocusViewDesktopPanelArrangement(
@@ -38,17 +48,22 @@ export function resolveAgentTerminalGeometryForTaskSessionSpawn(taskId: string):
 		) === "agent_above_workbench_below";
 	const estimatedTerminalPanelWidth = isMobile
 		? window.innerWidth
-		: isStackedDesktop
-			? window.innerWidth * (1 - loadDetailTaskCardsPanelRatioPreference()) - 1
-			: clampPanelWidthToWindow(loadDetailTerminalPanelWidth(), MIN_DETAIL_DIFF_PANEL_WIDTH_PX, window.innerWidth);
-	const estimatedTerminalHeight = isStackedDesktop
-		? window.innerHeight *
-			readPersistedResizeNumber({
-				key: LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
-				fallback: 0.6,
-				normalize: (value) => clampBetween(value, 0.25, 0.8),
-			})
-		: window.innerHeight;
+		: isStackedDesktop || isWorkbenchSidebarHidden
+			? estimatedDetailContentWidth
+			: clampPanelWidthToWindow(
+					loadDetailTerminalPanelWidth(),
+					MIN_DETAIL_DIFF_PANEL_WIDTH_PX,
+					estimatedDetailContentWidth,
+				);
+	const estimatedTerminalHeight =
+		isStackedDesktop && !isWorkbenchSidebarHidden
+			? window.innerHeight *
+				readPersistedResizeNumber({
+					key: LocalStorageKey.FocusViewStackedAgentPanelHeightRatio,
+					fallback: 0.6,
+					normalize: (value) => clampBetween(value, 0.25, 0.8),
+				})
+			: window.innerHeight;
 	// 视口尚未初始化或读到非有限值时，宽度沿用持久化偏好，高度交给估算器的最小行数兜底。
 	const safeTerminalPanelWidth =
 		Number.isFinite(window.innerWidth) && window.innerWidth > 0

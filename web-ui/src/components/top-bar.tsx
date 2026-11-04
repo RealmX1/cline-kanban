@@ -14,6 +14,8 @@ import {
 	Layers,
 	Lightbulb,
 	Menu,
+	PanelLeft,
+	PanelRight,
 	Play,
 	Plus,
 	Settings,
@@ -313,6 +315,11 @@ function TopBarGitStatusSection({
 
 export function TopBar({
 	onToggleSidebar,
+	onToggleCurrentPageLeftSidebar,
+	isCurrentPageLeftSidebarHidden = false,
+	currentPageLeftSidebarLabel = "项目栏",
+	onToggleFocusViewWorkbenchSidebar,
+	isFocusViewWorkbenchSidebarHidden = false,
 	projectSwitcher,
 	onOpenTaskSpotlightSearch,
 	onToggleTaskLookupWorkbench,
@@ -369,6 +376,11 @@ export function TopBar({
 	onOpenPostDeployVerification,
 }: {
 	onToggleSidebar?: () => void;
+	onToggleCurrentPageLeftSidebar?: () => void;
+	isCurrentPageLeftSidebarHidden?: boolean;
+	currentPageLeftSidebarLabel?: string;
+	onToggleFocusViewWorkbenchSidebar?: () => void;
+	isFocusViewWorkbenchSidebarHidden?: boolean;
 	// 顶栏最左侧的项目快速切换器。可选：不传就完全不渲染（既有的 top-bar 测试因此零改动）。
 	// 刻意不受 `hideProjectDependentActions` 影响——切换中、项目不可用、任务详情页里它都必须可用，
 	// 因为任务详情页会把左侧 ProjectNavigationPanel 整个卸载，这里是那时唯一的换项目入口。
@@ -511,6 +523,23 @@ export function TopBar({
 							aria-label="Toggle sidebar"
 							className={cn("shrink-0", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 						/>
+					) : null}
+					{!isMobile && onToggleCurrentPageLeftSidebar ? (
+						<Tooltip
+							side="bottom"
+							content={`${isCurrentPageLeftSidebarHidden ? "显示" : "隐藏"}${currentPageLeftSidebarLabel} (${isMacPlatform ? "Cmd+B" : "Ctrl+B"})`}
+						>
+							<Button
+								variant={isCurrentPageLeftSidebarHidden ? "ghost" : "default"}
+								size="sm"
+								icon={<PanelLeft size={16} />}
+								onClick={onToggleCurrentPageLeftSidebar}
+								aria-label={`${isCurrentPageLeftSidebarHidden ? "显示" : "隐藏"}${currentPageLeftSidebarLabel}`}
+								aria-pressed={!isCurrentPageLeftSidebarHidden}
+								aria-keyshortcuts={isMacPlatform ? "Meta+B" : "Control+B"}
+								className="shrink-0"
+							/>
+						</Tooltip>
 					) : null}
 					{onBack ? (
 						<div className="flex items-center shrink-0 overflow-visible">
@@ -795,6 +824,23 @@ export function TopBar({
 						</>
 					) : null}
 
+					{!isMobile && onToggleFocusViewWorkbenchSidebar ? (
+						<Tooltip
+							side="bottom"
+							content={`${isFocusViewWorkbenchSidebarHidden ? "显示" : "隐藏"}任务工作台 (${isMacPlatform ? "Cmd+Option+B" : "Ctrl+Alt+B"})`}
+						>
+							<Button
+								variant={isFocusViewWorkbenchSidebarHidden ? "ghost" : "default"}
+								size="sm"
+								icon={<PanelRight size={16} />}
+								onClick={onToggleFocusViewWorkbenchSidebar}
+								aria-label={`${isFocusViewWorkbenchSidebarHidden ? "显示" : "隐藏"}任务工作台`}
+								aria-pressed={!isFocusViewWorkbenchSidebarHidden}
+								aria-keyshortcuts={isMacPlatform ? "Meta+Alt+B" : "Control+Alt+B"}
+								className="shrink-0"
+							/>
+						</Tooltip>
+					) : null}
 					{onToggleTaskChangesSidebar ? (
 						<Tooltip side="bottom" content={isTaskChangesSidebarOpen ? "Show sessions" : "Show changes"}>
 							<Button
