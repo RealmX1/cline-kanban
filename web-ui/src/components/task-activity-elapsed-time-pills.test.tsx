@@ -69,7 +69,9 @@ describe("跨项目精简行的创建时间", () => {
 		};
 		renderElapsedTimePills({ agentConversationPromptSubmissionAcceptance: acceptance });
 		const status = container.querySelector('[role="status"]');
-		expect(status?.textContent).toContain("尚未确认接受");
+		expect(status?.textContent).toContain("输入确认待补证");
+		expect(status?.className).toContain("text-text-secondary");
+		expect(status?.getAttribute("title")).toContain("最近一次提交候选");
 		expect(status?.getAttribute("title")).toContain("程序化提交");
 		expect(status?.getAttribute("title")).toContain("尚无可关联的原生接受记录");
 		renderElapsedTimePills({ agentConversationPromptSubmissionAcceptance: { ...acceptance, status: "accepted" } });

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { copyFile, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import { isExplicitFreshTaskConversationSessionContext } from "../core/task-conversation-session-context-source";
 import { readIndependentTaskCreationTranscript } from "./conversation-context";
 
 async function copyStableTranscript(source: string, target: string) {
@@ -60,43 +61,50 @@ export async function captureIndependentTaskSourceContext(input: {
 	if (!metadata?.sideSessionCreatedAt)
 		warnings.push("存量侧会话未记录不可变创建边界，起点按现有启动记录定位；请核对引用。");
 	const parentIdentity = input.parent?.agentNativeConversationSessionIdentity;
+	const explicitlyFresh = isExplicitFreshTaskConversationSessionContext(metadata);
+	const originIdentity = explicitlyFresh
+		? undefined
+		: (metadata?.contextSourceNativeSessionIdentity ?? metadata?.creatorNativeConversationSessionIdentity);
+	const originNativeSessionId = originIdentity?.nativeSessionId ?? metadata?.sideSessionOriginMainNativeSessionId;
+	const originAgentId = originIdentity?.sourceAgentId ?? metadata?.sideSessionOriginMainAgentId;
+	const originTranscriptPath = originIdentity?.transcriptPath ?? metadata?.sideSessionOriginMainTranscriptPath;
 	const parentMatchesRecordedOriginIdentity =
-		(!metadata?.sideSessionOriginMainNativeSessionId ||
-			metadata.sideSessionOriginMainNativeSessionId === parentIdentity?.nativeSessionId) &&
-		(!metadata?.sideSessionOriginMainAgentId ||
-			metadata.sideSessionOriginMainAgentId === parentIdentity?.sourceAgentId);
-	const parentPath =
-		metadata?.sideSessionOriginMainTranscriptPath ??
-		(parentMatchesRecordedOriginIdentity ? parentIdentity?.transcriptPath : undefined);
-	if (!metadata?.sideSessionOriginMainTranscriptPath) {
+		(!originNativeSessionId || originNativeSessionId === parentIdentity?.nativeSessionId) &&
+		(!originAgentId || originAgentId === parentIdentity?.sourceAgentId);
+	const parentPath = explicitlyFresh
+		? undefined
+		: (originTranscriptPath ?? (parentMatchesRecordedOriginIdentity ? parentIdentity?.transcriptPath : undefined));
+	if (!originTranscriptPath) {
 		if (!parentMatchesRecordedOriginIdentity)
-			warnings.push("当前主会话原生身份与侧会话创建时记录的来源不一致，未混入其他会话的历史。");
-		else if (parentPath && !metadata?.sideSessionOriginMainNativeSessionId)
+			warnings.push("当前来源会话原生身份与侧会话创建时记录的来源不一致，未混入其他会话的历史。");
+		else if (parentPath && !originNativeSessionId)
 			warnings.push(
-				"存量侧会话未记录来源主会话原生身份，已按当前主会话读取；无法确认与创建时来源一致，请核对引用。",
+				"存量侧会话未记录来源会话原生身份，已按当前来源会话读取；无法确认与创建时来源一致，请核对引用。",
 			);
 	}
 	const parentAgent =
-		metadata?.sideSessionOriginMainAgentId ??
+		originAgentId ??
 		input.parent?.agentNativeConversationSessionIdentity?.sourceAgentId ??
 		sourceIdentity.sourceAgentId;
 	let before: Awaited<ReturnType<typeof readIndependentTaskCreationTranscript>> = [];
 	if (parentPath && parentPath !== sourceIdentity.transcriptPath && createdAt !== null) {
 		try {
-			const parentSnapshot = join(input.artifactDirectory, "origin-main-transcript.jsonl");
+			const parentSnapshot = join(input.artifactDirectory, "origin-conversation-transcript.jsonl");
 			await copyStableTranscript(parentPath, parentSnapshot);
 			const parentMessages = await readIndependentTaskCreationTranscript(parentSnapshot, parentAgent);
 			before = parentMessages.filter((message) => message.submittedAt !== null && message.submittedAt < createdAt);
 			if (parentMessages.some((message) => message.submittedAt === null))
-				warnings.push("部分来源主会话消息缺少时间，未冒充已证明的起点前历史。");
+				warnings.push("部分来源会话消息缺少时间，未冒充已证明的起点前历史。");
 		} catch (error) {
 			warnings.push(
-				`起点前的来源主会话无法完整读取，已保留侧会话正文：${error instanceof Error ? error.message : String(error)}`,
+				`起点前的来源会话无法完整读取，已保留侧会话正文：${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-	} else warnings.push("无法定位侧会话起点之前的主会话原文；请核对缺失材料。");
+	} else if (!explicitlyFresh) warnings.push("无法定位侧会话起点之前的主会话原文；请核对缺失材料。");
 	const after =
-		metadata?.taskConversationSessionContextSource === "forked_from_main_current_turn" && createdAt !== null
+		(metadata?.taskConversationSessionContextSource === "forked_from_main_current_turn" ||
+			metadata?.taskConversationSessionContextSource === "forked_from_conversation_session") &&
+		createdAt !== null
 			? allSourceMessages.filter((message) => message.submittedAt === null || message.submittedAt >= createdAt)
 			: allSourceMessages;
 	if (!after.some((message) => message.role === "user")) warnings.push("未找到可证明属于侧会话起点之后的用户正文。");

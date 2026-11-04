@@ -1,5 +1,11 @@
 import type { RuntimeAgentConversationPromptSubmissionAcceptance } from "@/runtime/types";
 
+export function promptSubmissionAcceptanceLabel(
+	acceptance: RuntimeAgentConversationPromptSubmissionAcceptance,
+): string {
+	return acceptance.status === "pending" ? "提交待确认" : "输入确认待补证";
+}
+
 export function describePromptSubmissionAcceptance(
 	acceptance: RuntimeAgentConversationPromptSubmissionAcceptance,
 ): string {
@@ -19,13 +25,14 @@ export function describePromptSubmissionAcceptance(
 		native_identity_changed: "原生身份发生变化，旧提交不能由其他会话确认",
 	};
 	return [
+		"正在核验最近一次提交候选是否对应原生接受记录。",
 		`提交来源：${source}`,
 		`提交时间：${new Date(acceptance.attemptedAtMs).toLocaleString()}`,
 		reason ? reasons[reason] : "正在核验 harness 是否已接受输入",
 		acceptance.verification?.nextCheckAtMs
 			? `下次核验：${new Date(acceptance.verification.nextCheckAtMs).toLocaleString()}`
 			: "",
-		"写入终端或前置 hook 放行不能证明提交成功。",
+		"此提示表示接受证据待补齐；任务运行状态独立显示。",
 	]
 		.filter(Boolean)
 		.join("\n");

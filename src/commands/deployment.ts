@@ -18,6 +18,7 @@ import { parsePostDeployVerificationState } from "../core/api-validation";
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { getTaskColumnId } from "../core/task-board-mutations";
 import { resolveMainTaskConversationSessionSummaryForTaskId } from "../core/task-main-conversation-session-binding";
+import { analyzeLocalDeploymentExecutions } from "../deployment/local-deployment-execution";
 import {
 	isChecklistOfPostDeployVerificationTaskFullyChecked,
 	resolveUncheckedChecklistItemClosureReasonsForPostDeployVerificationTask,
@@ -931,6 +932,16 @@ export function registerDeploymentCommand(program: Command): void {
 	const deployment = program
 		.command("deployment")
 		.description("Record deployments and drive Post-Deploy Verification from the CLI.");
+	deployment
+		.command("analyze")
+		.description("只读分析绑定的部署执行原件；不启动服务、不重新部署、不写成功记录。")
+		.requiredOption("--execution-directory <paths...>", "一个或多个持久部署执行目录。")
+		.action(async (options: { executionDirectory: string[] }) => {
+			await runDeploymentCommand(async () => ({
+				ok: true,
+				...(await analyzeLocalDeploymentExecutions(options.executionDirectory)),
+			}));
+		});
 
 	deployment
 		.command("record")
@@ -940,22 +951,31 @@ export function registerDeploymentCommand(program: Command): void {
 			"Kanban source checkout where the deploy delta is computed. Defaults to cwd.",
 		)
 		.option("--new-commit <ref>", "The newly deployed source commit/ref. Defaults to HEAD.")
+		.option("--execution-directory <path>", "绑定本次持久部署执行；同一执行重试返回原登记，不重复创建验证组。")
 		.option(
 			"--project-path <path>",
 			"Registered project whose tasks to correlate. Defaults to matching the source checkout path.",
 		)
-		.action(async (options: { sourceCheckoutPath?: string; newCommit?: string; projectPath?: string }) => {
-			await runDeploymentCommand(
-				async () =>
-					await recordDeploymentWithTaskDeploymentAttribution({
-						cwd: process.cwd(),
-						sourceCheckoutPath: options.sourceCheckoutPath,
-						newCommit: options.newCommit,
-						projectPath: options.projectPath,
-						readPostDeployVerificationStateReadOnly,
-					}),
-			);
-		});
+		.action(
+			async (options: {
+				sourceCheckoutPath?: string;
+				newCommit?: string;
+				projectPath?: string;
+				executionDirectory?: string;
+			}) => {
+				await runDeploymentCommand(
+					async () =>
+						await recordDeploymentWithTaskDeploymentAttribution({
+							cwd: process.cwd(),
+							sourceCheckoutPath: options.sourceCheckoutPath,
+							newCommit: options.newCommit,
+							projectPath: options.projectPath,
+							executionDirectory: options.executionDirectory,
+							readPostDeployVerificationStateReadOnly,
+						}),
+				);
+			},
+		);
 
 	deployment
 		.command("verification-summary")

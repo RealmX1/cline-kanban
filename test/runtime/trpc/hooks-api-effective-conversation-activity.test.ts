@@ -42,6 +42,32 @@ function setup(overrides: Partial<RuntimeTaskSessionSummary> = {}) {
 }
 
 describe("hook 有效会话活动的证据边界", () => {
+	it.each(["preserve_internal_whitespace", "collapse_all_whitespace", undefined] as const)(
+		"新旧 hook 请求及旧 spool 的正文归一化来源 %s 完整传给候选入口",
+		async (submittedPromptTextNormalization) => {
+			const { api, manager } = setup({ agentId: "codex" });
+			const submittedPromptText = "执行\n\t保留  正文";
+			expect(
+				await api.ingest({
+					workspaceId: "isolated",
+					taskId: "main-session",
+					event: "to_in_progress",
+					metadata: { source: "codex", hookEventName: "UserPromptSubmit" },
+					submittedPromptText,
+					submittedPromptTextNormalization,
+				}),
+			).toMatchObject({ ok: true });
+			expect(manager.markAgentConversationPromptSubmissionPending).toHaveBeenCalledWith(
+				"main-session",
+				expect.any(Number),
+				{
+					source: "harness_submit_hook",
+					submittedPromptText,
+					submittedPromptTextNormalization: submittedPromptTextNormalization ?? "collapse_all_whitespace",
+				},
+			);
+		},
+	);
 	it.each(["user", "agent"] as const)(
 		"%s 回合收到 rewind 信号只唤醒核验，不刷新活动或宣称提交接受",
 		async (turnOwner) => {

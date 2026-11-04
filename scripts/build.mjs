@@ -138,6 +138,12 @@ try {
 			const javascript = result.outputFiles.find((file) => file.path.endsWith("kanban-agent-hook-cli.js"));
 			if (!javascript || javascript.contents.length > 2_500_000) throw new Error("轻量 hook 入口超过 2.5 MB 构建预算");
 		}),
+		// 独立部署执行器不依赖被替换的 runtime 或 Agent 进程。
+		buildBundleIntoStagingDirectory({
+			...shared,
+			entryPoints: ["src/deployment/local-deployment-execution-command-line.ts"],
+			outfile: join(distributionDirectoryPath, "local-deployment-execution.js"),
+		}),
 		// Library export
 		buildBundleIntoStagingDirectory({
 			...shared,

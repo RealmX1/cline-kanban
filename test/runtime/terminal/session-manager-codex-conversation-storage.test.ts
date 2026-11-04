@@ -1,5 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const prepared = vi.hoisted(() => vi.fn());
@@ -7,6 +8,10 @@ const spawned = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/terminal/agent-session-adapters", () => ({ prepareAgentLaunch: prepared }));
 vi.mock("../../../src/terminal/pty-session", () => ({ PtySession: { spawn: spawned } }));
 
+import {
+	getCodexConfigurationSyncDirectory,
+	mutateCodexConfigurationSyncStore,
+} from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import {
 	getCodexConversationMigrationRecordPath,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -23,6 +28,8 @@ const nativeSessionId = "01a15120-4476-78b0-8c56-5a7321338e0b";
 beforeEach(async () => {
 	fixture = createTempDir("kanban-codex-storage-launch-");
 	vi.stubEnv("HOME", fixture.path);
+	vi.stubEnv("CODEX_HOME", join(fixture.path, ".codex"));
+	vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.path, ".codex"));
 	await mkdir(join(fixture.path, ".codex"));
 	prepared.mockReset();
 	prepared.mockImplementation(async (request) => ({ args: request.args, env: {} }));
@@ -47,6 +54,7 @@ beforeEach(async () => {
 afterEach(() => {
 	for (const manager of managers.splice(0)) manager.dispose();
 	vi.unstubAllEnvs();
+	vi.restoreAllMocks();
 	fixture.cleanup();
 });
 function createManager() {
@@ -112,6 +120,93 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		expect(spawned.mock.calls[0]?.[0].env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBeUndefined();
 		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(home);
 	});
+	it("配置锁超过旧预算后并发 resume 只启动一次，保持原生身份、目录且不重发 prompt", async () => {
+		const manager = createManager();
+		const home = join(fixture.path, ".codex");
+		const transcriptPath = join(home, "sessions", `${nativeSessionId}.jsonl`);
+		await mkdir(dirname(transcriptPath));
+		await writeFile(
+			transcriptPath,
+			`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId, source: "cli" } })}\n`,
+		);
+		hydrateStoppedCodexSession(manager, home, transcriptPath);
+		let releaseStoreMutation = () => {};
+		let markStoreMutationStarted = () => {};
+		const storeMutationStarted = new Promise<void>((resolve) => {
+			markStoreMutationStarted = resolve;
+		});
+		const storeMutationMayFinish = new Promise<void>((resolve) => {
+			releaseStoreMutation = resolve;
+		});
+		const heldMutation = mutateCodexConfigurationSyncStore(async () => {
+			markStoreMutationStarted();
+			await storeMutationMayFinish;
+		});
+		await storeMutationStarted;
+		const acquireLock = lockfile.lock;
+		const oldScheduleWaiter = acquireLock(getCodexConfigurationSyncDirectory(), {
+			realpath: false,
+			retries: { retries: 30, minTimeout: 20, maxTimeout: 150 },
+		}).then(
+			async (release) => {
+				await release();
+				return "acquired";
+			},
+			(error: NodeJS.ErrnoException) => error.code,
+		);
+		let markResumeWaiting = () => {};
+		const resumeWaiting = new Promise<void>((resolve) => {
+			markResumeWaiting = resolve;
+		});
+		vi.spyOn(lockfile, "lock").mockImplementation((path, options) => {
+			const waiting = acquireLock(path, options);
+			if (path === getCodexConfigurationSyncDirectory()) markResumeWaiting();
+			return waiting;
+		});
+		const resumeRequest = {
+			...request(),
+			prompt: "原始提示词不得重发",
+			resumePriorAgentConversationWithoutResendingPrompt: true,
+		};
+		const resumes = Promise.all([
+			manager.startTaskSession(resumeRequest, "stale_session_client_auto_resume"),
+			manager.startTaskSession(resumeRequest, "stale_session_client_auto_resume"),
+		]).then(
+			(summaries) => ({ summaries }),
+			(error: unknown) => ({ error }),
+		);
+		try {
+			await resumeWaiting;
+			expect(spawned).not.toHaveBeenCalled();
+			expect(await oldScheduleWaiter).toBe("ELOCKED");
+			// 旧等待方放弃后仍保持占用，避免用例因调度误差失去对旧预算的区分力。
+			await new Promise<void>((resolve) => {
+				setTimeout(resolve, 1_000);
+			});
+			releaseStoreMutation();
+			await heldMutation;
+			const outcome = await resumes;
+			expect(outcome).not.toHaveProperty("error");
+			expect(spawned).toHaveBeenCalledOnce();
+			expect(prepared).toHaveBeenCalledOnce();
+			expect(prepared.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing).toMatchObject({
+				sourceSessionId: nativeSessionId,
+				sourceSessionReuseMode: "resume_existing_session",
+			});
+			expect(spawned.mock.calls[0]?.[0].cwd).toBe(fixture.path);
+			expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(home);
+			expect(manager.getSummary(request().taskId)?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(
+				nativeSessionId,
+			);
+			expect(spawned.mock.results[0]?.value.write).not.toHaveBeenCalled();
+		} finally {
+			releaseStoreMutation();
+			await heldMutation;
+			await resumes;
+			await oldScheduleWaiter;
+		}
+	}, 60_000);
+
 	it("新目录启用后，旧会话仍在原目录按原生 ID 续接", async () => {
 		const manager = createManager();
 		const path = join(fixture.path, ".codex", "sessions", `${nativeSessionId}.jsonl`);

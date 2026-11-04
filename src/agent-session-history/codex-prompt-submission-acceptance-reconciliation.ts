@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { open, stat } from "node:fs/promises";
 import type {
 	RuntimeAgentConversationPromptSubmissionAcceptance,
+	RuntimeSubmittedPromptTextNormalization,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
@@ -21,8 +22,44 @@ export interface CodexPromptSubmissionAcceptanceReconciliation {
 	accepted?: { eventId: string; acceptedAtMs: number };
 }
 
-export function submittedPromptSha256(text: string): string {
-	return createHash("sha256").update(text.replace(/\r\n/g, "\n").trim()).digest("hex");
+export function submittedPromptSha256(
+	text: string,
+	submittedPromptTextNormalization: RuntimeSubmittedPromptTextNormalization = "preserve_internal_whitespace",
+): string {
+	const normalizedText =
+		submittedPromptTextNormalization === "collapse_all_whitespace" ? text.replace(/\s+/g, " ") : text;
+	return createHash("sha256").update(normalizedText.replace(/\r\n/g, "\n").trim()).digest("hex");
+}
+
+export function resolvePromptSubmissionTextNormalization(
+	candidate: Pick<
+		RuntimeAgentConversationPromptSubmissionAcceptance,
+		"submissionSource" | "submittedPromptTextNormalization"
+	>,
+): RuntimeSubmittedPromptTextNormalization {
+	return candidate.submissionSource === "harness_submit_hook"
+		? (candidate.submittedPromptTextNormalization ?? "collapse_all_whitespace")
+		: "preserve_internal_whitespace";
+}
+
+export function requiresLegacyHookPromptTextNormalizationReconciliation(
+	candidate: RuntimeAgentConversationPromptSubmissionAcceptance | null | undefined,
+): boolean {
+	return Boolean(
+		candidate &&
+			candidate.status !== "accepted" &&
+			candidate.submittedPromptSha256 &&
+			resolvePromptSubmissionTextNormalization(candidate) === "collapse_all_whitespace",
+	);
+}
+
+export function shouldRestartLegacyHookPromptAcceptanceReconciliation(
+	candidate: RuntimeAgentConversationPromptSubmissionAcceptance | null | undefined,
+): boolean {
+	return (
+		requiresLegacyHookPromptTextNormalizationReconciliation(candidate) &&
+		candidate?.verification?.submittedPromptTextNormalization !== "collapse_all_whitespace"
+	);
 }
 
 // 仅修复持久标记，不发布新输入边沿。每次最多读一个字节窗口，重启后沿持久游标继续。
@@ -35,6 +72,7 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 	const { summary, observedAtMs } = input;
 	const candidate = summary.agentConversationPromptSubmissionAcceptance;
 	const identity = summary.agentNativeConversationSessionIdentity;
+	const restartLegacyNormalizationScan = shouldRestartLegacyHookPromptAcceptanceReconciliation(candidate);
 	if (
 		!candidate ||
 		candidate.status === "accepted" ||
@@ -42,16 +80,23 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 		!summary.runtimeSessionIncarnationId ||
 		candidate.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
 		(!input.force &&
+			!restartLegacyNormalizationScan &&
 			candidate.verification?.nextCheckAtMs !== undefined &&
 			candidate.verification.nextCheckAtMs !== null &&
 			observedAtMs < candidate.verification.nextCheckAtMs)
 	)
 		return null;
+	const submittedPromptTextNormalization = resolvePromptSubmissionTextNormalization(candidate);
 	const verification: PromptSubmissionAcceptanceVerificationProgress = {
-		...candidate.verification,
+		// 旧比较的 EOF 和匹配不能用于新比较；格式标记与新游标一起持久保存，只重置一次。
+		...(!restartLegacyNormalizationScan ? candidate.verification : {}),
 		checkedAtMs: observedAtMs,
+		submittedPromptTextNormalization,
 		nextCheckAtMs: null,
-		consecutiveUnchangedCheckCount: input.force ? 0 : (candidate.verification?.consecutiveUnchangedCheckCount ?? 0),
+		consecutiveUnchangedCheckCount:
+			input.force || restartLegacyNormalizationScan
+				? 0
+				: (candidate.verification?.consecutiveUnchangedCheckCount ?? 0),
 		reason: "native_evidence_unavailable",
 	};
 	const result: CodexPromptSubmissionAcceptanceReconciliation = {
@@ -157,7 +202,11 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 					type: "response_item",
 					payload: { type: "message", role: "user", content: item.content },
 				});
-				if (!prompt || submittedPromptSha256(prompt.text) !== candidate.submittedPromptSha256) continue;
+				if (
+					!prompt ||
+					submittedPromptSha256(prompt.text, submittedPromptTextNormalization) !== candidate.submittedPromptSha256
+				)
+					continue;
 			}
 			// 先持久保存合格记录；晚于观察起点的事件时间在接受出口重验，不能随 EOF 游标丢失。
 			if (matches.length < 2)

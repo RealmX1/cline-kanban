@@ -107,6 +107,20 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			)
 		: null;
 	const destinationSessionId = destinationSummary?.taskId;
+	const reportOrigin = request.taskConversationSessionReportOrigin;
+	if (
+		reportOrigin &&
+		(!card ||
+			card.id !== reportOrigin.workspaceTaskId ||
+			card.createdAt !== reportOrigin.taskIncarnationCreatedAt ||
+			destinationSessionId !== reportOrigin.targetTaskConversationSessionId ||
+			!Object.values(sessions).some(
+				(summary) =>
+					summary.taskId === reportOrigin.sourceTaskConversationSessionId &&
+					(summary.taskId === card.id || summary.taskConversationSessionMetadata?.workspaceTaskId === card.id),
+			))
+	)
+		return { ok: false, error: "回报来源、目标或任务代次不匹配。" };
 	const requiredSessionId = request.requiredNativeIndependentUserTurnSessionId;
 	const requiredSummary =
 		requiredSessionId && destinationSessionId ? deps.getTaskSessionSummary?.(destinationSessionId) : null;
@@ -200,6 +214,7 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 			workspaceId,
 			enqueue: {
 				taskId: destinationSessionId,
+				taskConversationSessionReportOrigin: request.taskConversationSessionReportOrigin,
 				workspaceTaskId: card?.id ?? taskId,
 				injectionLedgerTaskId: taskId,
 				queueEntryId,

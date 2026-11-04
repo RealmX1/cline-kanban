@@ -30,6 +30,7 @@ import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-s
 import {
 	type CodexPromptSubmissionAcceptanceReconciliation,
 	reconcileCodexPromptSubmissionAcceptance,
+	requiresLegacyHookPromptTextNormalizationReconciliation,
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
@@ -51,6 +52,7 @@ import {
 	readCodexProfileAdoptionRetainedInput,
 	saveCodexProfileAdoptionRetainedInput,
 } from "../codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
+import { prepareCodexSharedPluginInstallationForNativeLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -102,6 +104,7 @@ import type {
 	RuntimeLastConversationProgressObservation,
 	RuntimeLastEffectiveAgentConversationActivityObservation,
 	RuntimeMainAgentConversationModelRequestDispatchEvidenceKind,
+	RuntimeSubmittedPromptTextNormalization,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskConnectionRetry,
 	RuntimeTaskConversationMode,
@@ -818,7 +821,7 @@ export interface StartTaskSessionRequest {
 	projectPath?: string;
 	parentSessionId?: string;
 	taskAgentSessionInitialization?: AgentAdapterLaunchInput["taskAgentSessionInitialization"];
-	taskConversationSessionMainContextForkSourceNativeSessionId?: string;
+	taskConversationSessionContextForkSourceNativeSessionId?: string;
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
@@ -1587,8 +1590,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? { ...previous, resumeRequestedAtMs: previous.resumeRequestedAtMs ?? now() }
 					: {
 							runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: now(),
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -5922,7 +5924,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const sourceNativeConversationSessionId = resumesExistingConversation
 			? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 			: (request.taskAgentSessionInitialization?.sourceSessionId ??
-				request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+				request.taskConversationSessionContextForkSourceNativeSessionId ??
 				request.parentSessionId);
 		if (
 			!this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions ||
@@ -5981,7 +5983,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const sourceId = resumesExistingConversation
 				? entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 				: (request.taskAgentSessionInitialization?.sourceSessionId ??
-					request.taskConversationSessionMainContextForkSourceNativeSessionId ??
+					request.taskConversationSessionContextForkSourceNativeSessionId ??
 					request.parentSessionId);
 			const environment = { ...process.env, ...request.env };
 			let storageHome =
@@ -6236,6 +6238,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							: null,
 					binary: request.binary,
 					environment: { ...process.env, ...request.env },
+					workingDirectory: request.cwd,
 				});
 				throwIfTaskSessionStartWasCancelled();
 				request = {
@@ -6276,8 +6279,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				workspaceId: request.workspaceId,
 				parentSessionId: request.parentSessionId,
 				taskAgentSessionInitialization: request.taskAgentSessionInitialization,
-				taskConversationSessionMainContextForkSourceNativeSessionId:
-					request.taskConversationSessionMainContextForkSourceNativeSessionId,
+				taskConversationSessionContextForkSourceNativeSessionId:
+					request.taskConversationSessionContextForkSourceNativeSessionId,
 				// 按-id 重启寻址。刻意**不**经 materializeTaskAgentSessionForExecutionWorkingDirectory：
 				// 那个函数是给「从别人的历史会话播种一张新卡」用的，源转录不存在时会 throw；而这里的转录
 				// 本来就在这个 cwd 里，让它把一次刷新变成硬失败没有任何道理。
@@ -6290,12 +6293,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way",
 				forkLatestWorkingDirectorySession:
 					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
-					"forked_from_main_current_turn",
+						"forked_from_main_current_turn" ||
+					taskConversationSessionMetadataForLaunch?.taskConversationSessionContextSource ===
+						"forked_from_conversation_session",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 			});
 			throwIfTaskSessionStartWasCancelled();
-			if (codexConfigurationWriterBinding)
+			if (codexConfigurationWriterBinding) {
+				const preparedPluginInstallation = await prepareCodexSharedPluginInstallationForNativeLaunch({
+					binding: codexConfigurationWriterBinding,
+					binary: launch.binary ?? request.binary,
+					environment: { ...process.env, ...request.env, ...launch.env },
+					nativeLaunchArguments: launch.args,
+					workingDirectory: request.cwd,
+				});
+				launch.args = preparedPluginInstallation.arguments;
 				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
+			}
 			throwIfTaskSessionStartWasCancelled();
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
@@ -6762,8 +6776,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 				!entry.summary.agentNativeConversationSessionIdentity
 					? {
 							runtimeSessionIncarnationId,
-							forkSourceNativeSessionId:
-								request.taskConversationSessionMainContextForkSourceNativeSessionId ?? null,
+							forkSourceNativeSessionId: request.taskConversationSessionContextForkSourceNativeSessionId ?? null,
 							resumeRequestedAtMs: null,
 							consecutiveUnchangedProbeCount: 0,
 							lastEvidenceFingerprint: null,
@@ -8907,7 +8920,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	markAgentConversationPromptSubmissionPending(
 		taskId: string,
 		attemptedAtMs: number = now(),
-		context: { source: "harness_submit_hook" | "programmatic_submission"; submittedPromptText?: string } = {
+		context: {
+			source: "harness_submit_hook" | "programmatic_submission";
+			submittedPromptText?: string;
+			submittedPromptTextNormalization?: RuntimeSubmittedPromptTextNormalization;
+		} = {
 			source: "harness_submit_hook",
 		},
 	): RuntimeTaskSessionSummary | null {
@@ -8917,6 +8934,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!Number.isFinite(attemptedAtMs) || attemptedAtMs < (entry.summary.startedAt ?? 0))
 			return cloneSummary(entry.summary);
 		const current = entry.summary.agentConversationPromptSubmissionAcceptance;
+		const submittedPromptTextNormalization =
+			context.source === "harness_submit_hook"
+				? (context.submittedPromptTextNormalization ?? "collapse_all_whitespace")
+				: "preserve_internal_whitespace";
 		const receipt = entry.active?.programmaticDeliveryReceipt;
 		if (
 			current?.status !== "accepted" &&
@@ -8924,7 +8945,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			context.source === "harness_submit_hook" &&
 			receipt?.phase === "awaiting_submit_confirmation" &&
 			(context.submittedPromptText !== undefined
-				? submittedPromptSha256(context.submittedPromptText) === current.submittedPromptSha256
+				? submittedPromptSha256(context.submittedPromptText, submittedPromptTextNormalization) ===
+					submittedPromptSha256(receipt.promptText, submittedPromptTextNormalization)
 				: (entry.active?.lastUserInputAt ?? 0) < current.attemptedAtMs)
 		)
 			return cloneSummary(entry.summary);
@@ -8955,8 +8977,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 				attemptedAtMs,
 				submissionId: randomUUID(),
 				submissionSource: context.source,
+				submittedPromptTextNormalization,
 				...(context.submittedPromptText !== undefined
-					? { submittedPromptSha256: submittedPromptSha256(context.submittedPromptText) }
+					? {
+							submittedPromptSha256: submittedPromptSha256(
+								context.submittedPromptText,
+								submittedPromptTextNormalization,
+							),
+						}
 					: {}),
 				...(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId
 					? { nativeSessionId: entry.summary.agentNativeConversationSessionIdentity.nativeSessionId }
@@ -9120,13 +9148,16 @@ export class TerminalSessionManager implements TerminalSessionService {
 		)
 			return null;
 
-		const nativeInputMatchesPendingSubmission = !(
-			candidate &&
-			candidate.status !== "accepted" &&
-			candidate.submittedPromptSha256 &&
-			input.submittedPromptText !== undefined &&
-			submittedPromptSha256(input.submittedPromptText) !== candidate.submittedPromptSha256
-		);
+		// 有损摘要必须先扫描历史证明唯一，不能由单个实时事件冒领空白不同的输入。
+		const nativeInputMatchesPendingSubmission =
+			!(entry.summary.agentId === "codex" && requiresLegacyHookPromptTextNormalizationReconciliation(candidate)) &&
+			!(
+				candidate &&
+				candidate.status !== "accepted" &&
+				candidate.submittedPromptSha256 &&
+				(input.submittedPromptText === undefined ||
+					submittedPromptSha256(input.submittedPromptText) !== candidate.submittedPromptSha256)
+			);
 
 		const managedStartup = this.managedArgumentStartupDeliveryByTaskId.get(taskId);
 		if (
@@ -9230,7 +9261,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 					? previous
 					: {
 							...(previous && previous.status !== "accepted"
-								? { submissionId: previous.submissionId, submissionSource: previous.submissionSource }
+								? {
+										submissionId: previous.submissionId,
+										submissionSource: previous.submissionSource,
+										submittedPromptTextNormalization: previous.submittedPromptTextNormalization,
+									}
 								: {}),
 							status: "accepted",
 							attemptedAtMs:
@@ -10859,7 +10894,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						return;
 					}
 					const requestForRestart = cloneStartTaskSessionRequest(request);
-					if (requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId) {
+					if (requestForRestart.taskConversationSessionContextForkSourceNativeSessionId) {
 						if (
 							await this.deferSideSessionResumeWaitingForNativeIdentity(entry, {
 								...requestForRestart,
@@ -10872,7 +10907,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							!observedChildIdentity ||
 							observedChildIdentity.sourceAgentId !== requestForRestart.agentId ||
 							observedChildIdentity.nativeSessionId ===
-								requestForRestart.taskConversationSessionMainContextForkSourceNativeSessionId
+								requestForRestart.taskConversationSessionContextForkSourceNativeSessionId
 						) {
 							this.refuseResumeBeforeSpawnWithExplanationInTerminalStateMirror(
 								entry,

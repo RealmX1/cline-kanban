@@ -103,6 +103,37 @@ function isBenignReleaseFailure(error: unknown): boolean {
 	return false;
 }
 
+// proper-lockfile 的默认 onCompromised 直接 `throw`；该回调运行在 mtime 刷新的定时器里，抛出即
+// uncaughtException → installCliFatalErrorHandlers → process.exit(1)，一次可恢复的锁抖动就会杀掉整个
+// 多项目服务器。调用方未显式提供时，安装一个「记录且绝不抛」的默认处理器：advisory 锁 compromise 最坏
+// 只是下一次原子写需重取锁/重试，把它降级为可用性事件而非致命退出。
+export function createDefaultNonThrowingLockCompromiseHandler(lockfilePath: string): (error: Error) => void {
+	return (error: Error) => {
+		logFileLockWarning(`compromised path=${lockfilePath} error=${safeLockErrorMessage(error)}`);
+	};
+}
+
+export async function releaseAdvisoryFileLock(release: () => Promise<void>, lockfilePath: string): Promise<void> {
+	try {
+		await release();
+	} catch (error) {
+		// 所有 release() 失败都在此被【刻意吞掉】、绝不重新抛出：该 try/catch 的唯一职责是消灭
+		// 「compromise 后 release() reject → unhandledRejection → installCliFatalErrorHandlers →
+		// process.exit(1)」这条第二崩溃路径，一次可恢复的锁抖动不得杀掉整个多项目服务器（尤其在
+		// fire-and-forget 的原子写调用点）。但日志需区分两类，避免把真实故障与良性情况混为一谈：
+		//   - 良性（ERELEASED / ENOTACQUIRED / ENOENT）：compromise 后锁已被标记释放并删除锁文件，
+		//     release() 因此拒绝——对已失效的锁属预期善后，记为 [warn]。
+		//   - 意外（EACCES / EIO / EPERM 等）：锁文件真的删不掉，写操作虽已成功却遗留了陈旧锁文件，
+		//     记为更醒目的 [error] 让运维察觉；遗留锁本身可经 staleMs(30s) 自愈，故仍无需抛出。
+		const releaseFailureLogTail = `path=${lockfilePath} error=${safeLockErrorMessage(error)}`;
+		if (isBenignReleaseFailure(error)) {
+			logFileLockWarning(`release-failed-benign ${releaseFailureLogTail}`);
+		} else {
+			logFileLockError(`release-failed-unexpected ${releaseFailureLogTail}`);
+		}
+	}
+}
+
 function createLockOptions(request: LockRequest, lockfilePath: string): LockOptions {
 	const options: LockOptions = {
 		stale: request.staleMs ?? DEFAULT_LOCK_STALE_MS,
@@ -110,16 +141,10 @@ function createLockOptions(request: LockRequest, lockfilePath: string): LockOpti
 		realpath: false,
 		lockfilePath,
 	};
-	// proper-lockfile 的默认 onCompromised 直接 `throw`；该回调运行在 mtime 刷新的定时器里，抛出即
-	// uncaughtException → installCliFatalErrorHandlers → process.exit(1)，一次可恢复的锁抖动就会杀掉整个
-	// 多项目服务器。调用方未显式提供时，安装一个「记录且绝不抛」的默认处理器：advisory 锁 compromise 最坏
-	// 只是下一次原子写需重取锁/重试，把它降级为可用性事件而非致命退出。
 	options.onCompromised =
 		typeof request.onCompromised === "function"
 			? request.onCompromised
-			: (error: Error) => {
-					logFileLockWarning(`compromised path=${lockfilePath} error=${safeLockErrorMessage(error)}`);
-				};
+			: createDefaultNonThrowingLockCompromiseHandler(lockfilePath);
 	return options;
 }
 
@@ -188,24 +213,7 @@ export class LockedFileSystem {
 			return await operation();
 		} finally {
 			for (const acquired of acquiredLocks.reverse()) {
-				try {
-					await acquired.release();
-				} catch (error) {
-					// 所有 release() 失败都在此被【刻意吞掉】、绝不重新抛出：该 try/catch 的唯一职责是消灭
-					// 「compromise 后 release() reject → unhandledRejection → installCliFatalErrorHandlers →
-					// process.exit(1)」这条第二崩溃路径，一次可恢复的锁抖动不得杀掉整个多项目服务器（尤其在
-					// fire-and-forget 的原子写调用点）。但日志需区分两类，避免把真实故障与良性情况混为一谈：
-					//   - 良性（ERELEASED / ENOTACQUIRED / ENOENT）：compromise 后锁已被标记释放并删除锁文件，
-					//     release() 因此拒绝——对已失效的锁属预期善后，记为 [warn]。
-					//   - 意外（EACCES / EIO / EPERM 等）：锁文件真的删不掉，写操作虽已成功却遗留了陈旧锁文件，
-					//     记为更醒目的 [error] 让运维察觉；遗留锁本身可经 staleMs(30s) 自愈，故仍无需抛出。
-					const releaseFailureLogTail = `path=${acquired.lockfilePath} error=${safeLockErrorMessage(error)}`;
-					if (isBenignReleaseFailure(error)) {
-						logFileLockWarning(`release-failed-benign ${releaseFailureLogTail}`);
-					} else {
-						logFileLockError(`release-failed-unexpected ${releaseFailureLogTail}`);
-					}
-				}
+				await releaseAdvisoryFileLock(acquired.release, acquired.lockfilePath);
 			}
 		}
 	}

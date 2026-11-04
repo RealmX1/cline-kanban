@@ -5,7 +5,12 @@ import { codexRemoteConversationLaunchPlanSchema } from "./codex-remote-conversa
 
 export type { CodexNativeSessionControlEndpoint } from "../core/codex-native-session-control-endpoint-contract";
 
-const ownedDirectorySchema = z.object({ path: z.string(), device: z.string(), inode: z.string() });
+const ownedDirectorySchema = z.object({
+	path: z.string(),
+	device: z.string(),
+	inode: z.string(),
+	preserveDirectoryAfterNativeControlHostExit: z.boolean().optional(),
+});
 export type OwnedCodexNativeSessionControlHostDirectory = z.infer<typeof ownedDirectorySchema>;
 
 export const codexNativeSessionControlHostLaunchSpecificationSchema = z.object({
@@ -29,6 +34,8 @@ export async function removeOwnedCodexNativeSessionControlHostDirectories(
 	directories: readonly OwnedCodexNativeSessionControlHostDirectory[],
 ) {
 	for (const directory of directories) {
+		// 固定 rendezvous 目录归实例所有，不能因一代启动失败删掉其它代的入口。
+		if (directory.preserveDirectoryAfterNativeControlHostExit) continue;
 		try {
 			const current = await lstat(directory.path, { bigint: true });
 			if (!current.isDirectory() || `${current.dev}` !== directory.device || `${current.ino}` !== directory.inode)

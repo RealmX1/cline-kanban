@@ -210,7 +210,7 @@ describe("ACP 协作 fork", () => {
 				...resumeInput,
 				taskId: "fork-child",
 				resumePriorAgentConversationWithoutResendingPrompt: false,
-				taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+				taskConversationSessionContextForkSourceNativeSessionId: "exact-main",
 			}),
 		).rejects.toThrow("独立的新会话 ID");
 		expect(fixture.connection.agent.request.mock.calls.map(([method]) => method)).toEqual([
@@ -232,7 +232,7 @@ describe("ACP 协作 fork", () => {
 				...resumeInput,
 				taskId: "fork-child",
 				resumePriorAgentConversationWithoutResendingPrompt: false,
-				taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+				taskConversationSessionContextForkSourceNativeSessionId: "exact-main",
 				revalidateTaskConversationSessionMainContextForkSource: async () => {
 					throw new Error("源身份已变化");
 				},
@@ -257,7 +257,7 @@ describe("ACP 协作 fork", () => {
 			...resumeInput,
 			taskId: "fork-child",
 			resumePriorAgentConversationWithoutResendingPrompt: false,
-			taskConversationSessionMainContextForkSourceNativeSessionId: "exact-main",
+			taskConversationSessionContextForkSourceNativeSessionId: "exact-main",
 		});
 		if (!supported) {
 			await expect(promise).rejects.toThrow("fork");

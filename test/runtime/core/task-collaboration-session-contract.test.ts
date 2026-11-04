@@ -40,6 +40,30 @@ describe("协作会话的角色与启动配置", () => {
 
 // summary 的其他字段不参与 fork 寻址；用最小结构凸显身份与 agent 的约束。
 describe("By the way 主对话身份边界", () => {
+	it("已有侧问时仍允许按精确原生身份再次复刻", () => {
+		const selection = resolveByTheWayMainSessionForkSelection({
+			workspaceTaskId: "task-1",
+			launchAgentId: "codex",
+			mainSessionWorkingDirectoryPath: "/repo",
+			mainSessionSummary: {
+				agentId: "codex",
+				agentNativeConversationSessionIdentity: { sourceAgentId: "codex", nativeSessionId: "source-native-id" },
+			} as RuntimeTaskSessionSummary,
+			existingTaskConversationSessionSummaries: [
+				{
+					taskId: "existing-side-session",
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "task-1",
+						taskConversationSessionRole: "by_the_way",
+					},
+				} as RuntimeTaskSessionSummary,
+			],
+		});
+		expect(selection).toEqual({
+			forkRejectionReason: null,
+			mainSessionNativeConversationSessionId: "source-native-id",
+		});
+	});
 	it.each(["claude", "codex"] as const)("拒绝把另一 harness 的主对话交给 %s fork", (launchAgentId) => {
 		const otherAgentId = launchAgentId === "claude" ? "codex" : "claude";
 		const selection = resolveByTheWayMainSessionForkSelection({

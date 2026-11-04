@@ -6,6 +6,8 @@ Use this reference for Cline Kanban, Vibe Kanban, or any local runtime that owns
 
 ## Before Restart
 
+本次候选包含 `local-deployment-execution.js` 时，按[持久执行与独立复盘合同](../../../../docs/local-deployment-execution-and-retrospective.md)冻结步骤并交给通用所属命令执行；以下检查仍是其步骤必须满足的部署门禁。不能因为有执行器就省略授权、ABI 或逐会话核查。
+
 - Capture the listening process:
   - `lsof -nP -iTCP:<port> -sTCP:LISTEN`
   - `ps -p <pid> -o pid,ppid,command`

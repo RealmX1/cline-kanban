@@ -50,9 +50,27 @@ export interface ExplorationThreadGraphSessionRefAssembly {
 const FORK_CAPABLE_HOST_AGENT_ID = "claude";
 
 // 单条会话的翻译。返回 null 表示这条进不了本次作业（原因写进 excluded）。
+function directMainSessionOriginTurnNumber(
+	summary: RuntimeTaskSessionSummary,
+	mainSessionTaskId: string,
+): number | undefined {
+	const metadata = summary.taskConversationSessionMetadata;
+	if (
+		metadata?.taskConversationSessionRole !== "by_the_way" ||
+		metadata.mainSessionOriginTurnNumber === null ||
+		metadata.taskConversationSessionContextSource === "started_from_scratch" ||
+		metadata.contextSourceSelectionAtCreation === "fresh"
+	)
+		return undefined;
+	const sourceId = metadata.contextSourceTaskConversationSessionId;
+	if (sourceId && sourceId !== mainSessionTaskId) return undefined;
+	return metadata.mainSessionOriginTurnNumber;
+}
+
 function buildConversationSessionRefFromSummary(
 	summary: RuntimeTaskSessionSummary,
 	excludedSessions: ExplorationThreadGraphExcludedSession[],
+	mainSessionTaskId: string,
 ): ConversationSessionRef | null {
 	const exclude = (reason: ExplorationThreadGraphSessionRefExclusionReason): null => {
 		excludedSessions.push({ taskId: summary.taskId, reason });
@@ -91,12 +109,7 @@ function buildConversationSessionRefFromSummary(
 		return exclude("missing_working_directory");
 	}
 
-	const conversationSessionMetadata = summary.taskConversationSessionMetadata;
-	const forkedFromParentSessionTurnNumber =
-		conversationSessionMetadata?.taskConversationSessionRole === "by_the_way" &&
-		conversationSessionMetadata.mainSessionOriginTurnNumber !== null
-			? conversationSessionMetadata.mainSessionOriginTurnNumber
-			: undefined;
+	const forkedFromParentSessionTurnNumber = directMainSessionOriginTurnNumber(summary, mainSessionTaskId);
 
 	return {
 		harnessKind: CLAUDE_CODE_HARNESS_KIND,
@@ -150,7 +163,7 @@ export function assembleExplorationThreadGraphSessionRefs(input: {
 	if (mainSummary === undefined) {
 		return { sessionRefs: [], excludedSessions, hostTaskIdByNativeSessionId };
 	}
-	const mainSessionRef = buildConversationSessionRefFromSummary(mainSummary, excludedSessions);
+	const mainSessionRef = buildConversationSessionRefFromSummary(mainSummary, excludedSessions, mainSummary.taskId);
 	if (mainSessionRef === null) {
 		return { sessionRefs: [], excludedSessions, hostTaskIdByNativeSessionId };
 	}
@@ -161,7 +174,7 @@ export function assembleExplorationThreadGraphSessionRefs(input: {
 		.filter((summary) => summary.taskId !== mainSummary.taskId)
 		.sort((left, right) => (left.taskId < right.taskId ? -1 : left.taskId > right.taskId ? 1 : 0));
 	for (const summary of byTheWaySummaries) {
-		const sessionRef = buildConversationSessionRefFromSummary(summary, excludedSessions);
+		const sessionRef = buildConversationSessionRefFromSummary(summary, excludedSessions, mainSummary.taskId);
 		if (sessionRef !== null) {
 			byTheWaySessionRefs.push(sessionRef);
 			hostTaskIdByNativeSessionId[sessionRef.nativeSessionId] = summary.taskId;
