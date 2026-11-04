@@ -15,6 +15,7 @@ import {
 /** 全 null / 全空字典：表示「服务端一条偏好都没有」，也是首次读取时的形态。 */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		taskConversationTranscriptDocumentVisibility: null,
 		newPeerSessionStartInPlanMode: null,
 		newByTheWaySessionStartInPlanMode: null,
 		taskProjectAssignmentAutomaticAnalysisEnabled: null,
@@ -72,6 +73,8 @@ export function normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins(
 		return parsed.success ? (parsed.data as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TField]) : null;
 	};
 	return {
+		taskConversationTranscriptDocumentVisibility:
+			parseNullableField("taskConversationTranscriptDocumentVisibility") ?? null,
 		newPeerSessionStartInPlanMode: parseNullableField("newPeerSessionStartInPlanMode") ?? null,
 		newByTheWaySessionStartInPlanMode: parseNullableField("newByTheWaySessionStartInPlanMode") ?? null,
 		taskProjectAssignmentAutomaticAnalysisEnabled:
@@ -101,6 +104,7 @@ export function hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(
 	preferences: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		preferences.taskConversationTranscriptDocumentVisibility == null &&
 		preferences.newPeerSessionStartInPlanMode == null &&
 		preferences.newByTheWaySessionStartInPlanMode == null &&
 		preferences.taskProjectAssignmentAutomaticAnalysisEnabled == null &&
@@ -134,6 +138,8 @@ export function areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
 	right: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins,
 ): boolean {
 	return (
+		(left.taskConversationTranscriptDocumentVisibility ?? null) ===
+			(right.taskConversationTranscriptDocumentVisibility ?? null) &&
 		(left.newPeerSessionStartInPlanMode ?? null) === (right.newPeerSessionStartInPlanMode ?? null) &&
 		(left.newByTheWaySessionStartInPlanMode ?? null) === (right.newByTheWaySessionStartInPlanMode ?? null) &&
 		(left.taskProjectAssignmentAutomaticAnalysisEnabled ?? null) ===
@@ -209,6 +215,10 @@ export function mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(
 		return current;
 	}
 	const replaced: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins = {
+		taskConversationTranscriptDocumentVisibility:
+			updates?.taskConversationTranscriptDocumentVisibility === undefined
+				? (current.taskConversationTranscriptDocumentVisibility ?? null)
+				: updates.taskConversationTranscriptDocumentVisibility,
 		newByTheWaySessionStartInPlanMode:
 			updates?.newByTheWaySessionStartInPlanMode === undefined
 				? (current.newByTheWaySessionStartInPlanMode ?? null)

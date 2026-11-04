@@ -65,6 +65,10 @@ function useUserInterfacePreference<TFieldName extends UserInterfacePreferenceFi
 	return [value, setValue];
 }
 
+export function useTaskConversationTranscriptDocumentVisibilityPreference() {
+	return useUserInterfacePreference("taskConversationTranscriptDocumentVisibility", "all_records");
+}
+
 /** 创建、Backlog 编辑与直接启动共用，未设置时默认关闭。 */
 export function useTaskProjectAssignmentAutomaticAnalysisEnabledPreference(): [
 	boolean,

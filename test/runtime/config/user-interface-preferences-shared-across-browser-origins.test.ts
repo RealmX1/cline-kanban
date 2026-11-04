@@ -9,6 +9,33 @@ import {
 import type { RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins } from "../../../src/core/api-contract";
 
 describe("跨浏览器 origin 共享的界面偏好", () => {
+	it("转录阅读可见度参与规范化、更新与持久化判据，坏值不影响其他偏好", () => {
+		const preferences = normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins({
+			taskConversationTranscriptDocumentVisibility: "conversation_only",
+		});
+		expect(hasNoUserInterfacePreferenceSharedAcrossBrowserOriginsSet(preferences)).toBe(false);
+		expect(
+			areUserInterfacePreferencesSharedAcrossBrowserOriginsEqual(
+				preferences,
+				USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
+			),
+		).toBe(false);
+		expect(
+			mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(preferences, { newTaskAutoReviewEnabled: true })
+				.taskConversationTranscriptDocumentVisibility,
+		).toBe("conversation_only");
+		expect(
+			mergeUserInterfacePreferencesSharedAcrossBrowserOriginsUpdate(preferences, {
+				taskConversationTranscriptDocumentVisibility: "all_records",
+			}).taskConversationTranscriptDocumentVisibility,
+		).toBe("all_records");
+		const invalid = normalizeUserInterfacePreferencesSharedAcrossBrowserOrigins({
+			taskConversationTranscriptDocumentVisibility: "invalid",
+			newTaskAutoReviewEnabled: true,
+		});
+		expect(invalid.taskConversationTranscriptDocumentVisibility).toBeNull();
+		expect(invalid.newTaskAutoReviewEnabled).toBe(true);
+	});
 	describe("项目归属自动分析偏好", () => {
 		it.each([undefined, null, "true"])("旧配置或坏值 %s 保持未设置", (value) => {
 			expect(

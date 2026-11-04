@@ -54,6 +54,7 @@ export type UserInterfacePreferenceFieldName = keyof RuntimeUserInterfacePrefere
  */
 export const USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins =
 	{
+		taskConversationTranscriptDocumentVisibility: null,
 		taskProjectAssignmentAutomaticAnalysisEnabled: null,
 		taskEditorSettingPresentationBySettingKey: {},
 		newPeerSessionStartInPlanMode: null,
@@ -136,6 +137,8 @@ const BROWSER_LOCAL_STORAGE_MIRROR_POLICY_BY_PREFERENCE_FIELD: Record<
 	taskProjectAssignmentAutomaticAnalysisEnabled:
 		PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	taskEditorSettingPresentationBySettingKey: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
+	taskConversationTranscriptDocumentVisibility:
+		PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	newPeerSessionStartInPlanMode: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	newByTheWaySessionStartInPlanMode: PREFERENCE_FIELD_KEPT_ONLY_ON_SERVER_WITHOUT_BROWSER_LOCAL_STORAGE_MIRROR,
 	newTaskAutoReviewEnabled: defineMirrorCodec<"newTaskAutoReviewEnabled">({
@@ -244,6 +247,7 @@ let hasStartedLoadingFromServer = false;
 // 本页显式选择持续覆盖服务端快照，包括保存成功后才到达的旧读取或其他偏好的响应。
 // 刷新后重新以服务端持久值为准；保存失败时只保留当前页面选择并明确提示。
 let taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession: boolean | null | undefined;
+let transcriptDocumentVisibilityExplicitChoiceInCurrentBrowserSession: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins["taskConversationTranscriptDocumentVisibility"];
 const pendingTaskEditorSettingPresentations = new Map<
 	string,
 	{ revision: number; value: "expanded" | "collapsed_in_group" | "hidden" }
@@ -286,6 +290,11 @@ export function haveUserInterfacePreferencesLoadedFromServer(): boolean {
 export function readEffectiveUserInterfacePreferenceValue<TFieldName extends UserInterfacePreferenceFieldName>(
 	fieldName: TFieldName,
 ): RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName] | null {
+	if (
+		fieldName === "taskConversationTranscriptDocumentVisibility" &&
+		transcriptDocumentVisibilityExplicitChoiceInCurrentBrowserSession !== undefined
+	)
+		return transcriptDocumentVisibilityExplicitChoiceInCurrentBrowserSession as RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins[TFieldName];
 	if (
 		fieldName === "taskProjectAssignmentAutomaticAnalysisEnabled" &&
 		taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession !== undefined
@@ -356,6 +365,8 @@ function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeCon
 		saveRequest.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskProjectAssignmentAutomaticAnalysisEnabled;
 	const patch =
 		saveRequest.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskEditorSettingPresentationBySettingKey;
+	const transcriptDocumentVisibilityUpdate =
+		saveRequest.userInterfacePreferencesSharedAcrossBrowserOrigins?.taskConversationTranscriptDocumentVisibility;
 	const revision = ++taskEditorSettingSaveRevision;
 	if (patch) {
 		for (const [key, value] of Object.entries(patch))
@@ -374,13 +385,19 @@ function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeCon
 				preferencesLoadedFromServer: savedConfig.userInterfacePreferencesSharedAcrossBrowserOrigins,
 			});
 		} catch {
+			if (transcriptDocumentVisibilityUpdate !== undefined)
+				notifyError("阅读内容可见度尚未保存到运行时，当前选择已保留。请在连接恢复后重新选择以保存。");
 			if (patch) notifyError("任务设置的收起与隐藏偏好尚未保存到运行时，请在连接恢复后重试。当前表单值已保留。");
 			if (taskProjectAssignmentAutomaticAnalysisEnabledUpdate !== undefined)
 				notifyError("“自动分析项目归属”偏好尚未保存到运行时，当前选择已保留。请在连接恢复后重新切换以保存。");
 		}
 	};
 	// 同一客户端按点击次序保存；跨客户端的不同设置键仍由运行时配置锁逐键合并。
-	if (patch || taskProjectAssignmentAutomaticAnalysisEnabledUpdate !== undefined)
+	if (
+		patch ||
+		taskProjectAssignmentAutomaticAnalysisEnabledUpdate !== undefined ||
+		transcriptDocumentVisibilityUpdate !== undefined
+	)
 		taskEditorPreferenceSaveSerialTail = taskEditorPreferenceSaveSerialTail.then(saveAndAdopt, saveAndAdopt);
 	else void saveAndAdopt();
 }
@@ -400,6 +417,9 @@ function sendPreferenceSaveRequestAndAdoptServerResponse(saveRequest: RuntimeCon
 export function saveUserInterfacePreferencesSharedAcrossBrowserOrigins(
 	update: Partial<RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins>,
 ): void {
+	if (update.taskConversationTranscriptDocumentVisibility !== undefined)
+		transcriptDocumentVisibilityExplicitChoiceInCurrentBrowserSession =
+			update.taskConversationTranscriptDocumentVisibility;
 	if (update.taskProjectAssignmentAutomaticAnalysisEnabled !== undefined)
 		taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession =
 			update.taskProjectAssignmentAutomaticAnalysisEnabled;
@@ -477,6 +497,7 @@ export function resetUserInterfacePreferencesSharedAcrossBrowserOriginsStoreForT
 	storeState = STORE_STATE_BEFORE_FIRST_LOAD;
 	hasStartedLoadingFromServer = false;
 	taskProjectAssignmentAutomaticAnalysisExplicitChoiceInCurrentBrowserSession = undefined;
+	transcriptDocumentVisibilityExplicitChoiceInCurrentBrowserSession = undefined;
 	pendingTaskEditorSettingPresentations.clear();
 	taskEditorSettingSaveRevision = 0;
 	taskEditorPreferenceSaveSerialTail = Promise.resolve();
