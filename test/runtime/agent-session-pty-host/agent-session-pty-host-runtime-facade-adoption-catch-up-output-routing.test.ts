@@ -185,6 +185,56 @@ async function startFacadeOverFakeConnectionAndTakeAdoptionCandidate(
 }
 
 describe("agent session pty host adoption catch-up output routing", () => {
+	it.each([true, false])("attach 原子检查点在历史字节前交付，身份不匹配时降级为未知：%s", async (identityMatches) => {
+		const { fakeConnection, adoptionCandidate } = await startFacadeOverFakeConnectionAndTakeAdoptionCandidate();
+		const events: string[] = [];
+		const adoption = adoptionCandidate.adoptHostedTerminalPtyProcess({
+			fromOutputByteOffset: 10,
+			onCatchUpOutputGap: () => {
+				events.push("gap");
+			},
+			onCatchUpOutputStart: ({ startByteOffset, terminalModeReplayState }) => {
+				expect(startByteOffset).toBe(20);
+				expect(terminalModeReplayState?.terminalModes.mouseCoordinateEncoding).toBe(
+					identityMatches ? 1006 : undefined,
+				);
+				events.push("modes");
+			},
+			onCatchUpOutput: () => events.push("bytes"),
+			onData: () => {
+				throw new Error("历史输出不能进入实时回调");
+			},
+			onExit: () => {},
+		});
+		await yieldToNextSocketDataEventTurn();
+		fakeConnection.deliverAttachResponseAndOutputFramesInOneSocketDataEvent(
+			{
+				kind: "attached",
+				catchUpStartByteOffset: 20,
+				catchUpEndByteOffset: 24,
+				overwrittenByteCountBeforeCatchUpStart: 10,
+				terminalModeCheckpoint: {
+					schemaVersion: 1,
+					hostedSessionKey: "hosted-session-adopted",
+					pid: identityMatches ? 4242 : 4243,
+					spawnedAtEpochMs: 1000,
+					outputByteOffset: 20,
+					terminalModes: {
+						alternateScreenActive: true,
+						mouseTrackingMode: 1002,
+						mouseCoordinateEncoding: 1006,
+						bracketedPasteActive: true,
+						focusReportingActive: false,
+					},
+					parserContinuationHex: "",
+				},
+			},
+			[{ startByteOffset: 20, bytes: Buffer.from("tail") }],
+		);
+		await adoption;
+		expect(events).toEqual(["gap", "modes", "bytes"]);
+	});
+
 	it("listing 后覆盖 checkpoint 时，先通知缺口再交付追赶字节，保留原会话", async () => {
 		const { fakeConnection, adoptionCandidate } = await startFacadeOverFakeConnectionAndTakeAdoptionCandidate();
 		const events: string[] = [];

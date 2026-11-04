@@ -7,6 +7,8 @@
 //
 // 只放进程级操作；输出与退出经 spawn 时注册的回调送达，不在接口上。
 
+import type { HostedSessionTerminalModeReplayState } from "../agent-session-pty-host/wire-protocol/hosted-session-terminal-mode-checkpoint";
+
 export interface TerminalPtyProcessExitEvent {
 	exitCode: number;
 	signal?: number;
@@ -92,6 +94,11 @@ export interface HostedTerminalPtySessionAdoptionCandidate {
 		fromOutputByteOffset?: number;
 		// attach 时才确证的覆盖缺口：必须在交付任何追赶字节前丢弃旧 checkpoint、重新建立 mirror。
 		onCatchUpOutputGap?: () => void | Promise<void>;
+		// 在缺口处理之后、任何历史字节之前调用；checkpoint 已在 facade 核对会话身份和真实起点。
+		onCatchUpOutputStart?: (input: {
+			startByteOffset: number;
+			terminalModeReplayState?: HostedSessionTerminalModeReplayState;
+		}) => void | Promise<void>;
 		onCatchUpOutput: (bytes: Buffer) => void;
 		onData: (chunk: Buffer) => void;
 		onExit: (event: TerminalPtyProcessExitEvent) => void;
