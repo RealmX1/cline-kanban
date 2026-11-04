@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { type FSWatcher, type Stats, unwatchFile, watch, watchFile } from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname } from "node:path";
@@ -21,6 +22,7 @@ import type {
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import {
+	buildCodexNativeAgentTurnExecutionSemanticGuard,
 	type CodexNativeAgentTurnExecutionObservation,
 	shouldContinuouslyObserveCodexNativeTurnExecution,
 } from "../core/codex-native-agent-turn-execution-observation";
@@ -63,6 +65,11 @@ export interface CreateNativeAgentConversationActivityObserverOptions {
 		observation: NativeAgentConversationActivityObservationContext & CodexNativeDirectInputReadinessObservation,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
 	) => Promise<void> | void;
+	onCodexNativeDirectInputReadinessReconciliation?: (
+		context: NativeAgentConversationActivityObservationContext,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		progress: NonNullable<RuntimeTaskSessionSummary["codexNativeDirectInputReadinessReconciliation"]>,
+	) => Promise<void> | void;
 	onActivity?: (
 		observation: NativeAgentConversationActivityObservationContext &
 			NativeAgentConversationTranscriptActivityObservation,
@@ -101,8 +108,8 @@ interface NativeConversationObservationState {
 	lastReadStartedAtMs: number;
 	consecutiveUnknownNativeExecutionReadCount: number;
 	nextNativeExecutionReadAtMs: number;
+	directInputReadinessReconciliation: RuntimeTaskSessionSummary["codexNativeDirectInputReadinessReconciliation"];
 	candidateExpiresAtMs: number | null;
-	wasCodexNeedsInputNativeReconciliationCandidate: boolean;
 	lastCodexNativeConversationRewindSignalKey: string | null;
 	retryTimer: ReturnType<typeof setTimeout> | null;
 	transcriptBacklogRetryTimer: ReturnType<typeof setTimeout> | null;
@@ -151,11 +158,12 @@ export function createNativeAgentConversationActivityObserver(
 				if (
 					isCurrent(state) &&
 					summary &&
-					shouldContinuouslyObserveCodexNativeTurnExecution(summary) &&
-					summary.codexNativeSessionControlEndpoint &&
-					nowMs() >= state.nextNativeExecutionReadAtMs
+					((shouldContinuouslyObserveCodexNativeTurnExecution(summary) &&
+						summary.codexNativeSessionControlEndpoint &&
+						nowMs() >= state.nextNativeExecutionReadAtMs) ||
+						isCodexNeedsInputNativeReconciliationCandidate(summary))
 				)
-					void scheduleRead(state);
+					void scheduleRead(state, false, isCodexNeedsInputNativeReconciliationCandidate(summary));
 			}
 		}, 15_000);
 		nativeExecutionSweepTimer.unref();
@@ -362,7 +370,11 @@ export function createNativeAgentConversationActivityObserver(
 		watchFile(transcriptPath, { persistent: false, interval: 15_000 }, onTranscriptMetadataChanged);
 		void inspectCurrentTranscriptMetadata();
 	}
-	function scheduleRead(state: NativeConversationObservationState, force = false): Promise<void> {
+	function scheduleRead(
+		state: NativeConversationObservationState,
+		force = false,
+		nativeReadinessOnly = false,
+	): Promise<void> {
 		if (state.inFlight) return state.inFlight;
 		if (!force && nowMs() - state.lastReadStartedAtMs < (options.cooldownMs ?? 250)) {
 			// 新触发即使落在冷却期，也必须在自己的固定窗口内得到补读。
@@ -412,7 +424,7 @@ export function createNativeAgentConversationActivityObserver(
 				!pendingVerification ||
 				(pendingVerification.nextCheckAtMs !== null && nowMs() >= pendingVerification.nextCheckAtMs);
 			// 状态未知只退避独立执行查询；消息活动和接受证据仍按自身冷却期读取。
-			const shouldReadCodexNativeAgentTurnExecution =
+			let shouldReadCodexNativeAgentTurnExecution =
 				force ||
 				state.consecutiveUnknownNativeExecutionReadCount === 0 ||
 				!shouldContinuouslyObserveCodexNativeTurnExecution(summaryBeforeRead) ||
@@ -448,9 +460,64 @@ export function createNativeAgentConversationActivityObserver(
 			let hasKnownNativeExecution = false;
 			let readFailureWasReported = false;
 			let shouldReadMoreTranscriptBacklog = false;
+			let skippedNativeReadinessVerification = false;
 			void Promise.resolve()
-				.then(() =>
-					readNativeActivity({
+				.then(async () => {
+					if (isCodexNeedsInputNativeReconciliationCandidate(summaryBeforeRead)) {
+						const paths = [
+							summaryBeforeRead.codexNativeSessionControlEndpoint?.socketPath,
+							summaryBeforeRead.agentNativeConversationSessionIdentity?.transcriptPath,
+						];
+						const metadata = await Promise.all(
+							paths.map(async (path) => {
+								const value = path ? await stat(path).catch(() => null) : null;
+								return [path, value?.dev, value?.ino, value?.size, value?.mtimeMs];
+							}),
+						);
+						const acceptance = summaryBeforeRead.agentConversationPromptSubmissionAcceptance;
+						// 接受扫描的自身进度不能重新武装原生就绪查询预算。
+						const evidenceSummary = {
+							...summaryBeforeRead,
+							agentConversationPromptSubmissionAcceptance: acceptance
+								? { ...acceptance, verification: undefined }
+								: acceptance,
+						};
+						const evidenceFingerprint = createHash("sha256")
+							.update(
+								JSON.stringify([buildCodexNativeAgentTurnExecutionSemanticGuard(evidenceSummary), metadata]),
+							)
+							.digest("hex");
+						const previous =
+							state.getCurrentSummary()?.codexNativeDirectInputReadinessReconciliation ??
+							state.directInputReadinessReconciliation;
+						const sameEvidence = previous?.evidenceFingerprint === evidenceFingerprint;
+						shouldReadCodexNativeAgentTurnExecution =
+							!sameEvidence ||
+							(previous != null && nowMs() >= (previous.nextCheckAtMs ?? previous.lastAttemptAtMs + 60_000));
+						if (shouldReadCodexNativeAgentTurnExecution) {
+							const attemptCount = sameEvidence && previous ? previous.attemptCount + 1 : 1;
+							const progress = {
+								evidenceFingerprint,
+								attemptCount,
+								lastAttemptAtMs: nowMs(),
+								// 同一 socket 可以不改元数据就恢复响应；三次快速补证后仅每分钟探测一次。
+								nextCheckAtMs: nowMs() + (attemptCount < 3 ? 15_000 : 60_000),
+								recheckCondition: "三次补证后每分钟探测端点；原生历史或回合证据变化立即重验，重绘不重置预算。",
+							};
+							await options.onCodexNativeDirectInputReadinessReconciliation?.(
+								context(state),
+								summaryBeforeRead,
+								progress,
+							);
+							state.directInputReadinessReconciliation = progress;
+						}
+						if (nativeReadinessOnly && !shouldReadCodexNativeAgentTurnExecution) {
+							skippedNativeReadinessVerification = true;
+							return null;
+						}
+					}
+					if (!isReadStillCurrent()) return null;
+					return readNativeActivity({
 						workspaceId: state.workspaceId,
 						summary: summaryBeforeRead,
 						shouldReadCodexNativeAgentTurnExecution,
@@ -460,11 +527,12 @@ export function createNativeAgentConversationActivityObserver(
 						codexToolTranscriptCursor: state.codexToolTranscriptCursor,
 						observedAtMs: state.lastReadStartedAtMs,
 						signal: state.abortController.signal,
-					}),
-				)
+					});
+				})
 				.then(async (result) => {
 					if (!isReadStillCurrent()) return;
 					if (!result) {
+						if (skippedNativeReadinessVerification) return;
 						if (state.codexFullMessageReadContinuation) state.consecutiveUnchangedCodexFullMessageReadCount += 1;
 						await recordUnavailableAcceptanceEvidence();
 						return;
@@ -484,7 +552,7 @@ export function createNativeAgentConversationActivityObserver(
 						reportReadFailure(new Error(readFailure), state);
 					}
 					// 首次基线与 rewind 后没有新增消息时，也必须消费独立的状态证明。
-					if (result.codexNativeDirectInputReadiness) {
+					if (shouldReadCodexNativeAgentTurnExecution && result.codexNativeDirectInputReadiness) {
 						await options.onCodexNativeDirectInputReadiness?.(
 							{ ...context(state), ...result.codexNativeDirectInputReadiness },
 							summaryBeforeRead,
@@ -679,8 +747,8 @@ export function createNativeAgentConversationActivityObserver(
 			lastReadStartedAtMs: Number.NEGATIVE_INFINITY,
 			consecutiveUnknownNativeExecutionReadCount: 0,
 			nextNativeExecutionReadAtMs: 0,
+			directInputReadinessReconciliation: summary.codexNativeDirectInputReadinessReconciliation,
 			candidateExpiresAtMs: null,
-			wasCodexNeedsInputNativeReconciliationCandidate: false,
 			lastCodexNativeConversationRewindSignalKey: null,
 			retryTimer: null,
 			transcriptBacklogRetryTimer: null,
@@ -705,18 +773,11 @@ export function createNativeAgentConversationActivityObserver(
 		observeTaskSessionSummary(workspaceId, summary, getCurrentSummary) {
 			const state = stateFor(workspaceId, summary, getCurrentSummary);
 			if (state) {
-				const isCandidate = isCodexNeedsInputNativeReconciliationCandidate(summary);
 				const rewindSignalKey = isCodexNativeConversationRewindSignal(summary.latestHookActivity ?? undefined)
 					? JSON.stringify([summary.lastHookAt, summary.latestHookActivity?.hookEventName])
 					: null;
 				// 只认待输入进入边沿或新的 rewind；重绘、重复摘要与补读不能续期。
-				if (
-					isCandidate &&
-					(!state.wasCodexNeedsInputNativeReconciliationCandidate ||
-						(rewindSignalKey !== null && rewindSignalKey !== state.lastCodexNativeConversationRewindSignalKey))
-				)
-					state.candidateExpiresAtMs = nowMs() + 5_000;
-				state.wasCodexNeedsInputNativeReconciliationCandidate = isCandidate;
+				// 待输入核验由持久预算驱动；五秒窗口只服务输入接受补证。
 				if (rewindSignalKey !== null && rewindSignalKey !== state.lastCodexNativeConversationRewindSignalKey) {
 					if (state.codexFullMessageReadContinuationRetryTimer)
 						clearTimeout(state.codexFullMessageReadContinuationRetryTimer);

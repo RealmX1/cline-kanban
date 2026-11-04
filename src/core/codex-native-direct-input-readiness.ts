@@ -1,4 +1,5 @@
 import type { RuntimeTaskHookActivity, RuntimeTaskSessionSummary } from "./api-contract";
+import { buildCodexNativeAgentTurnExecutionSemanticGuard } from "./codex-native-agent-turn-execution-observation";
 import { resolveSessionFacets } from "./session-activity";
 
 // 这是当前原生控制面的状态证明，不是用户提交被接受或对话发生新活动的证明。
@@ -32,16 +33,7 @@ export function canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
 	const identity = current.agentNativeConversationSessionIdentity;
 	const endpoint = current.codexNativeSessionControlEndpoint;
 	return (
-		isCodexNeedsInputNativeReconciliationCandidate(summaryBeforeRead) &&
-		isCodexNeedsInputNativeReconciliationCandidate(current) &&
-		current.updatedAt === summaryBeforeRead.updatedAt &&
-		current.taskId === summaryBeforeRead.taskId &&
-		current.reviewReason === summaryBeforeRead.reviewReason &&
-		current.lastHookAt === summaryBeforeRead.lastHookAt &&
-		current.latestHookActivity === summaryBeforeRead.latestHookActivity &&
-		current.agentResponseGenerationTurnSequence === summaryBeforeRead.agentResponseGenerationTurnSequence &&
-		JSON.stringify(current.agentConversationPromptSubmissionAcceptance) ===
-			JSON.stringify(summaryBeforeRead.agentConversationPromptSubmissionAcceptance) &&
+		isUnchangedCodexNeedsInputReconciliationCandidate(summaryBeforeRead, current) &&
 		current.pid !== null &&
 		current.pid === summaryBeforeRead.pid &&
 		current.startedAt === summaryBeforeRead.startedAt &&
@@ -58,5 +50,17 @@ export function canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
 		endpoint.workspaceId === summaryBeforeRead.codexNativeSessionControlEndpoint?.workspaceId &&
 		Number.isFinite(observation.observedAtMs) &&
 		observation.observedAtMs >= summaryBeforeRead.updatedAt
+	);
+}
+
+export function isUnchangedCodexNeedsInputReconciliationCandidate(
+	before: RuntimeTaskSessionSummary,
+	current: RuntimeTaskSessionSummary,
+): boolean {
+	return (
+		isCodexNeedsInputNativeReconciliationCandidate(before) &&
+		isCodexNeedsInputNativeReconciliationCandidate(current) &&
+		buildCodexNativeAgentTurnExecutionSemanticGuard(before) ===
+			buildCodexNativeAgentTurnExecutionSemanticGuard(current)
 	);
 }

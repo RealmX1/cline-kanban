@@ -430,7 +430,7 @@ function preservePersistedStartedTaskSessionsMissingFromIncomingSnapshot(
 function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	persistedSessions: Record<string, RuntimeTaskSessionSummary>,
 	incomingSessions: Record<string, RuntimeTaskSessionSummary>,
-	preservePersistedMainSessionHandoverMetadata = false,
+	preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot = false,
 ): Record<string, RuntimeTaskSessionSummary> {
 	let reconciledSessions = incomingSessions;
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
@@ -455,7 +455,20 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 			}
 		}
 		if (
-			preservePersistedMainSessionHandoverMetadata &&
+			preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot &&
+			persistedSummary.codexNativeDirectInputReadinessReconciliation !== undefined &&
+			persistedSummary.agentId === reconciledSummary.agentId &&
+			persistedSummary.runtimeSessionIncarnationId === reconciledSummary.runtimeSessionIncarnationId
+		) {
+			// 补证预算属于运行时；旧 bundle 的整板保存不能删除预算或复活已清除的预算。
+			reconciledSummary = {
+				...reconciledSummary,
+				codexNativeDirectInputReadinessReconciliation:
+					persistedSummary.codexNativeDirectInputReadinessReconciliation,
+			};
+		}
+		if (
+			preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot &&
 			persistedSummary.taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation
 		) {
 			// 旧 bundle 不认识新的角色与恢复快照；整板保存不能删除运行时已经确认的会话归属。

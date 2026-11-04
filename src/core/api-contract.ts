@@ -1538,6 +1538,17 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	agentSessionForkReplayLaunchArguments: runtimeAgentSessionForkReplayLaunchArgumentsSchema.nullable().optional(),
 	// 本代 Codex TUI 独享的原生活动分支控制面；随 summary/adoption record 持久化，换代整体替换。
 	codexNativeSessionControlEndpoint: codexNativeSessionControlEndpointSchema.nullable().optional(),
+	// 仅保存当前状态补证的预算与恢复条件，不代表接受输入或产生对话活动。
+	codexNativeDirectInputReadinessReconciliation: z
+		.object({
+			evidenceFingerprint: z.string(),
+			attemptCount: z.number().int().nonnegative(),
+			lastAttemptAtMs: z.number(),
+			nextCheckAtMs: z.number().nullable(),
+			recheckCondition: z.string(),
+		})
+		.nullable()
+		.optional(),
 	// 这条**活会话**实际用的通话方式。agent-catalog 的 `sessionTransport` 只是该 agent 的**默认**通道；
 	// omp 可在 TUI（pty_terminal）与 ACP（acp_stdio_subprocess）之间随时切换，切换后 agentId 不变，
 	// 于是「渲染 xterm 还是会话面板」「stop / 输入 / 消息走哪条通路」一律以本字段为准，不得再从 agentId 静态派生。

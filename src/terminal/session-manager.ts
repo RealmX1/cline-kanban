@@ -140,6 +140,7 @@ import {
 import {
 	type CodexNativeDirectInputReadinessObservation,
 	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
+	isUnchangedCodexNeedsInputReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
 import {
 	type CodexNativePromptDeliveryLedgerBinding,
@@ -984,9 +985,11 @@ function reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
 			pid: null,
 			agentId: summary.agentId,
 		}),
-		workspacePath: null,
+		// 交接冻结的目录与代际用于续跑核验；归零活性不能抹去已持久化的执行归属。
+		...(summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			? {}
+			: { workspacePath: null, startedAt: null }),
 		pid: null,
-		startedAt: null,
 		lastOutputAt: null,
 		reviewReason: null,
 		exitCode: null,
@@ -6877,6 +6880,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 						? codexConfigurationPermissionMode(codexConfigurationProfileLaunchFields)
 						: null,
 			agentConversationPromptSubmissionAcceptance: null,
+			codexNativeDirectInputReadinessReconciliation: null,
 			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath } : {}),
 			// 本次启动 argv 的 fork 重放快照：与新活体 id 同一批写入，因此天然「每个活体一份、换 agent
 			// 或换模型后整体替换」。未接入的 agent 返回 null——必须显式写 null 而不是省略，否则同一任务
@@ -7527,9 +7531,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 				pid: null,
 				agentId: entry.summary.agentId,
 			}),
-			workspacePath: null,
+			...(entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+				? {}
+				: { workspacePath: null, startedAt: null }),
 			pid: null,
-			startedAt: null,
 			lastOutputAt: null,
 			reviewReason: null,
 			exitCode: null,
@@ -8585,11 +8590,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 				agentId: entry.summary.agentId,
 			}),
 			reviewReason: "hook",
+			codexNativeDirectInputReadinessReconciliation: null,
 		});
 		// user→user 的分类修正不制造回合或接受证据；历史、回收锚点及恢复守卫由原漏斗保留。
 		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
 		this.emitSummary(summary);
 		return cloneSummary(summary);
+	}
+
+	recordCodexNativeDirectInputReadinessReconciliation(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		progress: NonNullable<RuntimeTaskSessionSummary["codexNativeDirectInputReadinessReconciliation"]>,
+	): void {
+		const entry = this.entries.get(taskId);
+		if (!entry?.active || !isUnchangedCodexNeedsInputReconciliationCandidate(summaryBeforeRead, entry.summary))
+			return;
+		const summary = updateSummary(entry, { codexNativeDirectInputReadinessReconciliation: progress });
+		this.emitSummary(summary);
 	}
 
 	transitionToReview(
