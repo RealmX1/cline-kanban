@@ -62,6 +62,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
    - Do not rely on app metadata backups alone; preserve dirty worktree content or patch files too.
 
 3. 满足上述部署授权后，构建、安装与发布。
+   - **共享存储锁协议切换硬闸**：候选首次从 `proper-lockfile` 切换到 SQLite 内核锁，或回退到旧锁时，先按 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md` 运行 `scripts/verify-filesystem-lock-protocol-transition-preflight.ts`。隔离候选构建可以继续；在门禁放行前，不得替换共享产物、更新 CLI 链接或让任何 runtime/CLI/hook 载入新写入协议。清单绑定本次候选、runtime home 和真实退休写入者，覆盖仍可能启动旧 hook/CLI 的会话；只有 `ready_for_protocol_switch` 才切换。未知或存活仅延后切换，保留机器可重验的持久证据，不强杀会话；回退先完成全部待投影日志。实际切换前再次核验，不能消费过期回执。
    - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
    - Install dependencies using the repo's documented command.
    - Git 依赖构建陈旧时，先核对 lockfile 的精确 commit。可从已有本地对象用 `git archive <精确 SHA>` 导出到持久隔离目录，再用服务所用 Node 构建，并只调整当前 task 的私有依赖映射；不要用依赖仓库的浮动 HEAD 或改写主仓库共享 `node_modules`。恢复回执保存来源 SHA、构建命令和隔离路径。

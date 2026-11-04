@@ -646,6 +646,7 @@ export function createTerminalWebSocketBridge({
 	});
 
 	ioServer.on("connection", (ws: WebSocket, context: unknown) => {
+		ws.on("error", () => ws.terminate());
 		const taskId = (context as TerminalWebSocketConnectionContext).taskId;
 		const workspaceId = (context as TerminalWebSocketConnectionContext).workspaceId;
 		const clientId = (context as TerminalWebSocketConnectionContext).clientId;
@@ -689,6 +690,7 @@ export function createTerminalWebSocketBridge({
 	});
 
 	controlServer.on("connection", (ws: WebSocket, context: unknown) => {
+		ws.on("error", () => ws.terminate());
 		const taskId = (context as TerminalWebSocketConnectionContext).taskId;
 		const workspaceId = (context as TerminalWebSocketConnectionContext).workspaceId;
 		const clientId = (context as TerminalWebSocketConnectionContext).clientId;

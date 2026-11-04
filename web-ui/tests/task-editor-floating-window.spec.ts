@@ -27,6 +27,7 @@ async function openEditorHarness(
 	const observations = {
 		analysisRequestCount: 0,
 		savedAutomaticAnalysisChoices: [] as boolean[],
+		savedCustomBlockNameLists: [] as string[][],
 		lastSavedRelationDrafts: [] as unknown[],
 		sideSessionCreationRequests: [] as Array<Record<string, unknown>>,
 	};
@@ -56,6 +57,9 @@ async function openEditorHarness(
 			let value: unknown = null;
 			if (name === "runtime.getConfig" || name === "runtime.saveConfig") {
 				const patch = payload[index]?.userInterfacePreferencesSharedAcrossBrowserOrigins;
+				if (Array.isArray(patch?.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames)) {
+					observations.savedCustomBlockNameLists.push([...patch.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames]);
+				}
 				if (typeof patch?.taskProjectAssignmentAutomaticAnalysisEnabled === "boolean") {
 					if (options.failAutomaticAnalysisPreferenceSaves)
 						return {
@@ -283,6 +287,59 @@ test("从背景切回时解析剪贴板，临时揭示隐藏的关系组并保�
 });
 
 for (const mode of ["create", "edit"] as const) {
+	test(`${mode}：中文 Insert block 支持输入法确认、鼠标插入和最近使用恢复`, async ({ page }) => {
+		const observations = await openEditorHarness(page, { mode });
+		const prompt = page.getByRole("textbox", { name: "任务正文", exact: true });
+		const selectedText = "需要保留的正文";
+		await prompt.fill(selectedText);
+		await prompt.press("ControlOrMeta+A");
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		const blockNameInput = page.getByPlaceholder("Block name...", { exact: true });
+		await blockNameInput.focus();
+		const cdp = await page.context().newCDPSession(page);
+		await cdp.send("Input.imeSetComposition", { text: "问题", selectionStart: 2, selectionEnd: 2 });
+		await cdp.send("Input.dispatchKeyEvent", {
+			type: "keyDown",
+			windowsVirtualKeyCode: 13,
+			key: "Enter",
+			code: "Enter",
+		});
+		await cdp.send("Input.dispatchKeyEvent", {
+			type: "keyUp",
+			windowsVirtualKeyCode: 13,
+			key: "Enter",
+			code: "Enter",
+		});
+		await expect(blockNameInput).toBeFocused();
+		await expect(prompt).toHaveValue(selectedText);
+		await cdp.send("Input.insertText", { text: "问题" });
+		await expect(page.getByRole("button", { name: "Insert <问题> block", exact: true })).toBeVisible();
+		await blockNameInput.press("Enter");
+		await expect(blockNameInput).toHaveCount(0);
+		await expect(prompt).toHaveValue(`<问题>\n${selectedText}\n</问题>`);
+		await expect(prompt).toBeFocused();
+		expect(
+			await prompt.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]),
+		).toEqual(["<问题>\n".length, "<问题>\n".length + selectedText.length]);
+
+		await prompt.fill("");
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		await blockNameInput.fill("预期 结果");
+		await page.getByRole("button", { name: "Insert <预期_结果> block", exact: true }).click();
+		await expect(prompt).toHaveValue("<预期_结果>\n\n</预期_结果>");
+		await expect(prompt).toBeFocused();
+		expect(
+			await prompt.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]),
+		).toEqual(["<预期_结果>\n".length, "<预期_结果>\n".length]);
+		await expect.poll(() => observations.savedCustomBlockNameLists.at(-1)).toEqual(["预期_结果", "问题"]);
+
+		await page.reload();
+		await mountEditorHarness(page);
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		await expect(page.getByRole("button", { name: "<问题>", exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "<预期_结果>", exact: true })).toBeVisible();
+	});
+
 	for (const width of [1440, 320] as const) {
 		test(`${mode}：${width}px 仅正文即可提交，设置摘要和底栏保持在边界内`, async ({ page }) => {
 			await page.setViewportSize({ width, height: 900 });

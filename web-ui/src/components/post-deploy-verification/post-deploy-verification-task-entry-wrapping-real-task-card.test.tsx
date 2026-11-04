@@ -414,7 +414,19 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 		for (const ariaLabel of taskCardActionButtonAriaLabels) {
 			onRequestComplete.mockClear();
 			onActivateTaskCardOpeningTaskInItsProject.mockClear();
-			act(() => findButtonOnCardCopyByAriaLabel(ariaLabel)?.click());
+			const actionButton = findButtonOnCardCopyByAriaLabel(ariaLabel);
+			act(() => actionButton?.click());
+			// 附加操作按钮先打开本地菜单；实际菜单项才触发卡片动作。
+			if (ariaLabel.startsWith("展开") && actionButton?.getAttribute("aria-haspopup") === "menu") {
+				expect(actionButton.getAttribute("aria-expanded")).toBe("true");
+				expect(
+					document.getElementById(actionButton.getAttribute("aria-controls") ?? "")?.getAttribute("role"),
+				).toBe("menu");
+				expect(onRequestComplete).not.toHaveBeenCalled();
+				expect(onActivateTaskCardOpeningTaskInItsProject).not.toHaveBeenCalled();
+				act(() => actionButton.click());
+				continue;
+			}
 			expect(
 				{
 					ariaLabel,

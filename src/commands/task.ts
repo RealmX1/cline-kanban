@@ -4,6 +4,10 @@ import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/cli
 import type { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
+import {
+	AGENT_WORK_DELEGATION_SELECTION_CAVEAT,
+	INDEPENDENT_TASK_CREATION_GUIDANCE,
+} from "../core/agent-work-delegation-selection-guidance";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -59,7 +63,10 @@ import {
 	type TaskClosureRequest,
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
-import { taskCommandExecutionSpecificationSchema } from "../core/task-command-execution-contract";
+import {
+	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
+	taskCommandExecutionSpecificationSchema,
+} from "../core/task-command-execution-contract";
 import {
 	resolveMainTaskConversationSessionSummary,
 	resolveTaskChatMessageTargetConversationSessionSummary,
@@ -2007,6 +2014,22 @@ export function registerTaskCommand(program: Command): void {
 	});
 	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
 	commandExecution
+		.command("register-recovery-evidence-observation")
+		.requiredOption("--registration-file <path>", "绑定精确执行及原材料摘要的只读观察器 JSON。")
+		.option("--project-path <path>", "项目主仓库路径。")
+		.action(async (options: { registrationFile: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const workspaceId = await ensureRuntimeWorkspace(
+					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+				);
+				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.registerRecoveryEvidenceObservation.mutate(
+					taskCommandExecutionRecoveryObservationRegistrationRequestSchema.parse(
+						JSON.parse(await readFile(options.registrationFile, "utf8")),
+					),
+				);
+			});
+		});
+	commandExecution
 		.command("start")
 		.requiredOption("--task-id <id>", "任务 ID。")
 		.requiredOption("--idempotency-key <key>", "相同工作与材料的稳定幂等键。")
@@ -2174,7 +2197,13 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("create")
-		.description("Create a task in backlog.")
+		.description("在 Backlog 创建具有独立目标和生命周期的 Task。")
+		.addHelpText(
+			"after",
+			`\n${INDEPENDENT_TASK_CREATION_GUIDANCE}
+当前会话内部的分工可考虑 Subagent；同 Task 内与主线互补、适合共享工作目录且受益于用户独立参与的协作可考虑 task conversation-session create。
+${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
+		)
 		.option("--title <text>", "Task title.")
 		.option("--model <id>", "单次模型覆盖，缺省采用 Agent 当前默认配置。")
 		.option("--profile <id>", "Codex profile；未显式覆盖权限时采用其完整权限。")

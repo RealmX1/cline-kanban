@@ -283,12 +283,18 @@ function resolveEffectiveTaskAgentPermissionMode(
 	);
 }
 
+export type TaskSessionStopRequestScope = "whole_task_session" | "current_agent_turn";
+
 export interface CreateRuntimeApiDependencies {
 	getActiveWorkspaceId: () => string | null;
 	getActiveRuntimeConfig?: () => RuntimeConfigState;
 	loadScopedRuntimeConfig: (scope: RuntimeTrpcWorkspaceScope) => Promise<RuntimeConfigState>;
 	setActiveRuntimeConfig: (config: RuntimeConfigState) => void;
-	onTaskSessionStopRequested?: (workspaceId: string, taskId: string) => Promise<void>;
+	onTaskSessionStopRequested?: (
+		workspaceId: string,
+		taskId: string,
+		stopRequestScope?: TaskSessionStopRequestScope,
+	) => Promise<void>;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
 	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
@@ -3249,7 +3255,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		cancelTaskChatTurn: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatCancelRequest(input);
-				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId);
+				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId, "current_agent_turn");
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				const acpSummary = await acpTaskSessionService.cancelTaskTurn(body.taskId);
 				if (acpSummary) {

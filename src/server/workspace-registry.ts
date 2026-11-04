@@ -32,6 +32,7 @@ import { projectVisualIdentityStore } from "../state/project-visual-identity-sto
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	getPersistedWorkspaceBoardFilePathById,
+	getWorkspaceStateSnapshotReadFingerprintById,
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
@@ -39,7 +40,7 @@ import {
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
-import { persistOwnedCommandExecutionRevocationsBeforeUserTerminalInterrupt } from "../task-command-execution/task-command-execution-user-stop-port";
+import { applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
 import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
@@ -423,7 +424,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		const loading = (async () => {
 			const manager: TerminalSessionManager = new TerminalSessionManager({
 				beforeUserTerminalInterrupt: (sessionId) =>
-					persistOwnedCommandExecutionRevocationsBeforeUserTerminalInterrupt(workspaceId, sessionId),
+					applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt(workspaceId, sessionId),
 				enableManagedTaskPromptDeliveryRecording: true,
 				automaticFailureContinuationWorkspaceId: workspaceId,
 				readAutomaticFailureContinuationEligibility: async (conversationSessionId) => {
@@ -556,8 +557,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	}> => {
 		// 宽松读取可能把旧版 null 正文投影为空看板，严格查询不能继承这份兼容结果。
 		const boardReadCache = requireCompleteRead ? completeProjectSummaryBoardReadCache : projectSummaryBoardReadCache;
-		const board = await boardReadCache.read(getPersistedWorkspaceBoardFilePathById(workspaceId), () =>
-			loadWorkspaceBoardById(workspaceId, { requireCompleteRead }),
+		const board = await boardReadCache.read(
+			getPersistedWorkspaceBoardFilePathById(workspaceId),
+			() => loadWorkspaceBoardById(workspaceId, { requireCompleteRead }),
+			() => getWorkspaceStateSnapshotReadFingerprintById(workspaceId),
 		);
 		const terminalManager = getTerminalManagerForWorkspace(workspaceId);
 		let terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null = null;
