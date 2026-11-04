@@ -1,6 +1,6 @@
 import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../src/config/user-interface-preferences-shared-across-browser-origins";
-import type { RuntimeConfigResponse } from "../src/runtime/types";
+import type { RuntimeConfigResponse, RuntimeTerminalAgentModelSelectionOptionsResponse } from "../src/runtime/types";
 
 const sourceProjectId = "editor-source-project";
 const backgroundProjectId = "editor-background-project";
@@ -171,11 +171,12 @@ async function openRealApp(page: Page) {
 				value = {
 					agentId: input.agentId,
 					defaultModelId: null,
+					defaultLabel: "Default",
 					options: [
-						{ value: "source-codex-model", label: "来源模型", description: "来源模型" },
-						{ value: "wrong-background-model", label: "错误背景模型", description: "错误背景模型" },
+						{ modelId: "source-codex-model", label: "来源模型", description: "来源模型" },
+						{ modelId: "wrong-background-model", label: "错误背景模型", description: "错误背景模型" },
 					],
-				};
+				} satisfies RuntimeTerminalAgentModelSelectionOptionsResponse;
 			else if (procedure === "workUnit.getRelationModelingPreview")
 				value = {
 					rootWorkUnitKey: "draft-root",
@@ -256,6 +257,10 @@ for (const kind of ["create", "edit"] as const) {
 				.getByRole("dialog")
 				.filter({ has: page.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
 			await expect(dialog).toBeVisible();
+			if (kind === "create") {
+				await dialog.getByRole("button", { name: /^模型与参数：/ }).click();
+				await dialog.getByRole("button", { name: "来源模型", exact: true }).click();
+			}
 			await dialog.getByRole("textbox", { name: "任务名称（可选）", exact: true }).fill("切换后保留的名称");
 			await dialog.locator("textarea").first().fill("切换后台项目时不能丢失的正文");
 			await dialog.getByRole("textbox", { name: "任务名称（可选）", exact: true }).focus();
@@ -280,8 +285,9 @@ for (const kind of ["create", "edit"] as const) {
 				dialog.getByRole("button", { name: "OpenAI Codex (default agent)", exact: true }),
 			).toHaveAttribute("aria-pressed", "true");
 			if (kind === "create") {
-				await dialog.getByRole("button", { name: /^模型与参数：/ }).click();
-				await expect(dialog.getByRole("button", { name: "source-codex-model", exact: true })).toHaveAttribute(
+				const collapsedModelSettings = dialog.getByRole("button", { name: /^模型与参数：/ });
+				if (await collapsedModelSettings.isVisible()) await collapsedModelSettings.click();
+				await expect(dialog.getByRole("button", { name: "来源模型", exact: true })).toHaveAttribute(
 					"aria-pressed",
 					"true",
 				);

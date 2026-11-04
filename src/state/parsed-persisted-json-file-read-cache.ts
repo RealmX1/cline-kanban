@@ -1,7 +1,11 @@
 import { stat } from "node:fs/promises";
 
 export interface ParsedPersistedJsonFileReadCache<T> {
-	read(path: string, readAndParseCurrentFile: () => Promise<T>): Promise<T>;
+	read(
+		path: string,
+		readAndParseCurrentFile: () => Promise<T>,
+		readCurrentFingerprint?: () => Promise<string>,
+	): Promise<T>;
 	forget(path: string): void;
 }
 
@@ -22,8 +26,8 @@ export function createParsedPersistedJsonFileReadCache<T>(): ParsedPersistedJson
 	const pendingReadsByPath = new Map<string, { fingerprint: string; generation: symbol; promise: Promise<T> }>();
 
 	return {
-		async read(path, readAndParseCurrentFile) {
-			const before = await readPersistedFileIdentityAndChangeFingerprint(path);
+		async read(path, readAndParseCurrentFile, readCurrentFingerprint) {
+			const before = await (readCurrentFingerprint?.() ?? readPersistedFileIdentityAndChangeFingerprint(path));
 			if (before === null) {
 				cachedFilesByPath.delete(path);
 				pendingReadsByPath.delete(path);
@@ -37,7 +41,7 @@ export function createParsedPersistedJsonFileReadCache<T>(): ParsedPersistedJson
 			const generation = Symbol();
 			const promise = (async () => {
 				const value = await readAndParseCurrentFile();
-				const after = await readPersistedFileIdentityAndChangeFingerprint(path);
+				const after = await (readCurrentFingerprint?.() ?? readPersistedFileIdentityAndChangeFingerprint(path));
 				// 文件在读期间变了，或项目已被 forget：返回本次读取结果，但不把它标成当前版本。
 				if (before === after && pendingReadsByPath.get(path)?.generation === generation) {
 					cachedFilesByPath.set(path, { fingerprint: before, value });

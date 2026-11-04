@@ -421,7 +421,7 @@ describe("配置记录的完整比较", () => {
 			store.changes.push({
 				changeId: "race",
 				version: ++store.revision,
-				sourceWriterId: `user-source:${binding.sourceIdentity}`,
+				sourceWriterId: binding.writerId,
 				sourceIdentity: binding.sourceIdentity,
 				fieldKey,
 				previous: { value: "previous" },

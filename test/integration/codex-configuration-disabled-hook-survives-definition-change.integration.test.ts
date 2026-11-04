@@ -77,10 +77,12 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			configuration.hooks = { state: { [initialHook.key]: { enabled, trusted_hash: initialHook.currentHash } } };
 			await writeFile(join(sourceHome, "config.toml"), stringify(configuration));
 			const storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
+			let previousBinding: Awaited<ReturnType<typeof prepareCodexConfigurationWriterBinding>> | undefined;
 			const createWriter = () =>
 				prepareCodexConfigurationWriterBinding({
 					purpose: "native_session",
 					storageHome,
+					previousBinding,
 					runtimeSessionIncarnationId: randomUUID(),
 					binary,
 					environment,
@@ -88,15 +90,19 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			const previous = await createWriter();
 			const before = await readNativeHook({ ...environment, ...buildCodexConfigurationWriterEnvironment(previous) });
 			expect(before).toMatchObject({ enabled, trustStatus: "trusted" });
-			await writeHookDefinition("true # 新定义");
+			previousBinding = previous;
+			await writeFile(
+				join(previous.configurationHomeDirectoryPath, "hooks.json"),
+				JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "true # 新定义" }] }] } }),
+			);
 			const future = await createWriter();
 			const after = await readNativeHook({ ...environment, ...buildCodexConfigurationWriterEnvironment(future) });
-			expect(after).toMatchObject({ enabled, trustStatus: "untrusted" });
+			expect(after).toMatchObject({ enabled, trustStatus: "modified" });
 			expect(after.currentHash).not.toBe(initialHook.currentHash);
 			const futureConfiguration = parse(
 				await readFile(join(future.configurationHomeDirectoryPath, "config.toml"), "utf8"),
 			);
-			expect(JSON.stringify(futureConfiguration)).not.toContain("trusted_hash");
+			expect(JSON.stringify(futureConfiguration)).not.toContain(after.currentHash);
 			const store = await readCodexConfigurationSyncStore();
 			expect(store.sourceObservations).toHaveLength(1);
 			expect(store.changes.every((change) => change.approvalStatus !== "approved")).toBe(true);

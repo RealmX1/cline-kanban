@@ -8,7 +8,6 @@ import { parse, stringify } from "smol-toml";
 import {
 	preserveCodexConfigurationSourceFileResolution,
 	resolveCanonicalUserCodexHomeForManagedStorage,
-	resolveUserCodexHomeDirectoryPath,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import {
 	type CodexDirectoryIdentityExpectation,
@@ -19,6 +18,7 @@ import {
 	type CodexConfigurationWriterBinding,
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
+import { resolveCodexNativeDefaultReasoningEffortForModel } from "../terminal/terminal-agent-model-selection";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -29,22 +29,31 @@ import {
 	sameConfigurationField,
 	setConfigurationField,
 } from "./codex-configuration-field-projection";
+import { mergeObservedCodexConfigurationWriter } from "./codex-configuration-incremental-merge";
 import {
-	mergeObservedCodexConfigurationWriter,
-	reconcileCodexConfigurationUserSourceFields,
-} from "./codex-configuration-incremental-merge";
+	ensureCodexConfigurationInitializationSnapshot,
+	readVerifiedCodexConfigurationInitializationSnapshot,
+	relocateCodexCapturedAgentConfigurationReferences,
+	removeCodexDesktopConfiguration,
+} from "./codex-configuration-initialization-snapshot";
 import {
 	codexConfigurationExceptionGroup,
 	ensureCodexConfigurationSourceProfile,
 	getCodexConfigurationWriterProfile,
 	reuseConfirmedCodexHookTrust,
 } from "./codex-configuration-profiles";
+import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "./codex-configuration-sync-store";
+import {
+	assertCodexSourceSharedPluginInstallationDirectoriesBinding,
+	linkCodexSourceSharedPluginInstallationDirectories,
+	prepareCodexSourceSharedPluginInstallationDirectoriesBinding,
+} from "./codex-source-shared-plugin-installation-directories";
 
 const execFileAsync = promisify(execFile);
 export async function codexDirectoryIdentity(path: string, expectation?: CodexDirectoryIdentityExpectation) {
@@ -112,6 +121,15 @@ export async function resolveVerifiedCodexConfigurationSourceIdentity(
 		}
 	}
 	for (const sourceIdentity of registeredSourceIdentities) {
+		const source = store.sources[sourceIdentity];
+		if (source?.configurationInitialization && source.home === canonicalSourceHome) {
+			await readVerifiedCodexConfigurationInitializationSnapshot(
+				sourceIdentity,
+				canonicalSourceHome,
+				source.configurationInitialization,
+			);
+			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+		}
 		if (
 			Object.values(store.legacySessionProfileAdoptions ?? {}).some(
 				(adoption) => adoption.sourceIdentity === sourceIdentity,
@@ -151,6 +169,7 @@ export async function assertCodexConfigurationWriterBindingIdentity(binding: Cod
 			boundAtMs: binding.createdAt,
 			legacyBindingManifestPath: manifestPath,
 		});
+	await assertCodexSourceSharedPluginInstallationDirectoriesBinding(binding);
 }
 
 function readCodexLaunchExceptionSelections(arguments_: string[], fields: CodexConfigurationFields) {
@@ -218,9 +237,14 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	previousBinding?: CodexConfigurationWriterBinding | null;
 	binary?: string;
 	environment?: NodeJS.ProcessEnv;
+	workingDirectory?: string;
 	nativeLaunchArguments?: string[];
 	codexConfigurationProfileId?: string;
 	sessionModelId?: string;
+	sessionReasoningEffortOverride?: string;
+	allowTaskReasoningEffortFeedback?: boolean;
+	/** profile 没有 model_reasoning_effort 时，模型目录给出的原生默认档。传入后不再探测目录。 */
+	nativeDefaultReasoningEffort?: string;
 	sessionPermissionMode?: string;
 	sessionPermissionSelectionSource?: "profile" | "task_local";
 }): Promise<CodexConfigurationWriterBinding> {
@@ -247,11 +271,11 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 	if (input.binary)
 		try {
 			const environment = input.environment ?? process.env;
-			for (const candidate of isAbsolute(input.binary)
+			for (const candidate of isAbsolute(input.binary) || input.binary.includes("/")
 				? [input.binary]
 				: (environment.PATH ?? "").split(delimiter).map((directory) => join(directory, input.binary ?? "codex"))) {
 				try {
-					nativeExecutableRealPath = await realpath(candidate);
+					nativeExecutableRealPath = await realpath(resolve(input.workingDirectory ?? process.cwd(), candidate));
 					const metadata = await lstat(nativeExecutableRealPath, { bigint: true });
 					nativeExecutableIdentityDigest = configurationDigest([
 						nativeExecutableRealPath,
@@ -268,6 +292,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			nativeBinaryVersion = (
 				await execFileAsync(input.binary, ["--version"], {
 					env: input.environment,
+					cwd: input.workingDirectory,
 					timeout: 3_000,
 					maxBuffer: 4_096,
 				})
@@ -275,6 +300,26 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		} catch {
 			/* 未核验版本不声明原生重载。 */
 		}
+	const preflightSourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
+		preflightSourceHome,
+		preflightStoreSnapshot,
+		preflightParentBinding?.sourceIdentity,
+	);
+	const sourceSharedPluginInstallationDirectoriesBinding =
+		nativeBinaryVersion === "codex-cli 0.166.0" && nativeExecutableRealPath && nativeExecutableIdentityDigest
+			? await prepareCodexSourceSharedPluginInstallationDirectoriesBinding({
+					sourceHome: preflightSourceHome,
+					existingBindings: Object.values(preflightStoreSnapshot.writers)
+						.filter((writer) => writer.binding.sourceIdentity === preflightSourceIdentity)
+						.map((writer) => writer.binding),
+					nativeCapabilityEvidence: {
+						nativeBinaryVersion,
+						nativeExecutableRealPath,
+						nativeExecutableIdentityDigest,
+						observedAtMs: Date.now(),
+					},
+				})
+			: undefined;
 	// 锁外预取只提供观察；下方持锁后重新选择 parent，并完整重核验当前归属。
 	return mutateCodexConfigurationSyncStore(async (store) => {
 		const parent =
@@ -294,27 +339,17 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			parent?.sourceIdentity,
 		);
 		const canonicalSourceHome = await realpath(sourceHome);
+		if (sourceIdentity !== preflightSourceIdentity || canonicalSourceHome !== (await realpath(preflightSourceHome)))
+			throw new Error("Codex 插件来源在锁外预取后已变化，等待来源稳定后自动重试。");
 		const onHookDefinitionObservationProblem = () => {
 			store.observationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
 		};
-		const sourceFileNames = [
-			"config.toml",
-			...(await readdir(sourceHome)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-		];
-		const userFields = await projectCodexConfigurationFields({
-			home: sourceHome,
-			sourceHome: canonicalSourceHome,
-			fileNames: sourceFileNames,
-			previousFields: store.sources[sourceIdentity]?.observedUserFields,
-			onHookDefinitionObservationProblem,
-		});
-		store.sources[sourceIdentity] ??= {
-			home: canonicalSourceHome,
-			version: store.revision,
-			fields: structuredClone(userFields),
-			observedUserFields: userFields,
-		};
-		reconcileCodexConfigurationUserSourceFields(store, sourceIdentity, userFields);
+		const initializationSnapshot = await ensureCodexConfigurationInitializationSnapshot(
+			store,
+			sourceIdentity,
+			canonicalSourceHome,
+		);
+		const sourceFileNames = initializationSnapshot.fileNames;
 		const previous = parent && store.writers[parent.writerId];
 		const sourceProfile = ensureCodexConfigurationSourceProfile(store, sourceIdentity);
 		const selectedProfileId =
@@ -381,18 +416,26 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				},
 			};
 		}
+		const taskReasoningEffortSelectionChanged =
+			input.sessionReasoningEffortOverride !== previous?.taskReasoningEffortSelectionAtLaunch;
+		if (previous && taskReasoningEffortSelectionChanged) {
+			delete previous.localExceptionOverrides?.reasoning_effort;
+			delete selectedLocalExceptions.reasoning_effort;
+		}
+		const effortSelection = input.sessionReasoningEffortOverride ?? argumentSelections.effort;
 		if (
-			argumentSelections.effort &&
+			effortSelection &&
 			(!previous ||
+				taskReasoningEffortSelectionChanged ||
 				(canPreserveLegacyGroup("reasoning_effort") && !observedGroupChangedAfterLaunch("reasoning_effort")))
 		) {
 			const key = JSON.stringify(["config.toml", "model_reasoning_effort"]);
-			launchSelectionFields[key] = { value: argumentSelections.effort };
+			launchSelectionFields[key] = { value: effortSelection };
 			selectedLocalExceptions.reasoning_effort = {
 				profileVersionAtSelection: selectedProfile.version,
 				fields: {
 					...selectedLocalExceptions.reasoning_effort?.fields,
-					[key]: { value: argumentSelections.effort },
+					[key]: { value: effortSelection },
 				},
 			};
 		}
@@ -450,7 +493,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 		const writerDirectory = join(getCodexConfigurationSyncDirectory(), "writers", writerId);
 		await mkdir(join(writerDirectory, "configuration-home"), { recursive: true, mode: 0o700 });
 		const configurationHome = await realpath(join(writerDirectory, "configuration-home"));
-		const copyFrom = parent?.configurationHomeDirectoryPath ?? sourceHome;
+		const copyFrom = parent?.configurationHomeDirectoryPath ?? initializationSnapshot.directory;
 		const sharedFileNames = Object.keys(selectedProfile.fields).map((key) => configurationFieldAddress(key).fileName);
 		const fileNames = [
 			...new Set([
@@ -472,17 +515,15 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			}
 			await linkVerifiedDirectoryBridge(join(historyHome, name), join(configurationHome, name), false);
 		}
-		for (const name of [
-			"auth.json",
-			".credentials.json",
-			"AGENTS.md",
-			"skills",
-			"plugins",
-			"rules",
-			"prompts",
-			"marketplaces",
-		])
+		for (const name of ["auth.json", ".credentials.json", "AGENTS.md", "skills", "rules", "prompts", "marketplaces"])
 			await linkVerifiedDirectoryBridge(join(sourceHome, name), join(configurationHome, name), false);
+		if (sourceSharedPluginInstallationDirectoriesBinding)
+			await linkCodexSourceSharedPluginInstallationDirectories(
+				sourceHome,
+				configurationHome,
+				sourceSharedPluginInstallationDirectoriesBinding,
+			);
+		else await linkVerifiedDirectoryBridge(join(sourceHome, "plugins"), join(configurationHome, "plugins"), false);
 		try {
 			await writeFile(join(configurationHome, "hooks.json"), await readFile(join(copyFrom, "hooks.json")), {
 				mode: 0o600,
@@ -499,16 +540,18 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			}
 			const configuration = parse(text);
+			removeCodexDesktopConfiguration(configuration);
 			if (configuration.cli_auth_credentials_store === "keyring")
 				throw new Error("当前 Codex 认证使用 keyring，配置隔离尚未核验此认证归属。");
 			relocateCodexHookStateSourcePaths(configuration, await realpath(copyFrom), canonicalSourceHome);
 			if (!parent) {
 				const source = {
-					observedUserFields: store.sources[sourceIdentity].observedUserFields,
+					observedUserFields: initializationSnapshot.source.observedUserFields,
 					fields: selectedProfile.fields,
 				};
 				for (const fieldKey of new Set([
 					...Object.keys(source.observedUserFields),
+					...initializationSnapshot.fieldKeys,
 					...Object.keys(source.fields),
 				])) {
 					const address = configurationFieldAddress(fieldKey);
@@ -555,8 +598,9 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 					);
 					if (
 						!pendingTarget ||
+						isCodexConfigurationChangeExcludedFromSettingsSynchronization(change) ||
 						change.codexConfigurationProfileId ||
-						!sameConfigurationField(store.sources[sourceIdentity].fields[change.fieldKey], change.value)
+						!sameConfigurationField(initializationSnapshot.source.fields[change.fieldKey], change.value)
 					)
 						continue;
 					if (
@@ -571,6 +615,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 					if (address.fileName === fileName) setConfigurationField(configuration, address.keyPath, change.value);
 				}
 			}
+			removeCodexDesktopConfiguration(configuration);
 			configuration.sqlite_home = sqliteHome;
 			for (const [fieldKey, field] of Object.entries(launchSelectionFields)) {
 				const address = configurationFieldAddress(fieldKey);
@@ -580,6 +625,12 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 				configuration,
 				await realpath(dirname(join(copyFrom, fileName))),
 			);
+			// 旧会话副本仍可能保留捕获前的引用；覆盖 profile 后再次绑定同一快照。
+			relocateCodexCapturedAgentConfigurationReferences(
+				configuration,
+				initializationSnapshot.directory,
+				initializationSnapshot.agentConfigurationFiles,
+			);
 			relocateCodexHookStateSourcePaths(configuration, canonicalSourceHome, await realpath(configurationHome));
 			await writeFile(join(configurationHome, fileName), stringify(configuration), { mode: 0o600, flag: "wx" });
 		}
@@ -587,7 +638,7 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			home: configurationHome,
 			sourceHome: canonicalSourceHome,
 			fileNames,
-			previousFields: previous?.lastObservedFields ?? store.sources[sourceIdentity].fields,
+			previousFields: previous?.lastObservedFields ?? initializationSnapshot.source.fields,
 			onHookDefinitionObservationProblem,
 		});
 		// 定义变化时移除过期信任；明确禁用仍保留，避免原生缺省重新启用。
@@ -650,6 +701,16 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			sqliteHomeDirectoryPath: sqliteHome,
 			sourceHomeDirectoryPath: sourceHome,
 			sourceIdentity,
+			...(sourceSharedPluginInstallationDirectoriesBinding
+				? { sourceSharedPluginInstallationDirectoriesBinding }
+				: {
+						sourceSharedPluginInstallationDirectoriesCompatibilityObservation: {
+							status: "unverified_native_capability",
+							nativeBinaryVersion,
+							nativeExecutableRealPath,
+							automaticRecheckCondition: "next_native_process_generation",
+						},
+					}),
 			storageDirectoryIdentity: await codexDirectoryIdentity(historyHome),
 			sqliteDirectoryIdentity: await codexDirectoryIdentity(sqliteHome),
 			launchConfigurationDigest: configurationDigest(baseline),
@@ -661,7 +722,56 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 			mode: 0o600,
 			flag: "wx",
 		});
+		let taskReasoningEffortFeedbackSelection =
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			previous?.taskReasoningEffortFeedbackSelection?.effort === input.sessionReasoningEffortOverride &&
+			previous.taskReasoningEffortFeedbackSelection.profileId === selectedProfileId
+				? structuredClone(previous.taskReasoningEffortFeedbackSelection)
+				: undefined;
+		const profileReasoningEffort =
+			selectedProfile.fields[JSON.stringify(["config.toml", "model_reasoning_effort"])]?.value;
+		const profileModel = selectedProfile.fields[JSON.stringify(["config.toml", "model"])]?.value;
+		let inheritedReasoningEffort = typeof profileReasoningEffort === "string" ? profileReasoningEffort : undefined;
+		if (
+			inheritedReasoningEffort === undefined &&
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			!taskReasoningEffortFeedbackSelection
+		) {
+			try {
+				inheritedReasoningEffort =
+					input.nativeDefaultReasoningEffort ??
+					(await resolveCodexNativeDefaultReasoningEffortForModel(
+						input.sessionModelId ?? (typeof profileModel === "string" ? profileModel : undefined),
+					));
+			} catch {
+				inheritedReasoningEffort = input.nativeDefaultReasoningEffort;
+			}
+		}
+		if (
+			input.allowTaskReasoningEffortFeedback &&
+			input.sessionReasoningEffortOverride &&
+			!taskReasoningEffortFeedbackSelection &&
+			inheritedReasoningEffort !== input.sessionReasoningEffortOverride
+		) {
+			taskReasoningEffortFeedbackSelection = {
+				selectionId: randomUUID(),
+				profileId: selectedProfileId,
+				profileVersionAtSelection: selectedProfile.version,
+				effort: input.sessionReasoningEffortOverride,
+				inheritedFields: structuredClone(
+					Object.fromEntries(
+						Object.entries(selectedProfile.fields).filter(
+							([key]) => codexConfigurationExceptionGroup(key) === "reasoning_effort",
+						),
+					),
+				),
+			};
+		}
 		store.writers[writerId] = {
+			taskReasoningEffortSelectionAtLaunch: input.sessionReasoningEffortOverride,
+			taskReasoningEffortFeedbackSelection,
 			taskModelSelectionAtLaunch: input.sessionModelId,
 			taskPermissionModeSelectionAtLaunch: input.sessionPermissionMode,
 			taskPermissionSelectionSourceAtLaunch: input.sessionPermissionSelectionSource,
@@ -699,17 +809,6 @@ export async function prepareCodexConfigurationWriterBinding(input: {
 
 export function buildCodexConfigurationWriterEnvironment(binding: CodexConfigurationWriterBinding) {
 	return { CODEX_HOME: binding.configurationHomeDirectoryPath, CODEX_SQLITE_HOME: binding.sqliteHomeDirectoryPath };
-}
-
-export async function prepareAuxiliaryCodexConfigurationEnvironment(environment: NodeJS.ProcessEnv, cwd: string) {
-	const home = resolveUserCodexHomeDirectoryPath(environment, cwd);
-	const binding = await prepareCodexConfigurationWriterBinding({
-		purpose: "auxiliary_process",
-		storageHome: home,
-		sqliteHome: environment.CODEX_SQLITE_HOME,
-		runtimeSessionIncarnationId: randomUUID(),
-	});
-	return { ...environment, ...buildCodexConfigurationWriterEnvironment(binding) };
 }
 
 export async function recordCodexConfigurationWriterLaunchArguments(

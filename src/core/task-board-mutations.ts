@@ -36,6 +36,7 @@ export {
 
 export interface RuntimeCreateTaskInput {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskId?: string;
 	title?: string;
@@ -70,6 +71,7 @@ export interface RuntimeCreateTaskInput {
 
 export interface RuntimeUpdateTaskInput {
 	codexConfigurationProfileId?: string | null;
+	codexReasoningEffortOverride?: string | null;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local" | null;
 	title?: string;
 	prompt: string;
@@ -255,6 +257,9 @@ export function addTaskToColumn(
 		globalDefaultSessionTransportForNewTasks: input.ompAgentSessionTransportForNewTasks,
 	});
 	const task: RuntimeBoardCard = {
+		...(input.codexReasoningEffortOverride
+			? { codexReasoningEffortOverride: input.codexReasoningEffortOverride.trim() }
+			: {}),
 		...(input.codexConfigurationProfileId ? { codexConfigurationProfileId: input.codexConfigurationProfileId } : {}),
 		...(input.codexConfigurationPermissionSelectionSource
 			? { codexConfigurationPermissionSelectionSource: input.codexConfigurationPermissionSelectionSource }
@@ -616,6 +621,10 @@ export function updateTask(
 				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
+				codexReasoningEffortOverride:
+					input.codexReasoningEffortOverride === undefined
+						? card.codexReasoningEffortOverride
+						: input.codexReasoningEffortOverride?.trim() || undefined,
 				codexConfigurationProfileId:
 					input.codexConfigurationProfileId === undefined
 						? card.codexConfigurationProfileId
@@ -625,6 +634,8 @@ export function updateTask(
 						? card.codexConfigurationPermissionSelectionSource
 						: (input.codexConfigurationPermissionSelectionSource ?? undefined),
 				title: resolveTaskTitle(input.title, prompt),
+				taskNameVersion:
+					(card.taskNameVersion ?? 0) + (resolveTaskTitle(input.title, prompt) !== card.title ? 1 : 0),
 				prompt,
 				startInPlanMode: Boolean(input.startInPlanMode),
 				// 三态：undefined 原样保留卡片现值（**包括「字段缺失」本身**）、null 复位到默认档、其余按传入值。

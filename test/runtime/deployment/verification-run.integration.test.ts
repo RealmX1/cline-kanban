@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimePostDeployVerificationState } from "../../../src/core/api-contract";
 import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndClosureWithDefaults } from "../../../src/deployment/post-deploy-verification-deployment-group-task-assembly";
@@ -10,9 +10,10 @@ import { getPostDeployVerificationStatePath } from "../../../src/deployment/post
 import { ensureVerificationAssetsDir } from "../../../src/deployment/verification-assets";
 import { createDeploymentApi } from "../../../src/trpc/deployment-api";
 import { createTempDir } from "../../utilities/temp-dir";
+import { cleanupIsolatedVerificationExecutionAttempts } from "./verification-execution-isolated-runtime-fixture";
 
 // server 端「运行自动脚本」全链路（不经 HTTP/tRPC 传输，直接调 handler）：置 running → spawn 脚本 → 写结果 + 自动勾选。
-describe.sequential("runPostDeployVerificationItem integration", () => {
+describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_000 }, () => {
 	let sandbox: ReturnType<typeof createTempDir>;
 	let previousHome: string | undefined;
 	let previousUserProfile: string | undefined;
@@ -23,9 +24,12 @@ describe.sequential("runPostDeployVerificationItem integration", () => {
 		previousUserProfile = process.env.USERPROFILE;
 		process.env.HOME = sandbox.path;
 		process.env.USERPROFILE = sandbox.path;
+		vi.stubEnv("CODEX_HOME", join(sandbox.path, "codex"));
+		vi.stubEnv("CODEX_SQLITE_HOME", join(sandbox.path, "codex-sqlite"));
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await cleanupIsolatedVerificationExecutionAttempts();
 		if (previousHome === undefined) {
 			delete process.env.HOME;
 		} else {
@@ -36,11 +40,14 @@ describe.sequential("runPostDeployVerificationItem integration", () => {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
+		vi.unstubAllEnvs();
 		sandbox.cleanup();
 	});
 
 	const deploymentApi = createDeploymentApi({
-		loadBoardTasksForWorkspace: async () => [],
+		loadBoardTasksForWorkspace: async () => [
+			{ taskId: "task-run-integ", columnId: "review", taskIncarnationCreatedAtEpochMs: 0 },
+		],
 		loadTaskAgentResponsePreview: async () => null,
 	});
 

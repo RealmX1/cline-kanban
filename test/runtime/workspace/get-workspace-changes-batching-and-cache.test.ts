@@ -23,6 +23,34 @@ describe("getWorkspaceChanges batching + cache", () => {
 		repoPath = repository.repositoryPath;
 	});
 
+	it.each(["working_copy", "from_ref", "between_refs"] as const)(
+		"%s 精确保留 Git 正文首尾空白和原始行位置",
+		async (variant) => {
+			const originalText = "\n\n\t  first line\r\nsecond line\n\n \t";
+			const changedText = "\n\t  first line\r\nsecond line\n \t\n\n";
+			writeFileSync(join(repoPath, "whitespace.txt"), originalText);
+			repository.runGit(["add", "."]);
+			repository.runGit(["commit", "--quiet", "-m", "原始正文"]);
+			const fromRef = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+			writeFileSync(join(repoPath, "whitespace.txt"), changedText);
+			if (variant === "between_refs") {
+				repository.runGit(["add", "."]);
+				repository.runGit(["commit", "--quiet", "-m", "只修改首尾空白"]);
+			}
+			const response =
+				variant === "working_copy"
+					? await getWorkspaceChanges(repoPath)
+					: variant === "from_ref"
+						? await getWorkspaceChangesFromRef({ cwd: repoPath, fromRef })
+						: await getWorkspaceChangesBetweenRefs({ cwd: repoPath, fromRef, toRef: "HEAD" });
+			expect(response.files).toHaveLength(1);
+			expect(response.files[0].oldText).toBe(originalText);
+			expect(response.files[0].newText).toBe(changedText);
+			expect(response.files[0].oldText?.split("\n")[2]).toBe("\t  first line\r");
+			expect(response.files[0].newText?.split("\n")[1]).toBe("\t  first line\r");
+		},
+	);
+
 	it("parses a renamed file's batch numstat (pair format) between two refs", async () => {
 		writeFileSync(join(repoPath, "a.txt"), "line1\nline2\nline3\nline4\nline5\n");
 		repository.runGit(["add", "."]);

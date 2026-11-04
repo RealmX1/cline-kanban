@@ -1,14 +1,16 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ensureVerificationAssetsDir } from "../../../src/deployment/verification-assets";
 import { runVerificationScript } from "../../../src/deployment/verification-script-runner";
 import { createTempDir } from "../../utilities/temp-dir";
+import { cleanupIsolatedVerificationExecutionAttempts } from "./verification-execution-isolated-runtime-fixture";
 
-describe.sequential("verification-script-runner", () => {
+describe.sequential("verification-script-runner", { timeout: 45_000 }, () => {
 	let sandbox: ReturnType<typeof createTempDir>;
 	let previousHome: string | undefined;
 	let previousUserProfile: string | undefined;
@@ -19,9 +21,12 @@ describe.sequential("verification-script-runner", () => {
 		previousUserProfile = process.env.USERPROFILE;
 		process.env.HOME = sandbox.path;
 		process.env.USERPROFILE = sandbox.path;
+		vi.stubEnv("CODEX_HOME", join(sandbox.path, "codex"));
+		vi.stubEnv("CODEX_SQLITE_HOME", join(sandbox.path, "codex-sqlite"));
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		await cleanupIsolatedVerificationExecutionAttempts();
 		if (previousHome === undefined) {
 			delete process.env.HOME;
 		} else {
@@ -32,6 +37,7 @@ describe.sequential("verification-script-runner", () => {
 		} else {
 			process.env.USERPROFILE = previousUserProfile;
 		}
+		vi.unstubAllEnvs();
 		sandbox.cleanup();
 	});
 
@@ -89,6 +95,78 @@ describe.sequential("verification-script-runner", () => {
 		});
 
 		expect(outcome.status).toBe("timed_out");
+	});
+
+	it("超时返回前确认孙进程停止写入", async () => {
+		const verificationId = randomUUID();
+		const descendantPidPath = join(sandbox.path, "verification-descendant-pid.txt");
+		const descendantWritesPath = join(sandbox.path, "verification-descendant-writes.txt");
+		const descendantSource = `const fs=require('node:fs');setInterval(()=>fs.appendFileSync(${JSON.stringify(descendantWritesPath)},'x'),20)`;
+		await writeScript(
+			verificationId,
+			"run.js",
+			`const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendantSource)}],{stdio:'ignore'});require('node:fs').writeFileSync(${JSON.stringify(descendantPidPath)},String(child.pid));setInterval(()=>{},1000)`,
+		);
+		try {
+			const pendingOutcome = runVerificationScript({
+				verificationId,
+				script: { entrypoint: "run.js", interpreter: "node", timeoutMs: 2000 },
+				startedAtIso: FIXED_START,
+				finishedAtIsoProvider: () => FIXED_FINISH,
+			});
+			await vi.waitFor(() => expect(existsSync(descendantWritesPath)).toBe(true), { timeout: 10_000 });
+			const outcome = await pendingOutcome;
+			if (outcome.status === "running")
+				expect(outcome.recoveryObservation?.reason).toBe("awaiting_exit_confirmation");
+			else expect(outcome.status).toBe("timed_out");
+			const writesAfterConfirmedExit = readFileSync(descendantWritesPath, "utf8");
+			await delay(200);
+			expect(readFileSync(descendantWritesPath, "utf8")).toBe(writesAfterConfirmedExit);
+		} finally {
+			if (existsSync(descendantPidPath)) {
+				try {
+					process.kill(Number(readFileSync(descendantPidPath, "utf8")), "SIGKILL");
+				} catch {
+					// 孙进程已由监督者确认退出。
+				}
+			}
+		}
+	});
+
+	it("快速双重脱组的孙进程在超时后停止写入", async () => {
+		const verificationId = randomUUID();
+		const descendantPidPath = join(sandbox.path, "detached-verification-descendant-pid.txt");
+		const descendantWritesPath = join(sandbox.path, "detached-verification-descendant-writes.txt");
+		const descendantSource = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(descendantPidPath)},String(process.pid));setInterval(()=>fs.appendFileSync(${JSON.stringify(descendantWritesPath)},'x'),20)`;
+		const intermediateSource = `require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendantSource)}],{detached:true,stdio:'ignore'}).unref()`;
+		await writeScript(
+			verificationId,
+			"run.js",
+			`require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(intermediateSource)}],{detached:true,stdio:'ignore'}).unref()`,
+		);
+		try {
+			const outcome = await runVerificationScript({
+				verificationId,
+				script: { entrypoint: "run.js", interpreter: "node", timeoutMs: 2000 },
+				startedAtIso: FIXED_START,
+				finishedAtIsoProvider: () => FIXED_FINISH,
+			});
+			await vi.waitFor(() => expect(existsSync(descendantWritesPath)).toBe(true), { timeout: 10_000 });
+			if (outcome.status === "running")
+				expect(outcome.recoveryObservation?.reason).toBe("awaiting_exit_confirmation");
+			else expect(outcome.status).toBe("timed_out");
+			const writesAfterConfirmedExit = readFileSync(descendantWritesPath, "utf8");
+			await delay(200);
+			expect(readFileSync(descendantWritesPath, "utf8")).toBe(writesAfterConfirmedExit);
+		} finally {
+			if (existsSync(descendantPidPath)) {
+				try {
+					process.kill(Number(readFileSync(descendantPidPath, "utf8")), "SIGKILL");
+				} catch {
+					/* 已确认退出。 */
+				}
+			}
+		}
 	});
 
 	it("node 解释器运行 .js 入口", async () => {

@@ -14,6 +14,7 @@ import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 // 编辑对话框点保存时，表单里的全部字段值（baseRef 已按默认分支补齐、prompt 已 trim）。
 export interface TaskEditorSubmittedTaskCardFieldValues {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskTitleOverride?: string;
 	prompt: string;
@@ -53,6 +54,8 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 ): RuntimeTaskCardFieldValuePatch {
 	const seed = taskCardTheEditorFormWasSeededFrom;
 	const patch: RuntimeTaskCardFieldValuePatch = {};
+	if (submitted.codexReasoningEffortOverride !== seed.codexReasoningEffortOverride)
+		patch.codexReasoningEffortOverride = submitted.codexReasoningEffortOverride ?? null;
 	if (submitted.codexConfigurationPermissionSelectionSource !== seed.codexConfigurationPermissionSelectionSource)
 		patch.codexConfigurationPermissionSelectionSource = submitted.codexConfigurationPermissionSelectionSource ?? null;
 	if (submitted.codexConfigurationProfileId !== seed.codexConfigurationProfileId)

@@ -6,9 +6,14 @@ import {
 	CodexConfigurationFullComparisonControls,
 	CodexConfigurationSourceEvidenceView,
 } from "@/components/codex-configuration-change-comparison";
+import { CodexConfigurationFeedbackSuggestionGroupView } from "@/components/codex-configuration-feedback-suggestion-group";
 import { CodexConfigurationProfileManagement } from "@/components/codex-configuration-profile-management";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import {
+	type CodexConfigurationFeedbackSuggestionGroup,
+	groupCodexConfigurationFeedbackSuggestions,
+} from "@/hooks/codex-configuration-feedback-suggestion-groups";
 import { useCodexConfigurationChangeDetails } from "@/hooks/use-codex-configuration-change-details";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import type { CodexConfigurationSyncNoticePresentation } from "@/hooks/use-codex-configuration-sync-notice";
@@ -53,6 +58,7 @@ function CodexConfigurationChangeActions({
 	const disabled = controller.pendingChangeId !== null;
 	const isPending = controller.pendingChangeId === change.changeId;
 	const isProfileManaged = Boolean(change.codexConfigurationProfileId);
+	const isArchivedBySettingsIsolation = change.settingsIsolationArchivedAtMs !== undefined;
 	const feedbackExpired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
 	return (
 		<article
@@ -88,9 +94,16 @@ function CodexConfigurationChangeActions({
 			{change.approvalStatus === "rejected" && (
 				<p className="mt-1 text-xs text-text-secondary">已拒绝采纳到看板默认。来源会话保留自己的配置。</p>
 			)}
-			{change.approvalStatus === "historical" && change.feedbackExpiresAtMs === undefined && (
-				<p className="mt-1 text-xs text-text-secondary">升级前的历史事实，保留此前已采用的默认值。</p>
+			{isArchivedBySettingsIsolation && (
+				<p className="mt-1 text-xs text-text-secondary">
+					设置隔离升级时归档；原始观测和已应用事实保留，后续不再审批或传播。
+				</p>
 			)}
+			{change.approvalStatus === "historical" &&
+				change.feedbackExpiresAtMs === undefined &&
+				!isArchivedBySettingsIsolation && (
+					<p className="mt-1 text-xs text-text-secondary">升级前的历史事实，保留此前已采用的默认值。</p>
+				)}
 			{details.sourceEvidence ? (
 				<div className="mt-2">
 					<CodexConfigurationSourceEvidenceView evidence={details.sourceEvidence} />
@@ -122,13 +135,15 @@ function CodexConfigurationChangeActions({
 			)}
 			{change.comparison && <CodexConfigurationFullComparisonControls details={details} />}
 			<p className="mt-1 mb-2 text-xs text-text-secondary">
-				{change.mergeStatus === "shared_default_updated"
-					? isProfileManaged
-						? "profile 已更新，正在自动广播；实际采用见下方进度。"
-						: change.sourceWriterId.startsWith("user-source:")
-							? "已用于未来会话。现有会话保持各自配置。"
-							: "已用于本会话及未来会话。现有会话保持各自配置。"
-					: configurationChangeMergeStatusDescriptions[change.mergeStatus]}
+				{isArchivedBySettingsIsolation
+					? "此记录已退出设置同步；此前的接受、保存与加载事实以下方历史进度为准。"
+					: change.mergeStatus === "shared_default_updated"
+						? isProfileManaged
+							? "profile 已更新，正在自动广播；实际采用见下方进度。"
+							: change.sourceWriterId.startsWith("user-source:")
+								? "已用于未来会话。现有会话保持各自配置。"
+								: "已用于本会话及未来会话。现有会话保持各自配置。"
+						: configurationChangeMergeStatusDescriptions[change.mergeStatus]}
 			</p>
 			{change.approvalStatus === "pending" && change.mergeStatus !== "conflict" && !feedbackExpired ? (
 				<div className="flex flex-wrap gap-2">
@@ -187,7 +202,7 @@ function CodexConfigurationChangeActions({
 						保留当前共享默认
 					</Button>
 				</div>
-			) : change.mergeStatus === "shared_default_updated" && !isProfileManaged ? (
+			) : change.mergeStatus === "shared_default_updated" && !isProfileManaged && !isArchivedBySettingsIsolation ? (
 				<>
 					<div className="flex items-start gap-2 text-xs text-text-primary">
 						<RadixSwitch.Root
@@ -237,23 +252,30 @@ function CodexConfigurationChangeActions({
 					</div>
 				</>
 			) : null}
-			{change.mergeStatus !== "shared_default_updated" && change.acknowledgedAt === null && !feedbackExpired && (
-				<Button
-					className="mt-2"
-					size="sm"
-					variant="ghost"
-					disabled={disabled}
-					onClick={() => {
-						if (change.approvalStatus === "pending")
-							void controller.batch("defer", [
-								{ entryKind: "settings_proposal", changeId: change.changeId, expectedVersion: change.version },
-							]);
-						else void controller.act(change, "acknowledge");
-					}}
-				>
-					稍后处理
-				</Button>
-			)}
+			{change.mergeStatus !== "shared_default_updated" &&
+				change.acknowledgedAt === null &&
+				!feedbackExpired &&
+				!isArchivedBySettingsIsolation && (
+					<Button
+						className="mt-2"
+						size="sm"
+						variant="ghost"
+						disabled={disabled}
+						onClick={() => {
+							if (change.approvalStatus === "pending")
+								void controller.batch("defer", [
+									{
+										entryKind: "settings_proposal",
+										changeId: change.changeId,
+										expectedVersion: change.version,
+									},
+								]);
+							else void controller.act(change, "acknowledge");
+						}}
+					>
+						稍后处理
+					</Button>
+				)}
 			{change.targets.length > 0 && (
 				<ul className="mt-3 mb-0 pl-4 space-y-1 text-xs text-text-secondary" aria-label="会话同步进度">
 					{change.targets.map((target) => (
@@ -263,9 +285,11 @@ function CodexConfigurationChangeActions({
 							</span>{" "}
 							· {target.reason}
 							{target.recoveryCondition && <span> 恢复条件：{target.recoveryCondition}。</span>}
-							{target.status === "conflict" && target.conflictingTargetValueDigest && (
-								<CodexConfigurationTargetConflict change={change} target={target} controller={controller} />
-							)}
+							{target.status === "conflict" &&
+								target.conflictingTargetValueDigest &&
+								!isArchivedBySettingsIsolation && (
+									<CodexConfigurationTargetConflict change={change} target={target} controller={controller} />
+								)}
 						</li>
 					))}
 				</ul>
@@ -294,42 +318,49 @@ function CodexConfigurationTargetConflict({
 			{comparison?.targetSourceEvidence && (
 				<CodexConfigurationSourceEvidenceView evidence={comparison.targetSourceEvidence} label="目标方" />
 			)}
-			{comparison && <CodexConfigurationComparisonRows comparison={comparison} />}
+			{comparison && (
+				<CodexConfigurationComparisonRows
+					comparison={comparison}
+					detectedAction={
+						<Button
+							size="sm"
+							disabled={disabled}
+							onClick={() => {
+								void controller.resolveTarget(
+									change,
+									{
+										...target,
+										conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
+									},
+									"use_source_change",
+								);
+							}}
+						>
+							向 {target.conversationSessionId} 应用来源决定
+						</Button>
+					}
+					targetAction={
+						<Button
+							size="sm"
+							disabled={disabled}
+							onClick={() => {
+								void controller.resolveTarget(
+									change,
+									{
+										...target,
+										conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
+									},
+									"keep_target_value",
+								);
+							}}
+						>
+							保留 {target.conversationSessionId} 的决定
+						</Button>
+					}
+				/>
+			)}
+			{!comparison && <p className="text-xs text-text-secondary">双方值暂不可读，恢复比较后可处理冲突。</p>}
 			{change.targetComparisons?.[target.writerId] && <CodexConfigurationFullComparisonControls details={details} />}
-			<div className="mt-1 flex flex-wrap gap-2">
-				<Button
-					size="sm"
-					disabled={disabled}
-					onClick={() => {
-						void controller.resolveTarget(
-							change,
-							{
-								...target,
-								conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
-							},
-							"use_source_change",
-						);
-					}}
-				>
-					向 {target.conversationSessionId} 应用来源决定
-				</Button>
-				<Button
-					size="sm"
-					disabled={disabled}
-					onClick={() => {
-						void controller.resolveTarget(
-							change,
-							{
-								...target,
-								conflictingTargetValueDigest: displayedDigest ?? target.conflictingTargetValueDigest,
-							},
-							"keep_target_value",
-						);
-					}}
-				>
-					保留 {target.conversationSessionId} 的决定
-				</Button>
-			</div>
 		</div>
 	);
 }
@@ -459,7 +490,8 @@ function CodexConfigurationObservedDefinitionChange({
 	);
 }
 
-const selectionIdentity = (change: CodexConfigurationChange) => `${change.changeId}:${change.version}`;
+const selectionIdentity = (group: CodexConfigurationFeedbackSuggestionGroup) =>
+	JSON.stringify(group.members.map((change) => [change.changeId, change.version]));
 function CodexConfigurationReviewList({
 	controller,
 	remindersOnly = false,
@@ -484,6 +516,7 @@ function CodexConfigurationReviewList({
 			change.approvalStatus === "pending" &&
 			(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
 	);
+	const proposalGroups = groupCodexConfigurationFeedbackSuggestions(proposals);
 	const history = changes.filter(
 		(change) =>
 			change.approvalStatus !== "pending" ||
@@ -508,18 +541,37 @@ function CodexConfigurationReviewList({
 		: (controller.state?.sourceObservations ?? []).filter(
 				(observation) => observation.acknowledgedAt !== null && matching(observationSearchText(observation)),
 			);
-	const selectable = filter === "all" || filter === "settings" ? proposals : [];
-	const selectedProposals = selectable.filter((change) => selected.has(selectionIdentity(change)));
+	const selectable = filter === "all" || filter === "settings" ? proposalGroups : [];
+	const selectedProposalGroups = selectable.filter((group) => selected.has(selectionIdentity(group)));
+	const selectedProposals = selectedProposalGroups.flatMap((group) => group.members);
 	const disabled = controller.pendingChangeId !== null;
 	const batch = async (action: "approve" | "reject" | "defer") => {
-		const results = await controller.batch(
-			action,
-			selectedProposals.map((change) => ({
-				entryKind: "settings_proposal",
-				changeId: change.changeId,
-				expectedVersion: change.version,
-			})),
-		);
+		const results = [];
+		if (action === "approve" && selectedProposalGroups.some((group) => group.members.length > 1)) {
+			for (const group of selectedProposalGroups) {
+				const outcomes = await controller.adoptCandidate(group.candidates[0]?.members ?? []);
+				if (outcomes) results.push(...outcomes);
+			}
+		} else {
+			const outcomes = await controller.batch(
+				action,
+				(action === "approve"
+					? selectedProposalGroups.flatMap((group) =>
+							group.candidates.length === 1 ? group.candidates[0]!.members.slice(0, 1) : [],
+						)
+					: selectedProposals
+				).map((change) => ({
+					entryKind: "settings_proposal",
+					changeId: change.changeId,
+					expectedVersion: change.version,
+					expectedSharedValueDigest:
+						action === "approve" && change.candidateFieldGroupKey
+							? change.comparison?.expectedSharedValueDigest
+							: undefined,
+				})),
+			);
+			if (outcomes) results.push(...outcomes);
+		}
 		const completed = new Set(
 			results
 				?.filter((result) => result.status === "applied" || result.status === "replayed")
@@ -530,8 +582,10 @@ function CodexConfigurationReviewList({
 				new Set(
 					[...previous].filter(
 						(key) =>
-							!selectedProposals.some(
-								(change) => selectionIdentity(change) === key && completed.has(change.changeId),
+							!selectedProposalGroups.some(
+								(group) =>
+									selectionIdentity(group) === key &&
+									group.members.some((change) => completed.has(change.changeId)),
 							),
 					),
 				),
@@ -573,7 +627,7 @@ function CodexConfigurationReviewList({
 						<input
 							type="checkbox"
 							aria-label="全选当前筛选结果中的设置"
-							checked={selectedProposals.length === selectable.length}
+							checked={selectedProposalGroups.length === selectable.length}
 							disabled={disabled}
 							onChange={(event) => {
 								const checked = event.target.checked;
@@ -589,7 +643,7 @@ function CodexConfigurationReviewList({
 						/>
 						全选当前筛选结果
 					</label>
-					<span className="text-xs text-text-secondary">已选 {selectedProposals.length} 项</span>
+					<span className="text-xs text-text-secondary">已选 {selectedProposalGroups.length} 项</span>
 					{(
 						[
 							["approve", "批量通过"],
@@ -601,7 +655,11 @@ function CodexConfigurationReviewList({
 							key={action}
 							size="sm"
 							variant={action === "approve" ? "primary" : "ghost"}
-							disabled={disabled || !selectedProposals.length}
+							disabled={
+								disabled ||
+								!selectedProposals.length ||
+								(action === "approve" && selectedProposalGroups.some((group) => group.candidates.length !== 1))
+							}
 							onClick={() => {
 								void batch(action);
 							}}
@@ -613,30 +671,39 @@ function CodexConfigurationReviewList({
 			)}
 			{(filter === "all" || filter === "settings") && (
 				<div role="group" aria-label="设置待反馈">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">设置待反馈 · {proposals.length}</h3>
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
+						设置待反馈 · {proposalGroups.length}
+					</h3>
 					{proposals.length === 0 && <p className="text-xs text-text-secondary">暂无待反馈设置。</p>}
 					<div className="divide-y divide-border">
-						{proposals.map((change) => (
-							<div key={change.changeId} className="flex min-w-0 items-start gap-2">
-								<input
-									type="checkbox"
-									className="mt-4 shrink-0"
-									aria-label={`选择 ${change.fieldLabel}`}
-									checked={selected.has(selectionIdentity(change))}
-									disabled={disabled}
-									onChange={(event) => {
-										const checked = event.target.checked;
-										setSelected((previous) => {
-											const next = new Set(previous);
-											if (checked) next.add(selectionIdentity(change));
-											else next.delete(selectionIdentity(change));
-											return next;
-										});
-									}}
-								/>
-								<CodexConfigurationChangeActions change={change} controller={controller} />
-							</div>
-						))}
+						{proposalGroups.map((group) => {
+							const change = group.members[0]!;
+							return (
+								<div key={group.fieldGroupKey} className="flex min-w-0 items-start gap-2">
+									<input
+										type="checkbox"
+										className="mt-4 shrink-0"
+										aria-label={`选择 ${change.fieldLabel}`}
+										checked={selected.has(selectionIdentity(group))}
+										disabled={disabled}
+										onChange={(event) => {
+											const checked = event.target.checked;
+											setSelected((previous) => {
+												const next = new Set(previous);
+												if (checked) next.add(selectionIdentity(group));
+												else next.delete(selectionIdentity(group));
+												return next;
+											});
+										}}
+									/>
+									{change.candidateFieldGroupKey ? (
+										<CodexConfigurationFeedbackSuggestionGroupView group={group} controller={controller} />
+									) : (
+										<CodexConfigurationChangeActions change={change} controller={controller} />
+									)}
+								</div>
+							);
+						})}
 					</div>
 				</div>
 			)}

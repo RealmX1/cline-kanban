@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	type HostedSessionTerminalModeReplayState,
+	serializeHostedSessionTerminalModes,
+} from "../../../src/agent-session-pty-host/wire-protocol/hosted-session-terminal-mode-checkpoint";
 
 const prepareAgentLaunchMock = vi.hoisted(() => vi.fn());
 
@@ -25,6 +29,7 @@ import {
 	parseTerminalSessionAdoptionRecord,
 	readRecentlyAppliedHookEventDeliveryIdempotencyKeysFromCarriedFields,
 } from "../../../src/terminal/terminal-session-adoption-record-for-runtime-restart";
+import { TerminalStateMirror } from "../../../src/terminal/terminal-state-mirror";
 
 interface FakeHostedTerminalPtyProcessHandle extends TerminalPtyProcessHandle {
 	write: ReturnType<typeof vi.fn<(data: string | Buffer) => void>>;
@@ -116,6 +121,8 @@ function createFakeAdoptionCandidate(input: {
 	retainedOutputStartByteOffset?: number;
 	outputEndByteOffset?: number;
 	catchUpOutputGap?: boolean;
+	terminalModeReplayState?: HostedSessionTerminalModeReplayState;
+	liveOutputTextDuringAttachment?: string;
 }): FakeAdoptionCandidateControls {
 	const handle = createFakeHostedTerminalPtyProcessHandle(input.pid);
 	const terminateAfterRefusedAdoption = vi.fn();
@@ -137,8 +144,15 @@ function createFakeAdoptionCandidate(input: {
 			requestedFromOutputByteOffset = callbacks.fromOutputByteOffset;
 			onDataCallback = callbacks.onData;
 			if (input.catchUpOutputGap) await callbacks.onCatchUpOutputGap?.();
+			await callbacks.onCatchUpOutputStart?.({
+				startByteOffset: input.retainedOutputStartByteOffset ?? 0,
+				terminalModeReplayState: input.terminalModeReplayState,
+			});
 			for (const catchUpOutputText of input.catchUpOutputTexts ?? []) {
 				callbacks.onCatchUpOutput(Buffer.from(catchUpOutputText, "utf8"));
+			}
+			if (input.liveOutputTextDuringAttachment) {
+				callbacks.onData(Buffer.from(input.liveOutputTextDuringAttachment, "utf8"));
 			}
 			if (input.exitDuringAttachment) {
 				callbacks.onExit(input.exitDuringAttachment);
@@ -176,6 +190,177 @@ describe("TerminalSessionManager hosted PTY session adoption after runtime resta
 
 	afterEach(() => {
 		vi.useRealTimers();
+	});
+
+	it("截断输出先恢复 host 模式再重放，不响应历史查询，也不把滚轮降成文本输入", async () => {
+		const taskId = "mode-checkpoint-adoption";
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 4545, prompt: "" });
+		const { candidate, handle } = createFakeAdoptionCandidate({
+			taskId,
+			pid: 4545,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+			retainedOutputStartByteOffset: 3 * 1024 * 1024,
+			outputEndByteOffset: 4 * 1024 * 1024,
+			terminalModeReplayState: {
+				terminalModes: {
+					alternateScreenActive: true,
+					mouseTrackingMode: 1002,
+					mouseCoordinateEncoding: 1006,
+					bracketedPasteActive: true,
+					focusReportingActive: true,
+				},
+				parserContinuationHex: Buffer.from("\u001b[?10").toString("hex"),
+			},
+			catchUpOutputTexts: ["03h\u001b[H会话显示", TERMINAL_QUERIES_THAT_MUST_NOT_BE_ANSWERED_DURING_CATCH_UP],
+		});
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({}, new Set([taskId]));
+		try {
+			await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+			const snapshot = await manager.getRestoreSnapshot(taskId);
+			expect(snapshot?.snapshot).toContain("\u001b[?1049h");
+			expect(snapshot?.snapshot).toContain("\u001b[?1003h");
+			expect(snapshot?.snapshot).toContain("\u001b[?1006h");
+			expect(snapshot?.snapshot).toContain("\u001b[?2004h");
+			expect(snapshot?.snapshot).toContain("会话显示");
+			expect(writtenTextOf(handle)).toBe("");
+		} finally {
+			manager.dispose();
+			previousRuntime.previousRuntimeManager.dispose();
+		}
+	});
+
+	it.each([
+		["\u001b[?100", "6h", false],
+		["\u001b[?1006", "h", true],
+		["\u001b[?1006;2004;1004", "h", false],
+		["\u001b[?1006;2004;1004", "l", true],
+		["\u001b]0;追赶标题", "实时标题\u0007", false],
+		["\u001b]0;追赶标题\u001b", "\\", true],
+	] as const)(
+		"追赶到实时输出续接同一个 CSI/OSC 解析状态：%j + %j，安装前到达=%j",
+		async (catchUpPrefix, liveSuffix, arrivesBeforeInstallation) => {
+			const taskId = "catch-up-live-protocol-continuation";
+			const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 4546, prompt: "" });
+			const terminalModeReplayState: HostedSessionTerminalModeReplayState = {
+				terminalModes: {
+					alternateScreenActive: true,
+					mouseTrackingMode: 1002,
+					mouseCoordinateEncoding: 0,
+					bracketedPasteActive: true,
+					focusReportingActive: true,
+				},
+				parserContinuationHex: "",
+			};
+			const liveOutput = `${liveSuffix}边界后的正文`;
+			const { candidate, handle, emitLiveOutput } = createFakeAdoptionCandidate({
+				taskId,
+				pid: 4546,
+				terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+				retainedOutputStartByteOffset: 3 * 1024 * 1024,
+				outputEndByteOffset: 4 * 1024 * 1024,
+				terminalModeReplayState,
+				catchUpOutputTexts: [TERMINAL_QUERIES_THAT_MUST_NOT_BE_ANSWERED_DURING_CATCH_UP, catchUpPrefix],
+				liveOutputTextDuringAttachment: arrivesBeforeInstallation ? liveOutput : undefined,
+			});
+			const manager = new TerminalSessionManager();
+			const uninterruptedMirror = new TerminalStateMirror(100, 30);
+			const observedOutput: Buffer[] = [];
+			manager.hydrateFromRecord({}, new Set([taskId]));
+			manager.attach(taskId, { onOutput: (chunk) => observedOutput.push(chunk) });
+			try {
+				await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+				if (!arrivesBeforeInstallation) emitLiveOutput(liveOutput);
+				uninterruptedMirror.applyOutput(serializeHostedSessionTerminalModes(terminalModeReplayState.terminalModes));
+				uninterruptedMirror.applyOutput(Buffer.from(catchUpPrefix + liveOutput));
+				expect((await manager.getRestoreSnapshot(taskId))?.snapshot).toBe(
+					(await uninterruptedMirror.getSnapshot()).snapshot,
+				);
+				expect(Buffer.concat(observedOutput).toString("utf8")).toBe(catchUpPrefix + liveOutput);
+				expect(writtenTextOf(handle)).toBe("");
+			} finally {
+				manager.dispose();
+				uninterruptedMirror.dispose();
+				previousRuntime.previousRuntimeManager.dispose();
+			}
+		},
+	);
+
+	it("旧 host 的截断输出保持模式未知，原生初始化后自动恢复并更新持久接管记录", async () => {
+		const taskId = "legacy-host-unknown-modes";
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 4646, prompt: "" });
+		const { candidate, handle, emitLiveOutput } = createFakeAdoptionCandidate({
+			taskId,
+			pid: 4646,
+			terminalSessionAdoptionRecord: previousRuntime.readLatestPublishedAdoptionRecord(),
+			retainedOutputStartByteOffset: 2 * 1024 * 1024,
+			outputEndByteOffset: 3 * 1024 * 1024,
+			catchUpOutputTexts: ["\u001b[2J\u001b[H只有重绘"],
+		});
+		const manager = new TerminalSessionManager();
+		manager.hydrateFromRecord({}, new Set([taskId]));
+		try {
+			await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+			expect(parseTerminalSessionAdoptionRecord(handle.publishedAdoptionRecords.at(-1))).toMatchObject({
+				kind: "usable_adoption_record",
+				adoptionRecord: { rederivationInputs: { terminalModesAreKnown: false } },
+			});
+			emitLiveOutput("\u001b[?1049;1002h");
+			emitLiveOutput("\u001b[?1006;2004;1004h");
+			await manager.getRestoreSnapshot(taskId);
+			expect(parseTerminalSessionAdoptionRecord(handle.publishedAdoptionRecords.at(-1))).toMatchObject({
+				kind: "usable_adoption_record",
+				adoptionRecord: { rederivationInputs: { terminalModesAreKnown: true } },
+			});
+			expect(writtenTextOf(handle)).toBe("");
+		} finally {
+			manager.dispose();
+			previousRuntime.previousRuntimeManager.dispose();
+		}
+	});
+
+	it("模式未知标记跨连续接管保留，未知屏幕检查点不会被当成模式已恢复", async () => {
+		const taskId = "unknown-mode-repeated-adoption";
+		const previousRuntime = await startHostedClaudeTaskSessionInPreviousRuntime({ taskId, pid: 4747, prompt: "" });
+		let adoptionRecord = previousRuntime.readLatestPublishedAdoptionRecord();
+		try {
+			for (let generation = 0; generation < 2; generation++) {
+				const { candidate, handle, readRequestedFromOutputByteOffset } = createFakeAdoptionCandidate({
+					taskId,
+					pid: 4747,
+					terminalSessionAdoptionRecord: adoptionRecord,
+					retainedOutputStartByteOffset: 100,
+					outputEndByteOffset: 300,
+					catchUpOutputTexts: [`\u001b[2J\u001b[H第 ${generation} 次重绘`],
+				});
+				const manager = new TerminalSessionManager();
+				manager.hydrateFromRecord({}, new Set([taskId]));
+				try {
+					await manager.adoptHostedTerminalPtySessionsAfterRuntimeRestart([candidate]);
+					expect(readRequestedFromOutputByteOffset()).toBeUndefined();
+					handle.outputByteOffsetAfterLastDeliveredChunk = 200;
+					await manager.detachHostedPtySessionsForRuntimeHandover({
+						readHostedSessionOrphanReclamationEligibleAtEpochMs: () => null,
+					});
+					adoptionRecord = handle.publishedAdoptionRecords.at(-1);
+					expect(parseTerminalSessionAdoptionRecord(adoptionRecord)).toMatchObject({
+						kind: "usable_adoption_record",
+						adoptionRecord: {
+							rederivationInputs: { terminalModesAreKnown: false },
+							plannedHandoverTerminalMirrorCheckpoint: {
+								outputByteOffsetCoveredBySnapshot: 200,
+								terminalModesAreKnown: false,
+							},
+						},
+					});
+					expect(handle.stop).not.toHaveBeenCalled();
+				} finally {
+					manager.dispose();
+				}
+			}
+		} finally {
+			previousRuntime.previousRuntimeManager.dispose();
+		}
 	});
 
 	it("Kimi 接管覆盖旧 suppress=true，追赶与 live 重绘均不叠加历史", async () => {

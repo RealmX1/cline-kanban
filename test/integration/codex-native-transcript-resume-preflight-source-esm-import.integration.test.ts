@@ -6,6 +6,10 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import {
+	compressedCodexTranscriptFixtureBytes,
+	compressedCodexTranscriptFixtureNativeSessionId,
+} from "../utilities/codex-native-resume-compressed-transcript-fixtures";
+import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline,
@@ -34,7 +38,7 @@ afterEach(async () => {
 describe("Codex 原生转录预检的源码 ESM 入口", { timeout: sourceModuleImportTestTimeoutMs }, () => {
 	it("真实 Node/tsx 导入后仍只接受身份匹配的持久主会话转录", async (testContext) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
-		const nativeSessionId = "019c889d-e9fa-71c3-98ed-9e6708a7bc57";
+		const nativeSessionId = compressedCodexTranscriptFixtureNativeSessionId;
 		const scenarios = [
 			{ directoryName: "persistent-main-conversation", id: nativeSessionId, source: "cli", accepted: true },
 			{
@@ -49,6 +53,27 @@ describe("Codex 原生转录预检的源码 ESM 入口", { timeout: sourceModule
 				source: "memory_consolidation",
 				accepted: false,
 			},
+			{
+				directoryName: "compressed-persistent-main",
+				id: nativeSessionId,
+				source: "cli",
+				accepted: true,
+				compressedScenario: "large-chinese-metadata" as const,
+			},
+			{
+				directoryName: "compressed-wrong-identity",
+				id: nativeSessionId,
+				source: "cli",
+				accepted: false,
+				compressedScenario: "wrong-identity" as const,
+			},
+			{
+				directoryName: "compressed-background-memory",
+				id: nativeSessionId,
+				source: "cli",
+				accepted: false,
+				compressedScenario: "memory_consolidation" as const,
+			},
 		];
 		const requests = [];
 		const expectedTranscriptPaths = [];
@@ -56,14 +81,17 @@ describe("Codex 原生转录预检的源码 ESM 入口", { timeout: sourceModule
 			const codexHomeDirectoryPath = join(fixture.fixtureRootDirectoryPath, scenario.directoryName);
 			const sessionsDirectoryPath = join(codexHomeDirectoryPath, "sessions");
 			await mkdir(sessionsDirectoryPath, { recursive: true });
-			const transcriptPath = join(sessionsDirectoryPath, `rollout-${nativeSessionId}.jsonl`);
+			const savedTranscriptPath = join(sessionsDirectoryPath, `rollout-${nativeSessionId}.jsonl`);
+			const transcriptPath = scenario.compressedScenario ? `${savedTranscriptPath}.zst` : savedTranscriptPath;
 			await writeFile(
 				transcriptPath,
-				`${JSON.stringify({ type: "session_meta", payload: { id: scenario.id, source: scenario.source } })}\n`,
+				scenario.compressedScenario
+					? compressedCodexTranscriptFixtureBytes(scenario.compressedScenario)
+					: `${JSON.stringify({ type: "session_meta", payload: { id: scenario.id, source: scenario.source } })}\n`,
 			);
 			requests.push({
 				nativeSessionId,
-				transcriptPath,
+				transcriptPath: savedTranscriptPath,
 				environmentOverrides: { CODEX_HOME: codexHomeDirectoryPath },
 			});
 			expectedTranscriptPaths.push(scenario.accepted ? transcriptPath : null);

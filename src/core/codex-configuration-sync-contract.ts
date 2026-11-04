@@ -4,6 +4,23 @@ export type CodexConfigurationPermissionSelectionSource = z.infer<
 	typeof codexConfigurationPermissionSelectionSourceSchema
 >;
 
+const codexNativePluginInstallationCapabilityEvidenceSchema = z.object({
+	nativeBinaryVersion: z.literal("codex-cli 0.166.0"),
+	nativeExecutableRealPath: z.string().min(1),
+	nativeExecutableIdentityDigest: z.string().min(1),
+	observedAtMs: z.number(),
+});
+export const codexSourceSharedPluginInstallationDirectoriesBindingSchema = z.object({
+	layoutVersion: z.literal(1),
+	pluginsDirectoryCanonicalPath: z.string().min(1),
+	pluginsDirectoryIdentity: z.string().min(1),
+	marketplaceInstallationDirectoryCanonicalPath: z.string().min(1),
+	marketplaceInstallationDirectoryIdentity: z.string().min(1),
+	nativeCapabilityEvidence: codexNativePluginInstallationCapabilityEvidenceSchema,
+});
+export type CodexSourceSharedPluginInstallationDirectoriesBinding = z.infer<
+	typeof codexSourceSharedPluginInstallationDirectoriesBindingSchema
+>;
 export const codexConfigurationWriterBindingSchema = z.object({
 	schemaVersion: z.literal(1),
 	writerId: z.string().uuid(),
@@ -18,6 +35,16 @@ export const codexConfigurationWriterBindingSchema = z.object({
 	sourceIdentity: z.string().min(1),
 	storageDirectoryIdentity: z.string().min(1),
 	sqliteDirectoryIdentity: z.string().min(1),
+	sourceSharedPluginInstallationDirectoriesBinding:
+		codexSourceSharedPluginInstallationDirectoriesBindingSchema.optional(),
+	sourceSharedPluginInstallationDirectoriesCompatibilityObservation: z
+		.object({
+			status: z.literal("unverified_native_capability"),
+			nativeBinaryVersion: z.string().nullable(),
+			nativeExecutableRealPath: z.string().nullable(),
+			automaticRecheckCondition: z.literal("next_native_process_generation"),
+		})
+		.optional(),
 	launchConfigurationDigest: z.string().min(1),
 	launchSharedVersion: z.number().int().nonnegative(),
 	codexConfigurationProfileId: z.string().min(1).optional(),
@@ -163,6 +190,7 @@ export const codexConfigurationComparisonRowSchema = z.object({
 	label: z.string(),
 	changeKind: z.enum(["added", "modified", "deleted", "unchanged", "unknown"]),
 	previous: codexConfigurationComparedValueSchema,
+	previousMatchesSharedCurrent: z.boolean().optional(),
 	detected: codexConfigurationComparedValueSchema,
 	sharedAtConflict: codexConfigurationComparedValueSchema.optional(),
 	sharedCurrent: codexConfigurationComparedValueSchema.optional(),
@@ -193,6 +221,9 @@ export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeCom
 export type CodexConfigurationChangeDetails = z.infer<typeof codexConfigurationChangeDetailsSchema>;
 
 export const codexConfigurationChangeSchema = z.object({
+	candidateFieldGroupKey: z.string().optional(),
+	completeCandidateValueDigest: z.string().optional(),
+	settingsIsolationArchivedAtMs: z.number().optional(),
 	changeId: z.string(),
 	version: z.number().int().positive(),
 	sourceWriterId: z.string(),
@@ -309,6 +340,7 @@ export const codexConfigurationBatchActionRequestSchema = z.object({
 		.array(
 			codexConfigurationChangeMutationRequestSchema.extend({
 				entryKind: z.enum(["settings_proposal", "source_observation"]),
+				expectedSharedValueDigest: z.string().min(1).optional(),
 			}),
 		)
 		.min(1)

@@ -143,6 +143,8 @@ else {
 						packagedCliPath,
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						"[TEST]来源任务",
 						"--prompt",

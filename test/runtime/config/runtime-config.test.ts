@@ -631,6 +631,8 @@ describe.sequential("runtime-config auto agent selection", () => {
 				expect(reloaded.userInterfacePreferencesSharedAcrossBrowserOrigins).toEqual({
 					taskConversationTranscriptDocumentVisibility: null,
 					taskProjectAssignmentAutomaticAnalysisEnabled: null,
+					newPeerSessionStartInPlanMode: null,
+					newByTheWaySessionStartInPlanMode: null,
 					newTaskAutoReviewEnabled: true,
 					newTaskAutoReviewMode: null,
 					taskCreateDialogPrimaryStartAction: null,

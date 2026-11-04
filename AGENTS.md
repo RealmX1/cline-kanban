@@ -36,6 +36,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - `npm test` 是 `test:guarded`（`test:policy` AST 静态策略 + invoking-repository mutation canary），**不要直接 `npx vitest`**——那会绕过策略与 canary。两个 project：`precommit-safe`（`test/**/*.test.ts`）与 `runtime-integration`（`*.integration.test.ts`，串行单 worker）。单文件：`npm run test:guarded -- --project precommit-safe <file>`。web-ui 是另一套 vitest（jsdom、测试与源码同目录）：`npm run web:test`；e2e 用 Playwright：`npm --prefix web-ui run e2e`。桌面壳：`npm --prefix packages/desktop run typecheck|test`。
 - **验证构建前先检查 `dist` 与 `web-ui/dist` 的 realpath**：任务 worktree 可能把它们软链到主仓库共享产物。必须先隔离两处输出，并显式设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`；不能把更新共享产物当成普通验证构建。
 - 真实 git 测试只能经 `test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts` 操作仓库（细则见 `test/README.md`）。
+- runtime 测试的 `createSpawnedChildProcessRegistrySigkilledAfterEachTest` 只登记句柄，必须显式在 `afterEach` 调用其回收方法；不能让仍在写盘的 runtime 与 fixture 清理并发。
 - 计时 / 资源阈值断言（等子进程退出、性能绊线、RSS 上限）按 `test/README.md`「负载敏感的墙钟 / 资源断言」分类：测试侧等待用两档（软档只告警、硬档才失败），并闭合用例与 hook 超时；**不要**用宿主 CPU 争用信号放过失败（实测不可靠）。
 - pre-commit（husky）顺序：`biome check --staged` → `npm run typecheck` → `npm run test:precommit`。
 
@@ -60,6 +61,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **Codex 暂存与注入分开**：Ctrl+S／Cmd+S 只走本代原生编辑器桥接，写库失败须非零退出；确认原生清框/恢复后才解锁与回放。注入继续 `turn/start`，旧会话不得转发无效 Ctrl+S。协议与恢复见 `docs/codex-draft-stash-to-prompts.md`。
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
+- **工作区 JSON 是已提交快照的投影**：读取和缓存必须识别快照日志与 `workspaceStateSnapshotCommitId`；后续写入先恢复投影再比较 revision，不重做业务变更。新旧写锁协议切换须核验旧写入者退出，回退先投影日志；见 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
@@ -115,10 +117,12 @@ web-ui：
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
 | `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
 | `docs/codex-configuration-writers-and-sync.md` | Codex 持久配置 writer、历史桥接、增量合并、选择性同步、原所有者重载及阶段闭包 |
+| `docs/codex-source-shared-plugin-installation-and-native-update-coordination.md` | Codex 同源 plugins／marketplace 双根、原生安装单写者、跨 profile 中断恢复及能力边界 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |
 | `docs/post-deploy-verification.md` / `docs/post-deploy-verification-natural-usage-observation-pipeline-design.md` | PDV 现行机制（三区归属、门禁、原因码、待观察记录）与「自然使用中多模态判定」pipeline 设计稿 |
+| `docs/post-deploy-verification-script-execution-attempt-supervision.md` | 自动脚本的持久 attempt、原生进程监督、退出确认与无浏览器恢复边界 |
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/post-mortems/codex-memory-consolidation-hook-overwrites-resume-identity-2026-10-20.md` | Codex 后台记忆整理 hook 的整事件隔离、原生转录续接预检与坏身份现场恢复 |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |

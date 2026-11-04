@@ -111,7 +111,21 @@ describe("可视化发布拒绝的真实运行时接线", { timeout: testTimeout
 					pendingPublicationDirectoryPath?: string;
 				};
 			};
-			const task = (await runCli(["task", "create", "--title", "隔离发布任务", "--prompt", "验证发布拒绝"], 0)).task;
+			const task = (
+				await runCli(
+					[
+						"task",
+						"create",
+						"--start-in-plan-mode",
+						"false",
+						"--title",
+						"隔离发布任务",
+						"--prompt",
+						"验证发布拒绝",
+					],
+					0,
+				)
+			).task;
 			if (!task) throw new Error("未创建隔离测试任务。");
 			const sourceHtmlFilePath = join(fixture.fixtureRootDirectoryPath, "chart.html");
 			await writeFile(sourceHtmlFilePath, "<h1>拒绝证据保留</h1>");
