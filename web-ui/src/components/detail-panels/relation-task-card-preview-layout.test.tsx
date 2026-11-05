@@ -1,18 +1,21 @@
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { RelationTaskCardPreviewLayout } from "@/components/detail-panels/relation-task-card-preview-layout";
 import { RelationNeighborWorkUnitReference } from "@/components/detail-panels/work-unit-relation-neighborhood-panel-neighbor-reference-and-badges";
+import { Dialog, DialogBody, DialogHeader } from "@/components/ui/dialog";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { buildRelationTaskCardPreviewTargetFromDisplayEntry } from "@/hooks/relation-task-card-preview-target";
 import { useRelationTaskCardPreview } from "@/hooks/use-relation-task-card-preview";
+import { useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
 import {
 	buildWorkUnitRelationNeighborPresentation,
 	type WorkUnitRelationNeighborPresentation,
 } from "@/hooks/work-unit-relation-neighborhood-panel-presentation-model";
 import { buildKanbanBoardCardDisplayEntryForTest } from "@/hooks/work-unit-relation-neighborhood-summary-response-test-fixtures";
 import type { RuntimeTaskCardSnapshotWithBoardColumnAndTaskSessionSummaries } from "@/runtime/types";
+import type { BoardCard } from "@/types";
 
 const { readSnapshot, openTask } = vi.hoisted(() => ({ readSnapshot: vi.fn(), openTask: vi.fn() }));
 vi.mock("@/runtime/directly-related-task-preview-query", async (importOriginal) => ({
@@ -57,6 +60,10 @@ function snapshot(taskId: string, createdAt = 1_000) {
 }
 function Harness() {
 	const controller = useRelationTaskCardPreview();
+	const [editedTaskCard, setEditedTaskCard] = useState<BoardCard | null>(null);
+	const taskCardActions = useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher({
+		onRequestEditBacklogTaskCardInOtherProject: (_workspaceId, taskCard) => setEditedTaskCard(taskCard),
+	});
 	return (
 		<TooltipProvider>
 			<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
@@ -73,6 +80,7 @@ function Harness() {
 						},
 					],
 					currentProjectId: "current",
+					otherProjectTaskCardActionHandlers: taskCardActions,
 					notificationLogByWorkspaceId: {},
 					isBoardScopeAllProjectsSelected: false,
 					focusedTaskInProject: null,
@@ -106,6 +114,17 @@ function Harness() {
 						预览虚拟根
 					</button>
 				</RelationTaskCardPreviewLayout>
+				<Dialog
+					open={editedTaskCard !== null}
+					onOpenChange={(open) => {
+						if (!open) setEditedTaskCard(null);
+					}}
+				>
+					<DialogHeader title="编辑关联任务" />
+					<DialogBody>
+						<textarea aria-label="关联任务描述" defaultValue={editedTaskCard?.prompt} />
+					</DialogBody>
+				</Dialog>
 			</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
 		</TooltipProvider>
 	);
@@ -166,6 +185,43 @@ it("焦点立即预览，点击固定后忽略其他悬停和焦点，点击其�
 	await click(button("关闭任务卡片预览"));
 	expect(fullCard()).toBeNull();
 	expect(document.activeElement).toBe(second());
+	expect(openTask).not.toHaveBeenCalled();
+});
+
+it("悬停卡片后以指针打开模态框，移出卡片仍保留原按钮并在 Escape 后回焦", async () => {
+	const backlogTaskSnapshot = snapshot("second");
+	readSnapshot.mockResolvedValueOnce({
+		...backlogTaskSnapshot,
+		taskCardSnapshot: { ...backlogTaskSnapshot.taskCardSnapshot, boardColumnIdContainingTaskCard: "backlog" },
+	});
+	await click(second());
+	await act(async () => second().focus());
+	await act(async () =>
+		fullCard()!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body })),
+	);
+	const originatingEditTaskButton = fullCard()!.querySelector<HTMLButtonElement>('[aria-label="Edit task title"]')!;
+	await act(async () => {
+		originatingEditTaskButton
+			.querySelector("svg")!
+			.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, cancelable: true }));
+		originatingEditTaskButton.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+		originatingEditTaskButton.click();
+	});
+	const taskEditorDialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+	expect(taskEditorDialog).not.toBeNull();
+	// 模态遮罩覆盖卡片会触发 mouseleave，Tooltip 的显隐不能重建发起操作的按钮。
+	await act(async () =>
+		fullCard()!.dispatchEvent(new MouseEvent("mouseout", { bubbles: true, relatedTarget: taskEditorDialog })),
+	);
+	await act(async () =>
+		document.activeElement!.dispatchEvent(
+			new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+		),
+	);
+	await act(async () => vi.advanceTimersByTime(50));
+	expect(document.querySelector('[role="dialog"]')).toBeNull();
+	expect(fullCard()!.querySelector('[aria-label="Edit task title"]')).toBe(originatingEditTaskButton);
+	expect(document.activeElement).toBe(originatingEditTaskButton);
 	expect(openTask).not.toHaveBeenCalled();
 });
 

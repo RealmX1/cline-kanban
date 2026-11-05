@@ -102,7 +102,7 @@ PDV 面板里显式的「带原因移入 Done」和批量带原因结案仍直�
 **例外**：
 
 - 删除任务不算进入 Done，不拦（仍记 `task_deleted`）；
-- 会话中断后自动流转进 Done 的路径会跳过受门禁的卡。
+- 会话中断一律保留原列，不发起进入 Done 的动作，也不触发结案门禁提示。
 
 CLI 带原因的写法（`kanban task done` 与 `kanban deployment verification-complete / verification-confirm` 通用）：
 

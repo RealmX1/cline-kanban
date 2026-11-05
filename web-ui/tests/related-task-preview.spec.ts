@@ -327,5 +327,8 @@ test("完整关联卡的评论打开、保存前重读与最终写入均携带�
 	});
 	await expect(commentsDialog.getByPlaceholder("Edit task comment...")).toHaveValue("评论仅保存到预览中的这一世任务");
 	await expect(commentsDialog.getByRole("alert")).toHaveCount(0);
+	await commentsDialog.press("Escape");
+	await expect(commentsDialog).toHaveCount(0);
+	await expect(popover).toBeVisible();
 	expect(fixture.pageErrors).toEqual([]);
 });

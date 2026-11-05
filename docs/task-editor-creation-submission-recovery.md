@@ -39,3 +39,7 @@
 - `task-editor-creation-submission-real-browser.integration.test.ts`：HOME、CODEX_HOME 和 CODEX_SQLITE_HOME 隔离的打包运行时与 Playwright。通过 `KANBAN_TASK_EDITOR_CREATION_PACKAGED_CLI_PATH` 指定隔离构建；`PLAYWRIGHT_BROWSERS_PATH` 指向浏览器缓存；证据目录由 `KANBAN_TASK_EDITOR_CREATION_BROWSER_EVIDENCE_DIRECTORY` 指定。
 
 本变更不恢复历史任务内容，不包含 Git 提交、分支同步或部署。
+
+## 跨项目启动展示
+
+已确认保存且请求启动的创建记录投影到跨项目条目的可选 `taskEditorCreationAgentStartupProgress`。投影与 Running 分组共同核对完整身份并优先采用真实会话；仅创建 Backlog 不受影响。首页、Focus View 与 CLI 查询共用分组，创建提交阶段变化即时广播。目录指纹缓存共享一轮读取，已完成提交不因后续状态变化反复解析。详见 [Running 展示与验证记录](research/new-task-running-startup-visibility-implementation.md)。

@@ -21,6 +21,10 @@ import { resolveUserCodexHomeDirectoryPath } from "../codex-conversation-storage
 import { prepareCodexPersistentDirectoryIdentity } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import type { CodexConfigurationWriterBinding } from "../core/codex-configuration-sync-contract";
 import { redactSecretShapedSubstringsInCommandLineText } from "../diagnostics/process-command-line-text-truncation-and-secret-redaction";
+import {
+	measureTaskSessionStartupPhase,
+	recordTaskSessionStartDiagnostic,
+} from "../diagnostics/task-session-start-diagnostics-logger";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
 	assertCodexAutomaticPluginGitWorkingDirectory,
@@ -34,6 +38,7 @@ import {
 	prepareCodexConfigurationWriterBinding,
 } from "./codex-configuration-writer-binding";
 import { formatCodexConfigurationOverrideTomlValue } from "./codex-native-configuration-override-toml-value";
+import { createCodexPluginRemoteRevisionProbeTransaction } from "./codex-plugin-remote-revision-probe-transaction";
 import { claimCodexSourcePluginInstallationControllerOwnership } from "./codex-source-plugin-installation-controller-ownership";
 
 const executeFile = promisify(execFile);
@@ -489,6 +494,7 @@ async function remoteGitRevision(
 }
 
 async function installedPluginPositivelyDiffersFromActivatedSource(input: {
+	remoteRevisionProbes?: ReturnType<typeof createCodexPluginRemoteRevisionProbeTransaction>;
 	binding: CodexConfigurationWriterBinding;
 	state: Pick<InstallationState, "completedPluginInstallations" | "completedMarketplaceRevisions" | "installerHome">;
 	environment: NodeJS.ProcessEnv;
@@ -520,7 +526,8 @@ async function installedPluginPositivelyDiffersFromActivatedSource(input: {
 	if (!installedRevision) return false;
 	const expected =
 		source.sha?.toLowerCase() ??
-		(await remoteGitRevision(source.url, source.ref, input.environment, input.state.installerHome));
+		(await (input.remoteRevisionProbes?.read(source.url, source.ref) ??
+			remoteGitRevision(source.url, source.ref, input.environment, input.state.installerHome)));
 	if (!expected) return false;
 	return installedRevision !== expected;
 }
@@ -1147,6 +1154,14 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 	const intentPath = input.recoverPreparationIntentPath ?? join(intentDirectory, `${preparationIntent.intentId}.json`);
 	await savePreparationIntent(intentPath, preparationIntent);
 	const abort = new AbortController();
+	const diagnosticContext = {
+		workspaceId: binding.workspaceId ?? "(unknown)",
+		taskId: binding.conversationSessionId ?? "(auxiliary)",
+		requestedAgentId: "codex" as const,
+		effectiveAgentId: "codex" as const,
+		runtimeSessionIncarnationId: binding.runtimeSessionIncarnationId,
+	};
+	const lockRequestedAt = performance.now();
 	try {
 		const result = await lockedFileSystem.withLock(
 			{
@@ -1157,6 +1172,16 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 				onCompromised: (error) => abort.abort(error),
 			},
 			async () => {
+				const lockWaitMs = Math.round(performance.now() - lockRequestedAt);
+				void recordTaskSessionStartDiagnostic({
+					...diagnosticContext,
+					event: "phase_completed",
+					phase: "codex_plugin_source_lock_wait",
+					elapsedMs: lockWaitMs,
+					phaseDurationMs: lockWaitMs,
+					error: null,
+					session: null,
+				});
 				await assertCodexConfigurationWriterBindingIdentity(binding);
 				const finishOwnership = await claimCodexSourcePluginInstallationControllerOwnership({
 					coordinationDirectoryPath: stateDirectory,
@@ -1226,6 +1251,17 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							updatedAtMs: Date.now(),
 						};
 					}
+					const remoteRevisionProbes = createCodexPluginRemoteRevisionProbeTransaction((url, ref) =>
+						measureTaskSessionStartupPhase(
+							{ ...diagnosticContext, phase: "codex_plugin_remote_revision_query" },
+							async () => {
+								const revision = await remoteGitRevision(url, ref, input.environment, state.installerHome);
+								if (!revision) throw new Error("插件远端 revision 查询未取得可信结果。");
+								return revision;
+							},
+						).catch(() => undefined),
+					);
+
 					let nativeUpgradeCount = 0,
 						nativePluginInstallationCount = 0;
 					const reusable = async () => {
@@ -1241,6 +1277,7 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							if (!marketplace) return false;
 							if (
 								await installedPluginPositivelyDiffersFromActivatedSource({
+									remoteRevisionProbes,
 									binding,
 									state,
 									environment: input.environment,
@@ -1259,10 +1296,23 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 						)
 							throw new Error("原生插件安装所有者仍在执行，保持机器等待；确认退出后自动补证。");
 					};
+					const observeTransactionRetryEvidenceFingerprint = async () => {
+						await reusable();
+						// 原始网络探测可能先恢复；本事务仍缓存未知结果，必须将这项缺证也纳入恢复条件。
+						return configurationDigest([
+							await observeRetryEvidenceFingerprint(binding, state, input.environment),
+							await remoteRevisionProbes.hasUnverifiedRevisionProbes(),
+						]);
+					};
 					const mustCheckNativeRevision =
 						binding.purpose === "native_session" && !input.recoverPreparationIntentPath;
 					await rejectWhileNativeWriterLives();
-					if (!mustCheckNativeRevision && state.attemptCount === 0 && (await reusable())) {
+					if (
+						!mustCheckNativeRevision &&
+						state.attemptCount === 0 &&
+						(await reusable()) &&
+						!(await remoteRevisionProbes.hasUnverifiedRevisionProbes())
+					) {
 						state.phase = "ready";
 						await saveState(statePath, state);
 						return {
@@ -1279,7 +1329,12 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 						};
 					}
 					await rejectWhileNativeWriterLives();
-					if (state.phase === "ready" && !mustCheckNativeRevision && (await reusable()))
+					if (
+						state.phase === "ready" &&
+						!mustCheckNativeRevision &&
+						(await reusable()) &&
+						!(await remoteRevisionProbes.hasUnverifiedRevisionProbes())
+					)
 						return {
 							arguments: nativeReadOnlyMarketplaceArguments(
 								binding,
@@ -1299,7 +1354,7 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 						state.pluginKeysRequiringInstallation = [];
 					}
 					if (state.attemptCount >= 3) {
-						const evidence = await observeRetryEvidenceFingerprint(binding, state, input.environment);
+						const evidence = await observeTransactionRetryEvidenceFingerprint();
 						if (state.retryEvidenceFingerprint !== evidence) {
 							state.attemptCount = 0;
 							state.retryEvidenceFingerprint = evidence;
@@ -1333,15 +1388,20 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 									isolatedGitWorkingDirectoryPath: state.installerHome,
 								});
 								const previous = await marketplaceMetadata(binding, marketplace);
+								remoteRevisionProbes.invalidateAfterSourceInstallationFactsChanged();
 								const result = nativeMarketplaceUpgradeResultSchema.parse(
-									await runNativeInstallationOperation({
-										...input,
-										state,
-										statePath,
-										kind: "marketplace_upgrade",
-										selection: marketplace.name,
-										abortSignal: abort.signal,
-									}),
+									await measureTaskSessionStartupPhase(
+										{ ...diagnosticContext, phase: "codex_native_marketplace_update" },
+										() =>
+											runNativeInstallationOperation({
+												...input,
+												state,
+												statePath,
+												kind: "marketplace_upgrade",
+												selection: marketplace.name,
+												abortSignal: abort.signal,
+											}),
+									),
 								);
 								if (
 									result.errors.length ||
@@ -1373,6 +1433,7 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 								const sourceDiffers = Boolean(
 									marketplace &&
 										(await installedPluginPositivelyDiffersFromActivatedSource({
+											remoteRevisionProbes,
 											binding,
 											state,
 											environment: input.environment,
@@ -1407,15 +1468,20 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 										continue;
 									}
 								}
+								remoteRevisionProbes.invalidateAfterSourceInstallationFactsChanged();
 								const result = nativePluginInstallationResultSchema.parse(
-									await runNativeInstallationOperation({
-										...input,
-										state,
-										statePath,
-										kind: "plugin_install",
-										selection: key,
-										abortSignal: abort.signal,
-									}),
+									await measureTaskSessionStartupPhase(
+										{ ...diagnosticContext, phase: "codex_native_plugin_installation" },
+										() =>
+											runNativeInstallationOperation({
+												...input,
+												state,
+												statePath,
+												kind: "plugin_install",
+												selection: key,
+												abortSignal: abort.signal,
+											}),
+									),
 								);
 								const current = await installedPlugin(binding, key);
 								if (
@@ -1432,6 +1498,8 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 								await saveState(statePath, state);
 							}
 							if (!(await reusable())) throw new Error("原生 marketplace 激活与插件安装尚未同时完成。");
+							if (await remoteRevisionProbes.hasUnverifiedRevisionProbes())
+								throw new Error("插件远端 revision 尚不可核验，保留完整缓存与待更新状态。");
 							state.phase = "ready";
 							delete state.failureReason;
 							delete state.activeNativeAttempt;
@@ -1455,11 +1523,7 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							state.failureReason = redactSecretShapedSubstringsInCommandLineText(
 								error instanceof Error ? error.message : String(error),
 							);
-							state.retryEvidenceFingerprint = await observeRetryEvidenceFingerprint(
-								binding,
-								state,
-								input.environment,
-							);
+							state.retryEvidenceFingerprint = await observeTransactionRetryEvidenceFingerprint();
 							state.nextEvidenceObservationAtMs = Date.now() + 30_000;
 							await saveState(statePath, state);
 							if (

@@ -255,6 +255,7 @@ export type TaskMainSessionHandoverRecord = z.infer<typeof taskMainSessionHandov
 export const taskMainSessionHandoverPrepareRequestSchema = z.object({ taskId: z.string().min(1) });
 export const taskMainSessionHandoverRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().optional(),
 	expectedMainTaskConversationSessionId: z.string().min(1),
 	requestId: z.string().uuid(),
 	destination: taskMainSessionHandoverDestinationSchema,

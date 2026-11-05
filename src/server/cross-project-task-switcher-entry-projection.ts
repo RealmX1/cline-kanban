@@ -4,9 +4,13 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeCrossProjectTaskSwitcherEntry,
+	TaskEditorCreationSubmissionStatus,
 } from "../core/api-contract";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/backlog-task-description-last-updated-ordering";
-import { isTaskCardWithinCrossProjectTaskSwitcherActivityScope } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import {
+	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
+	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
+} from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	buildTaskActivityDetailFromBoardCardAndTaskSessionFacts,
@@ -41,6 +45,7 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 		lastMainAgentConversationModelRequestDispatchObservation:
 			sessionFacts?.lastMainAgentConversationModelRequestDispatchObservation ?? null,
 		agentProcessStartedAt: sessionFacts?.agentProcessStartedAt ?? null,
+		agentSessionHasNoEstablishedAcpConnection: sessionFacts?.agentSessionHasNoEstablishedAcpConnection ?? false,
 		baseRef: card.baseRef,
 		...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
 	};
@@ -52,6 +57,7 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 	lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
 	nowMs: number;
 	activityHorizonMs: number;
+	taskEditorCreationAgentStartupProgressByTaskId?: ReadonlyMap<string, TaskEditorCreationSubmissionStatus>;
 }): RuntimeCrossProjectTaskSwitcherEntry[] {
 	const activityHorizonStartAt = input.nowMs - input.activityHorizonMs;
 	const entries: RuntimeCrossProjectTaskSwitcherEntry[] = [];
@@ -75,6 +81,16 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 				input.lastOpenedByUserAtByTaskId.get(card.id) ?? null,
 			);
 			const sessionActivityFacts = sessionActivityFactsByOwningCardId.get(card.id) ?? [];
+			const startupProgress = input.taskEditorCreationAgentStartupProgressByTaskId?.get(card.id);
+			if (
+				startupProgress &&
+				!card.mostRecentlyLaunchedAgentSessionAgentId &&
+				isCrossProjectTaskSwitcherEntryPreparingAgentStartup({
+					...entry,
+					taskEditorCreationAgentStartupProgress: startupProgress,
+				})
+			)
+				entry.taskEditorCreationAgentStartupProgress = startupProgress;
 			const mainSessionId = resolveMainTaskConversationSessionId(card);
 			const mainSessionFacts = resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(
 				card,

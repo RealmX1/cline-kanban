@@ -727,6 +727,7 @@ export const ClineAgentChatPanel = React.forwardRef<ClineAgentChatPanelHandle, C
 				) : null}
 				{saveFindingDraft && workspaceId ? (
 					<SaveFindingDialog
+						openingRequestIdentity={saveFindingDraft}
 						workspaceId={workspaceId}
 						conversationSessionTaskId={taskId}
 						// 锚三元在打开那一刻解析：turn 号来自位置性映射，commit 查投影 entries；

@@ -28,7 +28,9 @@ _Avoid_: card（它不是 board 卡片，没有 prompt / 动作按钮）
 各项目 Task Pinboard 的汇总，只有一种 pin（不另设「面板专用 pin」）。**允许**与下面三区重复；点击后打开任务，并把它在下方区里的那一行滚进视野、脉冲高亮。可折叠（默认展开，`kanban.cross-project-task-switcher-pinned-section-collapsed.v1`，与 This project 置顶分段各自一个键）。置顶 / 取消置顶 / 改原因一律走 `taskCardAction.setTaskPinboardPinStateOfTaskCard`：当前项目的卡由宿主弹原因对话框、带 overlay；其他项目的卡由面板弹同一个对话框、不带 overlay（结果随广播回来）。
 
 **Running（运行区）**：
-`turnOwner === "agent"` 且（`liveness` 为 `live` / `retrying`，或已 park 在等自己派发的后台工作）。默认收起成一行「Running N」：当前回合尚未结束的任务暂时不需要人。真实重连继续留在区内，精简行显示「重连中」。
+`turnOwner === "agent"` 且（`liveness === "live"`，或已 park 在等自己派发的后台工作）。重连和自动恢复等待使用独立的等待自动恢复组。Running 还展示共享编辑器中已确认保存且请求启动的任务，字段为 `taskEditorCreationAgentStartupProgress`：按项目、任务 ID、创建时间核对身份，准备状态不修改 session facet。真实会话出现后优先展示会话状态。
+
+正在启动的任务排在真实运行任务之后，按提交受理时间升序；组头分别统计「运行中」和「正在启动」。行内区分「正在启动」「启动等待恢复」与「正在核验启动结果」。只创建 Backlog 不进入启动分组。Stop、搁置、离开启动阶段、删除和同 ID 换世保留门禁；重连与运行时重启从持久创建记录恢复。保存确认、启动阶段和会话状态边沿及时广播，普通输出保留既有合并窗口。
 判据不读取 PTY 输出新鲜度，也不按列取：Review / Validation 中实际仍由 Agent 持有的存活回合同样进入 Running。
 排序：按**本轮 agent 回合开始时刻升序**（先进入的在前、后进入的在后；summary sidecar `agentResponseGenerationTurnStarted`，在 `mergeSummaryWithFacets` 的「非 agent → agent」边沿上盖章，与 `agentResponseGenerationStopped` 对偶）。缺字段时回落到 agent 进程启动时刻，再缺排到末尾；同一时刻按 (workspaceId, taskId) 兜底。比较器 `compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey`（由 `createComparatorByCurrentAgentTurnStartAscendingThenStableKey` 工厂产出）。**绝不按 `lastOutputAt` 排**：spinner 每次重绘都推进它，2026-10-04 在 3484 上实测成员不变的相邻样本 30/38 次顺序变了（用户报为闪烁）。
 - 离开 Running 再回来的位置：交出回合（Stop、权限 / 提问 / 计划审批、idle_stall）后再进入 Agent 回合是新边沿，排到**末尾**（`EXPERIMENT_NODE`：模态决策往返后是否保留原位）；同一回合内的静默、`live ↔ retrying` 和 park 均保留原相对位置。

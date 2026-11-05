@@ -10,7 +10,23 @@ async function mountHoverExpansionHarness(page: Page, host: "home" | "focus") {
 		// 所有 API/WebSocket 都隔离，任何请求均不触达真实 runtime。
 		expect(route.request().method()).toBe("GET");
 		const procedures = new URL(route.request().url()).pathname.split("/api/trpc/")[1]?.split(",") ?? [];
-		await route.fulfill({ json: procedures.map(() => ({ result: { data: { tasks: [] } } })) });
+		await route.fulfill({
+			json: procedures.map((procedure) => ({
+				result: {
+					data:
+						procedure.includes("DirectlyRelatedTaskPreview") || procedure.includes("directlyRelatedTaskPreview")
+							? {
+									entries: [],
+									totalTaskCount: 125,
+									mutedOnlyTaskCount: 0,
+									standaloneSessionCount: 0,
+									neighborhoodRevision: "empty",
+									nextCursor: null,
+								}
+							: { tasks: [] },
+				},
+			})),
+		});
 	});
 	await page.routeWebSocket("**/*", () => {});
 	await page.route("**/isolated-task-card-hover**", (route) =>
@@ -78,6 +94,20 @@ async function expectFloatingCardWithinViewport(scrollContainer: Locator, row: L
 }
 
 for (const host of ["home", "focus"] as const) {
+	test(`${host}：纯指针进入 Prompt 附加菜单后保持悬浮卡片`, async ({ page }) => {
+		const { rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+		const row = rows.first();
+		await hoverRow(page, row);
+		await row.getByRole("button", { name: "View original prompt", exact: true }).hover();
+		const menu = page.getByRole("menu", { name: "查看原始 Prompt附加操作" });
+		await expect(menu).toBeVisible();
+		await menu.hover();
+		await page.waitForTimeout(400);
+		await expect(row).toHaveAttribute(expansionStateAttribute, "expanded_in_place_by_hover");
+		await expect(menu.getByRole("menuitem", { name: "复制原始 Prompt" })).toBeVisible();
+		expect(pageErrors).toEqual([]);
+	});
+
 	test(`${host}：悬浮展开交接精简行的键盘焦点，焦点离开后自动收起`, async ({ page }) => {
 		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host);
 		const before = await measureList(scrollContainer);
@@ -97,6 +127,7 @@ for (const host of ["home", "focus"] as const) {
 
 	test(`${host}：展开、收起与交接保持行坐标、占位高度及滚动尺寸，浮层遮蔽下方内容且按钮可点`, async ({ page }) => {
 		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+		await page.getByRole("button", { name: "模拟卡片内容增长" }).click();
 		const before = await measureList(scrollContainer);
 		await hoverRow(page, rows.first());
 		await expect.poll(() => measureList(scrollContainer)).toEqual(before);
@@ -207,9 +238,11 @@ for (const host of ["home", "focus"] as const) {
 
 	test(`${host}：键盘焦点、菜单和 Portal 弹窗保持展开，Esc 先关闭弹窗，保持展开继续占据完整高度`, async ({ page }) => {
 		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+		await page.getByRole("button", { name: "模拟卡片内容增长" }).click();
 		const before = await measureList(scrollContainer);
 		await hoverRow(page, rows.first());
 		const card = rows.first().locator(floatingCardSelector);
+		await page.keyboard.press("Tab");
 		await card.getByRole("button", { name: "View original prompt", exact: true }).focus();
 		await page.mouse.move(1200, 10);
 		await page.waitForTimeout(400);
@@ -223,7 +256,7 @@ for (const host of ["home", "focus"] as const) {
 		await page.keyboard.press("Escape");
 		await expect(dialog).toHaveCount(0);
 		await expect(card).toBeVisible();
-		const doneAction = card.getByRole("button", { name: "Move task to done", exact: true });
+		const doneAction = card.getByRole("button", { name: "结案任务", exact: true });
 		await doneAction.focus();
 		await page.keyboard.press("ArrowDown");
 		await expect(page.getByRole("menu")).toBeVisible();
@@ -242,20 +275,70 @@ for (const host of ["home", "focus"] as const) {
 	});
 }
 
+for (const host of ["home", "focus"] as const) {
+	test(`${host}：侧边附着区在卡面外缘，进入关联预览和固定展开均保留卡片`, async ({ page }) => {
+		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+		const row = rows.first();
+		await expect(row.locator("[data-task-card-side-attachments]:visible")).toHaveCount(0);
+		await hoverRow(page, row);
+		const rail = row.locator("[data-task-card-side-attachments]");
+		await expect(rail).toHaveCSS("opacity", "1");
+		const surfaceBounds = await row.locator(".kb-board-card-surface").boundingBox();
+		const railBounds = await rail.boundingBox();
+		expect(railBounds!.x).toBeGreaterThanOrEqual(surfaceBounds!.x + surfaceBounds!.width);
+		await expectFloatingCardWithinViewport(scrollContainer, row);
+		await rail.getByRole("button", { name: "查看关联任务" }).hover();
+		await expect(page.getByRole("dialog", { name: "关联任务预览" })).toBeVisible();
+		await expect(rail).toContainText("125");
+		const attachmentBounds = (await rail.boundingBox())!;
+		const cardBounds = (await row.locator(".kb-board-card-shell").boundingBox())!;
+		expect(attachmentBounds.x + attachmentBounds.width).toBeLessThanOrEqual(cardBounds.x + cardBounds.width + 1);
+		expect(attachmentBounds.y + attachmentBounds.height).toBeLessThanOrEqual(cardBounds.y + cardBounds.height + 1);
+		await page.getByRole("dialog", { name: "关联任务预览" }).hover();
+		await page.waitForTimeout(350);
+		await expect(row).toHaveAttribute(expansionStateAttribute, "expanded_in_place_by_hover");
+		await page.keyboard.press("Escape");
+		await row.getByRole("button", { name: "Keep expanded in list", exact: true }).click();
+		await page.mouse.move(1200, 10);
+		await expect(row).toHaveAttribute(expansionStateAttribute, "kept_expanded_in_list");
+		await expect(rail).toHaveCSS("opacity", "1");
+		expect(pageErrors).toEqual([]);
+	});
+}
+
 test.describe("触屏长按", () => {
 	test.use({ hasTouch: true, viewport: { width: 390, height: 760 } });
 	test("长按展开保持占位、抬手不打开任务，外部触碰收起", async ({ page }) => {
 		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, "focus");
 		const before = await measureList(scrollContainer);
-		const rect = await rows.first().boundingBox();
+		const rect = await rows.first().locator("[data-cross-project-task-switcher-row-title]").boundingBox();
 		const session = await page.context().newCDPSession(page);
 		await session.send("Input.dispatchTouchEvent", {
 			type: "touchStart",
-			touchPoints: [{ x: rect!.x + 35, y: rect!.y + 12 }],
+			touchPoints: [{ x: rect!.x + 20, y: rect!.y + rect!.height / 2 }],
 		});
 		await expect(rows.first()).toHaveAttribute(expansionStateAttribute, "expanded_in_place_by_hover");
 		await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 		await expect(page.getByLabel("动作结果")).toBeEmpty();
+		const prompt = rows.first().getByRole("button", { name: "View original prompt", exact: true });
+		const rail = rows.first().locator("[data-task-card-side-attachments]");
+		await expect(rail).toHaveCSS("opacity", "1");
+		const promptBounds = await prompt.boundingBox();
+		expect(promptBounds!.width).toBeGreaterThanOrEqual(44);
+		expect(promptBounds!.height).toBeGreaterThanOrEqual(44);
+		await session.send("Input.dispatchTouchEvent", {
+			type: "touchStart",
+			touchPoints: [{ x: promptBounds!.x + 22, y: promptBounds!.y + 22 }],
+		});
+		await expect(page.getByRole("menu")).toBeVisible();
+		await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+		await expect(page.getByRole("menu")).toBeVisible();
+		await expect(rows.first()).toHaveAttribute(expansionStateAttribute, "expanded_in_place_by_hover");
+		await page.keyboard.press("Escape");
+		await prompt.tap();
+		await expect(page.getByRole("dialog")).toContainText("原始需求：悬浮任务 0");
+		await page.keyboard.press("Escape");
+		await session.detach();
 		expect(await measureList(scrollContainer)).toEqual(before);
 		await page.getByRole("button", { name: "恢复卡片内容" }).tap();
 		await expect(rows.first()).toHaveAttribute(expansionStateAttribute, "compact_row");

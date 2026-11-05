@@ -461,6 +461,14 @@ export function createIndependentTaskCreationService(deps: IndependentTaskCreati
 				}
 				const taskId = record.reservedTaskId;
 				const board = await loadWorkspaceBoardById(scope.workspaceId);
+				const sourceCard = board.columns
+					.flatMap((column) => column.cards)
+					.find((card) => card.id === record.draft.sourceTaskId);
+				if (!sourceCard || sourceCard.createdAt !== record.sourceTaskIncarnationCreatedAtEpochMs)
+					throw new TRPCError({
+						code: "CONFLICT",
+						message: "原任务身份已变化，填写内容已保留，未创建独立任务。",
+					});
 				let existing = board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId);
 				if (existing && existing.independentTaskCreationProvenance?.creationRequestId !== input.requestId)
 					throw new TRPCError({ code: "CONFLICT", message: "预留任务 ID 已由其他请求使用。" });

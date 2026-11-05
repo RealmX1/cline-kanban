@@ -1,5 +1,17 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
+async function longPressButton(page: Page, button: Locator) {
+	const bounds = await button.boundingBox();
+	const session = await page.context().newCDPSession(page);
+	await session.send("Input.dispatchTouchEvent", {
+		type: "touchStart",
+		touchPoints: [{ x: bounds!.x + bounds!.width / 2, y: bounds!.y + bounds!.height / 2 }],
+	});
+	await expect(page.getByRole("menu")).toBeVisible();
+	await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+	await session.detach();
+}
+
 async function openIsolatedQuickActionCard(
 	page: Page,
 	touch = false,
@@ -91,12 +103,39 @@ test("桌面悬停向下展开、直接完成、评论弹窗及原文复制", as
 
 test.describe("触屏快捷操作", () => {
 	test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
-	for (const width of [375, 390, 768])
-		test(`${width}px 独立入口向下展开，评论入口与复制不误触主操作`, async ({ page }) => {
+	test("滑动、滚动与取消终止待发长按，后续轻点仍执行一次主操作", async ({ page }) => {
+		await openIsolatedQuickActionCard(page, true);
+		const done = page.getByRole("button", { name: "结案任务", exact: true });
+		const session = await page.context().newCDPSession(page);
+		for (const cancellation of ["movement", "scroll", "cancel"]) {
+			const bounds = (await done.boundingBox())!;
+			const point = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+			await session.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+			if (cancellation === "movement")
+				await session.send("Input.dispatchTouchEvent", {
+					type: "touchMove",
+					touchPoints: [{ ...point, x: point.x + 12 }],
+				});
+			if (cancellation === "scroll") await page.evaluate(() => window.dispatchEvent(new Event("scroll")));
+			if (cancellation === "cancel")
+				await session.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+			await page.waitForTimeout(550);
+			await expect(page.getByRole("menu")).toHaveCount(0);
+			if (cancellation !== "cancel")
+				await session.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
+		}
+		await expect(page.getByLabel("直接移动次数")).toHaveText("0");
+		await done.tap();
+		await expect(page.getByLabel("直接移动次数")).toHaveText("1");
+		await session.detach();
+	});
+	for (const width of [360, 390, 768])
+		test(`${width}px 长按向下展开，评论入口与复制不误触主操作`, async ({ page }) => {
 			await page.setViewportSize({ width, height: 844 });
 			await openIsolatedQuickActionCard(page, true);
 			const done = page.getByRole("button", { name: "结案任务", exact: true });
-			await page.getByRole("button", { name: "展开结案附加操作", exact: true }).tap();
+			await expect(page.getByRole("button", { name: /展开.*附加操作/ })).toHaveCount(0);
+			await longPressButton(page, done);
 			await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 			await expect(page.getByLabel("直接移动次数")).toHaveText("0");
 			await page.screenshot({ path: test.info().outputPath("mobile-menu-expanded.png") });
@@ -112,7 +151,7 @@ test.describe("触屏快捷操作", () => {
 			await expect(page.getByLabel("已提交评论")).toHaveText("手机评论");
 			await done.tap();
 			await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-			await page.getByRole("button", { name: "展开查看原始 Prompt附加操作", exact: true }).tap();
+			await longPressButton(page, page.getByRole("button", { name: "View original prompt", exact: true }));
 			await expect(page.getByRole("dialog")).toHaveCount(0);
 			await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 			await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).tap();
@@ -197,7 +236,7 @@ test.describe("PDV 保持最前的触屏快捷菜单", () => {
 		await expect(panel).toHaveCSS("z-index", "70");
 		await panel.getByRole("button", { name: "结案任务", exact: true }).tap();
 		await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-		await panel.getByRole("button", { name: "展开查看原始 Prompt附加操作", exact: true }).tap();
+		await longPressButton(page, panel.getByRole("button", { name: "View original prompt", exact: true }));
 		await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 		await page.screenshot({ path: test.info().outputPath("pdv-pinned-touch-prompt-menu-expanded.png") });
 		await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).tap();

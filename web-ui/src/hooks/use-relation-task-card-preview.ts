@@ -67,10 +67,14 @@ export function useRelationTaskCardPreview(active = true) {
 		// window 捕获先于 Radix 在 document 上的祖先 Dialog 监听；独立模态框及行内编辑仍优先。
 		const handleEscape = (event: KeyboardEvent) => {
 			const foreground = document.querySelector('[data-expanded-foreground-view="active"]');
+			const floatingFormOwningKeyboardEvent =
+				event.target instanceof Element ? event.target.closest("[data-non-modal-floating-form-window]") : null;
 			if (
 				event.key !== "Escape" ||
 				event.defaultPrevented ||
 				isKeyboardEventEmittedDuringImeComposition(event) ||
+				(floatingFormOwningKeyboardEvent !== null &&
+					!floatingFormOwningKeyboardEvent.contains(layoutRef.current)) ||
 				(foreground && !foreground.contains(layoutRef.current)) ||
 				hasOpenModalDialogOutsideRelatedTaskPreview(layoutRef.current) ||
 				document.querySelector('[data-state="open"][role="menu"], [data-state="open"][role="listbox"]')

@@ -50,6 +50,7 @@ export interface UseProjectNavigationResult {
 	navigationCurrentProjectId: string | null;
 	permanentlyDeletingProjectId: string | null;
 	isAddProjectDialogOpen: boolean;
+	addProjectOpeningRequestSequence: number;
 	setIsAddProjectDialogOpen: (open: boolean) => void;
 	pendingNativeGitInitPath: string | null;
 	currentProjectId: string | null;
@@ -103,6 +104,11 @@ export function useProjectNavigation({
 	const [pendingAddedProjectId, setPendingAddedProjectId] = useState<string | null>(null);
 	const [permanentlyDeletingProjectId, setPermanentlyDeletingProjectId] = useState<string | null>(null);
 	const [isAddProjectDialogOpen, setIsAddProjectDialogOpen] = useState(false);
+	const [addProjectOpeningRequestSequence, setAddProjectOpeningRequestSequence] = useState(0);
+	const openAddProjectDialog = useCallback(() => {
+		setAddProjectOpeningRequestSequence((sequence) => sequence + 1);
+		setIsAddProjectDialogOpen(true);
+	}, []);
 	const [pendingGitInitPath, setPendingGitInitPath] = useState<string | null>(null);
 
 	const {
@@ -178,7 +184,7 @@ export function useProjectNavigation({
 
 	const handleAddProject = useCallback(async () => {
 		if (!isLocalhostAccess()) {
-			setIsAddProjectDialogOpen(true);
+			openAddProjectDialog();
 			return;
 		}
 
@@ -196,7 +202,7 @@ export function useProjectNavigation({
 						// Needs git init — open the dialog with the path
 						// pre-filled so the user can confirm initialization.
 						setPendingGitInitPath(picked.path);
-						setIsAddProjectDialogOpen(true);
+						openAddProjectDialog();
 						return;
 					}
 					throw new Error(added.error ?? "Could not add project.");
@@ -210,19 +216,19 @@ export function useProjectNavigation({
 			}
 			if (!picked.ok && isDirectoryPickerUnavailableError(picked.error)) {
 				// Native picker not available — fall back to dialog
-				setIsAddProjectDialogOpen(true);
+				openAddProjectDialog();
 				return;
 			}
 			throw new Error(picked.error ?? "Could not pick project directory.");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			if (isDirectoryPickerUnavailableError(message)) {
-				setIsAddProjectDialogOpen(true);
+				openAddProjectDialog();
 			} else {
 				showAppToast({ intent: "danger", icon: "warning-sign", message, timeout: 7000 });
 			}
 		}
-	}, [currentProjectId, handleAddProjectSuccess]);
+	}, [currentProjectId, handleAddProjectSuccess, openAddProjectDialog]);
 
 	const handleGetPermanentDeletionPreview = useCallback(
 		async (projectId: string): Promise<RuntimeProjectPermanentDeletionPreview | null> => {
@@ -344,6 +350,7 @@ export function useProjectNavigation({
 		navigationCurrentProjectId,
 		permanentlyDeletingProjectId,
 		isAddProjectDialogOpen,
+		addProjectOpeningRequestSequence,
 		setIsAddProjectDialogOpen,
 		pendingNativeGitInitPath: pendingGitInitPath,
 		currentProjectId,

@@ -1,8 +1,9 @@
 import type { ReactNode } from "react";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { TaskCardBody, type TaskCardBodyRenderRole } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { BoardCard } from "@/types";
@@ -70,6 +71,7 @@ beforeEach(() => {
 
 afterEach(() => {
 	act(() => root.unmount());
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 	container.remove();
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -77,6 +79,92 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的渲染角色", () => {
+	it.each<TaskCardBodyRenderRole>(["canonical_card_in_its_stage_list", "task_card_copy_in_related_task_preview"])(
+		"删除确认取消延时 Tooltip，首次 Escape 关闭确认框且不触发卡片导航：%s",
+		async (renderRole) => {
+			vi.useFakeTimers();
+			const taskCardPendingDeletion = createCard();
+			const requestTaskDeletion = vi.fn();
+			const confirmTaskDeletion = vi.fn();
+			const activateTaskCard = vi.fn();
+			function TaskCardDeleteConfirmationHarness() {
+				const [isDeleteTaskDialogOpen, setIsDeleteTaskDialogOpen] = useState(false);
+				return (
+					<>
+						<TaskCardBody
+							card={taskCardPendingDeletion}
+							columnId="review"
+							renderRole={renderRole}
+							onClick={activateTaskCard}
+							onDeleteTask={(taskId) => {
+								requestTaskDeletion(taskId);
+								setIsDeleteTaskDialogOpen(true);
+							}}
+						/>
+						<DeleteTaskDialog
+							task={isDeleteTaskDialogOpen ? taskCardPendingDeletion : null}
+							onCancel={() => setIsDeleteTaskDialogOpen(false)}
+							onConfirm={confirmTaskDeletion}
+						/>
+					</>
+				);
+			}
+			await act(async () => root.render(<TaskCardDeleteConfirmationHarness />));
+			await act(async () => cardShell(container)!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+			const deleteTaskButton = container.querySelector<HTMLButtonElement>('[aria-label="Delete task permanently"]')!;
+			await act(async () => deleteTaskButton.dispatchEvent(new MouseEvent("pointermove", { bubbles: true })));
+			expect(document.querySelector('[role="tooltip"]')).toBeNull();
+			const deleteTaskMouseDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+			await act(async () => {
+				deleteTaskButton.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+				deleteTaskButton.dispatchEvent(deleteTaskMouseDown);
+				deleteTaskButton.click();
+			});
+			expect(deleteTaskMouseDown.defaultPrevented).toBe(true);
+			expect(requestTaskDeletion).toHaveBeenCalledExactlyOnceWith(taskCardPendingDeletion.id);
+			expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+			// 等待悬停延时到期，确保 Tooltip 不会在确认框之上补开并抢走首次 Escape。
+			await act(async () => vi.advanceTimersByTime(500));
+			expect(document.querySelector('[role="tooltip"]')).toBeNull();
+			await act(async () =>
+				document.activeElement!.dispatchEvent(
+					new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+				),
+			);
+			expect(document.querySelector('[role="alertdialog"]')).toBeNull();
+			expect(confirmTaskDeletion).not.toHaveBeenCalled();
+			expect(activateTaskCard).not.toHaveBeenCalled();
+		},
+	);
+
+	it("关联预览的操作按钮在悬停切换时保持 DOM 身份与键盘焦点", () => {
+		act(() =>
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="backlog"
+					renderRole="task_card_copy_in_related_task_preview"
+					onOpenTaskEditor={vi.fn()}
+				/>,
+			),
+		);
+		const relatedPreviewCardShell = cardShell(container)!;
+		const originatingEditTaskButton = container.querySelector<HTMLButtonElement>('[aria-label="Edit task title"]')!;
+		act(() => originatingEditTaskButton.focus());
+		act(() =>
+			relatedPreviewCardShell.dispatchEvent(
+				new MouseEvent("mouseover", { bubbles: true, relatedTarget: document.body }),
+			),
+		);
+		act(() =>
+			relatedPreviewCardShell.dispatchEvent(
+				new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
+			),
+		);
+		expect(container.querySelector('[aria-label="Edit task title"]')).toBe(originatingEditTaskButton);
+		expect(document.activeElement).toBe(originatingEditTaskButton);
+	});
+
 	it.each<TaskCardBodyRenderRole>([
 		"canonical_card_in_its_stage_list",
 		"focused_card_copy_under_sticky_stage_header",

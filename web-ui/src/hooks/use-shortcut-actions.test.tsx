@@ -4,12 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useShortcutActions } from "@/hooks/use-shortcut-actions";
 
+const fetchRuntimeConfigMock = vi.hoisted(() => vi.fn());
 const saveRuntimeConfigMock = vi.hoisted(() => vi.fn());
 const showAppToastMock = vi.hoisted(() => vi.fn());
 const waitForTerminalLikelyPromptMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/runtime/runtime-config-query", () => ({
 	saveRuntimeConfig: saveRuntimeConfigMock,
+	fetchRuntimeConfig: fetchRuntimeConfigMock,
 }));
 
 vi.mock("@/components/app-toaster", () => ({
@@ -73,6 +75,7 @@ describe("useShortcutActions", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		fetchRuntimeConfigMock.mockReset().mockResolvedValue({ shortcuts: [] });
 		saveRuntimeConfigMock.mockReset();
 		showAppToastMock.mockReset();
 		waitForTerminalLikelyPromptMock.mockReset();
@@ -131,6 +134,50 @@ describe("useShortcutActions", () => {
 			appendNewline: true,
 		});
 		expect(showAppToastMock).not.toHaveBeenCalled();
+	});
+
+	it("跨项目导航后仍保存到原项目，并保留打开浮窗后新增的快捷方式", async () => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const prepareTerminalForShortcut = vi.fn(async () => ({ ok: true }));
+		const sendTaskSessionInput = vi.fn(async () => ({ ok: true }));
+		const onSnapshot = (snapshot: HookSnapshot) => {
+			latestSnapshot = snapshot;
+		};
+		await act(async () =>
+			root.render(
+				<HookHarness
+					currentProjectId="project-a"
+					shortcuts={[]}
+					prepareTerminalForShortcut={prepareTerminalForShortcut}
+					sendTaskSessionInput={sendTaskSessionInput}
+					onSnapshot={onSnapshot}
+				/>,
+			),
+		);
+		const saveFromOriginalWindow = requireSnapshot(latestSnapshot).handleCreateShortcut;
+		await act(async () =>
+			root.render(
+				<HookHarness
+					currentProjectId="project-b"
+					shortcuts={[]}
+					prepareTerminalForShortcut={prepareTerminalForShortcut}
+					sendTaskSessionInput={sendTaskSessionInput}
+					onSnapshot={onSnapshot}
+				/>,
+			),
+		);
+		fetchRuntimeConfigMock.mockResolvedValue({ shortcuts: [{ label: "Run", command: "npm run build" }] });
+		await act(async () => {
+			await saveFromOriginalWindow({ label: "Run", command: "npm run dev" });
+		});
+		expect(fetchRuntimeConfigMock).toHaveBeenCalledWith("project-a");
+		expect(saveRuntimeConfigMock).toHaveBeenCalledWith("project-a", {
+			shortcuts: [
+				{ label: "Run", command: "npm run build" },
+				{ label: "Run 2", command: "npm run dev", icon: undefined },
+			],
+			selectedShortcutLabel: "Run 2",
+		});
 	});
 
 	it("waits for a prompt without interrupting when it just opened the terminal", async () => {

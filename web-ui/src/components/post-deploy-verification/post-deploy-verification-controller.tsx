@@ -1,6 +1,5 @@
 import type { TaskClosureRequest } from "@runtime-task-closure-contract";
 import { type ReactElement, useCallback, useMemo, useRef, useState } from "react";
-
 import { showAppToast } from "@/components/app-toaster";
 import { resolvePostDeployVerificationStuckDoneRecovery } from "@/components/post-deploy-verification/post-deploy-verification-completion-recovery";
 import { buildPostDeployVerificationDoneEntryClosureDialogTaskEntriesFromReadModelAndBoard } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-closure-dialog-task-entries-from-read-model-and-board";
@@ -11,11 +10,12 @@ import {
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
 import type { PostDeployVerificationEntryNavigationRequest } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import { PostDeployVerificationPanel } from "@/components/post-deploy-verification/post-deploy-verification-panel";
-import { PostDeployVerificationReviewBeforeMoveIntoDoneDialog } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
+import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import type { RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
 import type { PostDeployVerificationMoveIntoDoneCompletionResult } from "@/hooks/use-board-interactions";
+import { useIsNonModalFloatingFormWindowPresent } from "@/hooks/use-is-non-modal-floating-form-window-present";
 import type { UsePostDeployVerificationResult } from "@/hooks/use-post-deploy-verification";
 import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
 import type {
@@ -93,6 +93,7 @@ export function PostDeployVerificationController({
 	entryNavigationRequest = null,
 	onEntryNavigationFinished,
 }: PostDeployVerificationControllerProps): ReactElement {
+	const hasFloatingFormWindows = useIsNonModalFloatingFormWindowPresent();
 	const { refresh, requestComplete, confirmComplete } = verification;
 	const taskCommentBeforeMoveIntoDone = useTaskCommentBeforeMoveIntoDone();
 	const {
@@ -113,6 +114,7 @@ export function PostDeployVerificationController({
 		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	} | null>(null);
 	const commentRequiresDoneEntryReviewRef = useRef(false);
+	const panelReviewCloseOutcomeRef = useRef<"completed" | "dismissed">("dismissed");
 	const [completingTaskId, setCompletingTaskId] = useState<string | null>(null);
 	const [singleTaskCompletionAwaitingClosureDialog, setSingleTaskCompletionAwaitingClosureDialog] =
 		useState<PostDeployVerificationSingleTaskCompletionAwaitingClosureDialog | null>(null);
@@ -564,7 +566,9 @@ export function PostDeployVerificationController({
 	return (
 		<>
 			{taskAwaitingDoneEntryReview && verification.activeGroup ? (
-				<PostDeployVerificationReviewBeforeMoveIntoDoneDialog
+				<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace
+					openingRequestIdentity={taskAwaitingDoneEntryReview}
+					postDeployVerificationCompletionDeploymentId={verification.activeGroup.deploymentId}
 					workspaceId={verification.activeGroup.workspaceId}
 					taskId={taskAwaitingDoneEntryReview.taskId}
 					board={board}
@@ -572,8 +576,12 @@ export function PostDeployVerificationController({
 					realTaskCardRenderingInputs={realTaskCardRenderingInputsForPostDeployVerificationPanelEntries}
 					isSubmittingClosure={isSubmittingClosure}
 					runtimeRejectionRevision={taskAwaitingDoneEntryReview.runtimeRejectionRevision}
+					taskCommentToAppendWhenMovingIntoDone={taskAwaitingDoneEntryReview.taskCommentToAppendWhenMovingIntoDone}
 					onSelectTask={() => onSelectTask(taskAwaitingDoneEntryReview.taskId)}
 					onNavigateToBoard={onNavigateToBoard}
+					onBeforeHostedClose={(outcome) => {
+						panelReviewCloseOutcomeRef.current = outcome;
+					}}
 					onRequestTaskCommentBeforeMovingIntoDone={() => {
 						const taskId = taskAwaitingDoneEntryReview.taskId;
 						setTaskAwaitingDoneEntryReview(null);
@@ -585,8 +593,18 @@ export function PostDeployVerificationController({
 							});
 					}}
 					onCancel={() => {
-						if (taskAwaitingDoneEntryReview.taskCommentToAppendWhenMovingIntoDone)
-							returnTaskCommentToEditing(taskAwaitingDoneEntryReview.taskId);
+						const pending = taskAwaitingDoneEntryReview;
+						const outcome = panelReviewCloseOutcomeRef.current;
+						panelReviewCloseOutcomeRef.current = "dismissed";
+						if (pending.taskCommentToAppendWhenMovingIntoDone) {
+							if (outcome === "completed")
+								completeTaskComment(
+									pending.taskId,
+									pending.taskCommentToAppendWhenMovingIntoDone.taskCommentEntryId,
+								);
+							else returnTaskCommentToEditing(pending.taskId);
+						}
+						if (outcome === "completed") commentRequiresDoneEntryReviewRef.current = false;
 						setTaskAwaitingDoneEntryReview(null);
 					}}
 					onConfirmClosureRequestsBySelectedTaskId={(requests) => {
@@ -618,7 +636,7 @@ export function PostDeployVerificationController({
 									);
 									showAppToast({
 										intent: "danger",
-										message: result.moveIntoDoneFailureMessage ?? "结案 失败，请重试",
+										message: result.moveIntoDoneFailureMessage ?? "结案失败，请重试",
 									});
 								}
 								refresh();
@@ -646,6 +664,7 @@ export function PostDeployVerificationController({
 				stayInFront={verification.stayInFront}
 				collapsed={verification.collapsed}
 				loweredForDialog={
+					hasFloatingFormWindows ||
 					isClosureDialogOpen ||
 					taskCommentBeforeMoveIntoDone.request !== null ||
 					isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel ||
@@ -667,13 +686,26 @@ export function PostDeployVerificationController({
 				onCreateFollowUpTaskFromChecklistItems={onCreateFollowUpTaskFromChecklistItems}
 			/>
 			<TaskCommentBeforeMoveIntoDoneDialog
+				postDeployVerificationCompletionDeploymentId={deploymentIdForTaskCommentCompletionRef.current ?? undefined}
 				controller={taskCommentBeforeMoveIntoDone}
 				onSubmit={submitTaskCommentBeforeCompletion}
 			/>
 			{singleTaskCompletionAwaitingClosureDialog ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog
 					key={`single:${singleTaskCompletionAwaitingClosureDialog.taskId}:${singleTaskCompletionAwaitingClosureDialog.token}`}
+					openingRequestIdentity={singleTaskCompletionAwaitingClosureDialog}
 					dialogTitle="完成核对并结案"
+					hostedCompletionContext={
+						verification.activeGroup
+							? {
+									workspaceId: verification.activeGroup.workspaceId,
+									deploymentId: singleTaskCompletionAwaitingClosureDialog.deploymentId,
+									board,
+									taskCommentToAppendWhenMovingIntoDone:
+										singleTaskCompletionAwaitingClosureDialog.taskCommentToAppendWhenMovingIntoDone,
+								}
+							: undefined
+					}
 					taskEntries={closureDialogTaskEntries}
 					taskEntrySelectionMode="single_task_entry_always_included"
 					isSubmittingClosure={isSubmittingClosure}
@@ -684,7 +716,17 @@ export function PostDeployVerificationController({
 			{batchClosureAwaitingClosureDialog ? (
 				<PostDeployVerificationUncheckedItemsClosureReasonDialog
 					key={`batch:${batchClosureAwaitingClosureDialog.deploymentId}:${batchClosureAwaitingClosureDialog.candidateTaskIds.join(",")}`}
+					openingRequestIdentity={batchClosureAwaitingClosureDialog}
 					dialogTitle="批量带原因结案"
+					hostedCompletionContext={
+						verification.activeGroup
+							? {
+									workspaceId: verification.activeGroup.workspaceId,
+									deploymentId: batchClosureAwaitingClosureDialog.deploymentId,
+									board,
+								}
+							: undefined
+					}
 					taskEntries={closureDialogTaskEntries}
 					taskEntrySelectionMode="multiple_task_entries_selectable_for_batch_closure"
 					isSubmittingClosure={isSubmittingClosure}

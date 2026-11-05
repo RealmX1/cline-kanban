@@ -15,6 +15,9 @@ import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-mo
 // 以及「浏览器端自动化撞上门禁只提示一次」的去重。PDV 面板自己的完成流另有一份对话框（在 controller 里）。
 
 export interface PostDeployVerificationDoneEntryClosureDialogRequestForBoardMoveIntoDone {
+	workspaceIdAtOpening?: string | null;
+	boardSnapshotAtOpening?: BoardData;
+	openingRequestIdentity?: symbol;
 	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
 	taskId: string;
 	// 拖拽进 Done 的落点；按钮入口缺省（列顶）。
@@ -42,9 +45,11 @@ export interface UsePostDeployVerificationDoneEntryClosureDialogForBoardMovesInt
 }
 
 export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesIntoDone({
+	workspaceId,
 	board,
 	postDeployVerificationActiveDeploymentGroup,
 }: {
+	workspaceId?: string | null;
 	board: BoardData;
 	postDeployVerificationActiveDeploymentGroup: RuntimePostDeployVerificationDeploymentGroup | null;
 }): UsePostDeployVerificationDoneEntryClosureDialogForBoardMovesIntoDoneResult {
@@ -56,6 +61,12 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 	// 提示里带上任务标题：提示函数身份要稳定（自动流转 effect 依赖它），标题从最新 board 现取。
 	const latestBoardForNoticeTaskTitleRef = useRef(board);
 	latestBoardForNoticeTaskTitleRef.current = board;
+	const workspaceIdForOpening = workspaceId ?? postDeployVerificationActiveDeploymentGroup?.workspaceId ?? null;
+	const workspaceOpeningContextRef = useRef({ workspaceId: workspaceIdForOpening, boardSnapshot: board });
+	if (workspaceOpeningContextRef.current.workspaceId !== workspaceIdForOpening)
+		workspaceOpeningContextRef.current = { workspaceId: workspaceIdForOpening, boardSnapshot: board };
+	else workspaceOpeningContextRef.current.boardSnapshot = board;
+	const workspaceOpeningContext = workspaceOpeningContextRef.current;
 
 	const closureDialogForBoardMoveIntoDone = useMemo(() => {
 		if (!dialogRequest) {
@@ -63,8 +74,11 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 		}
 		const taskEntries = buildPostDeployVerificationDoneEntryClosureDialogTaskEntriesFromReadModelAndBoard({
 			taskIds: [dialogRequest.taskId],
-			deploymentGroupContainingTasks: postDeployVerificationActiveDeploymentGroup,
-			board,
+			deploymentGroupContainingTasks:
+				postDeployVerificationActiveDeploymentGroup?.workspaceId === dialogRequest.workspaceIdAtOpening
+					? postDeployVerificationActiveDeploymentGroup
+					: null,
+			board: dialogRequest.boardSnapshotAtOpening ?? board,
 			taskIdsRejectedByRuntimeForMissingClosureReasons:
 				dialogRequest.runtimeRejectedMoveIntoDoneForMissingClosureReasons
 					? new Set([dialogRequest.taskId])
@@ -72,6 +86,18 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 		});
 		return { dialogRequest, taskEntries };
 	}, [board, dialogRequest, postDeployVerificationActiveDeploymentGroup]);
+	const openClosureDialogForBoardMoveIntoDone = useCallback(
+		(request: PostDeployVerificationDoneEntryClosureDialogRequestForBoardMoveIntoDone) => {
+			// 异步入口继续使用触发该动作时的项目与看板，不从完成响应时的背景导航重新取归属。
+			setDialogRequest({
+				...request,
+				workspaceIdAtOpening: request.workspaceIdAtOpening ?? workspaceOpeningContext.workspaceId,
+				boardSnapshotAtOpening: request.boardSnapshotAtOpening ?? workspaceOpeningContext.boardSnapshot,
+				openingRequestIdentity: Symbol("verification-review-opening-request"),
+			});
+		},
+		[workspaceOpeningContext],
+	);
 
 	const markClosureDialogTaskRejectedByRuntimeForMissingClosureReasons = useCallback((taskId: string) => {
 		setDialogRequest((current) =>
@@ -106,7 +132,7 @@ export function usePostDeployVerificationDoneEntryClosureDialogForBoardMovesInto
 
 	return {
 		closureDialogForBoardMoveIntoDone,
-		openClosureDialogForBoardMoveIntoDone: setDialogRequest,
+		openClosureDialogForBoardMoveIntoDone,
 		markClosureDialogTaskRejectedByRuntimeForMissingClosureReasons,
 		closeClosureDialogForBoardMoveIntoDone,
 		isClosureForBoardMoveIntoDoneSubmitting,
