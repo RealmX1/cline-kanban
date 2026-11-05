@@ -393,6 +393,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 					buildTaskCardActionHandlerBundleForOtherProjectTaskCard
 				}
 				rowContext={{
+					section,
 					projectName: showsProjectName ? entryInProject.projectName : null,
 					promptCacheWarmthEstimate: findPromptCacheWarmthEstimateShownOnRow(entryKey, section),
 					nowMs,

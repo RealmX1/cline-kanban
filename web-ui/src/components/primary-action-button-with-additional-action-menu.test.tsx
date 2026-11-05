@@ -13,6 +13,91 @@ afterAll(() => {
 	reactActEnvironment.IS_REACT_ACT_ENVIRONMENT = previousReactActEnvironment;
 });
 
+function touchPointer(type: string, clientX = 20, clientY = 20) {
+	const event = new Event(type, { bubbles: true, cancelable: true });
+	Object.defineProperties(event, {
+		pointerType: { value: "touch" },
+		pointerId: { value: 1 },
+		clientX: { value: clientX },
+		clientY: { value: clientY },
+	});
+	return event;
+}
+
+it.each(["release", "movement", "scroll", "cancel", "unmount", "complete", "leave-within-tolerance"] as const)(
+	"触屏长按：%s 清理与本次释放点击隔离",
+	async (ending) => {
+		vi.useFakeTimers();
+		const primary = vi.fn();
+		const onOpenChange = vi.fn();
+		const host = document.createElement("div");
+		document.body.append(host);
+		const root = createRoot(host);
+		let unmounted = false;
+		function Harness() {
+			const [open, setOpen] = useState(false);
+			return (
+				<PrimaryActionButtonWithAdditionalActionMenu
+					open={open}
+					onOpenChange={(value) => {
+						onOpenChange(value);
+						setOpen(value);
+					}}
+					icon={null}
+					primaryLabel="结案"
+					primaryAccessibleLabel="直接结案"
+					onPrimaryAction={primary}
+					additionalAction={{ label: "评论后结案", onSelect: () => {} }}
+					touchAdditionalActionTrigger="long_press_primary_button"
+				/>
+			);
+		}
+		try {
+			await act(async () => root.render(<Harness />));
+			expect(host.querySelectorAll("button")).toHaveLength(1);
+			const trigger = host.querySelector("button")!;
+			await act(async () => trigger.dispatchEvent(touchPointer("pointerdown")));
+			await act(async () => vi.advanceTimersByTime(499));
+			expect(onOpenChange).not.toHaveBeenCalled();
+			await act(async () => {
+				if (ending === "release") trigger.dispatchEvent(touchPointer("pointerup"));
+				if (ending === "movement") trigger.dispatchEvent(touchPointer("pointermove", 29));
+				if (ending === "scroll") window.dispatchEvent(new Event("scroll"));
+				if (ending === "cancel") trigger.dispatchEvent(touchPointer("pointercancel"));
+				if (ending === "leave-within-tolerance") {
+					trigger.dispatchEvent(touchPointer("pointermove", 26));
+					trigger.dispatchEvent(touchPointer("pointerout", 26));
+				}
+				if (ending === "unmount") {
+					root.unmount();
+					unmounted = true;
+				}
+				vi.advanceTimersByTime(1);
+			});
+			if (ending !== "complete" && ending !== "leave-within-tolerance") {
+				expect(onOpenChange).not.toHaveBeenCalled();
+				return;
+			}
+			expect(trigger.getAttribute("aria-expanded")).toBe("true");
+			await act(async () => {
+				trigger.dispatchEvent(touchPointer("pointerup"));
+				trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+			});
+			expect(primary).not.toHaveBeenCalled();
+			await act(async () => {
+				trigger.dispatchEvent(touchPointer("pointerdown"));
+				trigger.dispatchEvent(touchPointer("pointerup"));
+				trigger.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+			});
+			expect(primary).toHaveBeenCalledOnce();
+		} finally {
+			if (!unmounted) await act(async () => root.unmount());
+			host.remove();
+			vi.useRealTimers();
+		}
+	},
+);
+
 it("触屏主按钮直接执行，独立入口仅展开附加动作", async () => {
 	const primary = vi.fn();
 	const extra = vi.fn();
