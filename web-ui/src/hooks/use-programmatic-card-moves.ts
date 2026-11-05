@@ -19,7 +19,6 @@ type RequestMoveTaskToTrash = (
 
 export interface ProgrammaticCardMoveBehavior {
 	skipKickoff?: boolean;
-	skipTrashWorkflow?: boolean;
 	skipWorkingChangeWarning?: boolean;
 	insertAtTop?: boolean;
 	// dd2db Y-EVENT-8：动画落地时 handleDragEnd 才真正改 board，发起方随在途移动一路带到那里登记。

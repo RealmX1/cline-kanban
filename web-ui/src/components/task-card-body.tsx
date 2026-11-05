@@ -1490,9 +1490,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 							content={
 								isHovered ? (
 									<>
-										Restore session
+										重新打开已结案任务
 										<br />
-										in new worktree
+										复用原工作树；已清理时从归档恢复
 									</>
 								) : undefined
 							}

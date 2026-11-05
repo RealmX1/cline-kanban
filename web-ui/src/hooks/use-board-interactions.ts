@@ -19,7 +19,6 @@ import { notifyError, showAppToast } from "@/components/app-toaster";
 import {
 	describePostDeployVerificationDoneEntryGateRejectionForHumans,
 	doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask,
-	evaluatePostDeployVerificationDoneEntryGatePrecheckForTask,
 	isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate,
 	isWebUiBoardMutationInitiatorClientAutomation,
 	resolvePostDeployVerificationDoneEntryGateRejectionHandlingForMoveIntoDone,
@@ -648,16 +647,13 @@ export function useBoardInteractions({
 				const taskCard = findCardSelection(nextBoard, taskId)?.card;
 				const taskCardUpdatedAtMs = taskCard?.updatedAt;
 				const facets = resolveSessionFacets(summary);
-				const previousFacets = previous ? resolveSessionFacets(previous) : undefined;
-				if (taskCard?.taskShelvingState?.isShelved) continue;
+				// 会话中断只改变会话状态，不能代替显式结案；保留原列和原工作树以便续跑。
+				if (taskCard?.taskShelvingState?.isShelved || facets.liveness === "interrupted") continue;
 				if (
 					taskCard?.taskShelvingState &&
 					Math.max(
 						resolveLastEffectiveAgentConversationActivityObservation(summary)?.observedAtMs ?? 0,
 						resolveLastAgentConversationUserHandoffObservation(summary)?.observedAtMs ?? 0,
-						previousFacets && previousFacets.liveness !== "interrupted" && facets.liveness === "interrupted"
-							? summary.updatedAt
-							: 0,
 					) <= taskCard.taskShelvingState.lastChangedAt
 				)
 					continue;
@@ -665,7 +661,7 @@ export function useBoardInteractions({
 				// （resolveSessionFacets），绕开 projectLegacyState 对 live↔exited 的有损压扁。各判据
 				// 严格等价旧 legacy state：isAwaitingUserReviewTurn ⟺ awaiting_review（含 user+exited
 				// 折叠，故进程已退却仍等人审的会话照旧自动落位 review，不偷渡 distinction ②）、
-				// turnOwner==="agent" ⟺ running、liveness==="interrupted" ⟺ interrupted。
+				// turnOwner==="agent" ⟺ running；中断会话已在上方保留原列。
 				if (columnId === "backlog" && summary.startedAt != null) {
 					const moved = moveTaskToColumn(nextBoard, taskId, "in_progress", { insertAtTop: true });
 					if (moved.moved) {
@@ -728,56 +724,6 @@ export function useBoardInteractions({
 						recordSessionFacetDrivenColumnAutoflowInitiator(taskId);
 						nextBoard = moved.board;
 					}
-					continue;
-				}
-				if (
-					facets.liveness === "interrupted" &&
-					previousFacets?.liveness !== "interrupted" &&
-					columnId &&
-					columnId !== "trash" &&
-					columnId !== "validation"
-				) {
-					// 受 Post-Deploy Verification 门禁的卡（全勾的也算）：会话中断不自动进 Done，与 validation 列排除同理。
-					// 这条自动流转走浏览器本地移列 + 整板保存，不经 taskCardAction 的门禁，结不了案；服务端的整板保存兜底会把
-					// 未结案的受门禁卡改回原列，所以这里不移，免得卡片进了 Done 又弹回来。只在中断边沿判一次（上面的
-					// previousFacets 条件），不记入重试，因此不会每 tick 重试刷屏。
-					if (
-						evaluatePostDeployVerificationDoneEntryGatePrecheckForTask(
-							latestBoardInteractionStateRef.current
-								.postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
-							taskId,
-						).postDeployVerificationDoneEntryGatePrecheckOutcome !==
-						"task_not_subject_to_post_deploy_verification_done_entry_gate"
-					) {
-						showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(taskId);
-						continue;
-					}
-					const nextTaskId = getNextDetailTaskIdAfterTrashMove(nextBoard, taskId);
-					const programmaticMoveAttempt = tryProgrammaticCardMove(taskId, columnId, "trash", {
-						skipTrashWorkflow: true,
-						boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
-					});
-					if (programmaticMoveAttempt === "started" || programmaticMoveAttempt === "blocked") {
-						if (programmaticMoveAttempt === "blocked") {
-							deferredRetryTaskIds.add(taskId);
-						}
-						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
-						);
-						continue;
-					}
-					const moved = moveTaskToColumn(nextBoard, taskId, "trash", { insertAtTop: true });
-					if (moved.moved) {
-						recordWebUiBoardMutationInitiatorForTaskCardAspect({
-							taskId: taskId,
-							boardMutationAspectOfTaskCard: "task_card_column_placement",
-							boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
-						});
-						setSelectedTaskId((currentSelectedTaskId) =>
-							currentSelectedTaskId === taskId ? nextTaskId : currentSelectedTaskId,
-						);
-						nextBoard = moved.board;
-					}
 				}
 			}
 			const nextPreviousSessions = { ...mainSessionsByTaskCardId };
@@ -793,15 +739,7 @@ export function useBoardInteractions({
 			previousAutoFlowBoardRef.current = nextBoard;
 			return nextBoard;
 		});
-	}, [
-		currentProjectId,
-		programmaticCardMoveCycle,
-		sessions,
-		setBoard,
-		setSelectedTaskId,
-		showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard,
-		tryProgrammaticCardMove,
-	]);
+	}, [currentProjectId, programmaticCardMoveCycle, sessions, setBoard, setSelectedTaskId, tryProgrammaticCardMove]);
 
 	// 结案 走 taskCardAction.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree：服务端移列、停 agent 会话与
 	// 详情 shell 终端、删 worktree。浏览器只叠 overlay、把焦点挪到下一张卡。失败时抛错，让可 await 的调用方（PDV 完成）
@@ -989,8 +927,8 @@ export function useBoardInteractions({
 	// 拖放落地（含程序化移动的动画落地）。落点按 taskId 解出（见 resolveTaskCardDropFromDragResultByTaskId）。
 	//   - 跨列且由用户手势 / PDV / auto-review 发起：按 core 的移列分类映射到对应 taskCardAction 命令，浏览器只叠
 	//     overlay，不改会被保存的 board；
-	//   - 浏览器端列自动流转（会话 facet 驱动、会话中断进 Done）与列内重排：仍在浏览器改 board、整板保存——
-	//     自动流转不搬服务端（计划「明确不做」），中断进 Done 刻意不停会话、不删 worktree（保留供恢复）。
+	//   - 浏览器端列自动流转（会话 facet 驱动）与列内重排：仍在浏览器改 board、整板保存。
+	//     会话中断保留原列，不发起结案或清理。
 	const handleSetTaskShelvingState = useCallback(
 		(taskId: string, isShelved: boolean) => {
 			if (!currentProjectId) return;
@@ -1073,9 +1011,6 @@ export function useBoardInteractions({
 			// 不论入口带没带发起方，都留在浏览器（发起方照实登记，没带就是 null）。
 			const isBrowserColumnAutoflowMove =
 				boardMutationInitiatorForThisDrop === "web_ui_client_automation_session_facet_driven_column_autoflow" ||
-				boardMutationInitiatorForThisDrop ===
-					"web_ui_client_automation_interrupted_session_autoflow_into_done_column" ||
-				programmaticMoveBehavior?.skipTrashWorkflow === true ||
 				columnTransitionClassification === "board_column_transition_handing_agent_turn_to_user" ||
 				columnTransitionClassification === "board_column_transition_not_allowed_as_user_gesture";
 			if (isBrowserColumnAutoflowMove) {
