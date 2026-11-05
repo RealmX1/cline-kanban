@@ -339,6 +339,7 @@ function createTaskImage(id: string, data: string, overrides: Partial<TaskImage>
 
 interface HookSnapshot {
 	board: BoardData;
+	selectedTaskId: string | null;
 	// 与 App 同算法：会被保存的 board 叠上在途卡片命令的 overlay（服务端命令的结果在广播回灌前只在这里可见）。
 	displayedBoard: BoardData;
 	isInlineTaskCreateOpen: boolean;
@@ -442,7 +443,7 @@ function HookHarness({
 	const [board, setBoard] = useState<BoardData>(initialBoard);
 	const pendingTaskCardCommandBoardOverlayEntries = usePendingTaskCardCommandBoardOverlayEntries(currentProjectId);
 	const displayedBoard = applyPendingTaskCardCommandBoardOverlay(board, pendingTaskCardCommandBoardOverlayEntries);
-	const [, setSelectedTaskId] = useState<string | null>(null);
+	const [selectedTaskId] = useState<string | null>("focused-task");
 	const editor = useTaskEditor({
 		board,
 		setBoard,
@@ -456,13 +457,13 @@ function HookHarness({
 		newTaskStartInPlanModeByDefault,
 		newTaskAgentPermissionModeByDefault,
 		isNewTaskStartInPlanModeDefaultLoaded,
-		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 	});
 
 	useEffect(() => {
 		onSnapshot({
 			board,
+			selectedTaskId,
 			displayedBoard,
 			isInlineTaskCreateOpen: editor.isInlineTaskCreateOpen,
 			newTaskPrompt: editor.newTaskPrompt,
@@ -526,6 +527,7 @@ function HookHarness({
 		});
 	}, [
 		board,
+		selectedTaskId,
 		displayedBoard,
 		editor.handleOpenEditTaskCardInOtherProject,
 		editor.handleOpenCreateTaskInBoardScope,
@@ -1116,6 +1118,28 @@ describe("useTaskEditor", () => {
 		});
 
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards[0]?.startInPlanMode).toBe(false);
+	});
+
+	it.each(["save", "close"])("打开并%s Backlog 编辑器始终保留原 Focus 任务", async (action) => {
+		let latestSnapshot: HookSnapshot | null = null;
+		const task = createTask("backlog-task", "待编辑任务", 1);
+		await act(async () =>
+			root.render(
+				<HookHarness
+					initialBoard={createBoard([task])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			),
+		);
+		await act(async () => requireSnapshot(latestSnapshot).handleOpenEditTask(task));
+		expect(requireSnapshot(latestSnapshot).selectedTaskId).toBe("focused-task");
+		await act(async () => {
+			if (action === "save") requireSnapshot(latestSnapshot).handleSaveEditedTask();
+			else requireSnapshot(latestSnapshot).handleCancelEditTask();
+		});
+		expect(requireSnapshot(latestSnapshot).selectedTaskId).toBe("focused-task");
 	});
 
 	it("returns the edited task id when saving a task", async () => {

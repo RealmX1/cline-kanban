@@ -68,7 +68,6 @@ import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallb
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
 import { useAllProjectsFocusViewAdjacentTaskKeyboardNavigation } from "@/hooks/use-all-projects-focus-view-adjacent-task-keyboard-navigation";
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
-import { useBacklogTaskEditorOpeningInAnyProject } from "@/hooks/use-backlog-task-editor-opening-in-any-project";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
 import { useCodexConfigurationSyncNotice } from "@/hooks/use-codex-configuration-sync-notice";
@@ -516,17 +515,20 @@ export default function App(): ReactElement {
 		[handleSelectProject, setSelectedBoardOrSingleProjectScope],
 	);
 	// 后绑定：编辑对话框的打开函数在下方 useBoardInteractions 之后才有。
-	const openBacklogTaskEditorForCrossProjectTaskOpenRef = useRef<(card: BoardCard) => void>(() => {});
+	const openBacklogTaskEditorForCrossProjectTaskOpenRef = useRef<(workspaceId: string, card: BoardCard) => void>(
+		() => {},
+	);
 	const isCurrentProjectBoardSettled =
 		!isInitialRuntimeLoad && !isProjectSwitching && !isAwaitingWorkspaceSnapshot && !isWorkspaceMetadataPending;
 	const {
 		pendingCrossProjectTaskOpen,
 		handleOpenTaskInProject,
+		handleOpenBacklogTaskEditorInProject,
 		handleNavigateToProjectBoard,
 		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
 		dismissPendingCrossProjectTaskOpen,
 	} = useCrossProjectTaskOpenInProject({
-		board,
+		board: displayedBoard,
 		currentProjectId,
 		projectIdOwningHydratedBoard,
 		selectedTaskId,
@@ -534,7 +536,9 @@ export default function App(): ReactElement {
 		isCurrentProjectBoardSettled,
 		setSelectedTaskId,
 		handleSelectProject,
-		openBacklogTaskEditor: (card) => openBacklogTaskEditorForCrossProjectTaskOpenRef.current(card),
+		navigationCurrentProjectId,
+		openBacklogTaskEditor: (workspaceId, card) =>
+			openBacklogTaskEditorForCrossProjectTaskOpenRef.current(workspaceId, card),
 	});
 	const selectedCardTaskId = selectedCard?.card.id ?? null;
 	useRecordTaskOpenedByUserOnRuntime({
@@ -819,7 +823,6 @@ export default function App(): ReactElement {
 		isNewTaskStartInPlanModeDefaultLoaded: runtimeProjectConfig !== null,
 		// 全局那个旧开关如今只决定「新任务的默认权限档」，不再直接作用于会话启动。
 		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
-		setSelectedTaskId,
 		queueTaskStartAfterEdit,
 		onTaskCardsCreatedInOtherProject: handleTaskCardsCreatedInOtherProject,
 		openTaskInOtherProjectAfterStart: handleOpenTaskInProject,
@@ -894,11 +897,7 @@ export default function App(): ReactElement {
 		postDeployVerificationFollowUpTaskCreationDraftSeed,
 	]);
 
-	const handleOpenEditTaskKeepingDetailSelection = useCallback(
-		(task: BoardCard) => handleOpenEditTask(task, { preserveDetailSelection: true }),
-		[handleOpenEditTask],
-	);
-	openBacklogTaskEditorForCrossProjectTaskOpenRef.current = handleOpenEditTaskKeepingDetailSelection;
+	openBacklogTaskEditorForCrossProjectTaskOpenRef.current = handleOpenEditTaskCardInOtherProject;
 
 	const {
 		runningGitAction,
@@ -1308,7 +1307,7 @@ export default function App(): ReactElement {
 		onDeleteTask: handleOpenDeleteTask,
 		onCancelAutomaticTaskAction: handleCancelAutomaticTaskAction,
 		onSaveTitle: handleSaveTaskTitle,
-		onEditTask: handleOpenEditTaskKeepingDetailSelection,
+		onEditTask: handleOpenEditTask,
 		onRequestPinToTaskPinboard: handleRequestPinTaskToTaskPinboard,
 		onUnpinFromTaskPinboard: handleUnpinTaskFromTaskPinboard,
 		onSetTaskShelvingState: handleSetTaskShelvingState,
@@ -1533,14 +1532,6 @@ export default function App(): ReactElement {
 	});
 	const selectedTaskChatMessages = selectTaskChatMessagesForTask(selectedCard?.card.id, taskChatMessagesByTaskId);
 
-	// All projects 面板里点 backlog 行：原地打开任意项目那张卡的编辑对话框（不切项目）。
-	const handleOpenBacklogTaskEditorInProject = useBacklogTaskEditorOpeningInAnyProject({
-		currentProjectId: projectRuntimeWorkspaceId,
-		currentProjectDisplayedBoard: displayedBoard,
-		openTaskEditorForCurrentProjectTaskCardKeepingDetailSelection: handleOpenEditTaskKeepingDetailSelection,
-		openTaskEditorForTaskCardInOtherProject: handleOpenEditTaskCardInOtherProject,
-		openTaskInProject: handleOpenTaskInProject,
-	});
 	// 动作控制器跨首页、Focus View 与单项目看板存活，导航不会丢掉核对流程。
 	const navigateToProjectBoardForVerification = useCallback(
 		async (workspaceId: string) => {
@@ -2196,7 +2187,7 @@ export default function App(): ReactElement {
 										onStartTask={handleStartTaskFromBoard}
 										onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
 										onClearTrash={handleOpenClearTrash}
-										onEditTask={handleOpenEditTaskKeepingDetailSelection}
+										onEditTask={handleOpenEditTask}
 										onSaveTaskTitle={handleSaveTaskTitle}
 										onAgentCommitTask={handleAgentCommitTask}
 										onAgentOpenPrTask={handleAgentOpenPrTask}
