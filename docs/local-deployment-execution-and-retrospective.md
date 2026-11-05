@@ -26,9 +26,13 @@
 
 每个阶段的 `command` 都是 JSON argv 数组，不通过 shell 解释。发布、重启、登记必须声明 `effectVerificationCommand`。恢复所需依赖、认证或环境证据可通过 `recoveryEvidenceFilePaths` 声明；只记录摘要，不复制凭据内容。
 
+阶段可选 `readOnlyRecoveryEvidenceObservationCommand` 使用既有语义观察协议，返回 `{ "evidenceSha256": "<64位小写摘要>" }`。部署观察器将其与原有进程、效果和命令原件一起摘要；它只决定何时重验，不放行阶段，也不替代效果核验。命令无 shell，限时七秒，与原有观察并行；失败归为稳定未知，Stop 或执行结束后不再调用。源码验证工具直接提供冻结的观察 argv，无需新增调度器。
+
+源码准备命令明确返回 `ok: false, status: quality_validation_failed` 时，原生失败追加为同名质量分类，分析结果交回 Agent，取消机器重验时刻，不自动执行第二次检查。原件缺失和子进程未退出仍走机器待证；后续真实成功可取代当前失败资格，原失败观察继续保留。
+
 绑定候选目录必须保留，不能直接作为移动式 promote 或收尾清理的来源。把候选复制到独立暂存副本后再发布；原候选用于核对与冻结执行器，暂存副本才可删除。
 
-候选构建仍按现有 skill 完成；`candidate_preparation` 中记录发布前最终类型、ABI 与候选检查，`state_preservation` 刷新备份与逐会话门禁。没有新行为的步骤可调用现有只读核验脚本，不为填满阶段写空命令。`runtime_validation` 必须实际检查通知档案、agent 检测、工作树与任务映射；不能只查首页。
+候选构建仍按现有 skill 完成；`candidate_preparation` 中通过 skill 随包的 `prepare-source-validation-with-evidence-reuse.mjs` 自动核验源码证据并仅补跑冻结计划的缺项，已证明的最终类型检查可复用。它支持同步标准记录、备用路径完整树证据包和 RVF 原生验证；同步没有重跑不使原始验证失效。报告与必要原件路径并入 `recoveryEvidenceFilePaths`，复用已有所属执行的监督和恢复。ABI 与候选产物检查继续执行，源码验证报告不替代它们。`state_preservation` 刷新备份与逐会话门禁；`runtime_validation` 必须实际检查通知档案、agent 检测、工作树与任务映射，不能只查首页。
 
 ## 标准调用
 
