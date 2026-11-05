@@ -27,6 +27,7 @@ import { resolveMainTaskConversationSessionId } from "../core/task-main-conversa
 // 2.8 MB），每 150ms 一次的 projects_updated 广播不可能每次重新解析；workspace-registry 按文件 mtime 缓存，
 // 缓存里只留这几个字段（见 persisted-task-session-facts-cache-for-unloaded-projects.ts）。
 export interface TaskSessionFactsForCrossProjectTaskViews {
+	agentSessionHasNoEstablishedAcpConnection?: boolean;
 	automaticAgentFailureContinuation?: RuntimeTaskSessionSummary["automaticAgentFailureContinuation"];
 	agentConversationPromptSubmissionAcceptance?: RuntimeTaskSessionSummary["agentConversationPromptSubmissionAcceptance"];
 	taskConversationSessionMetadata?: RuntimeTaskSessionSummary["taskConversationSessionMetadata"];
@@ -73,6 +74,15 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 ): TaskSessionFactsForCrossProjectTaskViews {
 	const facets = resolveSessionFacets(summary);
 	return {
+		agentSessionHasNoEstablishedAcpConnection:
+			summary.sessionTransport === "acp_stdio_subprocess" &&
+			summary.pid === null &&
+			!summary.agentNativeConversationSessionIdentity &&
+			!resolveLastEffectiveAgentConversationActivityObservation(summary) &&
+			!resolveLastAgentConversationUserHandoffObservation(summary) &&
+			!summary.agentResponseGenerationStopped &&
+			!summary.agentResponseGenerationTurnStarted &&
+			summary.agentConversationPromptSubmissionAcceptance?.status !== "accepted",
 		...(summary.taskConversationSessionMetadata
 			? { taskConversationSessionMetadata: summary.taskConversationSessionMetadata }
 			: {}),

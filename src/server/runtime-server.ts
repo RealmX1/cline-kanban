@@ -1528,6 +1528,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
 	});
 	const taskEditorCreationSubmissionApi = createTaskEditorCreationSubmissionService({
+		onStatusChanged: () => {
+			void deps.runtimeStateHub.broadcastRuntimeProjectsUpdated(null);
+		},
 		findSession: findRuntimeSessionSummary,
 		resolveIdentity: async (workspaceId, card) => {
 			const { kanbanBoardCardIdentityCandidates } =

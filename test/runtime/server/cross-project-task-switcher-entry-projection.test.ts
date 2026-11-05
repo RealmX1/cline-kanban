@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { resolveLastEffectiveAgentConversationActivityObservation } from "../../../src/core/agent-conversation-activity-observation";
 import type { RuntimeBoardCard, RuntimeBoardColumnId, RuntimeBoardData } from "../../../src/core/api-contract";
 import { estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
+import type { TaskEditorCreationSubmissionStatus } from "../../../src/core/task-editor-creation-submission-status";
 import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "../../../src/server/cross-project-task-switcher-entry-projection";
 import {
 	collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts,
@@ -71,6 +72,50 @@ function collect(
 }
 
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
+	it("启动记录核对创建时间且不覆盖真实会话，等待中的老任务仍进入广播范围", () => {
+		const progress: TaskEditorCreationSubmissionStatus = {
+			submissionId: "00000000-0000-4000-8000-000000000001",
+			workspaceId: "project",
+			taskId: "start",
+			taskIncarnationCreatedAtEpochMs: 0,
+			cardPersisted: true,
+			relationsCompleted: true,
+			startRequested: true,
+			startCompleted: false,
+			phase: "waiting_for_evidence",
+			lastError: null,
+			recoveryCondition: null,
+			attemptsInCurrentRecoveryRound: 1,
+			acceptedAtEpochMs: NOW_MS,
+			updatedAtEpochMs: NOW_MS,
+		};
+		const project = (card: RuntimeBoardCard, facts?: TaskSessionFactsForCrossProjectTaskViews) =>
+			collectCrossProjectTaskSwitcherEntriesFromBoard({
+				board: makeBoard({ in_progress: [card] }),
+				sessionFactsByTaskId: facts ? new Map([[card.id, facts]]) : new Map(),
+				lastOpenedByUserAtByTaskId: new Map(),
+				nowMs: NOW_MS,
+				activityHorizonMs: HORIZON_MS,
+				taskEditorCreationAgentStartupProgressByTaskId: new Map([["start", progress]]),
+			});
+		expect(project(makeCard("start"))[0]?.taskEditorCreationAgentStartupProgress).toEqual(progress);
+		expect(project(makeCard("start", { createdAt: 1 }))).toEqual([]);
+		expect(
+			project(
+				makeCard("start", {
+					taskDescriptionLastUpdatedAt: NOW_MS,
+					mostRecentlyLaunchedAgentSessionAgentId: "codex",
+				}),
+			)[0]?.taskEditorCreationAgentStartupProgress,
+		).toBeUndefined();
+		expect(
+			project(
+				makeCard("start"),
+				makeFacts({ turnOwner: "agent", liveness: "live", agentProcessStartedAt: NOW_MS }),
+			)[0]?.taskEditorCreationAgentStartupProgress,
+		).toBeUndefined();
+	});
+
 	it("跨项目条目保留显式null，使旧推进和请求值无法重启业务时钟", () => {
 		const [entry] = collect(
 			makeBoard({ review: [makeCard("card", { taskDescriptionLastUpdatedAt: NOW_MS })] }),

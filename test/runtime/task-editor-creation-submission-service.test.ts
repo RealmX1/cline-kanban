@@ -5,8 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-client-connection-runtime";
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
+import { assignCrossProjectTaskSwitcherSections } from "../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 import type { TaskEditorCreationSubmissionRequest } from "../../src/core/task-editor-creation-submission-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { buildInterWorkUnitRelationWorkUnitKey } from "../../src/inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
+import * as liveRelationProjection from "../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import { createEmptyRecordedInterWorkUnitRelationProjectionState } from "../../src/inter-work-unit-relation-ledger/recorded-inter-work-unit-relation-projection-from-ledger-events";
+import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "../../src/server/cross-project-task-switcher-entry-projection";
+import { extractTaskSessionFactsForCrossProjectTaskViews } from "../../src/server/in-progress-task-detail-projection";
 import {
 	loadPersistedWorkspaceStateById,
 	loadWorkspaceContext,
@@ -15,6 +21,7 @@ import {
 } from "../../src/state/workspace-state";
 import { createTaskEditorCreationSubmissionService } from "../../src/task-editor-creation/task-editor-creation-submission-service";
 import {
+	readTaskEditorCreationAgentStartupProgressByTaskId,
 	readTaskEditorCreationSubmission,
 	recordTaskEditorCreationExplicitStop,
 } from "../../src/task-editor-creation/task-editor-creation-submission-store";
@@ -97,7 +104,8 @@ async function scenario() {
 		},
 	);
 	const warnings = vi.fn();
-	const resolveIdentity = vi.fn(async (_workspaceId: string, snapshot: RuntimeBoardCard) => {
+	const onStatusChanged = vi.fn();
+	const resolveIdentity = vi.fn(async (_workspaceId: string, snapshot: Pick<RuntimeBoardCard, "id" | "createdAt">) => {
 		for (const scope of scopes) {
 			const card = (await loadPersistedWorkspaceStateById(scope.workspaceId)).board.columns
 				.flatMap((column) => column.cards)
@@ -120,6 +128,7 @@ async function scenario() {
 			startAgent: start,
 			readDependencyFingerprint: async () => dependenciesVersion,
 			warn: warnings,
+			onStatusChanged,
 		});
 		services.push(service);
 		return service;
@@ -172,6 +181,13 @@ async function scenario() {
 			value: null,
 		}));
 	return {
+		readStartupProgress: (workspaceId: string) =>
+			readTaskEditorCreationAgentStartupProgressByTaskId(workspaceId, (status) =>
+				resolveIdentity(status.workspaceId, {
+					id: status.taskId,
+					createdAt: status.taskIncarnationCreatedAtEpochMs,
+				}),
+			),
 		recordPath: (submissionId: string) =>
 			join(
 				fixture.isolatedHomeDirectoryPath,
@@ -181,6 +197,7 @@ async function scenario() {
 				`${submissionId}.json`,
 			),
 		warnings,
+		onStatusChanged,
 		resolveIdentity,
 		source,
 		target,
@@ -199,6 +216,37 @@ async function scenario() {
 }
 
 describe("编辑器持久创建提交", { timeout: 30000 }, () => {
+	it("保存确认与阻塞启动即时通知，持久进度按项目恢复，Stop 立即排除旧记录", async () => {
+		const test = await scenario();
+		let releaseStart = () => {};
+		const startGate = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		test.start.mockImplementation(async () => {
+			await startGate;
+			throw new Error("隔离启动暂不可用");
+		});
+		const request = test.request("start", false);
+		await test.service.submit(test.target, request, evidence);
+		try {
+			await expect
+				.poll(async () => (await test.readStartupProgress(test.target.workspaceId)).get("start")?.phase)
+				.toBe("starting_agent");
+			expect(test.onStatusChanged).toHaveBeenCalled();
+			expect(await test.readStartupProgress(test.source.workspaceId)).toEqual(new Map());
+			expect((await test.readStartupProgress(test.target.workspaceId)).get("start")).toMatchObject({
+				cardPersisted: true,
+				startRequested: true,
+				startCompleted: false,
+			});
+			await recordTaskEditorCreationExplicitStop(test.target.workspaceId, "start", request.newTaskCard.createdAt);
+			expect(await test.readStartupProgress(test.target.workspaceId)).toEqual(new Map());
+		} finally {
+			releaseStart();
+			await test.service.settle();
+		}
+	});
+
 	it("A 的关系失败后，B 在另一项目独立建卡；重试不覆盖 A 的新字段", async () => {
 		const test = await scenario();
 		test.applyRelations.mockRejectedValue(new Error("账本暂不可用"));
@@ -598,18 +646,87 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 			}));
 		};
 		await move(test.source, test.target);
+		expect(await test.readStartupProgress(test.source.workspaceId)).toEqual(new Map());
+		expect((await test.readStartupProgress(test.target.workspaceId)).get(request.newTaskCard.id)).toMatchObject({
+			workspaceId: test.target.workspaceId,
+			phase: "waiting_for_dependency",
+		});
+		expect(
+			(await readTaskEditorCreationSubmission(test.source.workspaceId, request.submissionId))?.status.workspaceId,
+		).toBe(test.source.workspaceId);
 		await recordTaskEditorCreationExplicitStop(
 			test.target.workspaceId,
 			request.newTaskCard.id,
 			request.newTaskCard.createdAt,
 		);
 		await move(test.target, test.source);
+		expect(await test.readStartupProgress(test.source.workspaceId)).toEqual(new Map());
 		test.applyRelations.mockResolvedValue(undefined);
 		test.changeDependencies();
 		await test.service.sweep();
 		await test.service.settle();
 		expect(test.start).not.toHaveBeenCalled();
 		expect((await test.service.getStatus(test.source, request))?.phase).toBe("stopped");
+	});
+
+	it("启动投影按账本的精确一世键读取当前位置、历史项目和删除墓碑", async () => {
+		const test = await scenario();
+		const request = test.request("lgmov");
+		test.applyRelations.mockRejectedValue(new Error("等待关系依赖"));
+		await test.service.submit(test.source, request, evidence);
+		await test.service.settle();
+		const projectionState = createEmptyRecordedInterWorkUnitRelationProjectionState();
+		const identity = {
+			kanbanBoardCard: {
+				workUnitType: "kanban_board_card" as const,
+				workspaceId: test.source.workspaceId,
+				taskId: request.newTaskCard.id,
+				taskIncarnationCreatedAtEpochMs: request.newTaskCard.createdAt,
+			},
+			currentWorkspaceId: test.target.workspaceId,
+			workspaceIdsUsedByCard: [test.source.workspaceId, test.target.workspaceId],
+			kanbanBoardCardFirstObservationRoute: "task_card_created_on_board_within_live_capture" as const,
+			firstObservedAt: Date.now(),
+			creationActor: null,
+			creationOnBehalfOfInitiatingWorkUnit: null,
+			currentFieldValueSha256ByFieldName: {},
+			lastKnownBoardColumnId: "backlog",
+			movedToTrashColumnAt: null,
+			permanentlyRemovedFromBoardAt: null as number | null,
+		};
+		projectionState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.set(
+			buildInterWorkUnitRelationWorkUnitKey(identity.kanbanBoardCard),
+			identity,
+		);
+		const readProjection = vi
+			.spyOn(liveRelationProjection, "readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture")
+			.mockImplementation(async (read) =>
+				read({
+					projectionState,
+					readRetainedTaskCardFieldValuesBySha256: async () => new Map(),
+					findRetainedTaskCardFieldKeywordMatchesBySha256: async () => new Map(),
+				}),
+			);
+		try {
+			expect(await readTaskEditorCreationAgentStartupProgressByTaskId(test.source.workspaceId)).toEqual(new Map());
+			expect(
+				(await readTaskEditorCreationAgentStartupProgressByTaskId(test.target.workspaceId)).get(
+					request.newTaskCard.id,
+				)?.workspaceId,
+			).toBe(test.target.workspaceId);
+			identity.permanentlyRemovedFromBoardAt = Date.now();
+			expect(await readTaskEditorCreationAgentStartupProgressByTaskId(test.target.workspaceId)).toEqual(new Map());
+			identity.permanentlyRemovedFromBoardAt = null;
+			await recordTaskEditorCreationExplicitStop(
+				test.target.workspaceId,
+				request.newTaskCard.id,
+				request.newTaskCard.createdAt,
+			);
+			identity.currentWorkspaceId = test.source.workspaceId;
+			expect(await readTaskEditorCreationAgentStartupProgressByTaskId(test.source.workspaceId)).toEqual(new Map());
+		} finally {
+			readProjection.mockRestore();
+		}
 	});
 
 	it("旧草稿缺少快照时沿原已受理提交补证，不采用卡片现值", async () => {
@@ -664,8 +781,62 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 		const request = test.request("acper", false);
 		const connectionStart = vi
 			.spyOn(AcpClientConnectionRuntime.prototype, "startTaskConnection")
-			.mockRejectedValue(new Error("连接尚未启动"));
+			.mockImplementation(async () => {
+				await assertStartupVisible();
+				throw new Error("连接尚未启动");
+			});
 		const acp = new AcpTaskSessionService(null);
+		const assertStartupVisible = async () => {
+			const summary = acp.getSummary(request.newTaskCard.id);
+			if (!summary) throw new Error("缺少 ACP 准备摘要");
+			expect(
+				extractTaskSessionFactsForCrossProjectTaskViews({ ...summary, pid: process.pid })
+					.agentSessionHasNoEstablishedAcpConnection,
+			).toBe(false);
+			expect(
+				extractTaskSessionFactsForCrossProjectTaskViews({
+					...summary,
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "omp",
+						nativeSessionId: "established-native-session",
+						transcriptPath: null,
+						observedAt: Date.now(),
+					},
+				}).agentSessionHasNoEstablishedAcpConnection,
+			).toBe(false);
+			expect(
+				extractTaskSessionFactsForCrossProjectTaskViews({
+					...summary,
+					lastAgentConversationUserHandoffObservation: {
+						observedAtMs: Date.now(),
+						signalConfidence: "structured_user_turn",
+						turnSequence: 1,
+					},
+				}).agentSessionHasNoEstablishedAcpConnection,
+			).toBe(false);
+			const entries = collectCrossProjectTaskSwitcherEntriesFromBoard({
+				board: (await loadPersistedWorkspaceStateById(test.source.workspaceId)).board,
+				sessionFactsByTaskId: new Map([[summary.taskId, extractTaskSessionFactsForCrossProjectTaskViews(summary)]]),
+				lastOpenedByUserAtByTaskId: new Map(),
+				nowMs: Date.now(),
+				activityHorizonMs: 7 * 24 * 60 * 60_000,
+				taskEditorCreationAgentStartupProgressByTaskId: await test.readStartupProgress(test.source.workspaceId),
+			});
+			expect(entries[0]?.taskEditorCreationAgentStartupProgress).toBeDefined();
+			expect(
+				assignCrossProjectTaskSwitcherSections({
+					entriesInProjects: entries.map((entry) => ({
+						workspaceId: test.source.workspaceId,
+						projectName: "隔离项目",
+						entry,
+					})),
+					nowMs: Date.now(),
+					remainingSectionOrderingMode:
+						"most_recently_touched_by_conversation_progress_or_user_open_or_description_edit",
+					remainingSectionActivityHorizonMs: 7 * 24 * 60 * 60_000,
+				}).runningEntries,
+			).toHaveLength(1);
+		};
 		test.start.mockImplementationOnce(async (_scope, card, _record, beforeLaunch) => {
 			await beforeLaunch();
 			const summary = await acp.startTaskSession({
@@ -695,6 +866,7 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 			expect(status?.startCompleted).toBe(false);
 			expect(status?.phase).toBe("waiting_for_evidence");
 			expect(status?.lastError).toContain("连接尚未启动");
+			await assertStartupVisible();
 			expect(test.start).toHaveBeenCalledTimes(1);
 		} finally {
 			connectionStart.mockRestore();

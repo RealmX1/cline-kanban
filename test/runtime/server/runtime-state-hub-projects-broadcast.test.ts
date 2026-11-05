@@ -392,6 +392,40 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		expect(second.projects[0]?.taskCounts.in_progress).toBe(3);
 	});
 
+	it("已观察会话的启动与交棒边沿立即构建，普通输出仍合并", async () => {
+		const initial = {
+			...makeSummary("startup"),
+			turnOwner: null,
+			liveness: "none",
+			userTurnKind: null,
+			pid: null,
+			startedAt: null,
+		} as const;
+		harness.emitTerminalSummary(initial);
+		const before = harness.buildProjectsPayload.mock.calls.length;
+		harness.projects[0] = makeProject("project-a", 1);
+		harness.emitTerminalSummary({ ...initial, turnOwner: "agent", liveness: "live", pid: 123, startedAt: 10 });
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 1);
+		harness.emitTerminalSummary({
+			...initial,
+			turnOwner: "agent",
+			liveness: "live",
+			pid: 123,
+			startedAt: 10,
+			lastOutputAt: 20,
+		});
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 1);
+		harness.emitTerminalSummary({
+			...initial,
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			pid: 123,
+			startedAt: 10,
+		});
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 2);
+	});
+
 	it("合并窗口内的多次 flush 合并构建、广播 projects，最终送达最新状态", async () => {
 		const projectsPayloadBuildCountBeforeFlushes = harness.buildProjectsPayload.mock.calls.length;
 		// 4 个相隔 200ms 的 flush 批次（标称跨度 600ms，落在 1 秒合并窗口内），每批内容都在变：不合并的话要构建并广播 4 次。

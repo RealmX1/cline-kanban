@@ -1,5 +1,6 @@
 import type { RuntimePtySessionProcessOwnership } from "../core/agent-session-pty-host-diagnostics-contract";
 import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
+import { measureTaskSessionStartupPhase } from "../diagnostics/task-session-start-diagnostics-logger";
 import {
 	persistAutomaticAgentFailureContinuation,
 	readAutomaticAgentFailureContinuations,
@@ -6216,30 +6217,41 @@ export class TerminalSessionManager implements TerminalSessionService {
 				request.workspaceId &&
 				this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions
 			) {
-				codexConfigurationWriterBinding = await prepareCodexConfigurationWriterBinding({
-					nativeLaunchArguments: request.args,
-					sessionModelId:
-						request.terminalAgentModelOverrideSettings?.agentId === "codex"
-							? request.terminalAgentModelOverrideSettings.modelId
-							: undefined,
-					sessionPermissionMode: request.taskAgentPermissionMode,
-					sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
-					codexConfigurationProfileId:
-						request.codexConfigurationProfileId ?? entry.summary.codexConfigurationProfileId,
-					purpose: "native_session",
-					storageHome: request.env?.CODEX_HOME ?? resolveUserCodexHomeDirectoryPath(),
-					sqliteHome: request.env?.CODEX_SQLITE_HOME,
-					workspaceId: request.workspaceId,
-					conversationSessionId: request.taskId,
-					runtimeSessionIncarnationId,
-					previousBinding:
-						request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt
-							? entry.summary.codexConfigurationWriterBinding
-							: null,
-					binary: request.binary,
-					environment: { ...process.env, ...request.env },
-					workingDirectory: request.cwd,
-				});
+				codexConfigurationWriterBinding = await measureTaskSessionStartupPhase(
+					{
+						workspaceId: request.workspaceId ?? "(unknown)",
+						taskId: request.taskId,
+						requestedAgentId: request.agentId,
+						effectiveAgentId: request.agentId,
+						runtimeSessionIncarnationId,
+						phase: "codex_configuration_writer_binding",
+					},
+					() =>
+						prepareCodexConfigurationWriterBinding({
+							nativeLaunchArguments: request.args,
+							sessionModelId:
+								request.terminalAgentModelOverrideSettings?.agentId === "codex"
+									? request.terminalAgentModelOverrideSettings.modelId
+									: undefined,
+							sessionPermissionMode: request.taskAgentPermissionMode,
+							sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
+							codexConfigurationProfileId:
+								request.codexConfigurationProfileId ?? entry.summary.codexConfigurationProfileId,
+							purpose: "native_session",
+							storageHome: request.env?.CODEX_HOME ?? resolveUserCodexHomeDirectoryPath(),
+							sqliteHome: request.env?.CODEX_SQLITE_HOME,
+							workspaceId: request.workspaceId,
+							conversationSessionId: request.taskId,
+							runtimeSessionIncarnationId,
+							previousBinding:
+								request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt
+									? entry.summary.codexConfigurationWriterBinding
+									: null,
+							binary: request.binary,
+							environment: { ...process.env, ...request.env },
+							workingDirectory: request.cwd,
+						}),
+				);
 				throwIfTaskSessionStartWasCancelled();
 				request = {
 					...request,
@@ -6300,13 +6312,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			});
 			throwIfTaskSessionStartWasCancelled();
 			if (codexConfigurationWriterBinding) {
-				const preparedPluginInstallation = await prepareCodexSharedPluginInstallationForNativeLaunch({
+				const pluginLaunchPreparationInput = {
 					binding: codexConfigurationWriterBinding,
 					binary: launch.binary ?? request.binary,
 					environment: { ...process.env, ...request.env, ...launch.env },
 					nativeLaunchArguments: launch.args,
 					workingDirectory: request.cwd,
-				});
+				};
+				const preparedPluginInstallation = await measureTaskSessionStartupPhase(
+					{
+						workspaceId: request.workspaceId ?? "(unknown)",
+						taskId: request.taskId,
+						requestedAgentId: request.agentId,
+						effectiveAgentId: request.agentId,
+						runtimeSessionIncarnationId,
+						phase: "codex_shared_plugin_launch_preparation",
+					},
+					() => prepareCodexSharedPluginInstallationForNativeLaunch(pluginLaunchPreparationInput),
+				);
 				launch.args = preparedPluginInstallation.arguments;
 				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
 			}

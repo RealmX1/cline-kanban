@@ -5,6 +5,8 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { buildAllProjectsTaskGroupQueryResult } from "../../src/core/all-projects-task-group-query";
+import { lockedFileSystem } from "../../src/fs/locked-file-system";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { Browser, BrowserType } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -49,8 +51,16 @@ it.skipIf(!packagedCliPath)(
 		for (const key of Object.keys(environment))
 			if (/^(KANBAN_|ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|CURSOR_|GEMINI_|GOOGLE_|KIMI_)/u.test(key))
 				delete environment[key];
+		const isolatedAgentExecutableDirectory = join(fixture.isolatedHomeDirectoryPath, "isolated-agent-executables");
+		mkdirSync(isolatedAgentExecutableDirectory, { recursive: true });
+		writeFileSync(
+			join(isolatedAgentExecutableDirectory, "claude"),
+			`#!${process.execPath}\nif(process.argv.includes('--version'))process.stdout.write('2.1.0 (Claude Code)\\n');else if(process.argv.includes('--help'))process.stdout.write('--settings --session-id --model');else{process.stdout.write('Claude Code v2.1.0\\n> ');process.stdin.resume();setInterval(()=>{},1000);}\n`,
+			{ mode: 0o700 },
+		);
+
 		Object.assign(environment, {
-			PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+			PATH: `${isolatedAgentExecutableDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
 			KANBAN_RUNTIME_PORT: String(port),
 			CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"),
 			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-storage"),
@@ -85,6 +95,13 @@ it.skipIf(!packagedCliPath)(
 		};
 		let runtime = await startRuntime();
 		let browser: Browser | undefined;
+		let releaseWorktreeSetup = () => {};
+		let heldWorktreeSetup: Promise<void> | undefined;
+		let blockedStartupStartedAt = 0;
+		let blockedStartupDurationMs = 0;
+		let savedConfirmationToVisibleMs = 0;
+		let launchedFixtureTaskId: string | undefined;
+		let fixtureTaskWorkspaceId: string | undefined;
 		const client = (workspaceId?: string) =>
 			createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
@@ -140,13 +157,87 @@ it.skipIf(!packagedCliPath)(
 				expect(await promptInput.inputValue()).toBe(prompt);
 				return editor;
 			};
+			let markWorktreeSetupLockAcquired = () => {};
+			const worktreeSetupLockAcquired = new Promise<void>((done) => {
+				markWorktreeSetupLockAcquired = done;
+			});
+			const worktreeSetupReleased = new Promise<void>((done) => {
+				releaseWorktreeSetup = done;
+			});
+			heldWorktreeSetup = lockedFileSystem.withLock(
+				{
+					type: "directory",
+					path: join(source.repositoryPath, ".git"),
+					lockfileName: "kanban-task-worktree-setup.lock",
+				},
+				async () => {
+					blockedStartupStartedAt = Date.now();
+					markWorktreeSetupLockAcquired();
+					await worktreeSetupReleased;
+				},
+			);
+			await worktreeSetupLockAcquired;
+			const observerPage = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+			await observerPage.addInitScript(() => {
+				localStorage.setItem("kanban.onboarding.dialog.shown", "true");
+				sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
+				localStorage.setItem("kanban.cross-project-task-switcher-running-section-expanded.v1", "true");
+			});
+			await observerPage.goto(`${origin}/${sourceId}`);
+			const runningSection = observerPage.getByTestId("cross-project-task-switcher-section-running");
+			await runningSection.waitFor({ state: "visible" });
+
 			const editorA = await openCreate(sourceId, "任务 A 的原始正文", "[TEST]独立任务 A");
 			await editorA.getByRole("button", { name: "创建并启动", exact: true }).click();
 			await editorA.waitFor({ state: "hidden" });
+			const savedConfirmationObservedAt = Date.now();
+			await runningSection.getByText("正在启动", { exact: true }).waitFor({ state: "visible", timeout: 6_000 });
+			savedConfirmationToVisibleMs = Date.now() - savedConfirmationObservedAt;
+			if (savedConfirmationToVisibleMs > 1_000)
+				process.stderr.write(`启动展示软目标超出：${savedConfirmationToVisibleMs}ms\n`);
+			expect(runningSection && (await runningSection.innerText())).toContain("0 运行中 · 1 正在启动");
+
 			const cardsA = (await sourceClient.workspace.getState.query()).board.columns.flatMap((column) => column.cards);
 			expect(cardsA).toHaveLength(1);
 			const cardA = cardsA[0];
 			if (!cardA) throw new Error("任务 A 尚未保存");
+			await observerPage.screenshot({ path: join(evidenceDirectory, "running-startup-before-agent-process.png") });
+			const startingRow = runningSection.locator(`[data-cross-project-task-switcher-task-id="${cardA.id}"]`);
+			const compactStartingRowHeight = await startingRow.evaluate(
+				(element) => element.getBoundingClientRect().height,
+			);
+			await startingRow.hover();
+			const floatingStartingCard = startingRow.locator("[data-cross-project-task-switcher-hover-floating-card]");
+			await floatingStartingCard.waitFor({ state: "visible" });
+			expect(await startingRow.evaluate((element) => element.getBoundingClientRect().height)).toBe(
+				compactStartingRowHeight,
+			);
+			expect(await floatingStartingCard.getByText("正在启动", { exact: true }).count()).toBe(1);
+			await observerPage.screenshot({
+				path: join(evidenceDirectory, "running-startup-hover-preserves-row-height.png"),
+			});
+			await observerPage.mouse.move(1400, 900);
+			await floatingStartingCard.waitFor({ state: "hidden" });
+
+			const queryResult = buildAllProjectsTaskGroupQueryResult(
+				await sourceClient.projects.getAllProjectsTaskGroupQuerySnapshot.query({ recentDays: 7 }),
+				{ group: "running" },
+			);
+			expect(queryResult.groups[0]?.tasks.map((task) => task.taskId)).toContain(cardA.id);
+			await observerPage.reload();
+			await runningSection
+				.locator(`[data-cross-project-task-switcher-task-id="${cardA.id}"]`)
+				.waitFor({ state: "visible" });
+			await new Promise<void>((done) =>
+				setTimeout(done, Math.max(0, 60_000 - (Date.now() - blockedStartupStartedAt))),
+			);
+			expect(await runningSection.locator(`[data-cross-project-task-switcher-task-id="${cardA.id}"]`).count()).toBe(
+				1,
+			);
+			blockedStartupDurationMs = Date.now() - blockedStartupStartedAt;
+			releaseWorktreeSetup();
+			await heldWorktreeSetup;
+
 			await expect
 				.poll(
 					async () =>
@@ -196,14 +287,26 @@ it.skipIf(!packagedCliPath)(
 			await page.unroute("**/api/trpc/**");
 			const editorBatch = await openCreate(targetId, "- 第一张批量任务\n- 第二张批量任务", "");
 			await editorBatch.getByRole("button", { name: "Split into 2 tasks", exact: true }).click();
-			await editorBatch.getByRole("button", { name: "Create 2 tasks", exact: true }).click();
+			await editorBatch.getByRole("button", { name: "Start 2 tasks", exact: true }).click();
 			await editorBatch.waitFor({ state: "hidden" });
 			expect(
 				(await targetClient.workspace.getState.query()).board.columns.flatMap((column) => column.cards),
 			).toHaveLength(4);
+			await expect
+				.poll(async () => runningSection.locator("[data-cross-project-task-switcher-task-id]").count())
+				.toBe(3);
+			await observerPage.screenshot({ path: join(evidenceDirectory, "running-cross-project-batch-startup.png") });
+
 			runtime.kill("SIGINT");
 			expect(await waitForChildProcessExit(runtime, 30_000)).toBe(true);
 			runtime = await startRuntime();
+			await observerPage.goto(`${origin}/${sourceId}`);
+			await runningSection
+				.locator(`[data-cross-project-task-switcher-task-id="${cardA.id}"]`)
+				.waitFor({ state: "visible" });
+			await expect.poll(async () => runningSection.innerText(), { timeout: 15_000 }).toContain("启动等待恢复");
+			await observerPage.screenshot({ path: join(evidenceDirectory, "running-startup-after-runtime-restart.png") });
+
 			await page.goto(`${origin}/${sourceId}?task=${cardA.id}`);
 			await page
 				.locator(`[data-verification-anchor="task-editor-creation-progress:${cardA.id}"]`)
@@ -216,11 +319,56 @@ it.skipIf(!packagedCliPath)(
 			).toHaveLength(4);
 			await page.setViewportSize({ width: 390, height: 844 });
 			await page.screenshot({ path: join(evidenceDirectory, "creation-progress-after-runtime-restart-mobile.png") });
+			await page.setViewportSize({ width: 1440, height: 1000 });
+			const liveEditor = await openCreate(
+				sourceId,
+				"仅运行隔离 PTY fixture，不调用真实模型",
+				"[TEST]真实进程接管启动展示",
+			);
+			await liveEditor.getByRole("button", { name: "Agent：codex", exact: true }).click();
+			await liveEditor.getByRole("button", { name: "Claude Code", exact: true }).click();
+			await liveEditor.getByRole("button", { name: "创建并启动", exact: true }).click();
+			await liveEditor.waitFor({ state: "hidden" });
+			const liveCard = (await sourceClient.workspace.getState.query()).board.columns
+				.flatMap((column) => column.cards)
+				.find((card) => card.prompt === "仅运行隔离 PTY fixture，不调用真实模型");
+			if (!liveCard) throw new Error("未找到隔离 PTY 任务");
+			launchedFixtureTaskId = liveCard.id;
+			fixtureTaskWorkspaceId = sourceId;
+			await expect
+				.poll(async () => (await sourceClient.workspace.getState.query()).sessions[liveCard.id]?.pid, {
+					timeout: 20_000,
+				})
+				.toBeTypeOf("number");
+			const liveRow = runningSection.locator(`[data-cross-project-task-switcher-task-id="${liveCard.id}"]`);
+			await liveRow.waitFor({ state: "visible" });
+			await expect.poll(async () => runningSection.innerText()).toContain("1 运行中");
+			expect(
+				await liveRow
+					.locator(`[data-verification-anchor="task-editor-creation-agent-startup:${liveCard.id}"]`)
+					.count(),
+			).toBe(0);
+			expect(await liveRow.count()).toBe(1);
+			await observerPage.screenshot({
+				path: join(evidenceDirectory, "running-live-process-replaces-startup-label.png"),
+			});
+			await sourceClient.runtime.stopTaskSession.mutate({ taskId: liveCard.id });
+			launchedFixtureTaskId = undefined;
+
 			expect(pageErrors).toEqual([]);
 			writeFileSync(
 				join(evidenceDirectory, "browser-verification.json"),
 				JSON.stringify(
-					{ sourceId, targetId, cardA: cardA.id, targetTaskCount: 4, droppedSubmissionResponse, pageErrors },
+					{
+						sourceId,
+						targetId,
+						cardA: cardA.id,
+						targetTaskCount: 4,
+						droppedSubmissionResponse,
+						pageErrors,
+						savedConfirmationToVisibleMs,
+						blockedStartupDurationMs,
+					},
 					null,
 					2,
 				),
@@ -239,11 +387,15 @@ it.skipIf(!packagedCliPath)(
 				);
 			throw error;
 		} finally {
+			releaseWorktreeSetup();
+			await heldWorktreeSetup;
+			if (launchedFixtureTaskId && fixtureTaskWorkspaceId)
+				await client(fixtureTaskWorkspaceId).runtime.stopTaskSession.mutate({ taskId: launchedFixtureTaskId });
 			await browser?.close();
 			runtime.kill("SIGINT");
 			await waitForChildProcessExit(runtime, 30_000);
 			writeFileSync(join(evidenceDirectory, "isolated-runtime.log"), runtimeOutput);
 		}
 	},
-	180_000,
+	300_000,
 );

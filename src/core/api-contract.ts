@@ -1,3 +1,5 @@
+import { taskEditorCreationSubmissionStatusSchema } from "./task-editor-creation-submission-status";
+
 export * from "./agent-session-pty-host-diagnostics-contract";
 
 import { z } from "zod";
@@ -2245,6 +2247,9 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskEditorCreationAgentStartupProgress: taskEditorCreationSubmissionStatusSchema.optional(),
+	// ACP 准备摘要的 startedAt 只是连接尝试时刻；没有进程、原生会话或语义活动时仍属启动准备。
+	agentSessionHasNoEstablishedAcpConnection: z.boolean().optional(),
 	taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 	taskConversationSessionActivityObservations: z
 		.array(runtimeTaskConversationSessionActivityObservationSchema)
