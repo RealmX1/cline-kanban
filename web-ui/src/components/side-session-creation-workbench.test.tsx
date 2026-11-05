@@ -138,6 +138,26 @@ async function text(value: string) {
 }
 
 describe("共享侧会话创建工作台", () => {
+	it("无常驻宿主的独立嵌入也按原项目和任务恢复各自草稿", async () => {
+		const first = target();
+		const secondMain = { ...first.mainSessionSummary, taskId: "fghij" };
+		const second = {
+			...first,
+			workspaceId: "project-b",
+			task: { ...first.task, id: "fghij", createdAt: 2 },
+			mainSessionSummary: secondMain,
+			taskSessions: { fghij: secondMain },
+		};
+		await open(first);
+		await text("项目 A 的草稿");
+		await open(second);
+		expect(document.querySelector("textarea")?.value).toBe("");
+		await text("项目 B 的草稿");
+		await open(first);
+		expect(document.querySelector("textarea")?.value).toBe("项目 A 的草稿");
+		await open(second);
+		expect(document.querySelector("textarea")?.value).toBe("项目 B 的草稿");
+	});
 	it("不同项目的窗口保留独立草稿，重复打开不重挂，迟到创建结果只关闭原窗口", async () => {
 		let finishFirstCreation: (result: ReturnType<typeof creationResult>) => void = () => undefined;
 		vi.mocked(creationQueries.submitOrRecoverTaskConversationSessionCreation).mockImplementationOnce(

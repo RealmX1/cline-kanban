@@ -90,7 +90,11 @@ const startupSettingLabels = [
 export function SideSessionCreationWorkbench() {
 	const target = useSideSessionCreationWorkbenchTarget();
 	return target ? (
-		<HostedSideSessionCreationWorkbench target={target} onClose={closeSideSessionCreationWorkbench} />
+		<HostedSideSessionCreationWorkbench
+			key={JSON.stringify([target.workspaceId, target.task.id, target.task.createdAt])}
+			target={target}
+			onClose={closeSideSessionCreationWorkbench}
+		/>
 	) : null;
 }
 

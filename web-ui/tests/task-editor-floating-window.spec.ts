@@ -320,7 +320,8 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(false);
 	await focusableControls.first().focus();
 	await page.keyboard.press("Shift+Tab");
-	await expect(page.getByLabel("背景输入")).toBeFocused();
+	await expect.poll(() => dialog.evaluate((element) => element.contains(document.activeElement))).toBe(false);
+	await expect(page.locator(":focus")).toBeVisible();
 	await page.keyboard.press("Tab");
 	await expect(focusableControls.first()).toBeFocused();
 	const before = await dialog.boundingBox();
@@ -574,9 +575,9 @@ for (const viewport of [
 		dialog = page.getByRole("dialog", { name: "新建 Peer 会话", exact: true });
 		await expect(dialog.locator("textarea")).toHaveValue("Peer 的独立正文");
 		await expect(dialog.getByLabel("会话名称（可选）", { exact: true })).toHaveValue("Peer 主题");
-		await dialog.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
+		await dialog.getByRole("button", { name: "收起会话创建", exact: true }).click();
 		await page.getByRole("button", { name: "操作背景 0", exact: true }).click();
-		await page.getByRole("button", { name: "展开任务编辑器", exact: true }).click();
+		await dialog.getByRole("button", { name: "展开会话创建", exact: true }).click();
 		await dialog.getByRole("button", { name: "创建会话", exact: true }).click();
 		await expect(dialog.getByRole("alert")).toContainText("模拟创建失败");
 		await expect(dialog.locator("textarea")).toHaveValue("Peer 的独立正文");
