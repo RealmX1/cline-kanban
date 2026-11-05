@@ -6326,10 +6326,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 									? request.terminalAgentModelOverrideSettings.modelId
 									: undefined,
 							sessionReasoningEffortOverride: request.codexReasoningEffortOverride,
-						allowTaskReasoningEffortFeedback:
-							!taskConversationSessionMetadataForLaunch ||
-							taskConversationSessionMetadataForLaunch.taskConversationSessionRole === "main",
-						sessionPermissionMode: request.taskAgentPermissionMode,
+							allowTaskReasoningEffortFeedback:
+								!taskConversationSessionMetadataForLaunch ||
+								taskConversationSessionMetadataForLaunch.taskConversationSessionRole === "main",
+							sessionPermissionMode: request.taskAgentPermissionMode,
 							sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
 							codexConfigurationProfileId:
 								request.codexConfigurationProfileId ?? entry.summary.codexConfigurationProfileId,

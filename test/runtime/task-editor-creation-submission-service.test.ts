@@ -5,8 +5,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-client-connection-runtime";
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
-import { assignCrossProjectTaskSwitcherSections } from "../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 import { resolveCreationStartupSettings } from "../../src/core/creation-startup-settings";
+import { assignCrossProjectTaskSwitcherSections } from "../../src/core/cross-project-recently-active-task-switcher-section-assignment";
 import {
 	type TaskEditorCreationSubmissionRequest,
 	taskEditorCreationSubmissionRequestSchema,

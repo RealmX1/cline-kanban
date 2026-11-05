@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { resolveLastEffectiveAgentConversationActivityObservation } from "../../../src/core/agent-conversation-activity-observation";
-import type { RuntimeBoardCard, RuntimeBoardColumnId, RuntimeBoardData } from "../../../src/core/api-contract";
+import {
+	type RuntimeBoardCard,
+	type RuntimeBoardColumnId,
+	type RuntimeBoardData,
+	runtimeCrossProjectTaskSwitcherEntrySchema,
+	type TaskEditorCreationSubmissionStatus,
+} from "../../../src/core/api-contract";
+import { resolveCreationStartupSettings } from "../../../src/core/creation-startup-settings";
 import { estimateMainAgentConversationPromptCacheWarmthForTaskOutsideAgentTurn } from "../../../src/core/cross-project-recently-active-task-switcher-section-assignment";
-import type { TaskEditorCreationSubmissionStatus } from "../../../src/core/task-editor-creation-submission-status";
 import { collectCrossProjectTaskSwitcherEntriesFromBoard } from "../../../src/server/cross-project-task-switcher-entry-projection";
 import {
 	collectInProgressTaskDetailsFromBoardUsingTaskSessionFacts,
@@ -74,6 +80,12 @@ function collect(
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 	it("启动记录核对创建时间且不覆盖真实会话，等待中的老任务仍进入广播范围", () => {
 		const progress: TaskEditorCreationSubmissionStatus = {
+			resolvedSettings: resolveCreationStartupSettings({
+				agentId: "codex",
+				startInPlanMode: false,
+				defaultModelId: "frozen-creation-model",
+				codexConfigurationProfileId: "frozen-creation-profile",
+			}),
 			submissionId: "00000000-0000-4000-8000-000000000001",
 			workspaceId: "project",
 			taskId: "start",
@@ -99,6 +111,11 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 				taskEditorCreationAgentStartupProgressByTaskId: new Map([["start", progress]]),
 			});
 		expect(project(makeCard("start"))[0]?.taskEditorCreationAgentStartupProgress).toEqual(progress);
+		expect(
+			runtimeCrossProjectTaskSwitcherEntrySchema
+				.pick({ taskEditorCreationAgentStartupProgress: true })
+				.parse(project(makeCard("start"))[0]).taskEditorCreationAgentStartupProgress?.resolvedSettings,
+		).toEqual(progress.resolvedSettings);
 		expect(project(makeCard("start", { createdAt: 1 }))).toEqual([]);
 		expect(
 			project(

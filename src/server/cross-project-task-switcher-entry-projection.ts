@@ -4,13 +4,13 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeCrossProjectTaskSwitcherEntry,
+	TaskEditorCreationSubmissionStatus,
 } from "../core/api-contract";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/backlog-task-description-last-updated-ordering";
 import {
 	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
 	isTaskCardWithinCrossProjectTaskSwitcherActivityScope,
 } from "../core/cross-project-recently-active-task-switcher-section-assignment";
-import type { TaskEditorCreationSubmissionStatus } from "../core/task-editor-creation-submission-status";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import {
 	buildTaskActivityDetailFromBoardCardAndTaskSessionFacts,

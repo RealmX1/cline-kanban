@@ -1,5 +1,3 @@
-import { taskEditorCreationSubmissionStatusSchema } from "./task-editor-creation-submission-status";
-
 export * from "./agent-session-pty-host-diagnostics-contract";
 
 import { z } from "zod";
@@ -550,10 +548,7 @@ export const runtimeBoardCardSchema = z
 export type RuntimeBoardCard = z.infer<typeof runtimeBoardCardSchema>;
 
 // 编辑器创建提交单独定义，避免与关系草稿的值契约形成初始化环。
-export type {
-	TaskEditorCreationSubmissionRequest,
-	TaskEditorCreationSubmissionStatus,
-} from "./task-editor-creation-submission-contract";
+export type { TaskEditorCreationSubmissionRequest } from "./task-editor-creation-submission-contract";
 
 export const runtimeBoardColumnSchema = z.object({
 	id: runtimeBoardColumnIdSchema,
@@ -741,6 +736,34 @@ export const runtimeCreationResolvedSettingsSchema = z.object({
 });
 export type RuntimeCreationResolvedSettings = z.infer<typeof runtimeCreationResolvedSettingsSchema>;
 
+export const taskEditorCreationSubmissionStatusSchema = z.object({
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.optional(),
+	submissionId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	cardPersisted: z.boolean(),
+	relationsCompleted: z.boolean(),
+	startRequested: z.boolean(),
+	startCompleted: z.boolean(),
+	phase: z.enum([
+		"saving_card",
+		"saving_relations",
+		"starting_agent",
+		"completed",
+		"waiting_for_dependency",
+		"waiting_for_evidence",
+		"waiting_for_authorization",
+		"stopped",
+		"identity_conflict",
+	]),
+	lastError: z.string().nullable(),
+	recoveryCondition: z.string().nullable(),
+	attemptsInCurrentRecoveryRound: z.number().int().min(0).max(3),
+	acceptedAtEpochMs: z.number(),
+	updatedAtEpochMs: z.number(),
+});
+export type TaskEditorCreationSubmissionStatus = z.infer<typeof taskEditorCreationSubmissionStatusSchema>;
 // 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
 export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
