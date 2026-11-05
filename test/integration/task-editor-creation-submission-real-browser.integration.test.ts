@@ -58,11 +58,21 @@ it.skipIf(!packagedCliPath)(
 			`#!${process.execPath}\nif(process.argv.includes('--version'))process.stdout.write('2.1.0 (Claude Code)\\n');else if(process.argv.includes('--help'))process.stdout.write('--settings --session-id --model');else{process.stdout.write('Claude Code v2.1.0\\n> ');process.stdin.resume();setInterval(()=>{},1000);}\n`,
 			{ mode: 0o700 },
 		);
+		const isolatedCodexConfigurationDirectory = join(
+			fixture.isolatedHomeDirectoryPath,
+			"isolated-codex-configuration",
+		);
+		mkdirSync(isolatedCodexConfigurationDirectory, { recursive: true });
+		// 创建设置会读取 profile 默认模型；fixture 继续不提供 Codex binary，以核验真实启动失败。
+		writeFileSync(
+			join(isolatedCodexConfigurationDirectory, "config.toml"),
+			'model = "isolated-non-runnable-codex-model"\n',
+		);
 
 		Object.assign(environment, {
 			PATH: `${isolatedAgentExecutableDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
 			KANBAN_RUNTIME_PORT: String(port),
-			CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"),
+			CODEX_HOME: isolatedCodexConfigurationDirectory,
 			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-storage"),
 		});
 		const sourcePath = resolve(import.meta.dirname, "../..");
@@ -267,6 +277,10 @@ it.skipIf(!packagedCliPath)(
 			expect(cardsB).toHaveLength(1);
 			expect(cardsB[0]?.id).not.toBe(cardA.id);
 			expect(cardsB[0]?.prompt).toBe("任务 B 的独立正文");
+			expect(cardsB[0]?.terminalAgentModelOverrideSettings).toEqual({
+				agentId: "codex",
+				modelId: "isolated-non-runnable-codex-model",
+			});
 			let droppedSubmissionResponse = false;
 			await page.route("**/api/trpc/**", async (route) => {
 				if (!droppedSubmissionResponse && route.request().url().includes("taskEditorCreation.submit")) {
