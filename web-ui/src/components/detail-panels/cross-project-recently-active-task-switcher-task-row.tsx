@@ -1,7 +1,6 @@
 import {
 	type CrossProjectTaskSwitcherEntryInProject,
 	type CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
-	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import {
@@ -12,6 +11,7 @@ import { Pin, PinOff } from "lucide-react";
 import { type ReactElement, type ReactNode, type RefObject, useCallback, useLayoutEffect, useRef } from "react";
 import { CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
 import { CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
+import { CrossProjectTaskSwitcherAgentStartupProgressStatusNotice } from "@/components/detail-panels/cross-project-task-switcher-agent-startup-progress-status-notice";
 import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-panels/cross-project-task-switcher-row-agent-and-title";
 import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
@@ -150,32 +150,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	const fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
 
-	const startupProgress = isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry)
-		? entry.taskEditorCreationAgentStartupProgress
-		: undefined;
-
-	const startupStatusLabel =
-		startupProgress?.phase === "waiting_for_evidence"
-			? "正在核验启动结果"
-			: startupProgress?.phase === "waiting_for_dependency"
-				? "启动等待恢复"
-				: "正在启动";
-	const startupStatusExplanation =
-		startupProgress?.lastError ?? startupProgress?.recoveryCondition ?? "任务已保存，等待 Agent 进程启动";
-	const startupStatus = startupProgress ? (
-		<span
-			role="status"
-			aria-hidden={isHoverFloatingCardVisible || undefined}
-			className={cn("relative px-2 py-1 text-xs text-status-orange", isHoverFloatingCardVisible && "invisible")}
-			title={startupStatusExplanation}
-			data-verification-anchor={
-				isHoverFloatingCardVisible ? undefined : `task-editor-creation-agent-startup:${entry.taskId}`
-			}
-		>
-			{startupStatusLabel}
-		</span>
-	) : null;
-
 	return (
 		<div
 			ref={rowElementRef}
@@ -193,7 +167,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			{...rowContainerAttributes}
 			{...rowHoverExpansionTriggerProps}
 		>
-			{startupStatus}
 			{/* 普通形态角标跟随行，悬浮形态跟随浮层卡体。 */}
 			{!isHoverFloatingCardVisible ? (
 				<TaskCardCornerStatusIndicators
@@ -238,6 +211,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							data-task-card-status-notices=""
 							className="pointer-events-none relative flex flex-wrap gap-1 text-[10px] leading-snug text-text-secondary empty:hidden"
 						>
+							<CrossProjectTaskSwitcherAgentStartupProgressStatusNotice
+								entryInProject={entryInProject}
+								isHiddenByHoverFloatingCard={isHoverFloatingCardVisible}
+							/>
 							{entry.automaticAgentFailureContinuation &&
 							entry.automaticAgentFailureContinuation.phase !== "recovered" ? (
 								<span className="max-w-full break-words text-status-orange">
@@ -334,16 +311,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 								}
 								hasUnreadHandoffNotification={isUnreadHandoff}
 							/>
-						) : null}
-						{isHoverFloatingCardVisible && startupProgress ? (
-							<span
-								role="status"
-								className="relative px-2 py-1 text-xs text-status-orange"
-								title={startupStatusExplanation}
-								data-verification-anchor={`task-editor-creation-agent-startup:${entry.taskId}`}
-							>
-								{startupStatusLabel}
-							</span>
 						) : null}
 						{fullTaskCard}
 					</div>

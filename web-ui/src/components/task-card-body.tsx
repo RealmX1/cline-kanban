@@ -222,6 +222,8 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	projectName: string | null;
 	/** 精简行和展开行复用同一摘要，避免快照或资源药丸改变分组宽度。 */
 	summaryMetadata?: ReactNode;
+	/** 启动准备与恢复提示放在标题下，与其他状态共用提示区。 */
+	agentStartupProgressStatusNotice?: ReactNode;
 	isKeptExpandedInList?: boolean;
 	/** 元信息行右侧药丸组最前，对应精简行摘要右侧。 */
 	promptCacheWarmthPill: ReactNode;
@@ -1545,6 +1547,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					data-task-card-status-notices=""
 					className="flex flex-wrap items-center gap-1 text-[10px] empty:hidden [&:not(:empty)]:mt-1"
 				>
+					{crossProjectTaskSwitcherRowElements?.agentStartupProgressStatusNotice}
 					{submissionStatusNotices}
 					{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
 						<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">

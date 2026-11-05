@@ -9,6 +9,7 @@ import {
 	CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
+import { CrossProjectTaskSwitcherAgentStartupProgressStatusNotice } from "@/components/detail-panels/cross-project-task-switcher-agent-startup-progress-status-notice";
 import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-panels/cross-project-task-switcher-row-agent-and-title";
 import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
 import {
@@ -69,6 +70,9 @@ function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 	return {
 		projectName: rowContext.projectName,
 		isKeptExpandedInList: rowContext.inListExpansionState === "kept_expanded_in_list",
+		agentStartupProgressStatusNotice: (
+			<CrossProjectTaskSwitcherAgentStartupProgressStatusNotice entryInProject={entryInProject} />
+		),
 		summaryMetadata: (
 			<CrossProjectTaskSwitcherRowSummaryMetadata
 				entryInProject={entryInProject}
@@ -150,6 +154,9 @@ function ExpandedTaskCardUnavailableFallback({
 					agentId={entryInProject.entry.agentId}
 					title={entryInProject.entry.title}
 				/>
+			</div>
+			<div data-task-card-status-notices="" className="mt-1 flex flex-wrap gap-1 empty:hidden">
+				<CrossProjectTaskSwitcherAgentStartupProgressStatusNotice entryInProject={entryInProject} />
 			</div>
 			<div className="mt-1 flex items-center gap-1.5 text-xs text-text-tertiary">{children}</div>
 			<div
