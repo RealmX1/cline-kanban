@@ -522,6 +522,9 @@ test("真实浮窗内标题编辑首次 Esc 只取消编辑，之后依次关闭
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
 	await expect(page.getByRole("alertdialog")).toBeVisible();
 	await expect(page.getByRole("alertdialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+	await expect
+		.poll(() => page.getByRole("alertdialog").evaluate((element) => element.style.pointerEvents))
+		.toBe("auto");
 
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
