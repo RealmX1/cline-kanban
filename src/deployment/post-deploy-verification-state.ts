@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { access, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	RuntimeBoardColumnId,
 	RuntimeDeploymentMarker,
@@ -43,6 +44,16 @@ import {
 	reconcileCarriedForwardDeploymentGroupTaskAgainstPreviousCopyWithinStateLock,
 } from "./post-deploy-verification-deployment-group-task-assembly";
 import type { TaskDeploymentAttributionComputation } from "./task-deployment-attribution-from-commit-integration-provenance";
+import {
+	allocateVerificationExecutionAttempt,
+	cancelVerificationExecutionAttempt,
+	listVerificationExecutionAttempts,
+	readVerificationExecutionAttempt,
+	type VerificationExecutionAttempt,
+	withVerificationExecutionAdmissionLock,
+} from "./verification-execution-attempt-store";
+import { verificationExecutionDefinitionFingerprint } from "./verification-execution-definition-fingerprint";
+import { buildVerificationExecutionRunSnapshot } from "./verification-script-runner";
 
 // ~/.cline/kanban/post-deploy-verification-state.json —— 跨 workspace 的单一全局文件（plan 1c）。
 const POST_DEPLOY_VERIFICATION_STATE_FILENAME = "post-deploy-verification-state.json";
@@ -216,16 +227,97 @@ function normalizeStateForPersistence(
 // 导出给同目录的门禁模块（post-deploy-verification-done-entry-gate.ts）；src/commands/** 不得直接调用（CLI 写动词走 runtime procedure）。
 export async function mutatePostDeployVerificationState<ResultType>(
 	nowIso: string,
-	mutator: (state: RuntimePostDeployVerificationState) => ResultType,
+	mutator: (state: RuntimePostDeployVerificationState) => ResultType | Promise<ResultType>,
 	touchedDeploymentId?: string,
 ): Promise<ResultType> {
-	return await lockedFileSystem.withLock(getPostDeployVerificationStateLockRequest(), async () => {
-		const state = await readPostDeployVerificationStateCorruptionTolerant(nowIso);
-		const result = mutator(state);
-		const normalized = normalizeStateForPersistence(state, nowIso, touchedDeploymentId);
-		await lockedFileSystem.writeJsonFileAtomic(getPostDeployVerificationStatePath(), normalized, { lock: null });
-		return result;
-	});
+	return await lockedFileSystem.withLock(getPostDeployVerificationStateLockRequest(), async () =>
+		withVerificationExecutionAdmissionLock(async () => {
+			const state = await readPostDeployVerificationStateCorruptionTolerant(nowIso);
+			await migrateLegacyRunningVerificationExecutionsWithinStateLock(state, nowIso);
+			const result = await mutator(state);
+			const normalized = normalizeStateForPersistence(state, nowIso, touchedDeploymentId);
+			// 先保存失效意图，后替换公共状态；丢失引用不能使仍存活的旧执行重新获准派发。
+			for (const attempt of await listVerificationExecutionAttempts()) {
+				if (attempt.launchStage === "terminal" || attempt.deploymentId === "standalone-verification") continue;
+				const found = findPostDeployVerificationTaskFollowingCarriedForwardChain(
+					normalized,
+					attempt.deploymentId,
+					attempt.taskId,
+				);
+				const item = found?.task.checklist.find((entry) => entry.id === attempt.itemId);
+				if (
+					!found ||
+					found.group.workspaceId !== attempt.workspaceId ||
+					isPostDeployVerificationTaskClosed(found.task) ||
+					found.task.postDeployVerificationTaskInstanceId !== attempt.postDeployVerificationTaskInstanceId ||
+					(attempt.taskIncarnationCreatedAtEpochMs !== null &&
+						found.task.taskIncarnationCreatedAtEpochMs !== attempt.taskIncarnationCreatedAtEpochMs) ||
+					!item ||
+					item.run?.verificationExecutionAttemptId !== attempt.verificationExecutionAttemptId ||
+					verificationExecutionDefinitionFingerprint(item) !== attempt.verificationDefinitionFingerprint
+				) {
+					await cancelVerificationExecutionAttempt(
+						attempt.verificationExecutionAttemptId,
+						"verification_binding_invalidated",
+						nowIso,
+					);
+				}
+			}
+			await lockedFileSystem.writeJsonFileAtomic(getPostDeployVerificationStatePath(), normalized, {
+				lock: null,
+				durable: true,
+			});
+			return result;
+		}),
+	);
+}
+
+async function migrateLegacyRunningVerificationExecutionsWithinStateLock(
+	state: RuntimePostDeployVerificationState,
+	nowIso: string,
+): Promise<void> {
+	const attempts = await listVerificationExecutionAttempts();
+	for (const group of state.deploymentGroups)
+		for (const task of group.tasks)
+			for (const item of task.checklist) {
+				if (item.run?.status !== "running" || item.run.verificationExecutionAttemptId) continue;
+				const existing = attempts.find(
+					(attempt) =>
+						attempt.deploymentId === group.deploymentId &&
+						attempt.taskId === task.taskId &&
+						attempt.itemId === item.id &&
+						attempt.startedAtIso === (item.run?.startedAtIso ?? nowIso) &&
+						attempt.launchStage === "legacy_unowned",
+				);
+				task.postDeployVerificationTaskInstanceId ??=
+					existing?.postDeployVerificationTaskInstanceId ?? randomUUID();
+				const attempt =
+					existing ??
+					(await allocateVerificationExecutionAttempt({
+						workspaceId: group.workspaceId,
+						deploymentId: group.deploymentId,
+						taskId: task.taskId,
+						postDeployVerificationTaskInstanceId: task.postDeployVerificationTaskInstanceId,
+						itemId: item.id,
+						verificationId: item.id.replace(/^authored:/, ""),
+						verificationDefinitionFingerprint: verificationExecutionDefinitionFingerprint(item),
+						script: item.script,
+						startedAtIso: item.run.startedAtIso ?? nowIso,
+						legacyUnowned: true,
+					}));
+				attempts.push(attempt);
+				item.run = {
+					...item.run,
+					...buildVerificationExecutionRunSnapshot(attempt, item.run),
+					recoveryObservation: {
+						reason: "legacy_execution_ownership_unknown",
+						message: "旧运行记录缺少执行归属，正在自动补证；确认退出前禁止重跑",
+						unchangedEvidenceProbeCount: attempt.recoveryBudget.unchangedEvidenceProbeCount,
+						nextActiveProbeAtEpochMs: attempt.recoveryBudget.nextActiveProbeAtEpochMs,
+					},
+				};
+				item.checked = false;
+			}
 }
 
 function findGroup(
@@ -474,6 +566,7 @@ export interface PostDeployVerificationTaskMutationResult {
 	ok: boolean;
 	task: RuntimePostDeployVerificationTask | null;
 	error?: string;
+	executionAttempt?: VerificationExecutionAttempt;
 }
 
 /**
@@ -544,16 +637,44 @@ export async function updateTaskChecklist(
 // 自动脚本运行前置 running 态（plan Stage 3）：并发护栏——已在 running 则拒绝再次运行。
 // 返回 ok=false + error 表示定位失败 / 非自动脚本项 / 已在运行。
 export async function setVerificationRunState(
-	input: { deploymentId: string; taskId: string; itemId: string; startedAtIso: string },
+	input: {
+		deploymentId: string;
+		taskId: string;
+		itemId: string;
+		startedAtIso: string;
+		workspaceId?: string;
+		taskIncarnationCreatedAtEpochMs?: number;
+		executionDeadlineAtEpochMs?: number;
+		expectedVerificationDefinitionFingerprint?: string;
+	},
 	nowIso: string,
 ): Promise<PostDeployVerificationTaskMutationResult> {
 	return await mutatePostDeployVerificationState(
 		nowIso,
-		(state) => {
-			const task = findTask(state, input.deploymentId, input.taskId);
+		async (state) => {
+			if (input.executionDeadlineAtEpochMs !== undefined && Date.now() >= input.executionDeadlineAtEpochMs)
+				return { ok: false, task: null, error: "受理已超过执行截止，未派发脚本" };
+			const found = findPostDeployVerificationTaskFollowingCarriedForwardChain(
+				state,
+				input.deploymentId,
+				input.taskId,
+			);
+			const task = found?.task;
 			if (!task) {
 				return { ok: false, task: null, error: taskNotFoundError(input.deploymentId, input.taskId) };
 			}
+			if (
+				(input.workspaceId && found?.group.workspaceId !== input.workspaceId) ||
+				isPostDeployVerificationTaskClosed(task) ||
+				task.droppedReason !== null ||
+				task.pendingConfirmation !== null ||
+				task.doneEntryClosureAuthorizationInFlight !== null
+			) {
+				return { ok: false, task, error: "验证条目已结案、失效或正在结案，不能启动脚本" };
+			}
+			if (input.taskIncarnationCreatedAtEpochMs === undefined)
+				return { ok: false, task, error: "当前任务实例 createdAt 暂不可核验，未派发脚本" };
+			reconcileVerificationTaskIncarnationWithinStateLock(task, input.taskIncarnationCreatedAtEpochMs);
 			const item = task.checklist.find((entry) => entry.id === input.itemId);
 			if (!item) {
 				return { ok: false, task, error: `checklist 项未找到：${input.itemId}` };
@@ -561,20 +682,48 @@ export async function setVerificationRunState(
 			if (item.kind !== "automated_script" || item.script === null) {
 				return { ok: false, task, error: `仅自动脚本型验证项可运行：${input.itemId}` };
 			}
+			const definitionFingerprint = verificationExecutionDefinitionFingerprint(item);
+			if (
+				input.expectedVerificationDefinitionFingerprint !== undefined &&
+				definitionFingerprint !== input.expectedVerificationDefinitionFingerprint
+			) {
+				return { ok: false, task, error: "验证定义已变更，请按当前定义重新运行；未受理或派发脚本" };
+			}
 			if (item.run?.status === "running") {
 				return { ok: false, task, error: `验证项正在运行中：${input.itemId}` };
 			}
-			item.run = {
+			task.postDeployVerificationTaskInstanceId ??= randomUUID();
+			const unresolved = (await listVerificationExecutionAttempts()).some(
+				(attempt) =>
+					attempt.workspaceId === found?.group.workspaceId &&
+					attempt.taskId === input.taskId &&
+					attempt.itemId === input.itemId &&
+					(attempt.launchStage !== "terminal" || attempt.assetsCleanupPending),
+			);
+			if (unresolved) return { ok: false, task, error: "正在核验旧执行退出，确认前禁止重跑" };
+			const attempt = await allocateVerificationExecutionAttempt({
+				workspaceId: found?.group.workspaceId ?? "",
+				deploymentId: found?.group.deploymentId ?? input.deploymentId,
+				taskId: input.taskId,
+				postDeployVerificationTaskInstanceId: task.postDeployVerificationTaskInstanceId,
+				taskIncarnationCreatedAtEpochMs: input.taskIncarnationCreatedAtEpochMs,
+				itemId: input.itemId,
+				verificationId: item.id.replace(/^authored:/, ""),
+				verificationDefinitionFingerprint: definitionFingerprint,
+				script: item.script,
+				startedAtIso: input.startedAtIso,
+				deadlineAtEpochMs: input.executionDeadlineAtEpochMs,
+			});
+			item.run = buildVerificationExecutionRunSnapshot(attempt, {
 				status: "running",
 				exitCode: null,
-				startedAtIso: input.startedAtIso,
 				finishedAtIso: null,
 				outputExcerpt: "",
-			};
+			});
 			// 重跑护栏：开始运行即清掉上一轮 passed 留下的 checked=true，避免「显示已通过但正在重跑」的
 			// 短暂不一致；结果回来后由 applyVerificationRunResult 依据 run.status 重新决定 checked。
 			item.checked = false;
-			return { ok: true, task };
+			return { ok: true, task, executionAttempt: attempt };
 		},
 		input.deploymentId,
 	);
@@ -582,27 +731,152 @@ export async function setVerificationRunState(
 
 // 自动脚本运行完成后写入 run 结果（plan Stage 3）：pass 置 checked=true，fail/timed_out/errored 置 checked=false。
 // checked 由 run 结果驱动（自动项 checkbox 不接受手动切换），完成门控 every(checked) 因而对自动项也成立。
+export interface VerificationRunResultApplicationInput {
+	deploymentId: string;
+	taskId: string;
+	itemId: string;
+	run: RuntimePostDeployVerificationRun;
+	currentTaskIncarnationCreatedAtEpochMs?: number | null;
+	readCurrentTaskIncarnationCreatedAtEpochMs?: () => Promise<number | null>;
+}
+
 export async function applyVerificationRunResult(
-	input: { deploymentId: string; taskId: string; itemId: string; run: RuntimePostDeployVerificationRun },
+	input: VerificationRunResultApplicationInput,
 	nowIso: string,
 ): Promise<PostDeployVerificationTaskMutationResult> {
-	return await mutatePostDeployVerificationState(
+	return mutatePostDeployVerificationState(
 		nowIso,
-		(state) => {
-			const task = findTask(state, input.deploymentId, input.taskId);
-			if (!task) {
-				return { ok: false, task: null, error: taskNotFoundError(input.deploymentId, input.taskId) };
-			}
-			const item = task.checklist.find((entry) => entry.id === input.itemId);
-			if (!item) {
-				return { ok: false, task, error: `checklist 项未找到：${input.itemId}` };
-			}
-			item.run = input.run;
-			item.checked = input.run.status === "passed";
-			return { ok: true, task };
-		},
+		(state) => applyVerificationRunResultWithinStateLock(state, input),
 		input.deploymentId,
 	);
+}
+
+export async function applyVerificationRunResultWithinStateLock(
+	state: RuntimePostDeployVerificationState,
+	input: VerificationRunResultApplicationInput,
+): Promise<PostDeployVerificationTaskMutationResult> {
+	const currentTaskIncarnationCreatedAtEpochMs = input.readCurrentTaskIncarnationCreatedAtEpochMs
+		? await input.readCurrentTaskIncarnationCreatedAtEpochMs()
+		: input.currentTaskIncarnationCreatedAtEpochMs;
+	const found = findPostDeployVerificationTaskFollowingCarriedForwardChain(state, input.deploymentId, input.taskId);
+	const task = found?.task;
+	if (!task) {
+		return { ok: false, task: null, error: taskNotFoundError(input.deploymentId, input.taskId) };
+	}
+	if (currentTaskIncarnationCreatedAtEpochMs !== undefined && currentTaskIncarnationCreatedAtEpochMs !== null) {
+		reconcileVerificationTaskIncarnationWithinStateLock(task, currentTaskIncarnationCreatedAtEpochMs);
+	}
+	const item = task.checklist.find((entry) => entry.id === input.itemId);
+	if (!item) {
+		return { ok: false, task, error: `checklist 项未找到：${input.itemId}` };
+	}
+	if (
+		isPostDeployVerificationTaskClosed(task) ||
+		task.droppedReason !== null ||
+		task.pendingConfirmation !== null ||
+		task.doneEntryClosureAuthorizationInFlight !== null ||
+		item.run?.status !== "running" ||
+		!input.run.verificationExecutionAttemptId ||
+		input.run.verificationExecutionAttemptId !== item.run.verificationExecutionAttemptId ||
+		input.run.postDeployVerificationTaskInstanceId !== task.postDeployVerificationTaskInstanceId ||
+		input.run.verificationDefinitionFingerprint !== verificationExecutionDefinitionFingerprint(item)
+	) {
+		return { ok: false, task, error: "执行结果归属已失效，拒绝覆盖当前验证条目" };
+	}
+	const attempt = await readVerificationExecutionAttempt(input.run.verificationExecutionAttemptId);
+	if (
+		attempt.workspaceId !== found?.group.workspaceId ||
+		attempt.taskId !== input.taskId ||
+		attempt.itemId !== input.itemId ||
+		attempt.postDeployVerificationTaskInstanceId !== task.postDeployVerificationTaskInstanceId ||
+		attempt.verificationDefinitionFingerprint !== input.run.verificationDefinitionFingerprint ||
+		(attempt.taskIncarnationCreatedAtEpochMs !== null &&
+			(currentTaskIncarnationCreatedAtEpochMs !== attempt.taskIncarnationCreatedAtEpochMs ||
+				task.taskIncarnationCreatedAtEpochMs !== attempt.taskIncarnationCreatedAtEpochMs ||
+				input.run.taskIncarnationCreatedAtEpochMs !== attempt.taskIncarnationCreatedAtEpochMs))
+	)
+		return { ok: false, task, error: "执行结果的任务或条目实例归属已失效" };
+	if (
+		attempt.cancellationIntent &&
+		input.run.status === "passed" &&
+		attempt.launchStage === "terminal" &&
+		isDeepStrictEqual(attempt.terminalRun, input.run)
+	) {
+		item.run = null;
+		item.checked = false;
+		return { ok: false, task, error: "旧结果已取消；退出已确认，已释放旧执行占用" };
+	}
+
+	if (
+		(attempt.taskIncarnationCreatedAtEpochMs === null && input.run.status === "passed") ||
+		(attempt.cancellationIntent !== null && input.run.status === "passed") ||
+		(input.run.status !== "running" &&
+			(attempt.launchStage !== "terminal" ||
+				!attempt.terminalRun ||
+				!isDeepStrictEqual(attempt.terminalRun, input.run)))
+	) {
+		return { ok: false, task, error: "尚未取得同一 attempt 的可信终结回执" };
+	}
+	item.run = input.run;
+	item.checked = input.run.status === "passed";
+	return { ok: true, task };
+}
+
+export function reconcileVerificationTaskIncarnationWithinStateLock(
+	task: RuntimePostDeployVerificationTask,
+	currentCreatedAt: number,
+): void {
+	if (isPostDeployVerificationTaskClosed(task)) return;
+	if (task.taskIncarnationCreatedAtEpochMs === undefined) {
+		// 旧 running 的未知历史不能倒填为当前卡片实例。
+		if (!task.checklist.some((item) => item.run?.status === "running"))
+			task.taskIncarnationCreatedAtEpochMs = currentCreatedAt;
+		return;
+	}
+	if (task.taskIncarnationCreatedAtEpochMs === currentCreatedAt) return;
+	task.taskIncarnationCreatedAtEpochMs = currentCreatedAt;
+	task.postDeployVerificationTaskInstanceId = randomUUID();
+	task.pendingConfirmation = null;
+	task.doneEntryClosureAuthorizationInFlight = null;
+	for (const item of task.checklist) {
+		item.run = null;
+		item.checked = false;
+	}
+}
+
+export async function validateVerificationExecutionAttemptForDispatch(
+	attemptId: string,
+	currentTaskIncarnationCreatedAtEpochMs?: number | null | (() => Promise<number | null>),
+): Promise<void> {
+	const attempt = await readVerificationExecutionAttempt(attemptId);
+	await mutatePostDeployVerificationState(new Date().toISOString(), async (state) => {
+		const currentCreatedAt =
+			typeof currentTaskIncarnationCreatedAtEpochMs === "function"
+				? await currentTaskIncarnationCreatedAtEpochMs()
+				: currentTaskIncarnationCreatedAtEpochMs;
+		const found = findPostDeployVerificationTaskFollowingCarriedForwardChain(
+			state,
+			attempt.deploymentId,
+			attempt.taskId,
+		);
+		const item = found?.task.checklist.find((entry) => entry.id === attempt.itemId);
+		if (
+			!found ||
+			found.group.workspaceId !== attempt.workspaceId ||
+			isPostDeployVerificationTaskClosed(found.task) ||
+			found.task.droppedReason !== null ||
+			found.task.postDeployVerificationTaskInstanceId !== attempt.postDeployVerificationTaskInstanceId ||
+			!item ||
+			item.run?.verificationExecutionAttemptId !== attemptId ||
+			verificationExecutionDefinitionFingerprint(item) !== attempt.verificationDefinitionFingerprint ||
+			attempt.taskIncarnationCreatedAtEpochMs === null ||
+			currentCreatedAt !== attempt.taskIncarnationCreatedAtEpochMs ||
+			found.task.taskIncarnationCreatedAtEpochMs !== attempt.taskIncarnationCreatedAtEpochMs ||
+			attempt.cancellationIntent ||
+			attempt.launchStage === "terminal"
+		)
+			throw new Error("执行的任务实例、attempt 或定义已失效");
+	});
 }
 
 /**
@@ -835,6 +1109,7 @@ export async function markTaskVerified(
 
 export interface ReconcileGroupBoardTask {
 	taskId: string;
+	taskIncarnationCreatedAtEpochMs?: number;
 	columnId: RuntimeBoardColumnId;
 }
 
@@ -982,6 +1257,12 @@ export async function reconcileGroup(
 			);
 
 			for (const task of group.tasks) {
+				const currentIncarnation = input.currentBoardTasks.find(
+					(entry) => entry.taskId === task.taskId,
+				)?.taskIncarnationCreatedAtEpochMs;
+				if (currentIncarnation !== undefined)
+					reconcileVerificationTaskIncarnationWithinStateLock(task, currentIncarnation);
+
 				if (!isPostDeployVerificationTaskAwaitingVerification(task)) {
 					continue;
 				}
@@ -1028,6 +1309,7 @@ export async function reconcileGroup(
 				group.tasks.push(
 					assemblePostDeployVerificationTaskForDeploymentGroup({
 						taskId: boardTask.taskId,
+						taskIncarnationCreatedAtEpochMs: boardTask.taskIncarnationCreatedAtEpochMs,
 						columnIdAtMatch: boardTask.columnId,
 						inclusionReason: "validation_column",
 						deploymentId: group.deploymentId,

@@ -312,6 +312,23 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		tempHome.cleanup();
 	});
 
+	it("状态流非法帧只关闭出错连接，其他连接仍收到广播", async () => {
+		const invalidFrameClient = await openQueuedRuntimeSocket(harness.streamUrl);
+		await waitForRuntimeMessage(invalidFrameClient, (message) => message.type === "snapshot");
+		try {
+			invalidFrameClient.socket.send("未掩码帧", { mask: false });
+			await vi.waitFor(() => expect(invalidFrameClient.socket.readyState).toBe(WebSocket.CLOSED), {
+				timeout: RUNTIME_STATE_STREAM_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS,
+			});
+			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
+			const message = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
+			expect(message.projects).toHaveLength(1);
+			expect(client.socket.readyState).toBe(WebSocket.OPEN);
+		} finally {
+			invalidFrameClient.socket.terminate();
+		}
+	});
+
 	it("无内容变化时不重发 projects_updated", async () => {
 		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 		const first = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
@@ -390,6 +407,40 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		harness.emitTerminalSummary(makeSummary("task-1"));
 		const second = await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
 		expect(second.projects[0]?.taskCounts.in_progress).toBe(3);
+	});
+
+	it("已观察会话的启动与交棒边沿立即构建，普通输出仍合并", async () => {
+		const initial = {
+			...makeSummary("startup"),
+			turnOwner: null,
+			liveness: "none",
+			userTurnKind: null,
+			pid: null,
+			startedAt: null,
+		} as const;
+		harness.emitTerminalSummary(initial);
+		const before = harness.buildProjectsPayload.mock.calls.length;
+		harness.projects[0] = makeProject("project-a", 1);
+		harness.emitTerminalSummary({ ...initial, turnOwner: "agent", liveness: "live", pid: 123, startedAt: 10 });
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 1);
+		harness.emitTerminalSummary({
+			...initial,
+			turnOwner: "agent",
+			liveness: "live",
+			pid: 123,
+			startedAt: 10,
+			lastOutputAt: 20,
+		});
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 1);
+		harness.emitTerminalSummary({
+			...initial,
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "review",
+			pid: 123,
+			startedAt: 10,
+		});
+		expect(harness.buildProjectsPayload.mock.calls.length).toBe(before + 2);
 	});
 
 	it("合并窗口内的多次 flush 合并构建、广播 projects，最终送达最新状态", async () => {

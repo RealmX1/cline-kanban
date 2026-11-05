@@ -140,7 +140,7 @@ describe("useAppHotkeys", () => {
 		expect(handleCloseGitHistory).toHaveBeenCalledTimes(1);
 	});
 
-	it("requests start-all confirmation on Mod+B", async () => {
+	it("使用平台启动全部快捷键，原 Mod+B 不再启动任务", async () => {
 		const onRequestStartAllReadyBacklogTasks = vi.fn();
 
 		await act(async () => {
@@ -167,16 +167,19 @@ describe("useAppHotkeys", () => {
 			);
 		});
 
-		const startAllTasksCall = mockUseHotkeys.mock.calls.find(([shortcut]) => shortcut === "mod+b");
-		if (!startAllTasksCall || typeof startAllTasksCall[1] !== "function") {
-			throw new Error("Expected start all tasks shortcut to be registered.");
-		}
-
-		act(() => {
-			const startAllTasksHandler = startAllTasksCall[1] as () => void;
-			startAllTasksHandler();
+		const startAllEvent = new KeyboardEvent("keydown", {
+			code: "KeyB",
+			metaKey: scopeToggleHotkeyTestEnvironment.isMacPlatform,
+			ctrlKey: !scopeToggleHotkeyTestEnvironment.isMacPlatform,
+			shiftKey: true,
+			bubbles: true,
+			cancelable: true,
 		});
-
+		act(() => {
+			document.body.dispatchEvent(startAllEvent);
+		});
+		expect(startAllEvent.defaultPrevented).toBe(true);
+		expect(mockUseHotkeys.mock.calls.some(([shortcut]) => shortcut === "mod+b")).toBe(false);
 		expect(onRequestStartAllReadyBacklogTasks).toHaveBeenCalledTimes(1);
 	});
 

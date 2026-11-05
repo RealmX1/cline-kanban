@@ -1,21 +1,27 @@
 import { parseAdditionalAgentStartupArguments } from "@runtime-parse-additional-agent-startup-arguments";
 import { useId, useRef, useState } from "react";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 
-export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
+function AgentSessionRestartWithAdditionalStartupArgumentsDialogForm({
 	open,
 	onOpenChange,
 	isAgentSessionInActiveTurn,
 	onRestartAgentSession,
 	disabled = false,
 }: {
+	workspaceId?: string | null;
+	conversationSessionId?: string;
+	runtimeSessionIncarnationId?: string | null;
 	open: boolean;
+	openingRequestSequence?: number;
 	onOpenChange: (open: boolean) => void;
 	isAgentSessionInActiveTurn: boolean;
 	onRestartAgentSession: (additionalAgentStartupArgumentsForThisRestart: string[]) => Promise<void>;
@@ -116,3 +122,27 @@ export function AgentSessionRestartWithAdditionalStartupArgumentsDialog({
 		</Dialog>
 	);
 }
+
+export const AgentSessionRestartWithAdditionalStartupArgumentsDialog = hostNonModalFloatingForm(
+	AgentSessionRestartWithAdditionalStartupArgumentsDialogForm,
+	{
+		formKind: "session-restart-with-arguments",
+		openingRequestIdentity: (props) => props.openingRequestSequence,
+		isOpen: (props) => props.open,
+		instanceIdentity: (props) =>
+			JSON.stringify([props.workspaceId, props.conversationSessionId, props.runtimeSessionIncarnationId]),
+		ownership: (props) => ({
+			workspaceId: props.workspaceId,
+			conversationSessionId: props.conversationSessionId,
+			sourceIdentity: props.runtimeSessionIncarnationId ?? undefined,
+		}),
+		withClose: (props, close) => ({
+			...props,
+			open: true,
+			onOpenChange: (open) => {
+				if (!open) close();
+			},
+		}),
+		onClosed: (props) => props.onOpenChange(false),
+	},
+);

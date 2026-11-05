@@ -592,8 +592,9 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 
 	it("用户拖拽进 Done：受门禁的卡不发命令（卡自然弹回），打开对话框并记住落点", async () => {
 		const programmaticCardMoves = mockProgrammaticCardMoves();
+		const sourceBoard = createBoardWithTaskInColumn(GATED_TASK_ID, "validation");
 		await renderHarness({
-			board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"),
+			board: sourceBoard,
 			activeGroup: createActiveGroupWithTask(GATED_TASK_WITH_UNCHECKED_ITEM),
 		});
 		const dropIntoDone: DropResult = {
@@ -617,6 +618,9 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 				insertAtIndexWithinDoneBoardColumn: 0,
 				taskCommentToAppendWhenMovingIntoDone: expect.any(Object),
 				runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
+				workspaceIdAtOpening: "project-1",
+				boardSnapshotAtOpening: sourceBoard,
+				openingRequestIdentity: expect.any(Symbol),
 			},
 		);
 	});

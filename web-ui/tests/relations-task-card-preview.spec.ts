@@ -360,7 +360,7 @@ test("真实评论与删除确认保持展开，Esc 依次退出模态框、预�
 	);
 	expect(commentWrites).toHaveLength(1);
 	expect(commentWrites[0]?.input).toMatchObject({ taskId: "review", expectedTaskIncarnationCreatedAtEpochMs: 1_000 });
-	await page.keyboard.press("Escape");
+	await comments.press("Escape");
 	await expect(comments).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();
 	await expect.poll(() => pane(page).evaluate((element) => element.contains(document.activeElement))).toBe(true);
@@ -515,7 +515,7 @@ test("真实浮窗内标题编辑首次 Esc 只取消编辑，之后依次关闭
 	await fullCard(page).getByRole("button", { name: "任务评论", exact: true }).click();
 	const comments = page.getByRole("dialog", { name: "任务评论 · 任务 review", exact: true });
 	await expect(comments).toBeVisible();
-	await page.keyboard.press("Escape");
+	await comments.press("Escape");
 	await expect(comments).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();
 	await expect.poll(() => pane(page).evaluate((element) => element.contains(document.activeElement))).toBe(true);

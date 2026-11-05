@@ -1,8 +1,7 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { parse, stringify } from "smol-toml";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -59,7 +58,8 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 			Object.assign(localConfiguration, {
 				model: "approved-model",
 				model_reasoning_effort: "high",
-				hide_agent_reasoning: true,
+				approval_policy: "on-request",
+				sandbox_mode: "workspace-write",
 			});
 			await writeFile(localPath, stringify(localConfiguration));
 			const environment = fixture.createIsolatedChildProcessEnvironment();
@@ -93,8 +93,14 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				};
 			};
 			const { child, api } = await start();
-			const observed = await api.runtime.getCodexConfigurationSyncState.query();
-			expect(observed.changes.filter((change) => change.approvalStatus === "pending")).toHaveLength(3);
+			let observed = await api.runtime.getCodexConfigurationSyncState.query();
+			await vi.waitFor(
+				async () => {
+					observed = await api.runtime.getCodexConfigurationSyncState.query();
+					expect(observed.changes.filter((change) => change.approvalStatus === "pending")).toHaveLength(3);
+				},
+				{ timeout: 15_000 },
+			);
 			expect(
 				(await readCodexConfigurationSyncStore()).sources[binding.sourceIdentity].fields[
 					JSON.stringify(["config.toml", "model"])
@@ -113,7 +119,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 			});
 			const model = findChange("model"),
 				effort = findChange("model_reasoning_effort"),
-				hiddenReasoning = findChange("hide_agent_reasoning");
+				permissionSuggestion = findChange("approval_policy");
 			await expect(
 				api.runtime.synchronizeCodexConfigurationChange.mutate({
 					...item(model),
@@ -127,7 +133,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 			expect(
 				(await api.runtime.batchCodexConfigurationAction.mutate(approval)).results.map((result) => result.status),
 			).toEqual(["stale_version", "applied"]);
-			await api.runtime.batchCodexConfigurationAction.mutate({ action: "reject", items: [item(hiddenReasoning)] });
+			await api.runtime.batchCodexConfigurationAction.mutate({
+				action: "reject",
+				items: [item(permissionSuggestion)],
+			});
 			const deferred = await api.runtime.batchCodexConfigurationAction.mutate({
 				action: "defer",
 				items: [item(effort)],
@@ -158,21 +167,18 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 			expect(parse(await readFile(localPath, "utf8"))).toMatchObject({
 				model: "approved-model",
 				model_reasoning_effort: "high",
-				hide_agent_reasoning: true,
+				approval_policy: "on-request",
+				sandbox_mode: "workspace-write",
 			});
-			const verification = await promisify(execFile)(
-				process.execPath,
-				[resolve(".plan/verification/verify-deployed-codex-configuration-approval-and-runtime-trace.cjs")],
-				{
-					env: {
-						...environment,
-						KANBAN_RUNTIME_HOST: new URL(restarted.runtimeUrl).hostname,
-						KANBAN_RUNTIME_PORT: new URL(restarted.runtimeUrl).port,
-					},
-					timeout: 15000,
+			await vi.waitFor(
+				async () => {
+					expect(
+						(await restarted.api.runtime.getCodexConfigurationSyncState.query()).diagnosticCoverage
+							?.fileObservation,
+					).toBe("active");
 				},
+				{ timeout: 5_000 },
 			);
-			expect(verification.stdout).toContain("基础采集已启动");
 			const evidenceDirectory = process.env.KANBAN_CODEX_CONFIGURATION_SYNC_API_EVIDENCE_DIRECTORY;
 			if (evidenceDirectory) {
 				await mkdir(evidenceDirectory, { recursive: true });

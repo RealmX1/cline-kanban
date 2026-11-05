@@ -313,6 +313,10 @@ export function TaskRelatedTasksPreviewButton({
 	const [knownCount, setKnownCount] = useState<number | null>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
+	const isWithinSeparateFloatingForm = (target: EventTarget | null) => {
+		const floatingForm = target instanceof Element ? target.closest("[data-non-modal-floating-form-window]") : null;
+		return floatingForm !== null && !floatingForm.contains(triggerRef.current);
+	};
 	const rememberInteractionTarget = useRelatedTaskPreviewFocusReturnAfterModalDialog(isOpen, contentRef);
 	const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pinnedOpen = useRef(false);
@@ -423,7 +427,12 @@ export function TaskRelatedTasksPreviewButton({
 				<Popover.Root
 					open
 					onOpenChange={(open) => {
-						if (!open && !hasOpenModalDialogOutsideRelatedTaskPreview()) close();
+						if (
+							!open &&
+							!hasOpenModalDialogOutsideRelatedTaskPreview() &&
+							!isWithinSeparateFloatingForm(document.activeElement)
+						)
+							close();
 					}}
 				>
 					<Popover.Anchor virtualRef={triggerRef} />
@@ -441,7 +450,7 @@ export function TaskRelatedTasksPreviewButton({
 							align="start"
 							sideOffset={6}
 							collisionPadding={8}
-							className="z-50 flex w-[min(52rem,calc(100vw-1rem))] max-h-[min(42rem,80dvh,var(--radix-popover-content-available-height))] flex-col overflow-hidden rounded-lg border border-border-bright bg-surface-2 font-sans text-text-primary shadow-xl focus:outline-none"
+							className="z-[45] flex w-[min(52rem,calc(100vw-1rem))] max-h-[min(42rem,80dvh,var(--radix-popover-content-available-height))] flex-col overflow-hidden rounded-lg border border-border-bright bg-surface-2 font-sans text-text-primary shadow-xl focus:outline-none"
 							onOpenAutoFocus={(event) => {
 								if (!requestedKeyboardFocus.current) event.preventDefault();
 								else contentRef.current?.focus();
@@ -449,6 +458,7 @@ export function TaskRelatedTasksPreviewButton({
 							}}
 							onCloseAutoFocus={(event) => event.preventDefault()}
 							onEscapeKeyDown={(event) => {
+								if (isWithinSeparateFloatingForm(event.target)) return;
 								if (hasOpenModalDialogOutsideRelatedTaskPreview() || isEditingWithinRelatedPreview()) {
 									event.preventDefault();
 									return;
@@ -460,6 +470,7 @@ export function TaskRelatedTasksPreviewButton({
 							}}
 							onInteractOutside={(event) => {
 								if (
+									isWithinSeparateFloatingForm(event.target) ||
 									hasOpenModalDialogOutsideRelatedTaskPreview() ||
 									(event.target instanceof Node && triggerRef.current?.contains(event.target))
 								)

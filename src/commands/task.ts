@@ -4,6 +4,10 @@ import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/cli
 import type { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
+import {
+	AGENT_WORK_DELEGATION_SELECTION_CAVEAT,
+	INDEPENDENT_TASK_CREATION_GUIDANCE,
+} from "../core/agent-work-delegation-selection-guidance";
 import type {
 	RuntimeAgentId,
 	RuntimeBoardCard,
@@ -36,6 +40,7 @@ import {
 	resolveCliTrpcTimeoutMs,
 	safeStringify,
 } from "../core/cli-process-guards";
+import { assertCreationPlanModeWasExplicitlySelected } from "../core/creation-startup-settings";
 import {
 	collectKanbanCliInvocationEnvironmentActorClaims,
 	encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
@@ -58,7 +63,10 @@ import {
 	type TaskClosureRequest,
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
-import { taskCommandExecutionSpecificationSchema } from "../core/task-command-execution-contract";
+import {
+	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
+	taskCommandExecutionSpecificationSchema,
+} from "../core/task-command-execution-contract";
 import {
 	resolveMainTaskConversationSessionSummary,
 	resolveTaskChatMessageTargetConversationSessionSummary,
@@ -673,6 +681,8 @@ async function getTaskFromRuntimeWorkspace(
 }
 
 interface TaskCreateCommandInput {
+	modelId?: string;
+	codexConfigurationProfileId?: string;
 	cwd: string;
 	title?: string;
 	prompt: string;
@@ -694,6 +704,8 @@ interface TaskCreateCommandInput {
 
 function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreateRequestedSettings {
 	return {
+		modelId: input.modelId,
+		codexConfigurationProfileId: input.codexConfigurationProfileId,
 		title: input.title,
 		prompt: input.prompt,
 		baseRef: input.baseRef,
@@ -722,6 +734,7 @@ function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreat
  * （看板、项目注册表、任务 worktree）无关，且幂等；不为它单造一条只读配置加载路径。
  */
 async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRecord> {
+	assertCreationPlanModeWasExplicitlySelected(input.startInPlanMode);
 	const registeredWorkspace = await resolveRuntimeWorkspace(input.projectPath, input.cwd, {
 		autoCreateIfMissing: false,
 	}).catch(() => null);
@@ -770,6 +783,7 @@ async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRec
 }
 
 async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
+	assertCreationPlanModeWasExplicitlySelected(input.startInPlanMode);
 	// 复用这一次已经解析出来的 workspace context，而不是再走一趟 loadWorkspaceState：后者内部会重跑
 	// detectGitRepositoryInfo（4 个以上同步 git 子进程），在建卡这条本就要跑一遍的路径上等于把 git
 	// 探测的开销翻倍——机器一忙就是好几秒。看板另外单独读一次（纯文件读，不碰 git）。
@@ -830,6 +844,24 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 			// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
 			workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 			taskAgentPermissionMode: effectiveSettings.resolvedSettings.requestedTaskAgentPermissionMode.value,
+			codexConfigurationProfileId: effectiveSettings.resolvedSettings.codexConfigurationProfileId.value ?? undefined,
+			codexConfigurationPermissionSelectionSource:
+				input.codexConfigurationProfileId && !input.taskAgentPermissionMode ? "profile" : "task_local",
+			terminalAgentModelOverrideSettings:
+				effectiveSettings.resolvedSettings.modelId.value &&
+				["claude", "codex", "cursor", "kimi", "omp"].includes(
+					effectiveSettings.resolvedSettings.effectiveAgentId.value,
+				)
+					? {
+							agentId: effectiveSettings.resolvedSettings.effectiveAgentId.value as
+								| "claude"
+								| "codex"
+								| "cursor"
+								| "kimi"
+								| "omp",
+							modelId: effectiveSettings.resolvedSettings.modelId.value,
+						}
+					: undefined,
 			autoReviewEnabled: input.autoReviewEnabled,
 			autoReviewMode: input.autoReviewMode,
 			agentId: input.agentId,
@@ -1982,6 +2014,22 @@ export function registerTaskCommand(program: Command): void {
 	});
 	const commandExecution = task.command("command-execution").description("托管所属命令执行、查询或持久取消。");
 	commandExecution
+		.command("register-recovery-evidence-observation")
+		.requiredOption("--registration-file <path>", "绑定精确执行及原材料摘要的只读观察器 JSON。")
+		.option("--project-path <path>", "项目主仓库路径。")
+		.action(async (options: { registrationFile: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const workspaceId = await ensureRuntimeWorkspace(
+					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+				);
+				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.registerRecoveryEvidenceObservation.mutate(
+					taskCommandExecutionRecoveryObservationRegistrationRequestSchema.parse(
+						JSON.parse(await readFile(options.registrationFile, "utf8")),
+					),
+				);
+			});
+		});
+	commandExecution
 		.command("start")
 		.requiredOption("--task-id <id>", "任务 ID。")
 		.requiredOption("--idempotency-key <key>", "相同工作与材料的稳定幂等键。")
@@ -2149,12 +2197,20 @@ export function registerTaskCommand(program: Command): void {
 
 	task
 		.command("create")
-		.description("Create a task in backlog.")
+		.description("在 Backlog 创建具有独立目标和生命周期的 Task。")
+		.addHelpText(
+			"after",
+			`\n${INDEPENDENT_TASK_CREATION_GUIDANCE}
+当前会话内部的分工可考虑 Subagent；同 Task 内与主线互补、适合共享工作目录且受益于用户独立参与的协作可考虑 task conversation-session create。
+${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
+		)
 		.option("--title <text>", "Task title.")
+		.option("--model <id>", "单次模型覆盖，缺省采用 Agent 当前默认配置。")
+		.option("--profile <id>", "Codex profile；未显式覆盖权限时采用其完整权限。")
 		.requiredOption("--prompt <text>", "Task prompt text.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Task base branch/ref.")
-		.option("--start-in-plan-mode [value]", "Set plan mode (true|false). Flag-only implies true.")
+		.option("--start-in-plan-mode [value]", "创建必须显式选择 true 或 false；单独旗标表示 true。")
 		.option(
 			"--task-agent-permission-mode <mode>",
 			`Agent permission tier: ${VALID_TASK_AGENT_PERMISSION_MODES.join(" | ")}.`,
@@ -2192,6 +2248,8 @@ export function registerTaskCommand(program: Command): void {
 		)
 		.action(
 			async (options: {
+				model?: string;
+				profile?: string;
 				title?: string;
 				prompt: string;
 				projectPath?: string;
@@ -2214,6 +2272,8 @@ export function registerTaskCommand(program: Command): void {
 			}) => {
 				await runTaskCommand(async () => {
 					const taskCreateCommandInput: TaskCreateCommandInput = {
+						modelId: options.model,
+						codexConfigurationProfileId: options.profile,
 						cwd: process.cwd(),
 						title: options.title,
 						prompt: options.prompt,

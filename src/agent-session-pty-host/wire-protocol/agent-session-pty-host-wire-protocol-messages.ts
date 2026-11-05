@@ -9,6 +9,8 @@
 //
 // 本文件属于 host 进程的依赖闭包：只允许 import `node:*`（host bundle 的 import 守卫会检查）。
 
+import type { HostedSessionTerminalModeCheckpoint } from "./hosted-session-terminal-mode-checkpoint";
+
 export const AGENT_SESSION_PTY_HOST_WIRE_PROTOCOL_VERSION = 1;
 
 export type AgentSessionPtyHostHostedSessionKind = "task_agent_session" | "shell_session";
@@ -245,6 +247,8 @@ export type AttachHostedSessionOutputStreamOutcome =
 			catchUpStartByteOffset: number;
 			catchUpEndByteOffset: number;
 			overwrittenByteCountBeforeCatchUpStart: number;
+			// 与本次实际追赶起点原子对齐；旧 host 缺省，不得拿 listing 时的状态代替。
+			terminalModeCheckpoint?: HostedSessionTerminalModeCheckpoint;
 	  }
 	| { kind: "unknown_hosted_session" };
 

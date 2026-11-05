@@ -1,5 +1,7 @@
+import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SHELL_SESSION_TERMINAL_COLS, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
+import * as runtimeTrpcClientQueryModule from "@/runtime/trpc-client";
 import type { RuntimeTerminalWsResizeMessage } from "@/runtime/types";
 import {
 	disposeAllPersistentTerminalsForWorkspace,
@@ -23,11 +25,14 @@ const terminalNormalBuffer = vi.hoisted(() => ({
 	getLine: (_lineIndex: number) => undefined,
 }));
 const terminalScrollToBottomMock = vi.hoisted(() => vi.fn());
+const terminalResetMock = vi.hoisted(() => vi.fn());
+const terminalResizeMock = vi.hoisted(() => vi.fn());
 const terminalInputEventHandlers = vi.hoisted(() => ({
 	data: [] as Array<(data: string) => void>,
 	binary: [] as Array<(data: string) => void>,
 }));
 const terminalWriteSideEffect = vi.hoisted(() => ({ current: null as null | ((data: string | Uint8Array) => void) }));
+const nativeTerminalParserControl = vi.hoisted(() => ({ enabled: false }));
 // 用来复现「xterm 的 write 回调再也不触发」这一真实卡死形态：写队列是一条串行 promise 链，
 // 链上任何一次回调没来就永久悬停，applyRestore 第一句正是 await 这条链。
 const terminalWriteCallbackControl = vi.hoisted(() => ({
@@ -118,7 +123,16 @@ vi.mock("@xterm/xterm", () => ({
 		options: { theme?: unknown };
 		rows: number;
 		unicode = { activeVersion: "" };
-		buffer = { active: terminalBuffer, normal: terminalNormalBuffer };
+		private readonly nativeTerminal = nativeTerminalParserControl.enabled
+			? new HeadlessTerminal({ allowProposedApi: true })
+			: null;
+		get buffer() {
+			return this.nativeTerminal?.buffer ?? { active: terminalBuffer, normal: terminalNormalBuffer };
+		}
+
+		get modes() {
+			return this.nativeTerminal?.modes;
+		}
 		private readonly inputDataHandlers: Array<(data: string) => void> = [];
 
 		constructor(options: { cols?: number; rows?: number; theme?: unknown }) {
@@ -137,7 +151,9 @@ vi.mock("@xterm/xterm", () => ({
 
 		clearSelection(): void {}
 
-		dispose(): void {}
+		dispose(): void {
+			this.nativeTerminal?.dispose();
+		}
 
 		focus(): void {}
 
@@ -189,9 +205,14 @@ vi.mock("@xterm/xterm", () => ({
 			this.input(text);
 		}
 
-		reset(): void {}
+		reset(): void {
+			terminalResetMock();
+			this.nativeTerminal?.reset();
+		}
 
 		resize(cols: number, rows: number): void {
+			terminalResizeMock(cols, rows);
+			this.nativeTerminal?.resize(cols, rows);
 			this.cols = cols;
 			this.rows = rows;
 		}
@@ -201,6 +222,15 @@ vi.mock("@xterm/xterm", () => ({
 		}
 
 		write(data: string | Uint8Array, callback?: () => void): void {
+			if (this.nativeTerminal) {
+				this.nativeTerminal.write(data, callback);
+				return;
+			}
+			if (data === "\x18\x1bc") {
+				this.reset();
+				callback?.();
+				return;
+			}
 			terminalWriteSideEffect.current?.(data);
 			if (terminalWriteCallbackControl.suspended) {
 				// 回调故意吞掉：这一次写永远不会「完成」，写队列自此卡死。
@@ -350,9 +380,12 @@ describe("persistent-terminal-manager", () => {
 		terminalBuffer.baseY = 0;
 		terminalBuffer.viewportY = 0;
 		terminalScrollToBottomMock.mockReset();
+		terminalResetMock.mockReset();
+		terminalResizeMock.mockReset();
 		terminalInputEventHandlers.data.length = 0;
 		terminalInputEventHandlers.binary.length = 0;
 		terminalWriteSideEffect.current = null;
+		nativeTerminalParserControl.enabled = false;
 		terminalWriteCallbackControl.suspended = false;
 		terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.length = 0;
 		webglAddonConstructions.count = 0;
@@ -433,6 +466,31 @@ describe("persistent-terminal-manager", () => {
 		expect(newerDisposeSpy).not.toHaveBeenCalled(); // 较新 parked 在最近 2 个内，保留
 		expect(mountedDisposeSpy).not.toHaveBeenCalled(); // mounted 永不被回收
 	});
+
+	it.each([undefined, "new-runtime-incarnation"])(
+		"未捕获打开时的会话代次时阻止带参数重启（当前代次=%s）",
+		async (currentIncarnation) => {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+			const restart = terminal.captureAgentSessionRestartForFloatingForm();
+			const refresh = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			const readCurrentSession = vi.fn(async () => ({
+				summary: { taskId: "task-a", runtimeSessionIncarnationId: currentIncarnation },
+			}));
+			const client = vi.spyOn(runtimeTrpcClientQueryModule, "getRuntimeTrpcClient").mockReturnValue({
+				runtime: {
+					getTaskConversationSession: {
+						query: readCurrentSession,
+					},
+				},
+			} as unknown as ReturnType<typeof runtimeTrpcClientQueryModule.getRuntimeTrpcClient>);
+			try {
+				await expect(restart(["--extra-argument"])).rejects.toThrow("暂时无法核对原会话代次");
+				expect(refresh).not.toHaveBeenCalled();
+			} finally {
+				client.mockRestore();
+			}
+		},
+	);
 
 	it("does not resend unchanged resize control frames", () => {
 		const terminal = ensurePersistentTerminal({
@@ -636,6 +694,36 @@ describe("persistent-terminal-manager", () => {
 		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
 	});
 
+	it.each(["io", "control"] as const)("仅 %s 通道断线也成对更换 viewer，快照落屏前不报告就绪", async (role) => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const onConnectionReady = vi.fn();
+		terminal.subscribe({ onConnectionReady });
+		await completeTerminalRestoreHandshake();
+		onConnectionReady.mockClear();
+		const originalIoSocket = findNewestTerminalSocket("io");
+		const originalControlSocket = findNewestTerminalSocket("control");
+		const originalClientId = new URL(originalControlSocket.url).searchParams.get("clientId");
+
+		findNewestTerminalSocket(role).close();
+		vi.advanceTimersByTime(250);
+
+		const currentIoSocket = findNewestTerminalSocket("io");
+		const currentControlSocket = findNewestTerminalSocket("control");
+		expect(currentIoSocket).not.toBe(originalIoSocket);
+		expect(currentControlSocket).not.toBe(originalControlSocket);
+		expect(originalIoSocket.readyState).toBe(MockWebSocket.CLOSED);
+		expect(originalControlSocket.readyState).toBe(MockWebSocket.CLOSED);
+		const currentClientId = new URL(currentControlSocket.url).searchParams.get("clientId");
+		expect(currentClientId).not.toBe(originalClientId);
+		expect(new URL(currentIoSocket.url).searchParams.get("clientId")).toBe(currentClientId);
+		currentIoSocket.onopen?.(new Event("open"));
+		currentControlSocket.onopen?.(new Event("open"));
+		expect(onConnectionReady).not.toHaveBeenCalled();
+		await completeTerminalRestoreHandshake();
+		expect(onConnectionReady).toHaveBeenCalledTimes(1);
+	});
+
 	it.each(["none", "exited", "failed", "interrupted"] as const)(
 		"无进程且 facet 为 %s 时屏蔽终端输入，恢复后不补发旧输入",
 		(liveness) => {
@@ -703,6 +791,7 @@ describe("persistent-terminal-manager", () => {
 			vi.advanceTimersByTime(1);
 			expect(countIoSockets()).toBe(previousSocketCount + 1);
 			findNewestTerminalSocket("io").onopen?.(new Event("open"));
+			await completeTerminalRestoreHandshake();
 		}
 		vi.advanceTimersByTime(5_000);
 		const stableSocketCount = countIoSockets();
@@ -724,23 +813,33 @@ describe("persistent-terminal-manager", () => {
 		findNewestTerminalSocket("io").close();
 		findNewestTerminalSocket("control").close();
 		vi.advanceTimersByTime(250);
-		const ioSocket = findNewestTerminalSocket("io");
+		const supersededIoSocket = findNewestTerminalSocket("io");
 		findNewestTerminalSocket("control").close();
-		ioSocket.onopen?.(new Event("open"));
+		supersededIoSocket.onopen?.(new Event("open"));
 		expect(onLastError.mock.lastCall?.[0]).toContain("Reconnecting");
 		expect(onConnectionReady).not.toHaveBeenCalled();
 		const previousSocketCount = webSocketInstances.length;
 		terminal.mount(createContainer(), appearance, { isVisible: true });
 		expect(webSocketInstances).toHaveLength(previousSocketCount);
 		vi.advanceTimersByTime(500);
-		expect(webSocketInstances).toHaveLength(previousSocketCount + 1);
-		findNewestTerminalSocket("control").onopen?.(new Event("open"));
+		expect(webSocketInstances).toHaveLength(previousSocketCount + 2);
+		const ioSocket = findNewestTerminalSocket("io");
+		const controlSocket = findNewestTerminalSocket("control");
+		controlSocket.onopen?.(new Event("open"));
 		expect(onConnectionReady).not.toHaveBeenCalled();
 		ioSocket.readyState = 0;
-		await completeTerminalRestoreHandshake();
+		dispatchSocketMessage(
+			controlSocket,
+			JSON.stringify({ type: "restore", snapshot: "保留的终端画面", cols: 80, rows: 24 }),
+		);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(parseControlMessages(controlSocket).filter((message) => message.type === "restore_complete")).toEqual([]);
 		expect(onConnectionReady).not.toHaveBeenCalled();
 		ioSocket.readyState = MockWebSocket.OPEN;
 		ioSocket.onopen?.(new Event("open"));
+		expect(parseControlMessages(controlSocket).filter((message) => message.type === "restore_complete")).toEqual([
+			{ type: "restore_complete" },
+		]);
 		expect(onConnectionReady).toHaveBeenCalledTimes(1);
 		expect(onLastError).toHaveBeenLastCalledWith(null);
 	});
@@ -878,6 +977,26 @@ describe("persistent-terminal-manager", () => {
 		expect(restoreRequests).toHaveLength(1);
 	});
 
+	it("后台返回后快照超时会成对重连，保持错误屏幕不可继续接收输出", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		const originalIoSocket = findNewestTerminalSocket("io");
+		const originalControlSocket = findNewestTerminalSocket("control");
+		const onConnectionReady = vi.fn();
+		terminal.subscribe({ onConnectionReady });
+		onConnectionReady.mockClear();
+		setDocumentHidden(true);
+		dispatchSocketMessage(originalIoSocket, "后台输出");
+		setDocumentHidden(false);
+		await vi.advanceTimersByTimeAsync(5_250);
+		expect(findNewestTerminalSocket("io")).not.toBe(originalIoSocket);
+		expect(findNewestTerminalSocket("control")).not.toBe(originalControlSocket);
+		expect(onConnectionReady).not.toHaveBeenCalled();
+		await completeTerminalRestoreHandshake();
+		expect(onConnectionReady).toHaveBeenCalledTimes(1);
+	});
+
 	it("keeps the terminal at the bottom after restore when it was following output", async () => {
 		const terminal = ensurePersistentTerminal({
 			...appearance,
@@ -940,6 +1059,100 @@ describe("persistent-terminal-manager", () => {
 			return terminal;
 		}
 
+		it.each([
+			{ label: "普通 shell", previousOutput: "\x1b[?1049h\x1b[?1000h过期全屏", snapshot: "当前 shell> " },
+			{
+				label: "未结束的 OSC",
+				previousOutput: "\x1b[?1049h\x1b[?1000h过期全屏\x1b]0;未结束的标题",
+				snapshot: "当前 shell> ",
+			},
+			{ label: "空快照", previousOutput: "\x1b[?1049h\x1b[?1000h过期全屏", snapshot: "" },
+		])(
+			"后台返回先排空 xterm 原生输入，旧全屏字节不能污染当前快照（$label）",
+			async ({ previousOutput, snapshot }) => {
+				vi.useFakeTimers();
+				nativeTerminalParserControl.enabled = true;
+				const terminal = mountedTerminal("task-native-pending-input");
+				await completeTerminalRestoreHandshake();
+				const nativeXtermParserTerminal = Reflect.get(terminal, "terminal") as HeadlessTerminal;
+				const previousTerminalIoSocket = findNewestTerminalSocket("io");
+				dispatchSocketMessage(previousTerminalIoSocket, previousOutput);
+				// 只推进 Promise；真实 WriteBuffer 的解析定时器仍未运行。
+				await Promise.resolve();
+				await Promise.resolve();
+				expect(nativeXtermParserTerminal.buffer.active.type).toBe("normal");
+				setDocumentHidden(true);
+				dispatchSocketMessage(previousTerminalIoSocket, "后台丢弃输出");
+				setDocumentHidden(false);
+				dispatchRestoreToNewest(snapshot);
+				await vi.advanceTimersByTimeAsync(20);
+				expect(countRestoreCompletions(findNewestControlSocket())).toBe(2);
+				expect(nativeXtermParserTerminal.buffer.active.type).toBe("normal");
+				expect(nativeXtermParserTerminal.modes.mouseTrackingMode).toBe("none");
+				expect(nativeXtermParserTerminal.buffer.active.getLine(0)?.translateToString(true)).toBe(snapshot);
+			},
+		);
+
+		it("control 快照已到达甚至已完成后，旧 IO 的迟到帧仍不能写入新画面", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-restore-late-io-boundary");
+			await completeTerminalRestoreHandshake();
+			const previousTerminalIoSocket = findNewestTerminalSocket("io");
+			const terminalControlSocket = findNewestControlSocket();
+			const terminalWriteChunks: Array<string | Uint8Array> = [];
+			terminalWriteSideEffect.current = (data) => terminalWriteChunks.push(data);
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			terminalWriteCallbackControl.suspended = true;
+			dispatchRestoreToNewest("\x1b[?1049h\x1b[?1000h当前全屏");
+			await vi.advanceTimersByTimeAsync(0);
+			dispatchSocketMessage(previousTerminalIoSocket, "\x1b[?1049l\x1b[?1000l迟到旧 normal 输出");
+			terminalWriteCallbackControl.suspended = false;
+			for (const completeWrite of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(0)) {
+				completeWrite();
+			}
+			await vi.advanceTimersByTimeAsync(20);
+			await resync;
+			dispatchSocketMessage(previousTerminalIoSocket, "恢复完成后仍在途的旧 IO");
+			dispatchSocketMessage(findNewestTerminalSocket("io"), "当前快照之后的新输出");
+			await vi.advanceTimersByTimeAsync(0);
+			expect(terminalWriteChunks).not.toContain("\x1b[?1049l\x1b[?1000l迟到旧 normal 输出");
+			expect(terminalWriteChunks).not.toContain("恢复完成后仍在途的旧 IO");
+			expect(terminalWriteChunks.at(-1)).toBe("当前快照之后的新输出");
+			expect(new URL(findNewestTerminalSocket("io").url).searchParams.get("clientId")).toBe(
+				new URL(terminalControlSocket.url).searchParams.get("clientId"),
+			);
+			expect(countRestoreCompletions(terminalControlSocket)).toBe(2);
+		});
+
+		it("后台返回的替换 IO 未打开时不确认恢复，连接超时后成对重连", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-restore-replacement-io-open-timeout");
+			await completeTerminalRestoreHandshake();
+			const terminalControlSocket = findNewestControlSocket();
+			const onConnectionReady = vi.fn();
+			terminal.subscribe({ onConnectionReady });
+			onConnectionReady.mockClear();
+			setDocumentHidden(true);
+			dispatchSocketMessage(findNewestTerminalSocket("io"), "后台输出");
+			setDocumentHidden(false);
+			dispatchRestoreToNewest("当前全屏");
+			const replacementTerminalIoSocket = findNewestTerminalSocket("io");
+			replacementTerminalIoSocket.readyState = 0;
+			await vi.advanceTimersByTimeAsync(0);
+			expect(countRestoreCompletions(terminalControlSocket)).toBe(1);
+			expect(onConnectionReady).not.toHaveBeenCalled();
+			await vi.advanceTimersByTimeAsync(5_250);
+			expect(findNewestTerminalSocket("io")).not.toBe(replacementTerminalIoSocket);
+			expect(findNewestControlSocket()).not.toBe(terminalControlSocket);
+			replacementTerminalIoSocket.readyState = MockWebSocket.OPEN;
+			replacementTerminalIoSocket.onopen?.(new Event("open"));
+			expect(countRestoreCompletions(terminalControlSocket)).toBe(1);
+			expect(onConnectionReady).not.toHaveBeenCalled();
+			await completeTerminalRestoreHandshake();
+			expect(countRestoreCompletions(findNewestControlSocket())).toBe(1);
+			expect(onConnectionReady).toHaveBeenCalledTimes(1);
+		});
+
 		it("只在控制通道上要一份快照，不打 refreshTaskTerminal", async () => {
 			const terminal = mountedTerminal("task-resync-basic");
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
@@ -974,15 +1187,7 @@ describe("persistent-terminal-manager", () => {
 			expect(countRestoreCompletions(controlSocket)).toBeGreaterThan(0);
 		});
 
-		// 回归护栏：discardStalledTerminalWriteQueue 换掉的只是队尾指针，取消不了旧链——链上那些还没跑的
-		// link 会在前驱 write 回调迟到触发后（写队列卡死最常见的成因恰恰是「渲染只是被节流、后来还是回来
-		// 了」）照常排空。没有代次判据的话它们会把陈旧字节补写进刚被恢复快照重画的屏幕，还会插进
-		// sliceRestoreSnapshotForIncrementalWrite 按固定字符数硬切出来的快照分片之间截断 ANSI 序列；
-		// 反过来，若只是让它们别执行，这批字节的 output_ack 就永远发不出去——服务端在发送时已按量累加
-		// unacknowledgedOutputBytes，而「只发 request_restore、control socket 不重连」这条非升级路径不会
-		// 触发服务端的 resetUnacknowledgedOutputAccounting，PTY 会在画面看似已恢复之后继续被背压按住。
-		// 两头都得守住：不落屏，但 ack 照发。
-		it("被丢弃的旧写队列解冻后不再补写陈旧字节，但仍把它们的 output_ack 发出去", async () => {
+		it("旧写队列解冻后不补写陈旧字节，旧 IO 的 ACK 不能记到替换后的 IO 上", async () => {
 			const terminal = mountedTerminal("task-resync-discarded-write-queue-generation");
 			const ioSocket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/io")).at(-1);
 			if (!ioSocket) {
@@ -1025,9 +1230,135 @@ describe("persistent-terminal-manager", () => {
 			const acknowledgedOutputBytes = parseControlMessages(controlSocket)
 				.filter((message) => message.type === "output_ack")
 				.reduce((totalBytes, message) => totalBytes + (message.bytes ?? 0), 0);
-			expect(acknowledgedOutputBytes).toBe(
-				staleChunkAlreadyHandedToXterm.length + staleChunkStillQueuedBehindTheStalledWrite.length,
-			);
+			expect(acknowledgedOutputBytes).toBe(0);
+			const currentIo = findNewestTerminalSocket("io");
+			dispatchSocketMessage(currentIo, "新 IO 输出");
+			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
+			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toEqual([
+				{ type: "output_ack", bytes: new TextEncoder().encode("新 IO 输出").byteLength },
+			]);
+		});
+
+		it.each([false, true])(
+			"旧快照等待写队列后迟到，不得清屏、改尺寸、滚动或完成恢复（重连=%s）",
+			async (reconnect) => {
+				vi.useFakeTimers();
+				const terminal = mountedTerminal("task-late-restore");
+				await completeTerminalRestoreHandshake();
+				const oldControlSocket = findNewestControlSocket();
+				const writtenChunks: Array<string | Uint8Array> = [];
+				terminalWriteSideEffect.current = (data) => writtenChunks.push(data);
+				terminalWriteCallbackControl.suspended = true;
+				dispatchSocketMessage(findNewestTerminalSocket("io"), "等待回调的实时输出");
+				await vi.advanceTimersByTimeAsync(0);
+				dispatchSocketMessage(
+					oldControlSocket,
+					JSON.stringify({
+						type: "restore",
+						snapshot: "过期快照",
+						cols: 20,
+						rows: 8,
+					}),
+				);
+				await vi.advanceTimersByTimeAsync(0);
+				terminalWriteCallbackControl.suspended = false;
+
+				const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+				if (reconnect) await vi.advanceTimersByTimeAsync(1_600);
+				dispatchRestoreToNewest("当前快照");
+				await resync;
+				const currentControlSocket = findNewestControlSocket();
+				const previousCompletionCount = countRestoreCompletions(currentControlSocket);
+				const previousOldCompletionCount = countRestoreCompletions(oldControlSocket);
+				terminalResetMock.mockClear();
+				terminalResizeMock.mockClear();
+				terminalScrollToBottomMock.mockClear();
+				writtenChunks.length = 0;
+				for (const completeWrite of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(0)) {
+					completeWrite();
+				}
+				await vi.advanceTimersByTimeAsync(0);
+
+				expect(terminalResetMock).not.toHaveBeenCalled();
+				expect(terminalResizeMock).not.toHaveBeenCalled();
+				expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+				expect(writtenChunks).toEqual([]);
+				expect(countRestoreCompletions(currentControlSocket)).toBe(previousCompletionCount);
+				expect(countRestoreCompletions(oldControlSocket)).toBe(previousOldCompletionCount);
+				if (reconnect) {
+					expect(
+						parseControlMessages(currentControlSocket).filter((message) => message.type === "output_ack"),
+					).toEqual([]);
+				}
+			},
+		);
+
+		it("旧写队列里的会话清屏回调迟到，也不能擦掉已经恢复的新画面", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-superseded-queued-reset");
+			terminalWriteCallbackControl.suspended = true;
+			dispatchSocketMessage(findNewestTerminalSocket("io"), "等待回调的实时输出");
+			await vi.advanceTimersByTimeAsync(0);
+			terminal.reset();
+			terminalWriteCallbackControl.suspended = false;
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestoreToNewest("当前快照");
+			await resync;
+			terminalResetMock.mockClear();
+			for (const completeWrite of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(0)) {
+				completeWrite();
+			}
+			await vi.advanceTimersByTimeAsync(0);
+			expect(terminalResetMock).not.toHaveBeenCalled();
+		});
+
+		it("同一连接连续收到两份快照，只应用最新一份并完成一次握手", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-consecutive-snapshots");
+			const onConnectionReady = vi.fn();
+			terminal.subscribe({ onConnectionReady });
+			const writtenChunks: Array<string | Uint8Array> = [];
+			terminalWriteSideEffect.current = (data) => writtenChunks.push(data);
+			terminalWriteCallbackControl.suspended = true;
+			dispatchSocketMessage(findNewestTerminalSocket("io"), "等待回调的实时输出");
+			await vi.advanceTimersByTimeAsync(0);
+			dispatchRestoreToNewest("过期快照");
+			dispatchRestoreToNewest("当前快照");
+			terminalWriteCallbackControl.suspended = false;
+			for (const completeWrite of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(0)) {
+				completeWrite();
+			}
+			await vi.advanceTimersByTimeAsync(0);
+			expect(writtenChunks).toEqual(["等待回调的实时输出", "当前快照"]);
+			expect(terminalResetMock).toHaveBeenCalledTimes(1);
+			expect(countRestoreCompletions(findNewestControlSocket())).toBe(1);
+			expect(onConnectionReady).toHaveBeenCalledTimes(1);
+		});
+
+		it("新恢复完成后，旧快照剩余分片与迟到回调都不再写屏或发送完成回执", async () => {
+			vi.useFakeTimers();
+			const terminal = mountedTerminal("task-superseded-snapshot-slices");
+			const writtenChunks: Array<string | Uint8Array> = [];
+			terminalWriteSideEffect.current = (data) => writtenChunks.push(data);
+			terminalWriteCallbackControl.suspended = true;
+			dispatchRestoreToNewest("过期快照分片".repeat(30_000));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(writtenChunks).toHaveLength(1);
+			terminalWriteCallbackControl.suspended = false;
+			const resync = terminal.resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession();
+			dispatchRestoreToNewest("当前快照");
+			await resync;
+			const controlSocket = findNewestControlSocket();
+			expect(countRestoreCompletions(controlSocket)).toBe(1);
+			writtenChunks.length = 0;
+			terminalScrollToBottomMock.mockClear();
+			for (const completeWrite of terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.splice(0)) {
+				completeWrite();
+			}
+			await vi.advanceTimersByTimeAsync(0);
+			expect(writtenChunks).toEqual([]);
+			expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+			expect(countRestoreCompletions(controlSocket)).toBe(1);
 		});
 
 		it("等不到快照就换一个 clientId 重连两条 socket（服务端那条 viewer 已僵死，原地重试没用）", async () => {

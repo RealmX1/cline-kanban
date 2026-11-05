@@ -1,31 +1,21 @@
-import { randomUUID } from "node:crypto";
-import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
-import { platform } from "node:os";
-import { dirname, join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, open, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { platform, userInfo } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as waitBeforeLockAcquisitionRetry } from "node:timers/promises";
+import Database from "better-sqlite3";
 import type { LockOptions } from "proper-lockfile";
-import * as lockfile from "proper-lockfile";
 import {
 	readUtf8FileWithDailyWorkProgressCostObservation,
 	recordDailyWorkProgressFileWrite,
 } from "../diagnostics/daily-work-progress-collection-cost-recorder";
-import { logFileLockError, logFileLockWarning } from "./lock-diagnostics-logger";
+import { logFileLockError } from "./lock-diagnostics-logger";
 
-// proper-lockfile 每 stale/2 刷新一次锁的 mtime；一旦刷新定时器因事件循环停摆而错过、锁即被判 stale
-// 并 compromise。10s 太紧，重负载下的偶发 GC/IO/停摆抖动就会误判。放宽到 30s（刷新周期 15s）以吸收
-// 这些抖动。注意：这只是纵深防御的调参，真正的停摆根因在 workspace diff 的并发治理（见 git-concurrency）。
+// 兼容旧调用者的导出；内核锁没有租期，staleMs 与 onCompromised 不再参与互斥判定。
 export const DEFAULT_LOCK_STALE_MS = 30_000;
 
-// 取锁等待预算必须**覆盖** stale 阈值（再留余量），这是不变式而非调参。
-//
-// 旧值 200×25ms ≈ 5s，远短于 30s 的 stale 阈值，语义自相矛盾：一个已经死掉的持有者要 30s 才被判 stale，
-// 一个**活着但慢**的持有者却只要持锁超过 5s 就让等待方直接抛 ELOCKED。高负载下这是常态——worktree
-// setup 锁跨 `git worktree add` + submodule + ignored-path 镜像，index 锁里跑同步 git，event loop 一停就是
-// 数秒到十几秒；实测（2026-10-02 运行时日志）一上午就有 24 次 hook 身份持久化因此失败，而新任务的
-// ensureWorktree 失败时只有一条 toast、卡片停在 In Progress、服务端零记录，表现为「新任务起不来」。
-//
-// 形状：先 25ms 起步按 1.05 倍缓慢退避（短争用仍然快速拿到锁），封顶 250ms 轮询（长争用时不空转 fs）。
-// 总预算由 sumLockAcquisitionRetryWaitBudgetMs 计算，测试钉住「≥ stale + 余量」。
-// EXPERIMENT_NODE: 取锁等待预算（当前 ≈43s）与退避形状；更长 = 极端争用下更晚报错，更短 = 慢持有者再次让等待方先失败。
+// 保留原有约 43s 的异步等待预算，持有者暂停不会释放锁。
+// EXPERIMENT_NODE: 取锁退避预算；更长允许慢操作完成，更短可更快报告争用。
 export const LOCK_ACQUISITION_WAIT_BUDGET_MARGIN_BEYOND_STALE_THRESHOLD_MS = 10_000;
 export const DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD = {
 	retries: 200,
@@ -71,9 +61,9 @@ export interface DirectoryLockRequest extends BaseLockRequest {
 export type LockRequest = FileLockRequest | DirectoryLockRequest;
 
 interface NormalizedLockRequest {
-	path: string;
-	options: LockOptions;
-	sortKey: string;
+	canonicalLockPath: string;
+	databasePath: string;
+	retries: NonNullable<LockOptions["retries"]>;
 }
 
 export interface AtomicTextWriteOptions {
@@ -91,36 +81,99 @@ function safeLockErrorMessage(error: unknown): string {
 	return String(error);
 }
 
-// compromise 之后 proper-lockfile 会把锁标记为已释放并删除锁文件，此时 release() 以这些 code 拒绝——
-// 对一个已失效的锁而言都是良性的、可预期的 compromise 善后信号，而非真正的锁文件删除失败。
-const BENIGN_RELEASE_FAILURE_CODES: ReadonlySet<string> = new Set(["ERELEASED", "ENOTACQUIRED", "ENOENT"]);
-
-function isBenignReleaseFailure(error: unknown): boolean {
-	if (typeof error === "object" && error !== null && "code" in error) {
-		const code = (error as NodeJS.ErrnoException).code;
-		return typeof code === "string" && BENIGN_RELEASE_FAILURE_CODES.has(code);
-	}
-	return false;
+// 数据库文件不能删除或原子替换；它的 inode 在 workspace 删除、重建后仍代表同一把内核锁。
+export function getFilesystemKernelWriteLockDirectoryPath(): string {
+	// 归属操作系统账号，不能随调用进程 HOME 改变，否则共享目标会被拆成两把锁。
+	return join(userInfo().homedir, ".cline", "kanban", "filesystem-kernel-write-locks");
 }
 
-function createLockOptions(request: LockRequest, lockfilePath: string): LockOptions {
-	const options: LockOptions = {
-		stale: request.staleMs ?? DEFAULT_LOCK_STALE_MS,
-		retries: request.retries ?? DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
-		realpath: false,
-		lockfilePath,
+async function canonicalizeLockPath(path: string): Promise<string> {
+	const absolutePath = resolve(path);
+	try {
+		return await realpath(absolutePath);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		const parent = dirname(absolutePath);
+		if (parent === absolutePath) throw error;
+		return join(await canonicalizeLockPath(parent), absolutePath.slice(parent.length));
+	}
+}
+
+function foldCanonicalFilesystemKernelWriteLockPath(canonicalLockPath: string): string {
+	let foldedPath = canonicalLockPath.normalize("NFD");
+	// 展开 Unicode 大写后再小写，迭代覆盖 ẞ → ß → ss；不能稳定时拒绝创建另一把锁。
+	for (let pass = 0; pass < 8; pass += 1) {
+		const nextFoldedPath = foldedPath.toUpperCase().toLowerCase().normalize("NFD");
+		if (nextFoldedPath === foldedPath) return foldedPath;
+		foldedPath = nextFoldedPath;
+	}
+	throw new Error("锁路径的 Unicode 归一化未能稳定，已拒绝取锁。");
+}
+
+async function acquireNormalizedKernelWriteLock(request: NormalizedLockRequest): Promise<() => Promise<void>> {
+	const explicitRetryDelays = Array.isArray(request.retries)
+		? request.retries.slice().sort((a, b) => a - b)
+		: undefined;
+	const retryOptions =
+		typeof request.retries === "number"
+			? { retries: request.retries }
+			: Array.isArray(request.retries)
+				? {}
+				: request.retries;
+	const retryCount = explicitRetryDelays?.length ?? retryOptions.retries ?? 10;
+	const startedAtMs = performance.now();
+	// 禁止 forever：旧请求类型继续兼容，但跨进程争用始终有界。
+	if (retryOptions.forever || !Number.isFinite(retryCount) || retryCount < 0)
+		throw new Error("文件锁重试必须使用有限的非负预算。");
+	const database = new Database(request.databasePath, { timeout: 0 });
+	try {
+		for (let attempt = 0; ; attempt += 1) {
+			try {
+				database.exec("BEGIN IMMEDIATE");
+				break;
+			} catch (error) {
+				const code = (error as { code?: string }).code;
+				if (code !== "SQLITE_BUSY" && code !== "SQLITE_LOCKED") throw error;
+				if (attempt >= retryCount || performance.now() - startedAtMs >= (retryOptions.maxRetryTime ?? Infinity))
+					throw Object.assign(new Error(`文件锁等待预算耗尽：${request.canonicalLockPath}`), { code: "ELOCKED" });
+				const randomFactor = retryOptions.randomize ? 1 + Math.random() : 1;
+				const delay =
+					explicitRetryDelays?.[attempt] ??
+					Math.min(
+						Math.round(randomFactor * (retryOptions.minTimeout ?? 1_000) * (retryOptions.factor ?? 2) ** attempt),
+						retryOptions.maxTimeout ?? Number.MAX_SAFE_INTEGER,
+					);
+				if (!Number.isFinite(delay) || delay < 0 || delay > 2_147_483_647)
+					throw new Error("文件锁退避时长超出有限计时器预算。");
+				await waitBeforeLockAcquisitionRetry(
+					Math.min(
+						delay,
+						Math.max(0, (retryOptions.maxRetryTime ?? Infinity) - (performance.now() - startedAtMs)),
+					),
+					undefined,
+					{ ref: !retryOptions.unref },
+				);
+			}
+		}
+	} catch (error) {
+		database.close();
+		throw error;
+	}
+	return async () => {
+		try {
+			if (database.inTransaction) database.exec("ROLLBACK");
+		} finally {
+			database.close();
+		}
 	};
-	// proper-lockfile 的默认 onCompromised 直接 `throw`；该回调运行在 mtime 刷新的定时器里，抛出即
-	// uncaughtException → installCliFatalErrorHandlers → process.exit(1)，一次可恢复的锁抖动就会杀掉整个
-	// 多项目服务器。调用方未显式提供时，安装一个「记录且绝不抛」的默认处理器：advisory 锁 compromise 最坏
-	// 只是下一次原子写需重取锁/重试，把它降级为可用性事件而非致命退出。
-	options.onCompromised =
-		typeof request.onCompromised === "function"
-			? request.onCompromised
-			: (error: Error) => {
-					logFileLockWarning(`compromised path=${lockfilePath} error=${safeLockErrorMessage(error)}`);
-				};
-	return options;
+}
+
+export async function releaseFilesystemKernelWriteLock(release: () => Promise<void>, lockPath: string): Promise<void> {
+	try {
+		await release();
+	} catch (error) {
+		logFileLockError(`release-failed path=${lockPath} error=${safeLockErrorMessage(error)}`);
+	}
 }
 
 async function readFileIfExists(path: string): Promise<string | null> {
@@ -149,23 +202,24 @@ async function synchronizeFilesystemPath(path: string, filesystemPathKind: "file
 
 export class LockedFileSystem {
 	private async normalizeLockRequest(request: LockRequest): Promise<NormalizedLockRequest> {
-		if (request.type === "directory") {
-			await mkdir(request.path, { recursive: true });
-			const lockfilePath = request.lockfilePath ?? join(request.path, request.lockfileName ?? ".lock");
-			return {
-				path: request.path,
-				options: createLockOptions(request, lockfilePath),
-				sortKey: lockfilePath,
-			};
-		}
-
-		await mkdir(dirname(request.path), { recursive: true });
-		const lockfilePath = request.lockfilePath ?? `${request.path}.lock`;
+		await mkdir(request.type === "directory" ? request.path : dirname(request.path), { recursive: true });
+		const lockPath =
+			request.lockfilePath ??
+			(request.type === "directory" ? join(request.path, request.lockfileName ?? ".lock") : `${request.path}.lock`);
+		// 不存在的叶子也折叠，保守串行大小写与 Unicode 别名；不依赖会在原子替换后改变的目标 inode。
+		const canonicalLockPath = foldCanonicalFilesystemKernelWriteLockPath(await canonicalizeLockPath(lockPath));
+		const directoryPath = getFilesystemKernelWriteLockDirectoryPath();
+		await mkdir(directoryPath, { recursive: true, mode: 0o700 });
 		return {
-			path: request.path,
-			options: createLockOptions(request, lockfilePath),
-			sortKey: lockfilePath,
+			canonicalLockPath,
+			databasePath: join(directoryPath, `${createHash("sha256").update(canonicalLockPath).digest("hex")}.sqlite`),
+			retries: request.retries ?? DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
 		};
+	}
+
+	// Codex 存储的显式 acquire/release 调用也经同一协议，释放时关闭持锁的同进程连接。
+	async acquireLock(request: LockRequest): Promise<() => Promise<void>> {
+		return await acquireNormalizedKernelWriteLock(await this.normalizeLockRequest(request));
 	}
 
 	async withLock<T>(request: LockRequest, operation: () => Promise<T>): Promise<T> {
@@ -173,39 +227,26 @@ export class LockedFileSystem {
 	}
 
 	async withLocks<T>(requests: readonly LockRequest[], operation: () => Promise<T>): Promise<T> {
-		const normalizedRequests = await Promise.all(
-			requests.map(async (request) => await this.normalizeLockRequest(request)),
+		const normalizedRequests = await Promise.all(requests.map((request) => this.normalizeLockRequest(request)));
+		const orderedRequests = [
+			...new Map(normalizedRequests.map((request) => [request.canonicalLockPath, request])).values(),
+		].sort((left, right) =>
+			left.canonicalLockPath < right.canonicalLockPath
+				? -1
+				: left.canonicalLockPath > right.canonicalLockPath
+					? 1
+					: 0,
 		);
-		const orderedRequests = normalizedRequests
-			.slice()
-			.sort((left, right) => left.sortKey.localeCompare(right.sortKey));
-		const acquiredLocks: Array<{ lockfilePath: string; release: () => Promise<void> }> = [];
+		const acquiredLocks: Array<{ canonicalLockPath: string; release: () => Promise<void> }> = [];
 		try {
 			for (const request of orderedRequests) {
-				const release = await lockfile.lock(request.path, request.options);
-				acquiredLocks.push({ lockfilePath: request.sortKey, release });
+				const release = await acquireNormalizedKernelWriteLock(request);
+				acquiredLocks.push({ canonicalLockPath: request.canonicalLockPath, release });
 			}
 			return await operation();
 		} finally {
 			for (const acquired of acquiredLocks.reverse()) {
-				try {
-					await acquired.release();
-				} catch (error) {
-					// 所有 release() 失败都在此被【刻意吞掉】、绝不重新抛出：该 try/catch 的唯一职责是消灭
-					// 「compromise 后 release() reject → unhandledRejection → installCliFatalErrorHandlers →
-					// process.exit(1)」这条第二崩溃路径，一次可恢复的锁抖动不得杀掉整个多项目服务器（尤其在
-					// fire-and-forget 的原子写调用点）。但日志需区分两类，避免把真实故障与良性情况混为一谈：
-					//   - 良性（ERELEASED / ENOTACQUIRED / ENOENT）：compromise 后锁已被标记释放并删除锁文件，
-					//     release() 因此拒绝——对已失效的锁属预期善后，记为 [warn]。
-					//   - 意外（EACCES / EIO / EPERM 等）：锁文件真的删不掉，写操作虽已成功却遗留了陈旧锁文件，
-					//     记为更醒目的 [error] 让运维察觉；遗留锁本身可经 staleMs(30s) 自愈，故仍无需抛出。
-					const releaseFailureLogTail = `path=${acquired.lockfilePath} error=${safeLockErrorMessage(error)}`;
-					if (isBenignReleaseFailure(error)) {
-						logFileLockWarning(`release-failed-benign ${releaseFailureLogTail}`);
-					} else {
-						logFileLockError(`release-failed-unexpected ${releaseFailureLogTail}`);
-					}
-				}
+				await releaseFilesystemKernelWriteLock(acquired.release, acquired.canonicalLockPath);
 			}
 		}
 	}

@@ -188,12 +188,13 @@ describe("主会话交接入口", () => {
 		expect(requests.request.mock.calls[1]?.[1].requestId).toBe(requests.request.mock.calls[0]?.[1].requestId);
 	});
 
-	it("生成中先给两种选择，暂不交接不发请求，确认等待才持久排定", async () => {
+	it("生成中先给三种选择，暂不交接不发请求，确认等待才持久排定", async () => {
 		requests.prepare.mockResolvedValueOnce({ ...preview, busyTaskConversationSessionIds: ["task-1"] });
 		await click("交接主会话");
 		await click("确认交接");
 		expect(button("暂不交接")).toBeTruthy();
 		expect(button("等待两者都停下后自动交接")).toBeTruthy();
+		expect(button("中断并强制交接")).toBeTruthy();
 		expect(requests.request).not.toHaveBeenCalled();
 		await click("暂不交接");
 		requests.prepare.mockResolvedValueOnce({ ...preview, busyTaskConversationSessionIds: ["task-1"] });
@@ -201,6 +202,41 @@ describe("主会话交接入口", () => {
 		await click("确认交接");
 		await click("等待两者都停下后自动交接");
 		expect(requests.request).toHaveBeenCalledTimes(1);
+		expect(requests.request.mock.calls[0]?.[1].busySessionHandoverStrategy).toBe("wait_until_ready");
+	});
+	it("只显示所选双方的具体原因，强制交接明确传递中断策略", async () => {
+		requests.prepare.mockResolvedValueOnce({
+			...preview,
+			busyTaskConversationSessionIds: ["task-1", "codex-peer", "unselected-peer"],
+			blockingConversationSessions: [
+				{
+					taskConversationSessionId: "task-1",
+					reason: "awaiting_state_verification",
+					description: "状态待核验：正在核对原生状态。",
+				},
+				{
+					taskConversationSessionId: "codex-peer",
+					reason: "awaiting_explicit_user_decision",
+					description: "明确待答：有问题需要处理。",
+				},
+				{ taskConversationSessionId: "unselected-peer", reason: "generating", description: "未选会话仍在生成。" },
+			],
+		});
+		await click("交接主会话");
+		const select = document.querySelector('select[aria-label="接收会话"]') as HTMLSelectElement;
+		await act(async () => {
+			select.value = "codex-peer";
+			select.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await click("确认交接");
+		expect(document.body.textContent).toContain("状态待核验");
+		expect(document.body.textContent).toContain("明确待答");
+		expect(document.body.textContent).not.toContain("未选会话仍在生成");
+		await click("中断并强制交接");
+		expect(requests.request.mock.calls[0]?.[1]).toMatchObject({
+			busySessionHandoverStrategy: "interrupt_blocking_sessions",
+			destination: { kind: "existing_codex_session", taskConversationSessionId: "codex-peer" },
+		});
 	});
 
 	it.each(["claude", "codex", "cursor", "kimi", "omp"] as const)(

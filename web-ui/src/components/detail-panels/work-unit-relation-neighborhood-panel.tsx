@@ -394,6 +394,7 @@ export function WorkUnitRelationNeighborhoodPanel({
 	});
 	const [isRelationNeighborhoodPanelExpanded, setIsRelationNeighborhoodPanelExpanded] = useState(initiallyExpanded);
 	const [isAddReferenceRelationDialogOpen, setIsAddReferenceRelationDialogOpen] = useState(false);
+	const [addReferenceRelationOpeningRequestSequence, setAddReferenceRelationOpeningRequestSequence] = useState(0);
 	const [isModelingEditorOpen, setIsModelingEditorOpen] = useState(detachedForeground);
 	const summaryTaskCardPreview = useRelationTaskCardPreview(
 		isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen,
@@ -487,7 +488,10 @@ export function WorkUnitRelationNeighborhoodPanel({
 						className="mr-0.5"
 						icon={<Plus size={11} />}
 						title="Add a relation from this task to another task"
-						onClick={() => setIsAddReferenceRelationDialogOpen(true)}
+						onClick={() => {
+							setAddReferenceRelationOpeningRequestSequence((sequence) => sequence + 1);
+							setIsAddReferenceRelationDialogOpen(true);
+						}}
 					>
 						Add relation
 					</Button>
@@ -508,10 +512,12 @@ export function WorkUnitRelationNeighborhoodPanel({
 			</div>
 			{workspaceId ? (
 				<WorkUnitRelationAddReferenceRelationDialog
+					openingRequestSequence={addReferenceRelationOpeningRequestSequence}
 					isAddReferenceRelationDialogOpen={isAddReferenceRelationDialogOpen}
 					onAddReferenceRelationDialogOpenChange={setIsAddReferenceRelationDialogOpen}
 					subjectKanbanBoardCardWorkspaceId={workspaceId}
 					subjectKanbanBoardCardTaskId={kanbanBoardCardTaskId}
+					subjectTaskIncarnationCreatedAtEpochMs={taskIncarnationCreatedAtEpochMs}
 					onReferenceRelationAssertionWriteSucceeded={handleReferenceRelationAssertionWriteSucceeded}
 				/>
 			) : null}

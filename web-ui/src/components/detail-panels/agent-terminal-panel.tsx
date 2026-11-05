@@ -33,6 +33,7 @@ import {
 import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement, Ref } from "react";
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
+import { TaskConversationTranscriptDocumentReaderPanel } from "@/components/detail-panels/task-conversation-transcript-document-reader-panel";
 import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
 import { TerminalScrollToLatestButton } from "@/components/detail-panels/terminal-scroll-to-latest-button";
 import { TerminalScrollbackTranscriptReaderPanel } from "@/components/detail-panels/terminal-scrollback-transcript-reader-panel";
@@ -83,6 +84,7 @@ interface AgentTerminalSessionControls {
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
+	captureAgentSessionRestartForFloatingForm?: () => (arguments_: string[]) => Promise<void>;
 	refreshTerminal: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
 	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
@@ -415,6 +417,10 @@ function AgentTerminalEmptySessionRecoveryNotice({
 // - Restart：杀掉 agent 进程再从磁盘 transcript 续跑。它会丢掉当前这一轮（还没落盘），所以在活跃回合里
 //   先弹确认。
 function TerminalViewResyncAndAgentSessionRestartButtons({
+	workspaceId,
+	taskId,
+	runtimeSessionIncarnationId,
+	captureAgentSessionRestartForFloatingForm,
 	supportsAdditionalStartupArgumentsForRestart,
 	showAgentSessionRestartButton,
 	canRestartAgentSession,
@@ -426,6 +432,10 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 	iconSize,
 	variant,
 }: {
+	workspaceId: string | null;
+	taskId: string;
+	runtimeSessionIncarnationId?: string | null;
+	captureAgentSessionRestartForFloatingForm?: () => (arguments_: string[]) => Promise<void>;
 	supportsAdditionalStartupArgumentsForRestart: boolean;
 	showAgentSessionRestartButton: boolean;
 	canRestartAgentSession: boolean;
@@ -437,9 +447,13 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 	iconSize: number;
 	variant: "default" | "ghost";
 }): ReactElement {
+	const [restartBoundToOpenedForm, setRestartBoundToOpenedForm] = useState<
+		((arguments_: string[]) => Promise<void>) | null
+	>(null);
 	const [isRestartConfirmOpen, setIsRestartConfirmOpen] = useState(false);
 	const [isAdditionalRestartActionMenuOpen, setIsAdditionalRestartActionMenuOpen] = useState(false);
 	const [isRestartWithArgumentsDialogOpen, setIsRestartWithArgumentsDialogOpen] = useState(false);
+	const [restartWithArgumentsOpeningRequestSequence, setRestartWithArgumentsOpeningRequestSequence] = useState(0);
 	const requestQuickRestart = () => {
 		if (isAgentSessionInActiveTurn) setIsRestartConfirmOpen(true);
 		else void onRestartAgentSession();
@@ -471,7 +485,16 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 					primaryLabel="快捷重启"
 					primaryAccessibleLabel="Restart agent session"
 					onPrimaryAction={requestQuickRestart}
-					additionalAction={{ label: "带参数重启…", onSelect: () => setIsRestartWithArgumentsDialogOpen(true) }}
+					additionalAction={{
+						label: "带参数重启…",
+						onSelect: () => {
+							setRestartWithArgumentsOpeningRequestSequence((sequence) => sequence + 1);
+							setRestartBoundToOpenedForm(
+								() => captureAgentSessionRestartForFloatingForm?.() ?? onRestartAgentSession,
+							);
+							setIsRestartWithArgumentsDialogOpen(true);
+						},
+					}}
 					disabled={!canRestartAgentSession || isRestartingAgentSession}
 				/>
 			) : showAgentSessionRestartButton ? (
@@ -491,10 +514,14 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 			) : null}
 			{isRestartWithArgumentsDialogOpen ? (
 				<AgentSessionRestartWithAdditionalStartupArgumentsDialog
+					openingRequestSequence={restartWithArgumentsOpeningRequestSequence}
+					workspaceId={workspaceId}
+					conversationSessionId={taskId}
+					runtimeSessionIncarnationId={runtimeSessionIncarnationId}
 					open
 					onOpenChange={setIsRestartWithArgumentsDialogOpen}
 					isAgentSessionInActiveTurn={isAgentSessionInActiveTurn}
-					onRestartAgentSession={onRestartAgentSession}
+					onRestartAgentSession={restartBoundToOpenedForm ?? onRestartAgentSession}
 					disabled={!canRestartAgentSession}
 				/>
 			) : null}
@@ -605,13 +632,13 @@ function TerminalTranscriptReaderToggleButton({
 	variant: "default" | "ghost";
 }): ReactElement {
 	return (
-		<Tooltip side="top" content={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}>
+		<Tooltip side="top" content={isOpen ? "返回实时终端" : "以文档阅读会话记录"}>
 			<Button
 				icon={isOpen ? <TerminalSquare size={iconSize} /> : <ScrollText size={iconSize} />}
 				variant={isOpen ? "primary" : variant}
 				size="sm"
 				onClick={onToggle}
-				aria-label={isOpen ? "Back to the live terminal" : "Read the transcript as a document"}
+				aria-label={isOpen ? "返回实时终端" : "以文档阅读会话记录"}
 				aria-pressed={isOpen}
 			/>
 		</Tooltip>
@@ -856,6 +883,7 @@ function AgentTerminalPanelLayout({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		captureAgentSessionRestartForFloatingForm,
 		adoptExistingAgentConversationAndResume,
 		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
@@ -907,6 +935,11 @@ function AgentTerminalPanelLayout({
 	const showCompactHeader = !showSessionToolbar;
 	const isMobile = useIsMobile();
 	const [isTranscriptReaderOpen, setIsTranscriptReaderOpen] = useState(false);
+	const transcriptReaderIdentity = JSON.stringify([workspaceId, taskId]);
+	const [openedTranscriptReaderIdentity, setOpenedTranscriptReaderIdentity] = useState<string | null>(null);
+	useEffect(() => {
+		if (isTranscriptReaderOpen) setOpenedTranscriptReaderIdentity(transcriptReaderIdentity);
+	}, [isTranscriptReaderOpen, transcriptReaderIdentity]);
 	useImperativeHandle(
 		shortcutInputFocusHandleRef,
 		() => ({
@@ -1023,6 +1056,10 @@ function AgentTerminalPanelLayout({
 									/>
 								</Tooltip>
 								<TerminalViewResyncAndAgentSessionRestartButtons
+									workspaceId={workspaceId}
+									taskId={taskId}
+									runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
+									captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
 									supportsAdditionalStartupArgumentsForRestart={
 										(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
 										"codex"
@@ -1108,6 +1145,10 @@ function AgentTerminalPanelLayout({
 								/>
 							</Tooltip>
 							<TerminalViewResyncAndAgentSessionRestartButtons
+								workspaceId={workspaceId}
+								taskId={taskId}
+								runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
+								captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
 								supportsAdditionalStartupArgumentsForRestart={
 									(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
 									"codex"
@@ -1251,13 +1292,31 @@ function AgentTerminalPanelLayout({
 						onScrollToLatest={scrollTerminalToLatest}
 					/>
 				)}
-				{isTranscriptReaderOpen ? (
-					<div className="absolute inset-0 z-10 flex">
-						<TerminalScrollbackTranscriptReaderPanel
-							taskId={taskId}
-							isVisible
-							scrollContainerRef={readerScrollContainerRef}
-						/>
+				{isTranscriptReaderOpen || openedTranscriptReaderIdentity === transcriptReaderIdentity ? (
+					<div className={cn("absolute inset-0 z-10", isTranscriptReaderOpen ? "flex" : "hidden")}>
+						{isSyntheticShellSession ? (
+							<TerminalScrollbackTranscriptReaderPanel
+								taskId={taskId}
+								isVisible={isTranscriptReaderOpen}
+								scrollContainerRef={readerScrollContainerRef}
+							/>
+						) : (
+							<TaskConversationTranscriptDocumentReaderPanel
+								key={transcriptReaderIdentity}
+								workspaceId={workspaceId}
+								workspaceTaskId={summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId}
+								taskConversationSessionId={taskId}
+								nativeTranscriptBindingKey={JSON.stringify([
+									summary?.agentId,
+									summary?.workspacePath,
+									summary?.agentNativeConversationSessionIdentity?.sourceAgentId,
+									summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+									summary?.agentNativeConversationSessionIdentity?.transcriptPath,
+								])}
+								isVisible={isTranscriptReaderOpen}
+								scrollContainerRef={readerScrollContainerRef}
+							/>
+						)}
 					</div>
 				) : null}
 				{showEmptyTerminalRecoveryState ? (

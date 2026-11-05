@@ -90,11 +90,12 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 	);
 
 	const requestPinTaskCardInOtherProjectToTaskPinboard = useCallback(
-		(workspaceId: string, taskId: string, taskTitle: string) => {
+		(workspaceId: string, taskId: string, taskTitle: string, taskIncarnationCreatedAtEpochMs?: number) => {
 			setOtherProjectPinReasonDialogRequest({
 				workspaceId,
 				taskId,
 				taskTitle,
+				taskIncarnationCreatedAtEpochMs,
 				isEditingExistingPin: false,
 				initialPinReason: "",
 			});
@@ -124,7 +125,7 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 				unpinTaskCardInOtherProjectFromTaskPinboard(workspaceId, entry.taskId);
 				return;
 			}
-			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, entry.taskId, entry.title);
+			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, entry.taskId, entry.title, entry.createdAt);
 		},
 		[host, requestPinTaskCardInOtherProjectToTaskPinboard, unpinTaskCardInOtherProjectFromTaskPinboard],
 	);
@@ -139,6 +140,7 @@ function useCrossProjectTaskPinboardPinning(host: CrossProjectRecentlyActiveTask
 				workspaceId,
 				taskId: entry.taskId,
 				taskTitle: entry.title,
+				taskIncarnationCreatedAtEpochMs: entry.createdAt,
 				isEditingExistingPin: true,
 				initialPinReason: entry.taskPinboardPinReason ?? "",
 			});
@@ -251,7 +253,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 	const { onOpenBacklogTaskEditorInProject } = host;
 	const requestPinTaskCardInOtherProjectFromExpandedTaskCard = useCallback(
 		(workspaceId: string, taskCard: BoardCard) =>
-			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard.id, taskCard.title),
+			requestPinTaskCardInOtherProjectToTaskPinboard(workspaceId, taskCard.id, taskCard.title, taskCard.createdAt),
 		[requestPinTaskCardInOtherProjectToTaskPinboard],
 	);
 	const requestEditBacklogTaskCardInOtherProjectFromExpandedTaskCard = useMemo(

@@ -34,6 +34,7 @@ import type {
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
 import { isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports } from "../core/codex-native-prompt-delivery-journal";
+import { resolveCreationStartupSettings } from "../core/creation-startup-settings";
 import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
@@ -72,6 +73,7 @@ import {
 	listTaskIdsBlockedFromEnteringDoneWithoutPostDeployVerificationClosure,
 	revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 } from "../deployment/post-deploy-verification-done-entry-gate";
+import { startVerificationExecutionRecoveryLifecycle } from "../deployment/verification-execution-recovery";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
@@ -137,8 +139,8 @@ import {
 	writeTaskClosureOperation,
 } from "../task-closure/task-closure-operation-store";
 import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
+import { observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
 import { createTaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
-import { observeUserStopBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-user-stop-port";
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
@@ -149,6 +151,10 @@ import { loadAndAdvanceSharedTaskIndexingContext } from "../task-indexing-suppor
 import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
+import {
+	readCreationAgentDefaultModel,
+	readCreationAgentDefaultModelWithoutBlockingBacklogCard,
+} from "../terminal/creation-agent-default-model";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import { createTerminalWebSocketBridge } from "../terminal/ws-server";
 import { type RuntimeTrpcContext, type RuntimeTrpcWorkspaceScope, runtimeAppRouter } from "../trpc/app-router";
@@ -157,7 +163,7 @@ import { createDeploymentApi } from "../trpc/deployment-api";
 import { createExploratoryApi } from "../trpc/exploratory-api";
 import { createHooksApi } from "../trpc/hooks-api";
 import { createProjectsApi } from "../trpc/projects-api";
-import { createRuntimeApi } from "../trpc/runtime-api";
+import { createRuntimeApi, type TaskSessionStopRequestScope } from "../trpc/runtime-api";
 import { createTaskCardActionApi } from "../trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../trpc/task-card-action-per-task-command-serializer";
 import { sendTaskChatMessageAcrossSessionTransports } from "../trpc/task-chat-message-send-across-session-transports";
@@ -284,6 +290,8 @@ function readWorkspaceIdFromRequest(request: IncomingMessage, requestUrl: URL): 
 
 export async function createRuntimeServer(deps: CreateRuntimeServerDependencies): Promise<RuntimeServer> {
 	const webUiDir = getWebUiDir();
+	let verificationExecutionRecoveryLifecycle: ReturnType<typeof startVerificationExecutionRecoveryLifecycle> | null =
+		null;
 
 	try {
 		await readFile(join(webUiDir, "index.html"));
@@ -1101,12 +1109,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		| ((workspaceId: string, taskId: string) => Promise<void>)
 		| undefined;
 	let recordTaskEditorCreationStop: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
-	let cancelOwnedCommandExecutionsForStoppedTask: ((workspaceId: string, taskId: string) => Promise<void>) | undefined;
+	let applyOwnedCommandExecutionPolicyForSessionStopRequest:
+		| ((workspaceId: string, taskId: string, stopRequestScope?: TaskSessionStopRequestScope) => Promise<void>)
+		| undefined;
 	const runtimeApi = createRuntimeApi({
 		recordManagedTaskPromptDeliveries: true,
-		onTaskSessionStopRequested: async (workspaceId, taskId) => {
+		onTaskSessionStopRequested: async (workspaceId, taskId, stopRequestScope) => {
 			try {
-				await cancelOwnedCommandExecutionsForStoppedTask?.(workspaceId, taskId);
+				await applyOwnedCommandExecutionPolicyForSessionStopRequest?.(workspaceId, taskId, stopRequestScope);
 				await recordProgrammaticReviewExplicitUserStopObservations({
 					workspaceId,
 					workspaceTaskId: taskId,
@@ -1236,11 +1246,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				const board = await loadWorkspaceBoardById(record.workspaceId);
 				const card = board.columns.flatMap((column) => column.cards).find((item) => item.id === record.taskId);
 				if (!card) throw new Error("原任务已不存在");
+				const originatingSessionLaunchSettings =
+					summary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
 				const restored = await runtimeApi.startTaskSession(scope, {
 					taskId: record.originatingConversationSessionId,
 					workspaceTaskId: record.taskId,
 					prompt: "",
 					baseRef: card.baseRef ?? "main",
+					codexReasoningEffortOverride: originatingSessionLaunchSettings
+						? originatingSessionLaunchSettings.codexReasoningEffortOverride
+						: card.codexReasoningEffortOverride,
 					resumePriorAgentConversationWithoutResendingPrompt: true,
 				});
 				summary = restored.summary;
@@ -1424,10 +1439,14 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		listWorkspaceIds: async () => (await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
 		warn: deps.warn,
 	});
-	cancelOwnedCommandExecutionsForStoppedTask = taskCommandExecutionApi.cancelForTask;
-	const stopObservingOwnedCommandExecutionUserStops = observeUserStopBeforeOwnedCommandExecutionTerminalInterrupt(
-		taskCommandExecutionApi.cancelForTask,
-	);
+	applyOwnedCommandExecutionPolicyForSessionStopRequest = (workspaceId, taskId, stopRequestScope) =>
+		stopRequestScope === "current_agent_turn"
+			? taskCommandExecutionApi.handleOwnerSessionInterrupt(workspaceId, taskId)
+			: taskCommandExecutionApi.cancelForTask(workspaceId, taskId);
+	const stopObservingOwnedCommandExecutionOwnerSessionInterrupts =
+		observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt(
+			taskCommandExecutionApi.handleOwnerSessionInterrupt,
+		);
 
 	codexConfigurationSyncService.start();
 	const taskMainSessionHandoverApi = createTaskMainSessionHandoverCoordinator({
@@ -1522,6 +1541,44 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
 	});
 	const taskEditorCreationSubmissionApi = createTaskEditorCreationSubmissionService({
+		onStatusChanged: () => {
+			void deps.runtimeStateHub.broadcastRuntimeProjectsUpdated(null);
+		},
+		resolveCreationSettings: async (scope, card) => {
+			const config = await deps.workspaceRegistry.loadScopedRuntimeConfig(scope);
+			const agentId = card.agentId ?? config.selectedAgentId;
+			const defaults = await readCreationAgentDefaultModelWithoutBlockingBacklogCard(
+				() =>
+					readCreationAgentDefaultModel(
+						agentId,
+						scope.workspacePath,
+						card.codexConfigurationProfileId,
+						card.terminalAgentModelOverrideSettings?.agentId === agentId
+							? card.terminalAgentModelOverrideSettings.modelId
+							: undefined,
+					),
+				{
+					codexConfigurationProfileId: card.codexConfigurationProfileId,
+					taskAgentSessionInitialization: card.taskAgentSessionInitialization,
+				},
+			);
+			return resolveCreationStartupSettings({
+				agentId,
+				agentSelectionSource: card.agentId ? "explicit_request" : "workspace_config_default",
+				startInPlanMode: card.startInPlanMode ?? config.newTaskStartInPlanModeByDefault,
+				taskAgentPermissionMode: card.taskAgentPermissionMode,
+				modelId:
+					card.terminalAgentModelOverrideSettings?.agentId === agentId
+						? card.terminalAgentModelOverrideSettings.modelId
+						: undefined,
+				defaultModelId: defaults.modelId,
+				codexConfigurationProfileId: card.codexConfigurationProfileId,
+				defaultCodexConfigurationProfileId: defaults.codexConfigurationProfileId,
+				codexConfigurationPermissionSelectionSource: card.codexConfigurationPermissionSelectionSource,
+				requestedAgentSessionTransport: card.ompAgentSessionTransport,
+				defaultSessionTransport: agentId === "omp" ? config.ompAgentSessionTransportForNewTasks : undefined,
+			});
+		},
 		findSession: findRuntimeSessionSummary,
 		resolveIdentity: async (workspaceId, card) => {
 			const { kanbanBoardCardIdentityCandidates } =
@@ -1737,9 +1794,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			deploymentApi: createDeploymentApi({
 				// 看板当前列快照：直读该 workspace 的 board.json，摊平 columns×cards → (taskId, columnId)。
 				loadBoardTasksForWorkspace: async (scope) => {
-					const board = await loadWorkspaceBoardById(scope.workspaceId);
+					const board = await loadWorkspaceBoardById(scope.workspaceId, { requireCompleteRead: true });
 					return board.columns.flatMap((column) =>
-						column.cards.map((card) => ({ taskId: card.id, columnId: column.id })),
+						column.cards.map((card) => ({
+							taskId: card.id,
+							columnId: column.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+						})),
 					);
 				},
 				// 确认框 agent response 按 agent 类型分源（plan Grilling #5）。
@@ -2100,11 +2161,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		let requestUrl: URL;
 		try {
 			requestUrl = new URL(request.url ?? "/", getKanbanRuntimeOrigin());
+			if (normalizeRequestPath(requestUrl.pathname) !== "/api/runtime/ws") {
+				return;
+			}
 		} catch {
 			socket.destroy();
-			return;
-		}
-		if (normalizeRequestPath(requestUrl.pathname) !== "/api/runtime/ws") {
 			return;
 		}
 		// ── Passcode gate for WebSocket upgrades (remote mode only) ──────────
@@ -2189,7 +2250,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			queuedTaskPromptDeliveryDispatcher.stop();
 		}
 		taskCommandExecutionApi.stop();
-		stopObservingOwnedCommandExecutionUserStops();
+		stopObservingOwnedCommandExecutionOwnerSessionInterrupts();
 		unregisterQueuedTaskPromptDeliveryDispatchObserver();
 		stopObservingManagedTaskPromptDeliveries();
 	};
@@ -2197,6 +2258,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
 		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			verificationExecutionRecoveryLifecycle?.stop() ?? Promise.resolve(),
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
 			taskEditorCreationSubmissionApi.close(),
@@ -2279,6 +2341,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();
 	taskCommandExecutionApi.startRecovery();
+	verificationExecutionRecoveryLifecycle = startVerificationExecutionRecoveryLifecycle({
+		readCurrentTaskIncarnationCreatedAtEpochMs: async (workspaceId, taskId) => {
+			const board = await loadWorkspaceBoardById(workspaceId, { requireCompleteRead: true });
+			return board.columns.flatMap((column) => column.cards).find((card) => card.id === taskId)?.createdAt ?? null;
+		},
+	});
 	taskMainSessionHandoverApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();

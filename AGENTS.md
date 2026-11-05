@@ -36,6 +36,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - `npm test` 是 `test:guarded`（`test:policy` AST 静态策略 + invoking-repository mutation canary），**不要直接 `npx vitest`**——那会绕过策略与 canary。两个 project：`precommit-safe`（`test/**/*.test.ts`）与 `runtime-integration`（`*.integration.test.ts`，串行单 worker）。单文件：`npm run test:guarded -- --project precommit-safe <file>`。web-ui 是另一套 vitest（jsdom、测试与源码同目录）：`npm run web:test`；e2e 用 Playwright：`npm --prefix web-ui run e2e`。桌面壳：`npm --prefix packages/desktop run typecheck|test`。
 - **验证构建前先检查 `dist` 与 `web-ui/dist` 的 realpath**：任务 worktree 可能把它们软链到主仓库共享产物。必须先隔离两处输出，并显式设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`；不能把更新共享产物当成普通验证构建。
 - 真实 git 测试只能经 `test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts` 操作仓库（细则见 `test/README.md`）。
+- runtime 测试的 `createSpawnedChildProcessRegistrySigkilledAfterEachTest` 只登记句柄，必须显式在 `afterEach` 调用其回收方法；不能让仍在写盘的 runtime 与 fixture 清理并发。
 - 计时 / 资源阈值断言（等子进程退出、性能绊线、RSS 上限）按 `test/README.md`「负载敏感的墙钟 / 资源断言」分类：测试侧等待用两档（软档只告警、硬档才失败），并闭合用例与 hook 超时；**不要**用宿主 CPU 争用信号放过失败（实测不可靠）。
 - pre-commit（husky）顺序：`biome check --staged` → `npm run typecheck` → `npm run test:precommit`。
 
@@ -47,6 +48,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
+- **独立填写窗由页面级宿主持有**：入口只登记窗口，导航不卸载表单；任务键带 workspace/task/incarnation，保存绑定打开时归属。任务编辑器入口不得与窗口 controller 竞争持久草稿。见 `docs/non-modal-floating-form-windows-and-retained-sessions.md`。
 - **lint 强制的边界**（biome + `grit/*.grit`，各条 includes 作用域外仍只是约定）：`@clinebot/*` 直引限制（override 排除 `src/cline-sdk/**` 且只拦 `@clinebot/core`——目录内靠自觉，已有直引反例）；`createWorkspaceTrpcClient` 仅限 `web-ui/src/runtime/*-query.ts`；`src/`（除 `cli.ts`）禁 `console.*` 与 `process.exit`；禁解构 `process.env`；`src/commands/**` 禁直写 board/sessions（`mutateWorkspaceState` 等）、禁 import 关系账本模块、禁写 PDV `verifiedAt`——CLI 写动词一律走 runtime procedure，否则关系账本记不到行动者（dd2db 1a）。格式：tab 缩进、indentWidth 3、lineWidth 120。
 
 ## 铁律（每条都踩出过事故；细节见指针，此处只放承重规则）
@@ -60,6 +62,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **Codex 暂存与注入分开**：Ctrl+S／Cmd+S 只走本代原生编辑器桥接，写库失败须非零退出；确认原生清框/恢复后才解锁与回放。注入继续 `turn/start`，旧会话不得转发无效 Ctrl+S。协议与恢复见 `docs/codex-draft-stash-to-prompts.md`。
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
+- **工作区 JSON 是已提交快照的投影**：读取和缓存必须识别快照日志与 `workspaceStateSnapshotCommitId`；后续写入先恢复投影再比较 revision，不重做业务变更。新旧写锁协议切换须核验旧写入者退出，回退先投影日志；见 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
@@ -105,6 +108,7 @@ web-ui：
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
+| `docs/non-modal-floating-form-windows-and-retained-sessions.md` | 通用填写浮窗、常驻宿主、实例归属、焦点层级及跨页面保存 |
 | `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |
@@ -115,13 +119,16 @@ web-ui：
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
 | `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
 | `docs/codex-configuration-writers-and-sync.md` | Codex 持久配置 writer、历史桥接、增量合并、选择性同步、原所有者重载及阶段闭包 |
+| `docs/codex-source-shared-plugin-installation-and-native-update-coordination.md` | Codex 同源 plugins／marketplace 双根、原生安装单写者、跨 profile 中断恢复及能力边界 |
 | `docs/agent-context-management.md` | 上下文管理方法论（本文件的维护规则由此而来） |
 | `docs/session-facet-model.md` / `docs/agent-output-timestamps.md` | facet 模型与双时间戳机制全文 |
 | `docs/exploratory-mode-host-integration.md` | Exploratory Mode 集成要点（投影层 / 指令注入 / N0a 身份 sidecar / 作业 hook 短路 / findings 链路 / 与核心包的契约指针） |
 | `docs/post-deploy-verification.md` / `docs/post-deploy-verification-natural-usage-observation-pipeline-design.md` | PDV 现行机制（三区归属、门禁、原因码、待观察记录）与「自然使用中多模态判定」pipeline 设计稿 |
+| `docs/post-deploy-verification-script-execution-attempt-supervision.md` | 自动脚本的持久 attempt、原生进程监督、退出确认与无浏览器恢复边界 |
 | `docs/agent-session-fork-prompt-cache-measurements.md` | 五家 harness 的 fork prompt cache 实测（谁能命中、遥测陷阱、复现成本） |
 | `docs/post-mortems/codex-memory-consolidation-hook-overwrites-resume-identity-2026-10-20.md` | Codex 后台记忆整理 hook 的整事件隔离、原生转录续接预检与坏身份现场恢复 |
 | `docs/terminal-io.md` | output-reactions、终端 visibility 协议、PTY/argv 特殊字符安全 |
+| `docs/task-conversation-transcript-document-reader.md` | Agent 文档阅读的持久转录来源、稳定快照、分页与阅读状态保留；普通 shell 的终端缓冲区边界 |
 | `docs/automatic-agent-failure-continuation.md` | 网络／容量自动恢复、独立开关、持久 episode、原生投递与重启核对 |
 | `docs/prompt-library-agent-input-focus-handoff.md` | Prompt / Command 显式填入的同步聚焦、手机页签交接与来源条目点击稳定性 |
 | `docs/agent-harness-kimi.md` / `docs/agent-harness-omp-acp.md` / `docs/agent-harness-cursor.md` | Kimi、oh-my-pi(ACP) 与 Cursor 接入坑（Cursor：chat store 布局、trust、启动前分配 id、续跑预检） |

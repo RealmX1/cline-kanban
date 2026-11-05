@@ -13,7 +13,7 @@ import { isAutomaticAgentFailureContinuationWaiting } from "./session-activity";
 //
 // 五个区自上而下：Pinned → Running → Cache warm · your turn → Recent → Shelved。
 // Shelved 优先且独占归属；其余任务的 Pinned 允许与主分组重复，主分组按 Running > Cache warm > Recent 互斥归属。
-// Running 只看可信 Agent 回合、进程存活或明确后台等待，不读 PTY 输出新鲜度。
+// Running 展示可信 Agent 回合与已保存且请求启动的准备状态，不读 PTY 输出新鲜度；准备态不改 session facet。
 // Recent 包含所有阶段，统一按最近触达截取 7 / 30 天，再应用阶段多选与排序。
 // Cache warm 继续只收 In progress / Review，避免提醒用户接续已交付验证或完成的对话。
 //
@@ -125,6 +125,35 @@ export function isCrossProjectTaskSwitcherEntryRunning(
 	}
 	// 静默、转圈和重绘均不能证明回合结束。存活性由运行时负责，明确 park 仍由 agent 持有回合。
 	return entry.liveness === "live" || entry.isParkedAwaitingDispatchedBackgroundWork;
+}
+
+export function isCrossProjectTaskSwitcherEntryPreparingAgentStartup(
+	entry: RuntimeCrossProjectTaskSwitcherEntry,
+	workspaceId?: string,
+): boolean {
+	const progress = entry.taskEditorCreationAgentStartupProgress;
+	return Boolean(
+		progress?.cardPersisted &&
+			progress.startRequested &&
+			!progress.startCompleted &&
+			progress.taskId === entry.taskId &&
+			progress.taskIncarnationCreatedAtEpochMs === entry.createdAt &&
+			(workspaceId === undefined || progress.workspaceId === workspaceId) &&
+			[
+				"saving_card",
+				"saving_relations",
+				"starting_agent",
+				"waiting_for_dependency",
+				"waiting_for_evidence",
+			].includes(progress.phase) &&
+			!entry.taskShelvingState?.isShelved &&
+			(entry.columnId === "backlog" || entry.columnId === "in_progress") &&
+			((entry.turnOwner === null && entry.liveness === "none" && entry.agentProcessStartedAt == null) ||
+				(entry.agentSessionHasNoEstablishedAcpConnection === true &&
+					entry.turnOwner === "user" &&
+					((entry.liveness === "exited" && entry.userTurnKind === "review") ||
+						(entry.liveness === "failed" && entry.userTurnKind === "error")))),
+	);
 }
 
 // Cache warm 区只收「还等着人回复 agent」的列：In progress / Review。用户把任务移进 Validation（交给验证）或
@@ -320,6 +349,7 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 		| "lastAgentConversationUserHandoffObservation"
 		| "lastOpenedByUserAt"
 		| "taskDescriptionLastUpdatedAt"
+		| "taskEditorCreationAgentStartupProgress"
 	>,
 	activityHorizonStartAt: number,
 ): boolean {
@@ -329,6 +359,7 @@ export function isTaskCardWithinCrossProjectTaskSwitcherActivityScope(
 	if (entry.turnOwner === "agent") {
 		return true;
 	}
+	if (entry.taskEditorCreationAgentStartupProgress) return true;
 	return resolveMostRecentlyTouchedAtForCrossProjectTaskSwitcherEntry(entry) >= activityHorizonStartAt;
 }
 
@@ -418,7 +449,10 @@ export function assignCrossProjectTaskSwitcherSections(
 			automaticRecoveryWaitingEntries.push(entryInProject);
 			continue;
 		}
-		if (isCrossProjectTaskSwitcherEntryRunning(entry, input.nowMs)) {
+		if (
+			isCrossProjectTaskSwitcherEntryRunning(entry, input.nowMs) ||
+			isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry, entryInProject.workspaceId)
+		) {
 			runningEntries.push(entryInProject);
 			continue;
 		}
@@ -446,7 +480,18 @@ export function assignCrossProjectTaskSwitcherSections(
 			),
 	);
 	// Running 内先进入的在前、后进入的在后；顺序只在回合边沿变化，不随 agent 输出抖动。
-	runningEntries.sort(compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey);
+	runningEntries.sort((left, right) => {
+		const leftStarting = isCrossProjectTaskSwitcherEntryPreparingAgentStartup(left.entry);
+		const rightStarting = isCrossProjectTaskSwitcherEntryPreparingAgentStartup(right.entry);
+		if (leftStarting !== rightStarting) return leftStarting ? 1 : -1;
+		if (leftStarting && rightStarting) {
+			const difference =
+				(left.entry.taskEditorCreationAgentStartupProgress?.acceptedAtEpochMs ?? 0) -
+				(right.entry.taskEditorCreationAgentStartupProgress?.acceptedAtEpochMs ?? 0);
+			if (difference !== 0) return difference;
+		}
+		return compareRunningSectionEntriesByCurrentAgentTurnStartAscendingThenStableKey(left, right);
+	});
 	// 最快失效的排最前；同一失效时刻按键兜底。
 	promptCacheWarmAwaitingUserEntries.sort(
 		(left, right) =>

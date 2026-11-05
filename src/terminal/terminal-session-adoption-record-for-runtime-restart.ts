@@ -83,6 +83,7 @@ export interface TerminalSessionAdoptionRederivationInputs {
 	suppressScrollbackErasure: boolean;
 	suppressDeviceAttributeQueries: boolean;
 	outputReactionEngineWasActive: boolean;
+	terminalModesAreKnown?: boolean;
 }
 
 // 新 runtime 必须能读旧 runtime 写的记录：改结构就升版本；读到不认识的版本时退回「合成三元组」那一级，绝不因此杀会话。
@@ -98,6 +99,7 @@ export interface PlannedHandoverTerminalMirrorCheckpoint {
 	cols: number;
 	rows: number;
 	outputByteOffsetCoveredBySnapshot: number;
+	terminalModesAreKnown?: boolean;
 }
 
 export interface TerminalSessionAdoptionRecord {
@@ -146,6 +148,7 @@ export function buildTerminalSessionAdoptionRecord(input: {
 	active: ActiveProcessState;
 	recordedAtEpochMs: number;
 	plannedHandoverTerminalMirrorCheckpoint?: PlannedHandoverTerminalMirrorCheckpoint;
+	terminalModesAreKnown?: boolean;
 }): TerminalSessionAdoptionRecord {
 	return {
 		terminalSessionAdoptionRecordSchemaVersion: TERMINAL_SESSION_ADOPTION_RECORD_SCHEMA_VERSION,
@@ -156,6 +159,7 @@ export function buildTerminalSessionAdoptionRecord(input: {
 			suppressScrollbackErasure: input.active.terminalProtocolFilter.suppressScrollbackErasure,
 			suppressDeviceAttributeQueries: input.active.terminalProtocolFilter.suppressDeviceAttributeQueries,
 			outputReactionEngineWasActive: input.active.outputReactionEngine !== null,
+			...(input.terminalModesAreKnown !== undefined ? { terminalModesAreKnown: input.terminalModesAreKnown } : {}),
 		},
 		...(input.plannedHandoverTerminalMirrorCheckpoint !== undefined
 			? { plannedHandoverTerminalMirrorCheckpoint: input.plannedHandoverTerminalMirrorCheckpoint }
@@ -186,6 +190,7 @@ function readPlannedHandoverTerminalMirrorCheckpoint(
 		cols: cols as number,
 		rows: rows as number,
 		outputByteOffsetCoveredBySnapshot: outputByteOffsetCoveredBySnapshot as number,
+		...(rawCheckpoint.terminalModesAreKnown === false ? { terminalModesAreKnown: false } : {}),
 	};
 }
 

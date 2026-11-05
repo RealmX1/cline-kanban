@@ -1,25 +1,20 @@
-import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { resolveLastAgentConversationUserHandoffObservation } from "@runtime-agent-conversation-activity-observation";
-import {
-	resolveSessionFacets,
-	resolveTaskConversationSessionMainContextForkSelection,
-} from "@runtime-session-activity";
+import { resolveSessionFacets } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
+import { ConversationSessionNameEditor } from "@/components/conversation-session-name-editor";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TruncatedIdentifierChipWithCopyOnClick } from "@/components/shared/truncated-identifier-chip-with-copy-on-click";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
-import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
-import {
-	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
-	useFormPrimaryActionSubmitKeyboardShortcut,
-} from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { RuntimeAgentDefinition, RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import {
+	openSideSessionCreationWorkbench,
+	refreshSideSessionCreationWorkbenchContext,
+} from "@/state/side-session-creation-workbench-store";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
 import { IndependentTaskCreationAction } from "./independent-task-creation-action";
@@ -27,25 +22,7 @@ import { TaskMainSessionHandoverAction } from "./task-main-session-handover-acti
 
 type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "createdAt">;
 
-interface TaskSessionCreationDraft {
-	codexConfigurationProfileId?: string;
-	initialUserQuestion: string;
-	contextSource: NewTaskConversationSessionContextSource;
-	sessionRole: "by_the_way" | "task_collaborator";
-	collaborationAgentId: RuntimeAgentId;
-}
-// 仅存当前页面的草稿，按项目和任务隔离；对话框关闭或工作台换格不会清空。
-const taskSessionCreationDraftsByWorkspaceAndTask = new Map<string, TaskSessionCreationDraft>();
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
-
-const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["claude", "codex"]);
-const supportedAgentCatalog = getRuntimeLaunchSupportedAgentCatalog();
-
-function resolveDefaultCollaborationAgentId(mainAgentId: RuntimeAgentId): RuntimeAgentId {
-	return supportedAgentCatalog.some((entry) => entry.id === mainAgentId)
-		? mainAgentId
-		: (supportedAgentCatalog[0]?.id ?? "codex");
-}
 
 interface CreateTaskConversationSessionRequest {
 	codexConfigurationProfileId?: string;
@@ -53,6 +30,8 @@ interface CreateTaskConversationSessionRequest {
 	sessionRole: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
 	contextSource: NewTaskConversationSessionContextSource;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
+	contextSourceTaskConversationSessionId?: string;
 }
 
 // 每一行露出两个标识符：
@@ -156,7 +135,7 @@ export function TaskConversationSessionsPanel({
 	taskSessions,
 	selectedTaskConversationSessionId,
 	onSelectTaskConversationSession,
-	onCreateTaskConversationSession,
+	onCreateTaskConversationSession: _onCreateTaskConversationSession,
 }: {
 	isTaskAgentExecutionDisabled?: boolean;
 	workspaceId?: string | null;
@@ -178,51 +157,24 @@ export function TaskConversationSessionsPanel({
 	) => Promise<{ ok: boolean; message?: string }>;
 }): React.ReactElement {
 	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
-	const [isCreationDialogOpen, setCreationDialogOpen] = useState(false);
-	const draftIdentity = JSON.stringify([workspaceId, workspaceTaskId]);
-	const savedDraft = taskSessionCreationDraftsByWorkspaceAndTask.get(draftIdentity);
-	const [codexConfigurationProfileId, setCodexConfigurationProfileId] = useState<string | undefined>(
-		savedDraft?.codexConfigurationProfileId,
-	);
-	const [initialUserQuestion, setInitialUserQuestion] = useState(savedDraft?.initialUserQuestion ?? "");
-	const [contextSource, setContextSource] = useState<NewTaskConversationSessionContextSource>(
-		savedDraft?.contextSource ?? "forked_from_main_current_turn",
-	);
-	const [sessionRole, setSessionRole] = useState<"by_the_way" | "task_collaborator">(
-		savedDraft?.sessionRole ?? "task_collaborator",
-	);
-	const [collaborationAgentId, setCollaborationAgentId] = useState<RuntimeAgentId>(
-		() => savedDraft?.collaborationAgentId ?? resolveDefaultCollaborationAgentId(effectiveAgentId),
-	);
-	const selectedAgentId = sessionRole === "by_the_way" ? effectiveAgentId : collaborationAgentId;
-	const [isCreating, setIsCreating] = useState(false);
-	const isCreatingRef = useRef(false);
-	const [isPreparingQuestionImages, setIsPreparingQuestionImages] = useState(false);
-	const [creationError, setCreationError] = useState<string | null>(null);
-	const isByTheWaySessionCreationSupported = byTheWaySessionSupportedAgentIds.has(effectiveAgentId);
-	const isSessionCreationSupported =
-		sessionRole === "by_the_way"
-			? isByTheWaySessionCreationSupported
-			: supportedAgentCatalog.some((entry) => entry.id === selectedAgentId) &&
-				agents?.find((agent) => agent.id === selectedAgentId)?.installed !== false;
-	useEffect(() => {
-		if (workspaceId)
-			taskSessionCreationDraftsByWorkspaceAndTask.set(draftIdentity, {
-				codexConfigurationProfileId,
-				initialUserQuestion,
-				contextSource,
-				sessionRole,
-				collaborationAgentId,
-			});
-	}, [
+	const panelMounted = useRef(true);
+	const displayedTaskIdentity = JSON.stringify([
 		workspaceId,
-		draftIdentity,
-		initialUserQuestion,
-		contextSource,
-		sessionRole,
-		collaborationAgentId,
-		codexConfigurationProfileId,
+		workspaceTaskId,
+		taskCard?.createdAt ?? mainSessionOriginalPromptCard.createdAt,
 	]);
+	const displayedTaskIdentityRef = useRef(displayedTaskIdentity);
+	displayedTaskIdentityRef.current = displayedTaskIdentity;
+	useEffect(() => {
+		if (workspaceId && taskCard)
+			refreshSideSessionCreationWorkbenchContext({ workspaceId, task: taskCard, mainSessionSummary, taskSessions });
+	}, [workspaceId, taskCard, mainSessionSummary, taskSessions]);
+	useEffect(
+		() => () => {
+			panelMounted.current = false;
+		},
+		[],
+	);
 
 	const [readUserHandoffObservedAtMsBySessionId, setReadUserHandoffObservedAtMsBySessionId] = useState<
 		Record<string, number>
@@ -246,19 +198,6 @@ export function TaskConversationSessionsPanel({
 				.sort((left, right) => right.updatedAt - left.updatedAt),
 		[taskSessions, workspaceTaskId],
 	);
-	const mainSessionForkSelection = resolveTaskConversationSessionMainContextForkSelection({
-		workspaceTaskId,
-		launchAgentId: selectedAgentId,
-		sessionRole,
-		mainSessionSummary,
-		mainSessionWorkingDirectoryPath: mainSessionSummary.workspacePath,
-		existingTaskConversationSessionSummaries: Object.values(taskSessions),
-	});
-	const canForkCurrentMainSession =
-		mainSessionSummary.startedAt !== null && mainSessionForkSelection.forkRejectionReason === null;
-
-	// 身份尚未就绪时只暂时显示全新上下文；身份到达后恢复默认，保留用户明确选择。
-	const resolvedContextSource = canForkCurrentMainSession ? contextSource : "started_from_scratch";
 
 	useEffect(() => {
 		const selectedSummary = taskSessions[selectedTaskConversationSessionId];
@@ -283,47 +222,6 @@ export function TaskConversationSessionsPanel({
 		onSelectTaskConversationSession(summary.taskId);
 	};
 
-	const createSession = async () => {
-		if (
-			isTaskAgentExecutionDisabled ||
-			!isSessionCreationSupported ||
-			isPreparingQuestionImages ||
-			isCreatingRef.current
-		) {
-			return;
-		}
-		isCreatingRef.current = true;
-		setCreationError(null);
-		setIsCreating(true);
-
-		try {
-			const result = await onCreateTaskConversationSession({
-				...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
-				agentId: selectedAgentId,
-				sessionRole,
-				initialUserQuestion,
-				contextSource: resolvedContextSource,
-			});
-			if (!result.ok) {
-				setCreationError(result.message ?? "无法创建会话。");
-				return;
-			}
-			setInitialUserQuestion("");
-			setCreationDialogOpen(false);
-		} catch (cause: unknown) {
-			setCreationError(cause instanceof Error ? cause.message : String(cause));
-		} finally {
-			isCreatingRef.current = false;
-			setIsCreating(false);
-		}
-	};
-
-	const primaryActionDisabled =
-		isTaskAgentExecutionDisabled || !isSessionCreationSupported || isCreating || isPreparingQuestionImages;
-	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
-		onSubmit: createSession,
-		disabled: primaryActionDisabled,
-	});
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
 			<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
@@ -333,8 +231,22 @@ export function TaskConversationSessionsPanel({
 					size="sm"
 					icon={<Plus size={14} />}
 					className="ml-auto h-6"
-					onClick={() => setCreationDialogOpen(true)}
-					disabled={isCreating || isTaskAgentExecutionDisabled}
+					onClick={() => {
+						if (!workspaceId || !taskCard) return;
+						openSideSessionCreationWorkbench({
+							workspaceId,
+							task: taskCard,
+							mainSessionSummary,
+							agentId: effectiveAgentId,
+							agents,
+							taskSessions,
+							onCreated: (sessionId) => {
+								if (panelMounted.current && displayedTaskIdentityRef.current === displayedTaskIdentity)
+									onSelectTaskConversationSession(sessionId);
+							},
+						});
+					}}
+					disabled={isTaskAgentExecutionDisabled}
 				>
 					新建会话
 				</Button>
@@ -377,7 +289,9 @@ export function TaskConversationSessionsPanel({
 						onClick={() => selectSession(mainSessionSummary)}
 					>
 						<div className="flex items-center gap-2">
-							<span className="text-xs font-medium text-text-primary">Main session</span>
+							<span className="text-xs font-medium text-text-primary">
+								{mainSessionSummary.taskConversationSessionMetadata?.conversationSessionName || "Main session"}
+							</span>
 							<span className="ml-auto text-[11px] text-text-tertiary">
 								{getSessionStatusLabel(mainSessionSummary)}
 							</span>
@@ -432,7 +346,12 @@ export function TaskConversationSessionsPanel({
 								aria-current={selectedTaskConversationSessionId === summary.taskId ? "true" : undefined}
 								onClick={() => selectSession(summary)}
 							>
-								<div className="flex items-center gap-2">
+								<div className="flex flex-wrap items-center gap-2">
+									{metadata.conversationSessionName && (
+										<span className="text-xs font-medium text-text-primary">
+											{metadata.conversationSessionName}
+										</span>
+									)}
 									<MessageCircleQuestion size={13} className="text-status-purple" />
 									<span className="text-xs font-medium text-text-primary">
 										{metadata.taskConversationSessionHasHeldMainResponsibility ||
@@ -469,6 +388,13 @@ export function TaskConversationSessionsPanel({
 												: `Started from scratch · ${turnsAgo} turns ago`}
 								</p>
 							</button>
+							{workspaceId && taskCard && !isTaskAgentExecutionDisabled && (
+								<ConversationSessionNameEditor
+									workspaceId={workspaceId}
+									taskCard={taskCard}
+									summary={summary}
+								/>
+							)}
 							<TaskConversationSessionIdentifierChips
 								summary={summary}
 								taskConversationSessionId={summary.taskId}
@@ -480,6 +406,9 @@ export function TaskConversationSessionsPanel({
 									<IndependentTaskCreationAction
 										workspaceId={workspaceId}
 										sourceTaskId={workspaceTaskId}
+										expectedTaskIncarnationCreatedAtEpochMs={
+											taskCard?.createdAt ?? mainSessionOriginalPromptCard.createdAt
+										}
 										sourceSessionId={summary.taskId}
 									/>
 								)}
@@ -497,153 +426,6 @@ export function TaskConversationSessionsPanel({
 					</div>
 				) : null}
 			</div>
-			<Dialog
-				onKeyDown={handlePrimaryActionKeyDown}
-				open={isCreationDialogOpen}
-				onOpenChange={(open) => {
-					if (!isCreating) setCreationDialogOpen(open);
-				}}
-			>
-				<DialogHeader title="新建会话" />
-				<DialogDescription className="px-3 pt-2 text-xs text-text-secondary">
-					为当前任务创建协作会话或侧问会话。
-				</DialogDescription>
-				<DialogBody>
-					<div className="min-h-0 flex-1 overflow-y-auto p-3">
-						<label
-							className="mb-1 block text-xs font-medium text-text-secondary"
-							htmlFor="task-conversation-session-role"
-						>
-							会话类型
-						</label>
-						<select
-							id="task-conversation-session-role"
-							className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-							value={sessionRole}
-							disabled={isCreating}
-							onChange={(event) => {
-								setSessionRole(event.target.value as "by_the_way" | "task_collaborator");
-								setContextSource("forked_from_main_current_turn");
-								setCreationError(null);
-							}}
-						>
-							<option value="task_collaborator">协作会话</option>
-							<option value="by_the_way" disabled={!isByTheWaySessionCreationSupported}>
-								By the way
-							</option>
-						</select>
-						{sessionRole === "task_collaborator" ? (
-							<>
-								<label
-									className="mb-1 block text-xs font-medium text-text-secondary"
-									htmlFor="task-conversation-session-agent"
-								>
-									Agent
-								</label>
-								<select
-									id="task-conversation-session-agent"
-									value={collaborationAgentId}
-									disabled={isCreating}
-									className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-									onChange={(event) => {
-										setCollaborationAgentId(event.target.value as RuntimeAgentId);
-										setContextSource("forked_from_main_current_turn");
-									}}
-								>
-									{supportedAgentCatalog.map((agent) => (
-										<option
-											key={agent.id}
-											value={agent.id}
-											disabled={agents?.find((candidate) => candidate.id === agent.id)?.installed === false}
-										>
-											{agent.label}
-											{agents?.find((candidate) => candidate.id === agent.id)?.installed === false
-												? "（未安装）"
-												: ""}
-										</option>
-									))}
-								</select>
-								<p className="mb-3 text-xs text-text-secondary">共用当前工作目录。主会话负责卡片生命周期。</p>
-							</>
-						) : null}
-						{selectedAgentId === "codex" && (
-							<CodexConfigurationProfileSelect
-								workspaceId={workspaceId ?? null}
-								value={codexConfigurationProfileId}
-								onChange={setCodexConfigurationProfileId}
-								inheritedProfileId={
-									mainSessionSummary.codexConfigurationProfileId ?? taskCard?.codexConfigurationProfileId
-								}
-								enabled={isCreationDialogOpen && !isCreating}
-							/>
-						)}
-						<>
-							<label
-								className="mb-1 block text-xs font-medium text-text-secondary"
-								htmlFor="task-conversation-context-source"
-							>
-								Context
-							</label>
-							<select
-								id="task-conversation-context-source"
-								className="mb-3 h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary"
-								value={resolvedContextSource}
-								onChange={(event) =>
-									setContextSource(event.target.value as NewTaskConversationSessionContextSource)
-								}
-							>
-								<option value="forked_from_main_current_turn" disabled={!canForkCurrentMainSession}>
-									Fork current main session
-								</option>
-								<option value="started_from_scratch">Start from scratch</option>
-							</select>
-							{mainSessionForkSelection.forkRejectionReason ? (
-								<p className="mb-3 text-xs text-text-secondary">
-									{mainSessionForkSelection.forkRejectionReason}
-								</p>
-							) : null}
-						</>
-						<label
-							className="mb-1 block text-xs font-medium text-text-secondary"
-							htmlFor="task-conversation-initial-question"
-						>
-							首条消息（可选）
-						</label>
-						<TaskPromptComposer
-							id="task-conversation-initial-question"
-							workspaceId={workspaceId}
-							minimumTextareaHeight={96}
-							placeholder={
-								resolvedContextSource === "forked_from_main_current_turn"
-									? "可留空，先查看历史或 Rewind，再输入消息…"
-									: "可留空，创建后再输入消息…"
-							}
-							value={initialUserQuestion}
-							onImagePreparationPendingChange={setIsPreparingQuestionImages}
-							onValueChange={setInitialUserQuestion}
-						/>
-						<p className="mt-1 text-[11px] text-text-tertiary">
-							{sessionRole === "task_collaborator"
-								? "可执行命令与修改文件，权限和 Plan 起步设置沿用当前卡片。"
-								: !isByTheWaySessionCreationSupported
-									? `${effectiveAgentId} By the way sessions are not available.`
-									: `${effectiveAgentId === "claude" ? "Claude Code" : "Codex"} will run with read-only tools.`}
-						</p>
-						{creationError ? <p className="mt-2 text-xs text-status-red">{creationError}</p> : null}
-						<Button
-							variant="primary"
-							size="sm"
-							fill
-							className="mt-3"
-							{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
-							disabled={primaryActionDisabled}
-							onClick={() => void createSession()}
-						>
-							{isCreating ? "Creating…" : "Create session"}
-						</Button>
-					</div>
-				</DialogBody>
-			</Dialog>
 		</div>
 	);
 }

@@ -1,7 +1,6 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as RadixSwitch from "@radix-ui/react-switch";
-import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import type { WebUiUserDecisionClientCharacteristics } from "@runtime-work-unit-relation-assertion-write-api-contract";
 import {
 	ArrowBigUp,
@@ -20,18 +19,16 @@ import { useCallback, useDeferredValue, useEffect, useId, useMemo, useRef, useSt
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import type { BranchSelectOption } from "@/components/branch-select-dropdown";
 import { BranchSelectDropdown } from "@/components/branch-select-dropdown";
-import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
+import {
+	CreationWorkbenchContextControl,
+	CreationWorkbenchStartupSettings,
+} from "@/components/creation-workbench-startup-settings";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { DiscardTaskCreateConfirmDialog } from "@/components/discard-task-create-confirm-dialog";
+import { NonModalFloatingFormWindow } from "@/components/non-modal-floating-form-window";
 import type { PostDeployVerificationFollowUpTaskCreationDraftSeed } from "@/components/post-deploy-verification/post-deploy-verification-follow-up-task-creation-draft";
 import { taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
-import {
-	TaskAgentModelPicker,
-	type TaskTerminalAgentModelOverrideSettingsChangeOptions,
-	useTaskAgentModelPicker,
-} from "@/components/task-agent-model-picker";
-import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
-import { TaskAgentSessionInitializationControl } from "@/components/task-agent-session-initialization-control";
+import type { TaskTerminalAgentModelOverrideSettingsChangeOptions } from "@/components/task-agent-model-picker";
 import { TaskConversationModeControl } from "@/components/task-conversation-mode-control";
 import {
 	type TaskCreationTargetProjectField,
@@ -41,7 +38,6 @@ import {
 	type TaskEditDraftComparableValues,
 	TaskEditDraftRecoveryNotice,
 } from "@/components/task-edit-draft-recovery-notice";
-import { TaskEditorFloatingWindow } from "@/components/task-editor-floating-window";
 import {
 	TaskEditorHiddenSettingsManager,
 	TaskEditorSettingGroup,
@@ -66,6 +62,7 @@ import { readTaskEditorCreationSubmissionStatus } from "@/runtime/task-editor-cr
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
+	RuntimeAgentSessionTransport,
 	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
@@ -122,6 +119,7 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  */
 export interface TaskCreateFormSnapshot {
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
@@ -166,6 +164,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
 		current.codexConfigurationProfileId !== baseline.codexConfigurationProfileId ||
+		current.codexReasoningEffortOverride !== baseline.codexReasoningEffortOverride ||
 		current.codexConfigurationPermissionSelectionSource !== baseline.codexConfigurationPermissionSelectionSource ||
 		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
@@ -241,7 +240,7 @@ function parseListItems(text: string): string[] {
 	return [];
 }
 
-export function TaskEditorDialog({
+export function TaskEditorDialogForm({
 	suspendedTaskEditorTitle,
 	onResumeSuspendedTaskEditor,
 	open,
@@ -260,8 +259,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
 	codexConfigurationProfileId,
+	codexReasoningEffortOverride,
 	codexConfigurationPermissionSelectionSource,
 	onCodexConfigurationProfileIdChange,
+	onCodexReasoningEffortOverrideChange,
 	onCodexConfigurationPermissionSelectionSourceChange,
 	taskConversationMode,
 	onTaskConversationModeChange,
@@ -308,6 +309,9 @@ export function TaskEditorDialog({
 	onTaskCreationCardPersisted,
 	postDeployVerificationFollowUpTaskCreationDraftSeed,
 }: {
+	editingTaskSnapshot?: BoardCard | null;
+	openingRequestIdentity?: symbol;
+	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	suspendedTaskEditorTitle?: string | null;
 	onResumeSuspendedTaskEditor?: () => void;
 	open: boolean;
@@ -328,8 +332,10 @@ export function TaskEditorDialog({
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
 	codexConfigurationProfileId?: string;
+	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
+	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
 	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	taskConversationMode: RuntimeTaskConversationMode;
 	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
@@ -457,7 +463,7 @@ export function TaskEditorDialog({
 	const [taskPrompts, setTaskPrompts] = useState<string[]>([]);
 	const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 	const nextFocusIndexRef = useRef<number | null>(null);
-	const startInPlanModeId = useId();
+	const _startInPlanModeId = useId();
 	const autoReviewEnabledId = useId();
 	const createMoreId = useId();
 	const automaticProjectAssignmentAnalysisId = useId();
@@ -465,36 +471,6 @@ export function TaskEditorDialog({
 		useTaskProjectAssignmentAutomaticAnalysisEnabledPreference();
 	const [primaryStartAction, setPrimaryStartAction] = useTaskCreateDialogPrimaryStartActionPreference();
 	const [isDiscardConfirmOpen, setIsDiscardConfirmOpen] = useState(false);
-	const {
-		agentOptions,
-		clineProviderOptions,
-		clineModelOptions,
-		effectiveDefaultModelId,
-		providerModels,
-		isLoadingProviders,
-		isLoadingModels,
-		terminalAgentModelOptions,
-		terminalAgentDefaultModelId,
-		isLoadingTerminalAgentModels,
-		providerDefaultModels,
-	} = useTaskAgentModelPicker({
-		active: open,
-		workspaceId,
-		agentId,
-		clineSettings,
-		agents,
-		defaultAgentId,
-		defaultProviderId,
-		defaultModelId,
-	});
-
-	// 权限档位的能力标注要跟随「这张卡实际会用哪个 agent」：卡片没显式选就落到工作区默认 agent。
-	const effectiveTaskAgentPermissionModeAgentId = agentId ?? defaultAgentId ?? null;
-	const effectiveTaskAgentPermissionModeAgentLabel =
-		(effectiveTaskAgentPermissionModeAgentId === null
-			? null
-			: (agents?.find((agent) => agent.id === effectiveTaskAgentPermissionModeAgentId)?.label ??
-				getRuntimeAgentCatalogEntry(effectiveTaskAgentPermissionModeAgentId)?.label)) ?? "This agent";
 
 	// 只在「当前显示的正是被记住的那条 ref、且它确实偏离了仓库默认分支」时提示。两个条件都必要：
 	// 用户当次手动改过下拉框就不该再说是记住的；记忆值恰好等于默认分支时提示只是噪声。
@@ -607,18 +583,20 @@ export function TaskEditorDialog({
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
 		setNewTaskName("");
 		onImagesChange([]);
+		onCodexReasoningEffortOverrideChange?.(undefined);
 		setMode("single");
 		setTaskPrompts([]);
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, propagatePromptDraft]);
+	}, [onImagesChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
 
 	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
+	const editorSurfaceRef = useRef<HTMLDivElement>(null);
 	const revealAndFocusRelations = useCallback(() => {
 		setTemporarilyRevealedSettingKeys(new Set(["relations"]));
 		requestAnimationFrame(() => {
-			const section = document.querySelector<HTMLElement>('[data-task-editor-setting="relations"]');
+			const section = editorSurfaceRef.current?.querySelector<HTMLElement>('[data-task-editor-setting="relations"]');
 			section?.scrollIntoView({ block: "nearest" });
 			section?.querySelector<HTMLElement>("button, input")?.focus({ preventScroll: true });
 		});
@@ -641,6 +619,8 @@ export function TaskEditorDialog({
 	}, [workspaceId, editingTaskId, open, selectableTargetProjectField]);
 	const targetWorkspaceId =
 		selectableTargetProjectField?.selectedTargetWorkspaceId ?? localSelectedTargetWorkspaceId ?? workspaceId;
+	const [codexReasoningEffortValidationError, setCodexReasoningEffortValidationError] = useState<string | null>(null);
+
 	const setSelectedTargetWorkspaceId = (nextWorkspaceId: string) => {
 		if (selectableTargetProjectField) selectableTargetProjectField.onSelectTargetWorkspaceId(nextWorkspaceId);
 		else setLocalSelectedTargetWorkspaceId(nextWorkspaceId);
@@ -696,6 +676,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -947,6 +928,7 @@ export function TaskEditorDialog({
 						request: {
 							submissionId: createRandomUuidV4WithInsecureContextFallback(),
 							newTaskCard: allocatedCard,
+							suggestNameAfterCreation: !submittingTitle.trim(),
 							referenceRelationDrafts: promptOverride ? [] : draft.referenceRelationDrafts,
 							relationRevocations: promptOverride ? [] : draft.relationRevocations,
 							startAgentAfterCreation: action !== "create",
@@ -1355,6 +1337,7 @@ export function TaskEditorDialog({
 	const primaryActionDisabled =
 		!branchRef ||
 		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
+		Boolean(codexReasoningEffortValidationError) ||
 		isTaskCreationWaitingForRelationDraftHydration ||
 		isRelationAwareCreationInFlight;
 	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
@@ -1396,6 +1379,7 @@ export function TaskEditorDialog({
 		startInPlanMode,
 		taskAgentPermissionMode,
 		codexConfigurationProfileId,
+		codexReasoningEffortOverride,
 		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
@@ -1573,115 +1557,23 @@ export function TaskEditorDialog({
 				</>
 			),
 		},
-		{
-			key: "plan_mode",
-			label: "Plan Mode",
-			summary: startInPlanMode ? "开启" : "关闭",
-			content: (
-				<>
-					<label
-						htmlFor={startInPlanModeId}
-						className="flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-					>
-						<RadixCheckbox.Root
-							id={startInPlanModeId}
-							checked={startInPlanMode}
-							onCheckedChange={(checked) => onStartInPlanModeChange(checked === true)}
-							disabled={startInPlanModeDisabled}
-							className="flex h-3.5 w-3.5 cursor-pointer items-center justify-center rounded-sm border border-border-bright bg-surface-3 data-[state=checked]:bg-accent data-[state=checked]:border-accent disabled:cursor-default disabled:opacity-40"
-						>
-							<RadixCheckbox.Indicator>
-								<Check size={10} className="text-white" />
-							</RadixCheckbox.Indicator>
-						</RadixCheckbox.Root>
-						Start in plan mode
-					</label>
-				</>
-			),
-		},
-		{
-			key: "permissions",
-			label: "Agent 权限",
-			summary:
-				effectiveTaskAgentPermissionModeAgentId === "codex" &&
-				codexConfigurationPermissionSelectionSource === "profile"
-					? "跟随 profile 完整权限"
-					: {
-							ask_for_every_tool_use: "每次询问",
-							auto_approve_file_edits_only: "允许编辑文件",
-							bypass_all_permission_prompts: "全部允许",
-						}[taskAgentPermissionMode],
-			content: (
-				<>
-					<div>
-						{/* 权限档位与「Start in plan mode」是两条正交轴：plan 只决定开局先只读规划，
-							    不影响这里选定的放权程度（不能同时表达两者的 agent 会在选项 tooltip 里明示）。
-							    少数 harness（droid）把两条轴压在同一个单轴设置上，plan 起步会吃掉权限档——
-							    所以必须把 startInPlanMode 一并传下去，让控件当场把这个冲突说出来。 */}
-						<span className="text-[11px] text-text-secondary block mb-1">Agent permissions</span>
-						<TaskAgentPermissionModeControl
-							value={taskAgentPermissionMode}
-							selectionComesFromCodexProfile={
-								effectiveTaskAgentPermissionModeAgentId === "codex" &&
-								codexConfigurationPermissionSelectionSource === "profile"
-							}
-							onChange={(mode) => {
-								onTaskAgentPermissionModeChange(mode);
-								onCodexConfigurationPermissionSelectionSourceChange?.("task_local");
-							}}
-							selectedAgentId={effectiveTaskAgentPermissionModeAgentId}
-							selectedAgentLabel={effectiveTaskAgentPermissionModeAgentLabel}
-							startInPlanMode={startInPlanMode}
-							idPrefix="task-create-agent-permission-mode"
-						/>
-						{effectiveTaskAgentPermissionModeAgentId === "codex" &&
-							codexConfigurationPermissionSelectionSource === "profile" && (
-								<p className="mt-1 text-xs text-text-secondary">
-									当前使用 profile 的完整审批与沙箱设置；选择上方档位将改为此 Task 的局部权限。
-								</p>
-							)}
-					</div>
-				</>
-			),
-		},
 	];
 	const moreTaskEditorSettings = [
-		...(effectiveTaskAgentPermissionModeAgentId === "codex" && onCodexConfigurationProfileIdChange
-			? [
-					{
-						key: "codex_configuration_profile",
-						label: "Codex profile",
-						summary: codexConfigurationProfileId ? "已绑定" : "默认配置",
-						content: (
-							<CodexConfigurationProfileSelect
-								workspaceId={targetWorkspaceId}
-								value={codexConfigurationProfileId}
-								onChange={onCodexConfigurationProfileIdChange}
-								enabled={open}
-								automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
-								adoptDefaultProfilePermissions={codexConfigurationPermissionSelectionSource !== "task_local"}
-								onPermissionModeChange={(mode) => {
-									onTaskAgentPermissionModeChange(mode);
-									onCodexConfigurationPermissionSelectionSourceChange?.("profile");
-								}}
-							/>
-						),
-					},
-				]
-			: []),
 		{
 			key: "session_initialization",
 			label: "会话上下文",
 			content: (
 				<>
 					{mode === "single" && onTaskAgentSessionInitializationChange && onAgentIdChange ? (
-						<TaskAgentSessionInitializationControl
-							agentId={agentId}
-							defaultAgentId={defaultAgentId}
-							workspaceId={targetWorkspaceId}
-							value={taskAgentSessionInitialization}
-							onChange={onTaskAgentSessionInitializationChange}
-							onAgentIdChange={onAgentIdChange}
+						<CreationWorkbenchContextControl
+							nativeSessionInitialization={{
+								agentId,
+								defaultAgentId,
+								workspaceId: targetWorkspaceId,
+								value: taskAgentSessionInitialization,
+								onChange: onTaskAgentSessionInitializationChange,
+								onAgentIdChange,
+							}}
 						/>
 					) : null}
 				</>
@@ -1816,7 +1708,10 @@ export function TaskEditorDialog({
 
 	return (
 		<>
-			<TaskEditorFloatingWindow
+			<NonModalFloatingFormWindow
+				verificationAnchor="task-editor-floating-window"
+				collapseControlLabel="任务编辑器"
+				ownershipLabel={[editorSessionWorkspaceId, editingTaskId].filter(Boolean).join(" / ")}
 				open={open}
 				onOpenChange={handleDialogOpenChange}
 				title={dialogTitle}
@@ -1835,439 +1730,440 @@ export function TaskEditorDialog({
 					void clipboardTaskReference.processPastedText(event.clipboardData.getData("text/plain"));
 				}}
 			>
-				<TaskEditorSettingPresentationProvider
-					temporarilyRevealedKeys={temporarilyRevealedSettingKeys}
-					onUserPresentationChange={(key) =>
-						setTemporarilyRevealedSettingKeys((previous) => {
-							const next = new Set(previous);
-							next.delete(key);
-							return next;
-						})
-					}
-				>
-					<DialogBody>
-						<fieldset disabled={isTaskEditorPersisting} className="min-w-0">
-							{suspendedTaskEditorTitle && onResumeSuspendedTaskEditor ? (
-								<Button size="sm" onClick={onResumeSuspendedTaskEditor} className="mb-3 max-w-full truncate">
-									返回草稿：{suspendedTaskEditorTitle}
-								</Button>
-							) : null}
-							<div className="min-w-0 space-y-5">
-								<TaskEditorSettingGroup
-									title="所属项目"
-									defaultPresentation="expanded"
-									settings={[
-										{
-											key: "project",
-											label: "所属项目",
-											summary: targetWorkspaceId ?? "未选择",
-											content: effectiveProjectField ? (
-												<TaskCreationTargetProjectFieldControl
-													taskCreationTargetProjectField={effectiveProjectField}
-												/>
-											) : (
-												<p className="break-words text-sm text-text-primary">
-													{targetWorkspaceId ?? "请选择项目"}
-												</p>
-											),
-										},
-									]}
-								/>
-								<div className="min-w-0 space-y-3">
-									{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
-					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
-									{taskEditorMode === "edit" && editingTaskId !== null ? (
-										<TaskEditDraftRecoveryNotice
-											workspaceId={workspaceId}
-											taskId={editingTaskId}
-											seededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
-											currentFormValues={
-												{
-													// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
-													// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
-													taskTitleOverride: taskName,
-													prompt: promptDraft,
-													images,
-													startInPlanMode,
-													taskAgentPermissionMode,
-													codexConfigurationProfileId,
-													codexConfigurationPermissionSelectionSource,
-													autoReviewEnabled,
-													autoReviewMode,
-													branchRef,
-													worktreeMode,
-													agentId,
-													clineSettings,
-													terminalAgentModelOverrideSettings,
-													taskAgentSessionInitialization,
-												} satisfies TaskEditDraftComparableValues
-											}
-											onRevertToSavedTaskContent={() => onRevertEditTaskFormToSavedTaskContent?.()}
-											onSupersededCopyPromotedToCurrentDraft={(promotedDraft) =>
-												onAdoptPromotedTaskEditDraft?.(promotedDraft)
-											}
-										/>
-									) : null}
-									{mode === "single" ? (
-										<div>
-											<TaskNameInputWithAiSuggestions
-												key={`task-name-input-${editingTaskId ?? composerResetKey}`}
-												taskName={taskName}
-												onTaskNameChange={setTaskName}
-												taskDescription={promptDraft}
-												preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
-											/>
-
-											<TaskPromptComposer
-												key={`task-prompt-composer-${composerResetKey}`}
-												value={promptDraft}
-												onValueChange={setPromptDraft}
-												onValueBlur={() => propagatePromptDraft(promptDraft)}
-												images={images}
-												onImagesChange={onImagesChange}
-												placeholder="描述要完成的任务…"
-												aria-label="任务正文"
-												minimumTextareaHeight={180}
-												autoFocus
-												workspaceId={targetWorkspaceId}
-												showAttachImageButton
-												showPseudoHtmlBlockInsertButton
-											/>
-											<div className="flex items-center justify-between mt-1.5">
-												<p className="text-[11px] text-text-tertiary">
-													Use{" "}
-													<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
-														@file
-													</code>{" "}
-													to reference files. Drag and drop or{" "}
-													<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
-														{pasteShortcutLabel}
-													</code>{" "}
-													also adds images.
-												</p>
-												{taskEditorMode === "create" && detectedItems.length >= 2 ? (
-													<button
-														type="button"
-														onClick={handleSplitIntoTasks}
-														disabled={
-															isTaskCreationWaitingForRelationDraftHydration ||
-															relationModeling.hasChanges ||
-															Boolean(relationModeling.draft.createdTaskId) ||
-															hasUnstagedRelationForm ||
-															isRelationAwareCreationInFlight
-														}
-														title={
-															relationModeling.hasChanges ||
-															relationModeling.draft.createdTaskId ||
-															hasUnstagedRelationForm
-																? "请先完成或放弃关系草稿，再拆分为多个任务。"
-																: undefined
-														}
-														className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-default"
-													>
-														<List size={12} />
-														Split into {detectedItems.length} tasks
-													</button>
-												) : null}
-											</div>
-										</div>
-									) : (
-										<div>
-											<div className="flex flex-col gap-1.5">
-												{taskPrompts.map((taskPrompt, index) => (
-													<div key={index} className="flex items-center gap-1.5">
-														<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
-															{index + 1}.
-														</span>
-														<input
-															ref={(el) => setInputRef(index, el)}
-															type="text"
-															value={taskPrompt}
-															onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
-															onKeyDown={(e) => handleInputKeyDown(index, e)}
-															placeholder="Describe the task..."
-															className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
-														/>
-														<Button
-															variant="ghost"
-															size="sm"
-															icon={<X size={14} />}
-															onClick={() => handleRemoveTask(index)}
-															aria-label={`Remove task ${index + 1}`}
-														/>
-													</div>
-												))}
-											</div>
-											<div className="flex items-center justify-between mt-3">
-												<button
-													type="button"
-													onClick={() => handleAddTask()}
-													className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-												>
-													<Plus size={12} />
-													Add task
-												</button>
-												<button
-													type="button"
-													onClick={handleBackToSingle}
-													className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
-												>
-													<ArrowLeft size={12} />
-													Back to single prompt
-												</button>
-											</div>
-										</div>
-									)}
-								</div>
-								{onAgentIdChange && onClineSettingsChange ? (
-									<TaskAgentModelPicker
-										renderControls={({ agentSelection, modelSelection }) => (
-											<TaskEditorSettingGroup
-												title="常用设置"
-												settings={[
-													{
-														key: "agent",
-														label: "Agent",
-														summary: agentId ?? defaultAgentId ?? "默认",
-														content: agentSelection,
-													},
-													{
-														key: "model",
-														label: "模型与参数",
-														summary:
-															terminalAgentModelOverrideSettings?.modelId ??
-															effectiveDefaultModelId ??
-															"默认",
-														content: modelSelection,
-													},
-													...commonTaskEditorSettings,
-												]}
-											/>
-										)}
-										agentId={agentId}
-										onAgentIdChange={onAgentIdChange}
-										clineSettings={clineSettings}
-										onClineSettingsChange={onClineSettingsChange}
-										terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
-										onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
-										agentOptions={agentOptions}
-										clineProviderOptions={clineProviderOptions}
-										clineModelOptions={clineModelOptions}
-										terminalAgentModelOptions={terminalAgentModelOptions}
-										terminalAgentDefaultModelId={terminalAgentDefaultModelId}
-										effectiveDefaultModelId={effectiveDefaultModelId}
-										providerModels={providerModels}
-										isLoadingProviders={isLoadingProviders}
-										isLoadingModels={isLoadingModels}
-										isLoadingTerminalAgentModels={isLoadingTerminalAgentModels}
-										defaultAgentId={defaultAgentId}
-										defaultProviderId={defaultProviderId}
-										defaultReasoningEffort={defaultReasoningEffort}
-										providerDefaultModels={providerDefaultModels}
-									/>
-								) : (
-									<TaskEditorSettingGroup title="常用设置" settings={commonTaskEditorSettings} />
-								)}
-							</div>
-							{mode === "single" && workspaceId ? (
-								<TaskEditorSettingGroup
-									className="mt-5"
-									title="任务关系"
-									defaultPresentation="expanded"
-									settings={[
-										{
-											key: "relations",
-											label: "关系建模",
-											content: (
-												<ReferenceRelationModelingEditor
-													key={workspaceId}
-													controller={relationModeling}
-													presentation="task_editor"
-													clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
-													workspaceId={workspaceId}
-													taskId={taskEditorMode === "edit" ? editingTaskId : null}
-													rootTitle={taskName || "待创建任务"}
-													onUnstagedFormChange={setHasUnstagedRelationForm}
-													creationInFlight={isRelationAwareCreationInFlight}
-												/>
-											),
-										},
-									]}
-								/>
-							) : null}
-							<TaskEditorSettingGroup className="mt-5" title="更多设置" settings={moreTaskEditorSettings} />
-							<TaskEditorHiddenSettingsManager
-								settings={[
-									{ key: "project", label: "所属项目" },
-									{ key: "project_assignment_analysis", label: "项目归属分析" },
-									{ key: "worktree_mode", label: "任务工作区" },
-									{ key: "base_ref", label: "基础分支" },
-									{ key: "agent", label: "Agent" },
-									{ key: "model", label: "模型与参数" },
-									{ key: "session_initialization", label: "会话上下文" },
-									{ key: "plan_mode", label: "Plan Mode" },
-									{ key: "conversation_mode", label: "会话模式" },
-									{ key: "permissions", label: "Agent 权限" },
-									{ key: "auto_review_enabled", label: "自动评审" },
-									{ key: "auto_review_mode", label: "收尾方式" },
-									{ key: "relations", label: "关系建模" },
-								]}
-							/>
-						</fieldset>
-					</DialogBody>
-
-					{relationAwareCreationError ? (
-						<p role="alert" className="px-4 py-2 text-xs text-status-orange">
-							{relationAwareCreationError}
-						</p>
-					) : null}
-					{taskEditorOperationStatusText ? (
-						<p role="status" className="px-4 py-2 text-xs text-text-secondary">
-							{taskEditorOperationStatusText}
-						</p>
-					) : null}
-					<DialogFooter className="flex-wrap gap-y-2 [&>label]:max-sm:basis-full">
-						{taskEditorMode === "create" ? (
-							<label
-								htmlFor={createMoreId}
-								className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
-							>
-								<RadixSwitch.Root
-									id={createMoreId}
-									checked={createMore}
-									onCheckedChange={setCreateMore}
-									className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
-								>
-									<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
-								</RadixSwitch.Root>
-								<span>连续创建</span>
-							</label>
-						) : (
-							<span className="mr-auto" />
-						)}
-						{mode === "single" ? (
-							<>
-								<Button
-									size="sm"
-									onClick={handleCreateSingle}
-									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
-									disabled={
-										!hasPromptDraftContent ||
-										!branchRef ||
-										isTaskCreationWaitingForRelationDraftHydration ||
-										isRelationAwareCreationInFlight
-									}
-								>
-									<span className="inline-flex items-center">
-										{taskEditorMode === "edit" ? "保存更改" : "创建任务"}
-										<ButtonShortcut />
-									</span>
-								</Button>
-								{onCreateAndStart ? (
-									<DropdownMenu.Root>
-										<div className="inline-flex items-center">
-											<Button
-												variant="primary"
-												size="sm"
-												onClick={() => handleRunSingleStartAction(primaryStartAction)}
-												disabled={
-													!hasPromptDraftContent ||
-													!branchRef ||
-													isTaskCreationWaitingForRelationDraftHydration ||
-													isRelationAwareCreationInFlight
-												}
-												className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
-											>
-												<span className="inline-flex items-center">
-													{primaryStartLabel}
-													<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
-												</span>
-											</Button>
-											{onCreateStartAndOpen ? (
-												<DropdownMenu.Trigger asChild>
-													<Button
-														variant="primary"
-														size="sm"
-														disabled={
-															!hasPromptDraftContent ||
-															!branchRef ||
-															isTaskCreationWaitingForRelationDraftHydration ||
-															isRelationAwareCreationInFlight
-														}
-														className="rounded-l-none border-l border-white/20 px-1"
-														aria-label="More start options"
-													>
-														<ChevronDown size={12} />
-													</Button>
-												</DropdownMenu.Trigger>
-											) : null}
-										</div>
-										<DropdownMenu.Portal>
-											<DropdownMenu.Content
-												side="bottom"
-												align="end"
-												sideOffset={4}
-												className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
-												onCloseAutoFocus={(event) => event.preventDefault()}
-											>
-												<DropdownMenu.Item
-													className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
-													onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
-												>
-													{secondaryStartLabel}
-													<span
-														className="inline-flex items-center gap-0.5 text-text-tertiary"
-														aria-hidden
-													>
-														{secondaryStartShortcutModifier === "alt" ? (
-															isMacPlatform ? (
-																<Option size={10} />
-															) : (
-																<span className="text-[10px] font-medium leading-none">Alt</span>
-															)
-														) : (
-															<Command size={10} />
-														)}
-														<ArrowBigUp size={10} />
-														<CornerDownLeft size={10} />
-													</span>
-												</DropdownMenu.Item>
-											</DropdownMenu.Content>
-										</DropdownMenu.Portal>
-									</DropdownMenu.Root>
-								) : null}
-							</>
-						) : (
-							<>
-								<Button
-									{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
-									size="sm"
-									onClick={handleCreateAll}
-									disabled={primaryActionDisabled}
-								>
-									<span className="inline-flex items-center">
-										Create {validTaskCount} {taskCountLabel}
-										<ButtonShortcut />
-									</span>
-								</Button>
-								{onCreateAndStartMultiple ? (
-									<Button
-										variant="primary"
-										size="sm"
-										onClick={handleCreateAndStartAll}
-										disabled={validTaskCount === 0 || !branchRef}
-									>
-										<span className="inline-flex items-center">
-											Start {validTaskCount} {taskCountLabel}
-											<ButtonShortcut includeShift />
-										</span>
+				<div ref={editorSurfaceRef} className="contents">
+					<TaskEditorSettingPresentationProvider
+						temporarilyRevealedKeys={temporarilyRevealedSettingKeys}
+						onUserPresentationChange={(key) =>
+							setTemporarilyRevealedSettingKeys((previous) => {
+								const next = new Set(previous);
+								next.delete(key);
+								return next;
+							})
+						}
+					>
+						<DialogBody>
+							<fieldset disabled={isTaskEditorPersisting} className="min-w-0">
+								{suspendedTaskEditorTitle && onResumeSuspendedTaskEditor ? (
+									<Button size="sm" onClick={onResumeSuspendedTaskEditor} className="mb-3 max-w-full truncate">
+										返回草稿：{suspendedTaskEditorTitle}
 									</Button>
 								) : null}
-							</>
-						)}
-					</DialogFooter>
-				</TaskEditorSettingPresentationProvider>
-			</TaskEditorFloatingWindow>
+								<div className="min-w-0 space-y-5">
+									<TaskEditorSettingGroup
+										title="所属项目"
+										defaultPresentation="expanded"
+										settings={[
+											{
+												key: "project",
+												label: "所属项目",
+												summary: targetWorkspaceId ?? "未选择",
+												content: effectiveProjectField ? (
+													<TaskCreationTargetProjectFieldControl
+														taskCreationTargetProjectField={effectiveProjectField}
+													/>
+												) : (
+													<p className="break-words text-sm text-text-primary">
+														{targetWorkspaceId ?? "请选择项目"}
+													</p>
+												),
+											},
+										]}
+									/>
+									<div className="min-w-0 space-y-3">
+										{/* 草稿通知栏。只在 edit 模式出现：create 模式没有「任务已保存的内容」可以改回去，
+					    也不存在按 taskId 归属的落败副本。它不阻塞保存——只是把一直存在却看不见的事实说出来。 */}
+										{taskEditorMode === "edit" && editingTaskId !== null ? (
+											<TaskEditDraftRecoveryNotice
+												workspaceId={workspaceId}
+												taskId={editingTaskId}
+												seededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
+												currentFormValues={
+													{
+														// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
+														// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
+														taskTitleOverride: taskName,
+														prompt: promptDraft,
+														images,
+														startInPlanMode,
+														taskAgentPermissionMode,
+														codexConfigurationProfileId,
+														codexReasoningEffortOverride,
+														codexConfigurationPermissionSelectionSource,
+														autoReviewEnabled,
+														autoReviewMode,
+														branchRef,
+														worktreeMode,
+														agentId,
+														clineSettings,
+														terminalAgentModelOverrideSettings,
+														taskAgentSessionInitialization,
+													} satisfies TaskEditDraftComparableValues
+												}
+												onRevertToSavedTaskContent={() => onRevertEditTaskFormToSavedTaskContent?.()}
+												onSupersededCopyPromotedToCurrentDraft={(promotedDraft) =>
+													onAdoptPromotedTaskEditDraft?.(promotedDraft)
+												}
+											/>
+										) : null}
+										{mode === "single" ? (
+											<div>
+												<TaskNameInputWithAiSuggestions
+													key={`task-name-input-${editingTaskId ?? composerResetKey}`}
+													taskName={taskName}
+													onTaskNameChange={setTaskName}
+													taskDescription={promptDraft}
+													preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
+												/>
+
+												<TaskPromptComposer
+													key={`task-prompt-composer-${composerResetKey}`}
+													value={promptDraft}
+													onValueChange={setPromptDraft}
+													onValueBlur={() => propagatePromptDraft(promptDraft)}
+													images={images}
+													onImagesChange={onImagesChange}
+													placeholder="描述要完成的任务…"
+													aria-label="任务正文"
+													minimumTextareaHeight={180}
+													autoFocus
+													workspaceId={targetWorkspaceId}
+													showAttachImageButton
+													showPseudoHtmlBlockInsertButton
+												/>
+												<div className="flex items-center justify-between mt-1.5">
+													<p className="text-[11px] text-text-tertiary">
+														Use{" "}
+														<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
+															@file
+														</code>{" "}
+														to reference files. Drag and drop or{" "}
+														<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
+															{pasteShortcutLabel}
+														</code>{" "}
+														also adds images.
+													</p>
+													{taskEditorMode === "create" && detectedItems.length >= 2 ? (
+														<button
+															type="button"
+															onClick={handleSplitIntoTasks}
+															disabled={
+																isTaskCreationWaitingForRelationDraftHydration ||
+																relationModeling.hasChanges ||
+																Boolean(relationModeling.draft.createdTaskId) ||
+																hasUnstagedRelationForm ||
+																isRelationAwareCreationInFlight
+															}
+															title={
+																relationModeling.hasChanges ||
+																relationModeling.draft.createdTaskId ||
+																hasUnstagedRelationForm
+																	? "请先完成或放弃关系草稿，再拆分为多个任务。"
+																	: undefined
+															}
+															className="inline-flex items-center gap-1.5 text-[12px] text-status-blue hover:text-[#86BEFF] cursor-pointer shrink-0 disabled:opacity-40 disabled:cursor-default"
+														>
+															<List size={12} />
+															Split into {detectedItems.length} tasks
+														</button>
+													) : null}
+												</div>
+											</div>
+										) : (
+											<div>
+												<div className="flex flex-col gap-1.5">
+													{taskPrompts.map((taskPrompt, index) => (
+														<div key={index} className="flex items-center gap-1.5">
+															<span className="text-[12px] text-text-tertiary text-right shrink-0 tabular-nums">
+																{index + 1}.
+															</span>
+															<input
+																ref={(el) => setInputRef(index, el)}
+																type="text"
+																value={taskPrompt}
+																onChange={(e) => handleUpdateTaskPrompt(index, e.target.value)}
+																onKeyDown={(e) => handleInputKeyDown(index, e)}
+																placeholder="Describe the task..."
+																className="flex-1 min-w-0 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-[13px] text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none"
+															/>
+															<Button
+																variant="ghost"
+																size="sm"
+																icon={<X size={14} />}
+																onClick={() => handleRemoveTask(index)}
+																aria-label={`Remove task ${index + 1}`}
+															/>
+														</div>
+													))}
+												</div>
+												<div className="flex items-center justify-between mt-3">
+													<button
+														type="button"
+														onClick={() => handleAddTask()}
+														className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
+													>
+														<Plus size={12} />
+														Add task
+													</button>
+													<button
+														type="button"
+														onClick={handleBackToSingle}
+														className="inline-flex items-center gap-1.5 text-[12px] text-text-secondary hover:text-text-primary cursor-pointer"
+													>
+														<ArrowLeft size={12} />
+														Back to single prompt
+													</button>
+												</div>
+											</div>
+										)}
+									</div>
+									{
+										<CreationWorkbenchStartupSettings
+											active={open}
+											workspaceId={targetWorkspaceId}
+											agentId={agentId}
+											onAgentIdChange={onAgentIdChange ?? (() => undefined)}
+											allowAgentSelection={Boolean(onAgentIdChange && onClineSettingsChange)}
+											clineSettings={clineSettings}
+											onClineSettingsChange={onClineSettingsChange}
+											terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
+											onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
+											agents={agents}
+											defaultAgentId={defaultAgentId}
+											defaultProviderId={defaultProviderId}
+											defaultModelId={defaultModelId}
+											defaultReasoningEffort={defaultReasoningEffort}
+											startInPlanMode={startInPlanMode}
+											onStartInPlanModeChange={onStartInPlanModeChange}
+											startInPlanModeDisabled={startInPlanModeDisabled}
+											taskAgentPermissionMode={taskAgentPermissionMode}
+											onTaskAgentPermissionModeChange={onTaskAgentPermissionModeChange}
+											codexConfigurationProfileId={codexConfigurationProfileId}
+											codexReasoningEffortOverride={codexReasoningEffortOverride}
+											onCodexReasoningEffortOverrideChange={onCodexReasoningEffortOverrideChange}
+											onCodexReasoningEffortValidationErrorChange={setCodexReasoningEffortValidationError}
+											onCodexConfigurationProfileIdChange={onCodexConfigurationProfileIdChange}
+											codexConfigurationPermissionSelectionSource={
+												codexConfigurationPermissionSelectionSource
+											}
+											onCodexConfigurationPermissionSelectionSourceChange={
+												onCodexConfigurationPermissionSelectionSourceChange
+											}
+											automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
+											additionalSettings={commonTaskEditorSettings}
+										/>
+									}
+								</div>
+								{codexReasoningEffortValidationError && (
+									<p role="alert" className="mt-2 text-xs text-status-red">
+										{codexReasoningEffortValidationError}
+									</p>
+								)}
+								{mode === "single" && workspaceId ? (
+									<TaskEditorSettingGroup
+										className="mt-5"
+										title="任务关系"
+										defaultPresentation="expanded"
+										settings={[
+											{
+												key: "relations",
+												label: "关系建模",
+												content: (
+													<ReferenceRelationModelingEditor
+														key={workspaceId}
+														controller={relationModeling}
+														presentation="task_editor"
+														clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
+														workspaceId={workspaceId}
+														taskId={taskEditorMode === "edit" ? editingTaskId : null}
+														rootTitle={taskName || "待创建任务"}
+														onUnstagedFormChange={setHasUnstagedRelationForm}
+														creationInFlight={isRelationAwareCreationInFlight}
+													/>
+												),
+											},
+										]}
+									/>
+								) : null}
+								<TaskEditorSettingGroup className="mt-5" title="更多设置" settings={moreTaskEditorSettings} />
+								<TaskEditorHiddenSettingsManager
+									settings={[
+										{ key: "project", label: "所属项目" },
+										{ key: "project_assignment_analysis", label: "项目归属分析" },
+										{ key: "worktree_mode", label: "任务工作区" },
+										{ key: "base_ref", label: "基础分支" },
+										{ key: "agent", label: "Agent" },
+										{ key: "model", label: "模型与参数" },
+										{ key: "session_initialization", label: "会话上下文" },
+										{ key: "plan_mode", label: "Plan Mode" },
+										{ key: "conversation_mode", label: "会话模式" },
+										{ key: "permissions", label: "Agent 权限" },
+										{ key: "codex_configuration_profile", label: "Codex profile" },
+										{ key: "auto_review_enabled", label: "自动评审" },
+										{ key: "auto_review_mode", label: "收尾方式" },
+										{ key: "relations", label: "关系建模" },
+									]}
+								/>
+							</fieldset>
+						</DialogBody>
+
+						{relationAwareCreationError ? (
+							<p role="alert" className="px-4 py-2 text-xs text-status-orange">
+								{relationAwareCreationError}
+							</p>
+						) : null}
+						{taskEditorOperationStatusText ? (
+							<p role="status" className="px-4 py-2 text-xs text-text-secondary">
+								{taskEditorOperationStatusText}
+							</p>
+						) : null}
+						<DialogFooter className="flex-wrap gap-y-2 [&>label]:max-sm:basis-full">
+							{taskEditorMode === "create" ? (
+								<label
+									htmlFor={createMoreId}
+									className="mr-auto flex items-center gap-2 text-[12px] text-text-primary cursor-pointer select-none"
+								>
+									<RadixSwitch.Root
+										id={createMoreId}
+										checked={createMore}
+										onCheckedChange={setCreateMore}
+										className="relative h-5 w-9 rounded-full bg-surface-4 data-[state=checked]:bg-accent cursor-pointer"
+									>
+										<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
+									</RadixSwitch.Root>
+									<span>连续创建</span>
+								</label>
+							) : (
+								<span className="mr-auto" />
+							)}
+							{mode === "single" ? (
+								<>
+									<Button
+										size="sm"
+										onClick={handleCreateSingle}
+										{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+										disabled={
+											!hasPromptDraftContent ||
+											Boolean(codexReasoningEffortValidationError) ||
+											!branchRef ||
+											isTaskCreationWaitingForRelationDraftHydration ||
+											isRelationAwareCreationInFlight
+										}
+									>
+										<span className="inline-flex items-center">
+											{taskEditorMode === "edit" ? "保存更改" : "创建任务"}
+											<ButtonShortcut />
+										</span>
+									</Button>
+									{onCreateAndStart ? (
+										<DropdownMenu.Root>
+											<div className="inline-flex items-center">
+												<Button
+													variant="primary"
+													size="sm"
+													onClick={() => handleRunSingleStartAction(primaryStartAction)}
+													disabled={
+														!hasPromptDraftContent ||
+														Boolean(codexReasoningEffortValidationError) ||
+														!branchRef ||
+														isTaskCreationWaitingForRelationDraftHydration ||
+														isRelationAwareCreationInFlight
+													}
+													className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
+												>
+													<span className="inline-flex items-center">
+														{primaryStartLabel}
+														<ButtonShortcut includeShift modifier={primaryStartShortcutModifier} />
+													</span>
+												</Button>
+												{onCreateStartAndOpen ? (
+													<DropdownMenu.Trigger asChild>
+														<Button
+															variant="primary"
+															size="sm"
+															disabled={
+																!hasPromptDraftContent ||
+																Boolean(codexReasoningEffortValidationError) ||
+																!branchRef ||
+																isTaskCreationWaitingForRelationDraftHydration ||
+																isRelationAwareCreationInFlight
+															}
+															className="rounded-l-none border-l border-white/20 px-1"
+															aria-label="More start options"
+														>
+															<ChevronDown size={12} />
+														</Button>
+													</DropdownMenu.Trigger>
+												) : null}
+											</div>
+											<DropdownMenu.Portal>
+												<DropdownMenu.Content
+													side="bottom"
+													align="end"
+													sideOffset={4}
+													className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 shadow-lg"
+													onCloseAutoFocus={(event) => event.preventDefault()}
+												>
+													<DropdownMenu.Item
+														className="flex items-center justify-between gap-2 rounded-sm px-2 py-1 text-[12px] text-text-primary cursor-pointer outline-none data-[highlighted]:bg-surface-3 whitespace-nowrap"
+														onSelect={() => handleRunSingleStartAction(secondaryStartAction)}
+													>
+														{secondaryStartLabel}
+														<span
+															className="inline-flex items-center gap-0.5 text-text-tertiary"
+															aria-hidden
+														>
+															{secondaryStartShortcutModifier === "alt" ? (
+																isMacPlatform ? (
+																	<Option size={10} />
+																) : (
+																	<span className="text-[10px] font-medium leading-none">Alt</span>
+																)
+															) : (
+																<Command size={10} />
+															)}
+															<ArrowBigUp size={10} />
+															<CornerDownLeft size={10} />
+														</span>
+													</DropdownMenu.Item>
+												</DropdownMenu.Content>
+											</DropdownMenu.Portal>
+										</DropdownMenu.Root>
+									) : null}
+								</>
+							) : (
+								<>
+									<Button
+										{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
+										size="sm"
+										onClick={handleCreateAll}
+										disabled={primaryActionDisabled}
+									>
+										<span className="inline-flex items-center">
+											Create {validTaskCount} {taskCountLabel}
+											<ButtonShortcut />
+										</span>
+									</Button>
+									{onCreateAndStartMultiple ? (
+										<Button
+											variant="primary"
+											size="sm"
+											onClick={handleCreateAndStartAll}
+											disabled={
+												validTaskCount === 0 || !branchRef || Boolean(codexReasoningEffortValidationError)
+											}
+										>
+											<span className="inline-flex items-center">
+												Start {validTaskCount} {taskCountLabel}
+												<ButtonShortcut includeShift />
+											</span>
+										</Button>
+									) : null}
+								</>
+							)}
+						</DialogFooter>
+					</TaskEditorSettingPresentationProvider>
+				</div>
+			</NonModalFloatingFormWindow>
 			<DiscardTaskCreateConfirmDialog
 				open={isDiscardConfirmOpen}
 				alreadyCreatedTaskId={relationModeling.draft.createdTaskId}
@@ -2277,3 +2173,5 @@ export function TaskEditorDialog({
 		</>
 	);
 }
+
+export { TaskEditorDialog } from "@/components/task-editor-hosted-session";

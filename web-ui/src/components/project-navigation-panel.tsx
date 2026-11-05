@@ -64,6 +64,7 @@ export function ProjectNavigationPanel({
 	sidebarWidth,
 	setExpandedSidebarWidth,
 	isCollapsed,
+	isDesktopSidebarHidden = false,
 	setSidebarCollapsed,
 }: {
 	projects: RuntimeProjectSummary[];
@@ -86,6 +87,7 @@ export function ProjectNavigationPanel({
 	sidebarWidth: number;
 	setExpandedSidebarWidth: (width: number) => void;
 	isCollapsed: boolean;
+	isDesktopSidebarHidden?: boolean;
 	setSidebarCollapsed: (collapsed: boolean, persist?: boolean) => void;
 }): React.ReactElement {
 	const sortedProjects = [...projects].sort((a, b) => a.path.localeCompare(b.path));
@@ -104,11 +106,13 @@ export function ProjectNavigationPanel({
 	const isMobile = useIsMobile();
 	const [isMobileClosing, setIsMobileClosing] = useState(false);
 	const [projectIdBeingVisuallyEdited, setProjectIdBeingVisuallyEdited] = useState<string | null>(null);
+	const [projectVisualIdentityOpeningRequestSequence, setProjectVisualIdentityOpeningRequestSequence] = useState(0);
 	const projectBeingVisuallyEdited = projects.find((project) => project.id === projectIdBeingVisuallyEdited);
 	const projectVisualIdentityEditor = projectBeingVisuallyEdited ? (
 		<ProjectVisualIdentityEditorDialog
 			key={projectBeingVisuallyEdited.id}
 			project={projectBeingVisuallyEdited}
+			openingRequestSequence={projectVisualIdentityOpeningRequestSequence}
 			onClose={() => setProjectIdBeingVisuallyEdited(null)}
 		/>
 	) : null;
@@ -218,6 +222,7 @@ export function ProjectNavigationPanel({
 			<aside
 				className="flex flex-col items-center min-h-0 overflow-hidden bg-surface-1 relative shrink-0 py-2 gap-1.5"
 				style={{
+					display: !isMobile && isDesktopSidebarHidden ? "none" : undefined,
 					width: collapsedWidth,
 					minWidth: collapsedWidth,
 					borderRight: "1px solid var(--color-divider)",
@@ -304,6 +309,7 @@ export function ProjectNavigationPanel({
 								: "kb-sidebar-slide-in 200ms ease",
 						}
 					: {
+							display: isDesktopSidebarHidden ? "none" : undefined,
 							width: sidebarWidth,
 							minWidth: SIDEBAR_MIN_EXPANDED_WIDTH,
 							maxWidth: SIDEBAR_MAX_EXPANDED_WIDTH,
@@ -396,6 +402,7 @@ export function ProjectNavigationPanel({
 									}
 								}}
 								onEditVisualIdentity={(projectId) => {
+									setProjectVisualIdentityOpeningRequestSequence((sequence) => sequence + 1);
 									setProjectIdBeingVisuallyEdited(projectId);
 									if (isMobile) {
 										setIsMobileClosing(false);

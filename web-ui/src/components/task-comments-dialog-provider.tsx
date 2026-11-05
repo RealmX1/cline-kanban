@@ -1,7 +1,12 @@
-import { createContext, type ReactNode, useCallback, useContext, useMemo, useRef, useState } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { TaskCommentsPanel } from "@/components/detail-panels/task-comments-panel";
+import {
+	NonModalFloatingFormWindowHostProvider,
+	useNonModalFloatingFormWindowHost,
+} from "@/components/non-modal-floating-form-window-host-provider";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogDescription, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import { mergeTaskCommentEditsIntoLatestTaskComments } from "@/state/merge-task-comment-edits-into-latest-task-comments";
 import { updateTaskCardFieldValuesThroughRuntime } from "@/state/task-card-action-commands-for-any-workspace";
@@ -9,7 +14,12 @@ import type { TaskCommentEntry } from "@/types";
 
 interface TaskCommentsDialogController {
 	currentWorkspaceId: string | null;
-	openTaskComments: (workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
+	openTaskComments: (
+		workspaceId: string,
+		taskId: string,
+		expectedTaskIncarnationCreatedAtEpochMs?: number,
+		focusReturnElementCapturedAtOpeningRequest?: HTMLElement,
+	) => void;
 }
 interface TaskCommentsDialogTarget {
 	readonly workspaceId: string;
@@ -21,13 +31,61 @@ export function useTaskCommentsDialog() {
 	return useContext(TaskCommentsDialogContext);
 }
 
-export function TaskCommentsDialogProvider({
-	currentWorkspaceId,
-	children,
-}: {
-	currentWorkspaceId: string | null;
-	children: ReactNode;
-}) {
+type FloatingFormHost = NonNullable<ReturnType<typeof useNonModalFloatingFormWindowHost>>;
+
+function BindTaskCommentsFloatingFormHost({ hostRef }: { hostRef: { current: FloatingFormHost | null } }) {
+	hostRef.current = useNonModalFloatingFormWindowHost();
+	return null;
+}
+
+/** 评论 context 包住宿主，常驻窗口才能和页面子树一样打开任务评论。 */
+export function TaskCommentsDialogProvider(props: { currentWorkspaceId: string | null; children: ReactNode }) {
+	const parentHost = useNonModalFloatingFormWindowHost();
+	const hostRef = useRef<FloatingFormHost | null>(parentHost);
+	if (parentHost) hostRef.current = parentHost;
+	const openTaskComments = useCallback(
+		(
+			workspaceId: string,
+			taskId: string,
+			expectedTaskIncarnationCreatedAtEpochMs?: number,
+			focusReturnElementCapturedAtOpeningRequest?: HTMLElement,
+		) => {
+			const host = hostRef.current;
+			if (!host) return;
+			const target = { workspaceId, taskId, expectedTaskIncarnationCreatedAtEpochMs };
+			host.openWindow({
+				formKind: "task-comments",
+				focusReturnElementCapturedAtOpeningRequest,
+				instanceIdentity: JSON.stringify([workspaceId, taskId, expectedTaskIncarnationCreatedAtEpochMs]),
+				ownership: {
+					workspaceId,
+					taskId,
+					taskIncarnationCreatedAtEpochMs: expectedTaskIncarnationCreatedAtEpochMs,
+				},
+				render: ({ close }) => <TaskCommentsForm initialTarget={target} close={close} />,
+			});
+		},
+		[],
+	);
+	const value = useMemo(
+		() => ({ currentWorkspaceId: props.currentWorkspaceId, openTaskComments }),
+		[props.currentWorkspaceId, openTaskComments],
+	);
+	const context = (
+		<TaskCommentsDialogContext.Provider value={value}>{props.children}</TaskCommentsDialogContext.Provider>
+	);
+	if (parentHost) return context;
+	return (
+		<TaskCommentsDialogContext.Provider value={value}>
+			<NonModalFloatingFormWindowHostProvider>
+				<BindTaskCommentsFloatingFormHost hostRef={hostRef} />
+				{props.children}
+			</NonModalFloatingFormWindowHostProvider>
+		</TaskCommentsDialogContext.Provider>
+	);
+}
+
+function TaskCommentsForm({ initialTarget, close }: { initialTarget: TaskCommentsDialogTarget; close: () => void }) {
 	const [target, setTarget] = useState<TaskCommentsDialogTarget | null>(null);
 	const [entries, setEntries] = useState<TaskCommentEntry[]>([]);
 	const [title, setTitle] = useState("");
@@ -80,10 +138,16 @@ export function TaskCommentsDialogProvider({
 		},
 		[],
 	);
-	const contextValue = useMemo(
-		() => ({ currentWorkspaceId, openTaskComments }),
-		[currentWorkspaceId, openTaskComments],
-	);
+	useEffect(() => {
+		openTaskComments(
+			initialTarget.workspaceId,
+			initialTarget.taskId,
+			initialTarget.expectedTaskIncarnationCreatedAtEpochMs,
+		);
+		return () => {
+			++readGeneration.current;
+		};
+	}, [initialTarget, openTaskComments]);
 	const saveComments = async (nextEntries: TaskCommentEntry[]) => {
 		if (!target || isSaving || !hasLoaded) return;
 		const generation = readGeneration.current;
@@ -131,8 +195,7 @@ export function TaskCommentsDialogProvider({
 		}
 	};
 	return (
-		<TaskCommentsDialogContext.Provider value={contextValue}>
-			{children}
+		<>
 			<Dialog
 				contentClassName="h-[70svh]"
 				open={target !== null}
@@ -140,6 +203,7 @@ export function TaskCommentsDialogProvider({
 					if (!open && !isSaving) {
 						++readGeneration.current;
 						setTarget(null);
+						close();
 					}
 				}}
 			>
@@ -179,6 +243,6 @@ export function TaskCommentsDialogProvider({
 					) : null}
 				</DialogBody>
 			</Dialog>
-		</TaskCommentsDialogContext.Provider>
+		</>
 	);
 }

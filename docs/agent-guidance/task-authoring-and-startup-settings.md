@@ -12,6 +12,8 @@ TLDR 直接放在 XML 详情之前，不包进 XML 或代码围栏。摘要须�
   <task-initial-prompt-authorship-rules>
 ## 用户原话、Agent 补充与交付路径
 
+创建前参考同目录 [工作分流参考](kanban-command-reference.md#工作分流参考)：当前会话内部的分工通常使用 Subagent；与当前 Task 紧密相关、适合共享工作目录且受益于用户独立参与的协作线可用 Peer Session；需要独立安排和验收的工作可创建新 Task。以上仅供选择时参考，在已有授权和权限边界内按实际情况自行判断。
+
 起草任务时，保留用户请求及其来源，区分原话、必要展开和建议。不要把 Agent 的推断写成用户已经提出或批准的要求。
 当前会话的角色、技能和阶段限制只按其适用范围生效，不要自动复制成目标任务的长期限制。
 保留不同的交付路径：只交付研究报告；先调查并给出方案、等待用户选择或批准；已经批准实施、先调查再实现。不要在起草或转交时替换这些含义。
@@ -20,7 +22,9 @@ TLDR 直接放在 XML 详情之前，不包进 XML 或代码围栏。摘要须�
   <task-startup-settings-selection-rules>
 ## 启动设置：核对实际默认，再决定是否覆盖
 
-创建或更新任务设置时，沿用符合用户意图的实际默认。startInPlanMode 的默认由 Settings 决定；create/preview 回执的 resolvedSettings 会给出实际值和来源。不要仅因“调查”或“只读检查”而关闭 Plan Mode。
+AI CLI 创建 Task、Peer 和 By the way 必须显式提供 `--start-in-plan-mode true` 或 `--start-in-plan-mode false`，遗漏时零创建；CLI 不读取界面的 Plan 偏好。创建界面的 Task Plan 默认值保留现有偏好，Peer 和 By the way 分别记忆，初始均关闭。
+
+创建或更新任务设置时，沿用符合用户意图的实际默认。create/preview 回执的 resolvedSettings 会给出实际值和来源。不要仅因“调查”或“只读检查”而关闭 Plan Mode。
 需要覆盖设置时，先核对实际值与用户要求，并说明对应依据；用户明确选择非 Plan Mode 时照常执行。此规则同时适用于创建时传参、创建后更新和启动前调整，不只检查 create。Plan 起步与工具权限是独立设置。
 </task-startup-settings-selection-rules>
 

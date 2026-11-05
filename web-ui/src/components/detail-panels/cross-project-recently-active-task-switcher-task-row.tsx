@@ -1,6 +1,7 @@
 import {
 	type CrossProjectTaskSwitcherEntryInProject,
 	type CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
+	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import {
@@ -149,6 +150,32 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	const fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
 
+	const startupProgress = isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry)
+		? entry.taskEditorCreationAgentStartupProgress
+		: undefined;
+
+	const startupStatusLabel =
+		startupProgress?.phase === "waiting_for_evidence"
+			? "正在核验启动结果"
+			: startupProgress?.phase === "waiting_for_dependency"
+				? "启动等待恢复"
+				: "正在启动";
+	const startupStatusExplanation =
+		startupProgress?.lastError ?? startupProgress?.recoveryCondition ?? "任务已保存，等待 Agent 进程启动";
+	const startupStatus = startupProgress ? (
+		<span
+			role="status"
+			aria-hidden={isHoverFloatingCardVisible || undefined}
+			className={cn("relative px-2 py-1 text-xs text-status-orange", isHoverFloatingCardVisible && "invisible")}
+			title={startupStatusExplanation}
+			data-verification-anchor={
+				isHoverFloatingCardVisible ? undefined : `task-editor-creation-agent-startup:${entry.taskId}`
+			}
+		>
+			{startupStatusLabel}
+		</span>
+	) : null;
+
 	return (
 		<div
 			ref={rowElementRef}
@@ -166,6 +193,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			{...rowContainerAttributes}
 			{...rowHoverExpansionTriggerProps}
 		>
+			{startupStatus}
 			{/* 普通形态角标跟随行，悬浮形态跟随浮层卡体。 */}
 			{!isHoverFloatingCardVisible ? (
 				<TaskCardCornerStatusIndicators
@@ -277,7 +305,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 					</div>
 				</div>
 			)}
-			{/* 固定位置（第 2 个子节点）：精简行 ↔ 展开之间完整卡片是同一个实例，不重挂载、不重读。 */}
+			{/* 保持固定的 React 子节点位置：精简行 ↔ 展开之间完整卡片是同一个实例，不重挂载、不重读。 */}
 			{fullTaskCard !== undefined ? (
 				<div
 					ref={fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus}
@@ -306,6 +334,16 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 								}
 								hasUnreadHandoffNotification={isUnreadHandoff}
 							/>
+						) : null}
+						{isHoverFloatingCardVisible && startupProgress ? (
+							<span
+								role="status"
+								className="relative px-2 py-1 text-xs text-status-orange"
+								title={startupStatusExplanation}
+								data-verification-anchor={`task-editor-creation-agent-startup:${entry.taskId}`}
+							>
+								{startupStatusLabel}
+							</span>
 						) : null}
 						{fullTaskCard}
 					</div>

@@ -160,7 +160,7 @@ export type TaskMainSessionHandoverExistingTargetBinding = z.infer<
 
 export const taskMainSessionHandoverAutomaticRecoverySchema = z.object({
 	classification: z.enum(["waiting_for_machine_evidence", "execution_prohibited", "human_decision_required"]),
-	stage: z.enum(["preparing_target_session", "confirming_report_acceptance"]),
+	stage: z.enum(["stopping_blocking_sessions", "preparing_target_session", "confirming_report_acceptance"]),
 	reason: z.string(),
 	evidenceFingerprint: z.string(),
 	attemptCount: z.number().int().nonnegative(),
@@ -171,12 +171,33 @@ export const taskMainSessionHandoverAutomaticRecoverySchema = z.object({
 	reportAcceptanceScanVisitedCursorPairs: z.array(z.string()).optional(),
 });
 
+const taskMainSessionHandoverBusySessionStrategySchema = z.enum(["wait_until_ready", "interrupt_blocking_sessions"]);
+
+const taskMainSessionHandoverSessionInterruptionSchema = z.object({
+	taskConversationSessionId: z.string(),
+	agentId: taskMainSessionHandoverAgentIdSchema,
+	nativeSessionId: z.string().nullable(),
+	workingDirectoryPath: z.string().nullable(),
+	runtimeSessionIncarnationId: z.string().nullable(),
+	pid: z.number().nullable(),
+	startedAt: z.number().nullable(),
+	agentResponseGenerationTurnSequence: z.number().optional(),
+	promptSubmissionAttemptedAtMs: z.number().nullable().optional(),
+	stopAttemptCount: z.number().int().nonnegative(),
+	lastStopAttemptAtMs: z.number().nullable(),
+	confirmedStoppedAtMs: z.number().nullable(),
+	lastError: z.string().nullable(),
+});
+
 // 正文写持久交接目录；卡片只保存小型控制记录，以免热路径反复广播整份 transcript。
 export const taskMainSessionHandoverRecordSchema = z.object({
 	handoverId: z.string(),
 	sourceTaskConversationSessionId: z.string(),
 	targetTaskConversationSessionId: z.string(),
 	destination: taskMainSessionHandoverDestinationSchema,
+	// 旧记录缺省等待，绝不能在升级后隐式取得中断权限。
+	busySessionHandoverStrategy: taskMainSessionHandoverBusySessionStrategySchema.optional(),
+	blockingSessionInterruptionRequests: z.array(taskMainSessionHandoverSessionInterruptionSchema).optional(),
 	existingTargetSessionBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
 	status: z.enum([
 		"waiting_for_sessions_to_stop",
@@ -234,9 +255,11 @@ export type TaskMainSessionHandoverRecord = z.infer<typeof taskMainSessionHandov
 export const taskMainSessionHandoverPrepareRequestSchema = z.object({ taskId: z.string().min(1) });
 export const taskMainSessionHandoverRequestSchema = z.object({
 	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().optional(),
 	expectedMainTaskConversationSessionId: z.string().min(1),
 	requestId: z.string().uuid(),
 	destination: taskMainSessionHandoverDestinationSchema,
+	busySessionHandoverStrategy: taskMainSessionHandoverBusySessionStrategySchema.optional(),
 	userContextNotes: z.string().default(""),
 	additionalPlanReferencePaths: z.array(z.string().min(1)).default([]),
 });
@@ -279,6 +302,15 @@ export const taskMainSessionHandoverPrepareResponseSchema = z.object({
 		)
 		.optional(),
 	busyTaskConversationSessionIds: z.array(z.string()),
+	blockingConversationSessions: z
+		.array(
+			z.object({
+				taskConversationSessionId: z.string(),
+				reason: z.enum(["generating", "awaiting_explicit_user_decision", "awaiting_state_verification"]),
+				description: z.string(),
+			}),
+		)
+		.optional(),
 	targetAgentCapabilities: z
 		.array(
 			z.object({

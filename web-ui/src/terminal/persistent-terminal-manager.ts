@@ -58,7 +58,7 @@ const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 // EXPERIMENT_NODE: 连接连续健康 5 秒后清零重连退避，后续按真实弱网体验校准稳定窗口。
 const TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
-// 可见性恢复门控的兜底超时:request_restore 后恢复快照最长等待时间,超时解除门控防白屏。
+// 可见性恢复超时后重建两条通道，避免在错误的屏幕和鼠标模式上续写。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
 // 「重新同步画面」（resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession）等第一份服务端快照的
 // 截止时间。刻意远短于上面那个 5s 被动兜底：那是「标签页切回来了，顺手要一份新快照」，等久一点无所谓；
@@ -130,6 +130,13 @@ interface EnsurePersistentTerminalInput extends PersistentTerminalAppearance {
 	deferAutomaticSessionResumeUntilVisibleMount?: boolean;
 	taskId: string;
 	workspaceId: string;
+}
+
+interface TerminalRestoreIdentity {
+	terminalRestoreGeneration: number;
+	clientId: string;
+	ioSocket: WebSocket | null;
+	controlSocket: WebSocket | null;
 }
 
 function generateTerminalClientId(): string {
@@ -310,6 +317,7 @@ class PersistentTerminal {
 	private controlSocket: WebSocket | null = null;
 	private connectionReady = false;
 	private restoreCompleted = false;
+	private terminalRestoreGeneration = 0;
 	private hasRenderedAnyTerminalContent = false;
 	// 「用户打开 / 回到这个任务时把已经不在的 PTY agent 会话接回来」：资格、停留门槛、按活体计的闩与跨实例
 	// 冷却都在调度器里（见 stale-agent-terminal-session-automatic-resume-scheduler.ts），本类只在各个
@@ -340,11 +348,11 @@ class PersistentTerminal {
 	private documentVisible: boolean;
 	private renderingSuspended: boolean;
 	private needsSnapshotResync = false;
-	// 可见性恢复竞态门控:标签页回归可见、已发出 request_restore、恢复快照尚未到达的窗口内,
+	// 可见性恢复竞态门控:标签页回归可见、已发出 request_restore、恢复快照尚未落屏的窗口内,
 	// 实时 io chunk 只 ack + 丢弃(不写 xterm)——否则这些 chunk 会先写进过期屏幕(time-lapse
 	// 闪帧),随后又被 reset+快照整段覆盖(双重渲染)。丢弃无损:请求前的在途 chunk 已进服务端
 	// mirror(必含于快照),之后的 chunk 被服务端 restoreComplete=false 缓冲、restore_complete
-	// 后重放。5s 兜底超时防控制消息丢失导致白屏。
+	// 后重放。5s 超时后成对重连，从新 viewer 的完整快照恢复。
 	private awaitingRestoreSnapshot = false;
 	private awaitingRestoreSnapshotTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 	// 「重新同步画面」期间抑制陈旧会话自动续跑的一次性闩（与上面 suppressNextRestartReset 同构）。
@@ -599,13 +607,15 @@ class PersistentTerminal {
 	}
 
 	private beginAwaitingRestoreSnapshotGate(): void {
+		this.discardStalledTerminalWriteQueue();
+		this.connectionReady = false;
+		this.restoreCompleted = false;
+		this.clearTerminalTransportConnectionStabilityTimer();
 		this.awaitingRestoreSnapshot = true;
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
 		this.awaitingRestoreSnapshotTimeoutTimer = setTimeout(() => {
 			this.awaitingRestoreSnapshotTimeoutTimer = null;
-			// 兜底:恢复快照迟迟未到(控制消息丢失 / 服务端异常)。解除门控恢复实时渲染,
-			// 宁可屏幕内容从过期状态续写,也不能白屏卡死。
-			this.awaitingRestoreSnapshot = false;
+			this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
 		}, AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS);
 	}
 
@@ -673,7 +683,18 @@ class PersistentTerminal {
 	private discardStalledTerminalWriteQueue(): void {
 		this.terminalWriteQueue = Promise.resolve();
 		this.discardedTerminalWriteQueueGeneration += 1;
+		this.terminalRestoreGeneration += 1;
 		this.slowFlushLogged = false;
+	}
+
+	private isCurrentTerminalRestore(restoreIdentity: TerminalRestoreIdentity): boolean {
+		return (
+			!this.disposed &&
+			restoreIdentity.terminalRestoreGeneration === this.terminalRestoreGeneration &&
+			restoreIdentity.clientId === this.clientId &&
+			restoreIdentity.ioSocket === this.ioSocket &&
+			restoreIdentity.controlSocket === this.controlSocket
+		);
 	}
 
 	// 换一个 clientId 重连两条 socket。服务端按 clientId 存 viewerState，所以「同一个 clientId 重连」拿回的
@@ -686,11 +707,18 @@ class PersistentTerminal {
 	// 置空即让它们静默退出，不会反过来把新连接的状态清掉、也不会再排一次 scheduleReconnect 与这里的
 	// ensureConnected 抢。onmessage 上那道守卫和 onclose 上的一样是必需的：close() 只是发起关闭握手，此前
 	// 已入队的 message 事件仍会派发（服务端 restore 迟到，本就是走到这个升级分支的条件本身）。
-	private reconnectTerminalSocketsUnderRotatedClientId(): void {
+	private reconnectTerminalSocketsUnderRotatedClientId({
+		preserveReconnectBackoff = false,
+	}: {
+		preserveReconnectBackoff?: boolean;
+	} = {}): void {
 		if (this.disposed) {
 			return;
 		}
 		this.clientId = generateTerminalClientId();
+		this.discardStalledTerminalWriteQueue();
+		this.endAwaitingRestoreSnapshotGate();
+		this.needsSnapshotResync = false;
 		const stalledIoSocket = this.ioSocket;
 		const stalledControlSocket = this.controlSocket;
 		this.ioSocket = null;
@@ -699,16 +727,21 @@ class PersistentTerminal {
 		this.restoreCompleted = false;
 		this.lastSentResizeMessage = null;
 		this.outputTextDecoder = new TextDecoder();
-		try {
-			stalledIoSocket?.close(1000, "Resyncing terminal view.");
-			stalledControlSocket?.close(1000, "Resyncing terminal view.");
-		} catch {
-			// 关不掉就让它自己超时；重要的是本实例已经不再认它。
+		for (const stalledSocket of [stalledIoSocket, stalledControlSocket]) {
+			try {
+				stalledSocket?.close(1000, "Resyncing terminal view.");
+			} catch {
+				// 关不掉就让它自己超时；重要的是本实例已经不再认它。
+			}
 		}
 		this.clearReconnectTimer();
 		this.clearTerminalTransportConnectionStabilityTimer();
-		this.reconnectAttempt = 0;
-		this.ensureConnected();
+		if (preserveReconnectBackoff) {
+			this.scheduleReconnect();
+		} else {
+			this.reconnectAttempt = 0;
+			this.ensureConnected();
+		}
 	}
 
 	private notifyLastError(): void {
@@ -758,6 +791,9 @@ class PersistentTerminal {
 		) {
 			return;
 		}
+		// 新 IO 打开才证明服务端已替换旧出口，此前不能让快照之后的输出流向正在关闭的旧 IO。
+		this.endAwaitingRestoreSnapshotGate();
+		this.sendControlMessage({ type: "restore_complete" });
 		this.connectionReady = true;
 		void recoverPendingTerminalInputBoxStash({ workspaceId: this.workspaceId, taskId: this.taskId });
 		this.clearReconnectTimer();
@@ -886,12 +922,25 @@ class PersistentTerminal {
 			ackBytes?: number;
 			notifyText?: string | null;
 			keepScrolledToBottom?: boolean;
+			restoreIdentity?: TerminalRestoreIdentity;
 		} = {},
 	): Promise<void> {
 		const ackBytes = options.ackBytes ?? 0;
 		const notifyText = options.notifyText ?? null;
 		const enqueuedAt = performance.now();
 		const generationAtEnqueue = this.discardedTerminalWriteQueueGeneration;
+		const controlSocketAtEnqueue = this.controlSocket;
+		const ioSocketAtEnqueue = this.ioSocket;
+		const isWriteCurrent = (): boolean =>
+			!this.disposed &&
+			generationAtEnqueue === this.discardedTerminalWriteQueueGeneration &&
+			(!options.restoreIdentity || this.isCurrentTerminalRestore(options.restoreIdentity));
+		const acknowledgeOutput = (): void => {
+			// IO 替换会重建服务端背压记账；旧输出的 ACK 不能扣减新 IO 的未确认字节。
+			if (ackBytes > 0 && this.controlSocket === controlSocketAtEnqueue && this.ioSocket === ioSocketAtEnqueue) {
+				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+			}
+		};
 		this.terminalWriteQueue = this.terminalWriteQueue
 			.catch(() => undefined)
 			.then(
@@ -901,26 +950,20 @@ class PersistentTerminal {
 							resolve();
 							return;
 						}
-						if (generationAtEnqueue !== this.discardedTerminalWriteQueueGeneration) {
-							// 这条 link 属于已被 discardStalledTerminalWriteQueue 丢弃的旧链：不落屏、不发文本通知、
-							// 不动滚动位置——这些字节已经被随后那份恢复快照整段覆盖，补写只会把快照分片撕开。
-							//
-							// 但 ackBytes 必须照发：服务端在**发送**时就把它们计入了 unacknowledgedOutputBytes，
-							// 而「只发 request_restore、control socket 不重连」这条非升级路径不会触发服务端的
-							// resetUnacknowledgedOutputAccounting。漏发就等于把这批字节的记账永久悬空，PTY 会在
-							// 画面看似已恢复之后继续被背压按住，直到 30s 逐出兜底才放开。
-							if (ackBytes > 0) {
-								this.sendControlMessage({
-									type: "output_ack",
-									bytes: ackBytes,
-								});
-							}
+						if (!isWriteCurrent()) {
+							// 淘汰的旧链不得补写；IO 尚未替换时仍须结清原连接的背压。
+							acknowledgeOutput();
 							resolve();
 							return;
 						}
 						const shouldKeepScrolledToBottom =
 							options.keepScrolledToBottom === false ? false : this.shouldKeepScrolledToBottom();
 						this.terminal.write(data, () => {
+							acknowledgeOutput();
+							if (!isWriteCurrent()) {
+								resolve();
+								return;
+							}
 							const elapsed = performance.now() - enqueuedAt;
 							if (elapsed > VIEWER_QUEUE_STALL_MS) {
 								if (!this.slowFlushLogged) {
@@ -935,12 +978,6 @@ class PersistentTerminal {
 							if (notifyText) {
 								this.notifyOutputText(notifyText);
 							}
-							if (ackBytes > 0) {
-								this.sendControlMessage({
-									type: "output_ack",
-									bytes: ackBytes,
-								});
-							}
 							this.keepScrolledToBottom(shouldKeepScrolledToBottom);
 							resolve();
 						});
@@ -953,19 +990,28 @@ class PersistentTerminal {
 		snapshot: string,
 		cols: number | null | undefined,
 		rows: number | null | undefined,
-	): Promise<void> {
+		restoreIdentity: TerminalRestoreIdentity,
+	): Promise<boolean> {
 		const shouldKeepScrolledToBottom = this.shouldKeepScrolledToBottom();
 		await this.terminalWriteQueue.catch(() => undefined);
-		this.terminal.reset();
+		// 等写队列期间可能已完成新恢复；清屏前就必须淘汰旧恢复，完成回调里的守卫来不及。
+		if (!this.isCurrentTerminalRestore(restoreIdentity)) {
+			return false;
+		}
+		// CAN 终止旧的半截控制序列，RIS 在 xterm 原生解析队列中排在未解析旧字节之后完成重置。
+		await this.enqueueTerminalWrite("\x18\x1bc", { keepScrolledToBottom: false, restoreIdentity });
+		if (!this.isCurrentTerminalRestore(restoreIdentity)) {
+			return false;
+		}
 		if (cols && rows && (this.terminal.cols !== cols || this.terminal.rows !== rows)) {
 			this.terminal.resize(cols, rows);
 		}
 		if (!snapshot) {
-			// 空快照 = 服务端 mirror 已随运行时重启丢失：上面的 reset() 刚把 xterm 清成白板，屏幕上确实
+			// 空快照 = 服务端 mirror 已随运行时重启丢失：上面的 RIS 刚把 xterm 清成白板，屏幕上确实
 			// 一无所有，标志必须跟着落回 false，「会话已随运行时结束」的空态卡片才会出现。
 			this.setHasRenderedAnyTerminalContent(false);
 			this.keepScrolledToBottom(shouldKeepScrolledToBottom);
-			return;
+			return true;
 		}
 		this.markTerminalContentPresent();
 		// 快照分片写入:整段写会让 xterm 在一次 write 里同步解析数 MB(其 12ms 时间预算只在
@@ -973,10 +1019,17 @@ class PersistentTerminal {
 		// 在片间保持可响应。滚动定位保持在全部写完之后。
 		let lastSnapshotSliceWrite: Promise<void> = Promise.resolve();
 		for (const snapshotSlice of sliceRestoreSnapshotForIncrementalWrite(snapshot)) {
-			lastSnapshotSliceWrite = this.enqueueTerminalWrite(snapshotSlice, { keepScrolledToBottom: false });
+			lastSnapshotSliceWrite = this.enqueueTerminalWrite(snapshotSlice, {
+				keepScrolledToBottom: false,
+				restoreIdentity,
+			});
 		}
 		await lastSnapshotSliceWrite;
+		if (!this.isCurrentTerminalRestore(restoreIdentity)) {
+			return false;
+		}
 		this.keepScrolledToBottom(shouldKeepScrolledToBottom);
+		return true;
 	}
 
 	private getRenderedPixelSize(): { pixelWidth?: number; pixelHeight?: number } {
@@ -1048,8 +1101,9 @@ class PersistentTerminal {
 		if (!shouldKeepScrolledToBottom) {
 			return;
 		}
+		const restoreGenerationBeforeScheduledScroll = this.terminalRestoreGeneration;
 		window.requestAnimationFrame(() => {
-			if (this.disposed) {
+			if (this.disposed || restoreGenerationBeforeScheduledScroll !== this.terminalRestoreGeneration) {
 				return;
 			}
 			this.terminal.scrollToBottom();
@@ -1124,10 +1178,6 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
-			this.ioSocket = null;
-			this.outputTextDecoder = new TextDecoder();
-			this.connectionReady = false;
-			this.clearTerminalTransportConnectionStabilityTimer();
 			// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
 			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
 				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
@@ -1136,7 +1186,7 @@ class PersistentTerminal {
 				this.lastError = "Terminal stream closed. Reconnecting...";
 			}
 			this.notifyLastError();
-			this.scheduleReconnect();
+			this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
 		};
 	}
 
@@ -1171,23 +1221,40 @@ class PersistentTerminal {
 			}
 
 			if (payload.type === "restore") {
-				// 恢复快照已到达:解除可见性恢复门控。此后到 restore_complete 之间服务端不再
-				// 转发实时输出(restoreComplete=false 缓冲),不存在门控漏窗。
-				this.endAwaitingRestoreSnapshotGate();
+				const shouldReplaceTerminalIoSocketAfterRestoreSnapshot =
+					this.awaitingRestoreSnapshot || this.restoreCompleted;
+				this.awaitingRestoreSnapshot = true;
 				this.connectionReady = false;
 				this.clearTerminalTransportConnectionStabilityTimer();
 				this.restoreCompleted = false;
+				if (shouldReplaceTerminalIoSocketAfterRestoreSnapshot) {
+					// control 快照证明服务端已关转发闸，但旧 IO 仍可能有在途帧；换 IO 才能隔离这些字节。
+					const previousIoSocket = this.ioSocket;
+					this.ioSocket = null;
+					this.outputTextDecoder = new TextDecoder();
+					try {
+						previousIoSocket?.close(1000, "Replacing terminal stream after restore snapshot.");
+					} catch {
+						// 当前实例已不再接受该 IO 的事件，关闭失败不影响新通道建立。
+					}
+					this.connectIo();
+				}
 				// 到达序号在此刻定死（而非等落屏时再取），resync 才能分辨「本次请求到的那一份」与「更早在途、
 				// 恰好此刻才落屏的那一份」。
 				this.restoreSnapshotArrivalSequence += 1;
 				const arrivedRestoreSnapshotArrivalSequence = this.restoreSnapshotArrivalSequence;
-				void this.applyRestore(payload.snapshot, payload.cols, payload.rows)
-					.then(() => {
-						if (this.disposed || this.controlSocket !== controlSocket) {
+				const restoreIdentity: TerminalRestoreIdentity = {
+					terminalRestoreGeneration: ++this.terminalRestoreGeneration,
+					clientId: this.clientId,
+					ioSocket: this.ioSocket,
+					controlSocket,
+				};
+				void this.applyRestore(payload.snapshot, payload.cols, payload.rows, restoreIdentity)
+					.then((applied) => {
+						if (!applied || !this.isCurrentTerminalRestore(restoreIdentity)) {
 							return;
 						}
 						this.restoreCompleted = true;
-						this.sendControlMessage({ type: "restore_complete" });
 						if (this.ioSocket && this.visibleContainer) {
 							this.requestResize();
 						}
@@ -1205,7 +1272,7 @@ class PersistentTerminal {
 						this.notifyRestoreSnapshotApplied(arrivedRestoreSnapshotArrivalSequence);
 					})
 					.catch(() => {
-						if (this.disposed || this.controlSocket !== controlSocket) {
+						if (!this.isCurrentTerminalRestore(restoreIdentity)) {
 							return;
 						}
 						this.lastError = "Terminal restore failed.";
@@ -1240,10 +1307,6 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
-			this.controlSocket = null;
-			this.connectionReady = false;
-			this.clearTerminalTransportConnectionStabilityTimer();
-			this.restoreCompleted = false;
 			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
 				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
 				this.reconnectAttempt = 0;
@@ -1251,7 +1314,7 @@ class PersistentTerminal {
 				this.lastError = "Terminal control connection closed. Reconnecting...";
 			}
 			this.notifyLastError();
-			this.scheduleReconnect();
+			this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
 		};
 	}
 
@@ -1523,10 +1586,11 @@ class PersistentTerminal {
 	}
 
 	reset(): void {
+		const generationAtEnqueue = this.discardedTerminalWriteQueueGeneration;
 		this.terminalWriteQueue = this.terminalWriteQueue
 			.catch(() => undefined)
 			.then(() => {
-				if (this.disposed) {
+				if (this.disposed || generationAtEnqueue !== this.discardedTerminalWriteQueueGeneration) {
 					return;
 				}
 				this.terminal.reset();
@@ -1633,7 +1697,6 @@ class PersistentTerminal {
 			this.documentVisible = documentVisible;
 			this.renderingSuspended = !documentVisible;
 			this.needsSnapshotResync = false;
-			this.discardStalledTerminalWriteQueue();
 			this.beginAwaitingRestoreSnapshotGate();
 			// 基线卡在发出请求的这一刻：在此之前就已到达、只是还没落屏的快照都不算「本次 resync 请求到的
 			// 那一份」，不能拿来提前满足下面的等待（否则闩会在本次快照落地之前就被 finally 清掉）。
@@ -1647,9 +1710,7 @@ class PersistentTerminal {
 			) {
 				return;
 			}
-			// 升级。重连后服务端会重新走一遍 restore 握手，所以这里不必再发 request_restore；写队列再清一次，
-			// 因为上一轮那份迟到的快照可能已经把切片排进了那条卡死的队列。
-			this.discardStalledTerminalWriteQueue();
+			// 升级时一并淘汰旧写队列与恢复代次；新 viewer 会重新走 restore 握手，不必再发 request_restore。
 			// 第二段的基线独立重取：它等的是**重连之后**才到达的那份快照。第一段那份迟到的快照虽然已被
 			// applyRestore().then() 里的 `this.controlSocket !== controlSocket` 守卫挡在水位之外，但把这条
 			// 不变式押在另一个函数的守卫上太脆——在本地把基线取准，两段等待各自的语义才是自洽的。
@@ -1706,6 +1767,23 @@ class PersistentTerminal {
 			this.suppressNextRestartReset = false;
 			throw error;
 		}
+	}
+
+	captureAgentSessionRestartForFloatingForm(): (arguments_: string[]) => Promise<void> {
+		const incarnation = this.latestSummary?.runtimeSessionIncarnationId;
+		const workspaceTaskId = this.latestSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? this.taskId;
+		return async (arguments_) => {
+			const current = await getRuntimeTrpcClient(this.workspaceId).runtime.getTaskConversationSession.query({
+				taskId: workspaceTaskId,
+				taskConversationSessionId: this.taskId,
+			});
+			const currentIncarnation = current.summary?.runtimeSessionIncarnationId;
+			if (!current.summary || !incarnation || !currentIncarnation)
+				throw new Error("暂时无法核对原会话代次，参数已保留，未执行重启。");
+			if (currentIncarnation !== incarnation) throw new Error("原会话身份已变化，参数已保留，未执行重启。");
+			const result = await this.refresh(undefined, undefined, undefined, arguments_);
+			if (!result.ok) throw new Error(result.error ?? "重启原会话失败，参数已保留。");
+		};
 	}
 
 	consumeRestartResetSuppression(): boolean {

@@ -12,6 +12,7 @@ interface TaskCommentBeforeMoveIntoDoneRequest {
 	taskTitle: string;
 	insertAtIndexWithinDoneBoardColumn?: number;
 	closureRequestId: string;
+	openingRequestIdentity?: symbol;
 	expectedTaskUpdatedAtEpochMs: number;
 	taskCommentEntryId: string;
 	commentText: string;
@@ -30,7 +31,17 @@ export function useTaskCommentBeforeMoveIntoDone() {
 	}, []);
 	const open = useCallback(
 		(workspaceId: string, card: BoardCard, insertAtIndexWithinDoneBoardColumn?: number) => {
-			if (requestRef.current) return;
+			const existing = requestRef.current;
+			if (existing?.phase === "submitting") return;
+			const openingRequestIdentity = Symbol("task-closure-opening-request");
+			if (
+				existing?.workspaceId === workspaceId &&
+				existing.taskId === card.id &&
+				existing.expectedTaskIncarnationCreatedAtEpochMs === card.createdAt
+			) {
+				replaceRequest({ ...existing, openingRequestIdentity });
+				return;
+			}
 			replaceRequest({
 				workspaceId,
 				taskId: card.id,
@@ -38,6 +49,7 @@ export function useTaskCommentBeforeMoveIntoDone() {
 				taskTitle: card.title,
 				insertAtIndexWithinDoneBoardColumn,
 				closureRequestId: createRandomUuidV4WithInsecureContextFallback(),
+				openingRequestIdentity,
 				expectedTaskUpdatedAtEpochMs: card.updatedAt,
 				taskCommentEntryId: createTaskCommentEntryId(),
 				commentText: "",

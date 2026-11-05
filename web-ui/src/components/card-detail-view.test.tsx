@@ -6,8 +6,19 @@ import { CardDetailView } from "@/components/card-detail-view";
 import type { AgentTerminalPanelProps } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { DEFAULT_DETAIL_TERMINAL_PANEL_WIDTH_PX } from "@/resize/use-card-detail-layout";
-import type { RuntimeAgentSessionTransport, RuntimeConfigResponse, RuntimeTaskSessionSummary } from "@/runtime/types";
+import { useSidebarVisibilityLayout } from "@/resize/use-sidebar-visibility-layout";
+import * as taskVisualizationQueries from "@/runtime/task-visualization-query";
+import type {
+	RuntimeAgentSessionTransport,
+	RuntimeConfigResponse,
+	RuntimeTaskSessionSummary,
+	TaskVisualizationPreviewRequestedMessage,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
+import {
+	deliverTaskVisualizationStreamMessage,
+	readTaskVisualizationBrowserPageId,
+} from "@/stores/task-visualization-browser-bridge";
 import { TERMINAL_THEME_COLORS } from "@/terminal/theme-colors";
 import type { BoardCard, BoardColumn, BoardColumnId, CardSelection } from "@/types";
 
@@ -338,6 +349,116 @@ describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	it("详情重新渲染保留受控最大化，卸载时仅通知当前宿主恢复布局", async () => {
+		const originalOnDiffExpandedChange = vi.fn();
+		const currentOnDiffExpandedChange = vi.fn();
+		const renderMaximizedControlledCardDetail = async (
+			onDiffExpandedChange: (expanded: boolean) => void,
+			selection = createSelection(),
+		) =>
+			act(async () =>
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId="workspace-1"
+						sessionSummary={null}
+						taskSessions={{}}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+						isDiffExpanded
+						onDiffExpandedChange={onDiffExpandedChange}
+					/>,
+				),
+			);
+		await renderMaximizedControlledCardDetail(originalOnDiffExpandedChange);
+		await renderMaximizedControlledCardDetail(currentOnDiffExpandedChange, {
+			...createSelection(),
+			card: createCard("task-2"),
+		});
+		expect(originalOnDiffExpandedChange).not.toHaveBeenCalled();
+		expect(currentOnDiffExpandedChange).not.toHaveBeenCalled();
+		expect(container.querySelector<HTMLElement>("[data-focus-view-agent-panel]")?.style.display).toBe("none");
+		await act(async () => root.render(<div>跨项目打开的过渡外壳</div>));
+		expect(originalOnDiffExpandedChange).not.toHaveBeenCalled();
+		expect(currentOnDiffExpandedChange).toHaveBeenCalledExactlyOnceWith(false);
+	});
+
+	it.each([
+		{ isMobile: false, initiallyHidden: false },
+		{ isMobile: false, initiallyHidden: true },
+		{ isMobile: true, initiallyHidden: true },
+	])("有效预览只展开桌面工作台，保留最大化与其他偏好 %j", async ({ isMobile, initiallyHidden }) => {
+		mockUseIsMobile.mockReturnValue(isMobile);
+		vi.spyOn(document, "hasFocus").mockReturnValue(true);
+		vi.spyOn(taskVisualizationQueries, "fetchTaskVisualizationArtifacts").mockResolvedValue({
+			artifacts: [],
+			taskAttribution: { workspaceId: "workspace-1", taskId: "task-1", taskTitle: "预览回归" },
+			visualizationPublicationProtocolVersion: "task-visualization-artifacts/v1",
+		});
+		const onDiffExpandedChange = vi.fn();
+		let sidebarVisibility!: ReturnType<typeof useSidebarVisibilityLayout>;
+		function ControlledSidebarDetail() {
+			sidebarVisibility = useSidebarVisibilityLayout();
+			return (
+				<CardDetailView
+					selection={createSelection()}
+					currentProjectId="workspace-1"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+					isDiffExpanded={!initiallyHidden}
+					onDiffExpandedChange={onDiffExpandedChange}
+					isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
+					onFocusViewWorkbenchSidebarHiddenChange={sidebarVisibility.setFocusViewWorkbenchSidebarHidden}
+				/>
+			);
+		}
+		await act(async () => root.render(<ControlledSidebarDetail />));
+		await act(async () => {
+			sidebarVisibility.setFocusViewWorkbenchSidebarHidden(initiallyHidden);
+			sidebarVisibility.setHomeProjectSidebarHidden(true);
+			sidebarVisibility.setFocusViewTaskListSidebarHidden(true);
+		});
+		const preservedPreferences = localStorage.getItem(LocalStorageKey.FocusViewTaskListSidebarHidden);
+		const offeredPreview: TaskVisualizationPreviewRequestedMessage = {
+			type: "task_visualization_preview_requested",
+			workspaceId: "workspace-1",
+			taskId: "task-1",
+			browserPageId: readTaskVisualizationBrowserPageId(),
+			deliveryAttemptId: crypto.randomUUID(),
+			deliveryState: "offered",
+			previewRequest: {
+				previewRequestId: crypto.randomUUID(),
+				visualizationArtifactId: "a".repeat(64),
+				revisionId: "b".repeat(64),
+				requestedAtMs: 1,
+				displayedAtMs: null,
+			},
+		};
+		await act(async () => deliverTaskVisualizationStreamMessage(offeredPreview));
+		expect(sidebarVisibility.isFocusViewWorkbenchSidebarHidden).toBe(initiallyHidden);
+		await act(async () => deliverTaskVisualizationStreamMessage({ ...offeredPreview, deliveryState: "accepted" }));
+		expect(sidebarVisibility.isFocusViewWorkbenchSidebarHidden).toBe(isMobile && initiallyHidden);
+		expect(sidebarVisibility.isHomeProjectSidebarHidden).toBe(true);
+		expect(localStorage.getItem(LocalStorageKey.FocusViewTaskListSidebarHidden)).toBe(preservedPreferences);
+		expect(onDiffExpandedChange).not.toHaveBeenCalled();
+		if (!isMobile && !initiallyHidden)
+			expect(container.querySelector<HTMLElement>("[data-focus-view-agent-panel]")?.style.display).toBe("none");
+	});
+
 	it.each([false, true])("Done 打开完整工作台并展示只读历史，禁用执行入口（mobile=%s）", async (isMobile) => {
 		mockUseIsMobile.mockReturnValue(isMobile);
 		const selection = createSelection();

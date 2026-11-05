@@ -13,7 +13,7 @@ import {
 	hasCompletionReviewForSubmittedAutomaticFailureContinuation,
 } from "../../../src/terminal/automatic-agent-failure-continuation-coordinator";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
-import { persistSideSessionResumeRequestWaitingForNativeIdentity } from "../../../src/terminal/side-session-native-identity-recovery";
+import { persistTaskSessionResumeRequestWaitingForNativeConversationIdentity } from "../../../src/terminal/task-session-native-conversation-identity-recovery";
 
 const isolatedRuntimeHome = vi.hoisted(() => ({ path: "" }));
 vi.mock("../../../src/state/workspace-state", () => ({
@@ -123,7 +123,7 @@ describe("自动恢复意图的持久重建", () => {
 		await restored.restoreAutomaticFailureContinuationsAfterRuntimeRestart();
 		const summary = restored.getSummary("conversation");
 		if (!summary) throw new Error("未恢复测试会话");
-		await persistSideSessionResumeRequestWaitingForNativeIdentity(summary, {
+		await persistTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary, {
 			taskId: "conversation",
 			workspaceId: "isolated",
 			agentId: "codex",

@@ -6,6 +6,9 @@ export const taskCommandExecutionSpecificationSchema = z
 		command: commandArgumentsSchema,
 		resumeCommand: commandArgumentsSchema,
 		resumeCommandPreservesBusinessSingleFlight: z.boolean().default(false),
+		ownerSessionInterruptPolicy: z.enum(["cancel_execution", "preserve_execution"]).default("cancel_execution"),
+		continuationNoticesFile: z.string().min(1).optional(),
+		producerExecutionRevocationFile: z.string().min(1).optional(),
 		cancelCommand: commandArgumentsSchema.optional(),
 		workingDirectory: z.string().min(1),
 		resultFile: z.string().min(1),
@@ -13,8 +16,12 @@ export const taskCommandExecutionSpecificationSchema = z
 		label: z.string().min(1),
 		recoveryEvidencePaths: z.array(z.string()).default([]),
 		readOnlyRecoveryEvidenceObservationCommand: commandArgumentsSchema.optional(),
+		recoveryEvidenceObservationMode: z.enum(["semantic_observation_only"]).optional(),
 	})
-	.strict();
+	.strict()
+	.refine((value) => !value.recoveryEvidenceObservationMode || !!value.readOnlyRecoveryEvidenceObservationCommand, {
+		message: "语义观察优先模式必须登记只读观察命令",
+	});
 export type TaskCommandExecutionSpecification = z.infer<typeof taskCommandExecutionSpecificationSchema>;
 export const taskCommandExecutionStartRequestSchema = z.object({
 	taskId: z.string().min(1),
@@ -27,6 +34,46 @@ export const taskCommandExecutionIdentityRequestSchema = z.object({
 });
 export type TaskCommandExecutionStartRequest = z.input<typeof taskCommandExecutionStartRequestSchema>;
 export type TaskCommandExecutionIdentityRequest = z.infer<typeof taskCommandExecutionIdentityRequestSchema>;
+export const taskCommandExecutionRecoveryObservationRegistrationRequestSchema =
+	taskCommandExecutionIdentityRequestSchema
+		.extend({
+			expectedMaterialSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+			command: commandArgumentsSchema,
+			mode: z.literal("semantic_observation_only"),
+		})
+		.strict();
+export type TaskCommandExecutionRecoveryObservationRegistrationRequest = z.infer<
+	typeof taskCommandExecutionRecoveryObservationRegistrationRequestSchema
+>;
+
+export const taskCommandExecutionContinuationNoticeSchema = z
+	.object({
+		noticeId: z.string().min(1).max(256),
+		stage: z.string().min(1).max(80),
+		text: z.string().min(1).max(2000),
+		requiresCurrentResultNoticeMatch: z.boolean().optional(),
+	})
+	.strict();
+export type TaskCommandExecutionContinuationNotice = z.infer<typeof taskCommandExecutionContinuationNoticeSchema>;
+
+const taskCommandExecutionResultDeliverySchema = z.object({
+	producerNoticeId: z.string().nullable().default(null),
+	stage: z.string().default("final_agent_review"),
+	resultId: z.string(),
+	text: z.string(),
+	textSha256: z.string(),
+	state: z.enum(["known_not_submitted", "submission_unknown", "native_accepted"]),
+	attemptCount: z.number(),
+	attemptId: z.string().nullable(),
+	awaitingTransportReceipt: z.boolean(),
+	lastPreflightFailureEvidenceSha256: z.string().nullable(),
+	unchangedPreflightRetryCount: z.number(),
+	retryPreflightNotBeforeEpochMs: z.number().nullable(),
+	reconciliationAttemptCount: z.number(),
+	lastReconciliationEvidenceSha256: z.string().nullable(),
+	nextReconciliationAtEpochMs: z.number().nullable(),
+	nativeReceipt: z.record(z.string(), z.unknown()).nullable(),
+});
 
 export const taskCommandExecutionRecordSchema = z.object({
 	executionId: z.string().uuid(),
@@ -73,28 +120,34 @@ export const taskCommandExecutionRecordSchema = z.object({
 	progress: z.record(z.string(), z.unknown()).nullable(),
 	recovery: z.record(z.string(), z.unknown()).nullable(),
 	lastRecoveryEvidenceSha256: z.string().nullable(),
+	recoveryEvidenceObservationStatus: z.enum(["known", "unknown"]).optional(),
+	recoveryEvidenceAttemptBudgets: z
+		.record(
+			z.string(),
+			z.object({
+				resumeAttemptsUsed: z.number().int().nonnegative(),
+				maximumResumeAttempts: z.number().int().nonnegative(),
+				includesEvidenceTransitionLaunch: z.boolean().default(false),
+			}),
+		)
+		.optional(),
+	recoveryEvidenceObservationRegistration: z
+		.object({
+			registrationId: z.string(),
+			boundMaterialSha256: z.string(),
+			command: commandArgumentsSchema,
+			mode: z.literal("semantic_observation_only"),
+			registeredAtEpochMs: z.number(),
+			previousRecoveryEvidenceSha256: z.string().nullable(),
+			previousContinuationRequestId: z.string().nullable().optional(),
+		})
+		.optional(),
 	unchangedRecoveryAttemptCount: z.number(),
 	nextRecoveryAtEpochMs: z.number().nullable(),
 	parkOwned: z.boolean(),
 	logicalResultCount: z.number(),
-	resultDelivery: z
-		.object({
-			resultId: z.string(),
-			text: z.string(),
-			textSha256: z.string(),
-			state: z.enum(["known_not_submitted", "submission_unknown", "native_accepted"]),
-			attemptCount: z.number(),
-			attemptId: z.string().nullable(),
-			awaitingTransportReceipt: z.boolean(),
-			lastPreflightFailureEvidenceSha256: z.string().nullable(),
-			unchangedPreflightRetryCount: z.number(),
-			retryPreflightNotBeforeEpochMs: z.number().nullable(),
-			reconciliationAttemptCount: z.number(),
-			lastReconciliationEvidenceSha256: z.string().nullable(),
-			nextReconciliationAtEpochMs: z.number().nullable(),
-			nativeReceipt: z.record(z.string(), z.unknown()).nullable(),
-		})
-		.nullable(),
+	resultDelivery: taskCommandExecutionResultDeliverySchema.nullable(),
+	resultDeliveryHistory: z.array(taskCommandExecutionResultDeliverySchema).default([]),
 	cancellationObservation: z.record(z.string(), z.unknown()).nullable(),
 });
 export type TaskCommandExecutionRecord = z.infer<typeof taskCommandExecutionRecordSchema>;

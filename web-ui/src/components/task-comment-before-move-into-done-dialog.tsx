@@ -1,5 +1,8 @@
 import type { TaskClosureRequest } from "@runtime-task-closure-contract";
 import { useEffect, useRef, useState } from "react";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
+import { RetainedTaskClosureFormSession } from "@/components/retained-task-closure-form-session";
 import {
 	createTaskClosureFormDraft,
 	nonemptyClosureFormLines,
@@ -7,7 +10,8 @@ import {
 	TaskClosureFormFields,
 } from "@/components/task-closure-form-fields";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
@@ -15,12 +19,14 @@ import {
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import type { TaskCommentBeforeMoveIntoDoneController } from "@/hooks/use-task-comment-before-move-into-done";
 
-export function TaskCommentBeforeMoveIntoDoneDialog({
+export function TaskCommentBeforeMoveIntoDoneDialogForm({
 	controller,
 	onSubmit,
 }: {
 	controller: TaskCommentBeforeMoveIntoDoneController;
-	onSubmit: (commentText: string, closure?: TaskClosureRequest) => void;
+	prepareClosurePayloadOnly?: boolean;
+	postDeployVerificationCompletionDeploymentId?: string;
+	onSubmit: (commentText: string, closure?: TaskClosureRequest) => void | Promise<void>;
 }) {
 	const { request } = controller;
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -44,7 +50,7 @@ export function TaskCommentBeforeMoveIntoDoneDialog({
 		setResolvingIdentity(true);
 		try {
 			const details = await resolveTaskClosureFormDetails(draft, request.workspaceId);
-			onSubmit(commentText, {
+			await onSubmit(commentText, {
 				closureRequestId: request.closureRequestId,
 				expectedTaskUpdatedAtEpochMs: request.expectedTaskUpdatedAtEpochMs,
 				details,
@@ -116,4 +122,30 @@ export function TaskCommentBeforeMoveIntoDoneDialog({
 			</DialogFooter>
 		</Dialog>
 	);
+}
+
+const HostedTaskClosureFormEntry = hostNonModalFloatingForm(RetainedTaskClosureFormSession, {
+	formKind: "task-closure-form",
+	openingRequestIdentity: (props) => props.controller.request?.openingRequestIdentity,
+	isOpen: (props) => props.controller.request !== null,
+	instanceIdentity: (props) =>
+		JSON.stringify([
+			props.controller.request?.workspaceId,
+			props.controller.request?.taskId,
+			props.controller.request?.expectedTaskIncarnationCreatedAtEpochMs,
+		]),
+	ownership: (props) => ({
+		workspaceId: props.controller.request?.workspaceId,
+		taskId: props.controller.request?.taskId,
+		taskIncarnationCreatedAtEpochMs: props.controller.request?.expectedTaskIncarnationCreatedAtEpochMs,
+		displayLabel: props.controller.request?.taskTitle,
+	}),
+	withClose: (props, close) => ({ ...props, controller: { ...props.controller, cancel: close } }),
+	onClosed: (props) => props.controller.cancel(),
+});
+export function TaskCommentBeforeMoveIntoDoneDialog(
+	props: React.ComponentProps<typeof TaskCommentBeforeMoveIntoDoneDialogForm>,
+) {
+	const host = useNonModalFloatingFormWindowHost();
+	return host ? <HostedTaskClosureFormEntry {...props} /> : <TaskCommentBeforeMoveIntoDoneDialogForm {...props} />;
 }

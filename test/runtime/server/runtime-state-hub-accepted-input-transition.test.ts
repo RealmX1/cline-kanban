@@ -18,6 +18,7 @@ import { createTempDir } from "../../utilities/temp-dir";
 const mockedDependencies = vi.hoisted(() => ({
 	moveAcceptedInput: vi.fn<typeof moveTaskCardIntoInProgressAfterAcceptedMainConversationInput>(),
 	moveCorrectedReview: vi.fn(),
+	persistNativeReadiness: vi.fn().mockResolvedValue(true),
 	observeNativeSummary: vi.fn().mockResolvedValue(undefined),
 	wakeNativeSubmission: vi.fn(),
 	forgetNativeWorkspace: vi.fn(),
@@ -25,6 +26,10 @@ const mockedDependencies = vi.hoisted(() => ({
 	retentionWarning: vi.fn(),
 	completeMainSessionHandover: vi.fn(),
 	observerOptions: null as CreateNativeAgentConversationActivityObserverOptions | null,
+}));
+
+vi.mock("../../../src/state/persist-codex-native-direct-input-readiness-reconciliation", () => ({
+	persistCodexNativeDirectInputReadinessReconciliation: mockedDependencies.persistNativeReadiness,
 }));
 
 vi.mock("../../../src/state/workspace-state", async (importOriginal) => ({

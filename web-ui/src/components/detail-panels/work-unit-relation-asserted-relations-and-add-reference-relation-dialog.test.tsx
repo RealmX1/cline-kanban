@@ -6,6 +6,7 @@ import {
 	type CrossProjectRecentlyActiveTaskSwitcherHostContextValue,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
+import { NonModalFloatingFormWindowHostProvider } from "@/components/non-modal-floating-form-window-host-provider";
 import {
 	buildEmptyRelationNeighborhoodSummaryResponseForTest,
 	buildRelationNeighborhoodSummaryResponseWithAssertedRelationsForTest,
@@ -122,7 +123,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		});
 	}
 
-	async function renderExpandedPanel(): Promise<void> {
+	async function renderExpandedPanel(withRetainedFloatingFormHost = false): Promise<void> {
 		const crossProjectTaskOpenHost: CrossProjectRecentlyActiveTaskSwitcherHostContextValue = {
 			projects: [
 				buildKanbanProjectSummaryForTest(CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST, "current-project"),
@@ -138,13 +139,20 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 			onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
 		};
 		await act(async () => {
-			root.render(
+			const panel = (
 				<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectTaskOpenHost}>
 					<WorkUnitRelationNeighborhoodPanel
 						workspaceId={CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}
 						kanbanBoardCardTaskId={SUBJECT_KANBAN_BOARD_CARD_TASK_ID_FOR_TEST}
 					/>
-				</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>,
+				</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+			);
+			root.render(
+				withRetainedFloatingFormHost ? (
+					<NonModalFloatingFormWindowHostProvider>{panel}</NonModalFloatingFormWindowHostProvider>
+				) : (
+					panel
+				),
 			);
 		});
 		await flushPendingPromiseCallbacks();
@@ -174,6 +182,22 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		expect(assertedRelationRow).not.toBeNull();
 		return assertedRelationRow!;
 	}
+
+	it("真实添加关系入口重复点击会展开原窗口并保留关系草稿", async () => {
+		await renderExpandedPanel(true);
+		const trigger = findButtonByText(container, "Add relation");
+		await clickElement(trigger);
+		const dialog = findOpenAddRelationDialog();
+		const field = dialog.querySelector<HTMLInputElement>("input")!;
+		await changeFormControlValue(field, "关系草稿");
+		await clickElement(dialog.querySelector<HTMLButtonElement>('button[aria-expanded="true"]')!);
+		expect(dialog.getAttribute("data-collapsed")).toBe("true");
+		await clickElement(trigger);
+		expect(document.querySelectorAll("[data-non-modal-floating-form-window]")).toHaveLength(1);
+		expect(dialog.getAttribute("data-collapsed")).toBe("false");
+		expect(dialog.querySelector("input")).toBe(field);
+		expect(field.value).toBe("关系草稿");
+	});
 
 	function findButtonByText(scope: ParentNode, buttonText: string): HTMLButtonElement {
 		const button = [...scope.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -435,9 +459,13 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 				},
 				relationKind: "reference_concerns_behavior_or_state_of",
 				counterpartWorkUnit: {
-					workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-					bareTaskId: "def34",
-					workspaceId: OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST,
+					workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+					kanbanBoardCard: {
+						workUnitType: "kanban_board_card",
+						taskId: "def34",
+						workspaceId: OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST,
+						taskIncarnationCreatedAtEpochMs: 1000,
+					},
 				},
 				relationAssertionRationaleOneSentence: "Diagnosing its retry loop.",
 				relationAssertionEvidencePointers: ["docs/retry-notes.md"],

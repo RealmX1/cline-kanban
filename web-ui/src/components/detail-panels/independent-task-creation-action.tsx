@@ -1,13 +1,16 @@
 import { GitBranch } from "lucide-react";
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog } from "@/components/ui/non-modal-form-dialog";
 import { buildProjectTaskDeepLinkUrl } from "@/hooks/app-utils";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
+import { useHostedNonModalFloatingFormActionLifecycle } from "@/hooks/use-hosted-non-modal-floating-form-action-lifecycle";
 import { useIndependentTaskCreation } from "@/hooks/use-independent-task-creation";
 import {
 	independentTaskCreationClient,
@@ -20,15 +23,39 @@ const inputClassName =
 	"w-full rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-text-primary focus-visible:outline focus-visible:outline-accent";
 
 export function IndependentTaskCreationAction({
+	hostedFormClose,
+	expectedTaskIncarnationCreatedAtEpochMs,
 	workspaceId,
 	sourceTaskId,
 	sourceSessionId,
 }: {
+	hostedFormClose?: () => void;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
 	workspaceId: string;
 	sourceTaskId: string;
 	sourceSessionId: string;
 }) {
-	const creation = useIndependentTaskCreation(workspaceId, sourceTaskId, sourceSessionId);
+	const sourceIdentity = JSON.stringify([
+		workspaceId,
+		sourceTaskId,
+		sourceSessionId,
+		expectedTaskIncarnationCreatedAtEpochMs,
+	]);
+	const latestSourceIdentity = useRef(sourceIdentity);
+	latestSourceIdentity.current = sourceIdentity;
+	const isSourceMounted = useRef(true);
+	useEffect(() => {
+		isSourceMounted.current = true;
+		return () => {
+			isSourceMounted.current = false;
+		};
+	}, []);
+	const creation = useIndependentTaskCreation(
+		workspaceId,
+		sourceTaskId,
+		sourceSessionId,
+		expectedTaskIncarnationCreatedAtEpochMs,
+	);
 	const promptInputIdPrefix = useId();
 	const { draft, busy } = creation;
 	const [allowIncompleteContext, setAllowIncompleteContext] = useState(false);
@@ -72,12 +99,55 @@ export function IndependentTaskCreationAction({
 		onSubmit: () => creation.create(allowIncompleteContext),
 		disabled: primaryActionDisabled,
 	});
+	const floatingFormHost = useNonModalFloatingFormWindowHost();
+	useHostedNonModalFloatingFormActionLifecycle({ open: creation.open, begin: creation.begin, hostedFormClose });
+	const openFormWindow = () => {
+		if (!floatingFormHost || hostedFormClose) {
+			void creation.begin();
+			return;
+		}
+		floatingFormHost.openWindow({
+			formKind: "independent-task-creation",
+			instanceIdentity: JSON.stringify([
+				workspaceId,
+				sourceTaskId,
+				sourceSessionId,
+				expectedTaskIncarnationCreatedAtEpochMs,
+			]),
+			ownership: {
+				workspaceId,
+				taskId: sourceTaskId,
+				taskIncarnationCreatedAtEpochMs: expectedTaskIncarnationCreatedAtEpochMs,
+				conversationSessionId: sourceSessionId,
+			},
+			onClosed: () => {
+				if (!isSourceMounted.current || latestSourceIdentity.current !== sourceIdentity) return;
+				void independentTaskCreationClient(workspaceId)
+					.list.query({ sourceTaskId, sourceTaskConversationSessionId: sourceSessionId })
+					.then((result) => {
+						if (isSourceMounted.current && latestSourceIdentity.current === sourceIdentity)
+							setDerivedTasks(result.tasks);
+					})
+					.catch(() => {});
+			},
+			render: ({ close }) => (
+				<IndependentTaskCreationAction
+					workspaceId={workspaceId}
+					sourceTaskId={sourceTaskId}
+					sourceSessionId={sourceSessionId}
+					expectedTaskIncarnationCreatedAtEpochMs={expectedTaskIncarnationCreatedAtEpochMs}
+					hostedFormClose={close}
+				/>
+			),
+		});
+	};
 	return (
 		<div
+			hidden={Boolean(hostedFormClose)}
 			className="px-2 pb-2"
 			data-verification-anchor={`independent-task-creation:${sourceTaskId}:${sourceSessionId}`}
 		>
-			<Button size="sm" variant="ghost" icon={<GitBranch size={13} />} onClick={() => void creation.begin()}>
+			<Button size="sm" variant="ghost" icon={<GitBranch size={13} />} onClick={openFormWindow}>
 				分出独立任务
 			</Button>
 			{derivedTasks.map((task) => (
@@ -89,7 +159,7 @@ export function IndependentTaskCreationAction({
 					{task.title}
 				</a>
 			))}
-			<Dialog
+			<NonModalFormDialog
 				onKeyDown={handlePrimaryActionKeyDown}
 				open={creation.open}
 				onOpenChange={(value) => {
@@ -340,7 +410,7 @@ export function IndependentTaskCreationAction({
 						</Button>
 					)}
 				</DialogFooter>
-			</Dialog>
+			</NonModalFormDialog>
 		</div>
 	);
 }

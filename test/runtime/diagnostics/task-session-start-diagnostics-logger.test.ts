@@ -13,6 +13,8 @@ describe("task-session-start diagnostics logger", () => {
 				effectiveAgentId: "claude",
 				phase: "capture_initial_turn_checkpoint",
 				elapsedMs: 217_871,
+				phaseDurationMs: 123,
+				runtimeSessionIncarnationId: "isolated-runtime-incarnation",
 				error: "response transport closed",
 				session: {
 					state: "running",
@@ -30,6 +32,8 @@ describe("task-session-start diagnostics logger", () => {
 		expect(line).toContain("taskId=w0n47");
 		expect(line).toContain("phase=capture_initial_turn_checkpoint");
 		expect(line).toContain("elapsedMs=217871");
+		expect(line).toContain("phaseDurationMs=123");
+		expect(line).toContain("runtimeSessionIncarnationId=isolated-runtime-incarnation");
 		expect(line).toContain('"liveness":"live"');
 		expect(line).toContain('error="response transport closed"');
 		expect(line).toContain("requestedTerminalColumns=null");

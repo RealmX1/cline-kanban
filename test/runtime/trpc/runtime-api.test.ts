@@ -1293,6 +1293,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		function createColdRuntimeFixture(
 			sessionTransport: "pty_terminal" | "acp_stdio_subprocess",
 			isCurrentMain = false,
+			codexReasoningEffortOverride?: string,
 		) {
 			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/worktree");
 			const metadata = createCollaborationSummary().taskConversationSessionMetadata;
@@ -1309,6 +1310,7 @@ describe("createRuntimeApi startTaskSession", () => {
 						...metadata.taskConversationSessionLaunchSettings,
 						sessionTransport,
 						startInPlanMode: true,
+						codexReasoningEffortOverride,
 						terminalAgentModelOverrideSettings:
 							sessionTransport === "pty_terminal"
 								? { agentId: "codex", modelId: "collaborator-model" }
@@ -1335,6 +1337,7 @@ describe("createRuntimeApi startTaskSession", () => {
 									prompt: "原任务需求不能在恢复时重投",
 									baseRef: "main",
 									agentId: "codex",
+									codexReasoningEffortOverride: "ultra",
 									taskAgentPermissionMode: "bypass_all_permission_prompts",
 									mainTaskConversationSessionId: persisted.taskId,
 									taskMainSessionHandover: {
@@ -1398,6 +1401,30 @@ describe("createRuntimeApi startTaskSession", () => {
 			});
 			return { persisted, terminalManager, acpService, workspaceScope, api, spawnPty };
 		}
+
+		it.each([undefined, "max"])("冷恢复保留会话自己的推理选择 %s，不套用宿主覆盖", async (effort) => {
+			const { persisted, terminalManager, workspaceScope, api } = createColdRuntimeFixture(
+				"pty_terminal",
+				true,
+				effort,
+			);
+			const startSession = vi.spyOn(terminalManager, "startTaskSession").mockResolvedValue(persisted);
+			try {
+				const response = await api.startTaskSession(workspaceScope, {
+					taskId: "task-1",
+					baseRef: "main",
+					prompt: "",
+				});
+				expect(response.ok).toBe(true);
+				expect(startSession).toHaveBeenCalledWith(
+					expect.objectContaining({ taskId: persisted.taskId, codexReasoningEffortOverride: effort }),
+					expect.any(String),
+				);
+			} finally {
+				startSession.mockRestore();
+				terminalManager.markInterruptedAndStopAll();
+			}
+		});
 
 		it("Task 默认启动跟随新主；显式前主启动与 Sessions 重启都保留 Claude 身份和配置", async () => {
 			const { persisted, terminalManager, workspaceScope, api } = createColdRuntimeFixture("pty_terminal", true);
@@ -4082,6 +4109,34 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(stopResponse.ok).toBe(true);
 		expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-1");
 		expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+	});
+
+	it("ACP 取消当前回合声明回合范围，明确停止会话继续使用整任务范围", async () => {
+		const summary = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
+		const onTaskSessionStopRequested = vi.fn<NonNullable<CreateRuntimeApiDependencies["onTaskSessionStopRequested"]>>(
+			async () => undefined,
+		);
+		const acpService = {
+			listSummaries: () => [summary],
+			cancelTaskTurn: vi.fn(async () => summary),
+			stopTaskSession: vi.fn(async () => summary),
+		};
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: () => "workspace-1",
+			loadScopedRuntimeConfig: async () => createRuntimeConfigState(),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: async () => ({ listSummaries: () => [] }) as never,
+			getScopedAcpTaskSessionService: async () => acpService as never,
+			getScopedClineTaskSessionService: async () => createClineTaskSessionServiceMock() as never,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+			onTaskSessionStopRequested,
+		});
+		const scope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
+		expect((await api.cancelTaskChatTurn(scope, { taskId: summary.taskId })).ok).toBe(true);
+		expect(onTaskSessionStopRequested).toHaveBeenCalledWith("workspace-1", summary.taskId, "current_agent_turn");
+		expect((await api.stopTaskSession(scope, { taskId: summary.taskId })).ok).toBe(true);
+		expect(onTaskSessionStopRequested).toHaveBeenLastCalledWith("workspace-1", summary.taskId);
 	});
 
 	it("returns cline chat messages and sends chat message through cline service", async () => {

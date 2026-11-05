@@ -4,6 +4,7 @@ import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/c
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 import { loadDetailTaskCardsPanelRatioPreference } from "@/resize/use-card-detail-layout";
 
 /**
@@ -20,13 +21,16 @@ export function FocusViewCrossProjectTaskOpenInTransitShell({
 	targetProjectName,
 	targetTaskTitle,
 	onCancel,
+	isFocusViewTaskListSidebarHidden = false,
 }: {
 	host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue;
 	targetProjectName: string | null;
 	targetTaskTitle: string | null;
 	onCancel: () => void;
+	isFocusViewTaskListSidebarHidden?: boolean;
 }): ReactElement {
 	const [taskCardsPanelRatio] = useState(loadDetailTaskCardsPanelRatioPreference);
+	const isMobile = useIsMobile();
 	return (
 		<div
 			className="flex min-h-0 flex-1 overflow-hidden bg-surface-0"
@@ -34,7 +38,10 @@ export function FocusViewCrossProjectTaskOpenInTransitShell({
 		>
 			<div
 				className="flex min-h-0 min-w-0 flex-col border-r border-border"
-				style={{ width: `${(taskCardsPanelRatio * 100).toFixed(1)}%` }}
+				style={{
+					width: `${(taskCardsPanelRatio * 100).toFixed(1)}%`,
+					display: !isMobile && isFocusViewTaskListSidebarHidden ? "none" : undefined,
+				}}
 			>
 				<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />
 			</div>

@@ -11,6 +11,7 @@ import {
 	type NotificationAssessmentInput,
 } from "../notifications/notification-assessment-service";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import { persistCodexNativeDirectInputReadinessReconciliation } from "../state/persist-codex-native-direct-input-readiness-reconciliation";
 import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
@@ -62,6 +63,7 @@ import {
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import {
 	isNotifiableUserTurn,
+	isParkedAwaitingDispatchedBackgroundWork,
 	isTaskConversationSessionWithoutTaskLifecycleAuthority,
 	resolveSessionFacets,
 } from "../core/session-activity";
@@ -242,14 +244,41 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					observation,
 				);
 		},
-		onCodexNativeDirectInputReadiness: (observation, summaryBeforeRead) => {
-			terminalManagersByWorkspaceId
-				.get(observation.workspaceId)
-				?.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
-					observation.conversationSessionId,
+		onCodexNativeDirectInputReadiness: async (observation, summaryBeforeRead) => {
+			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			if (
+				!manager ||
+				!(await persistCodexNativeDirectInputReadinessReconciliation({
+					workspaceId: observation.workspaceId,
 					summaryBeforeRead,
-					observation,
-				);
+					getCurrentSummary: () => manager.getSummary(observation.conversationSessionId),
+					change: { observation },
+				}))
+			)
+				return;
+			manager.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+				observation.conversationSessionId,
+				summaryBeforeRead,
+				observation,
+			);
+		},
+		onCodexNativeDirectInputReadinessReconciliation: async (context, summaryBeforeRead, progress) => {
+			const manager = terminalManagersByWorkspaceId.get(context.workspaceId);
+			if (
+				!manager ||
+				!(await persistCodexNativeDirectInputReadinessReconciliation({
+					workspaceId: context.workspaceId,
+					summaryBeforeRead,
+					getCurrentSummary: () => manager.getSummary(context.conversationSessionId),
+					change: { progress },
+				}))
+			)
+				return;
+			manager.recordCodexNativeDirectInputReadinessReconciliation(
+				context.conversationSessionId,
+				summaryBeforeRead,
+				progress,
+			);
 		},
 		onActivity: (observation) => {
 			if (observation.activityKind === "accepted_user_input") return;
@@ -597,6 +626,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		const previousSummary = latestNotificationSummaries.get(`${workspaceId}:${summary.taskId}`);
+		const crossProjectSessionStatusFingerprint = (value: RuntimeTaskSessionSummary) =>
+			JSON.stringify([
+				resolveSessionFacets(value),
+				value.startedAt,
+				value.pid,
+				isParkedAwaitingDispatchedBackgroundWork(value),
+				value.automaticAgentFailureContinuation?.phase,
+			]);
+		const sessionStatusChanged =
+			previousSummary !== undefined &&
+			crossProjectSessionStatusFingerprint(previousSummary) !== crossProjectSessionStatusFingerprint(summary);
+
 		const sessionKey = `${workspaceId}:${summary.taskId}`;
 		const previousEdgeWasObserved = acceptedEdgeBySession.has(sessionKey);
 		const accepted = summary.agentConversationPromptSubmissionAcceptance;
@@ -656,6 +698,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 
 		latestNotificationSummaries.set(`${workspaceId}:${summary.taskId}`, summary);
+		if (sessionStatusChanged) void broadcastRuntimeProjectsUpdated(null);
 		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
 		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /
@@ -1076,6 +1119,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
+		client.on("error", () => client.terminate());
 		client.on("close", () => {
 			taskVisualizationArtifactService?.forgetBrowserClient(client);
 			cleanupRuntimeStateClient(client);

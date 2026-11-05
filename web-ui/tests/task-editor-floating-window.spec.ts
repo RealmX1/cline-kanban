@@ -22,12 +22,20 @@ async function mountEditorHarness(page: Page) {
 
 async function openEditorHarness(
 	page: Page,
-	options: { failAutomaticAnalysisPreferenceSaves?: boolean; mode?: "create" | "edit" } = {},
+	options: {
+		failAutomaticAnalysisPreferenceSaves?: boolean;
+		mode?: "create" | "edit";
+		failFirstModelCatalogRead?: boolean;
+	} = {},
 ) {
 	const observations = {
 		analysisRequestCount: 0,
 		savedAutomaticAnalysisChoices: [] as boolean[],
+		savedCustomBlockNameLists: [] as string[][],
 		lastSavedRelationDrafts: [] as unknown[],
+		modelCatalogReadCount: 0,
+		remainingModelCatalogFailures: options.failFirstModelCatalogRead ? 1 : 0,
+		sideSessionCreationRequests: [] as Array<Record<string, unknown>>,
 	};
 	await page.addInitScript(() => {
 		Object.defineProperty(navigator, "clipboard", {
@@ -55,6 +63,9 @@ async function openEditorHarness(
 			let value: unknown = null;
 			if (name === "runtime.getConfig" || name === "runtime.saveConfig") {
 				const patch = payload[index]?.userInterfacePreferencesSharedAcrossBrowserOrigins;
+				if (Array.isArray(patch?.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames)) {
+					observations.savedCustomBlockNameLists.push([...patch.taskPromptPseudoHtmlBlockRecentlyUsedCustomNames]);
+				}
 				if (typeof patch?.taskProjectAssignmentAutomaticAnalysisEnabled === "boolean") {
 					if (options.failAutomaticAnalysisPreferenceSaves)
 						return {
@@ -76,6 +87,72 @@ async function openEditorHarness(
 						},
 					};
 				value = { userInterfacePreferencesSharedAcrossBrowserOrigins: preferences };
+			} else if (name === "runtime.getTerminalAgentModelSelectionOptions") {
+				observations.modelCatalogReadCount++;
+				const failThisModelCatalogRead = observations.remainingModelCatalogFailures > 0;
+				if (failThisModelCatalogRead) observations.remainingModelCatalogFailures--;
+				value = failThisModelCatalogRead
+					? {
+							agentId: "codex",
+							defaultModelId: null,
+							defaultLabel: "默认",
+							options: [],
+							warning: "目录读取暂时失败",
+						}
+					: {
+							agentId: "codex",
+							defaultModelId: null,
+							defaultLabel: "默认",
+							options: [
+								{
+									modelId: "fixture-model",
+									label: "默认模型",
+									supportedReasoningEfforts: [{ effort: "high" }, { effort: "max" }, { effort: "ultra" }],
+									defaultReasoningEffort: "high",
+									modelSelectionGroup: "latest_tracking_alias",
+								},
+								{
+									modelId: "limited-model",
+									label: "受限模型",
+									supportedReasoningEfforts: [{ effort: "low" }],
+									modelSelectionGroup: "latest_tracking_alias",
+								},
+							],
+						};
+			} else if (name === "runtime.getCodexConfigurationSyncState") {
+				value = {
+					revision: 1,
+					changes: [],
+					sourceObservations: [],
+					observationProblem: null,
+					defaultCodexConfigurationProfileId: "fixture-profile",
+					profiles: [
+						{
+							profileId: "fixture-profile",
+							name: "默认配置",
+							sourceIdentity: "source",
+							version: 1,
+							fields: [
+								{
+									fieldKey: JSON.stringify(["config.toml", "model"]),
+									fieldLabel: "model",
+									value: "fixture-model",
+									valueSummary: "fixture-model",
+									version: 1,
+									exceptionGroup: "model",
+								},
+								{
+									fieldKey: JSON.stringify(["config.toml", "model_reasoning_effort"]),
+									fieldLabel: "effort",
+									value: "high",
+									valueSummary: "high",
+									version: 1,
+									exceptionGroup: "reasoning_effort",
+								},
+							],
+						},
+					],
+				};
 			} else if (name === "workUnit.resolveKanbanBoardCardIdentityByBareTaskId")
 				value = {
 					kanbanBoardCardIdentityCandidates: [
@@ -103,6 +180,16 @@ async function openEditorHarness(
 			else if (name === "workUnit.saveRelationModelingEditorDraft") {
 				observations.lastSavedRelationDrafts = payload[index]?.draft?.referenceRelationDrafts ?? [];
 				value = { saved: true };
+			} else if (name === "runtime.lookupTaskConversationSessionCreation") value = null;
+			else if (name === "runtime.createTaskConversationSession") {
+				observations.sideSessionCreationRequests.push(payload[index]);
+				return {
+					error: {
+						message: "模拟创建失败，输入保持",
+						code: -32603,
+						data: { code: "INTERNAL_SERVER_ERROR", httpStatus: 500 },
+					},
+				};
 			} else if (name === "workspace.allocateTaskIdForNewWebUiTaskCard")
 				value = { allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry: "abcde" };
 			else if (name === "support.analyzeTaskProjectAssignment") {
@@ -120,7 +207,7 @@ async function openEditorHarness(
 			}
 			return { result: { data: value } };
 		});
-		await route.fulfill({ json: results });
+		await route.fulfill({ json: url.searchParams.get("batch") === "1" ? results : results[0] });
 	});
 	await page.route("**/isolated-task-editor-floating-window*", (route) =>
 		route.fulfill({
@@ -132,6 +219,53 @@ async function openEditorHarness(
 	await mountEditorHarness(page);
 	return observations;
 }
+
+for (const mode of ["create", "edit"] as const) {
+	test(`${mode} 共用推理强度选择，默认模型可独立设置并显示不兼容错误`, async ({ page }) => {
+		await page.setViewportSize({ width: 1100, height: 1000 });
+		await openEditorHarness(page, { mode });
+		await page.getByRole("button", { name: /模型与参数：/ }).click();
+		const effort = page.getByLabel("推理强度", { exact: true });
+		await expect(effort).toHaveValue("");
+		await expect(effort.locator("option").first()).toHaveText("沿用 Codex 配置（high）");
+		await effort.selectOption("ultra");
+		await page.getByRole("button", { name: "收起模型与参数", exact: true }).click();
+		await expect(page.getByRole("button", { name: /模型与参数：.*推理：ultra/ })).toBeVisible();
+		await page.getByRole("button", { name: /模型与参数：/ }).click();
+		await expect(effort).toHaveValue("ultra");
+		await page.getByRole("button", { name: "受限模型", exact: true }).click();
+		await expect(page.getByRole("alert")).toContainText("不支持推理强度 ultra");
+		await expect(
+			page.getByRole("button", { name: mode === "create" ? "创建任务" : "保存更改", exact: true }),
+		).toBeDisabled();
+		await effort.selectOption("low");
+		await expect(page.getByRole("alert")).toHaveCount(0);
+		await effort.selectOption("");
+		await expect(effort).toHaveValue("");
+		await page.screenshot({ path: test.info().outputPath(`codex-effort-${mode}.png`) });
+	});
+}
+
+test("目录读取失败后自动重验，手机上可选 max 和 ultra", async ({ page }) => {
+	await page.setViewportSize({ width: 390, height: 844 });
+	const observations = await openEditorHarness(page, { failFirstModelCatalogRead: true });
+	await page.getByRole("button", { name: /模型与参数：/ }).click();
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
+	await expect.poll(() => observations.modelCatalogReadCount).toBeGreaterThan(1);
+	const effort = page.getByLabel("推理强度", { exact: true });
+	await effort.selectOption("max");
+	await effort.selectOption("ultra");
+	await expect(effort).toHaveValue("ultra");
+	observations.remainingModelCatalogFailures = 1;
+	await page.evaluate(() => window.dispatchEvent(new Event("online")));
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
+	await expect(effort).toHaveValue("ultra");
+	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toHaveCount(0);
+	await expect(effort).toHaveValue("ultra");
+	await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
+	await effort.scrollIntoViewIfNeeded();
+	await page.screenshot({ path: test.info().outputPath("codex-effort-mobile.png") });
+});
 
 test("自动归属开关默认关闭，手动分析可用，键盘切换后刷新恢复全局偏好", async ({ page }) => {
 	await page.setViewportSize({ width: 1440, height: 1000 });
@@ -183,9 +317,13 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	);
 	await focusableControls.last().focus();
 	await page.keyboard.press("Tab");
-	await expect(focusableControls.first()).toBeFocused();
+	expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(false);
+	await focusableControls.first().focus();
 	await page.keyboard.press("Shift+Tab");
-	await expect(focusableControls.last()).toBeFocused();
+	await expect.poll(() => dialog.evaluate((element) => element.contains(document.activeElement))).toBe(false);
+	await expect(page.locator(":focus")).toBeVisible();
+	await page.keyboard.press("Tab");
+	await expect(focusableControls.first()).toBeFocused();
 	const before = await dialog.boundingBox();
 	expect(before?.width).toBeGreaterThan(700);
 	const header = page.getByRole("heading", { name: "创建任务" });
@@ -213,12 +351,12 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	await page.getByRole("button", { name: "收起Plan Mode", exact: true }).click();
 	await expect(page.getByRole("button", { name: "Plan Mode：开启" })).toBeVisible();
 	await page.getByRole("button", { name: "Plan Mode：开启" }).click();
-	await expect(page.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeChecked();
+	await expect(page.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true })).toBeChecked();
 	await page.getByRole("button", { name: "隐藏Plan Mode", exact: true }).click();
-	await expect(page.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeHidden();
+	await expect(page.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true })).toBeHidden();
 	await page.getByRole("button", { name: /管理隐藏设置/ }).click();
 	await page.getByRole("button", { name: "显示Plan Mode", exact: true }).click();
-	await expect(page.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeChecked();
+	await expect(page.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true })).toBeChecked();
 	await page.setViewportSize({ width: 820, height: 700 });
 	await expect
 		.poll(async () => {
@@ -272,6 +410,59 @@ test("从背景切回时解析剪贴板，临时揭示隐藏的关系组并保�
 });
 
 for (const mode of ["create", "edit"] as const) {
+	test(`${mode}：中文 Insert block 支持输入法确认、鼠标插入和最近使用恢复`, async ({ page }) => {
+		const observations = await openEditorHarness(page, { mode });
+		const prompt = page.getByRole("textbox", { name: "任务正文", exact: true });
+		const selectedText = "需要保留的正文";
+		await prompt.fill(selectedText);
+		await prompt.press("ControlOrMeta+A");
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		const blockNameInput = page.getByPlaceholder("Block name...", { exact: true });
+		await blockNameInput.focus();
+		const cdp = await page.context().newCDPSession(page);
+		await cdp.send("Input.imeSetComposition", { text: "问题", selectionStart: 2, selectionEnd: 2 });
+		await cdp.send("Input.dispatchKeyEvent", {
+			type: "keyDown",
+			windowsVirtualKeyCode: 13,
+			key: "Enter",
+			code: "Enter",
+		});
+		await cdp.send("Input.dispatchKeyEvent", {
+			type: "keyUp",
+			windowsVirtualKeyCode: 13,
+			key: "Enter",
+			code: "Enter",
+		});
+		await expect(blockNameInput).toBeFocused();
+		await expect(prompt).toHaveValue(selectedText);
+		await cdp.send("Input.insertText", { text: "问题" });
+		await expect(page.getByRole("button", { name: "Insert <问题> block", exact: true })).toBeVisible();
+		await blockNameInput.press("Enter");
+		await expect(blockNameInput).toHaveCount(0);
+		await expect(prompt).toHaveValue(`<问题>\n${selectedText}\n</问题>`);
+		await expect(prompt).toBeFocused();
+		expect(
+			await prompt.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]),
+		).toEqual(["<问题>\n".length, "<问题>\n".length + selectedText.length]);
+
+		await prompt.fill("");
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		await blockNameInput.fill("预期 结果");
+		await page.getByRole("button", { name: "Insert <预期_结果> block", exact: true }).click();
+		await expect(prompt).toHaveValue("<预期_结果>\n\n</预期_结果>");
+		await expect(prompt).toBeFocused();
+		expect(
+			await prompt.evaluate((textarea: HTMLTextAreaElement) => [textarea.selectionStart, textarea.selectionEnd]),
+		).toEqual(["<预期_结果>\n".length, "<预期_结果>\n".length]);
+		await expect.poll(() => observations.savedCustomBlockNameLists.at(-1)).toEqual(["预期_结果", "问题"]);
+
+		await page.reload();
+		await mountEditorHarness(page);
+		await page.getByRole("button", { name: "Insert block", exact: true }).click();
+		await expect(page.getByRole("button", { name: "<问题>", exact: true })).toBeVisible();
+		await expect(page.getByRole("button", { name: "<预期_结果>", exact: true })).toBeVisible();
+	});
+
 	for (const width of [1440, 320] as const) {
 		test(`${mode}：${width}px 仅正文即可提交，设置摘要和底栏保持在边界内`, async ({ page }) => {
 			await page.setViewportSize({ width, height: 900 });
@@ -283,7 +474,7 @@ for (const mode of ["create", "edit"] as const) {
 			await expect(dialog.getByRole("textbox", { name: "任务名称（可选）" })).toHaveValue("");
 			await expect(dialog.getByRole("button", { name: "Agent：codex", exact: true })).toBeVisible();
 			await expect(dialog.getByRole("button", { name: "基础分支：main", exact: true })).toBeVisible();
-			await expect(dialog.getByRole("checkbox", { name: "Start in plan mode", exact: true })).toBeHidden();
+			await expect(dialog.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true })).toBeHidden();
 			await dialog.getByRole("textbox", { name: "任务正文", exact: true }).fill("只填写正文的创建或编辑要求");
 			const submit = dialog.getByRole("button", { name: mode === "create" ? "创建任务" : "保存更改", exact: true });
 			await expect(submit).toBeVisible();
@@ -359,3 +550,50 @@ test("六种关系不填详情均进入列表，方向修改与收起后刷新�
 	await pendingRelations.getByRole("button", { name: "详情", exact: true }).click();
 	await expect(page.getByRole("combobox", { name: "陈述方向", exact: true })).toHaveValue("other");
 });
+
+for (const viewport of [
+	{ width: 1440, height: 1000 },
+	{ width: 390, height: 844 },
+]) {
+	test(`共享创建工作台 ${viewport.width}：Task、Peer 与 By the way 保留独立草稿和固定目标`, async ({ page }) => {
+		await page.setViewportSize(viewport);
+		const observations = await openEditorHarness(page);
+		await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
+		await page.getByRole("button", { name: "新建会话", exact: true }).click();
+		let dialog = page.getByRole("dialog", { name: "新建 Peer 会话", exact: true });
+		await expect(dialog).toHaveAttribute("aria-modal", "false");
+		await dialog.locator("textarea").fill("Peer 的独立正文");
+		await dialog.getByLabel("会话名称（可选）", { exact: true }).fill("Peer 主题");
+		await dialog.getByRole("button", { name: "Plan Mode：关闭", exact: true }).click();
+		await dialog.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true }).check();
+		await dialog.getByLabel("创建类型", { exact: true }).selectOption("by_the_way");
+		dialog = page.getByRole("dialog", { name: "新建 By the way 会话", exact: true });
+		await expect(dialog.locator("textarea")).toHaveValue("");
+		await expect(dialog.getByRole("checkbox", { name: "以 Plan Mode 启动", exact: true })).not.toBeChecked();
+		await dialog.locator("textarea").fill("By the way 正文");
+		await dialog.getByLabel("创建类型", { exact: true }).selectOption("task_collaborator");
+		dialog = page.getByRole("dialog", { name: "新建 Peer 会话", exact: true });
+		await expect(dialog.locator("textarea")).toHaveValue("Peer 的独立正文");
+		await expect(dialog.getByLabel("会话名称（可选）", { exact: true })).toHaveValue("Peer 主题");
+		await dialog.getByRole("button", { name: "收起会话创建", exact: true }).click();
+		await page.getByRole("button", { name: "操作背景 0", exact: true }).click();
+		await dialog.getByRole("button", { name: "展开会话创建", exact: true }).click();
+		await dialog.getByRole("button", { name: "创建会话", exact: true }).click();
+		await expect(dialog.getByRole("alert")).toContainText("模拟创建失败");
+		await expect(dialog.locator("textarea")).toHaveValue("Peer 的独立正文");
+		expect(observations.sideSessionCreationRequests[0]).toMatchObject({
+			taskId: "abcde",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+			initialMessage: "Peer 的独立正文",
+			startInPlanMode: true,
+			conversationSessionName: "Peer 主题",
+		});
+		await page.screenshot({ path: test.info().outputPath(`shared-workbench-${viewport.width}.png`) });
+		await page.reload();
+		await mountEditorHarness(page);
+		await page.getByRole("button", { name: "收起任务编辑器", exact: true }).click();
+		await page.getByRole("button", { name: "新建会话", exact: true }).click();
+		dialog = page.getByRole("dialog", { name: "新建 Peer 会话", exact: true });
+		await expect(dialog.locator("textarea")).toHaveValue("Peer 的独立正文");
+	});
+}

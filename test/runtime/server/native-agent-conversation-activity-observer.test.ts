@@ -250,7 +250,7 @@ describe("Codex 原生待输入核验的有界重试", () => {
 					: {
 							events: [],
 							cursor: { transport: "codex_control", predecessorTurnId: null, seenEventIds: [] },
-							...(state.nativeReadinessAvailable
+							...(state.nativeReadinessAvailable && input.summary.userTurnKind === "needs_input"
 								? {
 										codexNativeDirectInputReadiness: {
 											nativeSessionId: "main",
@@ -272,6 +272,9 @@ describe("Codex 原生待输入核验的有界重试", () => {
 				onNativeReadiness(observation, before);
 				if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, state.summary, observation))
 					state.summary = { ...state.summary, userTurnKind: "review" };
+			},
+			onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {
+				state.summary = { ...state.summary, codexNativeDirectInputReadinessReconciliation: progress };
 			},
 		});
 		observers.push(observer);
@@ -543,25 +546,22 @@ describe("Codex 原生待输入核验的有界重试", () => {
 		await vi.advanceTimersByTimeAsync(1_000);
 		expect(target.onAccepted).not.toHaveBeenCalled();
 	});
-	it.each(["active", "unknown"])("旧窗口过期后，新 rewind 的首次 %s 结果仍会在窗口内补读", async (mode) => {
+	it.each(["active", "unknown"])("首次 %s 后跨过旧五秒窗口仍有界补证", async (mode) => {
 		const target = fixture();
 		target.state.nativeReadIsUnknown = mode === "unknown";
 		await target.observe();
 		await vi.advanceTimersByTimeAsync(6_000);
-		const readsAfterExpiration = target.readNativeActivity.mock.calls.length;
-		await vi.advanceTimersByTimeAsync(1_000);
-		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsAfterExpiration);
-		target.rewind();
-		await target.observe();
+		expect(target.state.summary.userTurnKind).toBe("needs_input");
 		target.state.nativeReadIsUnknown = false;
 		target.state.nativeReadinessAvailable = true;
-		await vi.advanceTimersByTimeAsync(250);
+		await vi.advanceTimersByTimeAsync(15_000);
+		await target.observe();
 		expect(target.state.summary.userTurnKind).toBe("review");
 		expect(target.onAccepted).not.toHaveBeenCalled();
 		expect(target.onActivity).not.toHaveBeenCalled();
 	});
 
-	it("cooldown 内进入待输入并发生 rewind 时，仍自动补读而无需新摘要", async () => {
+	it("cooldown 内进入待输入并发生 rewind 时，无需新摘要也会补证", async () => {
 		const target = fixture();
 		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
 		await target.observe();
@@ -569,10 +569,9 @@ describe("Codex 原生待输入核验的有界重试", () => {
 		target.state.summary = { ...target.state.summary, userTurnKind: "needs_input" };
 		target.rewind();
 		await target.observe();
-		expect(target.readNativeActivity).toHaveBeenCalledTimes(1);
 		target.state.nativeReadinessAvailable = true;
-		await vi.advanceTimersByTimeAsync(250);
-		expect(target.state.summary.userTurnKind).toBe("review");
+		await vi.advanceTimersByTimeAsync(16_000);
+		await vi.waitFor(() => expect(target.state.summary.userTurnKind).toBe("review"));
 		expect(target.onAccepted).not.toHaveBeenCalled();
 		expect(target.onActivity).not.toHaveBeenCalled();
 	});
@@ -590,7 +589,7 @@ describe("Codex 原生待输入核验的有界重试", () => {
 				}),
 		);
 		const pending = target.observe();
-		await vi.advanceTimersByTimeAsync(0);
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
 		const readsBeforeConcurrentSummary = target.readNativeActivity.mock.calls.length;
 		await vi.advanceTimersByTimeAsync(50);
 		if (change === "rewind") target.rewind();
@@ -604,46 +603,199 @@ describe("Codex 原生待输入核验的有界重试", () => {
 		await Promise.all([pending, concurrent]);
 		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsBeforeConcurrentSummary);
 		expect(target.onNativeReadiness).toHaveBeenCalledTimes(change === "rewind" ? 0 : 1);
-		expect(target.state.summary.userTurnKind).toBe("needs_input");
+		expect(target.state.summary.userTurnKind).toBe(change === "rewind" ? "needs_input" : "review");
 		target.state.nativeReadinessAvailable = true;
-		await vi.advanceTimersByTimeAsync(250);
-		expect(target.onNativeReadiness).toHaveBeenCalledTimes(change === "rewind" ? 1 : 2);
+		await vi.advanceTimersByTimeAsync(1_000);
+		await target.observe();
+		expect(target.onNativeReadiness).toHaveBeenCalledTimes(1);
 		expect(target.state.summary.userTurnKind).toBe("review");
 	});
 
-	it("重绘、重复 rewind 摘要和窗口自身重试都不能延长期限或重新武装同一触发", async () => {
-		const target = fixture();
-		target.rewind();
-		await target.observe();
-		await vi.advanceTimersByTimeAsync(4_500);
-		target.state.summary = {
-			...target.state.summary,
-			updatedAt: Date.now(),
-			lastOutputAt: Date.now(),
-			latestHookActivity: target.state.summary.latestHookActivity && { ...target.state.summary.latestHookActivity },
-		};
-		await target.observe();
-		await vi.advanceTimersByTimeAsync(499);
-		const readsBeforeExpiration = target.readNativeActivity.mock.calls.length;
-		await vi.advanceTimersByTimeAsync(5_501);
-		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsBeforeExpiration);
-		await target.observe();
-		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsBeforeExpiration + 1);
-		await vi.advanceTimersByTimeAsync(6_000);
-		expect(target.readNativeActivity).toHaveBeenCalledTimes(readsBeforeExpiration + 1);
-	});
-
-	it("旧窗口过期后离开再进入 needs_input 会创建新窗口", async () => {
+	it("端点迟到超过旧窗口后自动补证，预算持久化且重启不重新武装", async () => {
 		const target = fixture(0);
 		await target.observe();
-		await vi.advanceTimersByTimeAsync(6_000);
-		target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.attemptCount).toBe(1);
+		await vi.advanceTimersByTimeAsync(16_000);
 		await target.observe();
-		target.state.summary = { ...target.state.summary, userTurnKind: "needs_input" };
+		await vi.advanceTimersByTimeAsync(16_000);
 		await target.observe();
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.attemptCount).toBe(3);
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.nextCheckAtMs).toBe(
+			(target.state.summary.codexNativeDirectInputReadinessReconciliation?.lastAttemptAtMs ?? 0) + 60_000,
+		);
+		const previousProgress = target.state.summary.codexNativeDirectInputReadinessReconciliation;
+		target.observer.dispose();
+		const restarted = createNativeAgentConversationActivityObserver({
+			onAccepted: target.onAccepted,
+			readNativeActivity: target.readNativeActivity,
+			onCodexNativeDirectInputReadiness: (observation, before) => {
+				if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, target.state.summary, observation))
+					target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+			},
+			onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {
+				target.state.summary = { ...target.state.summary, codexNativeDirectInputReadinessReconciliation: progress };
+			},
+		});
+		observers.push(restarted);
+		await restarted.observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation).toEqual(previousProgress);
+		expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(false);
+		target.state.summary = {
+			...target.state.summary,
+			codexNativeSessionControlEndpoint: {
+				workspaceId: "workspace",
+				conversationSessionId: "conversation-main",
+				runtimeSessionIncarnationId: "incarnation-1",
+				socketPath: "/isolated/recovered-control.sock",
+			},
+		};
 		target.state.nativeReadinessAvailable = true;
-		await vi.advanceTimersByTimeAsync(250);
+		await restarted.observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
 		expect(target.state.summary.userTurnKind).toBe("review");
+		expect(target.onAccepted).not.toHaveBeenCalled();
+		expect(target.onActivity).not.toHaveBeenCalled();
+	});
+
+	it.each([false, true])(
+		"同一端点与历史均未变化时，跨重启低频探测恢复响应，兼容旧耗尽预算=%s",
+		async (legacyBudget) => {
+			const target = fixture(0);
+			for (const time of [10_000, 26_000, 42_000]) {
+				vi.setSystemTime(time);
+				await target.observe();
+			}
+			expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.attemptCount).toBe(3);
+			const previousProgress = target.state.summary.codexNativeDirectInputReadinessReconciliation;
+			if (!previousProgress) throw new Error("缺少已持久化的补证预算");
+			if (legacyBudget)
+				target.state.summary.codexNativeDirectInputReadinessReconciliation = {
+					...previousProgress,
+					nextCheckAtMs: null,
+				};
+			target.observer.dispose();
+			const restarted = createNativeAgentConversationActivityObserver({
+				onAccepted: target.onAccepted,
+				onActivity: target.onActivity,
+				cooldownMs: 0,
+				readNativeActivity: target.readNativeActivity,
+				onCodexNativeDirectInputReadiness(observation, before) {
+					if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, target.state.summary, observation))
+						target.state.summary = { ...target.state.summary, userTurnKind: "review" };
+				},
+				onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {
+					target.state.summary = {
+						...target.state.summary,
+						codexNativeDirectInputReadinessReconciliation: progress,
+					};
+				},
+			});
+			observers.push(restarted);
+			const observe = () =>
+				restarted.observeTaskSessionSummary("workspace", target.state.summary, () => target.state.summary);
+			target.state.nativeReadinessAvailable = true;
+			for (const time of [50_000, 80_000, 101_999]) {
+				vi.setSystemTime(time);
+				target.state.summary = { ...target.state.summary, updatedAt: time, lastOutputAt: time };
+				await observe();
+				expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(
+					false,
+				);
+				expect(target.state.summary.userTurnKind).toBe("needs_input");
+			}
+			vi.setSystemTime(102_000);
+			target.state.nativeReadinessAvailable = false;
+			await observe();
+			expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(true);
+			expect(target.state.summary.codexNativeDirectInputReadinessReconciliation).toMatchObject({
+				attemptCount: 4,
+				lastAttemptAtMs: 102_000,
+				nextCheckAtMs: 162_000,
+			});
+			vi.setSystemTime(161_999);
+			target.state.nativeReadinessAvailable = true;
+			await observe();
+			expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(false);
+			expect(target.state.summary.userTurnKind).toBe("needs_input");
+			vi.setSystemTime(162_000);
+			await observe();
+			expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(true);
+			expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.attemptCount).toBe(5);
+			expect(target.state.summary.userTurnKind).toBe("review");
+			expect(target.onAccepted).not.toHaveBeenCalled();
+			expect(target.onActivity).not.toHaveBeenCalled();
+		},
+	);
+	it("输入接受扫描的内部进度不重新武装原生就绪预算", async () => {
+		const target = fixture(0);
+		target.state.summary.agentConversationPromptSubmissionAcceptance = {
+			status: "unconfirmed",
+			attemptedAtMs: 1,
+			runtimeSessionIncarnationId: "incarnation-1",
+		};
+		await target.observe();
+		const progress = target.state.summary.codexNativeDirectInputReadinessReconciliation;
+		target.state.summary.agentConversationPromptSubmissionAcceptance = {
+			...target.state.summary.agentConversationPromptSubmissionAcceptance,
+			verification: {
+				checkedAtMs: 2,
+				nextCheckAtMs: 30000,
+				consecutiveUnchangedCheckCount: 1,
+				reason: "native_evidence_unavailable",
+			},
+		};
+		await target.observe();
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation).toEqual(progress);
+		expect(target.readNativeActivity.mock.calls.at(-1)?.[0].shouldReadCodexNativeAgentTurnExecution).toBe(false);
+	});
+
+	it("端点以同一路径延迟出现时，耗尽后的预算也会自动恢复", async () => {
+		const target = fixture(0);
+		const directory = await mkdtemp(join(tmpdir(), "native-readiness-delayed-endpoint-"));
+		directories.push(directory);
+		target.state.summary.codexNativeSessionControlEndpoint = {
+			workspaceId: "workspace",
+			conversationSessionId: "conversation-main",
+			runtimeSessionIncarnationId: "incarnation-1",
+			socketPath: join(directory, "delayed-control.sock"),
+		};
+		await target.observe();
+		for (let index = 0; index < 2; index++) {
+			await vi.advanceTimersByTimeAsync(16_000);
+			await target.observe();
+		}
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation?.nextCheckAtMs).toBe(
+			(target.state.summary.codexNativeDirectInputReadinessReconciliation?.lastAttemptAtMs ?? 0) + 60_000,
+		);
+		await writeFile(join(directory, "delayed-control.sock"), "端点已出现");
+		target.state.nativeReadinessAvailable = true;
+		await vi.advanceTimersByTimeAsync(16_000);
+		await target.observe();
+		expect(target.state.summary.userTurnKind).toBe("review");
+		expect(target.onAccepted).not.toHaveBeenCalled();
+	});
+
+	it("重绘、重复 rewind 摘要与重启均不重置补证预算", async () => {
+		const target = fixture(0);
+		target.rewind();
+		await target.observe();
+		const progress = target.state.summary.codexNativeDirectInputReadinessReconciliation;
+		for (let index = 0; index < 10; index++) {
+			target.state.summary = {
+				...target.state.summary,
+				updatedAt: Date.now() + index,
+				lastOutputAt: Date.now() + index,
+				latestHookActivity: target.state.summary.latestHookActivity && {
+					...target.state.summary.latestHookActivity,
+				},
+			};
+			await target.observe();
+		}
+		expect(target.state.summary.codexNativeDirectInputReadinessReconciliation).toEqual(progress);
+		expect(
+			target.readNativeActivity.mock.calls
+				.slice(1)
+				.every(([input]) => input.shouldReadCodexNativeAgentTurnExecution === false),
+		).toBe(true);
 	});
 });
 
