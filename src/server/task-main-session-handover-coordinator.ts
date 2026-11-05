@@ -2057,6 +2057,11 @@ export function createTaskMainSessionHandoverCoordinator(deps: HandoverCoordinat
 					const current = await loadState(scope);
 					const card = findCard(current.board, input.taskId);
 					if (card.taskMainSessionHandover?.handoverId === input.requestId) return;
+					if (
+						input.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+						card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs
+					)
+						throw new TRPCError({ code: "CONFLICT", message: "原任务身份已变化，请重新打开交接预览。" });
 					if (resolveMainTaskConversationSessionId(card) !== input.expectedMainTaskConversationSessionId)
 						throw new TRPCError({ code: "CONFLICT", message: "主会话已经变化，请重新打开交接预览。" });
 					const source = resolveHandoverSourceSummary(card, current.sessions);

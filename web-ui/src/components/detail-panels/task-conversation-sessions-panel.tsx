@@ -30,6 +30,8 @@ interface CreateTaskConversationSessionRequest {
 	sessionRole: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
 	contextSource: NewTaskConversationSessionContextSource;
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
+	contextSourceTaskConversationSessionId?: string;
 }
 
 // 每一行露出两个标识符：
@@ -156,6 +158,13 @@ export function TaskConversationSessionsPanel({
 }): React.ReactElement {
 	const [isOriginalPromptDialogOpen, setIsOriginalPromptDialogOpen] = useState(false);
 	const panelMounted = useRef(true);
+	const displayedTaskIdentity = JSON.stringify([
+		workspaceId,
+		workspaceTaskId,
+		taskCard?.createdAt ?? mainSessionOriginalPromptCard.createdAt,
+	]);
+	const displayedTaskIdentityRef = useRef(displayedTaskIdentity);
+	displayedTaskIdentityRef.current = displayedTaskIdentity;
 	useEffect(() => {
 		if (workspaceId && taskCard)
 			refreshSideSessionCreationWorkbenchContext({ workspaceId, task: taskCard, mainSessionSummary, taskSessions });
@@ -232,7 +241,8 @@ export function TaskConversationSessionsPanel({
 							agents,
 							taskSessions,
 							onCreated: (sessionId) => {
-								if (panelMounted.current) onSelectTaskConversationSession(sessionId);
+								if (panelMounted.current && displayedTaskIdentityRef.current === displayedTaskIdentity)
+									onSelectTaskConversationSession(sessionId);
 							},
 						});
 					}}
@@ -396,6 +406,9 @@ export function TaskConversationSessionsPanel({
 									<IndependentTaskCreationAction
 										workspaceId={workspaceId}
 										sourceTaskId={workspaceTaskId}
+										expectedTaskIncarnationCreatedAtEpochMs={
+											taskCard?.createdAt ?? mainSessionOriginalPromptCard.createdAt
+										}
 										sourceSessionId={summary.taskId}
 									/>
 								)}

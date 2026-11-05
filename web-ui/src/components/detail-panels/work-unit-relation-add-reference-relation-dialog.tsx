@@ -1,3 +1,5 @@
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 // dd2db 2.1「添加关系」对话框（T12 ②）：用户以面板所在的卡为主语，直接断言一条参照关系。
 // 对端从跨全部项目的任务里挑；kind 从注册表列（选项文案 = webUiAddRelationOptionLabel）；专有输入按 kind 显示。
 // 提交按钮或表单快捷键的原始事件交给传输层（runtime 据此拒绝脚本合成事件）；runtime 拒绝时把它那句话原样显示在对话框里，
@@ -15,7 +17,7 @@ import { Link2, TriangleAlert } from "lucide-react";
 import { type ReactElement, type ReactNode, useId } from "react";
 import { WorkUnitRelationCounterpartKanbanBoardCardPicker } from "@/components/detail-panels/work-unit-relation-counterpart-kanban-board-card-picker";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import {
@@ -167,11 +169,13 @@ const KIND_SPECIFIC_ATTRIBUTE_HINT_BY_ATTRIBUTE_KEY: Partial<Record<string, stri
 function AddReferenceRelationDialogContent({
 	subjectKanbanBoardCardWorkspaceId,
 	subjectKanbanBoardCardTaskId,
+	subjectTaskIncarnationCreatedAtEpochMs,
 	onCancel,
 	onReferenceRelationAssertionWriteSucceeded,
 }: {
 	subjectKanbanBoardCardWorkspaceId: string;
 	subjectKanbanBoardCardTaskId: string;
+	subjectTaskIncarnationCreatedAtEpochMs?: number;
 	onCancel: () => void;
 	onReferenceRelationAssertionWriteSucceeded: (writeResponse: InterWorkUnitRelationAssertionWriteResponse) => void;
 }): ReactElement {
@@ -179,6 +183,7 @@ function AddReferenceRelationDialogContent({
 	const form = useWorkUnitRelationAddReferenceRelationDialogForm({
 		subjectKanbanBoardCardWorkspaceId,
 		subjectKanbanBoardCardTaskId,
+		subjectTaskIncarnationCreatedAtEpochMs,
 		onReferenceRelationAssertionWriteSucceeded,
 	});
 	const draft = form.addReferenceRelationDialogDraft;
@@ -201,7 +206,6 @@ function AddReferenceRelationDialogContent({
 
 	return (
 		<div className="contents" onKeyDown={handlePrimaryActionKeyDown}>
-			<DialogHeader title="Add relation" icon={<Link2 size={14} />} />
 			<DialogBody className="flex flex-col gap-3">
 				<AddReferenceRelationFormField
 					fieldLabel="Other task"
@@ -365,17 +369,20 @@ function AddReferenceRelationDialogContent({
 	);
 }
 
-export function WorkUnitRelationAddReferenceRelationDialog({
+function WorkUnitRelationAddReferenceRelationDialogForm({
 	isAddReferenceRelationDialogOpen,
 	onAddReferenceRelationDialogOpenChange,
 	subjectKanbanBoardCardWorkspaceId,
 	subjectKanbanBoardCardTaskId,
+	subjectTaskIncarnationCreatedAtEpochMs,
 	onReferenceRelationAssertionWriteSucceeded,
 }: {
 	isAddReferenceRelationDialogOpen: boolean;
+	openingRequestSequence?: number;
 	onAddReferenceRelationDialogOpenChange: (isAddReferenceRelationDialogOpen: boolean) => void;
 	subjectKanbanBoardCardWorkspaceId: string;
 	subjectKanbanBoardCardTaskId: string;
+	subjectTaskIncarnationCreatedAtEpochMs?: number;
 	onReferenceRelationAssertionWriteSucceeded: (writeResponse: InterWorkUnitRelationAssertionWriteResponse) => void;
 }): ReactElement {
 	return (
@@ -385,12 +392,46 @@ export function WorkUnitRelationAddReferenceRelationDialog({
 			contentClassName="max-w-xl"
 		>
 			{/* 内容只在打开时挂载：关掉再开就是一张空表单，不残留上次的草稿与报错。 */}
+			<DialogHeader title="Add relation" icon={<Link2 size={14} />} />
 			<AddReferenceRelationDialogContent
 				subjectKanbanBoardCardWorkspaceId={subjectKanbanBoardCardWorkspaceId}
 				subjectKanbanBoardCardTaskId={subjectKanbanBoardCardTaskId}
+				subjectTaskIncarnationCreatedAtEpochMs={subjectTaskIncarnationCreatedAtEpochMs}
 				onCancel={() => onAddReferenceRelationDialogOpenChange(false)}
 				onReferenceRelationAssertionWriteSucceeded={onReferenceRelationAssertionWriteSucceeded}
 			/>
 		</Dialog>
 	);
 }
+
+export const WorkUnitRelationAddReferenceRelationDialog = hostNonModalFloatingForm(
+	WorkUnitRelationAddReferenceRelationDialogForm,
+	{
+		formKind: "WorkUnitRelationAddReferenceRelationDialog",
+		openingRequestIdentity: (props) => props.openingRequestSequence,
+		isOpen: (props) => props.isAddReferenceRelationDialogOpen,
+		instanceIdentity: (props) =>
+			JSON.stringify([
+				props.subjectKanbanBoardCardWorkspaceId,
+				props.subjectKanbanBoardCardTaskId,
+				props.subjectTaskIncarnationCreatedAtEpochMs,
+			]),
+		ownership: (props) => ({
+			workspaceId: props.subjectKanbanBoardCardWorkspaceId,
+			taskId: props.subjectKanbanBoardCardTaskId,
+			taskIncarnationCreatedAtEpochMs: props.subjectTaskIncarnationCreatedAtEpochMs,
+		}),
+		withClose: (props, close) => ({
+			...props,
+			isAddReferenceRelationDialogOpen: true,
+			onAddReferenceRelationDialogOpenChange: (open) => {
+				if (!open) close();
+			},
+			onReferenceRelationAssertionWriteSucceeded: (result) => {
+				props.onReferenceRelationAssertionWriteSucceeded(result);
+				close();
+			},
+		}),
+		onClosed: (props) => props.onAddReferenceRelationDialogOpenChange(false),
+	},
+);

@@ -1,11 +1,12 @@
 import { getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
 import { resolveTaskConversationSessionMainContextForkSelection } from "@runtime-session-activity";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
 	CreationWorkbenchContextControl,
 	CreationWorkbenchStartupSettings,
 } from "@/components/creation-workbench-startup-settings";
-import { TaskEditorFloatingWindow } from "@/components/task-editor-floating-window";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { NonModalFloatingFormWindow } from "@/components/non-modal-floating-form-window";
 import {
 	TaskEditorHiddenSettingsManager,
 	TaskEditorSettingGroup,
@@ -66,8 +67,8 @@ interface LiveSideSessionDraftImageTarget {
 	applyImages(images: SideSessionDraftImages): void;
 }
 
-// 同时只打开一个侧会话工作台。卸载后的图片回调必须写回屏幕上的当前草稿，不能写自己的旧快照。
-let liveSideSessionDraftImageTarget: LiveSideSessionDraftImageTarget | null = null;
+// 后到的图片只交给仍显示同一草稿的窗口，不能覆盖其他任务或角色的正文。
+const liveSideSessionDraftImageTargets = new Set<LiveSideSessionDraftImageTarget>();
 
 function isByTheWayCreationAgent(agentId: string): boolean {
 	return (BY_THE_WAY_CREATION_AGENT_IDS as readonly string[]).includes(agentId);
@@ -89,14 +90,36 @@ const startupSettingLabels = [
 export function SideSessionCreationWorkbench() {
 	const target = useSideSessionCreationWorkbenchTarget();
 	return target ? (
-		<SideSessionCreationWorkbenchForm
+		<HostedSideSessionCreationWorkbench
 			key={JSON.stringify([target.workspaceId, target.task.id, target.task.createdAt])}
 			target={target}
+			onClose={closeSideSessionCreationWorkbench}
 		/>
 	) : null;
 }
 
-function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreationWorkbenchTarget }) {
+function SideSessionCreationWorkbenchForm({
+	target: boundTarget,
+	onClose,
+}: {
+	target: SideSessionCreationWorkbenchTarget;
+	onClose: () => void;
+}) {
+	const liveTarget = useSideSessionCreationWorkbenchTarget();
+	const latestBoundTarget = useRef(boundTarget);
+	if (
+		liveTarget?.workspaceId === boundTarget.workspaceId &&
+		liveTarget.task.id === boundTarget.task.id &&
+		liveTarget.task.createdAt === boundTarget.task.createdAt &&
+		liveTarget.mainSessionSummary.taskId === boundTarget.mainSessionSummary.taskId
+	)
+		latestBoundTarget.current = {
+			...boundTarget,
+			mainSessionSummary: liveTarget.mainSessionSummary,
+			taskSessions: liveTarget.taskSessions,
+		};
+	const target = latestBoundTarget.current;
+	const sessionFieldIdPrefix = useId();
 	const [role, setRole] = useState<"task_collaborator" | "by_the_way">("task_collaborator");
 	const [planPreference, setPlanPreference] = useSideSessionStartInPlanModePreference(role);
 	const preferencesLoaded = useHaveUserInterfacePreferencesLoadedFromServer();
@@ -183,9 +206,9 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 				persistDraftRef.current({ ...current, request: { ...current.request, images } });
 			},
 		};
-		liveSideSessionDraftImageTarget = imageTarget;
+		liveSideSessionDraftImageTargets.add(imageTarget);
 		return () => {
-			if (liveSideSessionDraftImageTarget === imageTarget) liveSideSessionDraftImageTarget = null;
+			liveSideSessionDraftImageTargets.delete(imageTarget);
 		};
 	}, []);
 	const update = (patch: Partial<RuntimeTaskConversationSessionCreateRequest>) => {
@@ -228,7 +251,7 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 			persistSideSessionCreationDraft(target, null, frozen.sessionRole, frozenDraft.draftId);
 			if (mounted.current) {
 				target.onCreated?.(creation.taskConversationSessionId);
-				closeSideSessionCreationWorkbench();
+				onClose();
 			}
 		} catch (cause) {
 			if (mounted.current) setError(cause instanceof Error ? cause.message : String(cause));
@@ -298,10 +321,12 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 		}
 	};
 	return (
-		<TaskEditorFloatingWindow
+		<NonModalFloatingFormWindow
 			open
+			collapseControlLabel="会话创建"
+			ownershipLabel={`${target.workspaceId} / ${target.task.title} · ${target.task.id}`}
 			onOpenChange={(open) => {
-				if (!open) closeSideSessionCreationWorkbench();
+				if (!open) onClose();
 			}}
 			onClickCapture={undefined}
 			onKeyDownCapture={undefined}
@@ -315,11 +340,14 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 						<br />
 						工作目录：{target.mainSessionSummary.workspacePath}
 					</p>
-					<label htmlFor="creation-workbench-session-role" className="mb-1 block text-xs text-text-secondary">
+					<label
+						htmlFor={`${sessionFieldIdPrefix}-creation-workbench-session-role`}
+						className="mb-1 block text-xs text-text-secondary"
+					>
 						创建类型
 					</label>
 					<NativeSelect
-						id="creation-workbench-session-role"
+						id={`${sessionFieldIdPrefix}-creation-workbench-session-role`}
 						value={role}
 						disabled={isSubmitting}
 						onChange={(event) => selectRole(event.currentTarget.value as typeof role)}
@@ -338,7 +366,7 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 						/>
 						<TaskPromptComposer
 							key={`side-session-prompt:${draft.draftId}`}
-							id="creation-workbench-side-session-prompt"
+							id={`${sessionFieldIdPrefix}-creation-workbench-side-session-prompt`}
 							workspaceId={target.workspaceId}
 							minimumTextareaHeight={112}
 							placeholder="首条消息可留空，创建后再输入…"
@@ -357,7 +385,9 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 									update({ images: value });
 									return;
 								}
-								const liveTarget = liveSideSessionDraftImageTarget;
+								const liveTarget = [...liveSideSessionDraftImageTargets].find((candidate) =>
+									candidate.matches(ownerDraftId, ownerRole),
+								);
 								const liveShowsDraft = liveTarget?.matches(ownerDraftId, ownerRole) ?? false;
 								const baseImages = liveShowsDraft
 									? liveTarget?.currentImages()
@@ -427,10 +457,13 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 							]}
 						/>
 						{agentId === "omp" && (
-							<label htmlFor="side-session-creation-transport" className="block text-xs text-text-secondary">
+							<label
+								htmlFor={`${sessionFieldIdPrefix}-side-session-creation-transport`}
+								className="block text-xs text-text-secondary"
+							>
 								会话通道
 								<NativeSelect
-									id="side-session-creation-transport"
+									id={`${sessionFieldIdPrefix}-side-session-creation-transport`}
 									value={request.requestedAgentSessionTransport ?? ""}
 									onChange={(event) =>
 										update({
@@ -499,6 +532,22 @@ function SideSessionCreationWorkbenchForm({ target }: { target: SideSessionCreat
 					</Button>
 				</DialogFooter>
 			</TaskEditorSettingPresentationProvider>
-		</TaskEditorFloatingWindow>
+		</NonModalFloatingFormWindow>
 	);
 }
+
+const HostedSideSessionCreationWorkbench = hostNonModalFloatingForm(SideSessionCreationWorkbenchForm, {
+	formKind: "task-session-creation",
+	openingRequestIdentity: (props) => props.target.openingRequestIdentity,
+	isOpen: () => true,
+	instanceIdentity: (props) =>
+		JSON.stringify([props.target.workspaceId, props.target.task.id, props.target.task.createdAt]),
+	ownership: (props) => ({
+		workspaceId: props.target.workspaceId,
+		taskId: props.target.task.id,
+		taskIncarnationCreatedAtEpochMs: props.target.task.createdAt,
+		conversationSessionId: props.target.mainSessionSummary.taskId,
+	}),
+	withClose: (props, close) => ({ ...props, onClose: close }),
+	onClosed: (props) => props.onClose(),
+});

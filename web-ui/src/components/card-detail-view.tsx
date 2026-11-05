@@ -873,6 +873,8 @@ export function CardDetailView({
 		sessionRole?: "by_the_way" | "task_collaborator";
 		initialUserQuestion: string;
 		contextSource: "started_from_scratch" | "forked_from_main_current_turn";
+		expectedTaskIncarnationCreatedAtEpochMs?: number;
+		contextSourceTaskConversationSessionId?: string;
 		mainSessionOriginTurnNumber: number;
 		mainSessionOriginUserMessagePreview: string | null;
 	}) => Promise<{ ok: boolean; message?: string; taskConversationSessionId?: string }>;
@@ -916,6 +918,13 @@ export function CardDetailView({
 		persistSelection: boolean;
 	}>();
 	const [visualizationOverridesWorkspaceChanges, setVisualizationOverridesWorkspaceChanges] = useState(false);
+	const focusedTaskIdentityForSessionCreation = JSON.stringify([
+		currentProjectId,
+		selection.card.id,
+		selection.card.createdAt,
+	]);
+	const latestFocusedTaskIdentityForSessionCreation = useRef(focusedTaskIdentityForSessionCreation);
+	latestFocusedTaskIdentityForSessionCreation.current = focusedTaskIdentityForSessionCreation;
 	const workbenchModuleSelectionRequestSequence = useRef(0);
 	const foregroundResponsiveLayoutHandoff = useRef<{
 		viewKind: ExpandedForegroundViewTarget["viewKind"];
@@ -1561,6 +1570,8 @@ export function CardDetailView({
 				initialUserQuestion,
 				contextSource,
 				codexConfigurationProfileId,
+				expectedTaskIncarnationCreatedAtEpochMs,
+				contextSourceTaskConversationSessionId,
 			}) => {
 				if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
 					return { ok: false, message: "请先恢复任务，再创建会话。" };
@@ -1570,10 +1581,18 @@ export function CardDetailView({
 					sessionRole,
 					initialUserQuestion,
 					contextSource,
+					...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
+						? { expectedTaskIncarnationCreatedAtEpochMs }
+						: {}),
+					...(contextSourceTaskConversationSessionId ? { contextSourceTaskConversationSessionId } : {}),
 					mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
 					mainSessionOriginUserMessagePreview: selection.card.prompt,
 				});
-				if (result.ok && result.taskConversationSessionId) {
+				if (
+					result.ok &&
+					result.taskConversationSessionId &&
+					latestFocusedTaskIdentityForSessionCreation.current === focusedTaskIdentityForSessionCreation
+				) {
 					setSelectedTaskConversationSessionId(result.taskConversationSessionId);
 				}
 				return result;

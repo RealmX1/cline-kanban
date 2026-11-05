@@ -1,6 +1,8 @@
 import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import { AlertTriangle, Check, ClipboardCheck, Eye, Radio } from "lucide-react";
 import { type ReactElement, type ReactNode, useMemo, useState } from "react";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import {
 	applyClosureReasonToAllUncheckedChecklistItemsInDialogDraft,
 	buildPostDeployVerificationDoneEntryClosureRequestsBySelectedTaskId,
@@ -23,10 +25,12 @@ import {
 	boardColumnBadgeClassName,
 	formatBoardColumnLabel,
 } from "@/components/post-deploy-verification/post-deploy-verification-format";
+import { RetainedPostDeployVerificationClosureReasonsSession } from "@/components/retained-post-deploy-verification-closure-reasons-session";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
@@ -36,6 +40,8 @@ import type {
 	RuntimePostDeployVerificationDoneEntryClosureRequest,
 	RuntimePostDeployVerificationUncheckedChecklistItemClosureReasonCode,
 } from "@/runtime/types";
+import type { BoardData } from "@/types";
+import type { TaskCommentToAppendWhenMovingIntoDone } from "@/types/task-card-move-into-done-request";
 
 // 「带原因结案」对话框：PDV 面板（单任务完成 / 分区批量结案）与看板入口（按钮、拖拽、服务端拒绝兜底）共用。
 // 吸收了原先的两层确认框（跳过 Validation + in_progress 会话可能仍在跑）：它们现在是本对话框的条件段落，
@@ -46,6 +52,14 @@ export type PostDeployVerificationDoneEntryClosureDialogTaskEntrySelectionMode =
 	| "multiple_task_entries_selectable_for_batch_closure";
 
 export interface PostDeployVerificationUncheckedItemsClosureReasonDialogProps {
+	openingRequestIdentity?: unknown;
+	hostedCompletionContext?: {
+		workspaceId: string;
+		deploymentId: string;
+		board: BoardData;
+		taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+	};
+	submissionErrorMessage?: string | null;
 	dialogTitle: string;
 	open?: boolean;
 	onReturnToVerification?: () => void;
@@ -286,7 +300,8 @@ function ClosureDialogNoticeBox({
 	);
 }
 
-export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
+export function PostDeployVerificationUncheckedItemsClosureReasonDialogForm({
+	submissionErrorMessage,
 	dialogTitle,
 	open = true,
 	onReturnToVerification,
@@ -355,6 +370,11 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 		>
 			<DialogHeader title={dialogTitle} icon={<ClipboardCheck size={16} />} />
 			<DialogBody className="space-y-3 text-[13px] text-text-secondary">
+				{submissionErrorMessage && (
+					<p role="alert" className="whitespace-pre-wrap text-sm text-status-red">
+						{submissionErrorMessage}
+					</p>
+				)}
 				{hasAnyUncheckedItemOrInvisibleUncheckedItem ? (
 					<p className="m-0">
 						未全部勾选也可以结案，但每个未勾项都要给出原因；结案记录为「带原因结案」，不算「核对通过」。
@@ -506,5 +526,34 @@ export function PostDeployVerificationUncheckedItemsClosureReasonDialog({
 				</Button>
 			</DialogFooter>
 		</Dialog>
+	);
+}
+
+const HostedClosureReasonsEntry = hostNonModalFloatingForm(RetainedPostDeployVerificationClosureReasonsSession, {
+	formKind: "verification-closure-reasons",
+	openingRequestIdentity: (props) => props.openingRequestIdentity,
+	isOpen: (props) => props.open !== false,
+	instanceIdentity: (props) =>
+		JSON.stringify([
+			props.hostedCompletionContext?.workspaceId,
+			props.hostedCompletionContext?.deploymentId,
+			props.taskEntries.map((entry) => [entry.taskId, entry.taskIncarnationCreatedAtEpochMs]),
+		]),
+	ownership: (props) => ({
+		workspaceId: props.hostedCompletionContext?.workspaceId,
+		sourceIdentity: props.hostedCompletionContext?.deploymentId,
+		displayLabel: props.taskEntries.map((entry) => entry.taskTitle).join("、"),
+	}),
+	withClose: (props, close) => ({ ...props, onCancel: close }),
+	onClosed: (props) => props.onCancel(),
+});
+export function PostDeployVerificationUncheckedItemsClosureReasonDialog(
+	props: PostDeployVerificationUncheckedItemsClosureReasonDialogProps,
+) {
+	const host = useNonModalFloatingFormWindowHost();
+	return host && props.hostedCompletionContext ? (
+		<HostedClosureReasonsEntry {...props} />
+	) : (
+		<PostDeployVerificationUncheckedItemsClosureReasonDialogForm {...props} />
 	);
 }

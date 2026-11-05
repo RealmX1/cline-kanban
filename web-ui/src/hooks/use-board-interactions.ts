@@ -250,6 +250,7 @@ export function useBoardInteractions({
 			setIsPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting,
 		showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard,
 	} = usePostDeployVerificationDoneEntryClosureDialogForBoardMovesIntoDone({
+		workspaceId: currentProjectId,
 		board,
 		postDeployVerificationActiveDeploymentGroup: postDeployVerificationActiveDeploymentGroupForDoneEntryGatePrecheck,
 	});
@@ -859,6 +860,8 @@ export function useBoardInteractions({
 					case "open_board_level_closure_reason_dialog_for_user_gesture":
 						if (options?.taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 						openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+							workspaceIdAtOpening: currentProjectId,
+							boardSnapshotAtOpening: board,
 							taskCommentToAppendWhenMovingIntoDone: options?.taskCommentToAppendWhenMovingIntoDone,
 							taskId,
 							insertAtIndexWithinDoneBoardColumn: options?.insertAtIndexWithinDoneBoardColumn,
@@ -1108,6 +1111,8 @@ export function useBoardInteractions({
 							showOneTimeNoticeForAutomationSkippingPostDeployVerificationGatedTaskCard(drop.taskId);
 						} else {
 							openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+								workspaceIdAtOpening: currentProjectId,
+								boardSnapshotAtOpening: board,
 								taskId: drop.taskId,
 								insertAtIndexWithinDoneBoardColumn: drop.destinationIndex,
 								runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
@@ -1550,6 +1555,8 @@ export function useBoardInteractions({
 			) {
 				if (taskCommentToAppendWhenMovingIntoDone) suspendTaskCommentBeforeMoveIntoDone(taskId);
 				openPostDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone({
+					workspaceIdAtOpening: currentProjectId,
+					boardSnapshotAtOpening: latestBoardInteractionStateRef.current.board,
 					taskCommentToAppendWhenMovingIntoDone,
 					taskId,
 					insertAtIndexWithinDoneBoardColumn:
@@ -1876,19 +1883,24 @@ export function useBoardInteractions({
 		[currentProjectId],
 	);
 
-	const openTaskPinboardPinReasonDialog = useCallback((taskId: string, isEditingExistingPin: boolean) => {
-		const { board } = latestBoardInteractionStateRef.current;
-		const selection = findCardSelection(board, taskId);
-		if (!selection) {
-			return;
-		}
-		setTaskPinboardPinReasonRequest({
-			taskId,
-			taskTitle: selection.card.title,
-			isEditingExistingPin,
-			initialPinReason: selection.card.taskPinboardPinReason ?? "",
-		});
-	}, []);
+	const openTaskPinboardPinReasonDialog = useCallback(
+		(taskId: string, isEditingExistingPin: boolean) => {
+			const { board } = latestBoardInteractionStateRef.current;
+			const selection = findCardSelection(board, taskId);
+			if (!selection) {
+				return;
+			}
+			setTaskPinboardPinReasonRequest({
+				workspaceId: currentProjectId ?? undefined,
+				taskIncarnationCreatedAtEpochMs: selection.card.createdAt,
+				taskId,
+				taskTitle: selection.card.title,
+				isEditingExistingPin,
+				initialPinReason: selection.card.taskPinboardPinReason ?? "",
+			});
+		},
+		[currentProjectId],
+	);
 
 	const handleRequestPinTaskToTaskPinboard = useCallback(
 		(taskId: string) => openTaskPinboardPinReasonDialog(taskId, false),

@@ -82,13 +82,17 @@ async function clickCommentsButton(label: string) {
 }
 
 async function addComment(commentText: string) {
-	const textarea = document.querySelector<HTMLTextAreaElement>('textarea[placeholder="Write a task comment..."]')!;
+	const activeDialog = Array.from(document.querySelectorAll('[role="dialog"]')).at(-1)!;
+	const textarea = activeDialog.querySelector<HTMLTextAreaElement>('textarea[placeholder="Write a task comment..."]')!;
 	expect(textarea).not.toBeNull();
 	await act(async () => {
 		Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, commentText);
 		textarea.dispatchEvent(new Event("input", { bubbles: true }));
 	});
-	await clickCommentsButton("Add comment");
+	const addButton = Array.from(activeDialog.querySelectorAll("button")).find(
+		(button) => button.textContent === "Add comment",
+	)!;
+	await act(async () => addButton.click());
 }
 
 function deferredResult<T>() {
@@ -317,7 +321,10 @@ it("迟到的初次读取不能改变新打开评论目标的一世身份", asyn
 			await clickCommentsButton("打开旧卡");
 			await clickCommentsButton("打开新卡");
 			await act(async () => oldRead.resolve(taskCardLookupResult(41, "迟到旧卡评论")));
-			expect(document.body.textContent).not.toContain("迟到旧卡评论");
+			expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+			expect(Array.from(document.querySelectorAll('[role="dialog"]')).at(-1)?.textContent).not.toContain(
+				"迟到旧卡评论",
+			);
 			await addComment("为新卡保存");
 			expect(updateCard).toHaveBeenCalledWith(
 				expect.objectContaining({ expectedTaskIncarnationCreatedAtEpochMs: 42 }),
@@ -351,10 +358,15 @@ it.each(["保存前重读", "最终写入"])("%s 迟到时，不污染另一世�
 				delayedRead.resolve(taskCardLookupResult(41));
 				delayedWrite.resolve({ taskCardActionCommandExecutionOutcome: "command_completed_by_runtime" });
 			});
-			expect(document.body.textContent).not.toContain("旧卡待保存评论");
+			expect(Array.from(document.querySelectorAll('[role="dialog"]')).at(-1)?.textContent).not.toContain(
+				"旧卡待保存评论",
+			);
 			if (delayedStage === "最终写入")
 				expect(updateCard.mock.calls[0]?.[0].expectedTaskIncarnationCreatedAtEpochMs).toBe(41);
-			else expect(updateCard).not.toHaveBeenCalled();
+			else
+				expect(updateCard).toHaveBeenCalledWith(
+					expect.objectContaining({ expectedTaskIncarnationCreatedAtEpochMs: 41 }),
+				);
 			await addComment("新卡的新评论");
 			expect(updateCard).toHaveBeenLastCalledWith(
 				expect.objectContaining({

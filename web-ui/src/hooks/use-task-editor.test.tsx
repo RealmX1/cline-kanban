@@ -426,7 +426,9 @@ function HookHarness({
 	newTaskStartInPlanModeByDefault = true,
 	newTaskAgentPermissionModeByDefault = "bypass_all_permission_prompts" as const,
 	isNewTaskStartInPlanModeDefaultLoaded = true,
+	isTaskEditorOpeningRequestOnlyController = false,
 }: {
+	isTaskEditorOpeningRequestOnlyController?: boolean;
 	initialBoard: BoardData;
 	onSnapshot: (snapshot: HookSnapshot) => void;
 	queueTaskStartAfterEdit?: (taskId: string) => void;
@@ -445,6 +447,7 @@ function HookHarness({
 	const displayedBoard = applyPendingTaskCardCommandBoardOverlay(board, pendingTaskCardCommandBoardOverlayEntries);
 	const [selectedTaskId] = useState<string | null>("focused-task");
 	const editor = useTaskEditor({
+		isTaskEditorOpeningRequestOnlyController,
 		board,
 		setBoard,
 		createTaskBranchOptions,
@@ -643,6 +646,42 @@ describe("useTaskEditor", () => {
 		});
 		return captured;
 	}
+
+	it("只负责开窗的入口不会在切换或关闭时覆盖、清除实际窗口的持久草稿", async () => {
+		const first = createTask("task-1", "第一张任务的原文", 1);
+		const second = createTask("task-2", "第二张任务的原文", 2);
+		let latestSnapshot: HookSnapshot | null = null;
+		await act(async () =>
+			root.render(
+				<HookHarness
+					isTaskEditorOpeningRequestOnlyController
+					initialBoard={createBoard([first, second])}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			),
+		);
+		await act(async () => requireSnapshot(latestSnapshot).handleOpenEditTask(first));
+		await act(async () => {
+			saveTaskEditDraft("project-1", {
+				taskId: first.id,
+				prompt: "实际浮窗仍在填写的内容",
+				images: [],
+				startInPlanMode: true,
+				autoReviewEnabled: false,
+				autoReviewMode: "commit",
+				branchRef: "main",
+				savedAt: 100,
+			});
+			requireSnapshot(latestSnapshot).setEditTaskPrompt("入口不拥有的旧副本");
+		});
+		await act(async () => requireSnapshot(latestSnapshot).handleOpenEditTask(second));
+		expect(readSavedTaskEditDraft("project-1", first.id)?.prompt).toBe("实际浮窗仍在填写的内容");
+		await act(async () => requireSnapshot(latestSnapshot).handleOpenEditTask(first));
+		await act(async () => requireSnapshot(latestSnapshot).handleCancelEditTask());
+		expect(readSavedTaskEditDraft("project-1", first.id)?.prompt).toBe("实际浮窗仍在填写的内容");
+	});
 
 	it("uses the name typed in the task name field as the card title", async () => {
 		let latestSnapshot: HookSnapshot | null = null;

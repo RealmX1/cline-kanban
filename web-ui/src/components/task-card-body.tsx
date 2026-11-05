@@ -1576,7 +1576,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);
-									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id, card.createdAt);
+									taskCommentsDialog.openTaskComments(
+										taskCommentsWorkspaceId,
+										card.id,
+										card.createdAt,
+										event.currentTarget,
+									);
 								}}
 							/>
 						</Tooltip>

@@ -416,7 +416,7 @@ setInterval(() => {}, 1000);
 					);
 					throw error;
 				});
-			expect(await page.locator("#creation-workbench-session-role").inputValue()).toBe("task_collaborator");
+			expect(await page.locator('[id$="-creation-workbench-session-role"]').inputValue()).toBe("task_collaborator");
 			await page.getByRole("button", { name: /^Agent：/ }).click();
 			await page
 				.getByRole("group", { name: "Agent", exact: true })
@@ -425,9 +425,9 @@ setInterval(() => {}, 1000);
 					exact: true,
 				})
 				.click();
-			await page.locator("#creation-workbench-session-role").selectOption(sessionRole);
+			await page.locator('[id$="-creation-workbench-session-role"]').selectOption(sessionRole);
 			if (collaborationAgentId === "omp")
-				await page.locator("#side-session-creation-transport").selectOption(sessionTransport);
+				await page.locator('[id$="-side-session-creation-transport"]').selectOption(sessionTransport);
 			await page.getByRole("button", { name: /^会话上下文/ }).click();
 			const contextControl = page.getByLabel("会话上下文", { exact: true });
 			if (explicitContextSource)
@@ -441,7 +441,7 @@ setInterval(() => {}, 1000);
 				expectedContextSource === "started_from_scratch" ? "fresh" : "current_main",
 			);
 			await page
-				.locator("#creation-workbench-side-session-prompt")
+				.locator('[id$="-creation-workbench-side-session-prompt"]')
 				.fill(withoutInitialUserMessage ? " \n\t " : "实现协作部分");
 			await page.screenshot({ path: join(evidenceDirectory, "collaboration-create-form.png") });
 			await page.getByRole("button", { name: "创建会话", exact: true }).click();
