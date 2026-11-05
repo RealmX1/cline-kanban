@@ -8,8 +8,9 @@ import {
 	type CrossProjectTaskSwitcherFullTaskCardInListExpansionState,
 	CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
-import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
 import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
+import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-panels/cross-project-task-switcher-row-agent-and-title";
+import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
 import {
 	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
 	TaskCardBody,
@@ -29,7 +30,7 @@ import type { BoardData } from "@/types";
 
 // hover 展开与固定展开的行共用的卡框几何：零内边距、无边框，描边用 ring（box-shadow，不占布局）。这样卡体的
 // px-2 py-1.5 正好落在精简行 pl-2 py-1.5 的位置上，三态之间标题首行不动。颜色由行按形态给。
-export const CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME = "rounded-md p-0 ring-1";
+export const CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME = "rounded-md p-0";
 
 /**
  * 当前项目的卡在浏览器里已有完整数据（带 overlay 的 board、推流的 session summary）与 Focus View 同一套动作；
@@ -49,6 +50,7 @@ export interface CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion 
 export interface CrossProjectTaskSwitcherFullTaskCardRowContext {
 	// null = 只有一个项目，不显示项目名。
 	projectName: string | null;
+	section?: string;
 	promptCacheWarmthEstimate?: CrossProjectTaskSwitcherPromptCacheWarmthEstimate;
 	nowMs: number;
 	inListExpansionState: CrossProjectTaskSwitcherFullTaskCardInListExpansionState;
@@ -61,9 +63,22 @@ export interface CrossProjectTaskSwitcherFullTaskCardRowContext {
 
 function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 	rowContext: CrossProjectTaskSwitcherFullTaskCardRowContext,
+	entryInProject: CrossProjectTaskSwitcherEntryInProject,
+	currentProjectId: string | null,
 ): TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	return {
 		projectName: rowContext.projectName,
+		isKeptExpandedInList: rowContext.inListExpansionState === "kept_expanded_in_list",
+		summaryMetadata: (
+			<CrossProjectTaskSwitcherRowSummaryMetadata
+				entryInProject={entryInProject}
+				currentProjectId={currentProjectId}
+				projectName={rowContext.projectName}
+				nowMs={rowContext.nowMs}
+				section={rowContext.section}
+				promptCacheWarmthEstimate={rowContext.promptCacheWarmthEstimate}
+			/>
+		),
 		promptCacheWarmthPill: rowContext.promptCacheWarmthEstimate ? (
 			<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
 				promptCacheWarmthEstimate={rowContext.promptCacheWarmthEstimate}
@@ -87,10 +102,12 @@ function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
  */
 function ExpandedTaskCardUnavailableFallback({
 	entryInProject,
+	currentProjectId,
 	rowContext,
 	children,
 }: {
 	entryInProject: CrossProjectTaskSwitcherEntryInProject;
+	currentProjectId: string | null;
 	rowContext: CrossProjectTaskSwitcherFullTaskCardRowContext;
 	children: ReactNode;
 }): ReactElement {
@@ -100,7 +117,7 @@ function ExpandedTaskCardUnavailableFallback({
 		<div
 			ref={fallbackElementRefHandingOffToggleKeyboardFocus}
 			data-cross-project-task-switcher-full-task-card-unavailable-fallback=""
-			className="group/fallback relative cursor-pointer rounded-md px-2 py-1.5 hover:bg-surface-3"
+			className="group/fallback relative cursor-pointer rounded-md py-1.5 pl-2 pr-[calc(4rem+0.5rem)] hover:bg-surface-3"
 			onClick={(event) => {
 				if ((event.target as HTMLElement | null)?.closest("button")) {
 					return;
@@ -108,6 +125,14 @@ function ExpandedTaskCardUnavailableFallback({
 				rowContext.onActivateRow();
 			}}
 		>
+			<CrossProjectTaskSwitcherRowSummaryMetadata
+				entryInProject={entryInProject}
+				currentProjectId={currentProjectId}
+				projectName={rowContext.projectName}
+				nowMs={rowContext.nowMs}
+				section={rowContext.section}
+				promptCacheWarmthEstimate={rowContext.promptCacheWarmthEstimate}
+			/>
 			{/* 块级包一层不改首行几何；单击仍由外层统一处理（这一层不是 <button>，closest("button") 不拦）。 */}
 			<div
 				role="button"
@@ -121,7 +146,7 @@ function ExpandedTaskCardUnavailableFallback({
 					}
 				}}
 			>
-				<CrossProjectTaskSwitcherRowFirstLine
+				<CrossProjectTaskSwitcherRowAgentAndTitle
 					agentId={entryInProject.entry.agentId}
 					title={entryInProject.entry.title}
 				/>
@@ -157,7 +182,11 @@ function CurrentProjectExpandedTaskCard({
 	const selection = findCardSelection(currentProjectTaskCards.currentProjectDisplayedBoard, entry.taskId);
 	if (!selection) {
 		return (
-			<ExpandedTaskCardUnavailableFallback entryInProject={entryInProject} rowContext={rowContext}>
+			<ExpandedTaskCardUnavailableFallback
+				entryInProject={entryInProject}
+				currentProjectId={workspaceId}
+				rowContext={rowContext}
+			>
 				This task is no longer on the board.
 			</ExpandedTaskCardUnavailableFallback>
 		);
@@ -179,6 +208,8 @@ function CurrentProjectExpandedTaskCard({
 			renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
 			crossProjectTaskSwitcherRowElementsMergedIntoCardCopy={buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 				rowContext,
+				entryInProject,
+				workspaceId,
 			)}
 		/>
 	);
@@ -186,12 +217,14 @@ function CurrentProjectExpandedTaskCard({
 
 function OtherProjectExpandedTaskCard({
 	entryInProject,
+	currentProjectId,
 	otherProjectWorkspacePath,
 	defaultAgentId,
 	buildTaskCardActionHandlerBundleForOtherProjectTaskCard,
 	rowContext,
 }: {
 	entryInProject: CrossProjectTaskSwitcherEntryInProject;
+	currentProjectId: string | null;
 	otherProjectWorkspacePath: string | null;
 	defaultAgentId: RuntimeAgentId | null;
 	buildTaskCardActionHandlerBundleForOtherProjectTaskCard: TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher["buildTaskCardActionHandlerBundleForOtherProjectTaskCard"];
@@ -209,20 +242,32 @@ function OtherProjectExpandedTaskCard({
 	switch (loadState.otherProjectTaskCardSnapshotLoadStatus) {
 		case "loading":
 			return (
-				<ExpandedTaskCardUnavailableFallback entryInProject={entryInProject} rowContext={rowContext}>
+				<ExpandedTaskCardUnavailableFallback
+					entryInProject={entryInProject}
+					currentProjectId={currentProjectId}
+					rowContext={rowContext}
+				>
 					<Spinner size={12} />
 					Loading task…
 				</ExpandedTaskCardUnavailableFallback>
 			);
 		case "task_card_not_found":
 			return (
-				<ExpandedTaskCardUnavailableFallback entryInProject={entryInProject} rowContext={rowContext}>
+				<ExpandedTaskCardUnavailableFallback
+					entryInProject={entryInProject}
+					currentProjectId={currentProjectId}
+					rowContext={rowContext}
+				>
 					This task is no longer on its board.
 				</ExpandedTaskCardUnavailableFallback>
 			);
 		case "failed":
 			return (
-				<ExpandedTaskCardUnavailableFallback entryInProject={entryInProject} rowContext={rowContext}>
+				<ExpandedTaskCardUnavailableFallback
+					entryInProject={entryInProject}
+					currentProjectId={currentProjectId}
+					rowContext={rowContext}
+				>
 					{`Could not load the task: ${loadState.failureMessage}`}
 				</ExpandedTaskCardUnavailableFallback>
 			);
@@ -256,6 +301,8 @@ function OtherProjectExpandedTaskCard({
 					taskCardOwnedByOtherProjectWorkspaceId={workspaceId}
 					crossProjectTaskSwitcherRowElementsMergedIntoCardCopy={buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 						rowContext,
+						entryInProject,
+						currentProjectId,
 					)}
 				/>
 			);
@@ -302,6 +349,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRowExpandedTaskCard({
 				) : (
 					<OtherProjectExpandedTaskCard
 						entryInProject={entryInProject}
+						currentProjectId={currentProjectId}
 						otherProjectWorkspacePath={otherProjectWorkspacePath}
 						defaultAgentId={defaultAgentId}
 						buildTaskCardActionHandlerBundleForOtherProjectTaskCard={

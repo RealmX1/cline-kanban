@@ -61,7 +61,7 @@ function Harness() {
 	};
 	const summary: RuntimeTaskSessionSummary = {
 		taskId,
-		state: "running",
+		state: "awaiting_review",
 		agentId: "codex",
 		workspacePath: directoryPath,
 		pid: 1,
@@ -73,9 +73,9 @@ function Harness() {
 		lastHookAt: now,
 		latestTurnCheckpoint: null,
 		previousTurnCheckpoint: null,
-		turnOwner: "agent",
+		turnOwner: "user",
 		liveness: "live",
-		userTurnKind: null,
+		userTurnKind: "review",
 		latestHookActivity: {
 			activityText: activity,
 			toolName: "Read",
@@ -85,6 +85,7 @@ function Harness() {
 			notificationType: null,
 			source: "codex",
 		},
+		lastAgentConversationUserHandoffObservation: { observedAtMs: now - 300_000, signalConfidence: "harness_turn_complete", turnSequence: 1 },
 		agentResponseGenerationStopped: {
 			stoppedAt: now - 300_000,
 			signalConfidence: "harness_turn_complete",

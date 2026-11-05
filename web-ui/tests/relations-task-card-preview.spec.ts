@@ -290,10 +290,15 @@ test("记录型与断言型摘要都可悬停、固定和切换，独立打开�
 	await expect(fullCard(page)).toContainText("任务 backlog");
 	await page.screenshot({ path: test.info().outputPath("desktop-relations-preview.png") });
 	await fullCard(page).getByRole("button", { name: "Edit task title", exact: true }).click();
-	await expect(page.getByRole("dialog", { name: "编辑关联任务" })).toBeVisible();
+	const relatedTaskEditorDialog = page.getByRole("dialog", { name: "编辑关联任务", exact: true });
+	await expect(relatedTaskEditorDialog).toBeVisible();
+	await expect(relatedTaskEditorDialog.getByRole("button", { name: "Close", exact: true })).toBeFocused();
+	await expect.poll(() => relatedTaskEditorDialog.evaluate((element) => element.style.pointerEvents)).toBe("auto");
 	await expect(pane(page)).toBeVisible();
 	await page.keyboard.press("Escape");
+	await expect(relatedTaskEditorDialog).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();
+	await expect(fullCard(page).getByRole("button", { name: "Edit task title", exact: true })).toBeFocused();
 	await page.getByRole("button", { name: "预览 任务 review", exact: true }).click();
 	await pane(page).getByRole("button", { name: "打开任务", exact: true }).click();
 	await expect(page.getByLabel("当前聚焦任务")).toHaveText("project-b:review");
@@ -312,13 +317,15 @@ test("图根、多跳节点均预览，固定切换保持缩放、草稿与图�
 	await node(page, "second-hop").focus();
 	await page.keyboard.press("Enter");
 	await expect(fullCard(page)).toContainText("任务 second-hop");
-	await foreground.getByRole("button", { name: "添加关系", exact: true }).click();
-	await foreground.getByRole("textbox", { name: "关系理由", exact: true }).fill("切换预览仍保留这份草稿");
+	await pane(page).getByRole("button", { name: "与当前任务建立关系", exact: true }).click();
+	await foreground.getByRole("button", { name: "详情", exact: true }).click();
+	await foreground.getByText("可选详情", { exact: true }).click();
+	await foreground.getByRole("textbox", { name: "关系理由（可选）", exact: true }).fill("切换预览仍保留这份草稿");
 	await page.getByRole("button", { name: "放大关系图", exact: true }).click();
 	const transform = await page.locator(".react-flow__viewport").getAttribute("style");
 	await node(page, "review").click();
 	await expect(fullCard(page)).toContainText("任务 review");
-	await expect(foreground.getByRole("textbox", { name: "关系理由", exact: true })).toHaveValue(
+	await expect(foreground.getByRole("textbox", { name: "关系理由（可选）", exact: true })).toHaveValue(
 		"切换预览仍保留这份草稿",
 	);
 	await expect(page.locator(".react-flow__viewport")).toHaveAttribute("style", transform!);
@@ -358,7 +365,10 @@ test("真实评论与删除确认保持展开，Esc 依次退出模态框、预�
 	await expect(pane(page)).toBeVisible();
 	await expect.poll(() => pane(page).evaluate((element) => element.contains(document.activeElement))).toBe(true);
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
-	await expect(page.getByRole("alertdialog")).toBeVisible();
+	const deleteTaskDialog = page.getByRole("alertdialog");
+	await expect(deleteTaskDialog).toBeVisible();
+	await expect(deleteTaskDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+	await expect.poll(() => deleteTaskDialog.evaluate((element) => element.style.pointerEvents)).toBe("auto");
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();
@@ -377,12 +387,9 @@ test("从预览建立关系时保留一世身份，同 ID 重建后不产生关�
 	await page.getByRole("button", { name: "展开关系图", exact: true }).click();
 	await node(page, "review").click();
 	await expect(fullCard(page)).toBeVisible();
+	fixture.recreatedCounterpart.taskId = "review";
 	await pane(page).getByRole("button", { name: "与当前任务建立关系", exact: true }).click();
 	const editor = page.getByRole("region", { name: "任务关系建模", exact: true });
-	await editor.getByLabel("关系类型", { exact: true }).selectOption("reference_is_generally_related_with");
-	await editor.getByLabel("关系理由", { exact: true }).fill("只关联刚才预览的这一世任务");
-	fixture.recreatedCounterpart.taskId = "review";
-	await editor.getByRole("button", { name: "加入关系草稿", exact: true }).click();
 	await expect(editor.getByRole("alert")).toContainText("预览中的任务已删除并重建");
 	await expect(editor.getByRole("button", { name: "保存关系变更", exact: true })).toBeDisabled();
 	expect(
@@ -412,7 +419,7 @@ test("卡片动作沿用原流程；读取失败可重试，重建、墓碑和�
 		)?.input,
 	).toMatchObject({ taskId: "review", expectedTaskIncarnationCreatedAtEpochMs: 1_000 });
 	await node(page, "done").click();
-	await expect(fullCard(page).getByRole("button", { name: "Restore task from done", exact: true })).toBeVisible();
+	await expect(fullCard(page).getByRole("button", { name: "重新打开已结案任务", exact: true })).toBeVisible();
 	await expect(fullCard(page).getByRole("button", { name: "Start task", exact: true })).toHaveCount(0);
 	for (const [taskId, reason] of [
 		["rebuilt", "原任务已删除并重建"],
@@ -515,6 +522,7 @@ test("真实浮窗内标题编辑首次 Esc 只取消编辑，之后依次关闭
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
 	await expect(page.getByRole("alertdialog")).toBeVisible();
 	await expect(page.getByRole("alertdialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();

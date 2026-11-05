@@ -63,39 +63,43 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 				await page.mouse.move(1, 1);
 				await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 				const copyActions = card.locator("[data-task-directory-copy-actions]");
-				await expect(copyActions).toHaveCSS("opacity", "0");
-				const copyButtonBoundsWhenHidden = await copyButton.boundingBox();
-				expect(copyButtonBoundsWhenHidden).not.toBeNull();
-				if (!copyButtonBoundsWhenHidden) throw new Error("复制按钮缺少几何信息");
-				const hiddenCopyButtonCenter = {
-					x: copyButtonBoundsWhenHidden.x + copyButtonBoundsWhenHidden.width / 2,
-					y: copyButtonBoundsWhenHidden.y + copyButtonBoundsWhenHidden.height / 2,
-				};
-				expect(
-					await page.evaluate(({ x, y }) => {
-						return document.elementFromPoint(x, y)?.closest('[aria-label="Copy directory path"]') !== null;
-					}, hiddenCopyButtonCenter),
-				).toBe(false);
-				// 触屏直接点击隐藏区域，不先移入指针；桌面以浏览器命中元素派发点击，保持无 hover 状态。
 				if (hasTouch) {
-					await page.touchscreen.tap(hiddenCopyButtonCenter.x, hiddenCopyButtonCenter.y);
+					await expect(copyActions).toHaveCSS("opacity", "1");
 				} else {
-					await page.evaluate(({ x, y }) => {
-						(document.elementFromPoint(x, y) as HTMLElement | null)?.click();
-					}, hiddenCopyButtonCenter);
+					await expect(copyActions).toHaveCSS("opacity", "0");
+					const copyButtonBoundsWhenHidden = await copyButton.boundingBox();
+					expect(copyButtonBoundsWhenHidden).not.toBeNull();
+					if (!copyButtonBoundsWhenHidden) throw new Error("复制按钮缺少几何信息");
+					const hiddenCopyButtonCenter = {
+						x: copyButtonBoundsWhenHidden.x + copyButtonBoundsWhenHidden.width / 2,
+						y: copyButtonBoundsWhenHidden.y + copyButtonBoundsWhenHidden.height / 2,
+					};
+					expect(
+						await page.evaluate(({ x, y }) => {
+							return document.elementFromPoint(x, y)?.closest('[aria-label="Copy directory path"]') !== null;
+						}, hiddenCopyButtonCenter),
+					).toBe(false);
+					// 触屏直接点击隐藏区域，不先移入指针；桌面以浏览器命中元素派发点击，保持无 hover 状态。
+					if (hasTouch) {
+						await page.touchscreen.tap(hiddenCopyButtonCenter.x, hiddenCopyButtonCenter.y);
+					} else {
+						await page.evaluate(({ x, y }) => {
+							(document.elementFromPoint(x, y) as HTMLElement | null)?.click();
+						}, hiddenCopyButtonCenter);
+					}
+					await expect(page.locator("body")).not.toHaveAttribute("data-copied-task-directory-path");
+					await expect(page.locator("body")).not.toHaveAttribute("data-edited-task-id");
+					await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-task-start");
+					if (index === 1) {
+						await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-card-activation");
+					} else {
+						// 操作栏移至卡片上方后，隐藏按钮的旧命中点可以落在卡片外；仍须保证不误触任何操作。
+						await page
+							.locator("body")
+							.evaluate((element) => element.removeAttribute("data-unexpected-card-activation"));
+					}
 				}
-				await expect(page.locator("body")).not.toHaveAttribute("data-copied-task-directory-path");
-				await expect(page.locator("body")).not.toHaveAttribute("data-edited-task-id");
-				await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-task-start");
-				if (index === 1) {
-					await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-card-activation");
-				} else {
-					await expect(page.locator("body")).toHaveAttribute("data-unexpected-card-activation", "true");
-					await page
-						.locator("body")
-						.evaluate((element) => element.removeAttribute("data-unexpected-card-activation"));
-				}
-				await card.hover();
+				await card.locator("[data-task-card-title]").hover();
 				const editButton = card.getByRole("button", { name: "Edit task title" });
 				if (index !== 1) {
 					if (index === 0) await editButton.hover();
@@ -119,6 +123,7 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 						await page.locator("body").evaluate((element) => element.removeAttribute("data-edited-task-id"));
 					}
 				}
+				await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
 				const descriptionTimePill = card.locator("[data-backlog-task-description-last-updated-pill]");
 				await descriptionTimePill.hover();
 				expect(
@@ -132,7 +137,7 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 				await expect(page.getByRole("tooltip")).toContainText("Description last updated ·");
 				await page.mouse.move(1, 1);
 				await expect(page.getByRole("tooltip")).toHaveCount(0);
-				await card.hover();
+				await card.locator("[data-task-card-title]").hover();
 				await expect(card.locator("[data-task-directory-copy-actions]")).toHaveCSS("opacity", "1");
 				await expect(card.locator("[data-task-directory]")).toHaveCount(0);
 				await copyButton.hover();

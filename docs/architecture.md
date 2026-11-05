@@ -260,6 +260,10 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 
 ### BoardCard dual host chains
 
+`TaskCardBody` 按「项目／Git／时间摘要 → Agent 与标题 → 独立状态提示 → 阶段目标 → 当前行动与详情」呈现。摘要由 `task-card-summary-metadata.tsx` 和 `task-activity-elapsed-time-pills.tsx` 统一实现；跨项目缩略行、悬浮展开与固定展开复用 `cross-project-task-switcher-row-summary-metadata.tsx` 的同一条目数据，完整卡片仍按需加载并复用实例。接受待确认、排队和恢复提示不得回流到摘要。
+
+卡壳恒定预留右侧附着区，PDV 与关联导航在卡面外缘纵向排列；它们仍属于卡片 React 子树，悬浮测量覆盖整个卡壳。桌面按悬停／聚焦／固定展开显示，触屏完整卡片常显，主操作移入卡底并保持至少 44px 命中区。Prompt 与结案主按钮用 `long_press_primary_button` 显式启用附加菜单（500ms、移动超过 8px 取消），终端重启保留独立菜单入口；新触摸手势在捕获阶段清除缩略行上一轮释放点击的抑制状态。
+
 同一个 `BoardCard` 组件通过两条平行宿主链渲染；卡片阶段动作（移入 validation、移入 done、restore）必须贯通两条链。commit / open PR 已从所有卡片入口移除，仅保留 Focus View 的 agent 面板入口（`card-detail-view.tsx` 中的 `AgentTerminalPanel` / `ClineAgentChatPanel`）：
 
 - the main board: `kanban-board.tsx` → `board-column.tsx`

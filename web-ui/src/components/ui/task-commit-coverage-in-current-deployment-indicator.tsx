@@ -1,6 +1,6 @@
 import * as Popover from "@radix-ui/react-popover";
 import { Rocket } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeTaskCommitCoverageInCurrentDeployment } from "@/runtime/types";
 
@@ -48,6 +48,15 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 		clearCloseTimer();
 		setIsOpen(true);
 	};
+	const handleCoverageDetailsKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+		event.stopPropagation();
+		// 悬停打开时焦点仍在触发器上，不能让该层的冒泡隔离吞掉 Escape。
+		if (event.key !== "Escape") return;
+		event.preventDefault();
+		clearCloseTimer();
+		pinnedOpenRef.current = false;
+		setIsOpen(false);
+	};
 	return (
 		<span
 			className="inline-flex align-baseline whitespace-nowrap"
@@ -73,7 +82,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 				onBlur={scheduleClose}
 				onPointerDown={(event) => event.stopPropagation()}
 				onMouseDown={(event) => event.stopPropagation()}
-				onKeyDown={(event) => event.stopPropagation()}
+				onKeyDown={handleCoverageDetailsKeyDown}
 				onClick={(event) => {
 					event.stopPropagation();
 					pinnedOpenRef.current = true;
@@ -106,7 +115,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 							onPointerLeave={scheduleClose}
 							onClick={(event) => event.stopPropagation()}
 							onPointerDown={(event) => event.stopPropagation()}
-							onKeyDown={(event) => event.stopPropagation()}
+							onKeyDown={handleCoverageDetailsKeyDown}
 						>
 							<p>
 								{unknown

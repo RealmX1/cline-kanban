@@ -931,6 +931,163 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(gitMetadataOf("backlog-task")).toBeNull();
 	});
 
+	it.each(["上下文未水合", "卡片不在看板", "服务端未找到卡片", "服务端读取失败", "服务端已加载卡片"])(
+		"当前项目展开时保留推流 Git、dirty 和部署覆盖摘要：%s",
+		async (currentProjectTaskCardAvailability) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+			if (currentProjectTaskCardAvailability === "服务端未找到卡片") {
+				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
+					taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
+					lookedUpTaskId: "streamed-git",
+				});
+			} else if (currentProjectTaskCardAvailability === "服务端读取失败") {
+				readTaskCardWithBoardColumnInWorkspace.mockRejectedValue(new Error("快照暂不可读"));
+			} else if (currentProjectTaskCardAvailability === "服务端已加载卡片") {
+				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(
+					makeOtherProjectTaskCardSnapshot("streamed-git", "review"),
+				);
+			}
+			replaceWorkspaceMetadata({
+				homeGitSummary: null,
+				homeGitStateVersion: 0,
+				taskWorkspaces: [
+					{
+						...makeTaskWorkspaceMetadata("streamed-git", {
+							ahead: 2,
+							behind: 1,
+							changedFiles: 3,
+							additions: 15,
+							deletions: 4,
+						}),
+						taskCommitCoverageInCurrentDeployment: {
+							coverageStatus: "some_known_task_commits_in_current_deployment",
+							knownTaskCommitCount: 2,
+							matchedTaskCommitCountInCurrentDeployment: 1,
+							currentDeploymentId: "deployment-streamed-git",
+							currentDeployedSourceCommit: "abcdef1234567890",
+							currentDeploymentRecordedAtIso: "2026-11-05T00:00:00.000Z",
+							unavailableReason: null,
+							coverageVersion: "streamed-git-v1",
+						},
+					},
+				],
+			});
+			const host = makeHost({
+				projects: [makeProject("project-a", [makeEntry("streamed-git", { baseRef: "main" })])],
+				focusedTaskInProject: null,
+			});
+			const currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null =
+				currentProjectTaskCardAvailability === "卡片不在看板"
+					? {
+							currentProjectDisplayedBoard: { columns: [] },
+							currentProjectTaskSessions: {},
+							currentProjectTaskCardActionHandlers: {},
+							currentProjectWorkspacePath: "/repos/project-a",
+						}
+					: null;
+			await act(async () =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={host}
+						currentProjectTaskCards={currentProjectTaskCards}
+					/>,
+				),
+			);
+			const queryCurrentProjectTaskRow = () =>
+				section("remaining").querySelector<HTMLElement>(
+					'[data-cross-project-task-switcher-task-id="streamed-git"]',
+				);
+			const compactGitMetadata = queryCurrentProjectTaskRow()?.querySelector("[data-task-directory]");
+			expect(compactGitMetadata?.textContent).toContain("+15");
+			expect(compactGitMetadata?.textContent).toContain("-4");
+			expect(compactGitMetadata?.textContent).toContain("部署 1/2");
+			const compactGitDescription = compactGitMetadata
+				?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")
+				?.getAttribute("title");
+			expect(compactGitDescription).toContain("2 commits ahead of main");
+			await hoverRowUntilExpandedInPlace(queryCurrentProjectTaskRow());
+			expect(rowInPlaceExpansionState(queryCurrentProjectTaskRow())).toBe("expanded_in_place_by_hover");
+			const assertExpandedGitMetadataMatchesCompactRow = () => {
+				const expandedTaskCard = queryCurrentProjectTaskRow()?.querySelector(
+					'[data-testid="cross-project-task-switcher-full-task-card"]',
+				);
+				expect(expandedTaskCard).not.toBeNull();
+				if (currentProjectTaskCardAvailability === "服务端已加载卡片") {
+					expect(expandedTaskCard?.querySelector("[data-task-card-render-role]")).not.toBeNull();
+				} else {
+					expect(
+						expandedTaskCard?.querySelector(
+							"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
+						),
+					).not.toBeNull();
+				}
+				const expandedGitMetadata = expandedTaskCard?.querySelector("[data-task-directory]");
+				expect(expandedGitMetadata?.textContent).toBe(compactGitMetadata?.textContent);
+				expect(
+					expandedGitMetadata
+						?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")
+						?.getAttribute("title"),
+				).toBe(compactGitDescription);
+			};
+			assertExpandedGitMetadataMatchesCompactRow();
+			await act(async () => queryInListExpansionToggle(queryCurrentProjectTaskRow())?.click());
+			expect(rowInPlaceExpansionState(queryCurrentProjectTaskRow())).toBe("kept_expanded_in_list");
+			assertExpandedGitMetadataMatchesCompactRow();
+		},
+	);
+
+	it("其他项目同号任务展开兜底只用所属项目轮询，不借当前项目推流", async () => {
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		replaceWorkspaceMetadata({
+			homeGitSummary: null,
+			homeGitStateVersion: 0,
+			taskWorkspaces: [
+				makeTaskWorkspaceMetadata("shared-task-id", {
+					ahead: 2,
+					behind: 1,
+					changedFiles: 3,
+					additions: 15,
+					deletions: 4,
+				}),
+			],
+		});
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
+			tasks: [
+				{
+					workspaceId: "project-b",
+					taskId: "shared-task-id",
+					availability: "available",
+					taskWorkspaceMetadata: makeTaskWorkspaceMetadata("shared-task-id", {
+						ahead: 9,
+						behind: 0,
+						changedFiles: 1,
+						additions: 7,
+						deletions: 0,
+					}),
+				},
+			],
+		});
+		const host = makeHost({
+			projects: [makeProject("project-a", []), makeProject("project-b", [makeEntry("shared-task-id")])],
+			focusedTaskInProject: null,
+		});
+		await act(async () =>
+			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} currentProjectTaskCards={null} />),
+		);
+		const row = section("remaining").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="shared-task-id"]',
+		);
+		await act(async () => queryInListExpansionToggle(row)?.click());
+		const fallback = row?.querySelector("[data-cross-project-task-switcher-full-task-card-unavailable-fallback]");
+		expect(fallback).not.toBeNull();
+		expect(fallback?.querySelector("[data-task-directory]")?.textContent).toContain("+7");
+		expect(fallback?.querySelector("[data-task-directory]")?.textContent).not.toContain("+15");
+		expect(
+			fallback?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")?.getAttribute("title"),
+		).toContain("9 commits ahead of");
+	});
+
 	it("当前项目的行在推流里没有数据（All projects 下不在探测范围）时回落到轮询结果", async () => {
 		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
 			tasks: [
@@ -1048,6 +1205,11 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
+		expect(
+			container.querySelector(
+				'[data-cross-project-task-switcher-task-id="backlog-task"] [data-backlog-task-description-last-updated-pill]',
+			)?.textContent,
+		).toBe("1m");
 		act(() =>
 			section("remaining")
 				.querySelector<HTMLButtonElement>(

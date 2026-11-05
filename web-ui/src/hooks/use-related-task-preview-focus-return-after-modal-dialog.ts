@@ -20,7 +20,8 @@ export function useRelatedTaskPreviewFocusReturnAfterModalDialog(
 		(target: EventTarget | null) => {
 			if (!(target instanceof Element) || !popoverContentRef.current?.contains(target)) return;
 			const control = target.closest<HTMLElement>("button, input, textarea, a, [tabindex]");
-			if (control) lastInteractionTarget.current = control;
+			// 模态焦点域卸载时可能先回到容器，保留真正发起操作的控件。
+			if (control && control !== popoverContentRef.current) lastInteractionTarget.current = control;
 		},
 		[popoverContentRef],
 	);
@@ -43,7 +44,7 @@ export function useRelatedTaskPreviewFocusReturnAfterModalDialog(
 					if (
 						!content ||
 						hasOpenModalDialogOutsideRelatedTaskPreview(content) ||
-						content.contains(document.activeElement)
+						(document.activeElement !== content && content.contains(document.activeElement))
 					)
 						return;
 					const previous = lastInteractionTarget.current;
