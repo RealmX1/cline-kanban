@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import type { TaskEditorCreationSubmissionStatus } from "../core/api-contract";
 import {
 	taskEditorCreationSubmissionRequestSchema,
 	taskEditorCreationSubmissionStatusSchema,
@@ -10,6 +11,9 @@ import {
 import { webUiUserDecisionClientCharacteristicsSchema } from "../core/work-unit-relation-assertion-write-api-contract";
 import { referenceRelationModelingEditorDraftSchema } from "../core/work-unit-relation-modeling-api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { buildInterWorkUnitRelationWorkUnitKey } from "../inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
+import { readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import { createParsedPersistedJsonFileReadCache } from "../state/parsed-persisted-json-file-read-cache";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 
 const recordSchema = z.object({
@@ -38,6 +42,8 @@ const recordSchema = z.object({
 	failureHistory: z.array(z.object({ occurredAtEpochMs: z.number(), message: z.string() })),
 });
 export type TaskEditorCreationSubmissionRecord = z.infer<typeof recordSchema>;
+const startupProgressReadCache = createParsedPersistedJsonFileReadCache<TaskEditorCreationSubmissionStatus[]>();
+const completedStartupProjectionSubmissionIdsByDirectory = new Map<string, Set<string>>();
 export const taskEditorCreationFingerprint = (value: unknown) =>
 	createHash("sha256")
 		.update(
@@ -86,6 +92,84 @@ export async function writeTaskEditorCreationSubmission(record: TaskEditorCreati
 		lock: null,
 		durable: true,
 	});
+	startupProgressReadCache.forget(submissionsDirectory());
+	if (record.status.phase !== "completed")
+		completedStartupProjectionSubmissionIdsByDirectory
+			.get(submissionsDirectory())
+			?.delete(record.status.submissionId);
+}
+
+// 提交记录采用原子替换，目录指纹变化时重读；各项目广播共享同一轮读取，不反复解析冻结正文。
+export async function readTaskEditorCreationAgentStartupProgressByTaskId(
+	workspaceId: string,
+	resolveTaskIncarnationCurrentLocationAndWorkspaceHistory: (status: TaskEditorCreationSubmissionStatus) => Promise<{
+		workspaceId: string;
+		taskIncarnationCreatedAtEpochMs: number;
+		permanentlyRemoved: boolean;
+		workspaceIdsUsedByTaskIncarnation?: string[];
+	} | null> = (status) =>
+		readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture((reader) => {
+			const identity =
+				reader.projectionState.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.get(
+					buildInterWorkUnitRelationWorkUnitKey({
+						workUnitType: "kanban_board_card",
+						workspaceId: status.workspaceId,
+						taskId: status.taskId,
+						taskIncarnationCreatedAtEpochMs: status.taskIncarnationCreatedAtEpochMs,
+					}),
+				);
+			return identity
+				? {
+						workspaceId: identity.currentWorkspaceId ?? identity.kanbanBoardCard.workspaceId,
+						taskIncarnationCreatedAtEpochMs: identity.kanbanBoardCard.taskIncarnationCreatedAtEpochMs,
+						permanentlyRemoved: identity.permanentlyRemovedFromBoardAt !== null,
+						workspaceIdsUsedByTaskIncarnation: identity.workspaceIdsUsedByCard,
+					}
+				: null;
+		}),
+) {
+	const statuses = await startupProgressReadCache.read(submissionsDirectory(), async () => {
+		const completedSubmissionIds =
+			completedStartupProjectionSubmissionIdsByDirectory.get(submissionsDirectory()) ?? new Set<string>();
+		completedStartupProjectionSubmissionIdsByDirectory.set(submissionsDirectory(), completedSubmissionIds);
+		const records = await listTaskEditorCreationSubmissions(completedSubmissionIds, () => undefined);
+		for (const record of records)
+			if (record.status.phase === "completed") completedSubmissionIds.add(record.status.submissionId);
+		return records
+			.map((record) => record.status)
+			.filter(
+				(status) =>
+					status.cardPersisted &&
+					status.startRequested &&
+					!status.startCompleted &&
+					!["completed", "stopped", "identity_conflict", "waiting_for_authorization"].includes(status.phase),
+			);
+	});
+	const result = new Map<string, TaskEditorCreationSubmissionStatus>();
+	for (const status of statuses) {
+		const identity = await resolveTaskIncarnationCurrentLocationAndWorkspaceHistory(status);
+		if (
+			identity?.permanentlyRemoved ||
+			(identity && identity.taskIncarnationCreatedAtEpochMs !== status.taskIncarnationCreatedAtEpochMs) ||
+			(identity?.workspaceId ?? status.workspaceId) !== workspaceId
+		)
+			continue;
+		const stops = await Promise.all(
+			[...new Set([status.workspaceId, workspaceId, ...(identity?.workspaceIdsUsedByTaskIncarnation ?? [])])].map(
+				(locationWorkspaceId) =>
+					readTaskEditorCreationExplicitStop(
+						locationWorkspaceId,
+						status.taskId,
+						status.taskIncarnationCreatedAtEpochMs,
+					),
+			),
+		);
+		if (stops.some((stoppedAt) => stoppedAt !== null && stoppedAt >= status.acceptedAtEpochMs)) continue;
+		const previous = result.get(status.taskId);
+		if (!previous || previous.acceptedAtEpochMs < status.acceptedAtEpochMs)
+			result.set(status.taskId, { ...status, workspaceId });
+	}
+	return result;
 }
 export async function withTaskEditorCreationSubmissionLock<T>(
 	_workspaceId: string,

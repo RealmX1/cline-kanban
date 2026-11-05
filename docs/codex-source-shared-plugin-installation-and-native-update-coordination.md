@@ -47,6 +47,8 @@ plugins/.kanban-source-installation-coordination/
 
 主、侧会话的自然换代通过同步原生入口检查真实 revision；同源辅助进程在完整缓存可用时只复核目录与来源，不执行升级。正常 prompt 提交路径不加入同步升级。真实更新仍可替换最终目录；仅来源与 revision 未变化时不应发生无意义替换。原生流程可能产生临时 materialization／clone，不能把它们当作最终插件重装。
 
+同一来源锁内，相同插件 URL/ref 的远端 revision 核验复用一次结果（含未知结果）；来源 URL/ref 改变或原生 marketplace／插件安装改变事实后重新核验。缓存不跨启动事务。未知 revision 只允许沿用完整缓存并保持待更新，不写成更新成功。启动诊断逐项记录来源锁等待、原生更新、插件安装和 revision 查询耗时。
+
 同步 CLI 的 Git 操作保留原生 Automatic 环境隔离：去除仓库作用域 `GIT_*`，使用私有普通 cwd 与发现上界，禁止交互提示及可选写锁，保留认证和只读 Trace2。私有 cwd 出现 `.git` 发现标记时不执行命令，不能借此继承任务仓库的本地 Git 配置。
 
 ## 缺证、中断与自动恢复

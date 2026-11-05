@@ -5,7 +5,12 @@ import { dirname, join } from "node:path";
 const TASK_SESSION_START_DIAGNOSTICS_DIRECTORY_NAME = "task-session-start-diagnostics";
 const TASK_SESSION_START_DIAGNOSTICS_FILE_NAME = "task-session-start-diagnostics.log";
 
-export type TaskSessionStartDiagnosticEvent = "runtime_started" | "response_ready" | "failed";
+export type TaskSessionStartDiagnosticEvent =
+	| "runtime_started"
+	| "response_ready"
+	| "failed"
+	| "phase_completed"
+	| "phase_failed";
 
 export interface TaskSessionStartDiagnosticRecord {
 	event: TaskSessionStartDiagnosticEvent;
@@ -17,6 +22,8 @@ export interface TaskSessionStartDiagnosticRecord {
 	requestedTerminalRows?: number | null;
 	phase: string;
 	elapsedMs: number;
+	phaseDurationMs?: number;
+	runtimeSessionIncarnationId?: string;
 	error: string | null;
 	session: {
 		state: string;
@@ -53,9 +60,40 @@ export function formatTaskSessionStartDiagnosticLine(
 		`requestedTerminalRows=${record.requestedTerminalRows ?? null}`,
 		`phase=${record.phase}`,
 		`elapsedMs=${record.elapsedMs}`,
+		...(record.phaseDurationMs === undefined ? [] : [`phaseDurationMs=${record.phaseDurationMs}`]),
+		...(record.runtimeSessionIncarnationId
+			? [`runtimeSessionIncarnationId=${record.runtimeSessionIncarnationId}`]
+			: []),
 		`session=${JSON.stringify(record.session)}`,
 		`error=${JSON.stringify(record.error)}`,
 	].join(" ");
+}
+
+export async function measureTaskSessionStartupPhase<T>(
+	context: Pick<
+		TaskSessionStartDiagnosticRecord,
+		"workspaceId" | "taskId" | "requestedAgentId" | "effectiveAgentId" | "phase" | "runtimeSessionIncarnationId"
+	>,
+	run: () => Promise<T>,
+): Promise<T> {
+	const startedAt = performance.now();
+	let error: string | null = null;
+	try {
+		return await run();
+	} catch (failure) {
+		error = failure instanceof Error ? failure.message : String(failure);
+		throw failure;
+	} finally {
+		const phaseDurationMs = Math.round(performance.now() - startedAt);
+		void recordTaskSessionStartDiagnostic({
+			...context,
+			event: error === null ? "phase_completed" : "phase_failed",
+			elapsedMs: phaseDurationMs,
+			phaseDurationMs,
+			error,
+			session: null,
+		});
+	}
 }
 
 export async function recordTaskSessionStartDiagnostic(record: TaskSessionStartDiagnosticRecord): Promise<void> {

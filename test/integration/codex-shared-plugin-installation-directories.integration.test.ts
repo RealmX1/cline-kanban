@@ -12,6 +12,8 @@ import {
 	buildCodexConfigurationWriterEnvironment,
 	prepareCodexConfigurationWriterBinding,
 } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
+import * as remoteRevisionProbeTransaction from "../../src/codex-configuration-sync/codex-plugin-remote-revision-probe-transaction";
+import * as sourceInstallationControllerOwnership from "../../src/codex-configuration-sync/codex-source-plugin-installation-controller-ownership";
 import {
 	prepareCodexSharedPluginInstallationForNativeLaunch,
 	recoverPendingCodexSharedPluginInstallations,
@@ -302,6 +304,106 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			expect(completion, completion.stderr).toMatchObject({ exitCode: 0 });
 			expect(await native.snapshot()).toEqual(before);
 			expect(completion.outcome?.upgradedRoots).toEqual([]);
+		});
+
+		it("同次启动重复插件 revision 查询只执行一次，后续启动仍重新核验", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.managedLaunch(await native.writer());
+			const probeCount = async () =>
+				(await readFile(native.gitTraceFilePath, "utf8"))
+					.split("\n")
+					.filter(Boolean)
+					.map((line) =>
+						z.object({ event: z.string(), argv: z.array(z.string()).optional() }).parse(JSON.parse(line)),
+					)
+					.filter(
+						(event) =>
+							event.event === "start" &&
+							event.argv?.includes("ls-remote") &&
+							event.argv.includes(pathToFileURL(native.pluginRepository.repositoryPath).href),
+					).length;
+			const before = await probeCount();
+			expect((await native.managedLaunch(await native.writer())).status).toBe("ready");
+			expect((await probeCount()) - before).toBe(1);
+			expect((await native.managedLaunch(await native.writer())).status).toBe("ready");
+			expect((await probeCount()) - before).toBe(2);
+		});
+
+		it("插件远端 revision 未知只沿用完整缓存并标为待更新，来源恢复后自动重验", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.managedLaunch(await native.writer());
+			const movedPluginRepositoryPath = `${native.pluginRepository.repositoryPath}-unavailable`;
+			await rename(native.pluginRepository.repositoryPath, movedPluginRepositoryPath);
+			try {
+				const result = await native.managedLaunch(await native.writer());
+				expect(result.status).toBe("ready_with_pending_native_update");
+				if (!result.statePath) throw new Error("缺少插件来源核验恢复记录");
+				expect(JSON.parse(await readFile(result.statePath, "utf8"))).toMatchObject({
+					phase: "waiting_for_evidence",
+				});
+			} finally {
+				await rename(movedPluginRepositoryPath, native.pluginRepository.repositoryPath);
+			}
+			expect((await native.managedLaunch(await native.writer())).status).toBe("ready");
+		});
+
+		it("插件远端 revision 未知但失败指纹已恢复时，下一事务仍能完成准备意图", async () => {
+			const native = await createNativeInstallationFixture();
+			const binding = await native.writer();
+			// 本例验证重试状态机；来源锁保持真实，控制器进程代际由独立所有权用例覆盖。
+			const controllerOwnership = vi
+				.spyOn(sourceInstallationControllerOwnership, "claimCodexSourcePluginInstallationControllerOwnership")
+				.mockResolvedValue(async () => {});
+			const createTransaction = remoteRevisionProbeTransaction.createCodexPluginRemoteRevisionProbeTransaction;
+			let failFirstProbe = false;
+			const transactionFactory = vi
+				.spyOn(remoteRevisionProbeTransaction, "createCodexPluginRemoteRevisionProbeTransaction")
+				.mockImplementation((probe) =>
+					createTransaction(async (url, ref) => {
+						if (failFirstProbe) {
+							failFirstProbe = false;
+							return undefined;
+						}
+						return probe(url, ref);
+					}),
+				);
+			try {
+				await native.managedLaunch(binding);
+				const before = await native.snapshot();
+				failFirstProbe = true;
+				const pending = await native.managedLaunch(binding);
+				expect(pending.status).toBe("ready_with_pending_native_update");
+				const statePath = requireDefinedTestFixtureValue(pending.statePath);
+				expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({
+					phase: "waiting_for_evidence",
+					attemptCount: 3,
+				});
+				const recovered = await native.managedLaunch(binding);
+				expect(recovered).toMatchObject({
+					status: "ready",
+					nativeUpgradeCount: 0,
+					nativePluginInstallationCount: 0,
+				});
+				expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({ phase: "ready" });
+				const intentDirectory = join(statePath, "..", "native-launch-preparation-intents");
+				const intents = await Promise.all(
+					(await readdir(intentDirectory)).map(async (name) =>
+						JSON.parse(await readFile(join(intentDirectory, name), "utf8")),
+					),
+				);
+				expect(intents.filter((intent) => intent.status === "completed")).toHaveLength(2);
+				await writeFile(
+					statePath,
+					JSON.stringify({ ...JSON.parse(await readFile(statePath, "utf8")), nextEvidenceObservationAtMs: 0 }),
+				);
+				await recoverPendingCodexSharedPluginInstallations([binding], native.environment);
+				for (const name of await readdir(intentDirectory))
+					expect(JSON.parse(await readFile(join(intentDirectory, name), "utf8")).status).toBe("completed");
+				expect(await native.snapshot()).toEqual(before);
+			} finally {
+				transactionFactory.mockRestore();
+				controllerOwnership.mockRestore();
+			}
 		});
 
 		it("来源域协调让冷启动、已有记录与真实 revision 更新的三个并发进程仅完成一次最终安装", async () => {

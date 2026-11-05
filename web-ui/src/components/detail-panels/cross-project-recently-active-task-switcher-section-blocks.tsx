@@ -3,6 +3,7 @@ import type {
 	CrossProjectTaskSwitcherRecentTaskStageFilter,
 	CrossProjectTaskSwitcherRemainingSectionOrderingMode,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import { isCrossProjectTaskSwitcherEntryPreparingAgentStartup } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { Activity, ChevronDown, ChevronRight, ChevronUp, Flame, History, Pin, UnfoldHorizontal } from "lucide-react";
 import type {
 	MutableRefObject,
@@ -135,7 +136,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 	);
 }
 
-function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string; count: number }): ReactElement {
+function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string; count: ReactNode }): ReactElement {
 	return (
 		<>
 			<span className="truncate text-[13px] font-semibold text-text-primary">{title}</span>
@@ -284,6 +285,15 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	focusedTaskRowToKeepMounted,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const { sections, isRunningSectionExpanded, setIsRunningSectionExpanded } = sectionsModel;
+	const startupCount = sections.runningEntries.filter(({ entry }) =>
+		isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry),
+	).length;
+	const runningCount = (
+		<>
+			{sections.runningEntries.length - startupCount} 运行中{startupCount > 0 ? ` · ${startupCount} 正在启动` : ""}
+		</>
+	);
+
 	if (sectionBlockPresentation === "section_column_on_board_scope_all_projects_home_page") {
 		return (
 			<CrossProjectTaskSwitcherSectionFrame
@@ -293,7 +303,7 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 				header={
 					<>
 						<Activity size={13} className="shrink-0 text-status-blue" />
-						<CrossProjectTaskSwitcherSectionTitle title="Running" count={sections.runningEntries.length} />
+						<CrossProjectTaskSwitcherSectionTitle title="Running" count={runningCount} />
 					</>
 				}
 			>
@@ -324,7 +334,7 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 					) : (
 						<ChevronRight size={14} className="shrink-0 text-text-secondary" />
 					)}
-					<CrossProjectTaskSwitcherSectionTitle title="Running" count={sections.runningEntries.length} />
+					<CrossProjectTaskSwitcherSectionTitle title="Running" count={runningCount} />
 				</button>
 			}
 		>

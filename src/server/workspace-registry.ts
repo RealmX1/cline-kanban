@@ -17,6 +17,7 @@ import type {
 	RuntimeProjectUnavailableReason,
 	RuntimeTaskSessionSummary,
 	RuntimeWorkspaceStateResponse,
+	TaskEditorCreationSubmissionStatus,
 } from "../core/api-contract";
 import { CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { getDefaultProjectVisualIdentity, type ProjectVisualIdentity } from "../core/project-visual-identity";
@@ -41,6 +42,7 @@ import {
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
 import { applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
+import { readTaskEditorCreationAgentStartupProgressByTaskId } from "../task-editor-creation/task-editor-creation-submission-store";
 import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
 import { TerminalSessionManager } from "../terminal/session-manager";
@@ -554,6 +556,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		terminalManagerSessionsByTaskId: RuntimeWorkspaceStateResponse["sessions"] | null;
 		sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
 		lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
+		taskEditorCreationAgentStartupProgressByTaskId: ReadonlyMap<string, TaskEditorCreationSubmissionStatus>;
 	}> => {
 		// 宽松读取可能把旧版 null 正文投影为空看板，严格查询不能继承这份兼容结果。
 		const boardReadCache = requireCompleteRead ? completeProjectSummaryBoardReadCache : projectSummaryBoardReadCache;
@@ -589,7 +592,14 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			if (requireCompleteRead) throw error;
 			return new Map<string, number>();
 		});
-		return { board, terminalManagerSessionsByTaskId, sessionFactsByTaskId, lastOpenedByUserAtByTaskId };
+		return {
+			board,
+			terminalManagerSessionsByTaskId,
+			sessionFactsByTaskId,
+			lastOpenedByUserAtByTaskId,
+			taskEditorCreationAgentStartupProgressByTaskId:
+				await readTaskEditorCreationAgentStartupProgressByTaskId(workspaceId),
+		};
 	};
 
 	// 一次性汇总单个 project 的四样数据（共用一次 loadProjectBoardAndTaskSessionFacts，零重复 I/O）：
@@ -606,8 +616,13 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		crossProjectTaskSwitcherEntries: RuntimeCrossProjectTaskSwitcherEntry[];
 	}> => {
 		try {
-			const { board, terminalManagerSessionsByTaskId, sessionFactsByTaskId, lastOpenedByUserAtByTaskId } =
-				await loadProjectBoardAndTaskSessionFacts(workspaceId);
+			const {
+				board,
+				terminalManagerSessionsByTaskId,
+				sessionFactsByTaskId,
+				lastOpenedByUserAtByTaskId,
+				taskEditorCreationAgentStartupProgressByTaskId,
+			} = await loadProjectBoardAndTaskSessionFacts(workspaceId);
 			const persistedCounts = countTasksByColumn(board);
 			// 计数 overlay 仍只看 terminal manager 的 summary（未加载项目退化为原始列计数），与改动前一致。
 			const taskCounts = terminalManagerSessionsByTaskId
@@ -625,6 +640,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 					board,
 					sessionFactsByTaskId,
 					lastOpenedByUserAtByTaskId,
+					taskEditorCreationAgentStartupProgressByTaskId,
 					nowMs: now(),
 					activityHorizonMs: CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
 				}),
@@ -650,14 +666,19 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		return await Promise.all(
 			projects.map(async (project) => {
 				try {
-					const { board, sessionFactsByTaskId, lastOpenedByUserAtByTaskId } =
-						await loadProjectBoardAndTaskSessionFacts(project.workspaceId);
+					const {
+						board,
+						sessionFactsByTaskId,
+						lastOpenedByUserAtByTaskId,
+						taskEditorCreationAgentStartupProgressByTaskId,
+					} = await loadProjectBoardAndTaskSessionFacts(project.workspaceId);
 					return {
 						workspaceId: project.workspaceId,
 						crossProjectTaskSwitcherEntries: collectCrossProjectTaskSwitcherEntriesFromBoard({
 							board,
 							sessionFactsByTaskId,
 							lastOpenedByUserAtByTaskId,
+							taskEditorCreationAgentStartupProgressByTaskId,
 							nowMs,
 							activityHorizonMs,
 						}),

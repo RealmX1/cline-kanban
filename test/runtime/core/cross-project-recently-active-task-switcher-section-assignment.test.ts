@@ -103,6 +103,92 @@ function remainingTaskIds(sections: ReturnType<typeof assign>): string[] {
 	return section.entries.map(({ entry }) => entry.taskId);
 }
 
+describe("新建任务的启动准备归属", () => {
+	const progress = {
+		submissionId: "00000000-0000-4000-8000-000000000001",
+		workspaceId: "ws-a",
+		taskId: "start",
+		taskIncarnationCreatedAtEpochMs: 0,
+		cardPersisted: true,
+		relationsCompleted: true,
+		startRequested: true,
+		startCompleted: false,
+		phase: "starting_agent" as const,
+		lastError: null,
+		recoveryCondition: null,
+		attemptsInCurrentRecoveryRound: 1,
+		acceptedAtEpochMs: NOW_MS,
+		updatedAtEpochMs: NOW_MS,
+	};
+	const starting = (overrides: Partial<RuntimeCrossProjectTaskSwitcherEntry> = {}) =>
+		makeEntry("start", { columnId: "backlog", taskEditorCreationAgentStartupProgress: progress, ...overrides });
+
+	it("保存确认后无需进程即可进入 Running，并排在真实运行任务之后", () => {
+		const entry = starting();
+		const sections = assign([inProject("ws-a", entry), inProject("ws-b", makeEntry("live", AGENT_RUNNING))]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["live", "start"]);
+		expect(sections.remainingSection.entries).toEqual([]);
+		expect(isCrossProjectTaskSwitcherEntryRunning(entry, NOW_MS)).toBe(false);
+		expect(entry.liveness).toBe("none");
+	});
+
+	it.each(["waiting_for_dependency", "waiting_for_evidence"] as const)("%s 保留可见的等待状态", (phase) => {
+		expect(
+			assign([inProject("ws-a", starting({ taskEditorCreationAgentStartupProgress: { ...progress, phase } }))])
+				.runningEntries,
+		).toHaveLength(1);
+	});
+
+	it.each(["completed", "stopped", "identity_conflict", "waiting_for_authorization"] as const)(
+		"%s 不再冒充正在启动",
+		(phase) => {
+			expect(
+				assign([inProject("ws-a", starting({ taskEditorCreationAgentStartupProgress: { ...progress, phase } }))])
+					.runningEntries,
+			).toHaveLength(0);
+		},
+	);
+
+	it("未保存、未请求、已完成、换世、搁置和非启动阶段均不能进入启动分组", () => {
+		for (const overrides of [
+			{ taskEditorCreationAgentStartupProgress: { ...progress, cardPersisted: false } },
+			{ taskEditorCreationAgentStartupProgress: { ...progress, startRequested: false } },
+			{ taskEditorCreationAgentStartupProgress: { ...progress, startCompleted: true } },
+			{ createdAt: 1 },
+			{ columnId: "validation" as const },
+			{ taskShelvingState: { isShelved: true, lastChangedAt: NOW_MS } },
+		])
+			expect(assign([inProject("ws-a", starting(overrides))]).runningEntries).toHaveLength(0);
+		expect(assign([inProject("ws-b", starting())]).runningEntries).toHaveLength(0);
+	});
+
+	it("真实用户回合和退出证据优先于未收尾的创建记录", () => {
+		for (const facts of [USER_REVIEW_LIVE, USER_REVIEW_EXITED])
+			expect(assign([inProject("ws-a", starting(facts))]).runningEntries).toHaveLength(0);
+	});
+
+	it("未建立 ACP 连接的准备和失败摘要保留启动行，真实活体仍优先", () => {
+		for (const facts of [
+			USER_REVIEW_EXITED,
+			{ turnOwner: "user", liveness: "failed", userTurnKind: "error" } as const,
+		]) {
+			const entry = starting({
+				...facts,
+				agentProcessStartedAt: NOW_MS,
+				agentSessionHasNoEstablishedAcpConnection: true,
+			});
+			expect(assign([inProject("ws-a", entry)]).runningEntries).toHaveLength(1);
+			expect(
+				assign([inProject("ws-a", { ...entry, agentSessionHasNoEstablishedAcpConnection: false })]).runningEntries,
+			).toHaveLength(0);
+		}
+		expect(
+			assign([inProject("ws-a", starting({ ...USER_REVIEW_LIVE, agentSessionHasNoEstablishedAcpConnection: true }))])
+				.runningEntries,
+		).toHaveLength(0);
+	});
+});
+
 describe("Recent 的阶段多选与统一活动范围", () => {
 	const stageEntries = [
 		inProject("ws-a", makeEntry("progress", { columnId: "in_progress", lastOpenedByUserAt: NOW_MS })),
