@@ -68,7 +68,6 @@ function TaskEditorCreateHarness({
 	onRenderHandles: (handles: TaskEditorCreateHandles) => void;
 }): null {
 	const [board, setBoard] = useState<BoardData>(createEmptyBoard);
-	const [, setSelectedTaskId] = useState<string | null>(null);
 	const editor = useTaskEditor({
 		board,
 		setBoard,
@@ -82,7 +81,6 @@ function TaskEditorCreateHarness({
 		isNewTaskStartInPlanModeDefaultLoaded: true,
 		ompAgentSessionTransportForNewTasks,
 		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
-		setSelectedTaskId,
 	});
 
 	const onRenderHandlesRef = useRef(onRenderHandles);
