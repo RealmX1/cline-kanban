@@ -273,6 +273,14 @@ const node = (page: Page, taskId: string) =>
 		`.react-flow__node[data-id="kanban_board_card:${taskId === "root" ? "project-a" : "project-b"}:${taskId}:1000"]`,
 	);
 
+async function expectTaskDeletionConfirmationReadyForKeyboard(page: Page) {
+	const confirmation = page.getByRole("alertdialog");
+	await expect(confirmation).toBeVisible();
+	await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
+	// Cancel 获焦早于 Radix 交互层注册，按键还须等待交互层就绪。
+	await expect.poll(() => confirmation.evaluate((element) => element.style.pointerEvents)).toBe("auto");
+}
+
 test("记录型与断言型摘要都可悬停、固定和切换，独立打开携带完整身份", async ({ page }) => {
 	await page.setViewportSize({ width: 1440, height: 1000 });
 	const fixture = await openRelations(page);
@@ -365,10 +373,7 @@ test("真实评论与删除确认保持展开，Esc 依次退出模态框、预�
 	await expect(pane(page)).toBeVisible();
 	await expect.poll(() => pane(page).evaluate((element) => element.contains(document.activeElement))).toBe(true);
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
-	const deleteTaskDialog = page.getByRole("alertdialog");
-	await expect(deleteTaskDialog).toBeVisible();
-	await expect(deleteTaskDialog.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
-	await expect.poll(() => deleteTaskDialog.evaluate((element) => element.style.pointerEvents)).toBe("auto");
+	await expectTaskDeletionConfirmationReadyForKeyboard(page);
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
 	await expect(pane(page)).toBeVisible();
@@ -482,7 +487,7 @@ test("收起的真实非模态浮窗允许背景图键盘预览，独立确认�
 	await expect(fullCard(page)).toContainText("任务 review");
 	await expect(pane(page)).toHaveAttribute("data-preview-pinned", "true");
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
-	await expect(page.getByRole("alertdialog")).toBeVisible();
+	await expectTaskDeletionConfirmationReadyForKeyboard(page);
 	const snapshotReadCountBeforeBlockedSelection = fixture.reads.filter(
 		(entry) => entry.procedure === "taskCardAction.readTaskCardWithBoardColumn",
 	).length;
@@ -520,11 +525,7 @@ test("真实浮窗内标题编辑首次 Esc 只取消编辑，之后依次关闭
 	await expect(pane(page)).toBeVisible();
 	await expect.poll(() => pane(page).evaluate((element) => element.contains(document.activeElement))).toBe(true);
 	await fullCard(page).getByRole("button", { name: "Delete task permanently", exact: true }).click();
-	await expect(page.getByRole("alertdialog")).toBeVisible();
-	await expect(page.getByRole("alertdialog").getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
-	await expect
-		.poll(() => page.getByRole("alertdialog").evaluate((element) => element.style.pointerEvents))
-		.toBe("auto");
+	await expectTaskDeletionConfirmationReadyForKeyboard(page);
 
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
