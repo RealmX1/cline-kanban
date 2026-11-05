@@ -113,6 +113,8 @@ describe(
 				const created = await runCli([
 					"task",
 					"create",
+					"--start-in-plan-mode",
+					"false",
 					"--title",
 					"统一投递隔离验证",
 					"--prompt",

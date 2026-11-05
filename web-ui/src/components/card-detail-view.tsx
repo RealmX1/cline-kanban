@@ -115,7 +115,7 @@ import {
 	shouldHandOffKeyboardFocusToAgentEntryNow,
 } from "@/utils/keyboard-focus-handoff-to-agent-entry";
 import { matchesMobileViewportNow } from "@/utils/mobile-viewport-breakpoint";
-import { useWindowEvent } from "@/utils/react-use";
+import { useUnmount, useWindowEvent } from "@/utils/react-use";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
 
 // We still poll the open detail diff because line content can change without changing
@@ -765,6 +765,11 @@ export function CardDetailView({
 	onClineSettingsSaved,
 	onTaskClineSettingsChanged,
 	isTaskChangesSidebarOpen = false,
+	isFocusViewTaskListSidebarHidden = false,
+	isFocusViewWorkbenchSidebarHidden = false,
+	onFocusViewWorkbenchSidebarHiddenChange,
+	isDiffExpanded: controlledIsDiffExpanded,
+	onDiffExpandedChange,
 	onCreateTaskConversationSession,
 	taskChatMessagesByTaskId,
 	exploratoryFindings,
@@ -772,6 +777,11 @@ export function CardDetailView({
 	runtimeStreamSnapshotGeneration = 0,
 }: {
 	taskLookupWorkbenchContent?: React.ReactNode;
+	isFocusViewTaskListSidebarHidden?: boolean;
+	isFocusViewWorkbenchSidebarHidden?: boolean;
+	onFocusViewWorkbenchSidebarHiddenChange?: (hidden: boolean) => void;
+	isDiffExpanded?: boolean;
+	onDiffExpandedChange?: (expanded: boolean) => void;
 	mobileFocusViewControls?: MobileFocusViewCollapsibleControls;
 	onOpenPermanentlyDeletedTaskHistory?: () => void;
 	onBackToBoard?: () => void;
@@ -936,6 +946,7 @@ export function CardDetailView({
 			});
 	}, [isMobile, foregroundBelongsToThisTask, foregroundView?.target]);
 	const showAutomaticVisualizationPreview = useCallback(() => {
+		if (!isMobile) onFocusViewWorkbenchSidebarHiddenChange?.(false);
 		setMobileTab("visualizations");
 		setVisualizationOverridesWorkspaceChanges(true);
 		setWorkbenchModuleSelectionRequest({
@@ -944,7 +955,7 @@ export function CardDetailView({
 			requestKey: ++workbenchModuleSelectionRequestSequence.current,
 			persistSelection: false,
 		});
-	}, []);
+	}, [isMobile, onFocusViewWorkbenchSidebarHiddenChange]);
 	const taskVisualizations = useTaskVisualizationArtifacts({
 		workspaceId: currentProjectId,
 		taskId: selection.card.id,
@@ -987,7 +998,12 @@ export function CardDetailView({
 	}, []);
 	const [diffComments, setDiffComments] = useState<Map<string, DiffLineComment>>(new Map());
 	const [diffMode, setDiffMode] = useState<RuntimeWorkspaceChangesMode>("working_copy");
-	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
+	const [uncontrolledIsDiffExpanded, setUncontrolledIsDiffExpanded] = useState(false);
+	const isDiffExpanded =
+		(controlledIsDiffExpanded ?? uncontrolledIsDiffExpanded) && (isMobile || !isFocusViewWorkbenchSidebarHidden);
+	const setIsDiffExpanded = onDiffExpandedChange ?? setUncontrolledIsDiffExpanded;
+	// 跨项目过渡会卸载详情，但保留 App 与顶栏；最大化只属于本次详情挂载。
+	useUnmount(() => onDiffExpandedChange?.(false));
 	const [selectedTaskConversationSessionId, setSelectedTaskConversationSessionId] = useState(
 		resolveMainTaskConversationSessionId(selection.card),
 	);
@@ -1198,21 +1214,29 @@ export function CardDetailView({
 		conversationSessionTaskId: turnProjectionConversationSessionTaskId,
 		refreshKey: turnProjectionRefreshKey,
 	});
-	const agentPanelStyle: CSSProperties = isWorkbenchBelowAgent
-		? { display: isDiffExpanded ? "none" : "flex", width: "100%", flex: `0 0 ${stackedAgentPanelHeightRatio * 100}%` }
-		: showClineAgentChatPanel
-			? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
-			: {
+	const agentPanelStyle: CSSProperties = isFocusViewWorkbenchSidebarHidden
+		? { flex: "1 1 0", width: "100%", minWidth: 0 }
+		: isWorkbenchBelowAgent
+			? {
 					display: isDiffExpanded ? "none" : "flex",
-					flex: "0 0 auto",
-					maxWidth: `calc(100% - ${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px)`,
-					width: detailTerminalPanelWidth,
-				};
-	const diffPanelStyle: CSSProperties = isWorkbenchBelowAgent
-		? { flex: "1 1 0", width: "100%", minHeight: 0 }
-		: showClineAgentChatPanel
-			? { width: isDiffExpanded ? "100%" : diffPanelPercent }
-			: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
+					width: "100%",
+					flex: `0 0 ${stackedAgentPanelHeightRatio * 100}%`,
+				}
+			: showClineAgentChatPanel
+				? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
+				: {
+						display: isDiffExpanded ? "none" : "flex",
+						flex: "0 0 auto",
+						maxWidth: `calc(100% - ${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px)`,
+						width: detailTerminalPanelWidth,
+					};
+	const diffPanelStyle: CSSProperties = isFocusViewWorkbenchSidebarHidden
+		? { display: "none" }
+		: isWorkbenchBelowAgent
+			? { flex: "1 1 0", width: "100%", minHeight: 0 }
+			: showClineAgentChatPanel
+				? { width: isDiffExpanded ? "100%" : diffPanelPercent }
+				: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
 	const availablePaths = useMemo(() => {
 		if (!runtimeFiles || runtimeFiles.length === 0) {
 			return [];
@@ -1342,8 +1366,8 @@ export function CardDetailView({
 		if (!isDiffExpanded && bottomTerminalOpen) {
 			onBottomTerminalClose();
 		}
-		setIsDiffExpanded((previous) => !previous);
-	}, [bottomTerminalOpen, isDiffExpanded, onBottomTerminalClose]);
+		setIsDiffExpanded(!isDiffExpanded);
+	}, [bottomTerminalOpen, isDiffExpanded, onBottomTerminalClose, setIsDiffExpanded]);
 
 	// 填入当前会话草稿或终端输入框；终端使用粘贴，不追加提交用的回车。
 	const injectTextIntoActiveInput = useCallback(
@@ -1911,9 +1935,19 @@ export function CardDetailView({
 						</>
 					) : null}
 					<div ref={detailLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-						{!isMobile && (!isDiffExpanded || taskLookupWorkbenchContent) ? (
+						{!isMobile ? (
 							<>
-								<div className="flex min-h-0 min-w-0" style={{ width: taskCardsPanelPercent }}>
+								<div
+									data-focus-view-task-list-sidebar=""
+									className="flex min-h-0 min-w-0"
+									style={{
+										width: taskCardsPanelPercent,
+										display:
+											isFocusViewTaskListSidebarHidden || (isDiffExpanded && !taskLookupWorkbenchContent)
+												? "none"
+												: undefined,
+									}}
+								>
 									<ColumnContextPanel
 										onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
 										selection={selection}
@@ -1944,19 +1978,25 @@ export function CardDetailView({
 										defaultAgentId={selectedAgentId}
 									/>
 								</div>
-								<ResizeHandle
-									orientation="vertical"
-									ariaLabel="Resize task cards and detail panels"
-									onMouseDown={handleSeparatorMouseDown}
-									className="z-10"
-								/>
+								{!isMobile &&
+								!isFocusViewTaskListSidebarHidden &&
+								(!isDiffExpanded || taskLookupWorkbenchContent) ? (
+									<ResizeHandle
+										orientation="vertical"
+										ariaLabel="Resize task cards and detail panels"
+										onMouseDown={handleSeparatorMouseDown}
+										className="z-10"
+									/>
+								) : null}
 							</>
 						) : null}
 						<div
 							className="relative flex min-h-0 min-w-0 flex-col overflow-hidden"
 							style={{
 								width:
-									isMobile || (isDiffExpanded && !taskLookupWorkbenchContent)
+									isMobile ||
+									isFocusViewTaskListSidebarHidden ||
+									(isDiffExpanded && !taskLookupWorkbenchContent)
 										? "100%"
 										: detailContentPanelPercent,
 							}}
@@ -1976,6 +2016,7 @@ export function CardDetailView({
 									style={{ display: gitHistoryPanel && !isMobile ? "none" : undefined }}
 								>
 									<div
+										data-focus-view-agent-panel=""
 										className="flex min-h-0 min-w-0 flex-col"
 										style={
 											isMobile
@@ -1985,7 +2026,7 @@ export function CardDetailView({
 									>
 										{agentChatPanel}
 									</div>
-									{!isMobile && !isDiffExpanded ? (
+									{!isMobile && !isDiffExpanded && !isFocusViewWorkbenchSidebarHidden ? (
 										<ResizeHandle
 											orientation={isWorkbenchBelowAgent ? "horizontal" : "vertical"}
 											ariaLabel="Resize agent and diff panels"
@@ -2000,6 +2041,7 @@ export function CardDetailView({
 										/>
 									) : null}
 									<div
+										data-focus-view-workbench-sidebar=""
 										className="flex min-h-0 min-w-0 flex-col"
 										style={
 											isMobile

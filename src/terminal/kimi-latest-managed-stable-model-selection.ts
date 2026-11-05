@@ -39,7 +39,9 @@ export function selectLatestKimiManagedStableModel(
 		) {
 			return [];
 		}
-		return [{ item, version: match[1].split(".").map(BigInt), isPro: Boolean(match[2]) }];
+		const versionText = match[1];
+		if (!versionText) return [];
+		return [{ item, version: versionText.split(".").map(BigInt), isPro: Boolean(match[2]) }];
 	});
 	candidates.sort((left, right) => {
 		for (let index = 0; index < Math.max(left.version.length, right.version.length); index += 1) {

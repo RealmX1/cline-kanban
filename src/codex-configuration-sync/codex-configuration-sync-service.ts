@@ -27,6 +27,7 @@ import {
 } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
 import {
 	type CodexConfigurationTaskSourceContext,
+	completeCodexConfigurationCandidateValueDigest,
 	currentCodexConfigurationSharedValueDigest,
 	describeCodexConfigurationChange,
 } from "./codex-configuration-change-presentation";
@@ -40,10 +41,11 @@ import {
 	sameConfigurationField,
 	summarizeConfigurationField,
 } from "./codex-configuration-field-projection";
+import { mergeObservedCodexConfigurationWriter } from "./codex-configuration-incremental-merge";
 import {
-	mergeObservedCodexConfigurationWriter,
-	reconcileCodexConfigurationUserSourceFields,
-} from "./codex-configuration-incremental-merge";
+	ensureCodexConfigurationInitializationSnapshot,
+	readVerifiedCodexConfigurationInitializationSnapshot,
+} from "./codex-configuration-initialization-snapshot";
 import { describeCodexConfigurationSettingDifferences } from "./codex-configuration-observation-records";
 import {
 	codexConfigurationChangeSharedFields,
@@ -52,6 +54,7 @@ import {
 	enqueueCodexConfigurationProfileAdoptionForWriter,
 	ensureCodexConfigurationSourceProfile,
 	expireCodexConfigurationProfileFeedbackSuggestions,
+	recordCodexConfigurationExceptionFeedbackSuggestion,
 	updateCodexConfigurationProfileFields,
 } from "./codex-configuration-profiles";
 import {
@@ -61,6 +64,10 @@ import {
 	isCodexConfigurationSourceObservationStillCurrent,
 	prepareCodexConfigurationProposalIdentityVolumeObservations,
 } from "./codex-configuration-proposal-approval";
+import {
+	isCodexConfigurationChangeExcludedFromSettingsSynchronization,
+	isCodexDesktopConfigurationField,
+} from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
@@ -193,6 +200,12 @@ function publicState(
 			const writer = store.writers[change.sourceWriterId];
 			const presentation = describeCodexConfigurationChange(store, change, false, undefined, taskSourceContext);
 			return {
+				candidateFieldGroupKey: JSON.stringify([
+					change.codexConfigurationProfileId ?? change.sourceIdentity,
+					change.exceptionGroup ?? change.fieldKey,
+				]),
+				completeCandidateValueDigest: completeCodexConfigurationCandidateValueDigest(change),
+				settingsIsolationArchivedAtMs: change.settingsIsolationArchivedAtMs,
 				fieldKey: change.fieldKey,
 				sourceEvidence: presentation.sourceEvidence,
 				comparison: presentation,
@@ -426,13 +439,25 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				]),
 		]);
 		let preflightObservationProblem: string | null = null;
+		for (const [sourceIdentity, source] of Object.entries(preflightStoreSnapshot.sources)) {
+			if (!source.configurationInitialization) continue;
+			try {
+				await readVerifiedCodexConfigurationInitializationSnapshot(
+					sourceIdentity,
+					source.home,
+					source.configurationInitialization,
+				);
+			} catch {
+				preflightObservationProblem =
+					"部分初始化快照缺失或摘要暂不可核验；保留内部决定，原快照恢复后五秒补扫自动重验。";
+			}
+		}
 		const legacySessionSourceObservations = new Map<
 			string,
 			{
 				summary: RuntimeTaskSessionSummary;
 				sourceHome: string;
 				sourceIdentity: string;
-				fields: CodexConfigurationFields;
 			}
 		>();
 		for (const { workspaceId, summary } of deps.listSessions()) {
@@ -452,48 +477,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					sourceHome,
 					preflightStoreSnapshot,
 				);
-				const fields =
-					preflightStoreSnapshot.sources[sourceIdentity]?.fields ??
-					(await projectCodexConfigurationFields({
-						home: sourceHome,
-						sourceHome,
-						fileNames: [
-							"config.toml",
-							...(await readdir(sourceHome)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-						],
-						onHookDefinitionObservationProblem: () => {
-							preflightObservationProblem = "旧会话部分 hook 定义暂不可核验，保留未知信任。";
-						},
-					}));
 				legacySessionSourceObservations.set(JSON.stringify([workspaceId, summary.taskId]), {
 					summary: observedSummary,
 					sourceHome,
 					sourceIdentity,
-					fields,
 				});
 			} catch {
 				preflightObservationProblem = "部分旧会话配置来源暂不可核验，保留现场；来源恢复后自动重验。";
-			}
-		}
-		const sourceFieldObservations = new Map<string, CodexConfigurationFields>();
-		for (const [sourceIdentity, source] of Object.entries(preflightStoreSnapshot.sources)) {
-			try {
-				await resolveVerifiedCodexConfigurationSourceIdentity(source.home, preflightStoreSnapshot, sourceIdentity);
-				const fields = await projectCodexConfigurationFields({
-					home: source.home,
-					sourceHome: source.home,
-					fileNames: [
-						"config.toml",
-						...(await readdir(source.home)).filter((name) => /^[\w.-]+\.config\.toml$/.test(name)),
-					],
-					previousFields: source.observedUserFields,
-					onHookDefinitionObservationProblem: () => {
-						preflightObservationProblem = "部分 hook 来源或定义暂不可核验；保留既有决定，恢复后自动补扫。";
-					},
-				});
-				sourceFieldObservations.set(sourceIdentity, fields);
-			} catch {
-				preflightObservationProblem = "部分配置来源暂不可读；恢复原目录后将自动补扫。";
 			}
 		}
 		const writerFieldObservations = new Map<
@@ -678,17 +668,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						problem = "配置观察期间来源或会话已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
 						continue;
 					}
-					const { sourceHome, sourceIdentity, fields } = observation;
+					const { sourceHome, sourceIdentity } = observation;
 					if ((await resolveVerifiedCodexConfigurationSourceIdentity(sourceHome, store)) !== sourceIdentity)
 						throw new Error("旧会话配置来源身份已变化。");
-					if (!store.sources[sourceIdentity]) {
-						store.sources[sourceIdentity] = {
-							home: sourceHome,
-							version: store.revision,
-							fields,
-							observedUserFields: structuredClone(fields),
-						};
-					}
+					await ensureCodexConfigurationInitializationSnapshot(store, sourceIdentity, sourceHome);
 					const compatible = ensureCodexConfigurationSourceProfile(store, sourceIdentity);
 					const requested =
 						taskProfileBindingsToApply.find(
@@ -745,15 +728,14 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				writer.pendingSessionProfileBinding = requested;
 			}
 			for (const [sourceIdentity, source] of Object.entries(store.sources)) {
-				const observed = sourceFieldObservations.get(sourceIdentity);
-				if (!observed) continue;
 				if (!unchangedSourceIdentities.has(sourceIdentity)) {
 					problem = "配置观察期间来源已更新，已丢弃旧观察，下一次五秒补扫重新取证。";
 					continue;
 				}
 				try {
 					await resolveVerifiedCodexConfigurationSourceIdentity(source.home, store, sourceIdentity);
-					reconcileCodexConfigurationUserSourceFields(store, sourceIdentity, observed);
+					if (!source.configurationInitialization)
+						await ensureCodexConfigurationInitializationSnapshot(store, sourceIdentity, source.home);
 				} catch {
 					problem = "部分配置来源暂不可读；恢复原目录后将自动补扫。";
 				}
@@ -773,6 +755,49 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				}
 				try {
 					await assertCodexConfigurationWriterBindingIdentity(writer.binding);
+					const feedback = writer.taskReasoningEffortFeedbackSelection;
+					if (feedback && !feedback.registeredChangeId && !feedback.supersededAtMs) {
+						const effortFieldKey = JSON.stringify(["config.toml", "model_reasoning_effort"]);
+						if (
+							writer.launchBaselineFields[effortFieldKey]?.value !== feedback.effort ||
+							Object.entries(store.profiles[feedback.profileId]?.fieldVersions ?? {}).some(
+								([key, version]) =>
+									codexConfigurationExceptionGroup(key) === "reasoning_effort" &&
+									version > feedback.profileVersionAtSelection,
+							) ||
+							store.profiles[feedback.profileId]?.fields[effortFieldKey]?.value === feedback.effort
+						) {
+							feedback.supersededAtMs = Date.now();
+							store.revision++;
+						}
+						const launchedSession = deps
+							.listSessions()
+							.find(
+								({ workspaceId, summary }) =>
+									workspaceId === writer.binding.workspaceId &&
+									summary.taskId === writer.binding.conversationSessionId &&
+									summary.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+									summary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
+									summary.codexTaskReasoningEffortFeedbackLaunch?.selectionId === feedback.selectionId &&
+									(summary.exitCode === null || summary.exitCode === 0),
+							);
+						const launch = launchedSession?.summary.codexTaskReasoningEffortFeedbackLaunch;
+						if (launch && !feedback.supersededAtMs && feedback.profileId === writer.codexConfigurationProfileId) {
+							const change = recordCodexConfigurationExceptionFeedbackSuggestion(
+								store,
+								writer,
+								"reasoning_effort",
+								writer.launchBaselineFields,
+								{
+									selectionId: feedback.selectionId,
+									observedAtMs: launch.startedAtMs,
+									previousFields: feedback.inheritedFields,
+								},
+							);
+							if (change) feedback.registeredChangeId = change.changeId;
+							expireCodexConfigurationProfileFeedbackSuggestions(store);
+						}
+					}
 					const { observed, unavailableObservedHookFieldKeys, observedNativePermissionChange, ownerSummary } =
 						observation;
 					const transcriptPath = ownerSummary?.agentNativeConversationSessionIdentity?.transcriptPath;
@@ -1599,7 +1624,6 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const store = await readCodexConfigurationSyncStore();
 		const paths = [
 			getCodexConfigurationSyncDirectory(),
-			...Object.values(store.sources).map((source) => source.home),
 			...Object.values(store.writers)
 				.filter((writer) => writer.binding.purpose === "native_session" && !writer.retiredAt)
 				.map((writer) => writer.binding.configurationHomeDirectoryPath),
@@ -1696,9 +1720,19 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							entry.reminderDisposition = input.action === "defer" ? "deferred" : "confirmed";
 							entry.version = ++store.revision;
 						} else {
-							if (entry.recordKind !== "settings_proposal" || entry.approvalStatus !== "pending")
+							if (
+								isCodexConfigurationChangeExcludedFromSettingsSynchronization(entry) ||
+								entry.recordKind !== "settings_proposal" ||
+								entry.approvalStatus !== "pending"
+							)
 								throw new CodexConfigurationApprovalError("not_approvable", "此记录不是待审批设置提案。");
-							if (input.action === "approve") await approveStoredCodexConfigurationProposal(store, entry);
+							if (input.action === "approve")
+								await approveStoredCodexConfigurationProposal(
+									store,
+									entry,
+									entry.mergeStatus === "conflict" && item.expectedSharedValueDigest !== undefined,
+									item.expectedSharedValueDigest,
+								);
 							else if (input.action === "reject" || input.action === "defer") {
 								entry.acknowledgedAt = Date.now();
 								if (input.action === "reject") {
@@ -1763,7 +1797,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			if (kind === "synchronize" && !isCodexConfigurationSourceObservationStillCurrent(store, change))
 				throw new Error("检测位置已有新设置或来源定义，旧决定不能继续同步；新提案仍须审批。");
 			if (kind === "resolve_conflict" && "resolution" in input) {
-				if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
+				if (
+					isCodexConfigurationChangeExcludedFromSettingsSynchronization(change) ||
+					change.recordKind !== "settings_proposal" ||
+					change.approvalStatus !== "pending"
+				)
 					throw new Error("此记录不是待审批提案。");
 				if (change.mergeStatus !== "conflict") throw new Error("此配置变更已不处于冲突状态。");
 				const shared = codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey];
@@ -1934,6 +1972,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						const { keyPath } = configurationFieldAddress(edit.fieldKey);
 						// 管理页只编辑已知的可共享字段；信任决定只能来自原生确认，不能由任意 JSON 授权。
 						if (
+							isCodexDesktopConfigurationField(edit.fieldKey) ||
 							!(edit.fieldKey in profile.fields) ||
 							keyPath.some((key) => ["__proto__", "prototype", "constructor"].includes(key))
 						)

@@ -22,16 +22,33 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(!packagedCliPath).each([
-	{ mainAgentId: "claude", destinationKind: "new_codex_session", targetAgentId: "codex" },
-	{ mainAgentId: "claude", destinationKind: "existing_codex_session", targetAgentId: "codex" },
-	{ mainAgentId: "codex", destinationKind: "new_codex_session", targetAgentId: "codex" },
-	{ mainAgentId: "codex", destinationKind: "existing_codex_session", targetAgentId: "codex" },
-	{ mainAgentId: "codex", destinationKind: "new_agent_session", targetAgentId: "claude" },
-	{ mainAgentId: "codex", destinationKind: "existing_agent_session", targetAgentId: "claude" },
-	{ mainAgentId: "codex", destinationKind: "existing_agent_session", targetAgentId: "omp" },
+	{ mainAgentId: "claude", destinationKind: "new_codex_session", targetAgentId: "codex", handoverAction: "ready" },
+	{
+		mainAgentId: "claude",
+		destinationKind: "existing_codex_session",
+		targetAgentId: "codex",
+		handoverAction: "ready",
+	},
+	{ mainAgentId: "codex", destinationKind: "new_codex_session", targetAgentId: "codex", handoverAction: "ready" },
+	{ mainAgentId: "codex", destinationKind: "existing_codex_session", targetAgentId: "codex", handoverAction: "ready" },
+	{ mainAgentId: "codex", destinationKind: "new_agent_session", targetAgentId: "claude", handoverAction: "ready" },
+	{
+		mainAgentId: "codex",
+		destinationKind: "existing_agent_session",
+		targetAgentId: "claude",
+		handoverAction: "ready",
+	},
+	{ mainAgentId: "codex", destinationKind: "existing_agent_session", targetAgentId: "omp", handoverAction: "ready" },
+	{ mainAgentId: "claude", destinationKind: "existing_codex_session", targetAgentId: "codex", handoverAction: "wait" },
+	{
+		mainAgentId: "claude",
+		destinationKind: "existing_codex_session",
+		targetAgentId: "codex",
+		handoverAction: "force",
+	},
 ] as const)(
-	"打包态 $mainAgentId 主会话交接 $destinationKind：真实浏览器、PTY、迟到 hook 与冷恢复",
-	async ({ mainAgentId, destinationKind, targetAgentId }) => {
+	"打包态 $mainAgentId 主会话交接 $destinationKind/$handoverAction：真实浏览器、PTY、迟到 hook 与冷恢复",
+	async ({ mainAgentId, destinationKind, targetAgentId, handoverAction }) => {
 		const collaborationAgentId = targetAgentId;
 		const isExistingTarget =
 			destinationKind === "existing_codex_session" || destinationKind === "existing_agent_session";
@@ -63,7 +80,7 @@ it.skipIf(!packagedCliPath).each([
 		const evidenceDirectory = join(
 			process.env.KANBAN_MAIN_SESSION_HANDOVER_BROWSER_EVIDENCE_DIRECTORY ??
 				join(fixture.fixtureRootDirectoryPath, "browser-evidence"),
-			`${mainAgentId}-to-${collaborationAgentId}-${destinationKind}`,
+			`${mainAgentId}-to-${collaborationAgentId}-${destinationKind}-${handoverAction}`,
 		);
 		mkdirSync(evidenceDirectory, { recursive: true });
 		const fakeAgentBinaryDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-agent-binaries");
@@ -171,6 +188,7 @@ setInterval(() => {}, 1000);
 		let runtime = await startRuntime();
 		let browser: Browser | undefined;
 		let stopTestTaskSessions: (() => Promise<unknown>) | undefined;
+		let captureRuntimeStateOnTestCompletion: (() => Promise<void>) | undefined;
 		try {
 			const createTaskProcess = children.register(
 				spawn(
@@ -181,6 +199,8 @@ setInterval(() => {}, 1000);
 						packagedCliPath,
 						"task",
 						"create",
+						"--start-in-plan-mode",
+						"false",
 						"--title",
 						"协作会话隔离验收",
 						"--prompt",
@@ -221,6 +241,12 @@ setInterval(() => {}, 1000);
 			)?.id;
 			if (!workspaceId) throw new Error("隔离项目未注册");
 			const scoped = client(workspaceId);
+			captureRuntimeStateOnTestCompletion = async () => {
+				writeFileSync(
+					join(evidenceDirectory, "last-runtime-state.json"),
+					JSON.stringify(await scoped.workspace.getState.query(), null, 2),
+				);
+			};
 			stopTestTaskSessions = () => scoped.runtime.stopTaskSession.mutate({ taskId });
 			const state = await scoped.workspace.getState.query();
 			const backlog = state.board.columns.find((column) => column.id === "backlog");
@@ -310,13 +336,23 @@ setInterval(() => {}, 1000);
 					metadata: { source: targetAgentId, hookEventName: "Stop" },
 				});
 			}
+			if (handoverAction !== "ready") {
+				for (const id of [taskId, existingPeerId])
+					await scoped.hooks.ingest.mutate({
+						taskId: id,
+						workspaceId,
+						event: "to_in_progress",
+						metadata: { source: id === taskId ? mainAgentId : targetAgentId, hookEventName: "PreToolUse" },
+					});
+			}
 			const existingPeerLaunch = isExistingTarget
 				? readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8")
 				: null;
 			const requireFromWeb = createRequire(join(sourcePath, "web-ui/package.json"));
 			const { chromium } = requireFromWeb("playwright-core") as { chromium: BrowserType };
 			browser = await chromium.launch({ headless: true });
-			const page = await browser.newPage({ viewport: { width: 1600, height: 1000 } });
+			const browserContext = await browser.newContext({ viewport: { width: 1600, height: 1000 } });
+			let page = await browserContext.newPage();
 			page.setDefaultTimeout(20_000);
 			const pageErrors: string[] = [];
 			page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -334,6 +370,60 @@ setInterval(() => {}, 1000);
 			await page.getByLabel("补充交接说明").fill("真实浏览器交接验收：只读报告后等待用户。");
 			await page.screenshot({ path: join(evidenceDirectory, "handover-material-preview.png") });
 			await page.getByRole("button", { name: "确认交接", exact: true }).click();
+			if (handoverAction !== "ready") {
+				for (const name of ["暂不交接", "等待两者都停下后自动交接", "中断并强制交接"])
+					await expect.poll(() => page.getByRole("button", { name, exact: true }).count()).toBe(1);
+				await expect.poll(() => page.getByText("正在生成：Agent 回合尚未结束。", { exact: true }).count()).toBe(2);
+				await page.screenshot({
+					path: join(evidenceDirectory, "three-handover-actions.png"),
+					animations: "disabled",
+				});
+				await page.setViewportSize({ width: 390, height: 844 });
+				for (const name of ["暂不交接", "等待两者都停下后自动交接", "中断并强制交接"]) {
+					const bounds = await page.getByRole("button", { name, exact: true }).boundingBox();
+					assert(bounds);
+					expect(bounds.x).toBeGreaterThanOrEqual(0);
+					expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+					expect(bounds.y + bounds.height).toBeLessThanOrEqual(844);
+				}
+				await page.screenshot({
+					path: join(evidenceDirectory, "three-handover-actions-mobile.png"),
+					animations: "disabled",
+				});
+				await page.setViewportSize({ width: 1600, height: 1000 });
+				await page.getByRole("button", { name: "暂不交接", exact: true }).click();
+				expect((await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record).toBeNull();
+				await page.getByRole("button", { name: "交接主会话", exact: true }).click();
+				await page.getByLabel("接收会话").selectOption(existingPeerId);
+				await page.getByRole("button", { name: "确认交接", exact: true }).click();
+				await page
+					.getByRole("button", {
+						name: handoverAction === "force" ? "中断并强制交接" : "等待两者都停下后自动交接",
+						exact: true,
+					})
+					.click();
+				if (handoverAction === "wait") {
+					await expect
+						.poll(
+							async () =>
+								(await scoped.runtime.getTaskMainSessionHandoverStatus.query({ taskId })).record?.status,
+						)
+						.toBe("waiting_for_sessions_to_stop");
+					await page.close();
+					for (const id of [taskId, existingPeerId])
+						await scoped.hooks.ingest.mutate({
+							taskId: id,
+							workspaceId,
+							event: "to_review",
+							metadata: { source: id === taskId ? mainAgentId : targetAgentId, hookEventName: "Stop" },
+						});
+					page = await browserContext.newPage();
+					page.setDefaultTimeout(20_000);
+					page.on("pageerror", (error) => pageErrors.push(error.message));
+					await page.goto(`${origin}/${workspaceId}?task=${taskId}`);
+				}
+			}
+
 			await expect
 				.poll(
 					async () =>
@@ -353,9 +443,27 @@ setInterval(() => {}, 1000);
 					agentId: targetAgentId,
 					taskConversationSessionId: existingPeerId,
 				});
-				expect(readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8")).toBe(
-					existingPeerLaunch,
-				);
+				if (handoverAction === "force") {
+					await expect
+						.poll(() => readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8"), {
+							timeout: 30_000,
+						})
+						.not.toBe(existingPeerLaunch);
+					const restarted = JSON.parse(
+						readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8"),
+					) as { args: string[] };
+					expect(restarted.args).toContain(nativeCodexId);
+					expect(record.busySessionHandoverStrategy).toBe("interrupt_blocking_sessions");
+					await scoped.hooks.ingest.mutate({
+						taskId: existingPeerId,
+						workspaceId,
+						event: "to_review",
+						metadata: { source: "codex", hookEventName: "Stop" },
+					});
+				} else
+					expect(readFileSync(join(repository.repositoryPath, `launch-${existingPeerId}.json`), "utf8")).toBe(
+						existingPeerLaunch,
+					);
 				expect(record.existingTargetSessionBinding?.sessionTransport).toBe(targetSessionTransport);
 			}
 			await expect
@@ -550,6 +658,7 @@ setInterval(() => {}, 1000);
 			);
 			await browser.close();
 			browser = undefined;
+			const targetBeforeRuntimeRestart = (await scoped.workspace.getState.query()).sessions[targetId];
 			runtime.kill("SIGINT");
 			expect(await waitForChildProcessExit(runtime, 15_000)).toBe(true);
 			runtime = await startRuntime();
@@ -577,6 +686,14 @@ setInterval(() => {}, 1000);
 					{ method: "session/load", sessionId: nativeCodexId },
 				]);
 				expect(methods.filter((entry) => entry.method === "session/fork")).toHaveLength(0);
+			} else if (
+				targetBeforeRuntimeRestart.pid !== null &&
+				restarted.summary?.runtimeSessionIncarnationId === targetBeforeRuntimeRestart.runtimeSessionIncarnationId &&
+				restarted.summary?.pid === targetBeforeRuntimeRestart.pid &&
+				restarted.summary?.startedAt === targetBeforeRuntimeRestart.startedAt
+			) {
+				// 独立 PTY host 可接回原活体；保持同一代际时不会产生新的 resume argv。
+				expect(restarted.summary?.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(nativeCodexId);
 			} else {
 				await expect
 					.poll(
@@ -604,6 +721,7 @@ setInterval(() => {}, 1000);
 			);
 		} finally {
 			try {
+				await captureRuntimeStateOnTestCompletion?.().catch(() => {});
 				await stopTestTaskSessions?.();
 			} finally {
 				await browser?.close();

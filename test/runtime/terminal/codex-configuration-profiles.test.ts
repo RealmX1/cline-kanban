@@ -67,6 +67,51 @@ async function writer(sessionId: string, profileId?: string) {
 }
 
 describe("Codex profile 自动共享", () => {
+	it("来源会话改选 profile 后，旧反馈不能更新原 profile", async () => {
+		const binding = await writer("profile-rebound-feedback");
+		const configurationPath = join(binding.configurationHomeDirectoryPath, "config.toml");
+		const configuration = parse(await readFile(configurationPath, "utf8"));
+		configuration.model = "local-model";
+		await writeFile(configurationPath, stringify(configuration));
+		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		try {
+			await sync.scan();
+			const suggestion = requireDefinedTestFixtureValue(
+				(await sync.getState()).changes.find((change) => change.approvalStatus === "pending"),
+			);
+			await mutateCodexConfigurationSyncStore((store) => {
+				const current = store.writers[binding.writerId];
+				const replacement = createCodexConfigurationProfile(store, {
+					name: "改选配置",
+					copyFromProfileId: requireDefinedTestFixtureValue(current.codexConfigurationProfileId),
+				});
+				current.codexConfigurationProfileId = replacement.profileId;
+			});
+			const result = await sync.batchAction({
+				action: "approve",
+				items: [
+					{
+						entryKind: "settings_proposal",
+						changeId: suggestion.changeId,
+						expectedVersion: suggestion.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			});
+			expect(result.results[0]?.status).toBe("stale_version");
+			expect(result.state.changes.find((change) => change.changeId === suggestion.changeId)).toMatchObject({
+				approvalStatus: "historical",
+				mergeStatus: "superseded",
+			});
+			expect(
+				result.state.profiles?.every(
+					(profile) => profile.fields.find((field) => field.fieldKey === modelFieldKey)?.value === "initial-model",
+				),
+			).toBe(true);
+		} finally {
+			await sync.close();
+		}
+	});
 	it("文件权限变更先显示待核验，跨运行时取得本代原生回合证据后才更新实际权限", async () => {
 		const binding = await writer("permission-evidence");
 		const transcriptPath = join(fixture.path, "permission-evidence.jsonl");
@@ -715,12 +760,10 @@ describe("Codex profile 自动共享", () => {
 			await restarted.close();
 		}
 	});
-	it("权限组审批核验全部共享字段，较新的全局权限决定不被旧反馈覆盖", async () => {
+
+	it("权限组的新 profile 决定结束旧反馈，旧完整权限组不能覆盖已接受值", async () => {
 		const binding = await writer("permission-group-stale-feedback");
-		const sourcePath = join(sourceHome, "config.toml");
-		await writeFile(sourcePath, 'approval_policy="on-request"\n');
-		const replacement = await writer("permission-group-replacement");
-		const path = join(replacement.configurationHomeDirectoryPath, "config.toml");
+		const path = join(binding.configurationHomeDirectoryPath, "config.toml");
 		await writeFile(path, 'approval_policy="never"\nsandbox_mode="workspace-write"\n');
 		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {
@@ -730,30 +773,29 @@ describe("Codex profile 自动共享", () => {
 					(change) => change.exceptionGroup === "permissions" && change.approvalStatus === "pending",
 				),
 			);
-			await writeFile(sourcePath, 'approval_policy="on-request"\nsandbox_mode="read-only"\n');
-			await sync.scan();
-			const globalSuggestion = requireDefinedTestFixtureValue(
-				(await sync.getState()).changes.find(
-					(change) => change.fieldLabel.endsWith(" · sandbox_mode") && change.approvalStatus === "pending",
-				),
-			);
-			const item = (change: typeof suggestion) => ({
-				entryKind: "settings_proposal" as const,
-				changeId: change.changeId,
-				expectedVersion: change.version,
-				idempotencyKey: randomUUID(),
-			});
-			expect(
-				(await sync.batchAction({ action: "approve", items: [item(globalSuggestion)] })).results[0]?.status,
-			).toBe("applied");
-			const result = await sync.batchAction({ action: "approve", items: [item(suggestion)] });
-			expect(result.results[0]?.status).toBe("conflict");
 			const profileId = requireDefinedTestFixtureValue(binding.codexConfigurationProfileId);
+			await mutateCodexConfigurationSyncStore((store) =>
+				updateCodexConfigurationProfileFields(store, profileId, {
+					[JSON.stringify(["config.toml", "sandbox_mode"])]: { value: "read-only" },
+				}),
+			);
+			const result = await sync.batchAction({
+				action: "approve",
+				items: [
+					{
+						entryKind: "settings_proposal",
+						changeId: suggestion.changeId,
+						expectedVersion: suggestion.version,
+						idempotencyKey: randomUUID(),
+					},
+				],
+			});
+			expect(result.results[0]?.status).toBe("stale_version");
 			expect(result.state.profiles?.find((profile) => profile.profileId === profileId)?.fields).toEqual(
 				expect.arrayContaining([expect.objectContaining({ fieldLabel: "sandbox_mode", value: "read-only" })]),
 			);
 			expect(result.state.changes.find((change) => change.changeId === suggestion.changeId)?.mergeStatus).toBe(
-				"conflict",
+				"superseded",
 			);
 		} finally {
 			await sync.close();

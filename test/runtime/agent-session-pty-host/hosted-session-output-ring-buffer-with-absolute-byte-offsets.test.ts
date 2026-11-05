@@ -6,6 +6,41 @@ function bytesOf(text: string): Buffer {
 }
 
 describe("HostedSessionOutputRingBufferWithAbsoluteByteOffsets", () => {
+	it("输出超过 2 MiB 后仍保留重放起点的模式，且不提前应用尾部关闭序列", () => {
+		const ringBuffer = new HostedSessionOutputRingBufferWithAbsoluteByteOffsets();
+		ringBuffer.append(bytesOf("\u001b[?1049;1002;1006;2004;1004h"));
+		ringBuffer.append(Buffer.alloc(2 * 1024 * 1024 + 10, "x"));
+		ringBuffer.append(bytesOf("\u001b[?1002;1006l"));
+		const replay = ringBuffer.readFromAbsoluteByteOffset(0);
+		expect(replay.overwrittenByteCountBeforeStart).toBeGreaterThan(0);
+		expect(ringBuffer.readTerminalModeStateAtAbsoluteByteOffset(replay.startByteOffset)).toMatchObject({
+			terminalModes: {
+				alternateScreenActive: true,
+				mouseTrackingMode: 1002,
+				mouseCoordinateEncoding: 1006,
+				bracketedPasteActive: true,
+				focusReportingActive: true,
+			},
+			parserContinuationHex: "",
+		});
+		expect(ringBuffer.readTerminalModeStateAtAbsoluteByteOffset(ringBuffer.endByteOffset)).toMatchObject({
+			terminalModes: { mouseTrackingMode: 0, mouseCoordinateEncoding: 0 },
+		});
+	});
+
+	it("环形缓冲恰好截在 CSI 内部时保留解析前缀，分片不会提前开启模式", () => {
+		const ringBuffer = new HostedSessionOutputRingBufferWithAbsoluteByteOffsets(4);
+		ringBuffer.append(bytesOf("\u001b[?10"));
+		ringBuffer.append(bytesOf("06h!"));
+		expect(ringBuffer.readTerminalModeStateAtAbsoluteByteOffset(5)).toMatchObject({
+			terminalModes: { mouseCoordinateEncoding: 0 },
+			parserContinuationHex: bytesOf("\u001b[?10").toString("hex"),
+		});
+		expect(ringBuffer.readTerminalModeStateAtAbsoluteByteOffset(9)).toMatchObject({
+			terminalModes: { mouseCoordinateEncoding: 1006 },
+		});
+	});
+
 	it("returns every appended byte with absolute offsets while under capacity", () => {
 		const ringBuffer = new HostedSessionOutputRingBufferWithAbsoluteByteOffsets(16);
 

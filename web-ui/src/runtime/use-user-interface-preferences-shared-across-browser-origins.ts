@@ -65,6 +65,10 @@ function useUserInterfacePreference<TFieldName extends UserInterfacePreferenceFi
 	return [value, setValue];
 }
 
+export function useTaskConversationTranscriptDocumentVisibilityPreference() {
+	return useUserInterfacePreference("taskConversationTranscriptDocumentVisibility", "all_records");
+}
+
 /** 创建、Backlog 编辑与直接启动共用，未设置时默认关闭。 */
 export function useTaskProjectAssignmentAutomaticAnalysisEnabledPreference(): [
 	boolean,
@@ -163,4 +167,19 @@ export function useTaskEditorSettingPresentationPreference(): [
 		});
 	}, []);
 	return [preferences, setPresentation];
+}
+
+/** 服务端偏好到达后变为 true，用来给晚于首屏的字段补初始化。 */
+export function useHaveUserInterfacePreferencesLoadedFromServer(): boolean {
+	return useUserInterfacePreferenceStoreState().preferencesLoadedFromServer !== null;
+}
+
+/** Peer 与 By the way 各自记住 Plan 选择，初始均关闭。 */
+export function useSideSessionStartInPlanModePreference(
+	role: "task_collaborator" | "by_the_way",
+): [boolean, Dispatch<SetStateAction<boolean>>] {
+	return useUserInterfacePreference(
+		role === "task_collaborator" ? "newPeerSessionStartInPlanMode" : "newByTheWaySessionStartInPlanMode",
+		false,
+	);
 }

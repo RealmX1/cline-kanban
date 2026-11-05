@@ -35,7 +35,6 @@ beforeEach(async () => {
 	vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
 	await mkdir(sourceHome);
 	await writeFile(join(sourceHome, "config.toml"), 'model="initial-model"\n');
-	storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
 	services = [];
 });
 afterEach(async () => {
@@ -73,6 +72,7 @@ async function configureHookSource(kind: string): Promise<HookSelection> {
 	const keyPath = [...tablePath, "state", sourceKey];
 	setConfigurationField(configuration, keyPath, { value: { enabled: true, trusted_hash: "initial-hash" } });
 	await writeFile(join(sourceHome, fileName), stringify(configuration));
+	storageHome = await prepareManagedCodexConversationStorageHome(sourceHome);
 	return { fileName, keyPath, sourceKey, definitionFilePath };
 }
 const fieldKey = (selection: HookSelection) => JSON.stringify([selection.fileName, ...selection.keyPath]);
@@ -330,17 +330,17 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			}
 		},
 	);
-	it("来源 JSON 损坏时保留 hook 决定并继续吸收独立字段，恢复后清除问题", async () => {
+	it("会话 JSON 损坏时保留 hook 决定并继续吸收独立字段，恢复后清除问题", async () => {
 		const selection = await configureHookSource("user_file");
 		const origin = await writer();
 		const instance = service();
 		const initial = (await readCodexConfigurationSyncStore()).sources[origin.sourceIdentity].fields[
 			fieldKey(selection)
 		];
-		await writeFile(selection.definitionFilePath, "{broken-json");
-		const configuration = parse(await readFile(join(sourceHome, "config.toml"), "utf8"));
+		await writeFile(join(origin.configurationHomeDirectoryPath, "hooks.json"), "{broken-json");
+		const configuration = parse(await readFile(join(origin.configurationHomeDirectoryPath, "config.toml"), "utf8"));
 		configuration.model = "independently-updated-model";
-		await writeFile(join(sourceHome, "config.toml"), stringify(configuration));
+		await writeFile(join(origin.configurationHomeDirectoryPath, "config.toml"), stringify(configuration));
 		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeTruthy();
 		const stored = await readCodexConfigurationSyncStore();
@@ -349,7 +349,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			"independently-updated-model",
 		);
 		expect(stored.changes.filter((change) => change.fieldKey === fieldKey(selection))).toHaveLength(0);
-		await writeFile(selection.definitionFilePath, JSON.stringify({ hooks: definition }));
+		await writeFile(join(origin.configurationHomeDirectoryPath, "hooks.json"), JSON.stringify({ hooks: definition }));
 		await instance.scan();
 		expect((await instance.getState()).observationProblem).toBeNull();
 	});

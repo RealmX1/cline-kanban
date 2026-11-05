@@ -225,7 +225,8 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 			const powerLoss = vi
 				.spyOn(lockedFileSystem, "writeTextFileAtomic")
 				.mockImplementation((path, value, options) => {
-					if (path === join(sourceScope.statePath, "board.json")) throw new Error("模拟目标已落盘后的断电");
+					if (path === join(sourceScope.statePath, "workspace-state-snapshot-commit.json"))
+						throw new Error("模拟目标已落盘后的断电");
 					return originalWrite(path, value, options);
 				});
 			await expect(
@@ -369,7 +370,7 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 		);
 	});
 
-	it("携带当前版本的整板仍允许显式删除迁入卡", async () => {
+	it("携带当前版本的整板仍不能绕过卡片生命周期删除迁入卡", async () => {
 		const { sourceScope, targetScope, target, request, targetSnapshotBeforeTransfer } =
 			await createIsolatedBacklogTaskProjectTransferScenario();
 		await transferNeverStartedBacklogTaskToProject(
@@ -383,8 +384,6 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 			sessions: {},
 			expectedRevision: currentTargetState.revision,
 		});
-		expect((await loadWorkspaceBoardById(targetScope.workspaceId)).columns.flatMap((column) => column.cards)).toEqual(
-			[],
-		);
+		expect(await loadWorkspaceBoardById(targetScope.workspaceId)).toEqual(currentTargetState.board);
 	});
 });

@@ -11,6 +11,7 @@ import {
 	type NotificationAssessmentInput,
 } from "../notifications/notification-assessment-service";
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
+import { persistCodexNativeDirectInputReadinessReconciliation } from "../state/persist-codex-native-direct-input-readiness-reconciliation";
 import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
@@ -243,14 +244,41 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					observation,
 				);
 		},
-		onCodexNativeDirectInputReadiness: (observation, summaryBeforeRead) => {
-			terminalManagersByWorkspaceId
-				.get(observation.workspaceId)
-				?.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
-					observation.conversationSessionId,
+		onCodexNativeDirectInputReadiness: async (observation, summaryBeforeRead) => {
+			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			if (
+				!manager ||
+				!(await persistCodexNativeDirectInputReadinessReconciliation({
+					workspaceId: observation.workspaceId,
 					summaryBeforeRead,
-					observation,
-				);
+					getCurrentSummary: () => manager.getSummary(observation.conversationSessionId),
+					change: { observation },
+				}))
+			)
+				return;
+			manager.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+				observation.conversationSessionId,
+				summaryBeforeRead,
+				observation,
+			);
+		},
+		onCodexNativeDirectInputReadinessReconciliation: async (context, summaryBeforeRead, progress) => {
+			const manager = terminalManagersByWorkspaceId.get(context.workspaceId);
+			if (
+				!manager ||
+				!(await persistCodexNativeDirectInputReadinessReconciliation({
+					workspaceId: context.workspaceId,
+					summaryBeforeRead,
+					getCurrentSummary: () => manager.getSummary(context.conversationSessionId),
+					change: { progress },
+				}))
+			)
+				return;
+			manager.recordCodexNativeDirectInputReadinessReconciliation(
+				context.conversationSessionId,
+				summaryBeforeRead,
+				progress,
+			);
 		},
 		onActivity: (observation) => {
 			if (observation.activityKind === "accepted_user_input") return;
@@ -1091,6 +1119,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
+		client.on("error", () => client.terminate());
 		client.on("close", () => {
 			taskVisualizationArtifactService?.forgetBrowserClient(client);
 			cleanupRuntimeStateClient(client);

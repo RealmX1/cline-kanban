@@ -158,7 +158,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					.filter({ has: page.getByText("config.toml · model", { exact: true }) });
 				await modelComparison.getByRole("button", { name: "展开完整比较", exact: true }).click();
 				await modelComparison.getByRole("button", { name: "收起完整比较", exact: true }).waitFor();
-				await modelComparison.getByText('"fixture-updated"', { exact: true }).waitFor();
+				await modelComparison
+					.locator('[data-configuration-value-choice="candidate"]')
+					.getByText('"fixture-updated"', { exact: true })
+					.waitFor();
 				expect(await modelComparison.textContent()).toContain('"fixture-initial"');
 				expect(await modelComparison.textContent()).toContain("缺少修改发起者的原生记录");
 				await modelComparison.getByRole("button", { name: "收起完整比较", exact: true }).click();
@@ -393,7 +396,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				checks.push("选择与阅读位置在折叠后保留；重复点击只提交一次批量审批，通过后未来 writer 采用默认");
 				const beforeNewDesktopNotice = await measureWorkspaceGeometry("desktop-before-new-notice");
 				await writeFile(
-					join(sourceHome, "hooks.json"),
+					join(binding.configurationHomeDirectoryPath, "hooks.json"),
 					JSON.stringify({
 						hooks: { Stop: [{ hooks: [{ type: "command", command: "printf updated-definition" }] }] },
 					}),
@@ -403,7 +406,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				assertUnchangedGeometry(beforeNewDesktopNotice, await measureWorkspaceGeometry("desktop-after-new-notice"));
 				expect(await notice.textContent()).toContain("待反馈 0 项 · 来源更新 1 条");
 				expect(
-					await notice.getByRole("button", { name: /反馈到 profile 并广播|采用新值作为未来默认/ }).count(),
+					await notice
+						.getByRole("button", { name: /采用此值并广播|反馈到 profile 并广播|采用新值作为未来默认/ })
+						.count(),
 				).toBe(0);
 				await notice.getByRole("button", { name: "标记已读", exact: true }).click();
 				await notice.waitFor({ state: "detached", timeout: 15_000 });
@@ -426,9 +431,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					.getByRole("button", { name: "稍后处理", exact: true })
 					.click();
 				await vi.waitFor(async () =>
-					expect(
-						await settings.getByRole("button", { name: "反馈到 profile 并广播", exact: true }).isEnabled(),
-					).toBe(true),
+					expect(await settings.getByRole("button", { name: "采用此值并广播", exact: true }).isEnabled()).toBe(
+						true,
+					),
 				);
 				const profiles = settings.locator('[data-verification-anchor="codex-configuration-profile-management"]');
 				await profiles.getByLabel("从当前 profile 复制", { exact: true }).fill("浏览器验证配置");

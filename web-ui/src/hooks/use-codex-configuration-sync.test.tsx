@@ -3,7 +3,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
-import type { CodexConfigurationProfileMutationRequest, CodexConfigurationSyncState } from "@/runtime/types";
+import type {
+	CodexConfigurationChange,
+	CodexConfigurationProfileMutationRequest,
+	CodexConfigurationSyncState,
+} from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
 const queries = vi.hoisted(() => ({ fetch: vi.fn(), profile: vi.fn(), batch: vi.fn() }));
@@ -47,6 +51,79 @@ afterEach(async () => {
 	await act(async () => root.unmount());
 	container.remove();
 	vi.unstubAllGlobals();
+});
+
+function displayedCandidate(changeId: string, digest = "same-complete-value"): CodexConfigurationChange {
+	return {
+		changeId,
+		version: 7,
+		sourceWriterId: changeId,
+		sourceConversationSessionId: changeId,
+		sourceWorkspaceId: "workspace",
+		fieldLabel: "model",
+		previousValueSummary: "A",
+		valueSummary: "B",
+		observedAt: 1,
+		recordKind: "settings_proposal",
+		approvalStatus: "pending",
+		decidedAt: null,
+		settingDifferences: [],
+		mergeStatus: "pending_approval",
+		acknowledgedAt: null,
+		eligibleTargetCount: 0,
+		targets: [],
+		candidateFieldGroupKey: "profile-a:model",
+		codexConfigurationProfileId: "profile-a",
+		completeCandidateValueDigest: digest,
+	};
+}
+
+describe("候选采用只重试已展示的等价来源", () => {
+	it.each([2, 4])("展示 %s 个等价来源时，来源暂不可用最多尝试三个原始版本", async (count) => {
+		const displayed = Array.from({ length: count }, (_, index) => displayedCandidate(`source-${index}`));
+		queries.batch.mockImplementation(async (request) => ({
+			state,
+			results: [
+				{
+					changeId: request.items[0].changeId,
+					status: count === 2 && request.items[0].changeId === "source-1" ? "applied" : "source_unverifiable",
+					message: "来源状态",
+				},
+			],
+		}));
+		await act(async () => {
+			await currentSync.adoptCandidate([...displayed, displayedCandidate("other-value", "different-value")]);
+		});
+		expect(queries.batch.mock.calls.map(([request]) => request.items[0].changeId)).toEqual(
+			displayed.slice(0, 3).map((change) => change.changeId),
+		);
+		expect(queries.batch.mock.calls.every(([request]) => request.items[0].expectedVersion === 7)).toBe(true);
+	});
+	it.each(["stale_version", "conflict"])("收到 %s 时补读并保留真实状态，不自动切换其他来源或值", async (status) => {
+		queries.batch.mockImplementation(async (request) => ({
+			state,
+			results: [{ changeId: request.items[0].changeId, status, message: "版本变化" }],
+		}));
+		const readsBefore = queries.fetch.mock.calls.length;
+		await act(async () => {
+			await currentSync.adoptCandidate([displayedCandidate("first"), displayedCandidate("second")]);
+		});
+		expect(queries.batch).toHaveBeenCalledTimes(1);
+		expect(queries.fetch.mock.calls.length).toBeGreaterThan(readsBefore);
+	});
+	it("回执未知时保留原幂等身份，不用其他来源再次发送", async () => {
+		queries.batch.mockRejectedValue(new Error("回执丢失"));
+		const displayed = [displayedCandidate("first"), displayedCandidate("second")];
+		await act(async () => {
+			await currentSync.adoptCandidate(displayed);
+		});
+		expect(queries.batch).toHaveBeenCalledTimes(1);
+		const identity = queries.batch.mock.calls[0]![0].items[0].idempotencyKey;
+		await act(async () => {
+			await currentSync.adoptCandidate(displayed);
+		});
+		expect(queries.batch.mock.calls[1]![0].items[0].idempotencyKey).toBe(identity);
+	});
 });
 
 describe("profile 操作的幂等身份生命周期", () => {

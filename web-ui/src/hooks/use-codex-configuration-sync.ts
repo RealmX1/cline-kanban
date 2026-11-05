@@ -224,6 +224,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 				entryKind: "settings_proposal" | "source_observation";
 				changeId: string;
 				expectedVersion: number;
+				expectedSharedValueDigest?: string;
 			}>,
 		) => {
 			if (!entries.length) return;
@@ -267,7 +268,41 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		},
 		[workspaceId, refresh, scope, acceptState, isCurrentScope, recoveryController],
 	);
+	const adoptCandidate = useCallback(
+		async (displayedMembers: CodexConfigurationChange[], expectedSharedValueDigest?: string) => {
+			const first = displayedMembers[0];
+			if (!first) return;
+			const equivalents = displayedMembers
+				.filter(
+					(change) =>
+						change === first ||
+						(first.completeCandidateValueDigest &&
+							first.candidateFieldGroupKey &&
+							change.completeCandidateValueDigest === first.completeCandidateValueDigest &&
+							change.candidateFieldGroupKey === first.candidateFieldGroupKey),
+				)
+				.slice(0, 3);
+			for (const change of equivalents) {
+				if (!isCurrentScope()) return;
+				const results = await batch("approve", [
+					{
+						entryKind: "settings_proposal",
+						changeId: change.changeId,
+						expectedVersion: change.version,
+						expectedSharedValueDigest: expectedSharedValueDigest ?? change.comparison?.expectedSharedValueDigest,
+					},
+				]);
+				if (results?.[0]?.status !== "source_unverifiable") {
+					if (results?.[0]?.status !== "applied" && results?.[0]?.status !== "replayed") void refresh();
+					return results;
+				}
+			}
+			void refresh();
+		},
+		[batch, refresh, isCurrentScope],
+	);
 	return {
+		adoptCandidate,
 		workspaceId,
 		state,
 		error,

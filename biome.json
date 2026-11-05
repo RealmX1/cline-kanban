@@ -23,6 +23,7 @@
 			"src/**/*.ts",
 			"src/**/*.tsx",
 			"test/**/*.ts",
+			"scripts/base-branch-sync-ordering-experiment/**/*.ts",
 			"vitest.config.ts",
 			"web-ui/src/**/*.ts",
 			"web-ui/src/**/*.tsx",

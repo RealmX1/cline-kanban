@@ -1,15 +1,12 @@
 import type * as ChildProcess from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type * as FileSystem from "node:fs";
-import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import type * as OperatingSystem from "node:os";
 import { dirname, join } from "node:path";
-import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createCodexConfigurationSyncService } from "../../../src/codex-configuration-sync/codex-configuration-sync-service";
 import {
-	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
@@ -17,6 +14,7 @@ import {
 	codexDirectoryIdentity,
 	prepareCodexConfigurationWriterBinding,
 } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
+import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createTempDir } from "../../utilities/temp-dir";
 
 const volumeQueryFixture = vi.hoisted(() => ({
@@ -28,7 +26,6 @@ const volumeQueryFixture = vi.hoisted(() => ({
 	blockSlowVolumeQueries: false,
 	onSlowVolumeQueryStarted: undefined as (() => void) | undefined,
 	pendingSlowVolumeQueries: [] as Array<() => void>,
-	systemQueriesStartedWhileStoreLocked: 0,
 	systemQueryCount: 0,
 }));
 vi.mock("node:os", async (original) => ({
@@ -83,8 +80,6 @@ vi.mock("node:child_process", async (original) => {
 			if (!["/bin/df", "/usr/sbin/diskutil", "/usr/sbin/sysctl"].includes(binary))
 				return childProcess.execFile(binary, arguments_, options, callback);
 			volumeQueryFixture.systemQueryCount++;
-			if (existsSync(`${getCodexConfigurationSyncDirectory()}.lock`))
-				volumeQueryFixture.systemQueriesStartedWhileStoreLocked++;
 			const isSlowVolume = arguments_.some(
 				(argument) =>
 					argument.startsWith(volumeQueryFixture.slowSourceHome) || argument === "/dev/fixture-slow-volume",
@@ -130,7 +125,6 @@ beforeEach(async () => {
 	volumeQueryFixture.slowDeviceNodeInode++;
 	volumeQueryFixture.blockSlowVolumeQueries = false;
 	volumeQueryFixture.pendingSlowVolumeQueries = [];
-	volumeQueryFixture.systemQueriesStartedWhileStoreLocked = 0;
 	volumeQueryFixture.systemQueryCount = 0;
 	for (const home of [volumeQueryFixture.slowSourceHome, reliableSourceHome]) {
 		await mkdir(home);
@@ -169,7 +163,6 @@ describe("配置 store 锁不等待卷系统查询", () => {
 		async (slowOperationKind) => {
 			await prepareWriterForSource(volumeQueryFixture.slowSourceHome);
 			const reliableBinding = await prepareWriterForSource(reliableSourceHome);
-			volumeQueryFixture.systemQueriesStartedWhileStoreLocked = 0;
 			const slowQueryStarted = holdSlowVolumeQueriesUntilExplicitRelease();
 			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 			const slowOperation = (
@@ -187,7 +180,6 @@ describe("配置 store 锁不等待卷系统查询", () => {
 				if (reliableStartupResult.kind === "prepared")
 					expect(reliableStartupResult.binding.sourceIdentity).toBe(reliableBinding.sourceIdentity);
 				expect(volumeQueryFixture.blockSlowVolumeQueries).toBe(true);
-				expect(volumeQueryFixture.systemQueriesStartedWhileStoreLocked).toBe(0);
 			} finally {
 				releaseSlowVolumeQueries();
 				await slowOperation;
@@ -233,7 +225,6 @@ describe("配置 store 锁不等待卷系统查询", () => {
 	it("持锁身份调用不发起系统查询，退出异步锁作用域后仍可正常补证", async () => {
 		const binding = await prepareWriterForSource(volumeQueryFixture.slowSourceHome);
 		volumeQueryFixture.slowDeviceNodeInode++;
-		volumeQueryFixture.systemQueriesStartedWhileStoreLocked = 0;
 		const queriesBeforeLockedVerification = volumeQueryFixture.systemQueryCount;
 		await expect(
 			mutateCodexConfigurationSyncStore(() =>
@@ -241,7 +232,6 @@ describe("配置 store 锁不等待卷系统查询", () => {
 			),
 		).rejects.toThrow(/卷身份暂不可核验/);
 		expect(volumeQueryFixture.systemQueryCount).toBe(queriesBeforeLockedVerification);
-		expect(volumeQueryFixture.systemQueriesStartedWhileStoreLocked).toBe(0);
 		await expect(
 			codexDirectoryIdentity(volumeQueryFixture.slowSourceHome, { expectedIdentity: binding.sourceIdentity }),
 		).resolves.toBe(binding.sourceIdentity);
@@ -266,15 +256,17 @@ describe("配置 store 锁不等待卷系统查询", () => {
 				await storeMutationMayFinish;
 			});
 			await storeMutationStarted;
-			const acquireStoreLock = lockfile.lock;
+			const acquireStoreLock = lockedFileSystem.acquireLock.bind(lockedFileSystem);
 			let markWriterWaitingForStoreLock: () => void = () => {};
 			const writerWaitingForStoreLock = new Promise<void>((resolve) => {
 				markWriterWaitingForStoreLock = resolve;
 			});
-			const storeLockAttemptObserver = vi.spyOn(lockfile, "lock").mockImplementation((...parameters) => {
-				markWriterWaitingForStoreLock();
-				return acquireStoreLock(...parameters);
-			});
+			const storeLockAttemptObserver = vi
+				.spyOn(lockedFileSystem, "acquireLock")
+				.mockImplementation((...parameters) => {
+					markWriterWaitingForStoreLock();
+					return acquireStoreLock(...parameters);
+				});
 			const preparingWriter = prepareCodexConfigurationWriterBinding({
 				purpose: "native_session",
 				storageHome: volumeQueryFixture.slowSourceHome,

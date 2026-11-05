@@ -73,6 +73,7 @@ import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-select
 
 export interface AgentAdapterLaunchInput {
 	codexConfigurationProfileLaunchFields?: CodexConfigurationFields;
+	codexReasoningEffortOverride?: string;
 	taskId: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: RuntimeAgentId;
@@ -1266,10 +1267,11 @@ function stripClaudeImmediateBypassAndPermissionModeArgs(args: string[]): void {
 function applyClaudePermissionAndPlanModeArgs(args: string[], input: AgentAdapterLaunchInput): void {
 	const permissionMode = resolveLaunchPermissionMode(input);
 
-	// 只读提问会话是最强约束，压过其余一切。
+	// 只读约束压过放权档，但不代替 Plan。关闭 Plan 时只收紧工具，不进入 Claude 的 plan 工作流。
 	if (input.readOnlyQuestionSession) {
 		stripClaudeImmediateBypassAndPermissionModeArgs(args);
-		args.push("--permission-mode", "plan", "--tools", "Read,Glob,Grep,WebSearch,WebFetch");
+		args.push("--tools", "Read,Glob,Grep,WebSearch,WebFetch");
+		if (input.startInPlanMode) args.push("--permission-mode", "plan");
 		return;
 	}
 
@@ -1352,9 +1354,11 @@ const claudeAdapter: AgentSessionAdapter = {
 					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
 						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
-		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
-			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
-			: input.args;
+		const modelBaseArgs =
+			inheritsNativeForkModelWithoutCardDefault &&
+			!input.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.resolvedSettings
+				? removeCliOptionsWithValues(input.args, ["--model", "-m"])
+				: input.args;
 		const args = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const env: Record<string, string | undefined> = {
 			...resolveClaudeCodeTerminalRenderingModeEnv(),
@@ -1458,7 +1462,12 @@ const claudeAdapter: AgentSessionAdapter = {
 		// （全新与恢复）都落到看板预期的默认模型，并覆盖上述重建。仅在未显式指定 model 时注入，故按任务
 		// 指定的具体模型仍然优先。注意：只有 `--model` 这个「旗标」能解析 `default` 别名并压过 `--continue`
 		// 的重建；`ANTHROPIC_MODEL=default` 环境变量会被当成名为 "default" 的自定义模型（实测失效）。
-		if (!explicitModelId && !hasCliOption(args, "--model") && !inheritsNativeForkModelWithoutCardDefault) {
+		if (
+			!explicitModelId &&
+			!hasCliOption(args, "--model") &&
+			(!inheritsNativeForkModelWithoutCardDefault ||
+				Boolean(input.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.resolvedSettings))
+		) {
 			args.push("--model", "default");
 		}
 		const hooks = resolveHookContext(input);
@@ -1654,9 +1663,11 @@ const codexAdapter: AgentSessionAdapter = {
 					(input.taskConversationSessionMetadata.taskConversationSessionRole === "task_collaborator" ||
 						input.taskConversationSessionMetadata.taskAutomationSuspendedForMainSessionHandover)),
 		);
-		const modelBaseArgs = inheritsNativeForkModelWithoutCardDefault
-			? removeCliOptionsWithValues(input.args, ["--model", "-m"])
-			: input.args;
+		const modelBaseArgs =
+			inheritsNativeForkModelWithoutCardDefault &&
+			!input.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.resolvedSettings
+				? removeCliOptionsWithValues(input.args, ["--model", "-m"])
+				: input.args;
 		let codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
 		const profilePermissionArguments =
 			input.codexConfigurationProfileLaunchFields &&
@@ -1664,10 +1675,13 @@ const codexAdapter: AgentSessionAdapter = {
 		if (profilePermissionArguments) codexArgs = profilePermissionArguments;
 		const profileReasoningEffort =
 			input.codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model_reasoning_effort"])];
-		if (profileReasoningEffort)
+		const selectedReasoningEffort = input.codexConfigurationProfileLaunchFields
+			? profileReasoningEffort?.value
+			: input.codexReasoningEffortOverride;
+		if (selectedReasoningEffort !== undefined)
 			codexArgs.push(
 				"-c",
-				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(profileReasoningEffort.value)}`,
+				`model_reasoning_effort=${formatCodexConfigurationOverrideTomlValue(selectedReasoningEffort)}`,
 			);
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
@@ -2830,7 +2844,8 @@ const kimiAdapter: AgentSessionAdapter = {
 // 也就完全不必碰 session-manager 的就绪判定与注入闸。
 const ompAdapter: AgentSessionAdapter = {
 	async prepare(input) {
-		const args = [...input.args];
+		const explicitModelId = resolveTerminalAgentModelOverride(input, "omp");
+		const args = explicitModelId ? setModelCliOption(input.args, explicitModelId) : [...input.args];
 		const observedNativeSessionResumeAddressing =
 			resolveObservedAgentNativeConversationSessionResumeAddressing(input);
 		const env: Record<string, string | undefined> = {
@@ -2883,7 +2898,7 @@ const ompAdapter: AgentSessionAdapter = {
 			args.splice(
 				0,
 				args.length,
-				...removeCliOptionsWithValues(forkArgs, ["--model", "-m"]),
+				...(explicitModelId ? forkArgs : removeCliOptionsWithValues(forkArgs, ["--model", "-m"])),
 				"--fork",
 				input.taskConversationSessionContextForkSourceNativeSessionId,
 			);
