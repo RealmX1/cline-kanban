@@ -62,6 +62,8 @@ export interface CreateTaskConversationSessionInput {
 	sessionRole?: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;
 	contextSource: "started_from_scratch" | "forked_from_main_current_turn";
+	expectedTaskIncarnationCreatedAtEpochMs?: number;
+	contextSourceTaskConversationSessionId?: string;
 	mainSessionOriginTurnNumber: number;
 	mainSessionOriginUserMessagePreview: string | null;
 }
@@ -324,7 +326,14 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 				startInPlanMode: false,
 				expectedTaskIncarnationCreatedAtEpochMs: input.task.createdAt,
 				creationReason: "用户在 Sessions 中创建侧会话",
-				creatorTaskConversationSessionId: resolveMainTaskConversationSessionId(input.task),
+				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+					: {}),
+				...(input.contextSourceTaskConversationSessionId
+					? { contextSourceTaskConversationSessionId: input.contextSourceTaskConversationSessionId }
+					: {}),
+				creatorTaskConversationSessionId:
+					input.contextSourceTaskConversationSessionId ?? resolveMainTaskConversationSessionId(input.task),
 				codexConfigurationProfileId: input.codexConfigurationProfileId,
 			};
 			const fingerprint = JSON.stringify(request);

@@ -1,6 +1,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { NonModalFloatingFormWindowHostProvider } from "@/components/non-modal-floating-form-window-host-provider";
 import { SideSessionCreationWorkbench } from "@/components/side-session-creation-workbench";
 import * as imageUtils from "@/components/task-image-input-utils";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -121,7 +122,7 @@ async function click(text: string) {
 }
 async function role(value: "by_the_way" | "task_collaborator") {
 	await act(async () => {
-		const select = document.querySelector<HTMLSelectElement>("#creation-workbench-session-role");
+		const select = document.querySelector<HTMLSelectElement>('[id$="-creation-workbench-session-role"]');
 		if (!select) throw new Error("缺少类型选择");
 		select.value = value;
 		select.dispatchEvent(new Event("change", { bubbles: true }));
@@ -137,6 +138,71 @@ async function text(value: string) {
 }
 
 describe("共享侧会话创建工作台", () => {
+	it("不同项目的窗口保留独立草稿，重复打开不重挂，迟到创建结果只关闭原窗口", async () => {
+		let finishFirstCreation: (result: ReturnType<typeof creationResult>) => void = () => undefined;
+		vi.mocked(creationQueries.submitOrRecoverTaskConversationSessionCreation).mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finishFirstCreation = resolve;
+				}),
+		);
+		const first = target();
+		const secondMain = { ...first.mainSessionSummary, taskId: "fghij" };
+		const second = {
+			...first,
+			workspaceId: "project-b",
+			task: { ...first.task, id: "fghij", createdAt: 2 },
+			mainSessionSummary: secondMain,
+			taskSessions: { fghij: secondMain },
+		};
+		await act(async () => {
+			openSideSessionCreationWorkbench(first);
+			root.render(
+				<TooltipProvider>
+					<NonModalFloatingFormWindowHostProvider>
+						<SideSessionCreationWorkbench />
+					</NonModalFloatingFormWindowHostProvider>
+				</TooltipProvider>,
+			);
+		});
+		await text("项目 A 的草稿");
+		const firstTextarea = document.querySelector("textarea");
+		await click("创建会话");
+		await act(async () => openSideSessionCreationWorkbench(second));
+		const secondTextarea = Array.from(document.querySelectorAll("textarea")).find(
+			(element) => element !== firstTextarea,
+		);
+		if (!secondTextarea) throw new Error("缺少项目 B 的独立窗口");
+		await act(async () => {
+			Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+				secondTextarea,
+				"项目 B 的草稿",
+			);
+			secondTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+		});
+		await act(async () => openSideSessionCreationWorkbench(first));
+		expect(document.querySelectorAll("textarea")).toHaveLength(2);
+		expect(firstTextarea?.isConnected).toBe(true);
+		expect(firstTextarea?.value).toBe("项目 A 的草稿");
+		expect(secondTextarea.value).toBe("项目 B 的草稿");
+		const roleIds = Array.from(document.querySelectorAll('[id$="-creation-workbench-session-role"]')).map(
+			(element) => element.id,
+		);
+		expect(new Set(roleIds).size).toBe(2);
+		await act(async () => openSideSessionCreationWorkbench(second));
+		await act(async () => finishFirstCreation(creationResult("started", null)));
+		expect(firstTextarea?.isConnected).toBe(false);
+		expect(secondTextarea.isConnected).toBe(true);
+		expect(secondTextarea.value).toBe("项目 B 的草稿");
+		expect(creationQueries.submitOrRecoverTaskConversationSessionCreation).toHaveBeenCalledWith(
+			"project-a",
+			expect.objectContaining({
+				taskId: "abcde",
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+				contextSourceTaskConversationSessionId: "abcde",
+			}),
+		);
+	});
 	it.each([
 		"{不可读原文",
 		JSON.stringify({ schemaVersion: 2, activeDraftIdentityByCreationScope: [], draftsByIdentity: [] }),

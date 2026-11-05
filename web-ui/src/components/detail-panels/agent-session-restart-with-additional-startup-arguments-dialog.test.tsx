@@ -109,7 +109,7 @@ describe("Codex 带参数重启弹窗", () => {
 		await submit();
 		expect(restart).toHaveBeenCalledOnce();
 		expect(document.querySelector("textarea")!.disabled).toBe(true);
-		await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close"]')!.click());
+		await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="关闭填写窗口"]')!.click());
 		expect(close).not.toHaveBeenCalled();
 		await act(async () => rejectRestart(new Error("原生启动失败")));
 		expect(document.querySelector('[role="alert"]')?.textContent).toBe("原生启动失败");

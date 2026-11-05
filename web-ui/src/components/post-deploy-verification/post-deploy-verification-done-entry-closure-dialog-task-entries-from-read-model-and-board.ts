@@ -34,6 +34,7 @@ export function buildPostDeployVerificationDoneEntryClosureDialogTaskEntriesFrom
 			: [];
 		taskEntries.push({
 			taskId,
+			taskIncarnationCreatedAtEpochMs: selection.card.createdAt,
 			taskTitle: resolveTaskTitleForPostDeployVerificationPanel(input.board, taskId),
 			boardColumnIdOfTaskCardBeforeMoveIntoDone: selection.column.id,
 			uncheckedChecklistItemsRequiringClosureReason,

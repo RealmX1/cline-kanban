@@ -156,6 +156,7 @@ export default function App(): ReactElement {
 	const [sessions, setSessions] = useState<Record<string, RuntimeTaskSessionSummary>>({});
 	const [canPersistWorkspaceState, setCanPersistWorkspaceState] = useState(false);
 	const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+	const [settingsOpeningRequestSequence, setSettingsOpeningRequestSequence] = useState(0);
 	const [settingsInitialSection, setSettingsInitialSection] = useState<RuntimeSettingsSection | null>(null);
 	const [homeSidebarSection, setHomeSidebarSection] = useState<"projects" | "agent">("projects");
 	const sidebarLayout = useProjectNavigationLayout();
@@ -239,6 +240,7 @@ export default function App(): ReactElement {
 		handleGetPermanentDeletionPreview,
 		handlePermanentlyDeleteProjectData,
 		isAddProjectDialogOpen,
+		addProjectOpeningRequestSequence,
 		setIsAddProjectDialogOpen,
 		pendingNativeGitInitPath,
 		resetProjectNavigationState,
@@ -699,6 +701,8 @@ export default function App(): ReactElement {
 
 	const {
 		isInlineTaskCreateOpen,
+		editingTaskSnapshot,
+		taskEditorOpeningRequestIdentity,
 		taskEditorSessionWorkspaceId,
 		taskEditorDefaultAgentId,
 		newTaskName,
@@ -805,6 +809,7 @@ export default function App(): ReactElement {
 		handleTaskEditorCreationCardPersisted,
 		resetTaskEditorState,
 	} = useTaskEditor({
+		isTaskEditorOpeningRequestOnlyController: true,
 		board,
 		setBoard,
 		createTaskBranchOptions,
@@ -1097,6 +1102,7 @@ export default function App(): ReactElement {
 	);
 
 	const handleOpenSettings = useCallback((section?: RuntimeSettingsSection) => {
+		setSettingsOpeningRequestSequence((sequence) => sequence + 1);
 		setSettingsInitialSection(section ?? null);
 		setIsSettingsOpen(true);
 	}, []);
@@ -1238,6 +1244,15 @@ export default function App(): ReactElement {
 		refreshPostDeployVerificationReadModelAfterDoneEntryGateRejection:
 			postDeployVerificationForBoardOrSingleProjectScope.refreshPostDeployVerificationReadModelAfterCurrentProjectDoneEntryGateRejection,
 	});
+	const boardMoveIntoDoneReviewRequest =
+		postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone?.dialogRequest;
+	const boardMoveIntoDoneReviewBinding =
+		boardMoveIntoDoneReviewRequest?.workspaceIdAtOpening && boardMoveIntoDoneReviewRequest.boardSnapshotAtOpening
+			? {
+					workspaceId: boardMoveIntoDoneReviewRequest.workspaceIdAtOpening,
+					board: boardMoveIntoDoneReviewRequest.boardSnapshotAtOpening,
+				}
+			: null;
 
 	const {
 		handleCreateAndStartTask,
@@ -1749,906 +1764,912 @@ export default function App(): ReactElement {
 		[editingTaskId, handleCancelCreateTask, handleCancelEditTask],
 	);
 
-	if (isRuntimeDisconnected) {
-		return <RuntimeDisconnectedFallback />;
-	}
-	if (isKanbanAccessBlocked) {
-		return <KanbanAccessBlockedFallback />;
-	}
-
 	const renderedApplicationView = (
-		<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectRecentlyActiveTaskSwitcherHost}>
-			<LayoutCustomizationsProvider
-				onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
-				onResetSidebarVisibilityLayoutCustomizations={() => {
-					sidebarVisibility.resetSidebarVisibilityLayoutCustomizations();
-					setIsFocusViewDiffExpanded(false);
-				}}
+		<>
+			<div
+				ref={mobileFocusViewControls.focusViewRootRef}
+				style={{ height: mobileFocusViewControls.visibleViewportHeightPx }}
+				className="flex h-[100svh] min-w-0 overflow-hidden"
 			>
-				<div
-					ref={mobileFocusViewControls.focusViewRootRef}
-					style={{ height: mobileFocusViewControls.visibleViewportHeightPx }}
-					className="flex h-[100svh] min-w-0 overflow-hidden"
-				>
-					{!isFocusViewChromeShown ? (
-						<ProjectNavigationPanel
-							projects={displayedProjects}
-							isLoadingProjects={isProjectListLoading}
-							currentProjectId={navigationCurrentProjectId}
-							permanentlyDeletingProjectId={permanentlyDeletingProjectId}
-							activeSection={homeSidebarSection}
-							onActiveSectionChange={setHomeSidebarSection}
-							canShowAgentSection={!hasNoProjects && projectRuntimeWorkspaceId !== null}
-							agentSectionContent={homeSidebarAgentPanel}
-							selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
-							clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
-							featurebaseFeedbackState={featurebaseFeedbackState}
-							onSelectProject={(projectId) => {
-								handleSelectProjectNarrowingToSingleProjectScope(projectId);
-							}}
-							onGetPermanentDeletionPreview={handleGetPermanentDeletionPreview}
-							onPermanentlyDeleteProjectData={handlePermanentlyDeleteProjectData}
-							onAddProject={() => {
-								void handleAddProject();
-							}}
-							sidebarWidth={sidebarLayout.sidebarWidth}
-							setExpandedSidebarWidth={sidebarLayout.setExpandedSidebarWidth}
-							isCollapsed={sidebarLayout.isCollapsed}
-							isDesktopSidebarHidden={sidebarVisibility.isHomeProjectSidebarHidden}
-							setSidebarCollapsed={sidebarLayout.setSidebarCollapsed}
-						/>
-					) : null}
-					<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-						<div
-							hidden={
-								mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded
+				{!isFocusViewChromeShown ? (
+					<ProjectNavigationPanel
+						projects={displayedProjects}
+						isLoadingProjects={isProjectListLoading}
+						currentProjectId={navigationCurrentProjectId}
+						permanentlyDeletingProjectId={permanentlyDeletingProjectId}
+						activeSection={homeSidebarSection}
+						onActiveSectionChange={setHomeSidebarSection}
+						canShowAgentSection={!hasNoProjects && projectRuntimeWorkspaceId !== null}
+						agentSectionContent={homeSidebarAgentPanel}
+						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
+						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
+						featurebaseFeedbackState={featurebaseFeedbackState}
+						onSelectProject={(projectId) => {
+							handleSelectProjectNarrowingToSingleProjectScope(projectId);
+						}}
+						onGetPermanentDeletionPreview={handleGetPermanentDeletionPreview}
+						onPermanentlyDeleteProjectData={handlePermanentlyDeleteProjectData}
+						onAddProject={() => {
+							void handleAddProject();
+						}}
+						sidebarWidth={sidebarLayout.sidebarWidth}
+						setExpandedSidebarWidth={sidebarLayout.setExpandedSidebarWidth}
+						isCollapsed={sidebarLayout.isCollapsed}
+						isDesktopSidebarHidden={sidebarVisibility.isHomeProjectSidebarHidden}
+						setSidebarCollapsed={sidebarLayout.setSidebarCollapsed}
+					/>
+				) : null}
+				<div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+					<div
+						hidden={mobileFocusViewControls.isEnabled && !mobileFocusViewControls.upperNavigationAndToolsExpanded}
+						className="shrink-0"
+						data-mobile-focus-view-global-navigation=""
+						data-mobile-focus-view-collapsible-region=""
+					>
+						<TopBar
+							workspaceId={projectRuntimeWorkspaceId}
+							codexConfigurationNoticeSummaryControl={
+								<CodexConfigurationSyncSummaryButton notice={codexConfigurationNotice} />
 							}
-							className="shrink-0"
-							data-mobile-focus-view-global-navigation=""
-							data-mobile-focus-view-collapsible-region=""
-						>
-							<TopBar
-								codexConfigurationNoticeSummaryControl={
-									<CodexConfigurationSyncSummaryButton notice={codexConfigurationNotice} />
-								}
-								dailyWorkProgressSummaryControl={
-									<DailyWorkProgressSummaryButton progress={dailyWorkProgressStatistics} />
-								}
-								onOpenPermanentlyDeletedTaskHistory={
-									!isFocusViewChromeShown || mobileFocusViewControls.isEnabled
-										? openPermanentlyDeletedTaskHistory
-										: undefined
-								}
-								onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
-								onToggleCurrentPageLeftSidebar={
-									!isFocusViewChromeShown || canToggleFocusViewTaskSidebars
-										? handleToggleCurrentPageLeftSidebar
-										: undefined
-								}
-								isCurrentPageLeftSidebarHidden={
-									isFocusViewChromeShown
-										? sidebarVisibility.isFocusViewTaskListSidebarHidden || isFocusViewDiffExpanded
-										: sidebarVisibility.isHomeProjectSidebarHidden
-								}
-								currentPageLeftSidebarLabel={isFocusViewChromeShown ? "任务列表" : "项目栏"}
-								onToggleFocusViewWorkbenchSidebar={
-									canToggleFocusViewTaskSidebars ? handleToggleFocusViewWorkbenchSidebar : undefined
-								}
-								isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
-								projectSwitcher={topBarProjectSwitcherState}
-								onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
-								onToggleTaskLookupWorkbench={
-									!hasNoProjects
-										? () => {
-												if (taskLookupWorkbench.isOpen) taskLookupWorkbench.close();
-												else taskLookupWorkbench.open();
-											}
-										: undefined
-								}
-								isTaskLookupWorkbenchOpen={taskLookupWorkbench.isOpen}
-								onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
-									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-										? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
-										: undefined
-								}
-								isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
-								onBack={
-									taskLookupWorkbench.isOpen
-										? taskLookupWorkbench.close
-										: isFocusViewChromeShown
-											? handleBackFromFocusView
-											: undefined
-								}
-								workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
-								isWorkspacePathLoading={shouldShowProjectLoadingState}
-								workspaceHint={navbarWorkspaceHint}
-								runtimeHint={navbarRuntimeHint}
-								selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
-								selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
-								showHomeGitSummary={
-									!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
-								}
-								runningGitAction={
-									isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
-										? null
-										: runningGitAction
-								}
-								onGitFetch={
-									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-										? undefined
-										: () => {
-												void runGitAction("fetch");
-											}
-								}
-								onGitPull={
-									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-										? undefined
-										: () => {
-												void runGitAction("pull");
-											}
-								}
-								onGitPush={
-									isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
-										? undefined
-										: () => {
-												void runGitAction("push");
-											}
-								}
-								onToggleTerminal={
-									hasNoProjects ||
-									taskLookupWorkbench.isOpen ||
-									isCurrentProjectRuntimeUnavailable ||
-									isFocusViewCrossProjectTaskOpenInTransit
-										? undefined
-										: selectedCard
-											? handleToggleDetailTerminal
-											: handleToggleHomeTerminal
-								}
-								isTerminalOpen={
-									isFocusViewCrossProjectTaskOpenInTransit
-										? false
-										: selectedCard
-											? isDetailTerminalOpen
-											: showHomeBottomTerminal
-								}
-								isTerminalLoading={
-									isFocusViewCrossProjectTaskOpenInTransit
-										? false
-										: selectedCard
-											? isDetailTerminalStarting
-											: isHomeTerminalStarting
-								}
-								onOpenSettings={handleOpenSettings}
-								showDebugButton={debugModeEnabled}
-								onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
-								shortcuts={shortcuts}
-								selectedShortcutLabel={selectedShortcutLabel}
-								onSelectShortcutLabel={handleSelectShortcutLabel}
-								runningShortcutLabel={runningShortcutLabel}
-								onRunShortcut={handleRunShortcut}
-								onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
-								openTargetOptions={openTargetOptions}
-								openTargetOptionsFootnote={openTargetOptionsFootnote}
-								selectedOpenTargetId={selectedOpenTargetId}
-								onSelectOpenTarget={onSelectOpenTarget}
-								onOpenWorkspace={onOpenWorkspace}
-								canOpenWorkspace={canOpenWorkspace}
-								isOpeningWorkspace={isOpeningWorkspace}
-								onToggleGitHistory={
-									hasNoProjects || isCurrentProjectRuntimeUnavailable || taskLookupWorkbench.isOpen
-										? undefined
-										: handleToggleGitHistory
-								}
-								isGitHistoryOpen={isGitHistoryOpen}
-								onToggleFindings={
-									!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
-										? handleToggleFindings
-										: undefined
-								}
-								isFindingsOpen={isFindingsOpen}
-								onToggleTaskChangesSidebar={
-									selectedCardRenderedInFocusView && !taskLookupWorkbench.isOpen
-										? () => setIsTaskChangesSidebarOpen((open) => !open)
-										: undefined
-								}
-								isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
-								hideProjectDependentActions={
-									shouldHideProjectDependentTopBarActions || taskLookupWorkbench.isOpen
-								}
-								connectionRetrySessions={connectionRetrySessions}
-								onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
-								onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
-								notificationCenter={
-									<NotificationCenter
-										panelGroups={notificationCenter.panelGroups}
-										onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
-										hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
-										archiveReadError={notificationCenter.archiveReadError}
-										allGroups={notificationCenter.allGroups}
-										allEntriesSortedByTriggeredAtDescending={
-											notificationCenter.allEntriesSortedByTriggeredAtDescending
+							dailyWorkProgressSummaryControl={
+								<DailyWorkProgressSummaryButton progress={dailyWorkProgressStatistics} />
+							}
+							onOpenPermanentlyDeletedTaskHistory={
+								!isFocusViewChromeShown || mobileFocusViewControls.isEnabled
+									? openPermanentlyDeletedTaskHistory
+									: undefined
+							}
+							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
+							onToggleCurrentPageLeftSidebar={
+								!isFocusViewChromeShown || canToggleFocusViewTaskSidebars
+									? handleToggleCurrentPageLeftSidebar
+									: undefined
+							}
+							isCurrentPageLeftSidebarHidden={
+								isFocusViewChromeShown
+									? sidebarVisibility.isFocusViewTaskListSidebarHidden || isFocusViewDiffExpanded
+									: sidebarVisibility.isHomeProjectSidebarHidden
+							}
+							currentPageLeftSidebarLabel={isFocusViewChromeShown ? "任务列表" : "项目栏"}
+							onToggleFocusViewWorkbenchSidebar={
+								canToggleFocusViewTaskSidebars ? handleToggleFocusViewWorkbenchSidebar : undefined
+							}
+							isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
+							projectSwitcher={topBarProjectSwitcherState}
+							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
+							onToggleTaskLookupWorkbench={
+								!hasNoProjects
+									? () => {
+											if (taskLookupWorkbench.isOpen) taskLookupWorkbench.close();
+											else taskLookupWorkbench.open();
 										}
-										unreadCount={notificationCenter.unreadCount}
-										onFocusTask={focusNotificationTask}
-										onMarkGroupVisited={handleMarkTaskNotificationsVisited}
-										onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
-										onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
-										onClearAll={notificationCenter.clearAll}
-									/>
-								}
-								postDeployVerificationPendingCount={postDeployVerificationPendingCount}
-								onOpenPostDeployVerification={handleOpenPostDeployVerification}
-								bugReportTriggerButton={
-									<BugReportTriggerButton
-										projects={projects}
-										currentProjectId={currentProjectId}
-										activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
-									/>
-								}
-							/>
-						</div>
-						<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
-							<DailyWorkProgressExpandedRegion
-								progress={dailyWorkProgressStatistics}
-								onOpenTask={handleOpenTaskInProject}
-							/>
-							<div
-								className="kb-home-layout"
-								aria-hidden={isFocusViewChromeShown ? true : undefined}
-								style={isFocusViewChromeShown ? { visibility: "hidden" } : undefined}
-							>
-								{shouldShowProjectLoadingState ? (
-									<div className="flex flex-1 min-h-0 items-center justify-center bg-surface-0">
-										<Spinner size={30} />
+									: undefined
+							}
+							isTaskLookupWorkbenchOpen={taskLookupWorkbench.isOpen}
+							onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope={
+								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+									? handleToggleBetweenBoardScopeAndFocusedTaskProjectScope
+									: undefined
+							}
+							isBoardScopeAllProjectsSelected={isBoardScopeAllProjectsSelected}
+							onBack={
+								taskLookupWorkbench.isOpen
+									? taskLookupWorkbench.close
+									: isFocusViewChromeShown
+										? handleBackFromFocusView
+										: undefined
+							}
+							workspacePath={isFocusViewCrossProjectTaskOpenInTransit ? undefined : navbarWorkspacePath}
+							isWorkspacePathLoading={shouldShowProjectLoadingState}
+							workspaceHint={navbarWorkspaceHint}
+							runtimeHint={navbarRuntimeHint}
+							selectedTaskId={selectedCardRenderedInFocusView?.card.id ?? null}
+							selectedTaskBaseRef={selectedCardRenderedInFocusView?.card.baseRef ?? null}
+							showHomeGitSummary={
+								!hasNoProjects && !isFocusViewChromeShown && !isCurrentProjectRuntimeUnavailable
+							}
+							runningGitAction={
+								isFocusViewChromeShown || hasNoProjects || isCurrentProjectRuntimeUnavailable
+									? null
+									: runningGitAction
+							}
+							onGitFetch={
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+									? undefined
+									: () => {
+											void runGitAction("fetch");
+										}
+							}
+							onGitPull={
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+									? undefined
+									: () => {
+											void runGitAction("pull");
+										}
+							}
+							onGitPush={
+								isFocusViewChromeShown || isCurrentProjectRuntimeUnavailable
+									? undefined
+									: () => {
+											void runGitAction("push");
+										}
+							}
+							onToggleTerminal={
+								hasNoProjects ||
+								taskLookupWorkbench.isOpen ||
+								isCurrentProjectRuntimeUnavailable ||
+								isFocusViewCrossProjectTaskOpenInTransit
+									? undefined
+									: selectedCard
+										? handleToggleDetailTerminal
+										: handleToggleHomeTerminal
+							}
+							isTerminalOpen={
+								isFocusViewCrossProjectTaskOpenInTransit
+									? false
+									: selectedCard
+										? isDetailTerminalOpen
+										: showHomeBottomTerminal
+							}
+							isTerminalLoading={
+								isFocusViewCrossProjectTaskOpenInTransit
+									? false
+									: selectedCard
+										? isDetailTerminalStarting
+										: isHomeTerminalStarting
+							}
+							onOpenSettings={handleOpenSettings}
+							showDebugButton={debugModeEnabled}
+							onOpenDebugDialog={debugModeEnabled ? handleOpenDebugDialog : undefined}
+							shortcuts={shortcuts}
+							selectedShortcutLabel={selectedShortcutLabel}
+							onSelectShortcutLabel={handleSelectShortcutLabel}
+							runningShortcutLabel={runningShortcutLabel}
+							onRunShortcut={handleRunShortcut}
+							onCreateFirstShortcut={projectRuntimeWorkspaceId ? handleCreateShortcut : undefined}
+							openTargetOptions={openTargetOptions}
+							openTargetOptionsFootnote={openTargetOptionsFootnote}
+							selectedOpenTargetId={selectedOpenTargetId}
+							onSelectOpenTarget={onSelectOpenTarget}
+							onOpenWorkspace={onOpenWorkspace}
+							canOpenWorkspace={canOpenWorkspace}
+							isOpeningWorkspace={isOpeningWorkspace}
+							onToggleGitHistory={
+								hasNoProjects || isCurrentProjectRuntimeUnavailable || taskLookupWorkbench.isOpen
+									? undefined
+									: handleToggleGitHistory
+							}
+							isGitHistoryOpen={isGitHistoryOpen}
+							onToggleFindings={
+								!isFocusViewChromeShown && !hasNoProjects && !isCurrentProjectRuntimeUnavailable
+									? handleToggleFindings
+									: undefined
+							}
+							isFindingsOpen={isFindingsOpen}
+							onToggleTaskChangesSidebar={
+								selectedCardRenderedInFocusView && !taskLookupWorkbench.isOpen
+									? () => setIsTaskChangesSidebarOpen((open) => !open)
+									: undefined
+							}
+							isTaskChangesSidebarOpen={selectedCardRenderedInFocusView ? isTaskChangesSidebarOpen : false}
+							hideProjectDependentActions={shouldHideProjectDependentTopBarActions || taskLookupWorkbench.isOpen}
+							connectionRetrySessions={connectionRetrySessions}
+							onContinueConnectionRetrySessions={handleContinueConnectionRetrySessions}
+							onDismissConnectionRetrySessions={handleDismissConnectionRetrySessions}
+							notificationCenter={
+								<NotificationCenter
+									panelGroups={notificationCenter.panelGroups}
+									onLoadMorePanelGroups={notificationCenter.loadMorePanelGroups}
+									hasMorePanelGroups={notificationCenter.hasMorePanelGroups}
+									archiveReadError={notificationCenter.archiveReadError}
+									allGroups={notificationCenter.allGroups}
+									allEntriesSortedByTriggeredAtDescending={
+										notificationCenter.allEntriesSortedByTriggeredAtDescending
+									}
+									unreadCount={notificationCenter.unreadCount}
+									onFocusTask={focusNotificationTask}
+									onMarkGroupVisited={handleMarkTaskNotificationsVisited}
+									onMarkAllPanelGroupsVisited={notificationCenter.markAllPanelGroupsVisited}
+									onMarkAllHistoryGroupsVisited={notificationCenter.markAllHistoryGroupsVisited}
+									onClearAll={notificationCenter.clearAll}
+								/>
+							}
+							postDeployVerificationPendingCount={postDeployVerificationPendingCount}
+							onOpenPostDeployVerification={handleOpenPostDeployVerification}
+							bugReportTriggerButton={
+								<BugReportTriggerButton
+									projects={projects}
+									currentProjectId={currentProjectId}
+									activeView={selectedTaskId ? `task:${selectedTaskId}` : "board"}
+								/>
+							}
+						/>
+					</div>
+					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+						<DailyWorkProgressExpandedRegion
+							progress={dailyWorkProgressStatistics}
+							onOpenTask={handleOpenTaskInProject}
+						/>
+						<div
+							className="kb-home-layout"
+							aria-hidden={isFocusViewChromeShown ? true : undefined}
+							style={isFocusViewChromeShown ? { visibility: "hidden" } : undefined}
+						>
+							{shouldShowProjectLoadingState ? (
+								<div className="flex flex-1 min-h-0 items-center justify-center bg-surface-0">
+									<Spinner size={30} />
+								</div>
+							) : hasNoProjects ? (
+								<div className="flex flex-1 min-h-0 items-center justify-center bg-surface-0 p-6">
+									<div className="flex flex-col items-center justify-center gap-3 text-text-tertiary">
+										<FolderOpen size={48} strokeWidth={1} />
+										<h3 className="text-sm font-semibold text-text-primary">No projects yet</h3>
+										<p className="text-[13px] text-text-secondary">
+											Add a git repository to start using Kanban.
+										</p>
+										<Button
+											variant="primary"
+											onClick={() => {
+												void handleAddProject();
+											}}
+										>
+											Add Project
+										</Button>
 									</div>
-								) : hasNoProjects ? (
-									<div className="flex flex-1 min-h-0 items-center justify-center bg-surface-0 p-6">
-										<div className="flex flex-col items-center justify-center gap-3 text-text-tertiary">
-											<FolderOpen size={48} strokeWidth={1} />
-											<h3 className="text-sm font-semibold text-text-primary">No projects yet</h3>
-											<p className="text-[13px] text-text-secondary">
-												Add a git repository to start using Kanban.
-											</p>
-											<Button
-												variant="primary"
-												onClick={() => {
-													void handleAddProject();
-												}}
-											>
-												Add Project
-											</Button>
-										</div>
-									</div>
-								) : currentUnavailableProject ? (
-									<UnavailableProjectRuntimeState
-										project={currentUnavailableProject}
-										onRecheck={recheckProjectAvailability}
-									/>
-								) : (
-									<div className="flex flex-1 flex-col min-h-0 min-w-0">
-										<div className="flex flex-1 min-h-0 min-w-0">
-											{/* Focus View 打开时真正卸载看板视图，而不是只让外层 `visibility: hidden`。
+								</div>
+							) : currentUnavailableProject ? (
+								<UnavailableProjectRuntimeState
+									project={currentUnavailableProject}
+									onRecheck={recheckProjectAvailability}
+								/>
+							) : (
+								<div className="flex flex-1 flex-col min-h-0 min-w-0">
+									<div className="flex flex-1 min-h-0 min-w-0">
+										{/* Focus View 打开时真正卸载看板视图，而不是只让外层 `visibility: hidden`。
 										    隐藏保留布局盒：两个 `DragDropContext`（看板 + Focus View 左侧栏）会同时挂载。
 										    只卸载这一层：外层 wrapper 与底部 home 终端保持挂载——隐藏的 xterm
 										    本就已暂停渲染，卸载它只会换来一次多余的重连 + 快照恢复。
 										    列的滚动位置与渐进渲染进度由 `board-column-scroll-offset-store` 补回。 */}
-											{isFocusViewChromeShown ? null : isBoardScopeAllProjectsSelected ? (
-												<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
-													host={crossProjectRecentlyActiveTaskSwitcherHost}
-													currentProjectTaskCards={
-														currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage
+										{isFocusViewChromeShown ? null : isBoardScopeAllProjectsSelected ? (
+											<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+												host={crossProjectRecentlyActiveTaskSwitcherHost}
+												currentProjectTaskCards={
+													currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansionOnBoardScopeHomePage
+												}
+												defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+											/>
+										) : isGitHistoryOpen ? (
+											<GitHistoryView
+												workspaceId={currentProjectId}
+												gitHistory={gitHistory}
+												onCheckoutBranch={(branch) => {
+													void switchHomeBranch(branch);
+												}}
+												onDiscardWorkingChanges={() => {
+													void discardHomeWorkingChanges();
+												}}
+												isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
+											/>
+										) : isFindingsOpen && currentProjectId ? (
+											<FindingsView
+												workspaceId={currentProjectId}
+												findings={exploratoryFindingsData.findings}
+												queryPhase={exploratoryFindingsData.queryPhase}
+											/>
+										) : (
+											<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
+												<KanbanBoard
+													data={displayedBoard}
+													taskSessions={sessions}
+													workspacePath={workspacePath}
+													resolveTaskWorkspaceAbsoluteDirectoryPath={
+														resolveTaskWorkspaceAbsoluteDirectoryPath
+													}
+													onCardSelect={handleCardSelect}
+													onCreateTask={handleOpenCreateTask}
+													onStartTask={handleStartTaskFromBoard}
+													onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
+													onClearTrash={handleOpenClearTrash}
+													onEditTask={handleOpenEditTask}
+													onSaveTaskTitle={handleSaveTaskTitle}
+													onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+													onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
+													onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+													onSetTaskShelvingState={handleSetTaskShelvingState}
+													onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
+													moveToTrashLoadingById={moveToTrashLoadingById}
+													moveToReviewLoadingById={moveToReviewLoadingById}
+													onMoveToTrashTask={handleMoveReviewCardToTrash}
+													onMoveToValidationTask={handleMoveCardToValidation}
+													onMoveToReviewTask={handleMoveCardToReview}
+													onRestoreFromTrashTask={handleRestoreTaskFromTrash}
+													onDeleteTask={handleOpenDeleteTask}
+													onRequestProgrammaticCardMoveReady={
+														isFocusViewChromeShown ? undefined : handleProgrammaticCardMoveReady
+													}
+													onDragEnd={handleDragEnd}
+													defaultClineModelId={
+														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
 													}
 													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 												/>
-											) : isGitHistoryOpen ? (
-												<GitHistoryView
-													workspaceId={currentProjectId}
-													gitHistory={gitHistory}
-													onCheckoutBranch={(branch) => {
-														void switchHomeBranch(branch);
-													}}
-													onDiscardWorkingChanges={() => {
-														void discardHomeWorkingChanges();
-													}}
-													isDiscardWorkingChangesPending={isDiscardingHomeWorkingChanges}
-												/>
-											) : isFindingsOpen && currentProjectId ? (
-												<FindingsView
-													workspaceId={currentProjectId}
-													findings={exploratoryFindingsData.findings}
-													queryPhase={exploratoryFindingsData.queryPhase}
-												/>
-											) : (
-												<div className="flex flex-1 flex-col min-h-0 min-w-0 bg-surface-0">
-													<KanbanBoard
-														data={displayedBoard}
-														taskSessions={sessions}
-														workspacePath={workspacePath}
-														resolveTaskWorkspaceAbsoluteDirectoryPath={
-															resolveTaskWorkspaceAbsoluteDirectoryPath
-														}
-														onCardSelect={handleCardSelect}
-														onCreateTask={handleOpenCreateTask}
-														onStartTask={handleStartTaskFromBoard}
-														onRequestStartAllReadyBacklogTasks={
-															requestStartAllReadyBacklogTasksConfirmation
-														}
-														onClearTrash={handleOpenClearTrash}
-														onEditTask={handleOpenEditTask}
-														onSaveTaskTitle={handleSaveTaskTitle}
-														onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-														onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
-														onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
-														onSetTaskShelvingState={handleSetTaskShelvingState}
-														onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
-														moveToTrashLoadingById={moveToTrashLoadingById}
-														moveToReviewLoadingById={moveToReviewLoadingById}
-														onMoveToTrashTask={handleMoveReviewCardToTrash}
-														onMoveToValidationTask={handleMoveCardToValidation}
-														onMoveToReviewTask={handleMoveCardToReview}
-														onRestoreFromTrashTask={handleRestoreTaskFromTrash}
-														onDeleteTask={handleOpenDeleteTask}
-														onRequestProgrammaticCardMoveReady={
-															isFocusViewChromeShown ? undefined : handleProgrammaticCardMoveReady
-														}
-														onDragEnd={handleDragEnd}
-														defaultClineModelId={
-															runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
-														}
-														defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-													/>
-												</div>
-											)}
-										</div>
-										{showHomeBottomTerminal ? (
-											<ResizableBottomPane
-												minHeight={200}
-												initialHeight={homeTerminalPaneHeight}
-												onHeightChange={setHomeTerminalPaneHeight}
-												onCollapse={collapseHomeTerminal}
-												isExpanded={isHomeTerminalExpanded}
-											>
-												<div
-													style={{
-														display: "flex",
-														flex: "1 1 0",
-														minWidth: 0,
-														paddingLeft: 12,
-														paddingRight: 12,
-													}}
-												>
-													<AgentTerminalPanel
-														key={`home-shell-${homeTerminalTaskId}`}
-														taskId={homeTerminalTaskId}
-														workspaceId={currentProjectId}
-														summary={homeTerminalSummary}
-														onSummary={upsertSession}
-														showSessionToolbar={false}
-														autoFocus
-														onClose={closeHomeTerminal}
-														minimalHeaderTitle="Terminal"
-														minimalHeaderSubtitle={homeTerminalSubtitle}
-														panelBackgroundColor="var(--color-surface-1)"
-														terminalBackgroundColor={terminalThemeColors.surfaceRaised}
-														cursorColor={terminalThemeColors.textPrimary}
-														onConnectionReady={markTerminalConnectionReady}
-														agentCommand={agentCommand}
-														onSendAgentCommand={handleSendAgentCommandToHomeTerminal}
-														isExpanded={isHomeTerminalExpanded}
-														onToggleExpand={handleToggleExpandHomeTerminal}
-													/>
-												</div>
-											</ResizableBottomPane>
-										) : null}
+											</div>
+										)}
 									</div>
-								)}
-							</div>
-							{isFocusViewCrossProjectTaskOpenInTransit ? (
-								<div className="absolute inset-0 flex min-h-0 min-w-0">
-									<FocusViewCrossProjectTaskOpenInTransitShell
-										isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
-										host={crossProjectRecentlyActiveTaskSwitcherHost}
-										targetProjectName={crossProjectTaskOpenInTransitTarget?.projectName ?? null}
-										targetTaskTitle={crossProjectTaskOpenInTransitTarget?.taskTitle ?? null}
-										onCancel={cancelPendingCrossProjectTaskOpenReturningToOriginTask}
-									/>
+									{showHomeBottomTerminal ? (
+										<ResizableBottomPane
+											minHeight={200}
+											initialHeight={homeTerminalPaneHeight}
+											onHeightChange={setHomeTerminalPaneHeight}
+											onCollapse={collapseHomeTerminal}
+											isExpanded={isHomeTerminalExpanded}
+										>
+											<div
+												style={{
+													display: "flex",
+													flex: "1 1 0",
+													minWidth: 0,
+													paddingLeft: 12,
+													paddingRight: 12,
+												}}
+											>
+												<AgentTerminalPanel
+													key={`home-shell-${homeTerminalTaskId}`}
+													taskId={homeTerminalTaskId}
+													workspaceId={currentProjectId}
+													summary={homeTerminalSummary}
+													onSummary={upsertSession}
+													showSessionToolbar={false}
+													autoFocus
+													onClose={closeHomeTerminal}
+													minimalHeaderTitle="Terminal"
+													minimalHeaderSubtitle={homeTerminalSubtitle}
+													panelBackgroundColor="var(--color-surface-1)"
+													terminalBackgroundColor={terminalThemeColors.surfaceRaised}
+													cursorColor={terminalThemeColors.textPrimary}
+													onConnectionReady={markTerminalConnectionReady}
+													agentCommand={agentCommand}
+													onSendAgentCommand={handleSendAgentCommandToHomeTerminal}
+													isExpanded={isHomeTerminalExpanded}
+													onToggleExpand={handleToggleExpandHomeTerminal}
+												/>
+											</div>
+										</ResizableBottomPane>
+									) : null}
 								</div>
-							) : taskLookupWorkbench.isOpen && (!selectedCardRenderedInFocusView || !detailSession) ? (
-								<div className="absolute inset-0 flex min-h-0 min-w-0">{taskLookupWorkbenchContent}</div>
-							) : selectedCardRenderedInFocusView && detailSession ? (
-								<div className="absolute inset-0 flex min-h-0 min-w-0">
-									<CardDetailView
-										isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
-										isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
-										onFocusViewWorkbenchSidebarHiddenChange={
-											sidebarVisibility.setFocusViewWorkbenchSidebarHidden
-										}
-										isDiffExpanded={isFocusViewDiffExpanded}
-										onDiffExpandedChange={setIsFocusViewDiffExpanded}
-										taskLookupWorkbenchContent={taskLookupWorkbenchContent}
-										onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
-										mobileFocusViewControls={mobileFocusViewControls}
-										onBackToBoard={handleBackFromFocusView}
-										selection={selectedCardRenderedInFocusView}
-										currentProjectId={currentProjectId}
-										taskIdsOnBoard={taskIdsOnBoard}
-										workspacePath={workspacePath}
-										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
-										selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-										runtimeConfig={runtimeProjectConfig ?? null}
-										sessionSummary={detailSession}
-										taskSessions={sessions}
-										taskChatMessagesByTaskId={taskChatMessagesByTaskId}
-										exploratoryFindings={exploratoryFindingsData.findings}
-										explorationThreadGraph={explorationThreadGraphData}
-										runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
-										isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
-										onCreateTaskConversationSession={async (input) =>
-											await createTaskConversationSession({
-												task: selectedCardRenderedInFocusView.card,
-												...input,
-											})
-										}
-										onSessionSummary={upsertSession}
-										onCardSelect={handleCardSelect}
-										onTaskDragEnd={handleDetailTaskDragEnd}
-										onCreateTask={handleOpenCreateTask}
-										onStartTask={handleStartTaskFromBoard}
-										onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
-										onClearTrash={handleOpenClearTrash}
-										onEditTask={handleOpenEditTaskKeepingDetailSelection}
-										onSaveTaskTitle={handleSaveTaskTitle}
-										onAgentCommitTask={handleAgentCommitTask}
-										onAgentOpenPrTask={handleAgentOpenPrTask}
-										agentCommitTaskLoadingById={agentCommitTaskLoadingById}
-										agentOpenPrTaskLoadingById={agentOpenPrTaskLoadingById}
-										moveToTrashLoadingById={moveToTrashLoadingById}
-										onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
-										onMoveReviewCardToValidation={handleMoveCardToValidation}
-										onMoveCardToReview={handleMoveCardToReview}
-										moveToReviewLoadingById={moveToReviewLoadingById}
-										onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
-										onStartFreshTaskSessionWithOriginalPrompt={handleStartFreshTaskSessionWithOriginalPrompt}
-										onDeleteTask={handleOpenDeleteTask}
-										onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
-										onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
-										onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
-										onSetTaskShelvingState={handleSetTaskShelvingState}
-										onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
-										onAddReviewComments={(taskId: string, text: string) => {
-											void handleAddReviewComments(taskId, text);
-										}}
-										onSendReviewComments={(taskId: string, text: string) => {
-											void handleSendReviewComments(taskId, text);
-										}}
-										onSendClineChatMessage={sendTaskChatMessage}
-										onCancelClineChatTurn={cancelTaskChatTurn}
-										onResolveTaskAgentUserDecision={resolveTaskAgentUserDecision}
-										onLoadClineChatMessages={fetchTaskChatMessages}
-										latestClineChatMessage={latestSelectedTaskChatMessage}
-										streamedClineChatMessages={selectedTaskChatMessages}
-										onMoveToTrash={handleMoveToTrash}
-										isMoveToTrashLoading={
-											moveToTrashLoadingById[selectedCardRenderedInFocusView.card.id] ?? false
-										}
-										onMoveToValidation={handleMoveSelectedCardToValidation}
-										gitHistoryPanel={
-											isGitHistoryOpen ? (
-												<GitHistoryView workspaceId={currentProjectId} gitHistory={gitHistory} />
-											) : undefined
-										}
-										onCloseGitHistory={handleCloseGitHistory}
-										bottomTerminalOpen={isDetailTerminalOpen}
-										bottomTerminalTaskId={detailTerminalTaskId}
-										bottomTerminalSummary={detailTerminalSummary}
-										bottomTerminalSubtitle={detailTerminalSubtitle}
-										onBottomTerminalClose={closeDetailTerminal}
-										onBottomTerminalCollapse={collapseDetailTerminal}
-										bottomTerminalPaneHeight={detailTerminalPaneHeight}
-										onBottomTerminalPaneHeightChange={setDetailTerminalPaneHeight}
-										onBottomTerminalConnectionReady={markTerminalConnectionReady}
-										bottomTerminalAgentCommand={agentCommand}
-										onBottomTerminalSendAgentCommand={handleSendAgentCommandToDetailTerminal}
-										isBottomTerminalExpanded={isDetailTerminalExpanded}
-										onBottomTerminalToggleExpand={handleToggleExpandDetailTerminal}
-										isDocumentVisible={isDocumentVisible}
-										onClineSettingsSaved={refreshRuntimeProjectConfig}
-										onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
-									/>
-								</div>
-							) : null}
-							{/* 同一覆盖层级按 DOM 顺序绘制，通知须覆盖手机首页终端。 */}
-							<CodexConfigurationSyncNotice
-								notice={codexConfigurationNotice}
-								onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
-							/>
+							)}
 						</div>
-					</div>
-					<TaskProjectAssignmentPreflightHost />
-					<RuntimeSettingsDialog
-						open={isSettingsOpen}
-						workspaceId={settingsWorkspaceId}
-						initialConfig={settingsRuntimeProjectConfig}
-						liveMcpAuthStatuses={latestMcpAuthStatuses}
-						initialSection={settingsInitialSection}
-						onOpenChange={(nextOpen) => {
-							setIsSettingsOpen(nextOpen);
-							if (!nextOpen) {
-								setSettingsInitialSection(null);
-							}
-						}}
-						onSaved={() => {
-							refreshRuntimeProjectConfig();
-							refreshSettingsRuntimeProjectConfig();
-						}}
-						onAccountSwitched={refreshKanbanAccess}
-					/>
-					<DebugDialog
-						open={isDebugDialogOpen}
-						onOpenChange={handleDebugDialogOpenChange}
-						isResetAllStatePending={isResetAllStatePending}
-						onShowStartupOnboardingDialog={handleShowStartupOnboardingDialog}
-						onResetAllState={handleResetAllState}
-					/>
-					<TaskEditorDialog
-						suspendedTaskEditorTitle={suspendedTaskEditorTitle}
-						onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
-						open={
-							!projects.some(
-								(project) =>
-									project.id === taskEditorSessionWorkspaceId && project.availability.status === "unavailable",
-							) &&
-							(isInlineTaskCreateOpen || editingTaskId !== null)
-						}
-						onOpenChange={handleCreateDialogOpenChange}
-						taskEditorMode={editingTaskId ? "edit" : "create"}
-						creatingTaskName={newTaskName}
-						onCreatingTaskNameChange={setNewTaskName}
-						editorSessionWorkspaceId={taskEditorSessionWorkspaceId}
-						editingTaskName={editTaskName}
-						onEditingTaskNameChange={setEditTaskName}
-						editingTaskId={editingTaskId}
-						editTaskFormSeededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
-						onRevertEditTaskFormToSavedTaskContent={handleRevertEditTaskFormToSavedTaskContent}
-						onAdoptPromotedTaskEditDraft={handleAdoptPromotedTaskEditDraft}
-						prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
-						onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
-						images={editingTaskId ? editTaskImages : newTaskImages}
-						onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
-						onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
-						onTaskCreationCardPersisted={handleTaskEditorCreationCardPersisted}
-						onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
-						onCreateAndStart={
-							editingTaskId
-								? (options) => {
-										// options 必须原样转交：里面携带对话框本地草稿的 promptOverride，
-										// 丢掉它会让「保存并启动」写回上一次上抛的旧文本。
-										handleSaveAndStartEditedTask(options);
-										return editingTaskId;
+						{isFocusViewCrossProjectTaskOpenInTransit ? (
+							<div className="absolute inset-0 flex min-h-0 min-w-0">
+								<FocusViewCrossProjectTaskOpenInTransitShell
+									isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
+									host={crossProjectRecentlyActiveTaskSwitcherHost}
+									targetProjectName={crossProjectTaskOpenInTransitTarget?.projectName ?? null}
+									targetTaskTitle={crossProjectTaskOpenInTransitTarget?.taskTitle ?? null}
+									onCancel={cancelPendingCrossProjectTaskOpenReturningToOriginTask}
+								/>
+							</div>
+						) : taskLookupWorkbench.isOpen && (!selectedCardRenderedInFocusView || !detailSession) ? (
+							<div className="absolute inset-0 flex min-h-0 min-w-0">{taskLookupWorkbenchContent}</div>
+						) : selectedCardRenderedInFocusView && detailSession ? (
+							<div className="absolute inset-0 flex min-h-0 min-w-0">
+								<CardDetailView
+									isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
+									isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
+									onFocusViewWorkbenchSidebarHiddenChange={
+										sidebarVisibility.setFocusViewWorkbenchSidebarHidden
 									}
-								: taskCreationTargetOtherProjectWorkspaceId
-									? handleCreateAndStartTaskInOtherProject
-									: handleCreateAndStartTask
-						}
-						onCreateStartAndOpen={
-							editingTaskId
-								? () => editingTaskId
-								: taskCreationTargetOtherProjectWorkspaceId
-									? handleCreateStartAndOpenTaskInOtherProject
-									: handleCreateStartAndOpenTask
-						}
-						onCreateMultiple={handleCreateTasks}
-						onCreateAndStartMultiple={
-							taskCreationTargetOtherProjectWorkspaceId
-								? handleCreateAndStartTasksInOtherProject
-								: handleCreateAndStartTasks
-						}
-						startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
-						onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
-						codexConfigurationPermissionSelectionSource={
-							editingTaskId
-								? editTaskCodexConfigurationPermissionSelectionSource
-								: newTaskCodexConfigurationPermissionSelectionSource
-						}
-						onCodexConfigurationPermissionSelectionSourceChange={
-							editingTaskId
-								? setEditTaskCodexConfigurationPermissionSelectionSource
-								: setNewTaskCodexConfigurationPermissionSelectionSource
-						}
-						codexReasoningEffortOverride={
-							editingTaskId ? editTaskCodexReasoningEffortOverride : newTaskCodexReasoningEffortOverride
-						}
-						onCodexReasoningEffortOverrideChange={
-							editingTaskId ? setEditTaskCodexReasoningEffortOverride : setNewTaskCodexReasoningEffortOverride
-						}
-						codexConfigurationProfileId={
-							editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
-						}
-						onCodexConfigurationProfileIdChange={
-							editingTaskId ? setEditTaskCodexConfigurationProfileId : setNewTaskCodexConfigurationProfileId
-						}
-						taskAgentPermissionMode={editingTaskId ? editTaskAgentPermissionMode : newTaskAgentPermissionMode}
-						onTaskAgentPermissionModeChange={
-							editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
-						}
-						taskConversationMode={editingTaskId ? editTaskConversationMode : newTaskConversationMode}
-						onTaskConversationModeChange={
-							editingTaskId ? setEditTaskConversationMode : setNewTaskConversationMode
-						}
-						startInPlanModeDisabled={
-							editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
-						}
-						autoReviewEnabled={editingTaskId ? editTaskAutoReviewEnabled : newTaskAutoReviewEnabled}
-						onAutoReviewEnabledChange={editingTaskId ? setEditTaskAutoReviewEnabled : setNewTaskAutoReviewEnabled}
-						autoReviewMode={editingTaskId ? editTaskAutoReviewMode : newTaskAutoReviewMode}
-						onAutoReviewModeChange={editingTaskId ? setEditTaskAutoReviewMode : setNewTaskAutoReviewMode}
-						// 编辑其他项目的卡（All projects 面板原地编辑）时，@file 搜索、会话起步列表、分支都按那个项目取。
-						workspaceId={editingTaskId ? editTaskWorkspaceId : taskCreationTargetWorkspaceId}
-						branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
-						branchOptions={
-							editingTaskId ? editTaskBranchOptionsForEditTarget : createTaskBranchOptionsForCreationTarget
-						}
-						onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
-						taskCreateBaseRefRememberedForCurrentProject={
-							taskCreationTargetOtherProjectWorkspaceId
-								? rememberedTaskCreateBaseRefForCreationTargetOtherProject
-								: rememberedTaskCreateBaseRefForCurrentProject
-						}
-						repositoryDefaultBranchRef={
-							taskCreationTargetOtherProjectWorkspaceId
-								? repositoryDefaultBranchRefOfCreationTargetOtherProject
-								: (workspaceGit?.defaultBranch ?? null)
-						}
-						rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists={
-							taskCreationTargetOtherProjectWorkspaceId
-								? null
-								: rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists
-						}
-						resolvedDefaultTaskCreateBaseRef={resolvedDefaultCreateTaskBranchRefForCreationTarget}
-						taskCreationTargetProjectField={taskCreationTargetProjectFieldOfTaskEditorDialog}
-						postDeployVerificationFollowUpTaskCreationDraftSeed={
-							postDeployVerificationFollowUpTaskCreationDraftSeed
-						}
-						worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
-						onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
-						agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
-						onAgentIdChange={editingTaskId ? setEditTaskAgentId : setNewTaskAgentId}
-						clineSettings={editingTaskId ? editTaskClineSettings : newTaskClineSettings}
-						onClineSettingsChange={editingTaskId ? setEditTaskClineSettings : setNewTaskClineSettings}
-						terminalAgentModelOverrideSettings={
-							editingTaskId
-								? editTaskTerminalAgentModelOverrideSettings
-								: newTaskTerminalAgentModelOverrideSettings
-						}
-						onTerminalAgentModelOverrideSettingsChange={
-							editingTaskId
-								? setEditTaskTerminalAgentModelOverrideSettings
-								: setNewTaskTerminalAgentModelOverrideSettings
-						}
-						taskAgentSessionInitialization={
-							editingTaskId ? editTaskAgentSessionInitialization : newTaskAgentSessionInitialization
-						}
-						onTaskAgentSessionInitializationChange={
-							editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
-						}
-						agents={runtimeProjectConfig?.agents ?? []}
-						defaultAgentId={taskEditorDefaultAgentId}
-						defaultProviderId={defaultTaskClineProviderId}
-						defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-						defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
-					/>
-					<ClearTrashDialog
-						open={isClearTrashDialogOpen}
-						taskCount={trashTaskCount}
-						onCancel={() => setIsClearTrashDialogOpen(false)}
-						onConfirm={handleConfirmClearTrash}
-					/>
-					<DeleteTaskDialog
-						task={deleteTaskTarget}
-						onCancel={handleCancelDeleteTask}
-						onConfirm={handleConfirmDeleteTask}
-					/>
-					<TaskPinboardPinReasonDialog
-						request={taskPinboardPinReasonRequest}
-						onCancel={handleCancelTaskPinboardPinReason}
-						onConfirm={handleConfirmTaskPinboardPinReason}
-					/>
-					<StartupOnboardingDialog
-						open={isStartupOnboardingDialogOpen}
-						onClose={handleCloseStartupOnboardingDialog}
-						selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
-						agents={runtimeProjectConfig?.agents ?? []}
-						clineProviderSettings={runtimeProjectConfig?.clineProviderSettings ?? null}
-						workspaceId={currentProjectId}
-						runtimeConfig={runtimeProjectConfig ?? null}
-						onSelectAgent={handleSelectOnboardingAgent}
-						onClineSetupSaved={handleOnboardingClineSetupSaved}
-					/>
-
-					<AddProjectDialog
-						open={isAddProjectDialogOpen}
-						onOpenChange={setIsAddProjectDialogOpen}
-						onProjectAdded={handleAddProjectSuccess}
-						currentProjectId={currentProjectId}
-						initialGitInitPath={pendingNativeGitInitPath}
-					/>
-
-					<UpdateNotificationController />
-
-					<PostDeployVerificationTaskClosureFormHost />
-					<TaskCommentBeforeMoveIntoDoneDialog
-						controller={taskCommentBeforeMoveIntoDone}
-						onSubmit={confirmTaskCommentBeforeMoveIntoDone}
-					/>
-					<SkipValidationConfirmDialog
-						open={isMoveToDoneConfirmOpen}
-						onCancel={cancelMoveToDone}
-						onConfirm={confirmMoveToDone}
-					/>
-					{currentProjectId && postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone ? (
-						<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace
-							key={`board-move-into-done:${postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}`}
-							workspaceId={currentProjectId}
-							taskId={postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}
-							board={displayedBoard}
-							verification={
-								postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ===
-								currentProjectId
-									? postDeployVerification
-									: undefined
-							}
-							runtimeRejectionRevision={
-								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest
-									.runtimeRejectionRevision
-							}
-							realTaskCardRenderingInputs={{
-								realTaskCardRenderingInputsBoardSourceKind: "current_project_board_hydrated_in_browser",
-								currentProjectTaskSessions: sessions,
-								currentProjectWorkspacePath: workspacePath ?? null,
-								currentProjectTaskCardActionHandlers: {
-									onMoveToTrashTask: handleMoveReviewCardToTrash,
-									onStartTask: handleStartTaskFromBoard,
-									onMoveToValidationTask: handleMoveCardToValidation,
-									onMoveToReviewTask: handleMoveCardToReview,
-									onRestoreFromTrashTask: handleRestoreTaskFromTrash,
-								},
-								onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
-								defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
-								defaultClineModelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
-							}}
-							onSelectTask={() =>
-								setSelectedTaskId(
-									postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId,
-								)
-							}
-							onNavigateToBoard={() => setSelectedTaskId(null)}
-							onRequestTaskCommentBeforeMovingIntoDone={() => {
-								const taskId =
-									postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId;
-								cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone();
-								handleMoveReviewCardToTrash(taskId, { requestTaskCommentBeforeMovingIntoDone: true });
-							}}
-							isSubmittingClosure={isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting}
-							onCancel={cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone}
-							onConfirmClosureRequestsBySelectedTaskId={
-								confirmPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone
-							}
+									isDiffExpanded={isFocusViewDiffExpanded}
+									onDiffExpandedChange={setIsFocusViewDiffExpanded}
+									taskLookupWorkbenchContent={taskLookupWorkbenchContent}
+									onOpenPermanentlyDeletedTaskHistory={openPermanentlyDeletedTaskHistory}
+									mobileFocusViewControls={mobileFocusViewControls}
+									onBackToBoard={handleBackFromFocusView}
+									selection={selectedCardRenderedInFocusView}
+									currentProjectId={currentProjectId}
+									taskIdsOnBoard={taskIdsOnBoard}
+									workspacePath={workspacePath}
+									resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
+									selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+									runtimeConfig={runtimeProjectConfig ?? null}
+									sessionSummary={detailSession}
+									taskSessions={sessions}
+									taskChatMessagesByTaskId={taskChatMessagesByTaskId}
+									exploratoryFindings={exploratoryFindingsData.findings}
+									explorationThreadGraph={explorationThreadGraphData}
+									runtimeStreamSnapshotGeneration={streamSnapshotGeneration}
+									isTaskChangesSidebarOpen={isTaskChangesSidebarOpen}
+									onCreateTaskConversationSession={async (input) =>
+										await createTaskConversationSession({
+											task: selectedCardRenderedInFocusView.card,
+											...input,
+										})
+									}
+									onSessionSummary={upsertSession}
+									onCardSelect={handleCardSelect}
+									onTaskDragEnd={handleDetailTaskDragEnd}
+									onCreateTask={handleOpenCreateTask}
+									onStartTask={handleStartTaskFromBoard}
+									onRequestStartAllReadyBacklogTasks={requestStartAllReadyBacklogTasksConfirmation}
+									onClearTrash={handleOpenClearTrash}
+									onEditTask={handleOpenEditTaskKeepingDetailSelection}
+									onSaveTaskTitle={handleSaveTaskTitle}
+									onAgentCommitTask={handleAgentCommitTask}
+									onAgentOpenPrTask={handleAgentOpenPrTask}
+									agentCommitTaskLoadingById={agentCommitTaskLoadingById}
+									agentOpenPrTaskLoadingById={agentOpenPrTaskLoadingById}
+									moveToTrashLoadingById={moveToTrashLoadingById}
+									onMoveReviewCardToTrash={handleMoveReviewCardToTrash}
+									onMoveReviewCardToValidation={handleMoveCardToValidation}
+									onMoveCardToReview={handleMoveCardToReview}
+									moveToReviewLoadingById={moveToReviewLoadingById}
+									onRestoreTaskFromTrash={handleRestoreTaskFromTrash}
+									onStartFreshTaskSessionWithOriginalPrompt={handleStartFreshTaskSessionWithOriginalPrompt}
+									onDeleteTask={handleOpenDeleteTask}
+									onCancelAutomaticTaskAction={handleCancelAutomaticTaskAction}
+									onRequestPinToTaskPinboard={handleRequestPinTaskToTaskPinboard}
+									onUnpinFromTaskPinboard={handleUnpinTaskFromTaskPinboard}
+									onSetTaskShelvingState={handleSetTaskShelvingState}
+									onEditTaskPinboardPinReason={handleRequestEditTaskPinboardPinReason}
+									onAddReviewComments={(taskId: string, text: string) => {
+										void handleAddReviewComments(taskId, text);
+									}}
+									onSendReviewComments={(taskId: string, text: string) => {
+										void handleSendReviewComments(taskId, text);
+									}}
+									onSendClineChatMessage={sendTaskChatMessage}
+									onCancelClineChatTurn={cancelTaskChatTurn}
+									onResolveTaskAgentUserDecision={resolveTaskAgentUserDecision}
+									onLoadClineChatMessages={fetchTaskChatMessages}
+									latestClineChatMessage={latestSelectedTaskChatMessage}
+									streamedClineChatMessages={selectedTaskChatMessages}
+									onMoveToTrash={handleMoveToTrash}
+									isMoveToTrashLoading={
+										moveToTrashLoadingById[selectedCardRenderedInFocusView.card.id] ?? false
+									}
+									onMoveToValidation={handleMoveSelectedCardToValidation}
+									gitHistoryPanel={
+										isGitHistoryOpen ? (
+											<GitHistoryView workspaceId={currentProjectId} gitHistory={gitHistory} />
+										) : undefined
+									}
+									onCloseGitHistory={handleCloseGitHistory}
+									bottomTerminalOpen={isDetailTerminalOpen}
+									bottomTerminalTaskId={detailTerminalTaskId}
+									bottomTerminalSummary={detailTerminalSummary}
+									bottomTerminalSubtitle={detailTerminalSubtitle}
+									onBottomTerminalClose={closeDetailTerminal}
+									onBottomTerminalCollapse={collapseDetailTerminal}
+									bottomTerminalPaneHeight={detailTerminalPaneHeight}
+									onBottomTerminalPaneHeightChange={setDetailTerminalPaneHeight}
+									onBottomTerminalConnectionReady={markTerminalConnectionReady}
+									bottomTerminalAgentCommand={agentCommand}
+									onBottomTerminalSendAgentCommand={handleSendAgentCommandToDetailTerminal}
+									isBottomTerminalExpanded={isDetailTerminalExpanded}
+									onBottomTerminalToggleExpand={handleToggleExpandDetailTerminal}
+									isDocumentVisible={isDocumentVisible}
+									onClineSettingsSaved={refreshRuntimeProjectConfig}
+									onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
+								/>
+							</div>
+						) : null}
+						{/* 同一覆盖层级按 DOM 顺序绘制，通知须覆盖手机首页终端。 */}
+						<CodexConfigurationSyncNotice
+							notice={codexConfigurationNotice}
+							onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
 						/>
-					) : null}
-
-					{otherProjectTaskCardActionHandlers.otherProjectTaskCardActionConfirmationDialogs}
-					<TaskSpotlightSearchDialog
-						controller={taskSpotlightSearch}
-						onAskTaskLookupAgent={(questionText) => {
-							const filters = taskSpotlightSearch.filterSelection;
-							taskLookupWorkbench.open({
-								questionText,
-								scope: {
-									projectIds: filters.selectedProjectIds.size
-										? [...filters.selectedProjectIds]
-										: taskSpotlightSearch.includeOtherProjects
-											? []
-											: currentProjectId
-												? [currentProjectId]
-												: [],
-									columnIds: [...filters.selectedStageColumnIds],
-								},
-							});
-							taskSpotlightSearch.close();
-						}}
-					/>
-					{permanentlyDeletedTaskHistoryScope ? (
-						<PermanentlyDeletedTaskHistoryDialog
-							defaultWorkspaceId={permanentlyDeletedTaskHistoryScope.workspaceId}
-							currentProjectId={currentProjectId}
-							projects={projects}
-							onClose={() => setPermanentlyDeletedTaskHistoryScope(null)}
-						/>
-					) : null}
-
-					<StartAllReadyBacklogTasksConfirmDialog
-						tasks={pendingStartAllReadyBacklogTaskCards}
-						onCancel={cancelStartAllReadyBacklogTasksConfirmation}
-						onConfirm={confirmStartAllReadyBacklogTasks}
-					/>
-
-					<AlertDialog
-						open={gitActionError !== null}
-						onOpenChange={(open) => {
-							if (!open) {
-								clearGitActionError();
-							}
-						}}
-					>
-						<AlertDialogHeader>
-							<AlertDialogTitle>{gitActionErrorTitle}</AlertDialogTitle>
-						</AlertDialogHeader>
-						<AlertDialogBody>
-							<p>{gitActionError?.message}</p>
-							{gitActionError?.output ? (
-								<pre className="max-h-[220px] overflow-auto rounded-md bg-surface-0 p-3 font-mono text-xs text-text-secondary whitespace-pre-wrap">
-									{gitActionError.output}
-								</pre>
-							) : null}
-						</AlertDialogBody>
-						<AlertDialogFooter className="justify-end">
-							<AlertDialogAction asChild>
-								<Button variant="default" onClick={clearGitActionError}>
-									Close
-								</Button>
-							</AlertDialogAction>
-						</AlertDialogFooter>
-					</AlertDialog>
-
-					{/* 面板该读的 board 还没到（快照未读到）时不挂，免得条目全显示「已从看板删除」；换绑 workspace 时重挂，
-					    丢掉上一个 workspace 的在途完成流程。 */}
-					{boardShownInPostDeployVerificationPanel ? (
-						<PostDeployVerificationController
-							key={
-								postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ??
-								"no-post-deploy-verification-workspace"
-							}
-							verification={postDeployVerification}
-							entryNavigationRequest={postDeployVerificationEntryNavigation.entryNavigationRequest}
-							onEntryNavigationFinished={postDeployVerificationEntryNavigation.finishNavigation}
-							board={boardShownInPostDeployVerificationPanel}
-							completePostDeployVerificationMoveToDone={
-								completePostDeployVerificationMoveToDoneForPanelBoardSource
-							}
-							onSelectTask={onSelectTaskInPostDeployVerificationPanel}
-							onNavigateToBoard={() => setSelectedTaskId(null)}
-							onCreateFollowUpTaskFromChecklistItems={
-								handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems
-							}
-							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
-								realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
-							}
-							isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
-								taskCommentBeforeMoveIntoDone.request !== null ||
-								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
-								isMoveToDoneConfirmOpen ||
-								deleteTaskTarget !== null ||
-								taskPinboardPinReasonRequest !== null ||
-								editingTaskId !== null ||
-								isInlineTaskCreateOpen
-							}
-							postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
-								postDeployVerificationWorkspaceProjectNameShownInPanelHeader
-							}
-						/>
-					) : null}
+					</div>
 				</div>
-			</LayoutCustomizationsProvider>
-		</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+				<TaskProjectAssignmentPreflightHost />
+				<RuntimeSettingsDialog
+					open={isSettingsOpen}
+					workspaceId={settingsWorkspaceId}
+					initialConfig={settingsRuntimeProjectConfig}
+					liveMcpAuthStatuses={latestMcpAuthStatuses}
+					initialSection={settingsInitialSection}
+					openingRequestSequence={settingsOpeningRequestSequence}
+					onOpenChange={(nextOpen) => {
+						setIsSettingsOpen(nextOpen);
+						if (!nextOpen) {
+							setSettingsInitialSection(null);
+						}
+					}}
+					onSaved={() => {
+						refreshRuntimeProjectConfig();
+						refreshSettingsRuntimeProjectConfig();
+					}}
+					onAccountSwitched={refreshKanbanAccess}
+				/>
+				<DebugDialog
+					open={isDebugDialogOpen}
+					onOpenChange={handleDebugDialogOpenChange}
+					isResetAllStatePending={isResetAllStatePending}
+					onShowStartupOnboardingDialog={handleShowStartupOnboardingDialog}
+					onResetAllState={handleResetAllState}
+				/>
+				<TaskEditorDialog
+					codexReasoningEffortOverride={
+						editingTaskId ? editTaskCodexReasoningEffortOverride : newTaskCodexReasoningEffortOverride
+					}
+					onCodexReasoningEffortOverrideChange={
+						editingTaskId ? setEditTaskCodexReasoningEffortOverride : setNewTaskCodexReasoningEffortOverride
+					}
+					editingTaskSnapshot={editingTaskSnapshot}
+					openingRequestIdentity={taskEditorOpeningRequestIdentity}
+					ompAgentSessionTransportForNewTasks={runtimeProjectConfig?.ompAgentSessionTransportForNewTasks}
+					suspendedTaskEditorTitle={suspendedTaskEditorTitle}
+					onResumeSuspendedTaskEditor={handleResumeSuspendedTaskEditor}
+					open={
+						!projects.some(
+							(project) =>
+								project.id === taskEditorSessionWorkspaceId && project.availability.status === "unavailable",
+						) &&
+						(isInlineTaskCreateOpen || editingTaskId !== null)
+					}
+					onOpenChange={handleCreateDialogOpenChange}
+					taskEditorMode={editingTaskId ? "edit" : "create"}
+					creatingTaskName={newTaskName}
+					onCreatingTaskNameChange={setNewTaskName}
+					editorSessionWorkspaceId={taskEditorSessionWorkspaceId}
+					editingTaskName={editTaskName}
+					onEditingTaskNameChange={setEditTaskName}
+					editingTaskId={editingTaskId}
+					editTaskFormSeededFromSavedDraftAt={editTaskFormSeededFromSavedDraftAt}
+					onRevertEditTaskFormToSavedTaskContent={handleRevertEditTaskFormToSavedTaskContent}
+					onAdoptPromotedTaskEditDraft={handleAdoptPromotedTaskEditDraft}
+					prompt={editingTaskId ? editTaskPrompt : newTaskPrompt}
+					onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
+					images={editingTaskId ? editTaskImages : newTaskImages}
+					onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
+					onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
+					onTaskCreationCardPersisted={handleTaskEditorCreationCardPersisted}
+					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
+					onCreateAndStart={
+						editingTaskId
+							? (options) => {
+									// options 必须原样转交：里面携带对话框本地草稿的 promptOverride，
+									// 丢掉它会让「保存并启动」写回上一次上抛的旧文本。
+									handleSaveAndStartEditedTask(options);
+									return editingTaskId;
+								}
+							: taskCreationTargetOtherProjectWorkspaceId
+								? handleCreateAndStartTaskInOtherProject
+								: handleCreateAndStartTask
+					}
+					onCreateStartAndOpen={
+						editingTaskId
+							? () => editingTaskId
+							: taskCreationTargetOtherProjectWorkspaceId
+								? handleCreateStartAndOpenTaskInOtherProject
+								: handleCreateStartAndOpenTask
+					}
+					onCreateMultiple={handleCreateTasks}
+					onCreateAndStartMultiple={
+						taskCreationTargetOtherProjectWorkspaceId
+							? handleCreateAndStartTasksInOtherProject
+							: handleCreateAndStartTasks
+					}
+					startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
+					onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
+					codexConfigurationPermissionSelectionSource={
+						editingTaskId
+							? editTaskCodexConfigurationPermissionSelectionSource
+							: newTaskCodexConfigurationPermissionSelectionSource
+					}
+					onCodexConfigurationPermissionSelectionSourceChange={
+						editingTaskId
+							? setEditTaskCodexConfigurationPermissionSelectionSource
+							: setNewTaskCodexConfigurationPermissionSelectionSource
+					}
+					codexConfigurationProfileId={
+						editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
+					}
+					onCodexConfigurationProfileIdChange={
+						editingTaskId ? setEditTaskCodexConfigurationProfileId : setNewTaskCodexConfigurationProfileId
+					}
+					taskAgentPermissionMode={editingTaskId ? editTaskAgentPermissionMode : newTaskAgentPermissionMode}
+					onTaskAgentPermissionModeChange={
+						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode
+					}
+					taskConversationMode={editingTaskId ? editTaskConversationMode : newTaskConversationMode}
+					onTaskConversationModeChange={editingTaskId ? setEditTaskConversationMode : setNewTaskConversationMode}
+					startInPlanModeDisabled={
+						editingTaskId ? isEditTaskStartInPlanModeDisabled : isNewTaskStartInPlanModeDisabled
+					}
+					autoReviewEnabled={editingTaskId ? editTaskAutoReviewEnabled : newTaskAutoReviewEnabled}
+					onAutoReviewEnabledChange={editingTaskId ? setEditTaskAutoReviewEnabled : setNewTaskAutoReviewEnabled}
+					autoReviewMode={editingTaskId ? editTaskAutoReviewMode : newTaskAutoReviewMode}
+					onAutoReviewModeChange={editingTaskId ? setEditTaskAutoReviewMode : setNewTaskAutoReviewMode}
+					// 编辑其他项目的卡（All projects 面板原地编辑）时，@file 搜索、会话起步列表、分支都按那个项目取。
+					workspaceId={editingTaskId ? editTaskWorkspaceId : taskCreationTargetWorkspaceId}
+					branchRef={editingTaskId ? editTaskBranchRef : newTaskBranchRef}
+					branchOptions={
+						editingTaskId ? editTaskBranchOptionsForEditTarget : createTaskBranchOptionsForCreationTarget
+					}
+					onBranchRefChange={editingTaskId ? setEditTaskBranchRef : setNewTaskBranchRef}
+					taskCreateBaseRefRememberedForCurrentProject={
+						taskCreationTargetOtherProjectWorkspaceId
+							? rememberedTaskCreateBaseRefForCreationTargetOtherProject
+							: rememberedTaskCreateBaseRefForCurrentProject
+					}
+					repositoryDefaultBranchRef={
+						taskCreationTargetOtherProjectWorkspaceId
+							? repositoryDefaultBranchRefOfCreationTargetOtherProject
+							: (workspaceGit?.defaultBranch ?? null)
+					}
+					rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists={
+						taskCreationTargetOtherProjectWorkspaceId
+							? null
+							: rememberedTaskCreateBaseRefDiscardedBecauseBranchNoLongerExists
+					}
+					resolvedDefaultTaskCreateBaseRef={resolvedDefaultCreateTaskBranchRefForCreationTarget}
+					taskCreationTargetProjectField={taskCreationTargetProjectFieldOfTaskEditorDialog}
+					postDeployVerificationFollowUpTaskCreationDraftSeed={postDeployVerificationFollowUpTaskCreationDraftSeed}
+					worktreeMode={editingTaskId ? editTaskWorktreeMode : newTaskWorktreeMode}
+					onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
+					agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
+					onAgentIdChange={editingTaskId ? setEditTaskAgentId : setNewTaskAgentId}
+					clineSettings={editingTaskId ? editTaskClineSettings : newTaskClineSettings}
+					onClineSettingsChange={editingTaskId ? setEditTaskClineSettings : setNewTaskClineSettings}
+					terminalAgentModelOverrideSettings={
+						editingTaskId ? editTaskTerminalAgentModelOverrideSettings : newTaskTerminalAgentModelOverrideSettings
+					}
+					onTerminalAgentModelOverrideSettingsChange={
+						editingTaskId
+							? setEditTaskTerminalAgentModelOverrideSettings
+							: setNewTaskTerminalAgentModelOverrideSettings
+					}
+					taskAgentSessionInitialization={
+						editingTaskId ? editTaskAgentSessionInitialization : newTaskAgentSessionInitialization
+					}
+					onTaskAgentSessionInitializationChange={
+						editingTaskId ? setEditTaskAgentSessionInitialization : setNewTaskAgentSessionInitialization
+					}
+					agents={runtimeProjectConfig?.agents ?? []}
+					defaultAgentId={taskEditorDefaultAgentId}
+					defaultProviderId={defaultTaskClineProviderId}
+					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
+					defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
+				/>
+				<ClearTrashDialog
+					open={isClearTrashDialogOpen}
+					taskCount={trashTaskCount}
+					onCancel={() => setIsClearTrashDialogOpen(false)}
+					onConfirm={handleConfirmClearTrash}
+				/>
+				<DeleteTaskDialog
+					task={deleteTaskTarget}
+					onCancel={handleCancelDeleteTask}
+					onConfirm={handleConfirmDeleteTask}
+				/>
+				<TaskPinboardPinReasonDialog
+					request={taskPinboardPinReasonRequest}
+					onCancel={handleCancelTaskPinboardPinReason}
+					onConfirm={handleConfirmTaskPinboardPinReason}
+				/>
+				<StartupOnboardingDialog
+					open={isStartupOnboardingDialogOpen}
+					onClose={handleCloseStartupOnboardingDialog}
+					selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
+					agents={runtimeProjectConfig?.agents ?? []}
+					clineProviderSettings={runtimeProjectConfig?.clineProviderSettings ?? null}
+					workspaceId={currentProjectId}
+					runtimeConfig={runtimeProjectConfig ?? null}
+					onSelectAgent={handleSelectOnboardingAgent}
+					onClineSetupSaved={handleOnboardingClineSetupSaved}
+				/>
+
+				<AddProjectDialog
+					openingRequestSequence={addProjectOpeningRequestSequence}
+					open={isAddProjectDialogOpen}
+					onOpenChange={setIsAddProjectDialogOpen}
+					onProjectAdded={handleAddProjectSuccess}
+					currentProjectId={currentProjectId}
+					initialGitInitPath={pendingNativeGitInitPath}
+				/>
+
+				<UpdateNotificationController />
+
+				<TaskCommentBeforeMoveIntoDoneDialog
+					controller={taskCommentBeforeMoveIntoDone}
+					onSubmit={confirmTaskCommentBeforeMoveIntoDone}
+				/>
+				<SkipValidationConfirmDialog
+					open={isMoveToDoneConfirmOpen}
+					onCancel={cancelMoveToDone}
+					onConfirm={confirmMoveToDone}
+				/>
+				{boardMoveIntoDoneReviewBinding && postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone ? (
+					<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace
+						openingRequestIdentity={boardMoveIntoDoneReviewRequest?.openingRequestIdentity}
+						key={`board-move-into-done:${postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}`}
+						onOpenTaskInProject={handleOpenTaskInProject}
+						taskCommentToAppendWhenMovingIntoDone={
+							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest
+								.taskCommentToAppendWhenMovingIntoDone
+						}
+						onNavigateToProjectBoard={navigateToProjectBoardForVerification}
+						insertAtIndexWithinDoneBoardColumn={
+							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest
+								.insertAtIndexWithinDoneBoardColumn
+						}
+						workspaceId={boardMoveIntoDoneReviewBinding.workspaceId}
+						taskId={postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId}
+						board={boardMoveIntoDoneReviewBinding.board}
+						verification={
+							postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ===
+							boardMoveIntoDoneReviewBinding.workspaceId
+								? postDeployVerification
+								: undefined
+						}
+						runtimeRejectionRevision={
+							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest
+								.runtimeRejectionRevision
+						}
+						realTaskCardRenderingInputs={{
+							realTaskCardRenderingInputsBoardSourceKind: "current_project_board_hydrated_in_browser",
+							currentProjectTaskSessions: sessions,
+							currentProjectWorkspacePath: workspacePath ?? null,
+							currentProjectTaskCardActionHandlers: {
+								onMoveToTrashTask: handleMoveReviewCardToTrash,
+								onStartTask: handleStartTaskFromBoard,
+								onMoveToValidationTask: handleMoveCardToValidation,
+								onMoveToReviewTask: handleMoveCardToReview,
+								onRestoreFromTrashTask: handleRestoreTaskFromTrash,
+							},
+							onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
+							defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
+							defaultClineModelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
+						}}
+						onSelectTask={() =>
+							setSelectedTaskId(
+								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId,
+							)
+						}
+						onNavigateToBoard={() => setSelectedTaskId(null)}
+						onRequestTaskCommentBeforeMovingIntoDone={() => {
+							const taskId =
+								postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone.dialogRequest.taskId;
+							cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone();
+							handleMoveReviewCardToTrash(taskId, { requestTaskCommentBeforeMovingIntoDone: true });
+						}}
+						isSubmittingClosure={isPostDeployVerificationDoneEntryClosureForBoardMoveIntoDoneSubmitting}
+						onCancel={cancelPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone}
+						onConfirmClosureRequestsBySelectedTaskId={
+							confirmPostDeployVerificationDoneEntryClosureForBoardMoveIntoDone
+						}
+					/>
+				) : null}
+
+				{otherProjectTaskCardActionHandlers.otherProjectTaskCardActionConfirmationDialogs}
+				<TaskSpotlightSearchDialog
+					controller={taskSpotlightSearch}
+					onAskTaskLookupAgent={(questionText) => {
+						const filters = taskSpotlightSearch.filterSelection;
+						taskLookupWorkbench.open({
+							questionText,
+							scope: {
+								projectIds: filters.selectedProjectIds.size
+									? [...filters.selectedProjectIds]
+									: taskSpotlightSearch.includeOtherProjects
+										? []
+										: currentProjectId
+											? [currentProjectId]
+											: [],
+								columnIds: [...filters.selectedStageColumnIds],
+							},
+						});
+						taskSpotlightSearch.close();
+					}}
+				/>
+				{permanentlyDeletedTaskHistoryScope ? (
+					<PermanentlyDeletedTaskHistoryDialog
+						defaultWorkspaceId={permanentlyDeletedTaskHistoryScope.workspaceId}
+						currentProjectId={currentProjectId}
+						projects={projects}
+						onClose={() => setPermanentlyDeletedTaskHistoryScope(null)}
+					/>
+				) : null}
+
+				<StartAllReadyBacklogTasksConfirmDialog
+					tasks={pendingStartAllReadyBacklogTaskCards}
+					onCancel={cancelStartAllReadyBacklogTasksConfirmation}
+					onConfirm={confirmStartAllReadyBacklogTasks}
+				/>
+
+				<AlertDialog
+					open={gitActionError !== null}
+					onOpenChange={(open) => {
+						if (!open) {
+							clearGitActionError();
+						}
+					}}
+				>
+					<AlertDialogHeader>
+						<AlertDialogTitle>{gitActionErrorTitle}</AlertDialogTitle>
+					</AlertDialogHeader>
+					<AlertDialogBody>
+						<p>{gitActionError?.message}</p>
+						{gitActionError?.output ? (
+							<pre className="max-h-[220px] overflow-auto rounded-md bg-surface-0 p-3 font-mono text-xs text-text-secondary whitespace-pre-wrap">
+								{gitActionError.output}
+							</pre>
+						) : null}
+					</AlertDialogBody>
+					<AlertDialogFooter className="justify-end">
+						<AlertDialogAction asChild>
+							<Button variant="default" onClick={clearGitActionError}>
+								Close
+							</Button>
+						</AlertDialogAction>
+					</AlertDialogFooter>
+				</AlertDialog>
+
+				{/* 面板该读的 board 还没到（快照未读到）时不挂，免得条目全显示「已从看板删除」；换绑 workspace 时重挂，
+					    丢掉上一个 workspace 的在途完成流程。 */}
+				{boardShownInPostDeployVerificationPanel ? (
+					<PostDeployVerificationController
+						key={
+							postDeployVerificationForBoardOrSingleProjectScope.postDeployVerificationWorkspaceId ??
+							"no-post-deploy-verification-workspace"
+						}
+						verification={postDeployVerification}
+						entryNavigationRequest={postDeployVerificationEntryNavigation.entryNavigationRequest}
+						onEntryNavigationFinished={postDeployVerificationEntryNavigation.finishNavigation}
+						board={boardShownInPostDeployVerificationPanel}
+						completePostDeployVerificationMoveToDone={completePostDeployVerificationMoveToDoneForPanelBoardSource}
+						onSelectTask={onSelectTaskInPostDeployVerificationPanel}
+						onNavigateToBoard={() => setSelectedTaskId(null)}
+						onCreateFollowUpTaskFromChecklistItems={
+							handleCreateFollowUpTaskFromPostDeployVerificationChecklistItems
+						}
+						realTaskCardRenderingInputsForPostDeployVerificationPanelEntries={
+							realTaskCardRenderingInputsForPostDeployVerificationPanelEntries
+						}
+						isBoardLevelDialogOpenThatMustCoverPostDeployVerificationPanel={
+							taskCommentBeforeMoveIntoDone.request !== null ||
+							postDeployVerificationDoneEntryClosureDialogForBoardMoveIntoDone !== null ||
+							isMoveToDoneConfirmOpen ||
+							deleteTaskTarget !== null ||
+							taskPinboardPinReasonRequest !== null ||
+							editingTaskId !== null ||
+							isInlineTaskCreateOpen
+						}
+						postDeployVerificationWorkspaceProjectNameShownInPanelHeader={
+							postDeployVerificationWorkspaceProjectNameShownInPanelHeader
+						}
+					/>
+				) : null}
+			</div>
+		</>
 	);
 	return (
 		<ProjectVisualIdentityProvider projects={projects}>
-			<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
-				<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
-					{renderedApplicationView}
-					<SideSessionCreationWorkbench />
-				</PostDeployVerificationEntryNavigationHostProvider>
-			</TaskCommentsDialogProvider>
+			<PostDeployVerificationEntryNavigationHostProvider value={postDeployVerificationEntryNavigationHost}>
+				<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider
+					value={crossProjectRecentlyActiveTaskSwitcherHost}
+				>
+					<LayoutCustomizationsProvider
+						onResetBottomTerminalLayoutCustomizations={resetBottomTerminalLayoutCustomizations}
+						onResetSidebarVisibilityLayoutCustomizations={() => {
+							sidebarVisibility.resetSidebarVisibilityLayoutCustomizations();
+							setIsFocusViewDiffExpanded(false);
+						}}
+					>
+						<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
+							<PostDeployVerificationTaskClosureFormHost />
+							<SideSessionCreationWorkbench />
+							{isRuntimeDisconnected ? (
+								<RuntimeDisconnectedFallback />
+							) : isKanbanAccessBlocked ? (
+								<KanbanAccessBlockedFallback />
+							) : (
+								renderedApplicationView
+							)}
+						</TaskCommentsDialogProvider>
+					</LayoutCustomizationsProvider>
+				</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
+			</PostDeployVerificationEntryNavigationHostProvider>
 		</ProjectVisualIdentityProvider>
 	);
 }

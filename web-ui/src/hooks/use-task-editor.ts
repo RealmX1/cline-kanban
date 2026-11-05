@@ -166,6 +166,7 @@ type SetTaskCreateTerminalAgentModelOverrideSettings = (
 ) => void;
 
 interface UseTaskEditorInput {
+	isTaskEditorOpeningRequestOnlyController?: boolean;
 	board: BoardData;
 	setBoard: Dispatch<SetStateAction<BoardData>>;
 	createTaskBranchOptions: Array<{ value: string; label: string }>;
@@ -224,6 +225,8 @@ async function backfillSuggestedTaskTitleWithRuntimeCompareAndSet(
 }
 
 export interface UseTaskEditorResult {
+	editingTaskSnapshot: BoardCard | null;
+	taskEditorOpeningRequestIdentity: symbol;
 	handleTaskEditorCreationCardPersisted: (workspaceId: string, card: BoardCard, suggestTitle: boolean) => void;
 	isInlineTaskCreateOpen: boolean;
 	taskEditorSessionWorkspaceId: string | null;
@@ -346,6 +349,7 @@ export interface UseTaskEditorResult {
 }
 
 export function useTaskEditor({
+	isTaskEditorOpeningRequestOnlyController = false,
 	board,
 	setBoard,
 	createTaskBranchOptions,
@@ -707,7 +711,7 @@ export function useTaskEditor({
 	// 只为让看板刷新时重新判定。本 effect 必须写在 findEditingTaskCardWithBoardColumn 声明之后：依赖数组在渲染时求值，
 	// 写在前面会撞 const 暂时性死区。
 	useEffect(() => {
-		if (!editingTaskId) {
+		if (isTaskEditorOpeningRequestOnlyController || !editingTaskId) {
 			return;
 		}
 		const preservedSubmission = preservedTaskEditorSubmissionRef.current;
@@ -739,6 +743,7 @@ export function useTaskEditor({
 			clearTaskEditDraft(editTaskWorkspaceId, editingTaskId);
 		}
 	}, [
+		isTaskEditorOpeningRequestOnlyController,
 		board,
 		editTaskWorkspaceId,
 		editingTaskId,
@@ -752,7 +757,7 @@ export function useTaskEditor({
 	// 同步 flush 读到过期 state」的问题；提交路径另有 `promptOverride` 显式交接。
 	useDebouncedEffect(
 		() => {
-			if (!editingTaskId) {
+			if (isTaskEditorOpeningRequestOnlyController || !editingTaskId) {
 				return;
 			}
 			const selection = findEditingTaskCardWithBoardColumn(editingTaskId);
@@ -792,6 +797,7 @@ export function useTaskEditor({
 		},
 		TASK_EDIT_DRAFT_PERSIST_DEBOUNCE_MS,
 		[
+			isTaskEditorOpeningRequestOnlyController,
 			editTaskWorkspaceId,
 			findEditingTaskCardWithBoardColumn,
 			editTaskAgentId,
@@ -830,6 +836,7 @@ export function useTaskEditor({
 
 	const suspendCurrentTaskEditDraft = useCallback(
 		(preserveCreationDraft = true) => {
+			if (isTaskEditorOpeningRequestOnlyController) return;
 			if (!editingTaskId && preserveCreationDraft && isInlineTaskCreateOpen)
 				setSuspendedTaskEditorSeed({
 					kind: "create",
@@ -871,6 +878,7 @@ export function useTaskEditor({
 			});
 		},
 		[
+			isTaskEditorOpeningRequestOnlyController,
 			editingTaskId,
 			editTaskWorkspaceId,
 			editTaskName,
@@ -1222,7 +1230,7 @@ export function useTaskEditor({
 	const handleCancelEditTask = useCallback(() => {
 		taskEditorSessionIdentityRef.current = Symbol("closed-task-editor-session");
 		preservedTaskEditorSubmissionRef.current = null;
-		if (editingTaskId) {
+		if (!isTaskEditorOpeningRequestOnlyController && editingTaskId) {
 			clearTaskEditDraft(editTaskWorkspaceId, editingTaskId);
 		}
 		setEditingTaskId(null);
@@ -1245,7 +1253,7 @@ export function useTaskEditor({
 		setEditTaskClineSettings(undefined);
 		setEditTaskTerminalAgentModelOverrideSettings(undefined);
 		setEditTaskAgentSessionInitialization(undefined);
-	}, [editTaskWorkspaceId, editingTaskId, setEditingTaskCardInOtherProject]);
+	}, [isTaskEditorOpeningRequestOnlyController, editTaskWorkspaceId, editingTaskId, setEditingTaskCardInOtherProject]);
 
 	// 编辑器保存走 taskCardAction（与行内改名、CLI `task update` 同一个服务端实现），只发改过的字段。对话框立即
 	// 关闭、overlay 让卡片立刻显示新值；命令没成功时把这次提交的内容存回草稿并提示，重新打开编辑器就能找回
@@ -2296,6 +2304,8 @@ export function useTaskEditor({
 	]);
 
 	return {
+		editingTaskSnapshot: editTaskCardTheFormWasSeededFromRef.current,
+		taskEditorOpeningRequestIdentity: taskEditorSessionIdentityRef.current,
 		suspendedTaskEditorTitle: suspendedTaskEditorSeed
 			? suspendedTaskEditorSeed.kind === "create"
 				? "新建任务草稿"

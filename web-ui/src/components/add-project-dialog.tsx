@@ -2,9 +2,11 @@ import { FolderOpen, GitBranch, Search } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import { DirectoryAutocomplete } from "@/components/directory-autocomplete";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
@@ -22,9 +24,10 @@ export interface AddProjectDialogProps {
 	currentProjectId: string | null;
 	/** When set, the dialog opens directly to the git-init confirmation for this absolute path. */
 	initialGitInitPath?: string | null;
+	openingRequestSequence?: number;
 }
 
-export function AddProjectDialog({
+function AddProjectDialogForm({
 	open,
 	onOpenChange,
 	onProjectAdded,
@@ -562,3 +565,19 @@ function CloneTabContent({
 		</form>
 	);
 }
+
+export const AddProjectDialog = hostNonModalFloatingForm(AddProjectDialogForm, {
+	formKind: "AddProjectDialog",
+	isOpen: (props) => props.open,
+	openingRequestIdentity: (props) => props.openingRequestSequence,
+	instanceIdentity: () => "add-project",
+	ownership: (props) => ({ workspaceId: props.currentProjectId }),
+	withClose: (props, close) => ({
+		...props,
+		open: true,
+		onOpenChange: (open) => {
+			if (!open) close();
+		},
+	}),
+	onClosed: (props) => props.onOpenChange(false),
+});

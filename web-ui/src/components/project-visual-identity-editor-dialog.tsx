@@ -6,7 +6,8 @@ import {
 	type ProjectVisualIdentity,
 	type SetProjectVisualIdentityRequest,
 } from "@runtime-project-visual-identity";
-import { type ChangeEvent, useRef, useState } from "react";
+import { type ChangeEvent, useId, useRef, useState } from "react";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import {
 	PROJECT_PRESET_ICON_CHINESE_NAMES,
 	PROJECT_PRESET_ICON_COMPONENTS,
@@ -15,7 +16,8 @@ import {
 } from "@/components/project-visual-identity";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
@@ -23,13 +25,15 @@ import {
 import { resetProjectVisualIdentity, saveProjectVisualIdentity } from "@/runtime/project-visual-identity-query";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 
-export function ProjectVisualIdentityEditorDialog({
+function ProjectVisualIdentityEditorDialogForm({
 	project,
 	onClose,
 }: {
 	project: RuntimeProjectSummary;
 	onClose: () => void;
+	openingRequestSequence?: number;
 }) {
+	const fieldIdPrefix = useId();
 	const defaultIdentity = getDefaultProjectVisualIdentity(project.id, project.name);
 	const [draft, setDraft] = useState<ProjectVisualIdentity>(project.visualIdentity ?? defaultIdentity);
 	const [pendingImageUpload, setPendingImageUpload] = useState<SetProjectVisualIdentityRequest["imageUpload"]>();
@@ -107,7 +111,7 @@ export function ProjectVisualIdentityEditorDialog({
 			onOpenChange={(open) => {
 				if (!open && !isSaving) onClose();
 			}}
-			contentAriaDescribedBy="project-icon-upload-guidance"
+			contentAriaDescribedBy={`${fieldIdPrefix}-upload-guidance`}
 		>
 			<DialogHeader title="编辑项目图标与颜色" />
 			<DialogBody className="space-y-4">
@@ -153,11 +157,11 @@ export function ProjectVisualIdentityEditorDialog({
 						</div>
 					</div>
 					<div className="space-y-2">
-						<label htmlFor="project-preset-icon-search" className="block text-sm text-text-primary">
+						<label htmlFor={`${fieldIdPrefix}-icon-search`} className="block text-sm text-text-primary">
 							预设图标
 						</label>
 						<input
-							id="project-preset-icon-search"
+							id={`${fieldIdPrefix}-icon-search`}
 							value={query}
 							onChange={(event) => setQuery(event.target.value)}
 							placeholder="搜索中文名称或英文标识符"
@@ -225,7 +229,7 @@ export function ProjectVisualIdentityEditorDialog({
 									? "替换图片"
 									: "上传图片"}
 						</Button>
-						<p id="project-icon-upload-guidance" className="text-xs text-text-secondary">
+						<p id={`${fieldIdPrefix}-upload-guidance`} className="text-xs text-text-secondary">
 							PNG、JPEG、WebP，最大 2 MiB，长宽各不超过 4096px。不支持动画。完整保留图案，等比例缩放并透明补边。
 						</p>
 					</div>
@@ -266,3 +270,13 @@ export function ProjectVisualIdentityEditorDialog({
 		</Dialog>
 	);
 }
+
+export const ProjectVisualIdentityEditorDialog = hostNonModalFloatingForm(ProjectVisualIdentityEditorDialogForm, {
+	formKind: "ProjectVisualIdentityEditorDialog",
+	isOpen: () => true,
+	openingRequestIdentity: (props) => props.openingRequestSequence,
+	instanceIdentity: (props) => props.project.id,
+	ownership: (props) => ({ workspaceId: props.project.id, displayLabel: props.project.name }),
+	withClose: (props, close) => ({ ...props, onClose: close }),
+	onClosed: (props) => props.onClose(),
+});

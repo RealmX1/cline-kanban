@@ -4,7 +4,7 @@ import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "../sr
 import { ReferenceRelationModelingEditor } from "../src/components/detail-panels/reference-relation-modeling-editor";
 import { WorkUnitRelationNeighborhoodPanel } from "../src/components/detail-panels/work-unit-relation-neighborhood-panel";
 import { TaskCommentsDialogProvider } from "../src/components/task-comments-dialog-provider";
-import { TaskEditorFloatingWindow } from "../src/components/task-editor-floating-window";
+import { NonModalFloatingFormWindow } from "../src/components/non-modal-floating-form-window";
 import { Dialog, DialogBody, DialogHeader } from "../src/components/ui/dialog";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { createInitialBoardData } from "../src/data/board-data";
@@ -50,14 +50,16 @@ function boardForProject(workspaceId: string) {
 	return board;
 }
 
-function CreationTaskEditorFloatingWindowRelations() {
+function CreationNonModalFloatingFormWindowRelations() {
 	const controller = useReferenceRelationModelingEditor({ workspaceId: "project-a", taskId: null });
 	const [open, setOpen] = useState(true);
 	return (
-		<TaskEditorFloatingWindow
+		<NonModalFloatingFormWindow
 			open={open}
 			onOpenChange={setOpen}
 			title="创建任务"
+			collapseControlLabel="任务编辑器"
+			verificationAnchor="task-editor-floating-window"
 			onClickCapture={undefined}
 			onKeyDownCapture={undefined}
 			onKeyDown={undefined}
@@ -65,7 +67,7 @@ function CreationTaskEditorFloatingWindowRelations() {
 			<DialogBody>
 				<ReferenceRelationModelingEditor controller={controller} workspaceId="project-a" taskId={null} />
 			</DialogBody>
-		</TaskEditorFloatingWindow>
+		</NonModalFloatingFormWindow>
 	);
 }
 
@@ -122,7 +124,7 @@ function Harness() {
 								{projectId}:{selectedTaskId}
 							</output>
 							{host === "creation-dialog" || host === "creation-window-with-background" ? (
-								<CreationTaskEditorFloatingWindowRelations />
+								<CreationNonModalFloatingFormWindowRelations />
 							) : null}
 							{host !== "creation-dialog" ? (
 								<WorkUnitRelationNeighborhoodPanel

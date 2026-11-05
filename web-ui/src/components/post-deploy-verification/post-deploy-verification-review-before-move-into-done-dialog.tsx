@@ -1,25 +1,37 @@
 import { ClipboardCheck } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
-
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import {
 	PostDeployVerificationTaskEntryWrappingRealTaskCard,
 	type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries,
 } from "@/components/post-deploy-verification/post-deploy-verification-task-entry-wrapping-real-task-card";
 import { PostDeployVerificationUncheckedItemsClosureReasonDialog } from "@/components/post-deploy-verification/post-deploy-verification-unchecked-items-closure-reason-dialog";
 import { VerificationGuidanceOverlay } from "@/components/post-deploy-verification/verification-guidance-overlay";
+import { RetainedPostDeployVerificationReviewSession } from "@/components/retained-post-deploy-verification-review-session";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { type UsePostDeployVerificationResult, usePostDeployVerification } from "@/hooks/use-post-deploy-verification";
 import { usePostDeployVerificationReviewBeforeMoveIntoDone } from "@/hooks/use-post-deploy-verification-review-before-move-into-done";
 import type {
 	RuntimePostDeployVerificationChecklistItem,
 	RuntimePostDeployVerificationDoneEntryClosureRequest,
 } from "@/runtime/types";
-import { getTaskColumnId } from "@/state/board-state";
+import { findCardSelection, getTaskColumnId } from "@/state/board-state";
 import type { BoardData } from "@/types";
-import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
+import type {
+	TaskCardMoveIntoDoneRequestHandler,
+	TaskCommentToAppendWhenMovingIntoDone,
+} from "@/types/task-card-move-into-done-request";
 
 export interface PostDeployVerificationReviewBeforeMoveIntoDoneDialogProps {
+	openingRequestIdentity?: unknown;
+	postDeployVerificationCompletionDeploymentId?: string;
+	taskCommentToAppendWhenMovingIntoDone?: TaskCommentToAppendWhenMovingIntoDone;
+	insertAtIndexWithinDoneBoardColumn?: number;
+	onOpenTaskInProject?: (workspaceId: string, taskId: string) => void;
+	onNavigateToProjectBoard?: (workspaceId: string) => void | Promise<void>;
 	workspaceId: string;
 	taskId: string;
 	board: BoardData;
@@ -35,9 +47,11 @@ export interface PostDeployVerificationReviewBeforeMoveIntoDoneDialogProps {
 	onSelectTask?: () => void;
 	onNavigateToBoard?: () => void | Promise<void>;
 	onRequestTaskCommentBeforeMovingIntoDone?: () => void;
+	continueConfirmationAfterMove?: boolean;
+	onBeforeHostedClose?: (outcome: "completed" | "dismissed") => void;
 }
 
-export function PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace(
+function PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspaceForm(
 	props: Omit<PostDeployVerificationReviewBeforeMoveIntoDoneDialogProps, "verification"> & {
 		verification?: UsePostDeployVerificationResult;
 	},
@@ -240,5 +254,30 @@ export function PostDeployVerificationReviewBeforeMoveIntoDoneDialog(
 				/>
 			) : null}
 		</>
+	);
+}
+
+const HostedVerificationReviewEntry = hostNonModalFloatingForm(RetainedPostDeployVerificationReviewSession, {
+	formKind: "verification-review",
+	openingRequestIdentity: (props) => props.openingRequestIdentity,
+	isOpen: () => true,
+	instanceIdentity: (props) =>
+		JSON.stringify([props.workspaceId, props.taskId, findCardSelection(props.board, props.taskId)?.card.createdAt]),
+	ownership: (props) => ({
+		workspaceId: props.workspaceId,
+		taskId: props.taskId,
+		taskIncarnationCreatedAtEpochMs: findCardSelection(props.board, props.taskId)?.card.createdAt,
+	}),
+	withClose: (props, close) => ({ ...props, onCancel: close }),
+	onClosed: (props) => props.onCancel(),
+});
+export function PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace(
+	props: React.ComponentProps<typeof PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspaceForm>,
+) {
+	const host = useNonModalFloatingFormWindowHost();
+	return host ? (
+		<HostedVerificationReviewEntry {...props} />
+	) : (
+		<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspaceForm {...props} />
 	);
 }

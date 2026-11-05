@@ -13,6 +13,7 @@ export function usePostDeployVerificationReviewBeforeMoveIntoDone(input: {
 	refreshAndReadBoardBeforeCompletion?: () => Promise<BoardData>;
 	verification: UsePostDeployVerificationResult;
 	runtimeRejectionRevision?: number;
+	continueConfirmationAfterMove?: boolean;
 	onConfirmClosureRequestsBySelectedTaskId: (
 		requests: Record<string, RuntimePostDeployVerificationDoneEntryClosureRequest>,
 	) => void;
@@ -59,6 +60,10 @@ export function usePostDeployVerificationReviewBeforeMoveIntoDone(input: {
 			setCompletionError(null);
 			const initialDeploymentId = verification.activeGroup?.deploymentId;
 			try {
+				if (latestInputRef.current.continueConfirmationAfterMove) {
+					latestInputRef.current.onConfirmClosureRequestsBySelectedTaskId(closureRequests ?? {});
+					return;
+				}
 				const group = await verification.refreshAndReadActiveGroup();
 				if (!mountedRef.current) return;
 				const liveBoard = input.refreshAndReadBoardBeforeCompletion

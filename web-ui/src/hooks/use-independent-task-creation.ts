@@ -3,6 +3,7 @@ import {
 	independentTaskCreationClient,
 	saveIndependentTaskCreationDraft,
 } from "@/runtime/independent-task-creation-query";
+import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import type { IndependentTaskCreationDraft, IndependentTaskCreationDraftEdit } from "@/runtime/types";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
@@ -23,6 +24,7 @@ export function useIndependentTaskCreation(
 	workspaceId: string,
 	sourceTaskId: string,
 	sourceTaskConversationSessionId: string,
+	expectedTaskIncarnationCreatedAtEpochMs?: number,
 ) {
 	const [open, setOpen] = useState(false);
 	const [draft, setDraft] = useState<IndependentTaskCreationDraft | null>(null);
@@ -109,6 +111,18 @@ export function useIndependentTaskCreation(
 		setBusy(true);
 		setError(null);
 		try {
+			if (expectedTaskIncarnationCreatedAtEpochMs !== undefined) {
+				const found = await readTaskCardWithBoardColumnInWorkspace(
+					workspaceId,
+					sourceTaskId,
+					expectedTaskIncarnationCreatedAtEpochMs,
+				);
+				if (
+					found.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
+					found.taskCardSnapshot.taskCard.createdAt !== expectedTaskIncarnationCreatedAtEpochMs
+				)
+					throw new Error("原任务身份已变化，填写内容已保留，未准备独立任务。");
+			}
 			const existing = forceNew
 				? null
 				: await client.latestDraft.query({ sourceTaskId, sourceTaskConversationSessionId });
@@ -163,6 +177,18 @@ export function useIndependentTaskCreation(
 				if (edits.current !== version) throw new Error("生成期间你修改了草稿，请核对后再次创建。");
 				value = current.current;
 				if (!value || value.errorMessage) return;
+			}
+			if (expectedTaskIncarnationCreatedAtEpochMs !== undefined) {
+				const found = await readTaskCardWithBoardColumnInWorkspace(
+					workspaceId,
+					sourceTaskId,
+					expectedTaskIncarnationCreatedAtEpochMs,
+				);
+				if (
+					found.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
+					found.taskCardSnapshot.taskCard.createdAt !== expectedTaskIncarnationCreatedAtEpochMs
+				)
+					throw new Error("原任务身份已变化，填写内容已保留，未创建独立任务。");
 			}
 			const result = await client.create.mutate({ requestId: value.requestId });
 			replace(result);

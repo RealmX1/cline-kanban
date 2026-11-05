@@ -119,7 +119,7 @@ describe("SaveFindingDialog", () => {
 
 	it("相似标题警告：规范化标题相等/前缀包含即提示，但不阻断保存", async () => {
 		renderDialog({ existingFindings: [createFinding({ findingTitle: "存储方案: SQLite 单文件" })] });
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement | null;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement | null;
 		expect(titleInput).not.toBeNull();
 		await act(async () => {
 			setInputValue(titleInput!, "存储方案 SQLite");
@@ -131,7 +131,7 @@ describe("SaveFindingDialog", () => {
 
 	it("保存：mutation 参数携带锚三元 provenance 与 UI 生成 findingId；成功后 toast + 关 dialog", async () => {
 		renderDialog();
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		await act(async () => {
 			setInputValue(titleInput, "  存储方案定了  ");
 		});
@@ -160,7 +160,7 @@ describe("SaveFindingDialog", () => {
 
 	it("无锚保存：provenance 降级 user_authored_freeform（turnNumber/commit 置 null，绝不伪造锚）", async () => {
 		renderDialog({ anchor: null });
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		await act(async () => {
 			setInputValue(titleInput, "自由笔记");
 		});
@@ -180,7 +180,7 @@ describe("SaveFindingDialog", () => {
 
 	it("正文被编辑后按编辑内容保存", async () => {
 		renderDialog();
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		const textarea = document.body.querySelector("textarea") as HTMLTextAreaElement;
 		await act(async () => {
 			setInputValue(titleInput, "改过的标题");
@@ -198,7 +198,7 @@ describe("SaveFindingDialog", () => {
 			throw new Error("server exploded");
 		});
 		renderDialog();
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		await act(async () => {
 			setInputValue(titleInput, "会失败的保存");
 		});
@@ -217,7 +217,7 @@ describe("SaveFindingDialog", () => {
 			throw new Error("response lost");
 		});
 		renderDialog();
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		await act(async () => {
 			setInputValue(titleInput, "重试同 id");
 		});
@@ -244,7 +244,7 @@ describe("SaveFindingDialog", () => {
 			throw new Error("response lost");
 		});
 		renderDialog();
-		const titleInput = document.body.querySelector("#save-finding-title") as HTMLInputElement;
+		const titleInput = document.body.querySelector('input[id$="-title"]') as HTMLInputElement;
 		const textarea = document.body.querySelector("textarea") as HTMLTextAreaElement;
 		await act(async () => {
 			setInputValue(titleInput, "首次标题");

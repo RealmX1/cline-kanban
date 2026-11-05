@@ -317,9 +317,12 @@ test("桌面浮窗可拖动，背景可操作，折叠隐藏保留值且快捷�
 	);
 	await focusableControls.last().focus();
 	await page.keyboard.press("Tab");
-	await expect(focusableControls.first()).toBeFocused();
+	expect(await dialog.evaluate((element) => element.contains(document.activeElement))).toBe(false);
+	await focusableControls.first().focus();
 	await page.keyboard.press("Shift+Tab");
-	await expect(focusableControls.last()).toBeFocused();
+	await expect(page.getByLabel("背景输入")).toBeFocused();
+	await page.keyboard.press("Tab");
+	await expect(focusableControls.first()).toBeFocused();
 	const before = await dialog.boundingBox();
 	expect(before?.width).toBeGreaterThan(700);
 	const header = page.getByRole("heading", { name: "创建任务" });

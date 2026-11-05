@@ -1769,6 +1769,23 @@ class PersistentTerminal {
 		}
 	}
 
+	captureAgentSessionRestartForFloatingForm(): (arguments_: string[]) => Promise<void> {
+		const incarnation = this.latestSummary?.runtimeSessionIncarnationId;
+		const workspaceTaskId = this.latestSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? this.taskId;
+		return async (arguments_) => {
+			const current = await getRuntimeTrpcClient(this.workspaceId).runtime.getTaskConversationSession.query({
+				taskId: workspaceTaskId,
+				taskConversationSessionId: this.taskId,
+			});
+			const currentIncarnation = current.summary?.runtimeSessionIncarnationId;
+			if (!current.summary || !incarnation || !currentIncarnation)
+				throw new Error("暂时无法核对原会话代次，参数已保留，未执行重启。");
+			if (currentIncarnation !== incarnation) throw new Error("原会话身份已变化，参数已保留，未执行重启。");
+			const result = await this.refresh(undefined, undefined, undefined, arguments_);
+			if (!result.ok) throw new Error(result.error ?? "重启原会话失败，参数已保留。");
+		};
+	}
+
 	consumeRestartResetSuppression(): boolean {
 		const value = this.suppressNextRestartReset;
 		this.suppressNextRestartReset = false;

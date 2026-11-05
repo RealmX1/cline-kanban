@@ -27,6 +27,7 @@ export function BugReportTriggerButton({
 	activeView,
 }: BugReportTriggerButtonProps): ReactElement {
 	const [isOpen, setIsOpen] = useState(false);
+	const [openingRequestSequence, setOpeningRequestSequence] = useState(0);
 	const [isCapturing, setIsCapturing] = useState(false);
 	const [initialScreenshot, setInitialScreenshot] = useState<TaskImage | null>(null);
 	const devProject = useClineKanbanDevProject(projects);
@@ -38,6 +39,7 @@ export function BugReportTriggerButton({
 		const image = await capturePageScreenshotAsTaskImage();
 		setInitialScreenshot(image);
 		setIsCapturing(false);
+		setOpeningRequestSequence((sequence) => sequence + 1);
 		setIsOpen(true);
 	}, []);
 
@@ -63,6 +65,7 @@ export function BugReportTriggerButton({
 				currentProject={currentProject}
 				activeView={activeView}
 				initialScreenshot={initialScreenshot}
+				openingRequestSequence={openingRequestSequence}
 			/>
 		</>
 	);

@@ -24,18 +24,14 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
+import { FirstProjectScriptShortcutFormWindow } from "@/components/first-project-script-shortcut-form-window";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
 import {
 	topBarBoardScopeAllProjectsToggleButtonAnchorKey,
 	topBarTaskLookupWorkbenchTriggerAnchorKey,
 } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
-import {
-	getRuntimeShortcutIconComponent,
-	getRuntimeShortcutPickerOption,
-	RUNTIME_SHORTCUT_ICON_OPTIONS,
-	type RuntimeShortcutPickerIconId,
-} from "@/components/shared/runtime-shortcut-icons";
+import { getRuntimeShortcutIconComponent } from "@/components/shared/runtime-shortcut-icons";
 import { TaskSpotlightSearchTriggerButton } from "@/components/task-spotlight-search-trigger-button";
 import { formatBoardOrFocusedTaskProjectScopeToggleHotkeyLabel } from "@/components/top-bar-project-switcher/board-or-focused-task-project-scope-toggle-hotkey-descriptor";
 import {
@@ -44,7 +40,6 @@ import {
 } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { TaskRetainedCommittedLineChangeIndicator } from "@/components/ui/task-retained-committed-line-change-indicator";
 import { Tooltip } from "@/components/ui/tooltip";
@@ -68,65 +63,6 @@ function getWorkspacePathSegments(path: string): string[] {
 		.replaceAll("\\", "/")
 		.split("/")
 		.filter((segment) => segment.length > 0);
-}
-
-function FirstShortcutIconPicker({
-	value,
-	onSelect,
-}: {
-	value: RuntimeShortcutPickerIconId;
-	onSelect: (icon: RuntimeShortcutPickerIconId) => void;
-}): React.ReactElement {
-	const [open, setOpen] = useState(false);
-	const selectedOption = getRuntimeShortcutPickerOption(value);
-	const SelectedIconComponent = getRuntimeShortcutIconComponent(value);
-
-	return (
-		<RadixPopover.Root open={open} onOpenChange={setOpen}>
-			<RadixPopover.Trigger asChild>
-				<button
-					type="button"
-					aria-label={`Shortcut icon: ${selectedOption.label}`}
-					className="inline-flex items-center gap-1 h-8 px-2 rounded-md border border-border bg-surface-2 text-text-primary hover:bg-surface-3"
-				>
-					<SelectedIconComponent size={14} />
-					<ChevronDown size={12} />
-				</button>
-			</RadixPopover.Trigger>
-			<RadixPopover.Portal>
-				<RadixPopover.Content
-					side="bottom"
-					align="start"
-					sideOffset={4}
-					className="z-50 rounded-md border border-border bg-surface-2 p-1 shadow-lg"
-					style={{ animation: "kb-tooltip-show 100ms ease" }}
-				>
-					<div className="flex gap-0.5">
-						{RUNTIME_SHORTCUT_ICON_OPTIONS.map((option) => {
-							const IconComponent = getRuntimeShortcutIconComponent(option.value);
-							return (
-								<button
-									key={option.value}
-									type="button"
-									aria-label={option.label}
-									className={cn(
-										"p-1.5 rounded hover:bg-surface-3",
-										selectedOption.value === option.value && "bg-surface-3",
-									)}
-									onClick={() => {
-										onSelect(option.value);
-										setOpen(false);
-									}}
-								>
-									<IconComponent size={14} />
-								</button>
-							);
-						})}
-					</div>
-				</RadixPopover.Content>
-			</RadixPopover.Portal>
-		</RadixPopover.Root>
-	);
 }
 
 function GitBranchStatusControl({
@@ -314,6 +250,7 @@ function TopBarGitStatusSection({
 }
 
 export function TopBar({
+	workspaceId,
 	onToggleSidebar,
 	onToggleCurrentPageLeftSidebar,
 	isCurrentPageLeftSidebarHidden = false,
@@ -375,6 +312,7 @@ export function TopBar({
 	postDeployVerificationPendingCount,
 	onOpenPostDeployVerification,
 }: {
+	workspaceId?: string | null;
 	onToggleSidebar?: () => void;
 	onToggleCurrentPageLeftSidebar?: () => void;
 	isCurrentPageLeftSidebarHidden?: boolean;
@@ -460,36 +398,10 @@ export function TopBar({
 	const selectedShortcut = shortcutItems[selectedShortcutIndex >= 0 ? selectedShortcutIndex : 0] ?? null;
 	const SelectedShortcutIcon = selectedShortcut ? getRuntimeShortcutIconComponent(selectedShortcut.icon) : Terminal;
 	const [isCreateShortcutDialogOpen, setIsCreateShortcutDialogOpen] = useState(false);
-	const [isCreateShortcutSaving, setIsCreateShortcutSaving] = useState(false);
-	const [createShortcutError, setCreateShortcutError] = useState<string | null>(null);
-	const [newShortcutIcon, setNewShortcutIcon] = useState<RuntimeShortcutPickerIconId>("play");
-	const [newShortcutLabel, setNewShortcutLabel] = useState("Run");
-	const [newShortcutCommand, setNewShortcutCommand] = useState("");
-	const canSaveNewShortcut = newShortcutCommand.trim().length > 0;
+	const [createShortcutOpeningRequestSequence, setCreateShortcutOpeningRequestSequence] = useState(0);
 	const handleOpenCreateShortcutDialog = () => {
-		setCreateShortcutError(null);
-		setNewShortcutIcon("play");
-		setNewShortcutLabel("Run");
-		setNewShortcutCommand("");
 		setIsCreateShortcutDialogOpen(true);
-	};
-	const handleSaveFirstShortcut = async () => {
-		if (!onCreateFirstShortcut || !canSaveNewShortcut || isCreateShortcutSaving) {
-			return;
-		}
-		setCreateShortcutError(null);
-		setIsCreateShortcutSaving(true);
-		const result = await onCreateFirstShortcut({
-			label: newShortcutLabel.trim(),
-			command: newShortcutCommand.trim(),
-			icon: newShortcutIcon,
-		});
-		setIsCreateShortcutSaving(false);
-		if (!result.ok) {
-			setCreateShortcutError(result.message ?? "Could not save shortcut.");
-			return;
-		}
-		setIsCreateShortcutDialogOpen(false);
+		setCreateShortcutOpeningRequestSequence((sequence) => sequence + 1);
 	};
 
 	return (
@@ -975,78 +887,13 @@ export function TopBar({
 					/>
 				</div>
 			</nav>
-			<Dialog
+			<FirstProjectScriptShortcutFormWindow
 				open={isCreateShortcutDialogOpen}
-				contentAriaDescribedBy={undefined}
-				onOpenChange={(nextOpen) => {
-					if (isCreateShortcutSaving) {
-						return;
-					}
-					setIsCreateShortcutDialogOpen(nextOpen);
-					if (!nextOpen) {
-						setCreateShortcutError(null);
-					}
-				}}
-			>
-				<DialogHeader title="Set up your first script shortcut" icon={<Play size={16} />} />
-				<DialogBody>
-					<p className="text-text-secondary text-[13px] mt-0 mb-2">
-						Script shortcuts run a command in the bottom terminal so you can quickly run and test your project.
-					</p>
-					<p className="text-text-secondary text-[13px] mt-0 mb-3">
-						You can always open Settings to add and manage more shortcuts later.
-					</p>
-					<div className="grid gap-2" style={{ gridTemplateColumns: "max-content 1fr 2fr" }}>
-						<FirstShortcutIconPicker value={newShortcutIcon} onSelect={setNewShortcutIcon} />
-						<input
-							value={newShortcutLabel}
-							onChange={(event) => setNewShortcutLabel(event.target.value)}
-							placeholder="Label"
-							disabled={isCreateShortcutSaving}
-							className="h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none disabled:opacity-60"
-						/>
-						<input
-							value={newShortcutCommand}
-							onChange={(event) => setNewShortcutCommand(event.target.value)}
-							placeholder="npm run dev"
-							disabled={isCreateShortcutSaving}
-							className="h-8 w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none disabled:opacity-60"
-						/>
-					</div>
-					{createShortcutError ? (
-						<p className="text-status-red text-[13px] mt-3 mb-0">{createShortcutError}</p>
-					) : null}
-				</DialogBody>
-				<DialogFooter>
-					<Button
-						onClick={() => {
-							if (!isCreateShortcutSaving) {
-								setIsCreateShortcutDialogOpen(false);
-								setCreateShortcutError(null);
-							}
-						}}
-						disabled={isCreateShortcutSaving}
-					>
-						Cancel
-					</Button>
-					<Button
-						variant="primary"
-						onClick={() => {
-							void handleSaveFirstShortcut();
-						}}
-						disabled={!canSaveNewShortcut || isCreateShortcutSaving}
-					>
-						{isCreateShortcutSaving ? (
-							<>
-								<Spinner size={12} />
-								Saving...
-							</>
-						) : (
-							"Save"
-						)}
-					</Button>
-				</DialogFooter>
-			</Dialog>
+				workspaceId={workspaceId}
+				openingRequestSequence={createShortcutOpeningRequestSequence}
+				onClose={() => setIsCreateShortcutDialogOpen(false)}
+				onCreateFirstShortcut={onCreateFirstShortcut}
+			/>
 		</>
 	);
 }

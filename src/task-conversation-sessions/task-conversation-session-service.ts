@@ -156,7 +156,7 @@ function resolveCreationContextSource(
 		input.contextSource === "fresh"
 			? null
 			: input.contextSource === "current_main"
-				? resolveMainTaskConversationSessionId(card)
+				? (input.contextSourceTaskConversationSessionId ?? resolveMainTaskConversationSessionId(card))
 				: creatorId;
 	const source = sourceId ? requireSession(sessions, sourceId, input.taskId) : null;
 	if (source) {

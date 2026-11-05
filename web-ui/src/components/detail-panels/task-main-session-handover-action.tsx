@@ -1,13 +1,17 @@
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "@runtime-agent-catalog";
 import { ArrowRightLeft } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogDescription, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog } from "@/components/ui/non-modal-form-dialog";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
+import { useHostedNonModalFloatingFormActionLifecycle } from "@/hooks/use-hosted-non-modal-floating-form-action-lifecycle";
+import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import {
 	cancelTaskMainSessionHandover,
 	getTaskMainSessionHandoverStatus,
@@ -36,10 +40,12 @@ const handoverStatusLabels = {
 };
 
 export function TaskMainSessionHandoverAction({
+	hostedFormClose,
 	workspaceId,
 	taskCard,
 	mainSessionSummary,
 }: {
+	hostedFormClose?: () => void;
 	workspaceId: string;
 	taskCard: BoardCard;
 	mainSessionSummary: RuntimeTaskSessionSummary;
@@ -59,6 +65,7 @@ export function TaskMainSessionHandoverAction({
 	const [error, setError] = useState<string | null>(null);
 	const [showWaitChoice, setShowWaitChoice] = useState(false);
 	const requestId = useRef(createRandomUuidV4WithInsecureContextFallback());
+	const boundTaskIncarnationCreatedAtEpochMs = useRef(taskCard.createdAt);
 	const requestEpoch = useRef(0);
 	const submitRequestInFlightEpoch = useRef<number | null>(null);
 	const record = taskCard.taskMainSessionHandover;
@@ -161,6 +168,7 @@ export function TaskMainSessionHandoverAction({
 		: [];
 	const targetIsBusy = selectedBlockingSessions.length > 0;
 	async function openPreview() {
+		boundTaskIncarnationCreatedAtEpochMs.current = taskCard.createdAt;
 		const epoch = ++requestEpoch.current;
 		setOpen(true);
 		setBusy(true);
@@ -174,6 +182,14 @@ export function TaskMainSessionHandoverAction({
 		setPlanPaths("");
 		requestId.current = createRandomUuidV4WithInsecureContextFallback();
 		try {
+			if (hostedFormClose) {
+				const found = await readTaskCardWithBoardColumnInWorkspace(workspaceId, taskCard.id, taskCard.createdAt);
+				if (
+					found.taskCardLookupOutcome !== "task_card_found_on_workspace_board" ||
+					found.taskCardSnapshot.taskCard.createdAt !== taskCard.createdAt
+				)
+					throw new Error("原任务身份已变化，填写内容已保留，未准备交接。");
+			}
 			const result = await prepareTaskMainSessionHandover(workspaceId, taskCard.id);
 			if (requestEpoch.current === epoch) setPreview(result);
 		} catch (cause) {
@@ -195,12 +211,17 @@ export function TaskMainSessionHandoverAction({
 			setShowWaitChoice(true);
 			return;
 		}
+		if (taskCard.createdAt !== boundTaskIncarnationCreatedAtEpochMs.current) {
+			setError("原任务身份已变化，填写内容已保留，未提交交接。");
+			return;
+		}
 		setBusy(true);
 		submitRequestInFlightEpoch.current = epoch;
 		setError(null);
 		try {
 			await requestTaskMainSessionHandover(workspaceId, {
 				taskId: taskCard.id,
+				expectedTaskIncarnationCreatedAtEpochMs: boundTaskIncarnationCreatedAtEpochMs.current,
 				expectedMainTaskConversationSessionId: preview.mainTaskConversationSessionId,
 				requestId: requestId.current,
 				busySessionHandoverStrategy,
@@ -292,9 +313,36 @@ export function TaskMainSessionHandoverAction({
 		onSubmit: () => submit(),
 		disabled: primaryActionDisabled,
 	});
+	const floatingFormHost = useNonModalFloatingFormWindowHost();
+	useHostedNonModalFloatingFormActionLifecycle({ open: open, begin: openPreview, hostedFormClose });
 	if (!isSupportedHandoverSource && !record) return null;
+	const openFormWindow = () => {
+		if (!floatingFormHost || hostedFormClose) {
+			void openPreview();
+			return;
+		}
+		floatingFormHost.openWindow({
+			formKind: "main-session-handover",
+			instanceIdentity: JSON.stringify([workspaceId, taskCard.id, taskCard.createdAt, mainSessionSummary.taskId]),
+			ownership: {
+				workspaceId,
+				taskId: taskCard.id,
+				taskIncarnationCreatedAtEpochMs: taskCard.createdAt,
+				conversationSessionId: mainSessionSummary.taskId,
+			},
+			render: ({ close }) => (
+				<TaskMainSessionHandoverAction
+					workspaceId={workspaceId}
+					taskCard={taskCard}
+					mainSessionSummary={mainSessionSummary}
+					hostedFormClose={close}
+				/>
+			),
+		});
+	};
 	return (
 		<div
+			hidden={Boolean(hostedFormClose)}
 			data-verification-anchor={`task-main-session-handover:${taskCard.id}`}
 			className="border-b border-border px-2 py-2 text-xs text-text-secondary"
 		>
@@ -372,7 +420,7 @@ export function TaskMainSessionHandoverAction({
 				</div>
 			)}
 			{!inProgress && isSupportedHandoverSource && (
-				<Button size="sm" variant="ghost" icon={<ArrowRightLeft size={14} />} onClick={() => void openPreview()}>
+				<Button size="sm" variant="ghost" icon={<ArrowRightLeft size={14} />} onClick={openFormWindow}>
 					交接主会话
 				</Button>
 			)}
@@ -408,7 +456,7 @@ export function TaskMainSessionHandoverAction({
 					</Button>
 				</DialogFooter>
 			</Dialog>
-			<Dialog
+			<NonModalFormDialog
 				onKeyDown={handlePrimaryActionKeyDown}
 				open={open}
 				onOpenChange={(value) => {
@@ -419,6 +467,7 @@ export function TaskMainSessionHandoverAction({
 				<DialogHeader title={showWaitChoice ? "选择交接方式" : "交接主会话"} />
 				<DialogBody className="space-y-4 overflow-y-auto">
 					{busy && !preview && <p role="status">正在读取交接材料…</p>}
+					{!busy && !preview && error && <Button onClick={() => void openPreview()}>重试读取交接材料</Button>}
 					{error && (
 						<p role="alert" className="break-words text-status-red">
 							{error}
@@ -608,7 +657,7 @@ export function TaskMainSessionHandoverAction({
 						</Button>
 					)}
 				</DialogFooter>
-			</Dialog>
+			</NonModalFormDialog>
 		</div>
 	);
 }

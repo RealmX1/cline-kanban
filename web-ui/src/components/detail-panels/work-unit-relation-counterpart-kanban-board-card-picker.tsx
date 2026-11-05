@@ -27,6 +27,7 @@ function buildSelectedCounterpartFromTaskSearchDocument(
 	return {
 		counterpartKanbanBoardCardWorkspaceId: document.projectId,
 		counterpartKanbanBoardCardTaskId: document.taskId,
+		counterpartTaskIncarnationCreatedAtEpochMs: document.taskCreatedAtEpochMs,
 		counterpartKanbanBoardCardTitle: document.title || document.prompt.slice(0, 80) || `task ${document.taskId}`,
 		counterpartKanbanProjectDisplayName: document.projectName,
 	};
