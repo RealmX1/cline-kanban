@@ -39,7 +39,9 @@ import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
+import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
+import { ensureRuntimeBoundKanbanCliExecutable } from "../core/runtime-bound-kanban-cli-executable";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -330,6 +332,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 工作单元间关系账本：注册后本进程每一次 board 写入先过账本（dd2db 1a）。账本打不开时 board 只读。
 	const activatedInterWorkUnitRelationLedgerLiveCapture =
 		await activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+	if (process.platform !== "win32") {
+		try {
+			process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH = ensureRuntimeBoundKanbanCliExecutable({
+				commandParts: resolveKanbanCommandParts(),
+				executableStorageDirectoryPath: join(getRuntimeHomePath(), "runtime-bound-cli-executables"),
+			});
+		} catch (error) {
+			deps.warn(
+				`运行时绑定 CLI 入口暂不可用，保留完整启动前缀：${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,

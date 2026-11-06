@@ -6,7 +6,8 @@ import { renderAgentWorkDelegationSelectionGuidance } from "../core/agent-work-d
 import type { RuntimeAgentId } from "../core/api-contract";
 import { isHomeAgentSessionId } from "../core/home-agent-session";
 import { resolveKanbanCommandParts } from "../core/kanban-command";
-import { buildShellCommandLine, quoteShellArg } from "../core/shell";
+import { RUNTIME_BOUND_KANBAN_CLI_SHELL_COMMAND_PREFIX } from "../core/runtime-bound-kanban-cli-executable";
+import { buildShellCommandLine } from "../core/shell";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../core/task-initial-prompt-authoring-and-startup-settings-guidance";
 import { renderTaskAgentNamingAndWorkPhaseGoalGuidance } from "../core/task-naming-conventions";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
@@ -56,6 +57,9 @@ function resolveHomeAgentId(taskId: string): RuntimeAgentId | null {
 export function resolveAppendSystemPromptCommandPrefix(
 	options: ResolveAppendSystemPromptCommandPrefixOptions = {},
 ): string {
+	if (process.platform !== "win32" && process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH?.trim()) {
+		return RUNTIME_BOUND_KANBAN_CLI_SHELL_COMMAND_PREFIX;
+	}
 	const argv = options.argv ?? process.argv;
 	const fallbackCommandParts = resolveKanbanCommandParts({
 		execPath: options.execPath ?? process.execPath,
@@ -140,13 +144,12 @@ export function renderTaskSessionWorktreeGuardPrompt(
 ): string {
 	const kanbanCommand = commandPrefix.trim() || DEFAULT_COMMAND_PREFIX;
 	const trimmedTaskId = taskId.trim();
-	const quotedTaskId = quoteShellArg(trimmedTaskId);
 	return `# Kanban Task Workspace
 
 你负责在分配的工作区完成本任务，依据用户真实授权与仓库约定实施、验证并报告结果。
 任务 ID：\`${trimmedTaskId}\`；工作区：\`${cwd}\`。默认在这里修改源码与提交，不从 cwd 重新推导任务 ID。
 同一 git-common-dir 下由本任务工具创建的派生工作树，以及用户显式调用 workflow 操作的工作树，沿用已有授权。文档指向无关仓库时，先确认其编辑归属。
-命令前缀：\`${kanbanCommand}\`。task get --task-id ${quotedTaskId} --project-path <主仓库路径> 查询本任务；主仓库路径取 git rev-parse --git-common-dir 的父目录，不能传 task worktree。
+命令前缀：\`${kanbanCommand}\`。查询本任务直接运行 \`${kanbanCommand} task get-current-task\`，身份取自会话绑定，切换目录仍有效。查询其他任务用 task get --task-id <id> [--project-path <主仓库路径>]；主仓库路径取 git rev-parse --git-common-dir 的父目录，不能传 task worktree。
 
 ${renderTaskAgentNamingAndWorkPhaseGoalGuidance()}
 ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
@@ -154,6 +157,7 @@ ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
 ${renderAgentWorkDelegationSelectionGuidance()}
 
 按需操作：\`${resolveAgentGuidanceDocumentPath("kanban-command-reference.md")}\`。引用或复用别的任务时，用 work-unit assert-reference-relation 记录关系；work-unit get-relation-neighborhood-summary 查来源。
+简单查询、JSON 筛选和日志截取优先复用原生命令及参考中的简洁示例；复杂且反复使用的脚本写到持久位置后复用。准备文件、转义与额外调用也算成本，不为缩短命令省略身份、授权和错误检查。
 HTML 用 task visualization publish 发布到本任务，附属资源显式映射；status=published 才表示发布成功，awaiting_runtime_acceptance 表示待接收。预览用 task visualization request-preview，不调用宿主机 open。
 同 Task 侧会话使用 task conversation-session create。先 list/get 复用已有会话，说明创建原因并使用稳定幂等键；默认继承创建者已持久化历史，也可选 current_main 或 fresh。跨 Agent 选择 fresh，不支持的复刻会明确拒绝。创建后继续主线，不必等待，未回报不催收、不自动回灌。
 侧会话共用工作目录，创建前划清文件责任。继承历史只作背景，不能当作要求继续执行旧任务或真人批准。可写 peer 用 report 自愿回报，默认给创建者，也可指定同 Task 的会话；后续追问用 task message --attempt-id <会话ID>。系统回收可自动恢复，显式 Stop、结案、搁置和交接等待继续生效。

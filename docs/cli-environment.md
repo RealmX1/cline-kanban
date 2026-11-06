@@ -1,4 +1,12 @@
-# CLI environment variables
+# CLI 环境变量
+
+## 运行时绑定入口与当前任务身份
+
+macOS / Linux 运行时启动时，在 `~/.cline/kanban/runtime-bound-cli-executables/` 原子生成按内容寻址的 POSIX 可执行入口，并向新启动的 PTY / ACP 会话注入 `KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH`。入口固定该运行时的 Node、Node 参数与 CLI，使用 `"$KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH" task get-current-task` 调用，无需调整 `PATH`。运行时重启会复用同内容入口，不清理旧入口；对应 Node / CLI 安装须仍存在。Windows 保留原启动前缀。
+
+`task get-current-task` 复用 `task get` 的返回结构。`KANBAN_TASK_ID` 是宿主卡片 ID，`KANBAN_TASK_CONVERSATION_SESSION_ID` 是当前会话 ID，`KANBAN_PROJECT_PATH` 是注册主仓库路径；查询会核对运行时快照中的会话归属，不从 cwd 或 worktree 目录猜测，不自动跨项目改选卡片。它们是会话上下文，不是额外权限。身份缺失、绑定已失效时明确报错，仍可显式 `task get --task-id <id> --project-path <主仓库>` 查询。
+
+已有会话不会因磁盘更新自动获得环境变量；新启动 / 重启会话后才能使用短入口。`task rvf-history`、`task visualization list/publish/request-preview` 已接受当前任务环境默认值；资源声明和业务必填字段继续保留。运行时启动时会清除继承的旧入口与任务身份，再建立本实例绑定。
 
 Kanban inherits your shell environment when launched from the terminal. Hook subprocesses and automation bridges (RVF, Overwatch, Claude Code hooks) spawn short-lived `kanban` CLI children the same way.
 

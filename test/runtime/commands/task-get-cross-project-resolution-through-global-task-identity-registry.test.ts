@@ -119,7 +119,9 @@ function createKanbanBoardCardIdentityCandidate(input: {
 	};
 }
 
-async function runKanbanTaskGetFromCurrentDirectory(): Promise<{ exitCode: unknown; output: Record<string, unknown> }> {
+async function runKanbanTaskGetFromCurrentDirectory(
+	argumentsAfterTask = ["get", "--task-id", CROSS_PROJECT_TASK_ID],
+): Promise<{ exitCode: unknown; output: Record<string, unknown> }> {
 	const stdoutChunks: string[] = [];
 	vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
 		stdoutChunks.push(String(chunk));
@@ -128,7 +130,8 @@ async function runKanbanTaskGetFromCurrentDirectory(): Promise<{ exitCode: unkno
 	vi.spyOn(process, "cwd").mockReturnValue(CURRENT_DIRECTORY_WORKSPACE.repoPath);
 	const program = new Command();
 	registerTaskCommand(program);
-	await program.parseAsync(["node", "kanban", "task", "get", "--task-id", CROSS_PROJECT_TASK_ID]);
+	program.exitOverride();
+	await program.parseAsync(["node", "kanban", "task", ...argumentsAfterTask]);
 	return { exitCode: process.exitCode, output: JSON.parse(stdoutChunks.join("")) };
 }
 
@@ -148,7 +151,70 @@ describe("kanban task get 的跨 project 解析", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		process.exitCode = undefined;
+	});
+	it.each([CROSS_PROJECT_TASK_ID, "task-collaborator-session"])(
+		"当前查询通过会话 %s 找到宿主任务，不受 cwd 影响",
+		async (conversationSessionId) => {
+			vi.stubEnv("KANBAN_TASK_ID", CROSS_PROJECT_TASK_ID);
+			vi.stubEnv("KANBAN_PROJECT_PATH", OWNING_WORKSPACE_OF_CANDIDATE.repoPath);
+			vi.stubEnv("KANBAN_TASK_CONVERSATION_SESSION_ID", conversationSessionId);
+			harness.boardStateByWorkspaceId.set(OWNING_WORKSPACE_OF_CANDIDATE.workspaceId, {
+				...createBoardStateWithBacklogTaskCard(CROSS_PROJECT_TASK_ID),
+				sessions: {
+					[conversationSessionId]: {
+						taskId: conversationSessionId,
+						taskConversationSessionMetadata: {
+							workspaceTaskId: CROSS_PROJECT_TASK_ID,
+							taskConversationSessionRole:
+								conversationSessionId === CROSS_PROJECT_TASK_ID ? "main" : "task_collaborator",
+						},
+					},
+				},
+			});
+			const { exitCode, output } = await runKanbanTaskGetFromCurrentDirectory(["get-current-task"]);
+			expect(exitCode).not.toBe(1);
+			expect(output).toMatchObject({
+				ok: true,
+				workspacePath: OWNING_WORKSPACE_OF_CANDIDATE.repoPath,
+				task: { id: CROSS_PROJECT_TASK_ID },
+			});
+		},
+	);
+
+	it.each(["KANBAN_TASK_ID", "KANBAN_PROJECT_PATH", "KANBAN_TASK_CONVERSATION_SESSION_ID"])(
+		"当前查询缺少 %s 时明确报错，不从 cwd 猜测",
+		async (missingVariableName) => {
+			vi.stubEnv("KANBAN_TASK_ID", CROSS_PROJECT_TASK_ID);
+			vi.stubEnv("KANBAN_PROJECT_PATH", CURRENT_DIRECTORY_WORKSPACE.repoPath);
+			vi.stubEnv("KANBAN_TASK_CONVERSATION_SESSION_ID", CROSS_PROJECT_TASK_ID);
+			vi.stubEnv(missingVariableName, " ");
+			const { exitCode, output } = await runKanbanTaskGetFromCurrentDirectory(["get-current-task"]);
+			expect(exitCode).toBe(1);
+			expect(output).toMatchObject({ ok: false, error: expect.stringContaining("不会从 cwd 推测") });
+		},
+	);
+
+	it("当前查询拒绝会话归属不符或已经缺失的绑定", async () => {
+		vi.stubEnv("KANBAN_TASK_ID", CROSS_PROJECT_TASK_ID);
+		vi.stubEnv("KANBAN_PROJECT_PATH", CURRENT_DIRECTORY_WORKSPACE.repoPath);
+		vi.stubEnv("KANBAN_TASK_CONVERSATION_SESSION_ID", "unrelated-session");
+		harness.boardStateByWorkspaceId.set(CURRENT_DIRECTORY_WORKSPACE.workspaceId, {
+			...createBoardStateWithBacklogTaskCard(CROSS_PROJECT_TASK_ID),
+			sessions: {
+				"unrelated-session": {
+					taskId: "unrelated-session",
+					taskConversationSessionMetadata: {
+						workspaceTaskId: "another-task",
+						taskConversationSessionRole: "task_collaborator",
+					},
+				},
+			},
+		});
+		const { exitCode, output } = await runKanbanTaskGetFromCurrentDirectory(["get-current-task"]);
+		expect(exitCode).toBe(1);
+		expect(output).toMatchObject({ ok: false, error: expect.stringContaining("会话身份缺失或不属于当前 Task") });
 	});
 
 	it("唯一活卡候选可读：返回候选 project 里的卡并标注经全局登记簿解析（行为不变）", async () => {

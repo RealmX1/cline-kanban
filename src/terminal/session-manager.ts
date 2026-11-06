@@ -6439,6 +6439,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 
 		const taskContextEnv = {
+			...(process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH
+				? { KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH: process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH }
+				: {}),
 			KANBAN_VISUALIZATION_PUBLISH_COMMAND_JSON: JSON.stringify(resolveKanbanCommandParts()),
 			KANBAN_TASK_ID: request.workspaceTaskId ?? request.taskId,
 			KANBAN_ATTEMPT_ID: request.taskId,
