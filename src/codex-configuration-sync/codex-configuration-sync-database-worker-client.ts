@@ -53,6 +53,7 @@ export interface CodexConfigurationStoreReadSelection {
 	targetWriterIds?: string[];
 	writerHomePaths?: string[];
 	legacyMarketplaceInstallationSourceIdentities?: string[];
+	sourceIdentityBindingEvidenceSourceIdentities?: string[];
 	observationIds?: string[];
 	receiptKeys?: string[];
 	hookTrustDecisionIds?: string[];

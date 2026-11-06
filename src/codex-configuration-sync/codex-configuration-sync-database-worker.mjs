@@ -88,6 +88,7 @@ database.exec(`
  CREATE INDEX IF NOT EXISTS configuration_writers_observation ON configuration_writers(requires_observation,record_id);
  CREATE INDEX IF NOT EXISTS configuration_writers_recovery ON configuration_writers(requires_pending_configuration_recovery,record_id);
  CREATE INDEX IF NOT EXISTS configuration_writers_home ON configuration_writers(configuration_home);
+ CREATE INDEX IF NOT EXISTS configuration_writers_by_source_identity ON configuration_writers(source_identity);
  CREATE INDEX IF NOT EXISTS configuration_writers_legacy_marketplace_source ON configuration_writers(source_identity)
   WHERE json_extract(payload_json,'$.binding.sourceSharedPluginInstallationDirectoriesBinding') IS NULL;
 `);
@@ -161,6 +162,8 @@ function readSnapshot(input = {}, connection = reader) {
    for (const row of connection.prepare("SELECT rowid AS storage_record_sequence,* FROM configuration_writers WHERE configuration_home=?").all(home)) writerRows.set(row.record_id,row);
   for (const source of input.legacyMarketplaceInstallationSourceIdentities ?? [])
    for (const row of connection.prepare("SELECT rowid AS storage_record_sequence,* FROM configuration_writers WHERE source_identity=? AND json_extract(payload_json,'$.binding.sourceSharedPluginInstallationDirectoriesBinding') IS NULL").all(source)) writerRows.set(row.record_id,row);
+  for (const source of input.sourceIdentityBindingEvidenceSourceIdentities ?? [])
+   for (const row of connection.prepare("SELECT rowid AS storage_record_sequence,* FROM configuration_writers WHERE source_identity=?").all(source)) writerRows.set(row.record_id,row);
   const targetRows = full ? connection.prepare("SELECT * FROM configuration_propagation_targets ORDER BY insertion_sequence").all()
    : observe ? readCurrentlyRelevantTargetRows(connection) : [];
   for (const id of input.includeActiveTargets === false && !input.includeTerminalTargets ? [] : input.changeIds ?? [])

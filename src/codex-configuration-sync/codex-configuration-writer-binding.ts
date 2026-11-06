@@ -104,41 +104,54 @@ export async function resolveVerifiedCodexConfigurationSourceIdentity(
 		.map(([identity]) => identity);
 	if (!registeredSourceIdentities.length && !expectedSourceIdentity) return codexDirectoryIdentity(sourceHome);
 	// 来源归属只依赖原清单和来源指纹；退休、辅助 writer 或无关的旧历史桥接均不改变来源资格。
-	const candidates = Object.values(store.writers)
-		.map((writer) => writer.binding)
-		.filter((binding) => registeredSourceIdentities.includes(binding.sourceIdentity))
-		.sort((left, right) => left.createdAt - right.createdAt);
-	for (const binding of candidates) {
-		try {
-			if ((await realpath(binding.sourceHomeDirectoryPath)) !== canonicalSourceHome) continue;
-			if (store.sources[binding.sourceIdentity]?.home !== canonicalSourceHome) continue;
-			const { manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
-			return await codexDirectoryIdentity(sourceHome, {
-				expectedIdentity: binding.sourceIdentity,
-				boundAtMs: binding.createdAt,
-				legacyBindingManifestPath: manifestPath,
-			});
-		} catch {
-			// 一份旧 writer 损坏不否定其他可独立核验的同来源绑定。
+	const verifyBindings = async (bindings: CodexConfigurationWriterBinding[]) => {
+		const candidates = bindings
+			.filter((binding) => registeredSourceIdentities.includes(binding.sourceIdentity))
+			.sort((left, right) => left.createdAt - right.createdAt);
+		for (const binding of candidates) {
+			try {
+				if ((await realpath(binding.sourceHomeDirectoryPath)) !== canonicalSourceHome) continue;
+				if (store.sources[binding.sourceIdentity]?.home !== canonicalSourceHome) continue;
+				const { manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
+				return await codexDirectoryIdentity(sourceHome, {
+					expectedIdentity: binding.sourceIdentity,
+					boundAtMs: binding.createdAt,
+					legacyBindingManifestPath: manifestPath,
+				});
+			} catch {
+				// 一份旧 writer 损坏不否定其他可独立核验的同来源绑定。
+			}
 		}
-	}
+		return null;
+	};
+	const currentIdentity = await verifyBindings(Object.values(store.writers).map((writer) => writer.binding));
+	if (currentIdentity) return currentIdentity;
 	for (const sourceIdentity of registeredSourceIdentities) {
 		const source = store.sources[sourceIdentity];
-		if (source?.configurationInitialization && source.home === canonicalSourceHome) {
-			await readVerifiedCodexConfigurationInitializationSnapshot(
-				sourceIdentity,
-				canonicalSourceHome,
-				source.configurationInitialization,
-			);
-			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
-		}
-		if (
-			Object.values(store.legacySessionProfileAdoptions ?? {}).some(
-				(adoption) => adoption.sourceIdentity === sourceIdentity,
+		try {
+			if (source?.configurationInitialization && source.home === canonicalSourceHome) {
+				await readVerifiedCodexConfigurationInitializationSnapshot(
+					sourceIdentity,
+					canonicalSourceHome,
+					source.configurationInitialization,
+				);
+				return await codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+			}
+			if (
+				Object.values(store.legacySessionProfileAdoptions ?? {}).some(
+					(adoption) => adoption.sourceIdentity === sourceIdentity,
+				)
 			)
-		)
-			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+				return await codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+		} catch {
+			// 已持久身份不能核验时，仅为本来源补读旧绑定；稳定观察不加载退休历史。
+		}
 	}
+	const historical = await readCodexConfigurationSyncLookupStore({
+		sourceIdentityBindingEvidenceSourceIdentities: registeredSourceIdentities,
+	});
+	const recoveredIdentity = await verifyBindings(Object.values(historical.writers).map((writer) => writer.binding));
+	if (recoveredIdentity) return recoveredIdentity;
 	throw new Error("Codex 配置来源缺少可核验的原绑定证据，恢复原清单或目录后自动重试。");
 }
 

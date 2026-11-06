@@ -249,6 +249,13 @@ describe("配置同步 SQLite 权威存储", () => {
 				})
 			).writers[retiredLegacyInstallationWriterId],
 		).toBeDefined();
+		expect(
+			(
+				await readCodexConfigurationSyncLookupStore({
+					sourceIdentityBindingEvidenceSourceIdentities: [binding.sourceIdentity],
+				})
+			).writers[retiredLegacyInstallationWriterId],
+		).toBeDefined();
 		for (const count of [100, 1000]) {
 			await mutateCodexConfigurationSyncStore((store) => {
 				const original = store.writers[binding.writerId];
