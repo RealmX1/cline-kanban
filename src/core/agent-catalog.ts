@@ -178,8 +178,8 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 	},
 ];
 
-// Temporarily keep launch support scoped to the core agent set.
-// Re-enable additional CLIs by uncommenting entries below when ready.
+// 下列 agent 允许启动；适配维护范围以 AGENTS.md 为准。
+// Factory Droid / Kiro 保留接入、停止后续适配。
 export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
 	"claude",
 	"codex",

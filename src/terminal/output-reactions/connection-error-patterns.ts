@@ -13,9 +13,7 @@
 //   （agent-catalog.ts / runtimeAgentIdSchema 里都没有 cursor）。一旦把 Cursor
 //   接入为可选 agent，请在此补充其连接错误文案（Cursor Agent 的瞬时错误措辞），
 //   并在 connection-drop-auto-continue.ts 的 appliesTo 里放行 cursor。
-// TODO（第二序列 · droid / kiro 等）：用户主动使用这些终端 agent 时，按需在这里
-//   追加它们特有的连接错误文案即可——多数错误词条（econnreset / fetch failed /
-//   5xx 等）已经是通用的，通常无需改动。
+// Factory Droid / Kiro 的后续适配已停止（见 AGENTS.md），不再列为连接错误适配待办。
 
 export type ConnectionErrorClassification = "permanent" | "transient" | null;
 

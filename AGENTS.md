@@ -45,6 +45,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **三层职责**：浏览器是控制面；本地运行时是长驻唯一真相源；执行层才是 agent 本体。session/board 摘要状态**不靠浏览器轮询**——`src/server/runtime-state-hub.ts` 批量广播 → `use-runtime-state-stream.ts` → `App.tsx`，加 summary 字段只改契约即可搭车。但 **workspace diff 仍是定时轮询**，别假设它在推流链路上。
 - **两种可执行 session transport** 由 `src/core/agent-catalog.ts` 声明：`pty_terminal` → `src/terminal/`；`acp_stdio_subprocess`（omp 可切换，默认仍为 PTY）→ `src/acp-client-session/`。共享聊天面板与 hooks 使用 `agent-conversation-*` 命名，判断活会话时必须读取 summary 的实际通道。
 - **Cline agent 已彻底退役**：SDK、CLI adapter、专属账号/provider/MCP/telemetry/反馈界面已删除；`cline` 身份、旧 transport 和存储字段只为读取历史保留，所有执行入口必须明确拒绝。恢复依据与重新接入边界见 `docs/cline-agent-retirement.md`；不得把历史字段当成仍可启动的能力。
+- **Factory Droid 与 Kiro 保留接入、停止后续适配**：`droid` / `kiro` 的现有实现、启动入口、历史数据及回归测试保留；不再跟进其 CLI / 协议变化、补齐专属能力，也不作为新功能的适配或验收要求。共享能力改动可自然覆盖；只有用户明确要求时再恢复针对性适配。
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
