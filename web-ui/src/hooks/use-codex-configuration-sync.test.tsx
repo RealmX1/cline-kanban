@@ -14,7 +14,7 @@ const queries = vi.hoisted(() => ({ fetch: vi.fn(), profile: vi.fn(), batch: vi.
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			getCodexConfigurationSyncState: { query: queries.fetch },
+			getCodexConfigurationSyncActiveState: { query: queries.fetch },
 			mutateCodexConfigurationProfile: { mutate: queries.profile },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 		},

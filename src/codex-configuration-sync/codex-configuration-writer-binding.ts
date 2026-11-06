@@ -46,8 +46,10 @@ import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from ".
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
-	mutateCodexConfigurationSyncStore,
-	readCodexConfigurationSyncStore,
+	mutateCodexConfigurationSyncActiveStore as mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncLookupStore,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
+	runWithCodexConfigurationSyncStoreSelection,
 } from "./codex-configuration-sync-store";
 import {
 	assertCodexSourceSharedPluginInstallationDirectoriesBinding,
@@ -227,7 +229,7 @@ function readCodexLaunchExceptionSelections(arguments_: string[], fields: CodexC
 	};
 }
 
-export async function prepareCodexConfigurationWriterBinding(input: {
+async function prepareCodexConfigurationWriterBindingInternal(input: {
 	purpose: CodexConfigurationWriterBinding["purpose"];
 	storageHome: string;
 	sqliteHome?: string;
@@ -815,48 +817,62 @@ export async function recordCodexConfigurationWriterLaunchArguments(
 	binding: CodexConfigurationWriterBinding,
 	arguments_: string[],
 ) {
-	await mutateCodexConfigurationSyncStore((store) => {
-		const writer = store.writers[binding.writerId];
-		if (!writer) throw new Error("Codex 配置启动绑定不存在。");
-		const overrides: string[] = [];
-		for (let index = 0; index < arguments_.length; index++) {
-			const argument = arguments_[index];
-			if (!argument) continue;
-			if (argument === "--") break;
-			if (["--enable", "--disable"].includes(argument)) {
-				const feature = arguments_[++index];
-				if (feature) overrides.push(`features.${feature}`);
-				continue;
+	await runWithCodexConfigurationSyncStoreSelection({ writerIds: [binding.writerId] }, () =>
+		mutateCodexConfigurationSyncStore((store) => {
+			const writer = store.writers[binding.writerId];
+			if (!writer) throw new Error("Codex 配置启动绑定不存在。");
+			const overrides: string[] = [];
+			for (let index = 0; index < arguments_.length; index++) {
+				const argument = arguments_[index];
+				if (!argument) continue;
+				if (argument === "--") break;
+				if (["--enable", "--disable"].includes(argument)) {
+					const feature = arguments_[++index];
+					if (feature) overrides.push(`features.${feature}`);
+					continue;
+				}
+				if (argument.startsWith("--enable=") || argument.startsWith("--disable=")) {
+					overrides.push(`features.${argument.slice(argument.indexOf("=") + 1)}`);
+					continue;
+				}
+				if (["--model", "-m"].includes(argument)) {
+					overrides.push("model");
+					index++;
+					continue;
+				}
+				const value =
+					argument === "-c" || argument === "--config"
+						? arguments_[++index]
+						: argument.startsWith("--config=")
+							? argument.slice(9)
+							: argument.startsWith("-c")
+								? argument.slice(2)
+								: undefined;
+				if (value?.includes("=")) {
+					// 运行时的 session-flags 信任只作用于注入的 hook，不是用户 hooks.state 的永久覆盖。
+					if (value.startsWith("hooks.state=") && value.includes("<session-flags>")) continue;
+					overrides.push(value.slice(0, value.indexOf("=")));
+				}
 			}
-			if (argument.startsWith("--enable=") || argument.startsWith("--disable=")) {
-				overrides.push(`features.${argument.slice(argument.indexOf("=") + 1)}`);
-				continue;
-			}
-			if (["--model", "-m"].includes(argument)) {
-				overrides.push("model");
-				index++;
-				continue;
-			}
-			const value =
-				argument === "-c" || argument === "--config"
-					? arguments_[++index]
-					: argument.startsWith("--config=")
-						? argument.slice(9)
-						: argument.startsWith("-c")
-							? argument.slice(2)
-							: undefined;
-			if (value?.includes("=")) {
-				// 运行时的 session-flags 信任只作用于注入的 hook，不是用户 hooks.state 的永久覆盖。
-				if (value.startsWith("hooks.state=") && value.includes("<session-flags>")) continue;
-				overrides.push(value.slice(0, value.indexOf("=")));
-			}
-		}
-		writer.overrideKeyPaths = overrides;
-	});
+			writer.overrideKeyPaths = overrides;
+		}),
+	);
 }
 
 export async function findCodexConfigurationWriterByHome(home: string) {
-	return Object.values((await readCodexConfigurationSyncStore()).writers).find(
-		(writer) => resolve(writer.binding.configurationHomeDirectoryPath) === resolve(home),
+	return Object.values(
+		(await readCodexConfigurationSyncLookupStore({ writerHomePaths: [resolve(home)] })).writers,
+	).find((writer) => resolve(writer.binding.configurationHomeDirectoryPath) === resolve(home));
+}
+
+export async function prepareCodexConfigurationWriterBinding(
+	input: Parameters<typeof prepareCodexConfigurationWriterBindingInternal>[0],
+) {
+	return await runWithCodexConfigurationSyncStoreSelection(
+		{
+			writerIds: input.previousBinding ? [input.previousBinding.writerId] : [],
+			writerHomePaths: [resolve(input.storageHome)],
+		},
+		() => prepareCodexConfigurationWriterBindingInternal(input),
 	);
 }

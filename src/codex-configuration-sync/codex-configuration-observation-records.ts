@@ -48,7 +48,8 @@ export function recordCodexConfigurationSourceObservation(
 	observation.rawChangeIds.push(change.changeId);
 	if (!observation.detectedWriterIds.includes(change.sourceWriterId))
 		observation.detectedWriterIds.push(change.sourceWriterId);
-	observation.observationCount = observation.rawChangeIds.length;
+	observation.observationCount =
+		Math.max(observation.observationCount, 1) + (observation.rawChangeIds.length === 1 ? 0 : 1);
 	observation.detectedLocationCount = observation.detectedWriterIds.length;
 	observation.observedAt = change.observedAt;
 	observation.version = change.version;

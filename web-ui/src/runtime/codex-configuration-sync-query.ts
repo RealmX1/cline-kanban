@@ -2,6 +2,7 @@ import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	CodexConfigurationBatchActionRequest,
 	CodexConfigurationChangeDetailsRequest,
+	CodexConfigurationMutationReceiptRequest,
 	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationResolveConflictRequest,
 	CodexConfigurationResolveTargetConflictRequest,
@@ -11,21 +12,28 @@ import type {
 export const mutateCodexConfigurationProfile = (
 	workspaceId: string | null,
 	input: CodexConfigurationProfileMutationRequest,
-) => getRuntimeTrpcClient(workspaceId).runtime.mutateCodexConfigurationProfile.mutate(input);
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.mutateCodexConfigurationProfile.mutate({
+		...input,
+		stateResponseScope: "active",
+	});
 
 export const batchCodexConfigurationAction = (
 	workspaceId: string | null,
 	input: CodexConfigurationBatchActionRequest,
 	signal?: AbortSignal,
 ) =>
-	getRuntimeTrpcClient(workspaceId).runtime.batchCodexConfigurationAction.mutate(input, {
-		signal,
-		context: {
-			sendAsIndependentHttpRequest:
-				(input.action === "confirm_source" || input.action === "defer") &&
-				input.items.every((item) => item.entryKind === "source_observation"),
+	getRuntimeTrpcClient(workspaceId).runtime.batchCodexConfigurationAction.mutate(
+		{ ...input, stateResponseScope: "active" },
+		{
+			signal,
+			context: {
+				sendAsIndependentHttpRequest:
+					(input.action === "confirm_source" || input.action === "defer") &&
+					input.items.every((item) => item.entryKind === "source_observation"),
+			},
 		},
-	});
+	);
 
 type ConfigurationSyncInvalidationReason = "state_updated" | "runtime_reconnected";
 const invalidationListeners = new Set<(reason: ConfigurationSyncInvalidationReason) => void>();
@@ -41,7 +49,7 @@ export function subscribeCodexConfigurationSyncUpdated(
 	};
 }
 export const fetchCodexConfigurationSyncState = (workspaceId: string | null, signal?: AbortSignal) =>
-	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationSyncState.query(undefined, {
+	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationSyncActiveState.query(undefined, {
 		signal,
 		context: { sendAsIndependentHttpRequest: true },
 	});
@@ -57,16 +65,60 @@ export const fetchCodexConfigurationChangeDetails = (
 export const synchronizeCodexConfigurationChange = (
 	workspaceId: string | null,
 	input: CodexConfigurationSynchronizeRequest,
-) => getRuntimeTrpcClient(workspaceId).runtime.synchronizeCodexConfigurationChange.mutate(input);
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.synchronizeCodexConfigurationChange.mutate({
+		...input,
+		stateResponseScope: "active",
+	});
 export const resolveCodexConfigurationConflict = (
 	workspaceId: string | null,
 	input: CodexConfigurationResolveConflictRequest,
-) => getRuntimeTrpcClient(workspaceId).runtime.resolveCodexConfigurationConflict.mutate(input);
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.resolveCodexConfigurationConflict.mutate({
+		...input,
+		stateResponseScope: "active",
+	});
 export const acknowledgeCodexConfigurationChange = (
 	workspaceId: string | null,
 	input: { changeId: string; expectedVersion: number; idempotencyKey: string },
-) => getRuntimeTrpcClient(workspaceId).runtime.acknowledgeCodexConfigurationChange.mutate(input);
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.acknowledgeCodexConfigurationChange.mutate({
+		...input,
+		stateResponseScope: "active",
+	});
 export const resolveCodexConfigurationTargetConflict = (
 	workspaceId: string | null,
 	input: CodexConfigurationResolveTargetConflictRequest,
-) => getRuntimeTrpcClient(workspaceId).runtime.resolveCodexConfigurationTargetConflict.mutate(input);
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.resolveCodexConfigurationTargetConflict.mutate({
+		...input,
+		stateResponseScope: "active",
+	});
+
+export const fetchCodexConfigurationSyncHistory = (
+	workspaceId: string | null,
+	input: { category?: "all" | "settings" | "sources"; search?: string; limit?: number; cursor?: string },
+	signal?: AbortSignal,
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.listCodexConfigurationSyncHistory.query(input, {
+		signal,
+		context: { sendAsIndependentHttpRequest: true },
+	});
+export const fetchCodexConfigurationSourceObservation = (
+	workspaceId: string | null,
+	observationId: string,
+	signal?: AbortSignal,
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationSourceObservation.query(
+		{ observationId },
+		{ signal, context: { sendAsIndependentHttpRequest: true } },
+	);
+export const fetchCodexConfigurationMutationReceipt = (
+	workspaceId: string | null,
+	input: CodexConfigurationMutationReceiptRequest,
+	signal?: AbortSignal,
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.getCodexConfigurationMutationReceipt.query(input, {
+		signal,
+		context: { sendAsIndependentHttpRequest: true },
+	});

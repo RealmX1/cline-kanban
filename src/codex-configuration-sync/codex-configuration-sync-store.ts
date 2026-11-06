@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
@@ -21,6 +21,15 @@ import type { CodexConfigurationFields, CodexConfigurationFieldValue } from "./c
 import { migrateCodexConfigurationApprovalRecords } from "./codex-configuration-observation-records";
 import { migrateCodexConfigurationProfiles } from "./codex-configuration-profiles";
 import { migrateCodexConfigurationSettingsIsolation } from "./codex-configuration-settings-isolation";
+import {
+	type CodexConfigurationHistoryStoragePage,
+	type CodexConfigurationStoreReadSelection,
+	closeCodexConfigurationSyncDatabaseClients,
+	getCodexConfigurationSyncDatabaseClient,
+	restoreLatestCodexConfigurationSyncStateToLegacyStorage,
+} from "./codex-configuration-sync-database-worker-client";
+import { assertCodexSourceSharedPluginInstallationDirectoriesBinding } from "./codex-source-shared-plugin-installation-directories";
+import { codexSourceSharedPluginNativeLaunchPreparationIntentSchema } from "./codex-source-shared-plugin-native-launch-preparation-intent-contract";
 
 export interface StoredCodexConfigurationProfile {
 	profileId: string;
@@ -32,6 +41,7 @@ export interface StoredCodexConfigurationProfile {
 }
 
 export interface StoredCodexConfigurationWriter {
+	pendingSourceSharedPluginInstallationPreparations?: Record<string, unknown>;
 	taskReasoningEffortSelectionAtLaunch?: string;
 	taskReasoningEffortFeedbackSelection?: {
 		selectionId: string;
@@ -85,6 +95,7 @@ export interface StoredCodexConfigurationSource {
 	observedUserFields: CodexConfigurationFields;
 }
 export interface StoredCodexConfigurationChange {
+	propagationTargetTotalCount?: number;
 	settingsIsolationArchivedAtMs?: number;
 	taskReasoningEffortFeedbackSelectionId?: string;
 	modificationInitiator?: CodexConfigurationSourceEvidence["initiator"];
@@ -149,6 +160,12 @@ export interface StoredCodexConfigurationSourceObservation extends CodexConfigur
 	detectedWriterIds: string[];
 }
 export interface CodexConfigurationSyncStore {
+	storageIdentity?: string;
+	storageGeneration?: number;
+	sourceDecisionGenerations?: Record<string, number>;
+	historyTotalCount?: number;
+	historyMaximumSequence?: number;
+	historyProjectionGeneration?: number;
 	legacySessionProfileAdoptions: Record<
 		string,
 		{
@@ -188,6 +205,12 @@ export interface CodexConfigurationSyncStore {
 const fieldSchema = z.object({ value: z.unknown(), definitionDigest: z.string().optional() });
 const fieldsSchema = z.record(z.string(), fieldSchema);
 const storeSchema = z.object({
+	storageIdentity: z.string().optional(),
+	storageGeneration: z.number().int().nonnegative().optional(),
+	sourceDecisionGenerations: z.record(z.string(), z.number()).optional(),
+	historyTotalCount: z.number().int().nonnegative().optional(),
+	historyMaximumSequence: z.number().int().nonnegative().optional(),
+	historyProjectionGeneration: z.number().int().nonnegative().optional(),
 	legacySessionProfileAdoptions: z
 		.record(
 			z.string(),
@@ -253,6 +276,7 @@ const storeSchema = z.object({
 	writers: z.record(
 		z.string(),
 		z.object({
+			pendingSourceSharedPluginInstallationPreparations: z.record(z.string(), z.unknown()).optional(),
 			sourceTaskSnapshot: codexConfigurationTaskSourceSnapshotSchema.optional(),
 			pendingSessionProfileBinding: z
 				.object({
@@ -307,6 +331,7 @@ const storeSchema = z.object({
 	),
 	changes: z.array(
 		z.object({
+			propagationTargetTotalCount: z.number().int().nonnegative().optional(),
 			modificationInitiator: codexConfigurationSourceEvidenceSchema.shape.initiator.optional(),
 			settingsIsolationArchivedAtMs: z.number().optional(),
 			sharedConflictEvidence: z
@@ -396,91 +421,253 @@ const storeSchema = z.object({
 export const getCodexConfigurationSyncDirectory = () =>
 	join(getRuntimeHomePath(), "codex-configuration-writer-bindings-and-sync");
 
-async function readCodexConfigurationSyncStoreWithPersistedContent(): Promise<{
-	store: CodexConfigurationSyncStore;
-	persistedSerializedContent: string | null;
-}> {
-	try {
-		const persistedSerializedContent = await readFile(
-			join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json"),
-			"utf8",
+function parseLegacyConfigurationSyncStore(value: unknown): CodexConfigurationSyncStore {
+	const store = storeSchema.parse(
+		value ?? {
+			schemaVersion: 3,
+			legacySessionProfileAdoptions: {},
+			profiles: {},
+			defaultCodexConfigurationProfileId: null,
+			hookTrustDecisions: {},
+			revision: 0,
+			sources: {},
+			writers: {},
+			changes: [],
+			sourceObservations: [],
+			mutationReceipts: {},
+			observationProblem: null,
+		},
+	);
+	migrateCodexConfigurationApprovalRecords(store);
+	migrateCodexConfigurationProfiles(store);
+	migrateCodexConfigurationSettingsIsolation(store);
+	return store;
+}
+async function indexLegacySourcePluginRecoveryPreparations(store: CodexConfigurationSyncStore) {
+	const visitedDirectories = new Set<string>();
+	for (const writer of Object.values(store.writers)) {
+		const shared = writer.binding.sourceSharedPluginInstallationDirectoriesBinding;
+		if (!shared) continue;
+		const directory = join(
+			shared.pluginsDirectoryCanonicalPath,
+			".kanban-source-installation-coordination",
+			"native-launch-preparation-intents",
 		);
-		const store = storeSchema.parse(JSON.parse(persistedSerializedContent));
-		migrateCodexConfigurationApprovalRecords(store);
-		migrateCodexConfigurationProfiles(store);
-		migrateCodexConfigurationSettingsIsolation(store);
-		return { store, persistedSerializedContent };
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		return {
-			persistedSerializedContent: null,
-			store: {
-				schemaVersion: 3,
-				legacySessionProfileAdoptions: {},
-				profiles: {},
-				defaultCodexConfigurationProfileId: null,
-				hookTrustDecisions: {},
-				revision: 0,
-				sources: {},
-				writers: {},
-				changes: [],
-				sourceObservations: [],
-				mutationReceipts: {},
-				observationProblem: null,
-			},
-		};
+		if (visitedDirectories.has(directory)) continue;
+		visitedDirectories.add(directory);
+		try {
+			for (const name of await readdir(directory)) {
+				if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
+				const path = join(directory, name);
+				const intent = codexSourceSharedPluginNativeLaunchPreparationIntentSchema.parse(
+					JSON.parse(await readFile(path, "utf8")),
+				);
+				const owner = store.writers[intent.writerId];
+				if (intent.status === "pending" && owner?.binding.sourceIdentity === intent.sourceIdentity) {
+					owner.pendingSourceSharedPluginInstallationPreparations ??= {};
+					owner.pendingSourceSharedPluginInstallationPreparations[path] = intent;
+				}
+			}
+		} catch (error) {
+			const sourceExists = await lstat(shared.pluginsDirectoryCanonicalPath).then(
+				(file) => file.isDirectory(),
+				() => false,
+			);
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || !sourceExists) {
+				writer.pendingSourceSharedPluginInstallationPreparations ??= {};
+				writer.pendingSourceSharedPluginInstallationPreparations[directory] = {
+					requiresLegacyDirectoryObservation: true,
+				};
+			}
+		}
+	}
+	return store;
+}
+async function configurationDatabaseClient() {
+	return await getCodexConfigurationSyncDatabaseClient(
+		getCodexConfigurationSyncDirectory(),
+		parseLegacyConfigurationSyncStore,
+		indexLegacySourcePluginRecoveryPreparations,
+		materializePendingPluginPreparationsForLegacyRollback,
+	);
+}
+
+async function materializePendingPluginPreparationsForLegacyRollback(store: CodexConfigurationSyncStore) {
+	for (const writer of Object.values(store.writers)) {
+		const preparations = writer.pendingSourceSharedPluginInstallationPreparations;
+		if (!preparations || Object.keys(preparations).length === 0) continue;
+		const shared = writer.binding.sourceSharedPluginInstallationDirectoriesBinding;
+		if (!shared) throw new Error("插件恢复意图缺少共享来源绑定，尚不能回退。");
+		await assertCodexSourceSharedPluginInstallationDirectoriesBinding(writer.binding);
+		const directory = join(
+			shared.pluginsDirectoryCanonicalPath,
+			".kanban-source-installation-coordination",
+			"native-launch-preparation-intents",
+		);
+		for (const parent of [dirname(directory), directory]) {
+			await mkdir(parent, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
+				if (error.code !== "EEXIST") throw error;
+			});
+			const file = await lstat(parent);
+			if (!file.isDirectory() || file.isSymbolicLink() || (await realpath(parent)) !== parent)
+				throw new Error("插件回退恢复目录的物理归属不符。");
+		}
+		for (const [path, retained] of Object.entries(preparations)) {
+			if (path === directory) continue;
+			const intent = codexSourceSharedPluginNativeLaunchPreparationIntentSchema.parse(retained);
+			if (
+				dirname(path) !== directory ||
+				basename(path) !== `${intent.intentId}.json` ||
+				intent.writerId !== writer.binding.writerId ||
+				intent.sourceIdentity !== writer.binding.sourceIdentity
+			)
+				throw new Error("插件恢复意图与回退 writer 身份不符。");
+			try {
+				const file = await lstat(path);
+				if (!file.isFile() || file.isSymbolicLink()) throw new Error("插件回退意图路径不是普通文件。");
+				const existing = codexSourceSharedPluginNativeLaunchPreparationIntentSchema.parse(
+					JSON.parse(await readFile(path, "utf8")),
+				);
+				if (
+					existing.intentId !== intent.intentId ||
+					existing.writerId !== intent.writerId ||
+					existing.sourceIdentity !== intent.sourceIdentity
+				)
+					throw new Error("插件回退意图文件归属不符。");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(retained), {
+					lock: null,
+					durable: true,
+					fileMode: 0o600,
+				});
+			}
+		}
 	}
 }
-
-export async function readCodexConfigurationSyncStore(): Promise<CodexConfigurationSyncStore> {
-	return (await readCodexConfigurationSyncStoreWithPersistedContent()).store;
+export function runOutsideCodexConfigurationSyncStoreSelection<T>(operation: () => T): T {
+	return requestStorageSelection.exit(operation);
 }
+const requestStorageSelection = new AsyncLocalStorage<Omit<CodexConfigurationStoreReadSelection, "scope">>();
+export function runWithCodexConfigurationSyncStoreSelection<T>(
+	selection: Omit<CodexConfigurationStoreReadSelection, "scope">,
+	operation: () => T,
+): T {
+	const inherited = requestStorageSelection.getStore() ?? {};
+	return requestStorageSelection.run(
+		{
+			changeIds: [...(inherited.changeIds ?? []), ...(selection.changeIds ?? [])],
+			writerIds: [...(inherited.writerIds ?? []), ...(selection.writerIds ?? [])],
+			targetWriterIds: [...(inherited.targetWriterIds ?? []), ...(selection.targetWriterIds ?? [])],
+			writerHomePaths: [...(inherited.writerHomePaths ?? []), ...(selection.writerHomePaths ?? [])],
+			observationIds: [...(inherited.observationIds ?? []), ...(selection.observationIds ?? [])],
+			receiptKeys: [...(inherited.receiptKeys ?? []), ...(selection.receiptKeys ?? [])],
+			hookTrustDecisionIds: [...(inherited.hookTrustDecisionIds ?? []), ...(selection.hookTrustDecisionIds ?? [])],
+		},
+		operation,
+	);
+}
+export async function readCodexConfigurationSyncStore(): Promise<CodexConfigurationSyncStore> {
+	return storeSchema.parse(await (await configurationDatabaseClient()).request("snapshot", { scope: "full" }));
+}
+export async function readCodexConfigurationSyncActiveStore(
+	selection: Omit<CodexConfigurationStoreReadSelection, "scope"> = {},
+): Promise<CodexConfigurationSyncStore> {
+	return storeSchema.parse(
+		await (await configurationDatabaseClient()).request("snapshot", {
+			...requestStorageSelection.getStore(),
+			...selection,
+			scope: "active",
+		}),
+	);
+}
+export async function readCodexConfigurationSyncLookupStore(
+	selection: Omit<CodexConfigurationStoreReadSelection, "scope">,
+): Promise<CodexConfigurationSyncStore> {
+	return storeSchema.parse(
+		await (await configurationDatabaseClient()).request("snapshot", { ...selection, scope: "lookup" }),
+	);
+}
+export async function listCodexConfigurationSyncStoredHistory(input: {
+	category?: "all" | "settings" | "sources";
+	search?: string;
+	limit?: number;
+	cursor?: string;
+}): Promise<CodexConfigurationHistoryStoragePage> {
+	return await (await configurationDatabaseClient()).request("history", input);
+}
+export async function readCodexConfigurationSyncStorageMetrics() {
+	const client = await configurationDatabaseClient();
+	return { ...client.lastReadMetrics, cumulative: { ...client.cumulativeReadMetrics } };
+}
+export async function readCodexConfigurationSyncActiveQueryPlans() {
+	return await (await configurationDatabaseClient()).request<Array<{ detail: string }>>("active_query_plans");
+}
+export async function readCodexConfigurationSyncStorageMetadata() {
+	const stored = await (await configurationDatabaseClient()).request<{
+		storageIdentity: string;
+		storageGeneration: number;
+		storeHeader: { revision: number };
+	}>("metadata");
+	return {
+		storageIdentity: stored.storageIdentity,
+		storageGeneration: stored.storageGeneration,
+		revision: stored.storeHeader.revision,
+	};
+}
+export const closeCodexConfigurationSyncDatabase = closeCodexConfigurationSyncDatabaseClients;
 
-// 所有共享决定只有这一处写入，活配置文件始终交给原 app-server。
+// 复用旧跨进程锁保护异步取证；SQL 只在 worker 的短事务内提交。
 export async function mutateCodexConfigurationSyncStore<T>(
 	operation: (store: CodexConfigurationSyncStore) => Promise<T> | T,
-	options: { skipUnchangedObservationPersistence?: boolean } = {},
-) {
+	options: { skipUnchangedObservationPersistence?: boolean; selection?: CodexConfigurationStoreReadSelection } = {},
+): Promise<T> {
+	const client = await configurationDatabaseClient();
+	await client.verifyWriteAdmission();
 	const directory = getCodexConfigurationSyncDirectory();
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	if ((await lstat(directory)).isSymbolicLink()) throw new Error("Codex 配置绑定目录被替换，已保留现场。");
-	const lockAcquisitionStartedAtMs = performance.now();
 	const lockfilePath = `${directory}.lock`;
+	const lockAcquisitionStartedAtMs = performance.now();
 	const release = await lockedFileSystem
 		.acquireLock({ path: directory, type: "directory", lockfilePath })
-		.catch((error: unknown) => {
+		.catch(async (error: unknown) => {
+			await client.recordWriteLockFailure(error);
 			if (error instanceof Error)
 				error.message = `Codex 配置存储取锁失败：lockPath=${lockfilePath} phase=lock_acquisition waitedMs=${Math.round(performance.now() - lockAcquisitionStartedAtMs)}；${error.message}`;
 			throw error;
 		});
-	const pendingPath = join(directory, `${randomUUID()}.pending-configuration-sync-state.json`);
 	try {
-		const { store, persistedSerializedContent } = await readCodexConfigurationSyncStoreWithPersistedContent();
+		await client.confirmWriteLockAcquired();
+		const selection = { ...requestStorageSelection.getStore(), ...(options.selection ?? { scope: "full" }) };
+		const store = storeSchema.parse(await client.request("snapshot", selection));
+		const before = structuredClone(store);
 		const result = await runWithCodexDirectoryVolumeSystemQueriesDisabled(() => operation(store));
-		const serializedContent = JSON.stringify(store);
-		// 明确操作及其幂等重试仍须持久化，以补齐此前原子替换成功但目录同步失败的情况。
-		if (options.skipUnchangedObservationPersistence && serializedContent === persistedSerializedContent)
-			return result;
-		const pendingFile = await open(pendingPath, "wx", 0o600);
-		try {
-			await pendingFile.writeFile(serializedContent);
-			await pendingFile.sync();
-		} finally {
-			await pendingFile.close();
-		}
-		await rename(pendingPath, join(directory, "configuration-sync-state.json"));
-		if (process.platform !== "win32") {
-			const directoryHandle = await open(directory, "r");
-			try {
-				await directoryHandle.sync();
-			} finally {
-				await directoryHandle.close();
-			}
-		}
+		await client.request("commit", {
+			before,
+			after: store,
+			expectedStorageGeneration: before.storageGeneration,
+			scope: selection.scope,
+		});
 		return result;
 	} finally {
-		await rm(pendingPath, { force: true });
-		// 与共享写入入口相同，释放失败只记诊断，不覆盖业务结果。
 		await releaseFilesystemKernelWriteLock(release, lockfilePath);
 	}
+}
+export async function mutateCodexConfigurationSyncActiveStore<T>(
+	operation: (store: CodexConfigurationSyncStore) => Promise<T> | T,
+	options: { skipUnchangedObservationPersistence?: boolean; selection?: CodexConfigurationStoreReadSelection } = {},
+): Promise<T> {
+	return await mutateCodexConfigurationSyncStore(operation, {
+		...options,
+		selection: options.selection ?? { scope: "active" },
+	});
+}
+
+export async function restoreLatestCodexConfigurationSyncLegacyStorage() {
+	return await restoreLatestCodexConfigurationSyncStateToLegacyStorage(
+		getCodexConfigurationSyncDirectory(),
+		parseLegacyConfigurationSyncStore,
+		materializePendingPluginPreparationsForLegacyRollback,
+	);
 }

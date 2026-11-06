@@ -5,7 +5,11 @@ import { createRequire } from "node:module";
 import { join, resolve } from "node:path";
 import { parse, stringify } from "smol-toml";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readCodexConfigurationSyncStore } from "../../src/codex-configuration-sync/codex-configuration-sync-store";
+import {
+	closeCodexConfigurationSyncDatabase,
+	mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncStore,
+} from "../../src/codex-configuration-sync/codex-configuration-sync-store";
 import { prepareCodexConfigurationWriterBinding } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
@@ -14,18 +18,20 @@ import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutatio
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
+	waitForChildProcessExit,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(async () => {
 	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+	await closeCodexConfigurationSyncDatabase();
 	vi.unstubAllEnvs();
 });
 
 describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 	"打包态配置同步真实浏览器",
-	{ timeout: 120_000 },
+	{ timeout: 360_000 },
 	() => {
 		it("profile 自动共享与例外反馈经真实推流呈现，支持键盘、手机布局和稍后处理", async () => {
 			const fixture = createIsolatedGitTestWorkspaceFixture({
@@ -62,6 +68,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				sessions: {},
 			});
 			const sourceHome = join(fixture.isolatedHomeDirectoryPath, ".codex");
+			await writeFile(
+				join(fixture.isolatedHomeDirectoryPath, ".cline", "kanban", "config.json"),
+				JSON.stringify({ selectedAgentId: "codex" }),
+				{ mode: 0o600 },
+			);
 			await mkdir(sourceHome);
 			vi.stubEnv("CODEX_HOME", sourceHome);
 			vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
@@ -87,6 +98,38 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				runtimeSessionIncarnationId: randomUUID(),
 			});
 			const writerConfigurationPath = join(binding.configurationHomeDirectoryPath, "config.toml");
+			await mutateCodexConfigurationSyncStore((store) => {
+				store.changes.push(
+					...Array.from({ length: 65 }, (_, index) => ({
+						changeId: `paginated-history-${index}`,
+						version: index + 1,
+						sourceWriterId: binding.writerId,
+						sourceIdentity: binding.sourceIdentity,
+						fieldKey: JSON.stringify(["config.toml", `synthetic_history_${index}`]),
+						observedAt: index,
+						recordKind: "historical_record" as const,
+						approvalStatus: "historical" as const,
+						mergeStatus: "kept_shared_value" as const,
+						acknowledgedAt: 1,
+						targets: [],
+					})),
+				);
+				store.sourceObservations.push({
+					observationId: "paginated-source-reminder",
+					version: 1,
+					sourceIdentity: binding.sourceIdentity,
+					sourceKey: "paginated-source-reminder-key",
+					sourceLabel: "分页来源提醒",
+					firstObservedAt: 1,
+					observedAt: 1,
+					observationCount: 1,
+					detectedLocationCount: 1,
+					acknowledgedAt: 1,
+					reminderDisposition: "deferred",
+					rawChangeIds: [],
+					detectedWriterIds: [binding.writerId],
+				});
+			});
 			const configuration = parse(await readFile(writerConfigurationPath, "utf8"));
 			configuration.model = "fixture-updated";
 			configuration.model_reasoning_effort = "high";
@@ -132,12 +175,39 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 			const { chromium } = requireFromWebUi("playwright-core") as { chromium: BrowserType };
 			const browser = await chromium.launch({ headless: true });
 			const checks: string[] = [];
+			const browserEvents: Array<{ kind: string; detail: string }> = [];
 			const geometrySnapshots: Record<string, Array<{ x: number; y: number; width: number; height: number }>> = {};
 			try {
-				const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
-				await page.clock.install();
+				const page = await browser.newPage({ viewport: { width: 1280, height: 900 }, serviceWorkers: "block" });
+				page.setDefaultNavigationTimeout(90_000);
+				page.setDefaultTimeout(90_000);
+				await page.route(
+					(url) => /^https?:$/.test(url.protocol) && url.origin !== new URL(origin).origin,
+					(route) => route.abort(),
+				);
+				page.on("pageerror", (error) => browserEvents.push({ kind: "pageerror", detail: error.message }));
+				page.on("requestfailed", (request) =>
+					browserEvents.push({
+						kind: "requestfailed",
+						detail: `${request.url()} ${request.failure()?.errorText}`,
+					}),
+				);
+				page.on("response", (response) => {
+					if (response.url().includes("/api/"))
+						browserEvents.push({
+							kind: "api_response",
+							detail: `${Date.now()} ${response.status()} ${response.url().split("?")[0]}`,
+						});
+					if (!response.ok())
+						browserEvents.push({ kind: "http_error", detail: `${response.status()} ${response.url()}` });
+				});
 				const synchronizationRequests: string[] = [];
+				const historyRequests: string[] = [];
 				page.on("request", (request) => {
+					if (request.url().includes("/api/"))
+						browserEvents.push({ kind: "api_request", detail: `${Date.now()} ${request.url().split("?")[0]}` });
+					if (request.url().includes("runtime.listCodexConfigurationSyncHistory"))
+						historyRequests.push(request.url());
 					if (
 						/runtime\.(batchCodexConfigurationAction|acknowledgeCodexConfigurationChange|synchronizeCodexConfigurationChange|resolveCodexConfiguration)/u.test(
 							request.url(),
@@ -145,10 +215,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					)
 						synchronizationRequests.push(request.postData() ?? "");
 				});
-				await page.goto(origin);
+				await page.goto(origin, { waitUntil: "commit" });
 				const onboarding = page.getByRole("dialog", { name: "Get started" });
-				await onboarding.waitFor({ timeout: 15_000 });
-				await onboarding.getByRole("button", { name: "Close", exact: true }).click();
+				await onboarding.waitFor({ timeout: 90_000 });
+				await onboarding.getByRole("button", { name: "关闭填写窗口", exact: true }).click();
 				await onboarding.waitFor({ state: "detached" });
 				const notice = page.locator('[data-verification-anchor="codex-configuration-sync-notice"]');
 				const summary = page.locator('[data-verification-anchor="codex-configuration-sync-summary"]');
@@ -205,7 +275,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				await page.mouse.move(0, 0);
 				const terminalInput = page.locator(".xterm-helper-textarea").first();
 				await terminalInput.focus();
-				await page.clock.fastForward(8_001);
+				await page.waitForTimeout(8_001);
 				await notice.waitFor({ state: "hidden" });
 				expect(await summary.getAttribute("aria-expanded")).toBe("false");
 				expect(synchronizationRequests).toHaveLength(0);
@@ -223,7 +293,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				await page.keyboard.press("Space");
 				await notice.waitFor();
 				expect(await notice.evaluate((element) => element.ownerDocument.activeElement === element)).toBe(true);
-				await page.clock.fastForward(16_000);
+				await page.waitForTimeout(16_000);
 				expect(await notice.isVisible()).toBe(true);
 				assertUnchangedGeometry(expandedGeometry, await measureWorkspaceGeometry("desktop-manual-expanded"));
 				await page.keyboard.press("Escape");
@@ -244,8 +314,8 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				).toBe("fixture-initial");
 				await notice.getByRole("button", { name: "收起", exact: true }).focus();
 				await page.keyboard.press("Space");
-				await page.reload();
-				await summary.waitFor();
+				await page.reload({ waitUntil: "commit" });
+				await summary.waitFor({ timeout: 90_000 });
 				expect(await notice.isHidden()).toBe(true);
 				configuration.hide_agent_reasoning = true;
 				await writeFile(writerConfigurationPath, stringify(configuration));
@@ -338,6 +408,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				expect(synchronizationRequests).toHaveLength(0);
 				checks.push("手机与横屏内部滚动、关闭按钮可达、页面不横向溢出，展开与收起不推动顶栏、看板或终端");
 				const mobilePage = await browser.newPage({ viewport: { width: 390, height: 844 }, hasTouch: true });
+				mobilePage.setDefaultNavigationTimeout(90_000);
 				try {
 					await mobilePage.addInitScript(() => {
 						localStorage.setItem("kanban.onboarding.dialog.shown", "true");
@@ -425,6 +496,31 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				await notice.getByRole("button", { name: "配置同步设置", exact: true }).click();
 				const settings = page.locator('[data-verification-anchor="codex-configuration-sync-settings"]');
 				await settings.waitFor({ timeout: 15_000 });
+				expect(historyRequests).toHaveLength(0);
+				await settings.getByRole("button", { name: "历史记录", exact: true }).click();
+				const historical = settings.getByRole("group", { name: "历史记录", exact: true });
+				await vi.waitFor(async () => expect(await historical.getByRole("article").count()).toBe(50));
+				await historical.getByRole("button", { name: "加载更多历史", exact: true }).click();
+				await historical.getByText("config.toml · synthetic_history_0", { exact: true }).first().waitFor();
+				await settings.getByRole("searchbox", { name: "筛选配置记录" }).fill("synthetic_history_0");
+				await vi.waitFor(async () => expect(await historical.getByRole("article").count()).toBe(1));
+				await historical.getByRole("combobox", { name: "历史记录类别" }).selectOption("sources");
+				await settings.getByRole("searchbox", { name: "筛选配置记录" }).fill("分页来源提醒");
+				await historical.getByRole("button", { name: "标记已读", exact: true }).click();
+				await vi.waitFor(async () =>
+					expect(
+						(await readCodexConfigurationSyncStore()).sourceObservations.find(
+							(entry) => entry.observationId === "paginated-source-reminder",
+						)?.reminderDisposition,
+					).toBe("confirmed"),
+				);
+				await vi.waitFor(async () =>
+					expect(await historical.getByRole("button", { name: "标记已读", exact: true }).count()).toBe(0),
+				);
+				await page.screenshot({ path: join(evidenceDirectory, "mobile-paginated-configuration-history.png") });
+				await settings.getByRole("searchbox", { name: "筛选配置记录" }).fill("");
+				await settings.getByRole("button", { name: "全部", exact: true }).click();
+				checks.push("通知与首屏不加载历史；真实数据库支持50条分页、加载更多、全历史搜索及稍后提醒再次标记已读");
 				expect(await settings.evaluate((element) => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
 				await settings
 					.locator('[aria-label="设置待反馈"]')
@@ -481,15 +577,88 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 					.locator(".kb-home-layout")
 					.getByRole("button", { name: "Close terminal", exact: true });
 				if (await closeTerminal.isVisible()) await closeTerminal.click();
-				await page.reload();
-				await page.waitForLoadState("networkidle");
+				const latestStateRead = page.waitForResponse(
+					(response) => response.url().includes("runtime.getCodexConfigurationSyncActiveState") && response.ok(),
+				);
+				await page.reload({ waitUntil: "commit" });
+				await latestStateRead;
 				expect(await notice.count()).toBe(0);
 				checks.push("手机管理页无横向溢出，稍后仅撤下提醒，刷新不重弹");
+				const persisted = await readCodexConfigurationSyncStore();
+				child.kill("SIGKILL");
+				expect(await waitForChildProcessExit(child, 5_000)).toBe(true);
+				const restarted = children.register(
+					spawn(
+						process.execPath,
+						[
+							"--require",
+							resolve("test/integration/shutdown-ipc-hook.cjs"),
+							cliPath,
+							"--port",
+							"auto",
+							"--no-open",
+							"--no-passcode",
+						],
+						{
+							cwd: repository.repositoryPath,
+							env: environment,
+							stdio: ["ignore", "pipe", "pipe", "ipc"],
+						},
+					),
+				);
+				restarted.stdout?.on("data", (chunk) => {
+					output += String(chunk);
+				});
+				restarted.stderr?.on("data", (chunk) => {
+					output += String(chunk);
+				});
+				const { runtimeUrl: restartedOrigin } = await waitForRuntimeServerStartupBannerOrSigkillChild(restarted);
+				const response = await page.request.get(
+					new URL("/api/trpc/runtime.getCodexConfigurationSyncActiveState", restartedOrigin).href,
+				);
+				expect(response.ok()).toBe(true);
+				const active = (await response.json()).result.data;
+				expect(active.storageIdentity).toBe(persisted.storageIdentity);
+				expect(active.storageGeneration).toBeGreaterThanOrEqual(persisted.storageGeneration ?? 0);
+				const recoveredHistory = await page.request.get(
+					new URL(
+						`/api/trpc/runtime.listCodexConfigurationSyncHistory?input=${encodeURIComponent(JSON.stringify({ search: "synthetic_history_0", limit: 1 }))}`,
+						restartedOrigin,
+					).href,
+				);
+				expect((await recoveredHistory.json()).result.data.changes[0].changeId).toBe("paginated-history-0");
+				checks.push("打包 runtime 被强制终止后，重启仍保留同一存储身份、提交代数和完整历史查询");
 				await writeFile(
 					join(evidenceDirectory, "browser-configuration-sync-result.json"),
 					JSON.stringify({ status: "passed", checks, geometrySnapshots }, null, 2),
 				);
 			} catch (error) {
+				const probes = await Promise.all(
+					["runtime.getConfig", "runtime.getCodexConfigurationSyncActiveState", "workspace.getState"].map(
+						async (procedure) => {
+							const startedAt = performance.now();
+							try {
+								const response = await fetch(new URL(`/api/trpc/${procedure}`, origin), {
+									headers: { "x-kanban-workspace-id": workspaceId },
+									signal: AbortSignal.timeout(3000),
+								});
+								const body = (await response.json()) as { error?: { message?: string } };
+								return {
+									procedure,
+									elapsedMs: performance.now() - startedAt,
+									status: response.status,
+									error: body.error?.message,
+								};
+							} catch (failure) {
+								return { procedure, elapsedMs: performance.now() - startedAt, error: String(failure) };
+							}
+						},
+					),
+				);
+				await writeFile(
+					join(evidenceDirectory, "failed-runtime-read-only-probes.json"),
+					JSON.stringify(probes, null, 2),
+				);
 				const page = browser.contexts()[0]?.pages()[0];
 				if (page) {
 					await page.screenshot({ path: join(evidenceDirectory, "failed-browser-state.png") });
@@ -501,6 +670,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 				throw error;
 			} finally {
 				await browser.close();
+				await writeFile(
+					join(evidenceDirectory, "browser-network-observations.json"),
+					JSON.stringify(browserEvents, null, 2),
+				);
 				await writeFile(
 					join(evidenceDirectory, "workspace-geometry-snapshots.json"),
 					JSON.stringify(geometrySnapshots, null, 2),

@@ -68,6 +68,29 @@ export function describeCodexConfigurationFieldIdentity(fieldKey: string) {
 		: `${fileName} · ${keyPath.join(".")}`;
 }
 
+export function describeCodexConfigurationHistorySearchText(
+	store: CodexConfigurationSyncStore,
+	change: StoredCodexConfigurationChange,
+) {
+	const keys = new Set([
+		change.fieldKey,
+		...Object.keys(change.relatedFields ?? {}),
+		...(change.relatedDeletedFieldKeys ?? []),
+	]);
+	return JSON.stringify([
+		...[...keys].map(describeCodexConfigurationFieldIdentity),
+		change.fieldKey,
+		change.codexConfigurationProfileId,
+		describeCodexConfigurationSourceEvidence(
+			store,
+			change.sourceWriterId,
+			change.sourceTaskSnapshot,
+			undefined,
+			change.modificationInitiator,
+		),
+	]).toLocaleLowerCase();
+}
+
 const sensitiveFieldName = /secret|token|password|credential|api.?key|authorization|private.?key|^env$/i;
 // 对象、数组和命令里的凭据也须脱敏，浏览器不接收原始配置对象。
 export function redactCodexConfigurationDisplayValue(value: unknown): unknown {

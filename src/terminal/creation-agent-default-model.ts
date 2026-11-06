@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { z } from "zod";
-import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { resolveUserCodexHomeDirectoryPath } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeAgentId } from "../core/api-contract";
