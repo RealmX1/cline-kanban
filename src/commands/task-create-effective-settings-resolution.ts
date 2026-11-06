@@ -10,7 +10,7 @@
 // `src/core/task-create-warning-derivation.ts` 里，那边可以被纯单测逐条钉住。
 import { createHash } from "node:crypto";
 import type { RuntimeConfigState } from "../config/runtime-config";
-import { getRuntimeAgentCatalogEntry, getRuntimeAgentSessionTransport } from "../core/agent-catalog";
+import { assertRuntimeAgentIsNotRetired, getRuntimeAgentCatalogEntry } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
@@ -19,7 +19,6 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
-	RuntimeTaskClineSettings,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceStateResponse,
 } from "../core/api-contract";
@@ -76,7 +75,6 @@ export interface TaskCreateRequestedSettings {
 	autoReviewEnabled?: boolean | undefined;
 	autoReviewMode?: RuntimeTaskAutoReviewMode | undefined;
 	agentId?: RuntimeAgentId | undefined;
-	clineSettings?: RuntimeTaskClineSettings | undefined;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization | undefined;
 	parentSessionId?: string | undefined;
 	worktreeMode?: RuntimeTaskWorktreeMode | undefined;
@@ -91,7 +89,6 @@ export interface TaskCreateResolvedSettings extends RuntimeCreationResolvedSetti
 	title: TaskCreateResolvedSetting<string>;
 	baseRef: TaskCreateResolvedSetting<string>;
 	worktreeMode: TaskCreateResolvedSetting<RuntimeTaskWorktreeMode>;
-	clineSettings: TaskCreateResolvedSetting<RuntimeTaskClineSettings | null>;
 	taskAgentSessionInitialization: TaskCreateResolvedSetting<RuntimeTaskAgentSessionInitialization | null>;
 	parentSessionId: TaskCreateResolvedSetting<string | null>;
 	ompAgentSessionTransportForNewTasks: TaskCreateResolvedSetting<
@@ -229,6 +226,7 @@ export async function resolveTaskCreateEffectiveSettings(
 	});
 
 	const effectiveAgentId = requested.agentId ?? runtimeConfig.selectedAgentId;
+	assertRuntimeAgentIsNotRetired(effectiveAgentId);
 	const requestedPermissionMode = requested.taskAgentPermissionMode ?? "bypass_all_permission_prompts";
 	const resolvedPermissionMode = resolveTaskAgentPermissionModeForAgent(effectiveAgentId, requestedPermissionMode);
 	if (requested.modelId && !["claude", "codex", "cursor", "kimi", "omp"].includes(effectiveAgentId))
@@ -289,10 +287,6 @@ export async function resolveTaskCreateEffectiveSettings(
 			value: worktreeMode,
 			source: requested.worktreeMode === undefined ? "built_in_default" : "explicit_flag",
 		},
-		clineSettings: {
-			value: requested.clineSettings ?? null,
-			source: requested.clineSettings === undefined ? "workspace_config_default" : "explicit_flag",
-		},
 		taskAgentSessionInitialization: {
 			value: requested.taskAgentSessionInitialization ?? null,
 			source: requested.taskAgentSessionInitialization === undefined ? "built_in_default" : "explicit_flag",
@@ -321,8 +315,6 @@ export async function resolveTaskCreateEffectiveSettings(
 
 	const agentCatalogEntry = getRuntimeAgentCatalogEntry(effectiveAgentId);
 	const effectiveAgentBinary = agentCatalogEntry?.binary ?? "";
-	const doesEffectiveAgentLaunchThroughABinaryOnPath =
-		getRuntimeAgentSessionTransport(effectiveAgentId) !== "in_process_cline_sdk";
 	const [commitCountBaseRefIsBehindItsRemoteTrackingBranch, baseRefCheckoutHasUncommittedChanges] = await Promise.all([
 		readCommitCountBaseRefIsBehindItsRemoteTrackingBranch(input.workspaceRepoPath, baseRefResolution.baseRef),
 		readWhetherBaseRefCheckoutHasUncommittedChanges(
@@ -341,16 +333,8 @@ export async function resolveTaskCreateEffectiveSettings(
 		baseRefCheckoutHasUncommittedChanges,
 		effectiveAgentId,
 		effectiveAgentBinary,
-		// 两种情况都必须报「已装」而不是「没装」：
-		//   - 目录里查不到这个 agent（拿不到 binary 名）——「不知道」不该说成「没装」；
-		//   - 该 agent 根本不经 PATH 启动。判据用 sessionTransport 这个能力谓词而不是
-		//     `agentId === "cline"`（CLAUDE.md 的铁律）：in_process_cline_sdk 是在进程内经 SDK 起会话，
-		//     catalog 里那个 binary 名只是名义值，启动完全不查 PATH。照查会让「只装了 SDK」这种完全
-		//     合法的部署收到一条假告警，而且那条告警还断言「不装就启动失败」。
-		isEffectiveAgentBinaryInstalledOnPath:
-			!effectiveAgentBinary || !doesEffectiveAgentLaunchThroughABinaryOnPath
-				? true
-				: isBinaryAvailableOnPath(effectiveAgentBinary),
+		// 无法解析 binary 时保留未知态，不误报为未安装。
+		isEffectiveAgentBinaryInstalledOnPath: !effectiveAgentBinary || isBinaryAvailableOnPath(effectiveAgentBinary),
 		startInPlanMode,
 		resolvedPermissionMode,
 		worktreeMode,

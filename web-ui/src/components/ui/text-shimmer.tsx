@@ -15,7 +15,7 @@ interface ShimmeringTextProps {
 /**
  * 文字流光。动画由 `globals.css` 的 `kb-text-shimmer-sweep` keyframe 驱动，
  * 组件本身不参与逐帧计算——这是刻意的：本组件的唯一使用者
- * （`cline-thinking-indicator.tsx`）在 agent 流式输出期间常驻挂载，
+ * （`agent-conversation-thinking-indicator.tsx`）在 agent 流式输出期间常驻挂载，
  * 换成 JS 动画库等于在最忙的时候常开一条主线程 rAF 循环。
  */
 export function ShimmeringText({

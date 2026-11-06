@@ -7,6 +7,7 @@ import type {
 	RuntimeTaskSessionUserTurnKind,
 	RuntimeTaskTurnCheckpoint,
 } from "../core/api-contract";
+import { runtimeHookIngestResponseSchema } from "../core/api-contract";
 import { parseHookIngestRequest } from "../core/api-validation";
 import { isCodexNativeConversationRewindSignal } from "../core/codex-native-direct-input-readiness";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../core/harness-generated-restoration-prompt";
 import { classifyHookUserTurnKind } from "../core/harness-user-turn-kind-collection";
 import { classifyHookEventAsMainAgentConversationModelRequestDispatch } from "../core/main-agent-conversation-model-request-dispatch-hook-event-classification";
+import { resolveHookReviewLifecyclePromptSubmissionOrdering } from "../core/recoverable-hook-review-lifecycle-event";
 import {
 	canObserveCompletedAgentTurnForCurrentUnacceptedPromptSubmission,
 	isParkedAwaitingDispatchedBackgroundWork,
@@ -38,6 +40,11 @@ import {
 } from "../state/agent-raised-pending-user-decision-store";
 import { captureTaskMainSessionHandoverReportNativeIdentity } from "../state/capture-task-main-session-handover-report-native-identity";
 import { confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks } from "../state/confirm-task-main-session-handover-input-after-correlated-processing-hooks";
+import type {
+	RecoverableHookReviewLifecycleApplication,
+	RecoverableHookReviewLifecycleApplicationBoundary,
+	RecoverableHookReviewLifecycleEventDeliveries,
+} from "../state/recoverable-hook-review-lifecycle-event-deliveries";
 import {
 	consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
@@ -53,6 +60,7 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { canTransitionTaskForHookEvent } from "./hook-event-task-transition-gate";
 
 export interface CreateHooksApiDependencies {
+	recoverableHookReviewLifecycleEventDeliveries?: RecoverableHookReviewLifecycleEventDeliveries;
 	resolveCurrentTaskConversationSessionSummaryForLifecycle?: (
 		workspaceId: string,
 		summary: RuntimeTaskSessionSummary,
@@ -187,7 +195,9 @@ function resolveHookEventObservedAtEpochMs(
 	return Math.min(body.hookEventCapturedAtEpochMs, hookIngestReceivedAtEpochMs);
 }
 
-export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] {
+export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcContext["hooksApi"] & {
+	ingestRecoverableLifecycleEvent: RecoverableHookReviewLifecycleApplication;
+} {
 	const latestClaudeNativeTaskListProjectionRequestByConversation = new Map<
 		string,
 		{ observedAt: number; token: symbol }
@@ -206,7 +216,10 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 		deps.consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration ??
 		consumeHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration;
 
-	const ingestHookEventOnce = async (input: RuntimeHookIngestRequest): Promise<RuntimeHookIngestResponse> => {
+	const ingestHookEventOnce = async (
+		input: RuntimeHookIngestRequest,
+		recoverableApplicationBoundary?: RecoverableHookReviewLifecycleApplicationBoundary,
+	): Promise<RuntimeHookIngestResponse> => {
 		const hookIngestReceivedAtEpochMs = Date.now();
 		let notificationCandidateId: string | null = null;
 		// 资源占用采集（工具调用结果 + hooks CLI 开销）在所有出口统一写 journal（见 finally）；
@@ -278,6 +291,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				return {
 					ok: false,
 					error: `Workspace "${workspaceId}" not found`,
+					failureKind: "target_identity_not_verified",
 				} satisfies RuntimeHookIngestResponse;
 			}
 
@@ -289,8 +303,22 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				return {
 					ok: false,
 					error: `Task "${taskId}" not found in workspace "${workspaceId}"`,
+					failureKind: "target_identity_not_verified",
 				} satisfies RuntimeHookIngestResponse;
 			}
+			if (
+				recoverableApplicationBoundary &&
+				resolveHookReviewLifecyclePromptSubmissionOrdering(
+					summary,
+					body.hookEventCapturedAtEpochMs ?? 0,
+					recoverableApplicationBoundary.unacceptedPromptSubmissionIdObservedBeforeAdmission,
+				) !== "compatible"
+			)
+				return {
+					ok: false,
+					failureKind: "target_identity_not_verified",
+					error: "生命周期事件尚未取得当前输入的顺序证据。",
+				};
 
 			// 同一事件第二次送达（CLI 重试、或旧 runtime 已应用却没回响应、CLI 随后 spool 了它）：确认、不再应用。
 			// 第二次拿不到第一次的 harness 指令（例如恢复守卫的 block），只能 fail-open。
@@ -322,6 +350,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 				hookEventObservedAtEpochMs !== null
 					? { domainEventObservedAtEpochMs: hookEventObservedAtEpochMs, hookEventDeliveryIdempotencyKey }
 					: undefined;
+
 			const isCompactionPhaseEvent =
 				event === "main_agent_conversation_context_compaction_started" ||
 				event === "main_agent_conversation_context_compaction_completed";
@@ -379,6 +408,31 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			// 身份确认不代表对话继续，不触碰恢复守卫、活动时间或通知。
 			if (event === "agent_conversation_session_identity_observed")
 				return respondAfterRememberingAppliedHookDelivery(identityPersistenceResponse);
+
+			if (recoverableApplicationBoundary?.canRecordHistoricalAgentTurnCompletion) {
+				if (nativeIdentityPersistenceError) throw nativeIdentityPersistenceError;
+				if (
+					!body.hookRuntimeSessionIncarnationId ||
+					!hookEventDeliveryIdempotencyKey ||
+					hookEventObservedAtEpochMs === null
+				)
+					throw new Error("历史完成事件缺少原始身份或捕获时刻。");
+				const recovered = manager.recordRecoveredHistoricalHookReviewLifecycleEvent(taskId, {
+					runtimeSessionIncarnationId: body.hookRuntimeSessionIncarnationId,
+					agentTurnSequence: summary.agentResponseGenerationTurnSequence ?? 0,
+					capturedAtEpochMs: hookEventObservedAtEpochMs,
+					deliveryIdempotencyKey: hookEventDeliveryIdempotencyKey,
+				});
+				if (!recovered)
+					return {
+						ok: false,
+						failureKind: "target_identity_not_verified",
+						error: "历史完成事件尚未取得同代会话证据。",
+					};
+				await recoverableApplicationBoundary.confirmApplication();
+				void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
+				return { ok: true };
+			}
 
 			// 回退只是核验候选：更新 hook 元数据会唤醒原生观察器，不能当作主对话产出或新的用户回合。
 			if (event === "activity" && isCodexNativeConversationRewindSignal(body.metadata)) {
@@ -856,6 +910,25 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			const userInitiatedResume =
 				event === "to_in_progress" &&
 				(resumeContinueHookEventName === "userpromptsubmit" || resumeContinueHookEventName === "beforeagent");
+			if (recoverableApplicationBoundary) {
+				const current = manager.getSummary(taskId);
+				if (
+					!current ||
+					current.runtimeSessionIncarnationId !== body.hookRuntimeSessionIncarnationId ||
+					current.agentResponseGenerationTurnSequence !== summary.agentResponseGenerationTurnSequence ||
+					resolveHookReviewLifecyclePromptSubmissionOrdering(
+						current,
+						body.hookEventCapturedAtEpochMs ?? 0,
+						recoverableApplicationBoundary.unacceptedPromptSubmissionIdObservedBeforeAdmission,
+					) !== "compatible"
+				) {
+					return {
+						ok: false,
+						failureKind: "target_identity_not_verified",
+						error: "生命周期事件应用前会话归属已变化。",
+					};
+				}
+			}
 			let transitionedSummary =
 				event === "to_review"
 					? manager.transitionToReview(
@@ -879,6 +952,8 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					error: `Task "${taskId}" transition failed`,
 				} satisfies RuntimeHookIngestResponse;
 			}
+			// 领域投影和投递标识先在同一个工作区快照提交中落盘，再发出后续效果。
+			await recoverableApplicationBoundary?.confirmApplication();
 
 			if (body.metadata) {
 				manager.applyHookActivity(taskId, body.metadata);
@@ -893,6 +968,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			void deps.broadcastRuntimeWorkspaceStateUpdated(workspaceId, workspacePath);
 
 			if (
+				!recoverableApplicationBoundary?.isRecovery &&
 				event === "to_review" &&
 				body.metadata?.source?.trim().toLowerCase() === "claude" &&
 				normalizedHookEventName === "stop"
@@ -928,22 +1004,23 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			) {
 				// hook 终端路径恒广播。userTurnKind 取自刚落定的 transitionedSummary facet（经漏斗自洽，
 				// hook 转审 reviewReason="hook" → review），随事件 payload 内联下发给前端通知标题（③(b)）。
-				deps.broadcastTaskReadyForReview(
-					workspaceId,
-					transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
-					resolveSessionFacets(transitionedSummary).userTurnKind,
-					{
-						candidateId: notificationCandidateId ?? undefined,
-						summary: manager.getSummary(taskId) ?? transitionedSummary,
-						finalMessage: body.metadata?.finalMessage ?? undefined,
-						...(hookEventObservedAtEpochMs !== null
-							? {
-									agentEventDeliveredLateToRuntimeByMilliseconds:
-										hookIngestReceivedAtEpochMs - hookEventObservedAtEpochMs,
-								}
-							: {}),
-					},
-				);
+				if (!recoverableApplicationBoundary)
+					deps.broadcastTaskReadyForReview(
+						workspaceId,
+						transitionedSummary.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
+						resolveSessionFacets(transitionedSummary).userTurnKind,
+						{
+							candidateId: notificationCandidateId ?? undefined,
+							summary: manager.getSummary(taskId) ?? transitionedSummary,
+							finalMessage: body.metadata?.finalMessage ?? undefined,
+							...(hookEventObservedAtEpochMs !== null
+								? {
+										agentEventDeliveredLateToRuntimeByMilliseconds:
+											hookIngestReceivedAtEpochMs - hookEventObservedAtEpochMs,
+									}
+								: {}),
+						},
+					);
 
 				// F1：把 turn-checkpoint 的 git 工作移出 hook 客户端的响应关键路径。
 				// 看板列状态在 transitionToReview 时即已落定、并随上面两条广播即时下发；checkpoint 仅为
@@ -985,7 +1062,17 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 		} catch (error) {
 			await recordNotificationSignalDecision(notificationCandidateId, "hook_runtime_processing_failed", {}, true);
 			const message = error instanceof Error ? error.message : String(error);
-			return { ok: false, error: message } satisfies RuntimeHookIngestResponse;
+			const failureCode = runtimeHookIngestResponseSchema.shape.retryableRuntimeDependencyFailureCode.safeParse(
+				error && typeof error === "object" && "code" in error ? error.code : undefined,
+			);
+			return {
+				ok: false,
+				error: message,
+				failureKind: "runtime_dependency_unavailable",
+				...(failureCode.success && failureCode.data
+					? { retryableRuntimeDependencyFailureCode: failureCode.data }
+					: {}),
+			} satisfies RuntimeHookIngestResponse;
 		} finally {
 			if (hookIngestResourceUsageJournalContext && !hookNotificationAlreadyProcessed) {
 				recordHookIngestToolCallAndHookCliResourceUsageToJournal(hookIngestResourceUsageJournalContext);
@@ -994,6 +1081,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 	};
 
 	return {
+		ingestRecoverableLifecycleEvent: ingestHookEventOnce,
 		ingest: async (input) => {
 			const looselyReadHookIngestRequest = input as Partial<RuntimeHookIngestRequest> | null;
 			if (
@@ -1010,18 +1098,28 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 			if (typeof hookEventDeliveryIdempotencyKey !== "string") {
 				return await ingestHookEventOnce(input);
 			}
-			const inFlightResponse = hookIngestResponsesInFlightByDeliveryIdempotencyKey.get(
+			const scopedHookDeliveryKey = JSON.stringify([
+				input.workspaceId,
+				input.taskId,
+				input.hookRuntimeSessionIncarnationId ?? null,
 				hookEventDeliveryIdempotencyKey,
-			);
+			]);
+			const inFlightResponse = hookIngestResponsesInFlightByDeliveryIdempotencyKey.get(scopedHookDeliveryKey);
 			if (inFlightResponse !== undefined) {
 				return await inFlightResponse;
 			}
-			const response = ingestHookEventOnce(input);
-			hookIngestResponsesInFlightByDeliveryIdempotencyKey.set(hookEventDeliveryIdempotencyKey, response);
+			const response = deps.recoverableHookReviewLifecycleEventDeliveries
+				? deps.recoverableHookReviewLifecycleEventDeliveries.ingest(
+						input,
+						ingestHookEventOnce,
+						deps.ingestsHookEventsReplayedFromAgentSessionPtyHostSpool === true,
+					)
+				: ingestHookEventOnce(input);
+			hookIngestResponsesInFlightByDeliveryIdempotencyKey.set(scopedHookDeliveryKey, response);
 			try {
 				return await response;
 			} finally {
-				hookIngestResponsesInFlightByDeliveryIdempotencyKey.delete(hookEventDeliveryIdempotencyKey);
+				hookIngestResponsesInFlightByDeliveryIdempotencyKey.delete(scopedHookDeliveryKey);
 			}
 		},
 	};

@@ -2162,7 +2162,14 @@ it("通知已处理的重复 hook 仍补存身份，但不再次转换状态", a
 // 之后的出口离开——无论是去重出口还是身份落盘失败的异常出口，都绝不能再记第二条。
 it.each([
 	{ retryIdentityPersistenceFails: false, expectedRetryResponse: { ok: true } },
-	{ retryIdentityPersistenceFails: true, expectedRetryResponse: { ok: false, error: "identity storage unavailable" } },
+	{
+		retryIdentityPersistenceFails: true,
+		expectedRetryResponse: {
+			ok: false,
+			error: "identity storage unavailable",
+			failureKind: "runtime_dependency_unavailable",
+		},
+	},
 ])(
 	"带原生身份的已处理重试不重复写资源 journal，首投那条保留（重试身份落盘失败=$retryIdentityPersistenceFails）",
 	async ({ retryIdentityPersistenceFails, expectedRetryResponse }) => {

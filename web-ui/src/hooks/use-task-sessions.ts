@@ -8,10 +8,10 @@ import { useCallback, useRef } from "react";
 import { notifyError } from "@/components/app-toaster";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
 import {
-	type ClineChatActionResult,
-	type SendClineChatMessageOptions,
-	useClineChatRuntimeActions,
-} from "@/hooks/use-cline-chat-runtime-actions";
+	type AgentConversationChatActionResult,
+	type SendAgentConversationChatMessageOptions,
+	useAgentConversationChatRuntimeActions,
+} from "@/hooks/use-agent-conversation-chat-runtime-actions";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeAgentId,
@@ -116,15 +116,15 @@ export interface UseTaskSessionsResult {
 	sendTaskChatMessage: (
 		taskId: string,
 		text: string,
-		options?: SendClineChatMessageOptions,
-	) => Promise<ClineChatActionResult>;
-	abortTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
-	cancelTaskChatTurn: (taskId: string) => Promise<ClineChatActionResult>;
+		options?: SendAgentConversationChatMessageOptions,
+	) => Promise<AgentConversationChatActionResult>;
+	abortTaskChatTurn: (taskId: string) => Promise<AgentConversationChatActionResult>;
+	cancelTaskChatTurn: (taskId: string) => Promise<AgentConversationChatActionResult>;
 	resolveTaskAgentUserDecision: (
 		taskId: string,
 		decisionId: string,
 		optionId: string | null,
-	) => Promise<ClineChatActionResult>;
+	) => Promise<AgentConversationChatActionResult>;
 	fetchTaskChatMessages: (taskId: string) => Promise<RuntimeTaskChatMessage[] | null>;
 	cleanupTaskWorkspace: (
 		taskId: string,
@@ -190,7 +190,7 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 		abortTaskChatTurn,
 		cancelTaskChatTurn,
 		resolveTaskAgentUserDecision,
-	} = useClineChatRuntimeActions({
+	} = useAgentConversationChatRuntimeActions({
 		currentProjectId,
 		onSessionSummary: upsertSession,
 	});
@@ -252,7 +252,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					cols: geometry.cols,
 					rows: geometry.rows,
 					agentId: task.agentId,
-					clineSettings: task.clineSettings,
 					codexReasoningEffortOverride: task.codexReasoningEffortOverride,
 					terminalAgentModelOverrideSettings: task.terminalAgentModelOverrideSettings,
 					...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),

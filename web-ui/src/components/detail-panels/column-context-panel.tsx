@@ -65,7 +65,6 @@ function ColumnSection({
 	activeDragSourceColumnId,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
-	defaultClineModelId,
 	defaultAgentId,
 }: {
 	column: BoardDisplayGroup;
@@ -100,7 +99,6 @@ function ColumnSection({
 	activeDragSourceColumnId?: BoardDisplayGroupId | null;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
 	const cardDropType = "CARD";
@@ -157,7 +155,6 @@ function ColumnSection({
 			},
 			onActivateCard: onCardClick,
 			workspacePath,
-			defaultClineModelId,
 			defaultAgentId,
 		});
 
@@ -223,7 +220,6 @@ export function ColumnContextPanel({
 	selection,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
-	defaultClineModelId,
 	defaultAgentId,
 	onCardSelect,
 	taskSessions,
@@ -273,7 +269,6 @@ export function ColumnContextPanel({
 	onCancelAutomaticTaskAction?: (taskId: string) => void;
 	moveToTrashLoadingById?: Record<string, boolean>;
 	panelWidth?: string;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
 	const [activeDragSourceColumnId, setActiveDragSourceColumnId] = useState<BoardDisplayGroupId | null>(null);
@@ -483,7 +478,6 @@ export function ColumnContextPanel({
 						onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
 						onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 						workspacePath={workspacePath}
-						defaultClineModelId={defaultClineModelId}
 						defaultAgentId={defaultAgentId}
 					/>
 					{/* stage 列表区：StageHeaderRails 以绝对定位锚在这里，顶沿 rail 从置顶板分段下沿起算、不会盖住它。
@@ -547,7 +541,6 @@ export function ColumnContextPanel({
 										activeDragSourceColumnId={activeDragSourceColumnId}
 										workspacePath={workspacePath}
 										resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
-										defaultClineModelId={defaultClineModelId}
 										defaultAgentId={defaultAgentId}
 									/>
 								))}
@@ -569,7 +562,6 @@ export function ColumnContextPanel({
 							taskSessions={taskSessions}
 							taskCardActionHandlers={taskCardActionHandlers}
 							workspacePath={workspacePath}
-							defaultClineModelId={defaultClineModelId}
 							defaultAgentId={defaultAgentId}
 						/>
 					</div>

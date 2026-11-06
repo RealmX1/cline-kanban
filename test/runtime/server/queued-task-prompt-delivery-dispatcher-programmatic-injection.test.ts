@@ -216,12 +216,7 @@ function createUnifiedTaskChatTransportDependencies(input: {
 			},
 			listMessages: () => [],
 		}),
-		getScopedClineTaskSessionService: async () => ({
-			sendTaskSessionInput: async () => null,
-			rebindPersistedTaskSession: async () => null,
-		}),
 		loadScopedRuntimeConfig: async () => ({}),
-		resolveClineTaskSessionLaunchConfig: vi.fn(),
 	} as unknown as SendTaskChatMessageAcrossSessionTransportsDependencies;
 }
 

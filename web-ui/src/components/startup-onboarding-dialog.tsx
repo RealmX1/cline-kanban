@@ -8,33 +8,21 @@ import {
 import { Button } from "@/components/ui/button";
 import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
-import type {
-	RuntimeAgentDefinition,
-	RuntimeAgentId,
-	RuntimeClineProviderSettings,
-	RuntimeConfigResponse,
-} from "@/runtime/types";
+import type { RuntimeAgentDefinition, RuntimeAgentId } from "@/runtime/types";
 
 function StartupOnboardingDialogForm({
 	open,
 	onClose,
 	selectedAgentId,
 	agents,
-	clineProviderSettings,
 	onSelectAgent,
-	workspaceId,
-	runtimeConfig,
-	onClineSetupSaved,
 }: {
 	open: boolean;
 	onClose: () => void;
 	selectedAgentId?: RuntimeAgentId | null;
 	agents?: RuntimeAgentDefinition[];
-	clineProviderSettings?: RuntimeClineProviderSettings | null;
 	onSelectAgent?: (agentId: RuntimeAgentId) => Promise<{ ok: boolean; message?: string }>;
 	workspaceId?: string | null;
-	runtimeConfig?: RuntimeConfigResponse | null;
-	onClineSetupSaved?: () => void;
 }): ReactElement {
 	const [onboardingSlideIndex, setOnboardingSlideIndex] = useState(0);
 	const [isCompletingOnboarding, setIsCompletingOnboarding] = useState(false);
@@ -90,14 +78,10 @@ function StartupOnboardingDialogForm({
 			<DialogBody className="px-4 pt-2 pb-4">
 				<TaskStartAgentOnboardingCarousel
 					open={open}
-					workspaceId={workspaceId ?? null}
-					runtimeConfig={runtimeConfig ?? null}
 					selectedAgentId={selectedAgentId ?? null}
 					agents={agents ?? []}
-					clineProviderSettings={clineProviderSettings ?? null}
 					activeSlideIndex={onboardingSlideIndex}
 					onSelectAgent={onSelectAgent}
-					onClineSetupSaved={onClineSetupSaved}
 					onDoneActionChange={handleOnboardingDoneActionChange}
 				/>
 			</DialogBody>

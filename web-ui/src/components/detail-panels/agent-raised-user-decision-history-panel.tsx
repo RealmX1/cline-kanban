@@ -1,9 +1,8 @@
 import * as Popover from "@radix-ui/react-popover";
 import { ChevronDown, ChevronUp, History, RotateCw } from "lucide-react";
 import { type ReactElement, useEffect, useState } from "react";
-
+import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
 import { AgentRaisedUserDecisionQuestionPrompt } from "@/components/detail-panels/agent-raised-user-decision-question-content";
-import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
 import { Button } from "@/components/ui/button";
 import { useAgentRaisedUserDecisionHistory } from "@/hooks/use-agent-raised-user-decision-history";
 import type {
@@ -157,7 +156,7 @@ function AgentRaisedUserDecisionHistoryEntryCard({
 									<div className="flex gap-1.5">
 										<dt className="shrink-0 text-text-secondary">备注</dt>
 										<dd className="min-w-0">
-											<ClineMarkdownContent
+											<AgentConversationMarkdownContent
 												content={preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks(
 													questionAnswer.notesText,
 												)}

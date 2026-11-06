@@ -27,7 +27,6 @@ function createRuntimeApiWithSessionHolders(input: { acpSummaryTransport: "acp_s
 		loadScopedRuntimeConfig: vi.fn(),
 		setActiveRuntimeConfig: vi.fn(),
 		getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-		getScopedClineTaskSessionService: vi.fn(),
 		getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 		resolveInteractiveShellCommand: vi.fn(),
 		runCommand: vi.fn(),

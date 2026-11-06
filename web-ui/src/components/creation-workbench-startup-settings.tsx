@@ -16,20 +16,11 @@ import type { RuntimeTaskAgentPermissionMode } from "@/runtime/types";
 
 type AgentModelPickerProps = ComponentProps<typeof TaskAgentModelPicker>;
 export interface CreationWorkbenchStartupSettingsProps
-	extends Omit<
-		AgentModelPickerProps,
-		| "renderControls"
-		| "agentOptions"
-		| "clineProviderOptions"
-		| "clineModelOptions"
-		| "isLoadingProviders"
-		| "isLoadingModels"
-	> {
+	extends Omit<AgentModelPickerProps, "renderControls" | "agentOptions"> {
 	active: boolean;
 	workspaceId: string | null;
 	agents?: Parameters<typeof useTaskAgentModelPicker>[0]["agents"];
 	selectableAgentIds?: Parameters<typeof useTaskAgentModelPicker>[0]["selectableAgentIds"];
-	defaultModelId?: string | null;
 	startInPlanMode: boolean;
 	onStartInPlanModeChange: (value: boolean) => void;
 	startInPlanModeDisabled?: boolean;
@@ -54,12 +45,9 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 		active: props.active,
 		workspaceId: props.workspaceId,
 		agentId: props.agentId,
-		clineSettings: props.clineSettings,
 		agents: props.agents,
 		selectableAgentIds: props.selectableAgentIds,
 		defaultAgentId: props.defaultAgentId,
-		defaultProviderId: props.defaultProviderId,
-		defaultModelId: props.defaultModelId,
 	});
 	const planCheckboxId = useId();
 	const agentId = props.agentId ?? props.defaultAgentId ?? null;

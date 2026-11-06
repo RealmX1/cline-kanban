@@ -70,7 +70,6 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 		(editing ? controller.setEditTaskBranchRef : controller.setNewTaskBranchRef)?.(props.branchRef);
 		(editing ? controller.setEditTaskWorktreeMode : controller.setNewTaskWorktreeMode)?.(props.worktreeMode);
 		(editing ? controller.setEditTaskAgentId : controller.setNewTaskAgentId)?.(props.agentId);
-		(editing ? controller.setEditTaskClineSettings : controller.setNewTaskClineSettings)?.(props.clineSettings);
 		(editing
 			? controller.setEditTaskTerminalAgentModelOverrideSettings
 			: controller.setNewTaskTerminalAgentModelOverrideSettings)?.(props.terminalAgentModelOverrideSettings);
@@ -177,8 +176,6 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			onWorktreeModeChange={editing ? controller.setEditTaskWorktreeMode : controller.setNewTaskWorktreeMode}
 			agentId={editing ? controller.editTaskAgentId : controller.newTaskAgentId}
 			onAgentIdChange={editing ? controller.setEditTaskAgentId : controller.setNewTaskAgentId}
-			clineSettings={editing ? controller.editTaskClineSettings : controller.newTaskClineSettings}
-			onClineSettingsChange={editing ? controller.setEditTaskClineSettings : controller.setNewTaskClineSettings}
 			terminalAgentModelOverrideSettings={
 				editing
 					? controller.editTaskTerminalAgentModelOverrideSettings

@@ -93,24 +93,13 @@ describe("buildRuntimeConfigResponse", () => {
 			agentAutonomousModeEnabled: true,
 		});
 
-		const response = buildRuntimeConfigResponse(config, {
-			providerId: null,
-			modelId: null,
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: null,
-			oauthAccessTokenConfigured: false,
-			oauthRefreshTokenConfigured: false,
-			oauthAccountId: null,
-			oauthExpiresAt: null,
-		});
+		const response = buildRuntimeConfigResponse(config);
 
 		expect(response.agentAutonomousModeEnabled).toBe(true);
 		expect(response.newTaskStartInPlanModeByDefault).toBe(true);
 		expect(response.agents.map((agent) => agent.id)).toEqual([
 			"claude",
 			"codex",
-			"cline",
 			"cursor",
 			"droid",
 			"kiro",
@@ -119,11 +108,9 @@ describe("buildRuntimeConfigResponse", () => {
 		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
-		expect(response.agents.find((agent) => agent.id === "cline")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "cursor")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "droid")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "kiro")?.defaultArgs).toEqual(["chat"]);
-		expect(response.agents.find((agent) => agent.id === "cline")?.installed).toBe(true);
 	});
 
 	it("omits autonomous flags from curated agent commands when disabled", () => {
@@ -132,23 +119,12 @@ describe("buildRuntimeConfigResponse", () => {
 		});
 		commandDiscoveryMocks.isBinaryAvailableOnPath.mockImplementation((binary: string) => binary === "claude");
 
-		const response = buildRuntimeConfigResponse(config, {
-			providerId: null,
-			modelId: null,
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: null,
-			oauthAccessTokenConfigured: false,
-			oauthRefreshTokenConfigured: false,
-			oauthAccountId: null,
-			oauthExpiresAt: null,
-		});
+		const response = buildRuntimeConfigResponse(config);
 
 		expect(response.agentAutonomousModeEnabled).toBe(false);
 		expect(response.agents.map((agent) => agent.id)).toEqual([
 			"claude",
 			"codex",
-			"cline",
 			"cursor",
 			"droid",
 			"kiro",
@@ -157,11 +133,9 @@ describe("buildRuntimeConfigResponse", () => {
 		]);
 		expect(response.agents.find((agent) => agent.id === "claude")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "codex")?.defaultArgs).toEqual([]);
-		expect(response.agents.find((agent) => agent.id === "cline")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "cursor")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "droid")?.defaultArgs).toEqual([]);
 		expect(response.agents.find((agent) => agent.id === "kiro")?.defaultArgs).toEqual(["chat"]);
-		expect(response.agents.find((agent) => agent.id === "cline")?.installed).toBe(true);
 		expect(response.agents.find((agent) => agent.id === "claude")?.command).toBe("claude");
 		expect(response.agents.find((agent) => agent.id === "codex")?.command).toBe("codex");
 		expect(response.agents.find((agent) => agent.id === "cursor")?.command).toBe("cursor-agent");
@@ -171,33 +145,13 @@ describe("buildRuntimeConfigResponse", () => {
 
 	it("sets debug mode from runtime environment variables", () => {
 		process.env.KANBAN_DEBUG_MODE = "true";
-		const response = buildRuntimeConfigResponse(createRuntimeConfigState(), {
-			providerId: null,
-			modelId: null,
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: null,
-			oauthAccessTokenConfigured: false,
-			oauthRefreshTokenConfigured: false,
-			oauthAccountId: null,
-			oauthExpiresAt: null,
-		});
+		const response = buildRuntimeConfigResponse(createRuntimeConfigState());
 		expect(response.debugModeEnabled).toBe(true);
 	});
 
 	it("supports debug_mode fallback env name", () => {
 		process.env.debug_mode = "1";
-		const response = buildRuntimeConfigResponse(createRuntimeConfigState(), {
-			providerId: null,
-			modelId: null,
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: null,
-			oauthAccessTokenConfigured: false,
-			oauthRefreshTokenConfigured: false,
-			oauthAccountId: null,
-			oauthExpiresAt: null,
-		});
+		const response = buildRuntimeConfigResponse(createRuntimeConfigState());
 		expect(response.debugModeEnabled).toBe(true);
 	});
 
@@ -206,17 +160,7 @@ describe("buildRuntimeConfigResponse", () => {
 			runtimeHostOperatingSystemIdentityMocks.userInfo.mockImplementation(() => {
 				throw new Error("系统账号查询不可用");
 			});
-		const response = buildRuntimeConfigResponse(createRuntimeConfigState(), {
-			providerId: null,
-			modelId: null,
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: null,
-			oauthAccessTokenConfigured: false,
-			oauthRefreshTokenConfigured: false,
-			oauthAccountId: null,
-			oauthExpiresAt: null,
-		});
+		const response = buildRuntimeConfigResponse(createRuntimeConfigState());
 		expect(response.runtimeHostRemoteEditorAccessIdentity).toEqual({
 			operatingSystemAccountUsername: accountLookupUnavailable ? null : "runtime-host-account",
 			operatingSystemHostname: "runtime-host",

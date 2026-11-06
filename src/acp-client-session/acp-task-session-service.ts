@@ -1,5 +1,5 @@
 // 任务级门面：runtime-api 唯一的 ACP 入口。编排「连接运行时 + 会话账本 + SessionUpdate 适配器」
-// 三者，对位 src/cline-sdk/cline-task-session-service.ts。
+// 三者。
 import { randomUUID } from "node:crypto";
 import {
 	describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing,

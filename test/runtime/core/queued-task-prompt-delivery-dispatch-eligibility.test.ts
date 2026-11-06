@@ -482,3 +482,28 @@ describe("认领陈旧复核（双判据）", () => {
 		expect(isQueuedTaskPromptDeliveryClaimStillCurrentForSession(makeEntry(), makeSummary())).toBe(false);
 	});
 });
+
+describe("退役门禁的持久身份兜底", () => {
+	it.each([null, undefined])("摘要为 %s 时持久 Cline 身份明确阻塞", (sessionSummary) => {
+		expect(
+			resolveQueuedPromptDispatchBlockReason({
+				headEntry: makeEntry(),
+				sessionSummary,
+				persistedAgentId: "cline",
+				hasPendingProgrammaticTaskChatInputDelivery: false,
+				nowEpochMs: NOW,
+			}),
+		).toBe("agent_retired");
+	});
+	it("实际摘要身份优先于卡片的 Cline 选择", () => {
+		expect(
+			resolveQueuedPromptDispatchBlockReason({
+				headEntry: makeEntry(),
+				sessionSummary: makeSummary({ agentId: "codex" }),
+				persistedAgentId: "cline",
+				hasPendingProgrammaticTaskChatInputDelivery: false,
+				nowEpochMs: NOW,
+			}),
+		).toBeNull();
+	});
+});

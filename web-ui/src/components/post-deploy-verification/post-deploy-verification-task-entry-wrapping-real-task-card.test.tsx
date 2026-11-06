@@ -114,7 +114,6 @@ function renderingInputsFor(
 		currentProjectWorkspacePath: null,
 		onActivateTaskCardOpeningTaskDetail: vi.fn(),
 		defaultAgentId: null,
-		defaultClineModelId: null,
 	};
 }
 
@@ -129,7 +128,6 @@ function runtimeBoardSnapshotRenderingInputsFor(
 		workspacePathOwningRuntimeBoardSnapshot: "/fixture/cline-kanban",
 		onActivateTaskCardOpeningTaskInItsProject,
 		defaultAgentId: null,
-		defaultClineModelId: null,
 	};
 }
 

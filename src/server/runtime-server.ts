@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
@@ -10,13 +10,6 @@ import {
 	type AcpTaskSessionService,
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
-import { handleClineMcpOauthCallback } from "../cline-sdk/cline-mcp-runtime-service";
-import { createClineProviderService } from "../cline-sdk/cline-provider-service";
-import {
-	type ClineTaskSessionService,
-	createInMemoryClineTaskSessionService,
-} from "../cline-sdk/cline-task-session-service";
-import { createClineWatcherRegistry } from "../cline-sdk/cline-watcher-registry";
 import { createCodexConfigurationSyncService } from "../codex-configuration-sync/codex-configuration-sync-service";
 import { readCodexConfigurationTaskSourceContext } from "../codex-configuration-sync/codex-configuration-task-source-context";
 import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
@@ -40,6 +33,7 @@ import {
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
 import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
+import { resolveHookReviewLifecyclePromptSubmissionOrdering } from "../core/recoverable-hook-review-lifecycle-event";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -117,6 +111,7 @@ import {
 	computeQueuedTaskPromptDeliveryTextSha256,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
+import { RecoverableHookReviewLifecycleEventDeliveries } from "../state/recoverable-hook-review-lifecycle-event-deliveries";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
@@ -127,9 +122,14 @@ import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } f
 import {
 	getTaskWorktreesHomePath,
 	getWorkspaceDirectoryPath,
+	getWorkspaceStateSnapshotReadFingerprintById,
+	getWorkspacesRootPath,
 	listWorkspaceIndexEntries,
+	loadPersistedWorkspaceSessionsById,
 	loadWorkspaceBoardById,
 	loadWorkspaceState,
+	persistHookReviewLifecycleApplicationInWorkspaceSnapshot,
+	probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
 import {
@@ -177,7 +177,8 @@ import {
 import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
-	stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace,
+	countAcpTaskSessionsInterruptedByRuntimeExit,
+	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
@@ -233,6 +234,10 @@ export interface CreateRuntimeServerDependencies {
 			spooledHookIngestRequestApplier: (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>,
 		) => void;
 		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
+		retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges?: (
+			workspaceId: string,
+			evidenceFingerprint: string,
+		) => Promise<void>;
 	};
 	// runtime 退出类请求（`kanban runtime handover-restart` / `stop --terminate-hosted-agent-sessions`）的执行方：
 	// cli.ts 装好 graceful shutdown 之后才能执行，所以这里只给读取函数。缺席或尚未就绪时 procedure 报错。
@@ -443,10 +448,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 进行中，必须保持 treatFinalTurnAsCompleted 的默认 false。实例长活是为了复用增量读偏移——
 	// 每次请求新建会让每次看图都从头重读整份 transcript。
 	const explorationThreadGraphReadOnlyTurnSource = new ClaudeCodeTranscriptCompletedTurnSource();
-	// ACP（omp 等）会话按 workspace 作用域持有，与 Cline SDK 服务并列。
+	// ACP（omp 等）会话按 workspace 作用域持有。
 	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
-	// 与 clineWorkspacePathByWorkspaceId 对位：关服 / 重置时要遍历「只跑过 ACP 会话」的 workspace，
-	// 它们未必在 workspaceRegistry 或 Cline 的账本里出现过。
+	// 关服 / 重置时也要遍历「只跑过 ACP 会话」的 workspace，
+	// 它们未必在 workspaceRegistry 中出现过。
 	const acpWorkspacePathByWorkspaceId = new Map<string, string>();
 	const getScopedAcpTaskSessionService = async (scope: RuntimeTrpcWorkspaceScope): Promise<AcpTaskSessionService> => {
 		let service = acpTaskSessionServiceByWorkspaceId.get(scope.workspaceId);
@@ -481,44 +486,10 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		acpWorkspacePathByWorkspaceId.delete(workspaceId);
 		service.disposeAllTaskSessions();
 	};
-	const clineTaskSessionServiceByWorkspaceId = new Map<string, ClineTaskSessionService>();
-	const clineWorkspacePathByWorkspaceId = new Map<string, string>();
-	const clineWatcherRegistry = createClineWatcherRegistry();
-	const getScopedClineTaskSessionService = async (
-		scope: RuntimeTrpcWorkspaceScope,
-	): Promise<ClineTaskSessionService> => {
-		let service = clineTaskSessionServiceByWorkspaceId.get(scope.workspaceId);
-		if (!service) {
-			service = createInMemoryClineTaskSessionService({
-				watcherRegistry: clineWatcherRegistry,
-				kanbanWorkspaceIdentityForTaskAgentSessionEnvironment: {
-					workspaceId: scope.workspaceId,
-					workspaceRepositoryPath: scope.workspacePath,
-				},
-			});
-			clineTaskSessionServiceByWorkspaceId.set(scope.workspaceId, service);
-			clineWorkspacePathByWorkspaceId.set(scope.workspaceId, scope.workspacePath);
-			deps.runtimeStateHub.trackClineTaskSessionService(scope.workspaceId, scope.workspacePath, service);
-		}
-		return service;
-	};
-	const disposeClineTaskSessionServiceAsync = async (workspaceId: string): Promise<void> => {
-		const service = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
-		if (!service) {
-			return;
-		}
-		clineTaskSessionServiceByWorkspaceId.delete(workspaceId);
-		clineWorkspacePathByWorkspaceId.delete(workspaceId);
-		await service.dispose();
-	};
 	const listProjectRuntimeSessionSummaries = (workspaceId: string): RuntimeTaskSessionSummary[] => {
 		const summariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
 		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
 		for (const summary of terminalManager?.listSummaries() ?? []) {
-			summariesByTaskId.set(summary.taskId, summary);
-		}
-		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
-		for (const summary of clineTaskSessionService?.listSummaries() ?? []) {
 			summariesByTaskId.set(summary.taskId, summary);
 		}
 		const acpTaskSessionService = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
@@ -630,7 +601,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				?.inspectCodexNativeTurnBeforeReviewSessionReclamation(taskId)) ?? "allow_reclamation",
 		reclaimAgentSession: createTransportAwareAgentSessionReclamationExecutor({
 			getTerminalManager: (workspaceId) => deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId),
-			getClineTaskSessionService: (workspaceId) => clineTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
 			getAcpTaskSessionService: (workspaceId) => acpTaskSessionServiceByWorkspaceId.get(workspaceId) ?? null,
 		}),
 		// 审计结果写回 summary sidecar，供卡片 / Focus View 显示「会话已被回收」。
@@ -643,11 +613,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 						.getTerminalManagerForWorkspace(workspaceId)
 						?.applyAgentSessionReclamationOutcome(record.taskId, outcome);
 					return;
-				case "in_process_cline_sdk":
-					clineTaskSessionServiceByWorkspaceId
-						.get(workspaceId)
-						?.applyAgentSessionReclamationOutcome(record.taskId, outcome);
-					return;
 				case "acp_stdio_subprocess":
 					acpTaskSessionServiceByWorkspaceId
 						.get(workspaceId)
@@ -656,13 +621,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			}
 		},
 	});
-
-	// 排队 prompt 的出队引擎（runtime 级单例）。放在这里的理由与上面的回收调度器相同：三种 transport 的
-	// 服务持有者都在本作用域，findRuntimeSessionSummary 是现成的三流合并查询面。
-	//
-	// 发送走的是与人类聊天、后台任务消息 **同一条**三 transport 统一出口，只是每次投递构造一份 deps、
-	// 用闭包 observer 接住 PTY 的真实终态（与 runtime-api 的「一键放行」同款写法）。
-	const clineProviderServiceForQueuedPromptDelivery = createClineProviderService();
 	const queuedTaskPromptDeliveryDispatcher = createQueuedTaskPromptDeliveryDispatcher({
 		isTaskConversationSessionReportExecutionAllowed: async (workspaceId, origin) => {
 			const workspacePath = deps.workspaceRegistry.getWorkspacePathById(workspaceId);
@@ -689,11 +647,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			await sendTaskChatMessageAcrossSessionTransports(
 				{
 					getScopedTerminalManager,
-					getScopedClineTaskSessionService,
 					getScopedAcpTaskSessionService,
 					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-					resolveClineTaskSessionLaunchConfig: async () =>
-						await clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 					onProgrammaticTerminalDeliverySettled,
 					programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
@@ -758,12 +713,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			workspacePath,
 			listSummaries: () => terminalManager.listSummaries(),
 		}));
-	const listClineTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
-		Array.from(clineTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
-			workspaceId,
-			workspacePath: clineWorkspacePathByWorkspaceId.get(workspaceId) ?? null,
-			listSummaries: () => service.listSummaries(),
-		}));
 	const listAcpTaskResourceUsageAttributionSessionSources = (): TaskResourceUsageAttributionSessionSource[] =>
 		Array.from(acpTaskSessionServiceByWorkspaceId, ([workspaceId, service]) => ({
 			workspaceId,
@@ -773,7 +722,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const enumerateCurrentTaskResourceUsageAttributionRoots = () =>
 		enumerateTaskResourceUsageAttributionRoots({
 			listTerminalSessionSources: listTerminalTaskResourceUsageAttributionSessionSources,
-			listClineSessionSources: listClineTaskResourceUsageAttributionSessionSources,
 			listAcpSessionSources: listAcpTaskResourceUsageAttributionSessionSources,
 		});
 	// harness 根进程、MCP、agent 命令、残留孤儿、用户 shell / dev server 的内存与 CPU，按 task 归因后写 journal。
@@ -817,18 +765,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		isKanbanManagedTaskWorktreePath: (workingDirectoryPath) =>
 			workingDirectoryPath.startsWith(`${getTaskWorktreesHomePath()}/`),
 	});
-	const countLiveInProcessClineSdkSessions = (): number => {
-		let liveSessionCount = 0;
-		for (const { listSummaries } of listClineTaskResourceUsageAttributionSessionSources()) {
-			for (const summary of listSummaries()) {
-				const { liveness } = resolveSessionFacets(summary);
-				if (liveness === "starting" || liveness === "live" || liveness === "retrying") {
-					liveSessionCount += 1;
-				}
-			}
-		}
-		return liveSessionCount;
-	};
 
 	// 缺省终止 hosted 会话：删项目等路径（worktree 都要删了）必须停掉会话。只有 runtime 退出才传 detach。
 	const stopAndCollectProjectRuntimeSessionsForSafePersistence = async (
@@ -836,13 +772,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown = "terminate_hosted_agent_sessions",
 	): Promise<ActiveRuntimeSessionShutdownResult> => {
 		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
-		const clineTaskSessionService = clineTaskSessionServiceByWorkspaceId.get(workspaceId);
 		const acpTaskSessionService = acpTaskSessionServiceByWorkspaceId.get(workspaceId);
 		const detachesHostedAgentSessions =
 			hostedAgentSessionDisposition === "detach_hosted_agent_sessions_for_successor_runtime";
-		return await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+		return await stopActiveTerminalAndAcpRuntimeSessionsForWorkspace({
 			terminalManager,
-			clineTaskSessionService: clineTaskSessionService ?? null,
 			acpTaskSessionService: acpTaskSessionService ?? null,
 			hostedAgentSessionDisposition,
 			...(detachesHostedAgentSessions && terminalManager
@@ -858,9 +792,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	) => {
 		const workspacePathByWorkspaceId = new Map<string, string | null>();
 		for (const { workspaceId, workspacePath } of deps.workspaceRegistry.listManagedWorkspaces()) {
-			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
-		}
-		for (const [workspaceId, workspacePath] of clineWorkspacePathByWorkspaceId) {
 			workspacePathByWorkspaceId.set(workspaceId, workspacePath);
 		}
 		for (const [workspaceId, workspacePath] of acpWorkspacePathByWorkspaceId) {
@@ -896,18 +827,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			agentSessionsHostedByAgentSessionPtyHost += counts?.hostedInAgentSessionPtyHost ?? 0;
 			agentSessionsWithPtyOwnedByRuntimeProcess += counts?.inProcessPtyOwnedByRuntime ?? 0;
 		}
-		let conversationAgentSessionsRunningInsideRuntimeProcess = 0;
-		for (const service of [
-			...clineTaskSessionServiceByWorkspaceId.values(),
-			...acpTaskSessionServiceByWorkspaceId.values(),
-		]) {
-			for (const summary of service.listSummaries()) {
-				const { liveness } = resolveSessionFacets(summary);
-				if (liveness === "starting" || liveness === "live" || liveness === "retrying") {
-					conversationAgentSessionsRunningInsideRuntimeProcess += 1;
-				}
-			}
-		}
+		const conversationAgentSessionsRunningInsideRuntimeProcess = countAcpTaskSessionsInterruptedByRuntimeExit(
+			acpTaskSessionServiceByWorkspaceId.values(),
+		);
 		return {
 			agentSessionsHostedByAgentSessionPtyHost,
 			agentSessionsWithPtyOwnedByRuntimeProcess,
@@ -978,9 +900,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		for (const { workspaceId } of deps.workspaceRegistry.listManagedWorkspaces()) {
 			workspaceIds.add(workspaceId);
 		}
-		for (const workspaceId of clineTaskSessionServiceByWorkspaceId.keys()) {
-			workspaceIds.add(workspaceId);
-		}
 		for (const workspaceId of acpTaskSessionServiceByWorkspaceId.keys()) {
 			workspaceIds.add(workspaceId);
 		}
@@ -990,7 +909,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		for (const workspaceId of workspaceIds) {
 			disposeAcpTaskSessionService(workspaceId);
-			await disposeClineTaskSessionServiceAsync(workspaceId);
 			deps.disposeWorkspace(workspaceId, {
 				stopTerminalSessions: true,
 			});
@@ -1002,12 +920,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// （此前每次请求新建一个，纯属浪费）。提成单例还解开了 finding_candidate 转投的循环依赖——
 	// 维护触发器要调它的 ingest，而它的手动维护又要调触发器。
 	const exploratoryApi = createExploratoryApi({
-		getScopedClineTaskSessionService,
-		loadBoardCardAgentId: async (scope, taskId) => {
-			const board = await loadWorkspaceBoardById(scope.workspaceId);
-			const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
-			return card?.agentId ?? null;
-		},
 		onExploratoryFindingsUpdated: (workspaceId, findings) => {
 			deps.runtimeStateHub.broadcastExploratoryFindingsUpdated(workspaceId, findings);
 		},
@@ -1069,7 +981,156 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		loadWorkspaceBoardById,
 	});
 
+	const hookReviewSnapshotReadinessProbesByWorkspaceId = new Map<
+		string,
+		{ observedAtMs: number; evidence: Promise<string> }
+	>();
+	const recoverableHookReviewLifecycleEventDeliveries = new RecoverableHookReviewLifecycleEventDeliveries({
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		probeSnapshotCommitReadiness: async (request) => {
+			const previous = hookReviewSnapshotReadinessProbesByWorkspaceId.get(request.workspaceId);
+			if (previous && Date.now() - previous.observedAtMs < 15_000) return await previous.evidence;
+			const evidence = probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness(request.workspaceId);
+			hookReviewSnapshotReadinessProbesByWorkspaceId.set(request.workspaceId, {
+				observedAtMs: Date.now(),
+				evidence,
+			});
+			return await evidence;
+		},
+		isMainTaskConversationSession: async (request) => {
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			return board.columns.some((column) =>
+				column.cards.some((card) => (card.mainTaskConversationSessionId ?? card.id) === request.taskId),
+			);
+		},
+		getWorkspaceDeliveryFilePath: (workspaceId) => {
+			const workspaceDirectory = resolve(getWorkspaceDirectoryPath(workspaceId));
+			if (dirname(workspaceDirectory) !== resolve(getWorkspacesRootPath()))
+				throw new Error("生命周期恢复目录超出工作区范围。");
+			return join(workspaceDirectory, "recoverable-hook-lifecycle-event-deliveries.json");
+		},
+		readTarget: async (request) => {
+			const workspacePath =
+				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
+				(await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(request.workspaceId))?.repoPath;
+			if (!workspacePath) throw new Error("生命周期事件的工作区身份尚未核验。");
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			const manager = await deps.ensureTerminalManagerForWorkspace(request.workspaceId, workspacePath);
+			const summary = manager.getSummary(request.taskId);
+			const ownerTaskId = summary?.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId;
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === ownerTaskId));
+			const card = column?.cards.find((entry) => entry.id === ownerTaskId);
+			const persistedSummary = (
+				await loadPersistedWorkspaceSessionsById(request.workspaceId, { requireCompleteRead: true })
+			)[request.taskId];
+			return {
+				taskIncarnationCreatedAtEpochMs: card?.createdAt ?? null,
+				isTaskExecutionAllowed: Boolean(
+					card &&
+						column?.id !== "trash" &&
+						!isTaskCardShelved(card) &&
+						!summary?.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+						(card.mainTaskConversationSessionId
+							? card.mainTaskConversationSessionId === request.taskId
+							: request.taskId === card.id) &&
+						summary?.liveness !== "interrupted" &&
+						summary?.liveness !== "failed",
+				),
+				summary,
+				persistedSummary,
+				recoveryEvidenceFingerprint: createHash("sha256")
+					.update(
+						JSON.stringify([
+							card?.createdAt,
+							card?.mainTaskConversationSessionId,
+							column?.id,
+							card?.taskShelvingState,
+							summary?.runtimeSessionIncarnationId,
+							summary?.pid,
+							summary ? resolveSessionFacets(summary) : null,
+							summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+							summary?.agentResponseGenerationTurnSequence,
+							summary?.agentConversationPromptSubmissionAcceptance?.attemptedAtMs,
+							summary?.automaticAgentFailureContinuation?.phase,
+						]),
+					)
+					.digest("hex"),
+			};
+		},
+		persistApplicationConfirmation: async (request, taskIncarnationCreatedAtEpochMs) => {
+			const workspacePath =
+				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
+				(await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(request.workspaceId))?.repoPath;
+			if (!workspacePath) throw new Error("生命周期确认的工作区暂不可读。");
+			const manager = await deps.ensureTerminalManagerForWorkspace(request.workspaceId, workspacePath);
+			await persistHookReviewLifecycleApplicationInWorkspaceSnapshot({
+				workspaceId: request.workspaceId,
+				taskId: request.taskId,
+				taskIncarnationCreatedAtEpochMs,
+				deliveryIdempotencyKey: request.hookEventDeliveryIdempotencyKey,
+				runtimeSessionIncarnationId: request.hookRuntimeSessionIncarnationId,
+				readCurrentSummary: () => manager.getSummary(request.taskId),
+			});
+		},
+		onApplicationConfirmed: async (
+			request,
+			notificationCandidateId,
+			unacceptedPromptSubmissionIdObservedBeforeAdmission,
+		) => {
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			if (
+				!board.columns.some(
+					(column) =>
+						column.id !== "trash" &&
+						column.cards.some(
+							(card) =>
+								!isTaskCardShelved(card) && (card.mainTaskConversationSessionId ?? card.id) === request.taskId,
+						),
+				)
+			)
+				return;
+			const summary =
+				findRuntimeSessionSummary(request.workspaceId, request.taskId) ??
+				(await loadPersistedWorkspaceSessionsById(request.workspaceId, { requireCompleteRead: true }))[
+					request.taskId
+				];
+			if (
+				!summary ||
+				summary.runtimeSessionIncarnationId !== request.hookRuntimeSessionIncarnationId ||
+				summary.lastAppliedHookReviewLifecycleEventDelivery?.deliveryIdempotencyKey !==
+					request.hookEventDeliveryIdempotencyKey ||
+				(summary.agentResponseGenerationTurnStarted?.startedAt ?? 0) > request.hookEventCapturedAtEpochMs ||
+				resolveSessionFacets(summary).userTurnKind !== "review" ||
+				summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			)
+				return;
+			const promptSubmissionOrdering = resolveHookReviewLifecyclePromptSubmissionOrdering(
+				summary,
+				request.hookEventCapturedAtEpochMs,
+				unacceptedPromptSubmissionIdObservedBeforeAdmission,
+			);
+			if (promptSubmissionOrdering === "unknown") throw new Error("同毫秒输入缺少受理前身份，通知对账保留待补证。");
+			if (promptSubmissionOrdering === "superseded") return;
+			await deps.runtimeStateHub.broadcastTaskReadyForReview(
+				request.workspaceId,
+				summary.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId,
+				"review",
+				{
+					candidateId: notificationCandidateId,
+					summary,
+					finalMessage: request.metadata?.finalMessage ?? undefined,
+					agentEventDeliveredLateToRuntimeByMilliseconds: Math.max(
+						0,
+						Date.now() - (request.hookEventCapturedAtEpochMs ?? Date.now()),
+					),
+				},
+				{ requireDurableRegistration: true },
+			);
+		},
+		warn: deps.warn,
+	});
 	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		recoverableHookReviewLifecycleEventDeliveries,
 		resolveCurrentTaskConversationSessionSummaryForLifecycle: async (
 			workspaceId: string,
 			summary: RuntimeTaskSessionSummary,
@@ -1104,6 +1165,61 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
+	let recoveringHookReviewLifecycleEvents = false;
+	const recoverPendingHookReviewLifecycleEvents = async () => {
+		if (recoveringHookReviewLifecycleEvents) return;
+		recoveringHookReviewLifecycleEvents = true;
+		try {
+			for (const workspace of await listWorkspaceIndexEntries()) {
+				try {
+					await recoverableHookReviewLifecycleEventDeliveries.reconcileWorkspace(
+						workspace.workspaceId,
+						(request, boundary) =>
+							hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingestRecoverableLifecycleEvent(
+								request,
+								boundary,
+							),
+					);
+					const directory = getWorkspaceDirectoryPath(workspace.workspaceId);
+					const admissionStorageEvidence = await Promise.all(
+						[directory, join(directory, "recoverable-hook-lifecycle-event-deliveries.json")].map(async (path) => {
+							try {
+								const entry = await stat(path);
+								return [entry.dev, entry.ino, entry.mode, entry.size, entry.mtimeMs, entry.ctimeMs];
+							} catch (error) {
+								return (error as NodeJS.ErrnoException).code ?? "unreadable";
+							}
+						}),
+					);
+					await deps.agentSessionPtyHostHookSpool?.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges?.(
+						workspace.workspaceId,
+						createHash("sha256")
+							.update(
+								JSON.stringify([
+									await getWorkspaceStateSnapshotReadFingerprintById(workspace.workspaceId),
+									admissionStorageEvidence,
+									await recoverableHookReviewLifecycleEventDeliveries.probeWorkspaceHookReviewLifecycleEventDeliveryAdmissionLockReadiness(
+										workspace.workspaceId,
+									),
+								]),
+							)
+							.digest("hex"),
+					);
+				} catch (error) {
+					deps.warn(
+						`工作区 ${workspace.workspaceId} 的生命周期恢复等待补证：${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		} catch (error) {
+			deps.warn(`生命周期事件恢复保留待查状态：${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			recoveringHookReviewLifecycleEvents = false;
+		}
+	};
+	const hookReviewLifecycleRecoveryTimer = setInterval(() => void recoverPendingHookReviewLifecycleEvents(), 15_000);
+	hookReviewLifecycleRecoveryTimer.unref();
+	void recoverPendingHookReviewLifecycleEvents();
 
 	let pauseAutomaticMainSessionHandoverForStoppedTask:
 		| ((workspaceId: string, taskId: string) => Promise<void>)
@@ -1137,15 +1253,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 		setActiveRuntimeConfig: deps.workspaceRegistry.setActiveRuntimeConfig,
 		getScopedTerminalManager,
-		getScopedClineTaskSessionService,
 		getScopedAcpTaskSessionService,
 		resolveInteractiveShellCommand: deps.resolveInteractiveShellCommand,
 		runCommand: deps.runCommand,
-		broadcastClineMcpAuthStatusesUpdated: deps.runtimeStateHub.broadcastClineMcpAuthStatusesUpdated,
 		broadcastTaskChatCleared: deps.runtimeStateHub.broadcastTaskChatCleared,
 		broadcastNotificationLogUpdated: deps.runtimeStateHub.broadcastNotificationLogUpdated,
 		broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
-		bumpClineSessionContextVersion: deps.runtimeStateHub.bumpClineSessionContextVersion,
 		prepareForStateReset,
 		getUpdateStatus: deps.getUpdateStatus,
 		runUpdateNow: deps.runUpdateNow,
@@ -1306,11 +1419,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			const response = await sendTaskChatMessageAcrossSessionTransports(
 				{
 					getScopedTerminalManager,
-					getScopedClineTaskSessionService,
 					getScopedAcpTaskSessionService,
 					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-					resolveClineTaskSessionLaunchConfig: async () =>
-						clineProviderServiceForQueuedPromptDelivery.resolveLaunchConfig(),
 					programmaticInjectionLedgerTaskId: record.taskId,
 					validateBeforeTerminalWrite,
 					preserveExistingComposerDraft: true,
@@ -1502,7 +1612,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const createWorkspaceControlApi = () =>
 		createWorkspaceApi({
 			ensureTerminalManagerForWorkspace: deps.ensureTerminalManagerForWorkspace,
-			getScopedClineTaskSessionService,
 			loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
 			broadcastRuntimeWorkspaceStateUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 			broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
@@ -1763,7 +1872,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					const disposalFailureMessages: string[] = [];
 					try {
 						disposeAcpTaskSessionService(workspaceId);
-						await disposeClineTaskSessionServiceAsync(workspaceId);
 					} catch (error) {
 						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
 					}
@@ -1805,32 +1913,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				},
 				// 确认框 agent response 按 agent 类型分源（plan Grilling #5）。
 				loadTaskAgentResponsePreview: async (scope, taskId) => {
-					// agent 类型判定必须廉价：绝不为终端任务触发 loadTaskSessionMessages —— 后者会 boot Cline SDK
-					// session host（AGENTS.md 记载的 CI 卡死诱因）。先用「in-memory Cline summary agentId」+「看板卡
-					// 配置的 agentId」双廉价信号判定是否 Cline 任务，二者皆非 cline 才走终端 agent 路径。
-					const clineTaskSessionService = await getScopedClineTaskSessionService(scope);
 					const board = await loadWorkspaceBoardById(scope.workspaceId);
 					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
 					const conversationSessionId = card ? resolveMainTaskConversationSessionId(card) : taskId;
-					const isClineTask =
-						clineTaskSessionService.getSummary(conversationSessionId)?.agentId === "cline" ||
-						card?.agentId === "cline";
-					if (isClineTask) {
-						// Cline（in-process SDK）：取任务聊天记录最后一条 assistant message；拿不到时优雅降级为 null。
-						const messages = await clineTaskSessionService.loadTaskSessionMessages(conversationSessionId);
-						let lastAssistantMessageContent: string | null = null;
-						for (const message of messages) {
-							if (message.role === "assistant") {
-								lastAssistantMessageContent = message.content;
-							}
-						}
-						return lastAssistantMessageContent;
-					}
-					// ACP 会话（omp 切到 ACP 时）：既没有 hook finalMessage，也不在 Cline 账本里；只认 cline 会让
-					// 预览对它恒为 null。ACP service 的消息全在内存，读它同样廉价，不会 boot 任何 SDK host。
-					// 判据只能是「ACP service 里有这条会话的活会话摘要且它盖的是 ACP 章」——绝不能拿卡片
-					// agentId 兜底：omp 的两条通道共用 agentId="omp"，卡片判据会把一条 TUI 会话误判成 ACP，
-					// 于是预览恒读 ACP 那份空消息表。
 					const acpTaskSessionService = await getScopedAcpTaskSessionService(scope);
 					const isAcpTask = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
 						acpTaskSessionService.getSummary(conversationSessionId),
@@ -1870,14 +1955,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					appendCommittedEventsIntoLedgerOfActiveKanbanRuntimeLiveCaptureAndWaitForCommit,
 			}),
 			workUnitRelationAssertionWriteApi,
-			conversationTreeApi: createConversationTreeApi({
-				getScopedClineTaskSessionService,
-				loadBoardCardAgentId: async (scope, taskId) => {
-					const board = await loadWorkspaceBoardById(scope.workspaceId);
-					const card = board.columns.flatMap((column) => column.cards).find((entry) => entry.id === taskId);
-					return card?.agentId ?? null;
-				},
-			}),
+			conversationTreeApi: createConversationTreeApi(),
 			exploratoryApi,
 			taskVisualizationArtifactApi,
 		};
@@ -2118,17 +2196,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					// authenticated API calls are made.
 				}
 			}
-			// ── End passcode gate ──────────────────────────────────────────────
-
-			const oauthCallbackResponse = await handleClineMcpOauthCallback(requestUrl);
-			if (oauthCallbackResponse) {
-				res.writeHead(oauthCallbackResponse.statusCode, {
-					"Content-Type": "text/html; charset=utf-8",
-					"Cache-Control": "no-store",
-				});
-				res.end(oauthCallbackResponse.body);
-				return;
-			}
 			if (pathname.startsWith("/api/trpc")) {
 				await trpcHttpHandler(req, res);
 				return;
@@ -2195,9 +2262,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// fd 泄漏曾一路无声地越过 Darwin OPEN_MAX(10240)，才以「所有 git 调用 EBADF」的形式在一个毫不相干
 	// 的子系统里间接显形；这条探针让 fd 水位在爆炸前就可见，对任何一类 fd 泄漏回归都同样有效。
 	const stopProcessFileDescriptorWatermarkMonitor = startProcessFileDescriptorWatermarkMonitor();
-	// Kanban 进程自身的内存 / CPU 基线：固定服务器成本的对照，也是进程内 Cline SDK 会话唯一可见的资源面。
+	// Kanban 进程自身的内存 / CPU 基线，用于区分固定服务器成本与独立 Agent 进程成本。
 	const stopKanbanRuntimeProcessSelfResourceSampleMonitor = startKanbanRuntimeProcessSelfResourceSampleMonitor({
-		countLiveInProcessClineSdkSessions,
 		countLiveSessionsWithOsProcess: () => enumerateCurrentTaskResourceUsageAttributionRoots().roots.length,
 	});
 	const terminalWebSocketBridge = createTerminalWebSocketBridge({
@@ -2239,6 +2305,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return httpServerStoppedAcceptingConnections;
 	};
 	const stopStartingNewBackgroundWork = (preserveAlreadyStartedQueueDispatches = false) => {
+		clearInterval(hookReviewLifecycleRecoveryTimer);
 		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();
@@ -2258,6 +2325,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
 		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			recoverableHookReviewLifecycleEventDeliveries.close(),
 			verificationExecutionRecoveryLifecycle?.stop() ?? Promise.resolve(),
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
@@ -2287,14 +2355,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		acpTaskSessionServiceByWorkspaceId.clear();
 		acpWorkspacePathByWorkspaceId.clear();
-		await Promise.all(
-			Array.from(clineTaskSessionServiceByWorkspaceId.values()).map(async (service) => {
-				await service.dispose();
-			}),
-		);
-		clineTaskSessionServiceByWorkspaceId.clear();
-		clineWorkspacePathByWorkspaceId.clear();
-		await clineWatcherRegistry.close();
 		// 优雅退出主动销号，于是下一个实例不必等满宽限期才敢判本实例已死——重启后的排队 prompt
 		// 提醒因此立刻生效，而不是迟到一个宽限期。非优雅退出没有这一步，靠宽限期兜底。
 		await runtimeProcessInstanceHeartbeat.stop();

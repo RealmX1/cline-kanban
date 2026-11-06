@@ -218,9 +218,7 @@ describe("所有主动投递使用统一记录", () => {
 			recordManagedTaskPromptDeliveries: true,
 			getScopedAcpTaskSessionService: async () => acp,
 			getScopedTerminalManager: async () => ({ getSummary: () => null }) as unknown as TerminalSessionManager,
-			getScopedClineTaskSessionService: vi.fn(),
 			loadScopedRuntimeConfig: vi.fn(),
-			resolveClineTaskSessionLaunchConfig: vi.fn(),
 		};
 		const workspaceScope = { workspaceId: "workspace", workspacePath: "/isolated-repo" };
 		const image = { id: "image-1", data: "AQID", mimeType: "image/png" };
@@ -419,9 +417,7 @@ describe("所有主动投递使用统一记录", () => {
 				recordManagedTaskPromptDeliveries: true,
 				getScopedAcpTaskSessionService: async () => acp,
 				getScopedTerminalManager: async () => ({ getSummary: () => null }) as unknown as TerminalSessionManager,
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
-				resolveClineTaskSessionLaunchConfig: vi.fn(),
 			};
 			const request = { taskId: "session-1", text: "完整注入正文", source: "rvf-decision", idempotencyKey: "key-1" };
 			const response = await sendTaskChatMessageAcrossSessionTransports(

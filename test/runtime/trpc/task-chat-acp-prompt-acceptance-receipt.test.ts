@@ -29,6 +29,31 @@ const pendingSummary: RuntimeTaskSessionSummary = {
 };
 
 describe("ACP 统一发送出口使用真实接受回执", () => {
+	it("非 ACP 会话拒绝图片，避免静默丢弃附件", async () => {
+		const submitTaskChatInput = vi.fn();
+		const loadScopedRuntimeConfig = vi.fn();
+		const response = await sendTaskChatMessageAcrossSessionTransports(
+			{
+				getScopedAcpTaskSessionService: async () => ({ getSummary: () => null }) as never,
+				getScopedTerminalManager: async () =>
+					({
+						getSummary: () => ({ ...pendingSummary, agentId: "codex", sessionTransport: "pty_terminal" }),
+						submitTaskChatInput,
+					}) as never,
+				loadScopedRuntimeConfig,
+			},
+			{ workspaceId: "workspace" } as RuntimeTrpcWorkspaceScope,
+			{
+				taskId: "task-1",
+				text: "含附件的输入",
+				images: [{ id: "image-1", name: "image.png", mimeType: "image/png", data: "AA==" }],
+			},
+		);
+		expect(response.ok).toBe(false);
+		expect(response.error).toContain("ACP");
+		expect(submitTaskChatInput).not.toHaveBeenCalled();
+		expect(loadScopedRuntimeConfig).not.toHaveBeenCalled();
+	});
 	it("提交前忙碌拒绝与回执超时分别提供证据，不用失败状态猜测未提交", async () => {
 		const summary = {
 			...pendingSummary,
@@ -50,9 +75,7 @@ describe("ACP 统一发送出口使用真实接受回执", () => {
 			{
 				getScopedAcpTaskSessionService: async () => service,
 				getScopedTerminalManager: vi.fn(),
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
-				resolveClineTaskSessionLaunchConfig: vi.fn(),
 				programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
 				programmaticSubmissionAttemptId: "write-attempt",
 				onProgrammaticTerminalDeliverySettled: outcome,
@@ -86,9 +109,7 @@ describe("ACP 统一发送出口使用真实接受回执", () => {
 			{
 				getScopedAcpTaskSessionService: async () => service,
 				getScopedTerminalManager: vi.fn(),
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
-				resolveClineTaskSessionLaunchConfig: vi.fn(),
 				onProgrammaticTerminalDeliverySettled: outcome,
 			},
 			{ workspaceId: "workspace" } as RuntimeTrpcWorkspaceScope,

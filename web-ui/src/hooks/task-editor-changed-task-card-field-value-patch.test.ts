@@ -38,7 +38,6 @@ function submittedValuesMatching(card: BoardCard): TaskEditorSubmittedTaskCardFi
 		baseRef: card.baseRef,
 		worktreeMode: card.worktreeMode ?? "branch",
 		agentId: card.agentId,
-		clineSettings: card.clineSettings,
 		terminalAgentModelOverrideSettings: card.terminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization: card.taskAgentSessionInitialization,
 	};

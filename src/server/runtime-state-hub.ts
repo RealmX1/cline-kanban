@@ -4,7 +4,6 @@
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { subscribeToAgentSessionPtyHostDiagnosticsChanges } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import {
 	createNotificationAssessmentService,
 	isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate,
@@ -16,8 +15,8 @@ import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../s
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
 // 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
-export type ConversationTaskSessionSourceKind = "cline" | "acp";
-const CONVERSATION_TASK_SESSION_SOURCE_KINDS: readonly ConversationTaskSessionSourceKind[] = ["cline", "acp"];
+export type ConversationTaskSessionSourceKind = "acp";
+const CONVERSATION_TASK_SESSION_SOURCE_KINDS: readonly ConversationTaskSessionSourceKind[] = ["acp"];
 
 // 推流只需要这三件事，故按结构订阅而不是绑死某个具体 service 类。
 export interface ConversationTaskSessionSubscriptionSource {
@@ -27,17 +26,14 @@ export interface ConversationTaskSessionSubscriptionSource {
 }
 
 import type {
-	RuntimeClineMcpServerAuthStatus,
 	RuntimeExplorationThreadGraphProjectionView,
 	RuntimeExploratoryFindingEntry,
 	RuntimeLiveTaskResourceUsageSnapshot,
 	RuntimeNotificationFeedEntry,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
-	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamErrorMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
-	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
@@ -125,7 +121,6 @@ export interface RuntimeStateHub {
 	) => () => void;
 	broadcastTaskLookupConversationUpdated: (conversationId: string, revision: number) => void;
 	trackTerminalManager: (workspaceId: string, manager: TerminalSessionManager) => void;
-	trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => void;
 	broadcastTaskChatMessage: (workspaceId: string, taskId: string, message: RuntimeTaskChatMessage) => void;
 	// ACP 会话与 Cline SDK 会话共用同一套 summary/message 推流；两者只是来源不同。
 	trackAcpTaskSessionService: (
@@ -150,8 +145,6 @@ export interface RuntimeStateHub {
 	disposeWorkspace: (workspaceId: string) => void;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void>;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void>;
-	broadcastClineMcpAuthStatusesUpdated: (statuses: RuntimeClineMcpServerAuthStatus[]) => void;
-	bumpClineSessionContextVersion: () => void;
 	broadcastTaskReadyForReview: (
 		workspaceId: string,
 		taskId: string,
@@ -160,7 +153,8 @@ export interface RuntimeStateHub {
 			NotificationAssessmentInput,
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
-	) => void;
+		options?: { requireDurableRegistration: boolean },
+	) => Promise<void>;
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
 	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
@@ -430,7 +424,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		workspaceMetadataSubscriptionByClient.delete(client);
 		workspaceMetadataMonitor.disconnectWorkspace(subscription.workspaceId, subscription.subscriberId);
 	};
-	let clineSessionContextVersion = 0;
 	const runtimeStateWebSocketServer = new WebSocketServer({ noServer: true });
 	const workspaceMetadataMonitor = createWorkspaceMetadataMonitor({
 		onMetadataUpdated: (workspaceId, workspaceMetadata) => {
@@ -555,35 +548,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		// 握手期间被跳过过：snapshot 里的 projects 构建得比那次广播早，安静系统里不会很快再有广播来纠正，立即补一次最新的。
 		if (runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.delete(client)) {
 			void broadcastRuntimeProjectsUpdated(preferredCurrentProjectId);
-		}
-	};
-
-	const broadcastClineMcpAuthStatusesUpdated = (statuses: RuntimeClineMcpServerAuthStatus[]) => {
-		if (runtimeStateClients.size === 0) {
-			return;
-		}
-		const payload: RuntimeStateStreamMcpAuthUpdatedMessage = {
-			type: "mcp_auth_updated",
-			statuses,
-		};
-		const serializedPayload = JSON.stringify(payload);
-		for (const client of runtimeStateClients) {
-			sendSerializedRuntimeStateMessage(client, serializedPayload);
-		}
-	};
-
-	const bumpClineSessionContextVersion = () => {
-		clineSessionContextVersion += 1;
-		if (runtimeStateClients.size === 0) {
-			return;
-		}
-		const payload: RuntimeStateStreamClineSessionContextUpdatedMessage = {
-			type: "cline_session_context_updated",
-			version: clineSessionContextVersion,
-		};
-		const serializedPayload = JSON.stringify(payload);
-		for (const client of runtimeStateClients) {
-			sendSerializedRuntimeStateMessage(client, serializedPayload);
 		}
 	};
 
@@ -1112,10 +1076,14 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			NotificationAssessmentInput,
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
+		options?: { requireDurableRegistration: boolean },
 	) => {
 		if (evidence?.summary)
 			latestNotificationSummaries.set(`${workspaceId}:${evidence.summary.taskId}`, evidence.summary);
-		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
+		return notificationAssessment.enqueue(
+			{ workspaceId, taskId, userTurnKind, ...evidence },
+			{ waitForAssessmentCompletion: false, requireDurableRegistration: options?.requireDurableRegistration },
+		);
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
@@ -1250,7 +1218,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					projects: projectsPayload.projects,
 					workspaceState,
 					workspaceMetadata,
-					clineSessionContextVersion,
 					notificationLog,
 				} satisfies RuntimeStateStreamSnapshotMessage;
 				const serializedSnapshot = operation
@@ -1460,9 +1427,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			terminalSummaryUnsubscribeByWorkspaceId.set(workspaceId, unsubscribe);
 		},
-		trackClineTaskSessionService: (workspaceId: string, workspacePath: string, service: ClineTaskSessionService) => {
-			trackConversationTaskSessionService(workspaceId, workspacePath, service, "cline");
-		},
 		trackAcpTaskSessionService: (workspaceId, workspacePath, service) => {
 			trackConversationTaskSessionService(workspaceId, workspacePath, service, "acp");
 		},
@@ -1489,8 +1453,6 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		disposeWorkspace,
 		broadcastRuntimeWorkspaceStateUpdated,
 		broadcastRuntimeProjectsUpdated,
-		broadcastClineMcpAuthStatusesUpdated,
-		bumpClineSessionContextVersion,
 		broadcastTaskReadyForReview,
 		broadcastNotificationLogUpdated,
 		broadcastExploratoryFindingsUpdated,

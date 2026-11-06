@@ -141,7 +141,6 @@ export function RetainedPostDeployVerificationReviewSession(props: BoundReviewPr
 								onActivateTaskCardOpeningTaskInItsProject: (card) =>
 									props.onOpenTaskInProject?.(props.workspaceId, card.id),
 								defaultAgentId: source.defaultAgentId,
-								defaultClineModelId: source.defaultClineModelId,
 							}
 						: null
 				}

@@ -47,7 +47,6 @@ export const BoardColumn = memo(function BoardColumn({
 	programmaticCardMoveInFlight,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
-	defaultClineModelId,
 	defaultAgentId,
 	onCollapseColumn,
 	columnFlexStyle,
@@ -83,7 +82,6 @@ export const BoardColumn = memo(function BoardColumn({
 	programmaticCardMoveInFlight?: ProgrammaticCardMoveInFlight | null;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 	/** 主看板的列折叠入口；不传则不渲染折叠按钮。 */
 	onCollapseColumn?: (columnId: BoardDisplayGroupId) => void;
@@ -284,7 +282,6 @@ export const BoardColumn = memo(function BoardColumn({
 												},
 												onActivateCard: onCardClick,
 												workspacePath,
-												defaultClineModelId,
 												defaultAgentId,
 											})}
 										/>,

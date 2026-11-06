@@ -22,7 +22,6 @@ interface StageRailFocusedCardProps {
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	taskCardActionHandlers: TaskCardActionHandlerBundle;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
 
@@ -65,7 +64,6 @@ function StageHeaderRailEntry({
 	taskSessions,
 	taskCardActionHandlers,
 	workspacePath,
-	defaultClineModelId,
 	defaultAgentId,
 	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
@@ -116,7 +114,6 @@ function StageHeaderRailEntry({
 							selected: true,
 							handlers: taskCardActionHandlers,
 							workspacePath,
-							defaultClineModelId,
 							defaultAgentId,
 						})}
 					/>

@@ -34,7 +34,6 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
-	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -257,8 +256,6 @@ export interface UseTaskEditorResult {
 	setNewTaskWorktreeMode: Dispatch<SetStateAction<RuntimeTaskWorktreeMode>>;
 	newTaskAgentId: RuntimeAgentId | undefined;
 	setNewTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
-	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
-	setNewTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	setNewTaskTerminalAgentModelOverrideSettings: SetTaskCreateTerminalAgentModelOverrideSettings;
 	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
@@ -295,8 +292,6 @@ export interface UseTaskEditorResult {
 	setEditTaskWorktreeMode: Dispatch<SetStateAction<RuntimeTaskWorktreeMode>>;
 	editTaskAgentId: RuntimeAgentId | undefined;
 	setEditTaskAgentId: Dispatch<SetStateAction<RuntimeAgentId | undefined>>;
-	editTaskClineSettings: RuntimeTaskClineSettings | undefined;
-	setEditTaskClineSettings: Dispatch<SetStateAction<RuntimeTaskClineSettings | undefined>>;
 	editTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	setEditTaskTerminalAgentModelOverrideSettings: Dispatch<
 		SetStateAction<RuntimeTaskTerminalAgentModelOverrideSettings | undefined>
@@ -424,7 +419,6 @@ export function useTaskEditor({
 	const [editTaskWorktreeMode, setEditTaskWorktreeMode] = useState<RuntimeTaskWorktreeMode>("branch");
 
 	const [newTaskAgentId, setNewTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
-	const [newTaskClineSettings, setNewTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 	const [newTaskTerminalAgentModelOverrideSettings, setNewTaskTerminalAgentModelOverrideSettings] = useState<
 		RuntimeTaskTerminalAgentModelOverrideSettings | undefined
 	>(undefined);
@@ -432,7 +426,6 @@ export function useTaskEditor({
 		RuntimeTaskAgentSessionInitialization | undefined
 	>(undefined);
 	const [editTaskAgentId, setEditTaskAgentId] = useState<RuntimeAgentId | undefined>(undefined);
-	const [editTaskClineSettings, setEditTaskClineSettings] = useState<RuntimeTaskClineSettings | undefined>(undefined);
 	const [editTaskTerminalAgentModelOverrideSettings, setEditTaskTerminalAgentModelOverrideSettings] = useState<
 		RuntimeTaskTerminalAgentModelOverrideSettings | undefined
 	>(undefined);
@@ -653,7 +646,6 @@ export function useTaskEditor({
 		branchRef: editTaskBranchRef,
 		worktreeMode: editTaskWorktreeMode,
 		agentId: editTaskAgentId,
-		clineSettings: editTaskClineSettings,
 		terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 	};
@@ -732,7 +724,6 @@ export function useTaskEditor({
 			setEditTaskBranchRef("");
 			setEditTaskWorktreeMode("branch");
 			setEditTaskAgentId(undefined);
-			setEditTaskClineSettings(undefined);
 			setEditTaskAgentSessionInitialization(undefined);
 			clearTaskEditDraft(editTaskWorkspaceId, editingTaskId);
 		}
@@ -775,7 +766,6 @@ export function useTaskEditor({
 				branchRef: editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget,
 				worktreeMode: editTaskWorktreeMode,
 				agentId: editTaskAgentId,
-				clineSettings: editTaskClineSettings,
 				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
 				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 			};
@@ -803,7 +793,6 @@ export function useTaskEditor({
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
-			editTaskClineSettings,
 			editTaskTerminalAgentModelOverrideSettings,
 			editTaskAgentSessionInitialization,
 			editTaskImages,
@@ -852,7 +841,6 @@ export function useTaskEditor({
 						branchRef: newTaskBranchRef,
 						worktreeMode: newTaskWorktreeMode,
 						agentId: newTaskAgentId,
-						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 						taskAgentSessionInitialization: newTaskAgentSessionInitialization,
 					},
@@ -894,7 +882,6 @@ export function useTaskEditor({
 			newTaskBranchRef,
 			newTaskWorktreeMode,
 			newTaskAgentId,
-			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization,
 		],
@@ -922,7 +909,6 @@ export function useTaskEditor({
 			return;
 		}
 		setNewTaskAgentId(undefined);
-		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
 		setNewTaskStartInPlanMode(newTaskStartInPlanModeByDefault);
@@ -999,7 +985,6 @@ export function useTaskEditor({
 		setNewTaskBranchRef(resolvedDefaultCreateTaskBranchRef);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
-		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault, resolvedDefaultCreateTaskBranchRef]);
@@ -1031,7 +1016,6 @@ export function useTaskEditor({
 			branchRef: savedDraft?.branchRef ?? (task.baseRef || resolvedDefaultEditTaskBranchRefForEditTarget),
 			worktreeMode: savedDraft?.worktreeMode ?? task.worktreeMode ?? "branch",
 			agentId: savedDraft?.agentId ?? task.agentId,
-			clineSettings: savedDraft?.clineSettings ?? task.clineSettings,
 			terminalAgentModelOverrideSettings:
 				savedDraft?.terminalAgentModelOverrideSettings ?? task.terminalAgentModelOverrideSettings,
 			taskAgentSessionInitialization:
@@ -1060,7 +1044,6 @@ export function useTaskEditor({
 			setEditTaskBranchRef(formValues.branchRef);
 			setEditTaskWorktreeMode(formValues.worktreeMode ?? "branch");
 			setEditTaskAgentId(formValues.agentId);
-			setEditTaskClineSettings(formValues.clineSettings);
 			setEditTaskTerminalAgentModelOverrideSettings(formValues.terminalAgentModelOverrideSettings);
 			setEditTaskAgentSessionInitialization(formValues.taskAgentSessionInitialization);
 		},
@@ -1240,7 +1223,6 @@ export function useTaskEditor({
 		setEditTaskBranchRef("");
 		setEditTaskWorktreeMode("branch");
 		setEditTaskAgentId(undefined);
-		setEditTaskClineSettings(undefined);
 		setEditTaskTerminalAgentModelOverrideSettings(undefined);
 		setEditTaskAgentSessionInitialization(undefined);
 	}, [isTaskEditorOpeningRequestOnlyController, editTaskWorkspaceId, editingTaskId, setEditingTaskCardInOtherProject]);
@@ -1295,7 +1277,6 @@ export function useTaskEditor({
 				baseRef: options?.baseRefOverride || editTaskBranchRef || resolvedDefaultEditTaskBranchRefForEditTarget,
 				worktreeMode: editTaskWorktreeMode,
 				agentId: editTaskAgentId,
-				clineSettings: editTaskClineSettings,
 				terminalAgentModelOverrideSettings: editTaskTerminalAgentModelOverrideSettings,
 				taskAgentSessionInitialization: editTaskAgentSessionInitialization,
 			};
@@ -1333,7 +1314,6 @@ export function useTaskEditor({
 					branchRef: submitted.baseRef,
 					worktreeMode: submitted.worktreeMode,
 					agentId: submitted.agentId,
-					clineSettings: submitted.clineSettings,
 					terminalAgentModelOverrideSettings: submitted.terminalAgentModelOverrideSettings,
 					taskAgentSessionInitialization: submitted.taskAgentSessionInitialization,
 					savedAt: Date.now(),
@@ -1457,7 +1437,6 @@ export function useTaskEditor({
 				setEditTaskBranchRef("");
 				setEditTaskWorktreeMode("branch");
 				setEditTaskAgentId(undefined);
-				setEditTaskClineSettings(undefined);
 				setEditTaskTerminalAgentModelOverrideSettings(undefined);
 				setEditTaskAgentSessionInitialization(undefined);
 			}
@@ -1478,7 +1457,6 @@ export function useTaskEditor({
 			editTaskAutoReviewEnabled,
 			editTaskAutoReviewMode,
 			editTaskBranchRef,
-			editTaskClineSettings,
 			editTaskTerminalAgentModelOverrideSettings,
 			editTaskAgentSessionInitialization,
 			editTaskName,
@@ -1621,7 +1599,6 @@ export function useTaskEditor({
 						agentId: newTaskAgentId,
 						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 						ompAgentSessionTransportForNewTasks,
-						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 						// 「从已有会话起步」只对单卡有意义（同本页的 handleCreateTasks）。
 						...(newTaskCards.length === 1
@@ -1659,7 +1636,6 @@ export function useTaskEditor({
 			newTaskAgentSessionInitialization,
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
-			newTaskClineSettings,
 			newTaskConversationMode,
 			newTaskImages,
 			newTaskStartInPlanMode,
@@ -1724,7 +1700,6 @@ export function useTaskEditor({
 			setNewTaskBranchRef(baseRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
-			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -1795,7 +1770,6 @@ export function useTaskEditor({
 						agentId: newTaskAgentId,
 						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 						ompAgentSessionTransportForNewTasks,
-						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
 						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
@@ -1864,7 +1838,6 @@ export function useTaskEditor({
 					// 会话通道要不要固化看的正是「实际会跑哪个 agent」，所以工作区默认也得一起下沉到域层。
 					workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 					ompAgentSessionTransportForNewTasks,
-					clineSettings: newTaskClineSettings,
 					terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 					taskAgentSessionInitialization: newTaskAgentSessionInitialization,
 					baseRef,
@@ -1915,7 +1888,6 @@ export function useTaskEditor({
 			setNewTaskBranchRef(baseRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
-			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -1939,7 +1911,6 @@ export function useTaskEditor({
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
 			newTaskBranchRef,
-			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization,
 			newTaskImages,
@@ -1962,7 +1933,6 @@ export function useTaskEditor({
 			currentProjectId,
 			setBoard,
 			setNewTaskAgentId,
-			setNewTaskClineSettings,
 		],
 	);
 
@@ -2060,7 +2030,6 @@ export function useTaskEditor({
 						// 同 handleCreateTask：agentId 留空的卡片跑的是工作区默认 agent，固化判据要看它。
 						workspaceDefaultAgentIdForNewTasks: taskCreationDefaultAgentId ?? undefined,
 						ompAgentSessionTransportForNewTasks,
-						clineSettings: newTaskClineSettings,
 						terminalAgentModelOverrideSettings: newTaskTerminalAgentModelOverrideSettings,
 						baseRef,
 						worktreeMode: newTaskWorktreeMode,
@@ -2114,7 +2083,6 @@ export function useTaskEditor({
 			setNewTaskBranchRef(baseRef);
 			setNewTaskWorktreeMode(options?.keepDialogOpen ? newTaskWorktreeMode : "branch");
 			setNewTaskAgentId(undefined);
-			setNewTaskClineSettings(undefined);
 			setNewTaskTerminalAgentModelOverrideSettings(undefined);
 			setNewTaskAgentSessionInitialization(undefined);
 			if (!options?.keepDialogOpen) {
@@ -2135,7 +2103,6 @@ export function useTaskEditor({
 			newTaskAutoReviewEnabled,
 			newTaskAutoReviewMode,
 			newTaskBranchRef,
-			newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskImages,
 			// 同 handleCreateTask：全局默认只在建卡那一刻固化，漏进依赖会让批量建卡整批写成旧通道。
@@ -2154,7 +2121,6 @@ export function useTaskEditor({
 			currentProjectId,
 			setBoard,
 			setNewTaskAgentId,
-			setNewTaskClineSettings,
 		],
 	);
 
@@ -2238,12 +2204,10 @@ export function useTaskEditor({
 		setEditTaskImages([]);
 		setEditTaskBranchRef("");
 		setEditTaskAgentId(undefined);
-		setEditTaskClineSettings(undefined);
 		setEditTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskImages([]);
 		setNewTaskWorktreeMode("branch");
 		setNewTaskAgentId(undefined);
-		setNewTaskClineSettings(undefined);
 		setNewTaskTerminalAgentModelOverrideSettings(undefined);
 		setNewTaskAgentSessionInitialization(undefined);
 	}, [newTaskAgentPermissionModeByDefault, newTaskStartInPlanModeByDefault, setEditingTaskCardInOtherProject]);
@@ -2278,7 +2242,6 @@ export function useTaskEditor({
 		setNewTaskBranchRef(values.branchRef);
 		setNewTaskWorktreeMode(values.worktreeMode ?? "branch");
 		setNewTaskAgentId(values.agentId);
-		setNewTaskClineSettings(values.clineSettings);
 		restoredTaskCreationDraftModelSettingsAwaitingFirstEffectRef.current = true;
 		setNewTaskTerminalAgentModelOverrideSettings(values.terminalAgentModelOverrideSettings);
 		setNewTaskAgentSessionInitialization(values.taskAgentSessionInitialization);
@@ -2335,8 +2298,6 @@ export function useTaskEditor({
 		setNewTaskWorktreeMode,
 		newTaskAgentId,
 		setNewTaskAgentId,
-		newTaskClineSettings,
-		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
 		setNewTaskTerminalAgentModelOverrideSettings: updateNewTaskTerminalAgentModelOverrideSettings,
 		newTaskAgentSessionInitialization,
@@ -2371,8 +2332,6 @@ export function useTaskEditor({
 		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,
-		editTaskClineSettings,
-		setEditTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
 		setEditTaskTerminalAgentModelOverrideSettings,
 		editTaskAgentSessionInitialization,

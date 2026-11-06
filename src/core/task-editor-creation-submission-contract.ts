@@ -41,7 +41,6 @@ export const taskEditorCreationSubmissionRequestSchema: z.ZodType<TaskEditorCrea
 			agentId: true,
 			ompAgentSessionTransport: true,
 			taskConversationMode: true,
-			clineSettings: true,
 			terminalAgentModelOverrideSettings: true,
 			codexReasoningEffortOverride: true,
 			codexConfigurationProfileId: true,

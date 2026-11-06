@@ -12,6 +12,18 @@ import type { TerminalSessionListener, TerminalSessionService } from "../../../s
 import type { TerminalRestoreSnapshot } from "../../../src/terminal/terminal-state-mirror";
 import { createTerminalWebSocketBridge, type TerminalWebSocketBridge } from "../../../src/terminal/ws-server";
 
+const persistedWorkspaceStateMocks = vi.hoisted(() => ({
+	loadPersistedWorkspaceStateById: vi.fn(
+		async (
+			_workspaceId: string,
+		): Promise<{
+			board: { columns: { cards: { id: string; agentId: string }[] }[] };
+			sessions: Record<string, { agentId: string }>;
+		}> => ({ board: { columns: [] }, sessions: {} }),
+	),
+}));
+vi.mock("../../../src/state/workspace-state", () => persistedWorkspaceStateMocks);
+
 const TASK_ID = "task-1";
 const WORKSPACE_ID = "workspace-1";
 
@@ -52,6 +64,7 @@ function rawDataToBuffer(data: RawData): Buffer {
 
 class FakeTerminalManager implements TerminalSessionService {
 	private readonly listenersByTaskId = new Map<string, Set<TerminalSessionListener>>();
+	getSummary = vi.fn<TerminalSessionService["getSummary"]>(() => createSummary());
 
 	attach(taskId: string, listener: TerminalSessionListener): (() => void) | null {
 		const listeners = this.listenersByTaskId.get(taskId) ?? new Set<TerminalSessionListener>();
@@ -301,6 +314,11 @@ describe("createTerminalWebSocketBridge – passcode gate", () => {
 	let originalRuntimePort: number;
 
 	beforeEach(async () => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockReset();
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [] },
+			sessions: {},
+		});
 		originalRuntimePort = getKanbanRuntimePort();
 		terminalManager = new FakeTerminalManager();
 		server = createServer((_request, response) => {
@@ -417,6 +435,11 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 	let originalRuntimePort: number;
 
 	beforeEach(async () => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockReset();
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [] },
+			sessions: {},
+		});
 		originalRuntimePort = getKanbanRuntimePort();
 		terminalManager = new FakeTerminalManager();
 		server = createServer((_request, response) => {
@@ -499,6 +522,48 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		expect(controlSocket.socket.readyState).toBe(WebSocket.OPEN);
 		await closeSocket(ioSocket.socket);
 		await closeSocket(controlSocket.socket);
+	});
+
+	it.each(["card", "session"] as const)("无活动进程时从持久 %s 身份拒绝 Cline 输入", async (source) => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [{ cards: [{ id: TASK_ID, agentId: source === "card" ? "cline" : "codex" }] }] },
+			sessions: source === "session" ? { [TASK_ID]: { agentId: "cline" } } : {},
+		});
+		terminalManager.writeInput.mockReturnValue(null);
+		terminalManager.getSummary.mockReturnValue(null);
+		const ioSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=retired-cline-viewer`,
+		);
+		const closed = once(ioSocket.socket, "close");
+		ioSocket.socket.send("用户输入");
+		const [code, reason] = await closed;
+		expect(code).toBe(1011);
+		expect(reason.toString()).toContain("已退役");
+		expect(persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById).toHaveBeenCalledWith(WORKSPACE_ID);
+	});
+
+	it("已回收的 Codex 摘要优先于陈旧 Cline 卡片，保留终端连接", async () => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [{ cards: [{ id: TASK_ID, agentId: "cline" }] }] },
+			sessions: {},
+		});
+		terminalManager.writeInput.mockReturnValueOnce(null);
+		terminalManager.getSummary.mockReturnValue({ ...createSummary(), state: "idle", pid: null, startedAt: null });
+		const ioSocket = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=reclaimed-codex-viewer`,
+		);
+		const unexpectedClose = vi.fn();
+		ioSocket.socket.on("close", unexpectedClose);
+		ioSocket.socket.send("\u001b[I");
+		await waitForAssertion(() => expect(terminalManager.getSummary).toHaveBeenCalledWith(TASK_ID));
+		ioSocket.socket.send("恢复后的输入");
+		await waitForAssertion(() =>
+			expect(terminalManager.writeInput).toHaveBeenLastCalledWith(TASK_ID, Buffer.from("恢复后的输入")),
+		);
+		expect(unexpectedClose).not.toHaveBeenCalled();
+		expect(persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById).not.toHaveBeenCalled();
+		expect(ioSocket.socket.readyState).toBe(WebSocket.OPEN);
+		await closeSocket(ioSocket.socket);
 	});
 
 	it("真实输入写入异常仍以 1011 关闭连接", async () => {

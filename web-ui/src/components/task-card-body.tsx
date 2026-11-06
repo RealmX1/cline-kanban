@@ -43,11 +43,6 @@ import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { AutomaticAgentFailureContinuationNotice } from "@/components/automatic-agent-failure-continuation-notice";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
-import {
-	formatClineReasoningEffortLabel,
-	formatClineSelectedModelButtonText,
-	resolveClineModelDisplayName,
-} from "@/components/detail-panels/cline-model-picker-options";
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
@@ -164,7 +159,6 @@ export interface TaskCardBusinessProps {
 	workspacePath?: string | null;
 	/** 只读解析预定工作区的绝对路径；Backlog 不需要创建工作树或启动会话。 */
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
 
@@ -348,7 +342,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 		isMoveToReviewLoading = false,
 		workspacePath,
 		resolveTaskWorkspaceAbsoluteDirectoryPath,
-		defaultClineModelId = null,
 		defaultAgentId = null,
 		drag = null,
 		renderRole = "canonical_card_in_its_stage_list",
@@ -661,36 +654,16 @@ export const TaskCardBody = memo(function TaskCardBody(
 		if (!effectiveAgentId) {
 			return null;
 		}
-		return getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? effectiveAgentId;
+		return effectiveAgentId === "cline"
+			? "Cline（已退役）"
+			: (getRuntimeAgentCatalogEntry(effectiveAgentId)?.label ?? effectiveAgentId);
 	}, [effectiveAgentId]);
-	const modelOverrideLabel = useMemo(() => {
-		if (card.clineSettings === undefined) {
-			return null;
-		}
-		const explicitReasoningLabel = card.clineSettings.reasoningEffort
-			? formatClineReasoningEffortLabel(card.clineSettings.reasoningEffort)
-			: !card.clineSettings.providerId && !card.clineSettings.modelId
-				? "Default"
-				: null;
-		if (card.clineSettings.providerId && !card.clineSettings.modelId) {
-			const providerLabel = `Provider: ${card.clineSettings.providerId}`;
-			return explicitReasoningLabel ? `${providerLabel} (${explicitReasoningLabel})` : providerLabel;
-		}
-		const effectiveModelId = card.clineSettings.modelId ?? defaultClineModelId;
-		if (!effectiveModelId) {
-			return explicitReasoningLabel ? `Default model (${explicitReasoningLabel})` : null;
-		}
-		const modelName = resolveClineModelDisplayName(effectiveModelId);
-		if (explicitReasoningLabel) {
-			return `${modelName} (${explicitReasoningLabel})`;
-		}
-		const inheritedReasoningEffort = "";
-		return formatClineSelectedModelButtonText({
-			modelName,
-			reasoningEffort: inheritedReasoningEffort,
-			showReasoningEffort: Boolean(inheritedReasoningEffort),
-		});
-	}, [card.clineSettings, defaultClineModelId]);
+	const modelOverrideLabel =
+		effectiveAgentId === "cline"
+			? [card.clineSettings?.providerId, card.clineSettings?.modelId, card.clineSettings?.reasoningEffort]
+					.filter(Boolean)
+					.join(" · ") || null
+			: null;
 	const taskAgentSettingsLabel = useMemo(() => {
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;

@@ -45,8 +45,11 @@ function render(children: ReactNode): HTMLDivElement {
 	return container;
 }
 
-function findHeaderToggle(host: HTMLElement): HTMLButtonElement | undefined {
-	return [...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Pinned"));
+function findPinnedTasksContainerExpansionToggleButton(host: HTMLElement): HTMLButtonElement | undefined {
+	return (
+		host.querySelector<HTMLButtonElement>('button[aria-label="收起 Pinned"], button[aria-label="展开 Pinned"]') ??
+		[...host.querySelectorAll("button")].find((button) => button.textContent?.includes("Pinned"))
+	);
 }
 
 beforeEach(() => {
@@ -96,12 +99,12 @@ describe("主看板顶部的置顶板横条", () => {
 
 	it("折叠后隐藏分身，并把折叠态写进 localStorage", () => {
 		const host = render(<TaskPinboardStripOnKanbanBoard {...baseProps} pinnedTasks={[createPinnedTask("task-a")]} />);
-		act(() => findHeaderToggle(host)?.click());
+		act(() => findPinnedTasksContainerExpansionToggleButton(host)?.click());
 
 		expect(host.querySelectorAll('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]').length).toBe(0);
 		expect(window.localStorage.getItem(LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard)).toBe("true");
 		// 卡头本身仍在，否则折叠后就没有入口再展开。
-		expect(findHeaderToggle(host)).toBeInstanceOf(HTMLButtonElement);
+		expect(findPinnedTasksContainerExpansionToggleButton(host)).toBeInstanceOf(HTMLButtonElement);
 	});
 
 	it("点分身上的 stage 标签请求跳回本体卡", () => {
@@ -144,7 +147,7 @@ describe("Focus View 左侧的置顶板分段", () => {
 	// 两处的纵向空间预算不同，折叠态各存各的键，不联动。
 	it("折叠态存在与横条不同的 localStorage 键下", () => {
 		const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={[createPinnedTask("task-a")]} />);
-		act(() => findHeaderToggle(host)?.click());
+		act(() => findPinnedTasksContainerExpansionToggleButton(host)?.click());
 
 		expect(window.localStorage.getItem(LocalStorageKey.TaskPinboardSectionCollapsedInFocusView)).toBe("true");
 		expect(window.localStorage.getItem(LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard)).toBeNull();
@@ -185,7 +188,7 @@ describe("Focus View 左侧的置顶板分段", () => {
 				lastCopy && toggle ? lastCopy.compareDocumentPosition(toggle) & Node.DOCUMENT_POSITION_FOLLOWING : 0,
 			).toBeTruthy();
 			// 卡头计数仍是总数，不是可见数。
-			expect(findHeaderToggle(host)?.textContent).toContain("7");
+			expect(host.querySelector("[data-focus-view-group-header]")?.textContent).toContain("7");
 		});
 
 		it("点「Show N more」展开全部，再点「Show less」收回到 5 张", () => {
@@ -211,7 +214,7 @@ describe("Focus View 左侧的置顶板分段", () => {
 
 		it("折叠卡头后分身与展开按钮一并隐藏", () => {
 			const host = render(<TaskPinboardSectionInFocusView {...baseProps} pinnedTasks={sevenPinnedTasks} />);
-			act(() => findHeaderToggle(host)?.click());
+			act(() => findPinnedTasksContainerExpansionToggleButton(host)?.click());
 
 			expect(renderedPinnedCopyTitles(host)).toHaveLength(0);
 			expect(findShowMorePinnedTasksToggle(host)).toBeUndefined();
