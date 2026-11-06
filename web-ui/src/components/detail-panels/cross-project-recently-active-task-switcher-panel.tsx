@@ -121,7 +121,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 				}
 				// overflow-anchor: none —— 浮层定位不调整列表滚动，异步快照也不应触发浏览器锚定补偿；
 				// 保持用户选择的滚动位置。
-				className="isolate flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
+				className="isolate flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
 				data-testid="cross-project-recently-active-task-switcher-panel"
 				data-cross-project-focused-task-pin-state={focusedTaskPinState}
 			>

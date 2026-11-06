@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 // exploration thread graph 面板（B.2）：Focus View 侧栏里的可折叠 section，挂在
 // TaskConversationSessionsPanel 同位下方、「本会话 findings」之上。
 //
@@ -47,6 +48,7 @@ const JOB_OUTCOME_DISPLAY: Record<string, string> = {
 export function ExplorationThreadGraphPanel({
 	workspaceId,
 	explorationId,
+	headerNavigationContent,
 	data,
 	initiallyExpanded = false,
 	isTaskAgentExecutionDisabled = false,
@@ -55,6 +57,7 @@ export function ExplorationThreadGraphPanel({
 	onRefresh,
 	readError,
 }: {
+	headerNavigationContent?: ReactNode;
 	workspaceId: string;
 	explorationId: string;
 	data: ExplorationThreadGraphData;
@@ -140,12 +143,14 @@ export function ExplorationThreadGraphPanel({
 			title="探索地图"
 			className="flex shrink-0 flex-col border-t border-border bg-surface-1"
 		>
-			<div className="flex shrink-0 items-center">
+			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 px-2">
+				{headerNavigationContent}
 				<button
 					type="button"
 					onClick={() => setOpen((current) => !current)}
 					className="flex h-8 min-w-0 flex-1 items-center gap-1.5 px-2 text-left hover:bg-surface-3"
 					aria-expanded={open}
+					aria-label={headerNavigationContent ? (open ? "收起探索地图内容" : "展开探索地图内容") : undefined}
 				>
 					{open ? (
 						<ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
@@ -153,7 +158,7 @@ export function ExplorationThreadGraphPanel({
 						<ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
 					)}
 					<GitBranch className="size-3.5 shrink-0 text-muted-foreground" />
-					<span className="text-xs font-medium">探索地图</span>
+					{!headerNavigationContent ? <span className="text-xs font-medium">探索地图</span> : null}
 					{turnRows.length > 0 ? (
 						<span className="text-[11px] text-muted-foreground">
 							{threadCount} 条线 · {turnRows.length} 轮

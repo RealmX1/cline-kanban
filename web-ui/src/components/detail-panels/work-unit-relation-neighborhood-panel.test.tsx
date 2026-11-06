@@ -59,7 +59,7 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 		});
 	}
 
-	async function renderPanel(): Promise<void> {
+	async function renderPanel(withHeaderNavigation = false): Promise<void> {
 		const crossProjectTaskOpenHost: CrossProjectRecentlyActiveTaskSwitcherHostContextValue = {
 			projects: [
 				buildKanbanProjectSummaryForTest(CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST, "current-project"),
@@ -78,6 +78,7 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 			root.render(
 				<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectTaskOpenHost}>
 					<WorkUnitRelationNeighborhoodPanel
+						headerNavigationContent={withHeaderNavigation ? <span>区域导航</span> : undefined}
 						workspaceId={CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}
 						kanbanBoardCardTaskId={SUBJECT_KANBAN_BOARD_CARD_TASK_ID_FOR_TEST}
 					/>
@@ -142,6 +143,19 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 			root.unmount();
 		});
 		container.remove();
+	});
+
+	it.each(["empty", "loading", "populated"])("合并标题的 Relations 在 %s 时保留折叠按钮名称", async (state) => {
+		if (state === "empty")
+			fetchRelationNeighborhoodSummaryMock.mockResolvedValue(buildEmptyRelationNeighborhoodSummaryResponseForTest());
+		if (state === "loading") fetchRelationNeighborhoodSummaryMock.mockImplementation(() => new Promise(() => {}));
+		await renderPanel(true);
+		const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="展开关系内容"]');
+		expect(toggle).not.toBeNull();
+		expect(toggle!.getAttribute("aria-expanded")).toBe("false");
+		await clickElement(toggle!);
+		expect(toggle!.getAttribute("aria-label")).toBe("收起关系内容");
+		expect(toggle!.getAttribute("aria-expanded")).toBe("true");
 	});
 
 	it("默认收起，头部给出已列出关系数与静音数；展开后按「来源」「需求修订」「折叠（仅计数）」分区", async () => {

@@ -199,14 +199,13 @@ describe("useStageHeaderPinLayout", () => {
 		};
 		focusedCardRect = { top: -50, bottom: 30, height: 80 };
 
-		// c at sTop=190 is INSIDE the tall rail band (0..196) → must be pinned (masked by the opaque rail).
-		sectionRects = { ...scrolledPast, c: { top: 190, bottom: 490, height: 300 } };
+		// 卡头在 166px，落在包含焦点卡的 rail（0..176）内，必须钉住以免被遮住。
+		sectionRects = { ...scrolledPast, c: { top: 166, bottom: 466, height: 300 } };
 		await renderHarness("pinTop");
 		expect(readTop()).toBe("a,b,c");
 
-		// c at sTop=204 is BELOW the tall rail band → must stay in flow. Had the hook forgotten the card height
-		// (rail bottom ≈ 100), c would already be excluded at 190 — this pair is what proves the height is counted.
-		sectionRects = { ...scrolledPast, c: { top: 204, bottom: 504, height: 300 } };
+		// 卡头在 180px 已越过 rail，保持行内；两组边界证明焦点卡高度仍计入阈值。
+		sectionRects = { ...scrolledPast, c: { top: 180, bottom: 480, height: 300 } };
 		await dispatchScroll();
 		expect(readTop()).toBe("a,b");
 	});
