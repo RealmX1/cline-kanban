@@ -48,6 +48,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
+- **独立填写窗由页面级宿主持有**：入口只登记窗口，导航不卸载表单；任务键带 workspace/task/incarnation，保存绑定打开时归属。任务编辑器入口不得与窗口 controller 竞争持久草稿。见 `docs/non-modal-floating-form-windows-and-retained-sessions.md`。
 - **lint 强制的边界**（biome + `grit/*.grit`，各条 includes 作用域外仍只是约定）：`@clinebot/*` 直引限制（override 排除 `src/cline-sdk/**` 且只拦 `@clinebot/core`——目录内靠自觉，已有直引反例）；`createWorkspaceTrpcClient` 仅限 `web-ui/src/runtime/*-query.ts`；`src/`（除 `cli.ts`）禁 `console.*` 与 `process.exit`；禁解构 `process.env`；`src/commands/**` 禁直写 board/sessions（`mutateWorkspaceState` 等）、禁 import 关系账本模块、禁写 PDV `verifiedAt`——CLI 写动词一律走 runtime procedure，否则关系账本记不到行动者（dd2db 1a）。格式：tab 缩进、indentWidth 3、lineWidth 120。
 
 ## 铁律（每条都踩出过事故；细节见指针，此处只放承重规则）
@@ -65,7 +66,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
-- **Done 卡复用完整工作台但禁止执行**：历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
+- **Done 卡复用完整工作台但禁止执行**：会话中断保留原列，浏览器与项目计数都不得将其推断为结案；历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
 - **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
 - **查卡恢复必须按执行归属判断**：其他实例启动不等于本轮查询经历重启；只收口归属已退出的轮次，心跳不可读时保留未知态。持久图片与文本协议适配见 `docs/architecture/task-lookup-query-execution-ownership-and-persistent-prompt-images.md`。
 - **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。
@@ -107,6 +108,7 @@ web-ui：
 | `docs/architecture.md` | 系统图、运行时模式、所有权表、BoardCard 双宿主小节 |
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
+| `docs/non-modal-floating-form-windows-and-retained-sessions.md` | 通用填写浮窗、常驻宿主、实例归属、焦点层级及跨页面保存 |
 | `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |

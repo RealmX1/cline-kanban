@@ -45,6 +45,7 @@ export const localDeploymentStageCommandSchema = z.strictObject({
 	stage: z.enum(LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER),
 	command: commandArguments,
 	effectVerificationCommand: commandArguments.optional(),
+	readOnlyRecoveryEvidenceObservationCommand: commandArguments.optional(),
 	recoveryEvidenceFilePaths: z.array(absolutePath).optional(),
 });
 
@@ -113,6 +114,7 @@ export const localDeploymentObservationSchema = z.strictObject({
 	exitCode: z.number().int().nullable(),
 	commandOutputDirectory: absolutePath,
 	detail: z.string(),
+	commandFailureKind: z.literal("quality_validation_failed").optional(),
 });
 
 export const localDeploymentExecutionRecordSchema = z.strictObject({

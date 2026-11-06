@@ -8,34 +8,44 @@ interface PostDeployVerificationTaskClosureFormRequest {
 	workspaceId: string;
 	card: BoardCard;
 }
-let pendingRequest: PostDeployVerificationTaskClosureFormRequest | null = null;
-let resolvePendingRequest: ((comment: TaskCommentToAppendWhenMovingIntoDone | null) => void) | null = null;
+interface PendingPostDeployVerificationTaskClosureForm {
+	request: PostDeployVerificationTaskClosureFormRequest;
+	promise: Promise<TaskCommentToAppendWhenMovingIntoDone | null>;
+	resolve: (comment: TaskCommentToAppendWhenMovingIntoDone | null) => void;
+}
+const pendingRequests = new Map<string, PendingPostDeployVerificationTaskClosureForm>();
+let pendingRequestSnapshot: PostDeployVerificationTaskClosureFormRequest[] = [];
 let mountedHostCount = 0;
 const listeners = new Set<() => void>();
-export const readPostDeployVerificationTaskClosureFormRequest = () => pendingRequest;
+export const readPostDeployVerificationTaskClosureFormRequest = () => pendingRequestSnapshot[0] ?? null;
+export const readPostDeployVerificationTaskClosureFormRequests = () => pendingRequestSnapshot;
 export const subscribeToPostDeployVerificationTaskClosureFormRequest = (listener: () => void) => {
 	listeners.add(listener);
 	return () => {
 		listeners.delete(listener);
 	};
 };
+function publishPendingClosureFormRequests() {
+	pendingRequestSnapshot = Array.from(pendingRequests.values(), (pending) => pending.request);
+	for (const listener of listeners) listener();
+}
 export function settlePostDeployVerificationTaskClosureFormRequest(
 	requestId: string,
 	comment: TaskCommentToAppendWhenMovingIntoDone | null,
 ) {
-	if (pendingRequest?.requestId !== requestId) return;
-	const resolve = resolvePendingRequest;
-	pendingRequest = null;
-	resolvePendingRequest = null;
-	for (const listener of listeners) listener();
-	resolve?.(comment);
+	const pending = pendingRequests.get(requestId);
+	if (!pending) return;
+	pendingRequests.delete(requestId);
+	publishPendingClosureFormRequests();
+	pending.resolve(comment);
 }
 export function registerPostDeployVerificationTaskClosureFormHost() {
 	mountedHostCount += 1;
 	return () => {
 		mountedHostCount -= 1;
-		if (mountedHostCount === 0 && pendingRequest)
-			settlePostDeployVerificationTaskClosureFormRequest(pendingRequest.requestId, null);
+		if (mountedHostCount === 0)
+			for (const requestId of pendingRequests.keys())
+				settlePostDeployVerificationTaskClosureFormRequest(requestId, null);
 	};
 }
 
@@ -46,20 +56,30 @@ export async function requestPostDeployVerificationTaskClosureForm(
 	expectedCreatedAt?: number,
 ) {
 	if (mountedHostCount === 0) return undefined;
-	if (pendingRequest) throw new Error("另一项结案表单仍在等待，请先完成或取消。");
 	const found = await readTaskCardWithBoardColumnInWorkspace(workspaceId, taskId, expectedCreatedAt);
 	if (found.taskCardLookupOutcome !== "task_card_found_on_workspace_board")
 		throw new Error("任务不存在，未执行结案。");
+	if (expectedCreatedAt !== undefined && found.taskCardSnapshot.taskCard.createdAt !== expectedCreatedAt)
+		throw new Error("原任务身份已失效，未打开结案填写窗口。");
 	if (found.taskCardSnapshot.boardColumnIdContainingTaskCard === "trash") return undefined;
 	if (mountedHostCount === 0) return null;
-	if (pendingRequest) throw new Error("另一项结案表单仍在等待，请先完成或取消。");
-	return await new Promise<TaskCommentToAppendWhenMovingIntoDone | null>((resolve) => {
-		pendingRequest = {
-			requestId: createRandomUuidV4WithInsecureContextFallback(),
-			workspaceId,
-			card: found.taskCardSnapshot.taskCard,
-		};
-		resolvePendingRequest = resolve;
-		for (const listener of listeners) listener();
+	const existing = Array.from(pendingRequests.values()).find(
+		(pending) =>
+			pending.request.workspaceId === workspaceId &&
+			pending.request.card.id === taskId &&
+			pending.request.card.createdAt === found.taskCardSnapshot.taskCard.createdAt,
+	);
+	if (existing) return await existing.promise;
+	const request = {
+		requestId: createRandomUuidV4WithInsecureContextFallback(),
+		workspaceId,
+		card: found.taskCardSnapshot.taskCard,
+	};
+	let settle!: (comment: TaskCommentToAppendWhenMovingIntoDone | null) => void;
+	const promise = new Promise<TaskCommentToAppendWhenMovingIntoDone | null>((resolve) => {
+		settle = resolve;
 	});
+	pendingRequests.set(request.requestId, { request, promise, resolve: settle });
+	publishPendingClosureFormRequests();
+	return await promise;
 }

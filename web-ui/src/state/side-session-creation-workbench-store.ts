@@ -10,6 +10,7 @@ import type { BoardCard } from "@/types";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
 
 export interface SideSessionCreationWorkbenchTarget {
+	openingRequestIdentity?: symbol;
 	workspaceId: string;
 	task: BoardCard;
 	mainSessionSummary: RuntimeTaskSessionSummary;
@@ -26,7 +27,7 @@ export interface SideSessionCreationWorkbenchDraft {
 let activeTarget: SideSessionCreationWorkbenchTarget | null = null;
 const listeners = new Set<() => void>();
 export function openSideSessionCreationWorkbench(target: SideSessionCreationWorkbenchTarget) {
-	activeTarget = target;
+	activeTarget = { ...target, openingRequestIdentity: Symbol("side-session-creation-opening-request") };
 	for (const listener of listeners) listener();
 }
 export function refreshSideSessionCreationWorkbenchContext(
@@ -187,6 +188,7 @@ export function createSideSessionCreationDraft(
 			agentId: role === "by_the_way" && !["claude", "codex"].includes(target.agentId) ? "codex" : target.agentId,
 			startInPlanMode,
 			contextSource: "current_main",
+			contextSourceTaskConversationSessionId: target.mainSessionSummary.taskId,
 			initialMessage: "",
 			images: [],
 			creationReason: "用户在共享创建工作台中创建侧会话",

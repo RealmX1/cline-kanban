@@ -2,24 +2,39 @@ import { useEffect, useSyncExternalStore } from "react";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
 import { useTaskCommentBeforeMoveIntoDone } from "@/hooks/use-task-comment-before-move-into-done";
 import {
-	readPostDeployVerificationTaskClosureFormRequest,
+	readPostDeployVerificationTaskClosureFormRequests,
 	registerPostDeployVerificationTaskClosureFormHost,
 	settlePostDeployVerificationTaskClosureFormRequest,
 	subscribeToPostDeployVerificationTaskClosureFormRequest,
 } from "@/state/post-deploy-verification-task-closure-form-request";
 
 export function PostDeployVerificationTaskClosureFormHost() {
-	const request = useSyncExternalStore(
+	const requests = useSyncExternalStore(
 		subscribeToPostDeployVerificationTaskClosureFormRequest,
-		readPostDeployVerificationTaskClosureFormRequest,
+		readPostDeployVerificationTaskClosureFormRequests,
 	);
-	const controller = useTaskCommentBeforeMoveIntoDone();
 	useEffect(registerPostDeployVerificationTaskClosureFormHost, []);
+	return (
+		<>
+			{requests.map((request) => (
+				<PostDeployVerificationTaskClosureRequestForm key={request.requestId} request={request} />
+			))}
+		</>
+	);
+}
+
+function PostDeployVerificationTaskClosureRequestForm({
+	request,
+}: {
+	request: ReturnType<typeof readPostDeployVerificationTaskClosureFormRequests>[number];
+}) {
+	const controller = useTaskCommentBeforeMoveIntoDone();
 	useEffect(() => {
 		if (request) controller.open(request.workspaceId, request.card);
 	}, [request, controller.open]);
 	return (
 		<TaskCommentBeforeMoveIntoDoneDialog
+			prepareClosurePayloadOnly
 			controller={{
 				...controller,
 				cancel: () => {

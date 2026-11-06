@@ -34,7 +34,7 @@ export function buildTaskResourceUsagePillTooltipContent(snapshot: RuntimeLiveTa
 }
 
 /**
- * 卡片头部药丸条里的一段：这个 task 此刻的内存（进程树 RSS 上界）与 CPU。叶子组件自己按卡片 id 订阅
+ * 卡片的资源药丸：标准卡放在摘要，跨项目展开行放在详情，显示此刻的内存（进程树 RSS 上界）与 CPU。叶子组件自己按卡片 id 订阅
  * store，卡体不因每 15 秒的快照重渲染；没有归因到的进程（会话没在跑）时整段不渲染。
  * 有残留孤儿进程时整段转为警示色——它们是会话结束后仍在吃内存的泄漏。
  */
@@ -42,9 +42,11 @@ export function TaskCardResourceUsagePill({
 	taskCardId,
 	isTrashCard,
 	revealHoverActionTooltip,
+	showLeadingSeparator = true,
 }: {
 	taskCardId: string;
 	isTrashCard: boolean;
+	showLeadingSeparator?: boolean;
 	// 由 TaskCardBody 提供的 hover 门控（只在卡片 hover 时挂 tooltip），契约见那里的注释。
 	revealHoverActionTooltip: (label: string | null) => string | undefined;
 }): React.ReactElement | null {
@@ -55,7 +57,7 @@ export function TaskCardResourceUsagePill({
 	const hasSurvivingOrphanProcesses = snapshot.survivedSessionRootExitProcessCount > 0;
 	return (
 		<>
-			<span className="text-text-tertiary">·</span>
+			{showLeadingSeparator ? <span className="text-text-tertiary">·</span> : null}
 			<Tooltip content={revealHoverActionTooltip(buildTaskResourceUsagePillTooltipContent(snapshot))}>
 				<span
 					data-task-resource-usage-pill=""

@@ -22,6 +22,7 @@ import {
 	getManagedCodexConversationStorageHomeDirectoryPath,
 	prepareManagedCodexConversationStorageHome,
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
+import { prepareIsolatedCodexConfigurationLegacyStorageFixture } from "../../utilities/prepare-isolated-codex-configuration-legacy-storage-fixture";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixture: ReturnType<typeof createTempDir>;
@@ -404,6 +405,10 @@ describe("Codex 外部配置只导入一次", () => {
 				),
 			});
 		});
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(
+			fixture.path,
+			await readCodexConfigurationSyncStore(),
+		);
 		const migrated = await readCodexConfigurationSyncStore();
 		const change = migrated.changes.find((entry) => entry.changeId === changeId);
 		if (!change) throw new Error("缺少旧外部记录");
@@ -524,13 +529,12 @@ describe("Codex 外部配置只导入一次", () => {
 
 	it("快照已落盘但状态提交中断时，重试恢复同一导入而不读取变化后的外部文件", async () => {
 		const binding = await createWriter();
-		const storePath = join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json");
-		const store = JSON.parse(await readFile(storePath, "utf8"));
+		const store = await readCodexConfigurationSyncStore();
 		store.sources = {};
 		store.profiles = {};
 		store.writers = {};
 		store.defaultCodexConfigurationProfileId = null;
-		await writeFile(storePath, JSON.stringify(store));
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(fixture.path, store);
 		await writeFile(join(sourceHome, "config.toml"), 'model = "changed-after-interruption"\n');
 		const recovered = await createWriter();
 		expect(recovered.launchConfigurationDigest).toBe(binding.launchConfigurationDigest);

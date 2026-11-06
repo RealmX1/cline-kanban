@@ -5,12 +5,10 @@ import { cn } from "@/components/ui/cn";
 import type { RuntimeAgentId } from "@/runtime/types";
 
 /**
- * 精简行的首行（agent 图标 + 标题）。与完整卡片首行同一套度量（gap-1.5、图标 13px + mt-[3px]、
- * 标题 13px leading-snug font-medium），所以换成完整卡片时标题一像素不动。
- * 其他项目的卡快照还没到 / 读失败时，展开的卡先画这一行再在下面放提示，标题不会整行消失。
- * 用 span：精简行的首行在按钮里，按钮里只能放短语内容。
+ * 缩略行与快照未到时的兜底共用 Agent 图标和单行标题；完整卡片沿用同一字号与间距，最多展开三行。
+ * 摘要排在此行之前，标题增高只向下延伸。
  */
-export function CrossProjectTaskSwitcherRowFirstLine({
+export function CrossProjectTaskSwitcherRowAgentAndTitle({
 	agentId,
 	title,
 }: {

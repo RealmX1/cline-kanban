@@ -35,6 +35,16 @@ const partialCoverage: RuntimeTaskCommitCoverageInCurrentDeployment = {
 };
 
 describe("当前部署提交覆盖指标", () => {
+	it.each(["trigger", "content"] as const)("%s：Escape 关闭当前覆盖详情且保留卡片", async (focusedTarget) => {
+		act(() => root.render(<TaskCommitCoverageInCurrentDeploymentIndicator coverage={partialCoverage} />));
+		await act(async () => trigger().click());
+		const target = focusedTarget === "trigger" ? trigger() : document.querySelector<HTMLElement>('[role="dialog"]')!;
+		await act(async () =>
+			target.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })),
+		);
+		expect(document.querySelector('[role="dialog"]')).toBeNull();
+		expect(trigger().getAttribute("aria-expanded")).toBe("false");
+	});
 	it("展示提交覆盖而非任务完成；点按能查看版本且不触发卡片点击", async () => {
 		const onCardClick = vi.fn();
 		act(() =>

@@ -33,11 +33,13 @@ export interface WorkUnitRelationAddReferenceRelationDialogFormController {
 export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
 	subjectKanbanBoardCardWorkspaceId: string;
 	subjectKanbanBoardCardTaskId: string;
+	subjectTaskIncarnationCreatedAtEpochMs?: number;
 	onReferenceRelationAssertionWriteSucceeded: (writeResponse: InterWorkUnitRelationAssertionWriteResponse) => void;
 }): WorkUnitRelationAddReferenceRelationDialogFormController {
 	const {
 		subjectKanbanBoardCardWorkspaceId,
 		subjectKanbanBoardCardTaskId,
+		subjectTaskIncarnationCreatedAtEpochMs,
 		onReferenceRelationAssertionWriteSucceeded,
 	} = input;
 	const [addReferenceRelationDialogDraft, setAddReferenceRelationDialogDraft] =
@@ -57,6 +59,7 @@ export function useWorkUnitRelationAddReferenceRelationDialogForm(input: {
 		draft: addReferenceRelationDialogDraft,
 		subjectKanbanBoardCardWorkspaceId,
 		subjectKanbanBoardCardTaskId,
+		subjectTaskIncarnationCreatedAtEpochMs,
 	});
 
 	const submitReferenceRelationFromExplicitUserGesture = (

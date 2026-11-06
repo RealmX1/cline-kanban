@@ -1,6 +1,7 @@
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SHELL_SESSION_TERMINAL_COLS, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
+import * as runtimeTrpcClientQueryModule from "@/runtime/trpc-client";
 import type { RuntimeTerminalWsResizeMessage } from "@/runtime/types";
 import {
 	disposeAllPersistentTerminalsForWorkspace,
@@ -40,7 +41,7 @@ const terminalWriteCallbackControl = vi.hoisted(() => ({
 	swallowedWriteCompletionCallbacks: [] as Array<() => void>,
 }));
 const webglAddonConstructions = vi.hoisted(() => ({ count: 0 }));
-const platformOverrides = vi.hoisted(() => ({ isSafari: false }));
+const platformOverrides = vi.hoisted(() => ({ isSafari: false, isFirefox: false }));
 const webSocketInstances = vi.hoisted(
 	() =>
 		[] as Array<{
@@ -111,6 +112,9 @@ vi.mock("@/utils/platform", async (importOriginal) => {
 		...actual,
 		get isSafari() {
 			return platformOverrides.isSafari;
+		},
+		get isFirefox() {
+			return platformOverrides.isFirefox;
 		},
 	};
 });
@@ -389,6 +393,7 @@ describe("persistent-terminal-manager", () => {
 		terminalWriteCallbackControl.swallowedWriteCompletionCallbacks.length = 0;
 		webglAddonConstructions.count = 0;
 		platformOverrides.isSafari = false;
+		platformOverrides.isFirefox = false;
 		createdTerminalOptions.length = 0;
 		webSocketInstances.length = 0;
 		MockResizeObserver.instances.length = 0;
@@ -465,6 +470,31 @@ describe("persistent-terminal-manager", () => {
 		expect(newerDisposeSpy).not.toHaveBeenCalled(); // 较新 parked 在最近 2 个内，保留
 		expect(mountedDisposeSpy).not.toHaveBeenCalled(); // mounted 永不被回收
 	});
+
+	it.each([undefined, "new-runtime-incarnation"])(
+		"未捕获打开时的会话代次时阻止带参数重启（当前代次=%s）",
+		async (currentIncarnation) => {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+			const restart = terminal.captureAgentSessionRestartForFloatingForm();
+			const refresh = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			const readCurrentSession = vi.fn(async () => ({
+				summary: { taskId: "task-a", runtimeSessionIncarnationId: currentIncarnation },
+			}));
+			const client = vi.spyOn(runtimeTrpcClientQueryModule, "getRuntimeTrpcClient").mockReturnValue({
+				runtime: {
+					getTaskConversationSession: {
+						query: readCurrentSession,
+					},
+				},
+			} as unknown as ReturnType<typeof runtimeTrpcClientQueryModule.getRuntimeTrpcClient>);
+			try {
+				await expect(restart(["--extra-argument"])).rejects.toThrow("暂时无法核对原会话代次");
+				expect(refresh).not.toHaveBeenCalled();
+			} finally {
+				client.mockRestore();
+			}
+		},
+	);
 
 	it("does not resend unchanged resize control frames", () => {
 		const terminal = ensurePersistentTerminal({
@@ -2096,9 +2126,81 @@ describe("persistent-terminal-manager", () => {
 		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
 	});
 
-	it("loads the WebGL renderer on non-Safari browsers", () => {
-		platformOverrides.isSafari = false;
+	it("连续输出在同一帧只尾随滚动一次，每段输出仍独立确认", async () => {
+		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		terminalScrollToBottomMock.mockClear();
+		const scheduledAnimationFrameCallbacks: FrameRequestCallback[] = [];
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			scheduledAnimationFrameCallbacks.push(callback);
+			return scheduledAnimationFrameCallbacks.length;
+		});
+		const ioSocket = findNewestTerminalSocket("io");
+		const controlSocket = findNewestTerminalSocket("control");
+		for (const output of ["第一段", "第二段", "第三段"]) dispatchSocketMessage(ioSocket, output);
+		await vi.waitFor(() =>
+			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toHaveLength(3),
+		);
 
+		expect(scheduledAnimationFrameCallbacks).toHaveLength(1);
+		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+		scheduledAnimationFrameCallbacks.shift()?.(0);
+		expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(1);
+
+		dispatchSocketMessage(ioSocket, "下一帧");
+		await vi.waitFor(() =>
+			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toHaveLength(4),
+		);
+		expect(scheduledAnimationFrameCallbacks).toHaveLength(1);
+		scheduledAnimationFrameCallbacks.shift()?.(0);
+		expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(2);
+	});
+
+	it.each([false, true])("恢复代次变化后只执行新快照请求的尾随滚动（阅读历史=%s）", async (readingHistory) => {
+		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		terminalScrollToBottomMock.mockClear();
+		const scheduledAnimationFrameCallbacks: FrameRequestCallback[] = [];
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			scheduledAnimationFrameCallbacks.push(callback);
+			return scheduledAnimationFrameCallbacks.length;
+		});
+		const controlSocket = findNewestTerminalSocket("control");
+		dispatchSocketMessage(findNewestTerminalSocket("io"), "旧代次输出");
+		await vi.waitFor(() => expect(scheduledAnimationFrameCallbacks).toHaveLength(1));
+		if (readingHistory) {
+			terminalBuffer.baseY = 20;
+			terminalBuffer.viewportY = 10;
+		}
+		dispatchSocketMessage(controlSocket, JSON.stringify({ type: "restore", snapshot: "新快照", cols: 80, rows: 24 }));
+		await vi.waitFor(() =>
+			expect(
+				parseControlMessages(controlSocket).filter((message) => message.type === "restore_complete"),
+			).toHaveLength(2),
+		);
+
+		expect(scheduledAnimationFrameCallbacks).toHaveLength(1);
+		scheduledAnimationFrameCallbacks.shift()?.(0);
+		expect(terminalScrollToBottomMock).toHaveBeenCalledTimes(readingHistory ? 0 : 1);
+	});
+
+	it("销毁终端后不执行已经排队的尾随滚动", async () => {
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		terminalScrollToBottomMock.mockClear();
+		const scheduledAnimationFrameCallbacks: FrameRequestCallback[] = [];
+		vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+			scheduledAnimationFrameCallbacks.push(callback);
+			return scheduledAnimationFrameCallbacks.length;
+		});
+		dispatchSocketMessage(findNewestTerminalSocket("io"), "即将销毁的输出");
+		await vi.waitFor(() => expect(scheduledAnimationFrameCallbacks).toHaveLength(1));
+		terminal.dispose();
+		scheduledAnimationFrameCallbacks.shift()?.(0);
+		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
+	});
+
+	it("Safari 与 Firefox 之外的浏览器继续加载 WebGL 渲染器", () => {
 		ensurePersistentTerminal({
 			...appearance,
 			taskId: "task-a",
@@ -2108,10 +2210,9 @@ describe("persistent-terminal-manager", () => {
 		expect(webglAddonConstructions.count).toBe(1);
 	});
 
-	it("skips the WebGL renderer on Safari so the crisp DOM renderer is used", () => {
-		// Safari 不改变 window.devicePixelRatio，WebGL canvas 在 Cmd +/- 缩放时会发虚；
-		// 跳过 WebGL 后 xterm 回退到 DOM 渲染器，任意缩放都清晰。
-		platformOverrides.isSafari = true;
+	it.each(["Safari", "Firefox"])("%s 默认使用 DOM 渲染器", (browser) => {
+		platformOverrides.isSafari = browser === "Safari";
+		platformOverrides.isFirefox = browser === "Firefox";
 
 		ensurePersistentTerminal({
 			...appearance,

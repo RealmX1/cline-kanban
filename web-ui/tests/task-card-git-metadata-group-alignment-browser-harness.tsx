@@ -127,7 +127,7 @@ function Harness() {
 										<TaskCardBodyVisualDensityProvider
 											value={
 												host === "standard"
-													? "standard_card_with_floating_capsule"
+													? "standard_bordered_task_card"
 													: "compact_row_in_focus_view_left_column"
 											}
 										>

@@ -20,6 +20,7 @@ const RELATION_ASSERTION_EVIDENCE_POINTER_MAXIMUM_COUNT = 50;
 export interface SelectedCounterpartKanbanBoardCardForAddReferenceRelation {
 	counterpartKanbanBoardCardWorkspaceId: string;
 	counterpartKanbanBoardCardTaskId: string;
+	counterpartTaskIncarnationCreatedAtEpochMs?: number;
 	counterpartKanbanBoardCardTitle: string;
 	counterpartKanbanProjectDisplayName: string;
 }
@@ -133,6 +134,7 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 	draft: AddReferenceRelationDialogDraft;
 	subjectKanbanBoardCardWorkspaceId: string;
 	subjectKanbanBoardCardTaskId: string;
+	subjectTaskIncarnationCreatedAtEpochMs?: number;
 }): AddReferenceRelationDialogDraftValidationOutcome {
 	const { draft } = input;
 	const draftValidationProblemMessages: string[] = [];
@@ -192,18 +194,39 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 	return {
 		isDraftReadyForSubmission: true,
 		referenceRelationAssertionRequestWithoutClientCharacteristics: {
-			subjectWorkUnit: {
-				workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-				bareTaskId: input.subjectKanbanBoardCardTaskId,
-				// 显式带 workspaceId：裸 id 跨 project 会撞号。
-				workspaceId: input.subjectKanbanBoardCardWorkspaceId,
-			},
+			subjectWorkUnit:
+				input.subjectTaskIncarnationCreatedAtEpochMs !== undefined
+					? {
+							workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+							kanbanBoardCard: {
+								workUnitType: "kanban_board_card",
+								workspaceId: input.subjectKanbanBoardCardWorkspaceId,
+								taskId: input.subjectKanbanBoardCardTaskId,
+								taskIncarnationCreatedAtEpochMs: input.subjectTaskIncarnationCreatedAtEpochMs,
+							},
+						}
+					: {
+							workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+							bareTaskId: input.subjectKanbanBoardCardTaskId,
+							workspaceId: input.subjectKanbanBoardCardWorkspaceId,
+						},
 			relationKind,
-			counterpartWorkUnit: {
-				workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-				bareTaskId: counterpart.counterpartKanbanBoardCardTaskId,
-				workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
-			},
+			counterpartWorkUnit:
+				counterpart.counterpartTaskIncarnationCreatedAtEpochMs !== undefined
+					? {
+							workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+							kanbanBoardCard: {
+								workUnitType: "kanban_board_card",
+								workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
+								taskId: counterpart.counterpartKanbanBoardCardTaskId,
+								taskIncarnationCreatedAtEpochMs: counterpart.counterpartTaskIncarnationCreatedAtEpochMs,
+							},
+						}
+					: {
+							workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+							bareTaskId: counterpart.counterpartKanbanBoardCardTaskId,
+							workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
+						},
 			relationAssertionRationaleOneSentence,
 			relationAssertionEvidencePointers,
 			assertedRelationKindSpecificAttributes,

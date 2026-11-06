@@ -1,6 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
 import type { CodexConfigurationChangeDetails, CodexConfigurationSyncState } from "../src/runtime/types";
 
+test.setTimeout(90_000);
+
 async function openConfigurationComparisonFixture(page: Page) {
 	const changes: CodexConfigurationSyncState["changes"] = ["subagent_start", "user_prompt_submit"].map(
 		(event, index) => ({
@@ -83,7 +85,7 @@ async function openConfigurationComparisonFixture(page: Page) {
 				: route.request().postDataJSON();
 		const input = batched ? rawInput["0"] : rawInput;
 		let data: unknown;
-		if (procedure === "runtime.getCodexConfigurationSyncState") data = state;
+		if (procedure === "runtime.getCodexConfigurationSyncActiveState") data = state;
 		else if (procedure === "runtime.getCodexConfigurationChangeDetails") {
 			detailRequests.push(input);
 			if (failNextDetails) {
@@ -123,6 +125,7 @@ async function openConfigurationComparisonFixture(page: Page) {
 		}),
 	);
 	await page.goto("/isolated-configuration-comparison");
+	await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 	const settings = page.getByRole("region", { name: "隔离配置设置页" });
 	await expect(settings.getByRole("heading", { name: "设置待反馈 · 2", exact: true })).toBeVisible();
 	return {

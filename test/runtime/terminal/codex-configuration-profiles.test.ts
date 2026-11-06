@@ -25,6 +25,7 @@ import {
 } from "../../../src/codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
 import { prepareCodexRemoteConversationLaunchPlan } from "../../../src/codex-native-session-control-host/codex-remote-conversation-launch-plan";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import { prepareIsolatedCodexConfigurationLegacyStorageFixture } from "../../utilities/prepare-isolated-codex-configuration-legacy-storage-fixture";
 import { requireDefinedTestFixtureValue } from "../../utilities/require-defined-test-fixture-value";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -199,6 +200,10 @@ describe("Codex profile 自动共享", () => {
 				store.profiles = {};
 				store.defaultCodexConfigurationProfileId = null;
 			});
+			await prepareIsolatedCodexConfigurationLegacyStorageFixture(
+				fixture.path,
+				await readCodexConfigurationSyncStore(),
+			);
 			const migrated = await readCodexConfigurationSyncStore();
 			const profileId = requireDefinedTestFixtureValue(migrated.writers[first.writerId].codexConfigurationProfileId);
 			if (modelWasUpdated)
@@ -832,6 +837,10 @@ describe("Codex profile 自动共享", () => {
 			store.profiles = {};
 			store.defaultCodexConfigurationProfileId = null;
 		});
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(
+			fixture.path,
+			await readCodexConfigurationSyncStore(),
+		);
 		const migrated = await readCodexConfigurationSyncStore();
 		expect(migrated.schemaVersion).toBe(3);
 		expect(migrated.changes.every((change) => change.approvalStatus !== "pending")).toBe(true);

@@ -69,6 +69,77 @@ function manifest(executionDirectory: string): LocalDeploymentExecutionManifest 
 }
 
 describe("本地部署执行与复盘", () => {
+	it("源码质量失败交回 Agent，保留实际失败而非等待机器补证或重复检查", async () => {
+		const directory = createExecutionDirectory("local-deployment-source-quality-failure-");
+		await initializeLocalDeploymentExecution(directory, manifest(directory));
+		const commands: string[] = [];
+		const result = await executeLocalDeploymentStages(directory, {
+			runCommand: async (command) => {
+				commands.push(command[0]);
+				if (command[0] === "cleanup") return { processWasStarted: true, exitCode: 0, stdout: "", stderr: "" };
+				return {
+					processWasStarted: true,
+					exitCode: 1,
+					stdout: JSON.stringify({ ok: false, status: "quality_validation_failed" }),
+					stderr: "源码检查未通过，原始输出保存在验证报告中",
+				};
+			},
+		});
+		expect(commands).toEqual(["prepare", "cleanup"]);
+		expect(result.deploymentOutcome).toBe("quality_validation_failed");
+		expect(result.recovery.nextCheckAtEpochMs).toBeNull();
+		expect(
+			(await readLocalDeploymentExecution(directory)).observations.find(
+				(item) => item.stage === "candidate_preparation" && item.kind === "command_failed",
+			)?.commandFailureKind,
+		).toBe("quality_validation_failed");
+		const recovered = await executeLocalDeploymentStages(directory, {
+			runCommand: async (command) => ({
+				processWasStarted: true,
+				exitCode: 0,
+				stdout: verifiedEffectStdout(command),
+				stderr: "",
+			}),
+		});
+		expect(recovered.deploymentOutcome).toBe("succeeded");
+		expect(
+			(await readLocalDeploymentExecution(directory)).observations.some(
+				(item) => item.commandFailureKind === "quality_validation_failed",
+			),
+		).toBe(true);
+	});
+
+	it("准备阶段只读观察进入既有恢复指纹，nonce 不触发重试，Stop 禁止继续观察", async () => {
+		const directory = createExecutionDirectory("local-deployment-source-validation-observation-");
+		const binding = manifest(directory);
+		const observationPath = join(directory, "source-validation-observation.json");
+		const invocationPath = join(directory, "observer-invocations.txt");
+		binding.stages[0].readOnlyRecoveryEvidenceObservationCommand = [
+			process.execPath,
+			"-e",
+			"const fs=require('node:fs');fs.appendFileSync(process.argv[2],'观察\\n');process.stdout.write(fs.readFileSync(process.argv[1],'utf8'))",
+			observationPath,
+			invocationPath,
+		];
+		const fetchMock = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("隔离实例未启动"));
+		onTestFinished(() => fetchMock.mockRestore());
+		await writeFile(observationPath, JSON.stringify({ evidenceSha256: "1".repeat(64), nonce: 1 }));
+		await initializeLocalDeploymentExecution(directory, binding);
+		const initial = await observeLocalDeploymentRecoveryEvidence(directory);
+		await writeFile(observationPath, JSON.stringify({ evidenceSha256: "1".repeat(64), nonce: 2 }));
+		expect(await observeLocalDeploymentRecoveryEvidence(directory)).toEqual(initial);
+		await writeFile(observationPath, JSON.stringify({ evidenceSha256: "2".repeat(64) }));
+		expect(await observeLocalDeploymentRecoveryEvidence(directory)).not.toEqual(initial);
+		await restrictLocalDeploymentExecution(directory, {
+			kind: "permission_revoked",
+			reason: "Stop",
+			sourceReference: "test:stop-source-observation",
+		});
+		const invocationsBeforeStop = await readFile(invocationPath, "utf8");
+		await observeLocalDeploymentRecoveryEvidence(directory);
+		expect(await readFile(invocationPath, "utf8")).toBe(invocationsBeforeStop);
+	});
+
 	it.each(["isolated-deployment-workspace", "another-workspace"])(
 		"时间回拨后，%s 的后继登记可证明旧接受事实，前驱 marker 不能冒充后继",
 		(workspaceId) => {

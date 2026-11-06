@@ -29,7 +29,7 @@ export function useFormPrimaryActionSubmitKeyboardShortcut({
 			!event.currentTarget.contains(event.target as Node) ||
 			event.repeat ||
 			disabled ||
-			event.currentTarget.closest("fieldset[disabled]") ||
+			event.currentTarget.closest("fieldset[disabled], [hidden], [data-collapsed=true]") ||
 			submissionInFlight.current
 		)
 			return;

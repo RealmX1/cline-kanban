@@ -58,6 +58,7 @@ export function isClosureReasonCodeDeferringChecklistItemToNaturalUsageObservati
 
 export interface PostDeployVerificationDoneEntryClosureDialogTaskEntry {
 	taskId: string;
+	taskIncarnationCreatedAtEpochMs?: number;
 	taskTitle: string;
 	// 移入 Done 前卡片所在列：决定要哪些确认项（跳过 Validation / 会话可能仍在跑）。
 	boardColumnIdOfTaskCardBeforeMoveIntoDone: BoardColumnId;

@@ -592,8 +592,9 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 
 	it("用户拖拽进 Done：受门禁的卡不发命令（卡自然弹回），打开对话框并记住落点", async () => {
 		const programmaticCardMoves = mockProgrammaticCardMoves();
+		const sourceBoard = createBoardWithTaskInColumn(GATED_TASK_ID, "validation");
 		await renderHarness({
-			board: createBoardWithTaskInColumn(GATED_TASK_ID, "validation"),
+			board: sourceBoard,
 			activeGroup: createActiveGroupWithTask(GATED_TASK_WITH_UNCHECKED_ITEM),
 		});
 		const dropIntoDone: DropResult = {
@@ -617,6 +618,9 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 				insertAtIndexWithinDoneBoardColumn: 0,
 				taskCommentToAppendWhenMovingIntoDone: expect.any(Object),
 				runtimeRejectedMoveIntoDoneForMissingClosureReasons: false,
+				workspaceIdAtOpening: "project-1",
+				boardSnapshotAtOpening: sourceBoard,
+				openingRequestIdentity: expect.any(Symbol),
 			},
 		);
 	});
@@ -658,7 +662,7 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 		expect(closureDialog?.taskEntries[0]?.runtimeReportedUncheckedChecklistItemsInvisibleToLocalReadModel).toBe(true);
 	});
 
-	it("会话中断自动流转：受门禁的卡留在原列，只提示一次", async () => {
+	it("会话中断保留原列，不尝试结案或弹出 PDV 门禁提示", async () => {
 		const programmaticCardMoves = mockProgrammaticCardMoves();
 		const interruptedSession: RuntimeTaskSessionSummary = {
 			taskId: GATED_TASK_ID,
@@ -688,7 +692,7 @@ describe("useBoardInteractions · Post-Deploy Verification 结案门禁", () => 
 		expect(currentBoard.columns.find((column) => column.id === "in_progress")?.cards.map((card) => card.id)).toEqual([
 			GATED_TASK_ID,
 		]);
-		expect(showAppToastMock).toHaveBeenCalledTimes(1);
+		expect(showAppToastMock).not.toHaveBeenCalled();
 	});
 
 	it("自动 review 完成后的自动结案：受门禁的卡不发起（连动画都不放）", async () => {

@@ -30,6 +30,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CodexConfigurationSyncSettings } from "@/components/codex-configuration-sync";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { useNonModalFloatingFormWindowSession } from "@/components/non-modal-floating-form-window-host-provider";
 import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
 import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
 import { ClineSetupSection } from "@/components/shared/cline-setup-section";
@@ -44,8 +46,9 @@ import { TaskAssistanceModelProviderRoutingSettingsSection } from "@/components/
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { Dialog, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { TASK_GIT_BASE_REF_PROMPT_VARIABLE, type TaskGitAction } from "@/git-actions/build-task-git-action-prompt";
 import { useAgentSessionPtyHostDiagnostics } from "@/hooks/use-agent-session-pty-host-diagnostics";
 import {
@@ -395,7 +398,7 @@ function SettingsNav({
 	);
 }
 
-export function RuntimeSettingsDialog({
+function RuntimeSettingsDialogForm({
 	open,
 	workspaceId,
 	initialConfig = null,
@@ -413,8 +416,13 @@ export function RuntimeSettingsDialog({
 	onSaved?: () => void;
 	onAccountSwitched?: () => void;
 	initialSection?: RuntimeSettingsSection | null;
+	openingRequestSequence?: number;
 }): React.ReactElement {
 	const { config, isLoading, isSaving, save, refresh } = useRuntimeConfig(open, workspaceId, initialConfig);
+	const floatingFormSession = useNonModalFloatingFormWindowSession();
+	const sectionRequestedByOpening =
+		(floatingFormSession?.revealDetail as { initialSection?: RuntimeSettingsSection | null } | undefined)
+			?.initialSection ?? initialSection;
 	const [isPreparingGitPromptImages, setIsPreparingGitPromptImages] = useState(false);
 	const { resetLayoutCustomizations } = useLayoutCustomizations();
 	const [selectedAgentId, setSelectedAgentId] = useState<RuntimeAgentId>("claude");
@@ -706,11 +714,11 @@ export function RuntimeSettingsDialog({
 	useWindowEvent("focus", open ? refreshNotificationPermission : null);
 
 	useEffect(() => {
-		if (!open || !initialSection) {
+		if (!open || !sectionRequestedByOpening) {
 			return;
 		}
 		const timeout = window.setTimeout(() => {
-			if (initialSection === "shortcuts")
+			if (sectionRequestedByOpening === "shortcuts")
 				shortcutsSectionRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
 			else
 				bodyRef.current
@@ -720,7 +728,7 @@ export function RuntimeSettingsDialog({
 		return () => {
 			window.clearTimeout(timeout);
 		};
-	}, [initialSection, open]);
+	}, [sectionRequestedByOpening, open, floatingFormSession?.revealSequence]);
 
 	useEffect(() => {
 		if (pendingShortcutScrollIndex === null) {
@@ -880,7 +888,7 @@ export function RuntimeSettingsDialog({
 			codexModelCapacityErrorAutoContinuationEnabled,
 			programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 			postDeployVerificationForceCompleteEnabled,
-			shortcuts,
+			...(areRuntimeProjectShortcutsEqual(shortcuts, initialShortcuts) ? {} : { shortcuts }),
 			commitPromptTemplate,
 			openPrPromptTemplate,
 		});
@@ -1644,3 +1652,20 @@ export function RuntimeSettingsDialog({
 		</Dialog>
 	);
 }
+
+export const RuntimeSettingsDialog = hostNonModalFloatingForm(RuntimeSettingsDialogForm, {
+	formKind: "RuntimeSettingsDialog",
+	openingRequestIdentity: (props) => props.openingRequestSequence,
+	revealDetail: (props) => ({ initialSection: props.initialSection ?? null }),
+	isOpen: (props) => props.open,
+	instanceIdentity: () => "global-settings",
+	ownership: (props) => ({ workspaceId: props.workspaceId }),
+	withClose: (props, close) => ({
+		...props,
+		open: true,
+		onOpenChange: (open) => {
+			if (!open) close();
+		},
+	}),
+	onClosed: (props) => props.onOpenChange(false),
+});

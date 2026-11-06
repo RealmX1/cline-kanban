@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { SideSessionCreationWorkbenchTarget } from "@/state/side-session-creation-workbench-store";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
 const ORIGINAL_PROMPT_CARD = {
@@ -528,23 +529,23 @@ describe("TaskConversationSessionsPanel", () => {
 	it("创建入口固定完整宿主身份，并打开全局共享工作台", async () => {
 		const main = createSessionSummary("task-1");
 		const task = { ...ORIGINAL_PROMPT_CARD, id: "task-1", startInPlanMode: true, baseRef: "main", updatedAt: 1 };
-		await act(async () =>
-			root.render(
-				<TaskConversationSessionsPanel
-					workspaceId="project-a"
-					taskCard={task}
-					workspaceTaskId="task-1"
-					mainSessionSummary={main}
-					mainSessionUserMessagePreview="原正文"
-					mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
-					effectiveAgentId="claude"
-					taskSessions={{ "task-1": main }}
-					selectedTaskConversationSessionId="task-1"
-					onSelectTaskConversationSession={() => undefined}
-					onCreateTaskConversationSession={async () => ({ ok: true })}
-				/>,
-			),
+		const onSelect = vi.fn();
+		const renderPanel = (workspaceId: string) => (
+			<TaskConversationSessionsPanel
+				workspaceId={workspaceId}
+				taskCard={task}
+				workspaceTaskId="task-1"
+				mainSessionSummary={main}
+				mainSessionUserMessagePreview="原正文"
+				mainSessionOriginalPromptCard={ORIGINAL_PROMPT_CARD}
+				effectiveAgentId="claude"
+				taskSessions={{ "task-1": main }}
+				selectedTaskConversationSessionId="task-1"
+				onSelectTaskConversationSession={onSelect}
+				onCreateTaskConversationSession={async () => ({ ok: true })}
+			/>
 		);
+		await act(async () => root.render(renderPanel("project-a")));
 		await act(async () =>
 			Array.from(document.body.querySelectorAll("button"))
 				.find((button) => button.textContent?.includes("新建会话"))
@@ -556,6 +557,14 @@ describe("TaskConversationSessionsPanel", () => {
 				task: expect.objectContaining({ id: "task-1", createdAt: ORIGINAL_PROMPT_CARD.createdAt }),
 			}),
 		);
+		const openingTarget = openSideSessionCreationWorkbenchMock.mock.calls.at(-1)?.[0] as
+			| SideSessionCreationWorkbenchTarget
+			| undefined;
+		await act(async () => openingTarget?.onCreated?.("created-at-a"));
+		expect(onSelect).toHaveBeenCalledExactlyOnceWith("created-at-a");
+		await act(async () => root.render(renderPanel("project-b")));
+		await act(async () => openingTarget?.onCreated?.("late-from-a"));
+		expect(onSelect).toHaveBeenCalledTimes(1);
 	});
 
 	// 用户要拿会话 id 去对照日志 / 转录文件名，「看得见」与「拿得走」是两件事。

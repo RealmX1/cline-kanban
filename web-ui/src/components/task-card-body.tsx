@@ -7,11 +7,7 @@ import {
 	getRuntimeAgentCatalogEntry,
 	isRuntimeAgentSessionSummaryRenderedAsConversationPanel,
 } from "@runtime-agent-catalog";
-import {
-	collectTaskConversationSessionActivityObservations,
-	resolveLastAgentConversationUserHandoffObservation,
-	resolveLastEffectiveAgentConversationActivityObservation,
-} from "@runtime-agent-conversation-activity-observation";
+import { collectTaskConversationSessionActivityObservations } from "@runtime-agent-conversation-activity-observation";
 import {
 	deriveSessionRecentEffectiveActivityDisplayLiveness,
 	isNeverStartedPlaceholderTaskSessionSummary,
@@ -20,14 +16,12 @@ import {
 } from "@runtime-session-activity";
 import { buildTaskWorktreeDisplayPath } from "@runtime-task-worktree-path";
 import {
-	Activity,
 	AlertCircle,
 	AlertTriangle,
 	Archive,
 	ArchiveRestore,
 	Check,
 	ClipboardCheck,
-	Clock,
 	Copy,
 	Eye,
 	FileText,
@@ -57,38 +51,22 @@ import {
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
-import { ProjectIcon } from "@/components/project-visual-identity";
-import {
-	describePromptSubmissionAcceptance,
-	promptSubmissionAcceptanceLabel,
-} from "@/components/prompt-submission-acceptance-description";
+import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
 import { TaskCardStickers } from "@/components/task-card-stickers";
+import { TaskCardSummaryMetadata } from "@/components/task-card-summary-metadata";
 import { TaskClosureSummaryAndHistory } from "@/components/task-closure-summary-and-history";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
-import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
+import { TaskPromptSubmissionAcceptanceNotice } from "@/components/task-prompt-submission-acceptance-notice";
 import { TaskRelatedTasksPreviewButton } from "@/components/task-related-tasks-preview-button";
-import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { Spinner } from "@/components/ui/spinner";
-import { TaskCommitCoverageInCurrentDeploymentIndicator } from "@/components/ui/task-commit-coverage-in-current-deployment-indicator";
-import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
-import {
-	shouldDisplayTaskRetainedCommittedLineChangeSummary,
-	TaskRetainedCommittedLineChangeIndicator,
-} from "@/components/ui/task-retained-committed-line-change-indicator";
-import { describeTaskWorkspaceGitStatusAgainstBaseRef } from "@/components/ui/task-workspace-git-status-against-base-ref-description";
-import { TaskWorkspaceModeIconWithTooltip } from "@/components/ui/task-workspace-mode-icon-with-tooltip";
 import { Tooltip } from "@/components/ui/tooltip";
-import {
-	shouldDisplayWorktreeUncommittedChangeSummary,
-	WorktreeUncommittedChangeSummaryIndicator,
-} from "@/components/ui/worktree-uncommitted-change-summary-indicator";
 import { resolveBoardColumnTitle } from "@/data/board-data";
 import { resolveSessionActivityDotBreathingOpacityAtSharedFineClockTimestamp } from "@/hooks/use-session-activity-dot-breathing-opacity-on-shared-fine-clock";
 import { useSharedCoarseClockTimestampMs } from "@/hooks/use-shared-coarse-clock";
@@ -108,7 +86,6 @@ import { describeTerminalDeliveryContention } from "@/terminal/terminal-delivery
 import type { BoardCard as BoardCardModel, BoardColumnId, ReviewTaskWorkspaceSnapshot } from "@/types";
 import { getTaskAutoReviewCancelButtonLabel } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
-import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 import { formatPathForDisplay } from "@/utils/path-display";
 import { resolveTaskAgentSessionLaunchHistoryEvidence } from "@/utils/task-agent-session-launch-history-evidence";
@@ -241,9 +218,14 @@ export type TaskCardBodyRenderRole =
  * 行级信息与开关。并进卡体已有的位置，不在卡片上方另叠一条——另叠一条会把标题往下挤，hover 前后标题跳位。
  */
 export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
-	/** 元信息行最左，对应精简行第 2 行最左的项目名；null = 只有一个项目。 */
+	/** 元信息行最左，对应精简行摘要最左的项目名；null = 只有一个项目。 */
 	projectName: string | null;
-	/** 元信息行右侧药丸组最前，对应精简行第 2 行右侧。 */
+	/** 精简行和展开行复用同一摘要，避免快照或资源药丸改变分组宽度。 */
+	summaryMetadata?: ReactNode;
+	/** 启动准备与恢复提示放在标题下，与其他状态共用提示区。 */
+	agentStartupProgressStatusNotice?: ReactNode;
+	isKeptExpandedInList?: boolean;
+	/** 元信息行右侧药丸组最前，对应精简行摘要右侧。 */
 	promptCacheWarmthPill: ReactNode;
 	/** hover 动作组最右一格：与精简行上的展开开关同一坐标（动作组位置见下方常量）。 */
 	inListExpansionToggle: ReactNode;
@@ -260,7 +242,7 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
  * 标题可用宽度变窄）。精简行、卡体（`expanded_card_copy_in_cross_project_task_switcher_row`）、卡体兜底三处共用，
  * 最右一格的展开开关因此三态同一坐标。代价：行间只有 2px，动作组上半截会伸进上一行的右下角，hover 时盖住那里几像素。
  * 分区第一行上方不是上一行而是分区 header（右侧有折叠按钮 / 排序下拉框），不能伸进去：见下方首行上外边距常量。
- * 一般紧凑密度（Focus View 左栏列表）仍是 top-1，压在首行右端。
+ * 一般紧凑密度（Focus View 左栏列表）也使用 -top-3，避免动作组遮住摘要。
  */
 export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME =
 	"-top-3";
@@ -379,6 +361,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 	} = presentation;
 
 	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
+	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
 	const [isHovered, setIsHovered] = useState(false);
 	// 卡片多数 Tooltip（右上角动作组、行内 Edit、头部药丸、git 状态）content 统一收成
 	// 「hover 时才给」：Radix 在关闭态仍会挂 Root+Trigger（Popper context + state + 一串事件绑定）。
@@ -386,12 +369,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// `content` 直接返回 children，空闲态就退化成裸元素。头部药丸 / git 状态的触发点是不可聚焦的
 	// span，键盘可达性不受门控影响；动作按钮靠 aria-label 保留可访问名。
 	// 目录复制的 ID tooltip 常驻，保证键盘聚焦也能立即看到完整 ID。
+	// 关联预览也保留 Tooltip 触发器，避免模态遮罩触发 mouseleave 后重建按钮，使回焦记录失效。
 	//
 	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
 	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
 	// 才是原本保住 Tab 可达的机制。
 	const revealHoverActionTooltip = (label: string | null): string | undefined =>
-		isHovered && label ? label : undefined;
+		(isHovered || isRelatedTaskPreviewCopy) && label ? label : undefined;
 	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(card.title);
@@ -439,7 +423,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
-	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
 	const usesInFlowActionToolbar = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy;
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
@@ -451,7 +434,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 嵌套，也不改标题几何。其他角色不变。
 	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
 		(isCrossProjectTaskSwitcherRowCopy || isRelatedTaskPreviewCopy || historicalSnapshot != null) && onClick != null;
-	// 动作组 / 底色 / 复制按钮的 hover 呈现；tooltip 仍只认真实 hover（见 revealHoverActionTooltip）。
+	// 动作组 / 底色 / 复制按钮的 hover 呈现；Tooltip 触发器的挂载见 revealHoverActionTooltip。
 	const isHoverPresentationShown =
 		historicalSnapshot != null ||
 		isHovered ||
@@ -521,39 +504,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 一个 visibilitychange 监听，隐藏时整体停摆。
 	const elapsedNowMs = useSharedCoarseClockTimestampMs();
 
-	// 卡面表示真实历史交棒与有效对话活动；进程待命期限独立，不参与这两颗药丸。
-	const handoffObservation = sessionSummary
-		? resolveLastAgentConversationUserHandoffObservation(sessionSummary)
-		: null;
-	const lastAgentConversationUserHandoffAtMs =
-		sessionFacets?.turnOwner !== "agent" && !isParkedAwaitingBackgroundWork
-			? (handoffObservation?.observedAtMs ?? null)
-			: null;
-	const lastEffectiveAgentConversationActivityObservation = sessionSummary
-		? resolveLastEffectiveAgentConversationActivityObservation(sessionSummary)
-		: null;
-	const isConversationProgressApproximate =
-		lastEffectiveAgentConversationActivityObservation?.evidenceKind === "terminal_output_heuristic_classification";
-	const taskCreatedAtTooltipContent = useMemo(
-		() => `创建于 · ${new Date(card.createdAt).toLocaleString()}`,
-		[card.createdAt],
-	);
-	const lastAgentConversationUserHandoffTooltipContent = useMemo(
-		() =>
-			lastAgentConversationUserHandoffAtMs != null
-				? `交回用户 · ${new Date(lastAgentConversationUserHandoffAtMs).toLocaleString()}`
-				: null,
-		[lastAgentConversationUserHandoffAtMs],
-	);
 	const sessionActivityObservations = useMemo(
 		() =>
 			taskConversationSessionActivityObservations ??
 			collectTaskConversationSessionActivityObservations(card, sessionSummary ? [sessionSummary] : []),
 		[taskConversationSessionActivityObservations, card, sessionSummary],
-	);
-	const taskConversationSessionActivityTooltipContent = useMemo(
-		() => describeTaskConversationSessionActivityObservations(sessionActivityObservations, elapsedNowMs),
-		[sessionActivityObservations, elapsedNowMs],
 	);
 	const isAgentRecentlyActive =
 		isLiveAgentTurn && !isParkedAwaitingBackgroundWork && sessionSummary != null
@@ -669,22 +624,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 					: null
 				: reconstructTaskWorktreeDisplayPath(card.id, workspacePath)
 			: null;
-	const reviewChangeSummary =
-		reviewWorkspaceSnapshot &&
-		reviewWorkspaceSnapshot.changedFiles != null &&
-		shouldDisplayWorktreeUncommittedChangeSummary(reviewWorkspaceSnapshot)
-			? {
-					changedFiles: reviewWorkspaceSnapshot.changedFiles,
-					additions: reviewWorkspaceSnapshot.additions ?? 0,
-					deletions: reviewWorkspaceSnapshot.deletions ?? 0,
-				}
-			: null;
-	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath);
+	const showDirectoryRow = showWorkspaceStatus && Boolean(reviewWorkspacePath || reviewWorkspaceSnapshot);
 	const showTitleEditButton =
 		(onSaveTitle != null || onOpenTaskEditor != null) && !isPassiveFocusedTaskCardCopy && !isEditingTitle;
 	// 「已置顶」由 pinnedToTaskPinboardAt 的存在表达（见 state/task-pinboard-pinning.ts），没有冗余布尔。
 	const isPinnedToTaskPinboard = card.pinnedToTaskPinboardAt !== undefined;
-	// hover 动作组里那颗按钮：图标表示**动作**（要做什么），至于「这张卡已置顶」的常驻提示走左上角胶囊，
+	// hover 动作组里那颗按钮：图标表示**动作**（要做什么），至于「这张卡已置顶」的常驻提示走顶部摘要，
 	// 因为动作组在非 hover 态是 opacity-0，只靠它的话浏览原 stage 时根本看不出哪张卡被置顶了。
 	const taskPinboardToggle = useMemo(() => {
 		if (isPinnedToTaskPinboard) {
@@ -761,31 +706,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 		const parts = [agentLabel, modelOverrideLabel].filter((value): value is string => Boolean(value));
 		return parts.length > 0 ? parts.join(" · ") : null;
 	}, [agentLabel, modelOverrideLabel]);
-	// 简写目录行：工作区类型图标 ↑{ahead} ↓{behind} ({changed files} +{add} -{del})。
-	// ahead/behind 是与 base 分支的双向分歧（两侧皆 0 时整体不渲染）；工作区脏统计仍相对 HEAD，
-	// 但文件数与增删行数全为 0 时同样整体隐藏，避免无变化任务与真实脏任务争夺注意力。
-	const commitsAheadOfBaseRef = reviewWorkspaceSnapshot?.commitsAheadOfBaseRef ?? null;
-	const commitsBehindBaseRef = reviewWorkspaceSnapshot?.commitsBehindBaseRef ?? null;
-	const taskCommitsIntegratedIntoBaseRef = reviewWorkspaceSnapshot?.taskCommitsIntegratedIntoBaseRef ?? null;
-	const taskCommitIntegrationTrackingStatus = reviewWorkspaceSnapshot?.taskCommitIntegrationTrackingStatus;
-	const showTaskCommitIntegrationIndicator = taskCommitIntegrationTrackingStatus !== undefined;
-	const taskWorkspaceGitStatusTooltip = useMemo(
-		() =>
-			describeTaskWorkspaceGitStatusAgainstBaseRef({
-				baseRef: card.baseRef,
-				commitsAheadOfBaseRef,
-				commitsBehindBaseRef,
-				taskCommitsIntegratedIntoBaseRef,
-				taskCommitIntegrationTrackingStatus,
-			}),
-		[
-			commitsAheadOfBaseRef,
-			commitsBehindBaseRef,
-			card.baseRef,
-			taskCommitIntegrationTrackingStatus,
-			taskCommitsIntegratedIntoBaseRef,
-		],
-	);
 	// 复制与 Git 元数据、目录行独立；无回调的宿主只可使用已知绝对路径，不能复制展示用的 ~/ 简写。
 	const knownTaskWorkspaceAbsoluteDirectoryPath =
 		card.worktreeMode === "inplace" ? workspacePath : reviewWorkspaceSnapshot?.path;
@@ -881,19 +801,17 @@ export const TaskCardBody = memo(function TaskCardBody(
 	) : null;
 	const elapsedTimePills = (
 		<>
-			<Tooltip content={revealHoverActionTooltip(taskCreatedAtTooltipContent)}>
-				<span
-					data-task-created-at-pill=""
-					title={taskCreatedAtTooltipContent}
-					className={cn(
-						"inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[10px] leading-none",
-						isTrashCard ? "text-text-tertiary" : "text-text-secondary",
-					)}
-				>
-					<Clock size={8} className="shrink-0" />
-					{formatCompactElapsedSince(card.createdAt, elapsedNowMs)}
-				</span>
-			</Tooltip>
+			<TaskActivityElapsedTimePills
+				task={{
+					...sessionSummary,
+					createdAt: card.createdAt,
+					turnOwner: sessionFacets?.turnOwner,
+					isParkedAwaitingDispatchedBackgroundWork: isParkedAwaitingBackgroundWork,
+					taskConversationSessionActivityObservations: sessionActivityObservations,
+				}}
+				nowMs={elapsedNowMs}
+				revealTooltip={isHovered}
+			/>
 			{columnId === "backlog" ? (
 				<BacklogTaskDescriptionLastUpdatedPill
 					card={card}
@@ -901,47 +819,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 					revealHoverActionTooltip={revealHoverActionTooltip}
 				/>
 			) : null}
-			{lastAgentConversationUserHandoffAtMs != null ? (
-				<Tooltip content={lastAgentConversationUserHandoffTooltipContent}>
-					<span
-						data-agent-response-generation-stopped-pill=""
-						title={lastAgentConversationUserHandoffTooltipContent ?? undefined}
-						className="inline-flex items-center gap-0.5 text-[10px] leading-none text-text-secondary"
-					>
-						<Activity size={8} className="shrink-0" />
-						{formatCompactElapsedSince(lastAgentConversationUserHandoffAtMs, elapsedNowMs)}
-					</span>
-				</Tooltip>
-			) : null}
-			<Tooltip
-				content={<span className="whitespace-pre-line">{taskConversationSessionActivityTooltipContent}</span>}
-			>
-				<span
-					role="group"
-					tabIndex={0}
-					aria-label="各会话独立活动时间"
-					data-last-conversation-progress-pill={lastEffectiveAgentConversationActivityObservation ? "" : undefined}
-					data-task-conversation-session-activity-details=""
-					title={taskConversationSessionActivityTooltipContent}
-					className="inline-flex items-center gap-0.5 text-[10px] leading-none text-text-secondary"
-				>
-					<MessagesSquare size={8} className="shrink-0" />
-					{lastEffectiveAgentConversationActivityObservation
-						? `${isConversationProgressApproximate ? "~" : ""}${formatCompactElapsedSince(lastEffectiveAgentConversationActivityObservation.observedAtMs, elapsedNowMs)}`
-						: "活动未知"}
-				</span>
-			</Tooltip>
-			{sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "pending" ||
-			sessionSummary?.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
-				<span
-					role="status"
-					title={describePromptSubmissionAcceptance(sessionSummary.agentConversationPromptSubmissionAcceptance)}
-					className="inline-flex items-center gap-0.5 text-[10px] text-text-secondary"
-				>
-					<Hourglass size={10} />
-					{promptSubmissionAcceptanceLabel(sessionSummary.agentConversationPromptSubmissionAcceptance)}
-				</span>
-			) : null}
+		</>
+	);
+	const submissionStatusNotices = (
+		<>
+			<TaskPromptSubmissionAcceptanceNotice
+				acceptance={sessionSummary?.agentConversationPromptSubmissionAcceptance}
+			/>
 			{sessionSummary?.codexConfigurationProfileRetainedInputRecovery && (
 				<span
 					role="status"
@@ -953,11 +837,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 			)}
 		</>
 	);
+
 	const resourceUsagePill = isTaskCardOwnedByOtherProject ? null : (
 		<TaskCardResourceUsagePill
 			taskCardId={card.id}
 			isTrashCard={isTrashCard}
 			revealHoverActionTooltip={revealHoverActionTooltip}
+			showLeadingSeparator={!crossProjectTaskSwitcherRowElements?.summaryMetadata}
 		/>
 	);
 	const pinnedMarkerOrTaskPinboardStageLabel = (
@@ -1083,12 +969,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 			),
 		});
 	}
-	const showsRetainedCommittedLineChangeSummary =
-		columnId !== "backlog" &&
-		!historicalContext &&
-		shouldDisplayTaskRetainedCommittedLineChangeSummary(
-			reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary,
-		);
 	const relatedTasksPreviewShortcut =
 		!historicalContext && !isRelatedTaskPreviewCopy ? (
 			<TaskRelatedTasksPreviewButton
@@ -1103,83 +983,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 			workspaceId={taskCardOwnedByOtherProjectWorkspaceId}
 		/>
 	) : null;
-	const taskDirectoryRow = (
-		<div
-			data-task-directory=""
-			className={cn(
-				"flex w-max min-w-0 max-w-full flex-wrap items-center gap-x-1.5 gap-y-0.5 font-mono",
-				!isCompactRowInFocusViewLeftColumn && "mt-1",
-			)}
-			style={{
-				fontSize: isCompactRowInFocusViewLeftColumn ? 11 : 12,
-				lineHeight: 1.4,
-				color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : SESSION_ACTIVITY_COLOR.secondary,
-			}}
-		>
-			<span
-				data-task-card-base-branch-relation-group=""
-				className={cn(
-					"inline-flex min-w-[20ch] max-w-full flex-wrap items-center gap-1",
-					isTrashCard && "line-through",
-				)}
-			>
-				<TaskWorkspaceModeIconWithTooltip worktreeMode={card.worktreeMode} />
-				{taskWorkspaceGitStatusTooltip ? (
-					// Radix 的 Tooltip.Trigger 用 asChild 把事件与 ref 挂到子元素上，故子元素必须是真实 DOM 节点，
-					// 不能直接是不转发 props/ref 的函数组件——否则 hover 根本触发不了 tooltip。
-					<Tooltip side="bottom" content={revealHoverActionTooltip(taskWorkspaceGitStatusTooltip)}>
-						<span className="inline-flex flex-wrap items-center gap-1 align-middle">
-							<AheadBehindIndicator
-								ahead={commitsAheadOfBaseRef}
-								behind={commitsBehindBaseRef}
-								tone="semantic"
-								iconSize={10}
-							/>
-							{showTaskCommitIntegrationIndicator ? (
-								<span>
-									<TaskCommitsIntegratedIntoBaseRefIndicator
-										taskCommitsIntegratedIntoBaseRef={taskCommitsIntegratedIntoBaseRef}
-									/>
-								</span>
-							) : null}
-						</span>
-					</Tooltip>
-				) : null}
-				{!historicalContext && columnId !== "backlog" ? (
-					<TaskCommitCoverageInCurrentDeploymentIndicator
-						coverage={reviewWorkspaceSnapshot?.taskCommitCoverageInCurrentDeployment}
-					/>
-				) : null}
-				{postDeployVerificationEntryNavigationShortcut}
-			</span>
-			{relatedTasksPreviewShortcut}
-			{reviewChangeSummary || showsRetainedCommittedLineChangeSummary ? (
-				<span
-					data-task-card-line-change-statistics-group=""
-					className="inline-flex min-w-0 max-w-full flex-wrap items-baseline gap-1"
-				>
-					{reviewChangeSummary ? (
-						<WorktreeUncommittedChangeSummaryIndicator
-							{...reviewChangeSummary}
-							showUncommittedChangeBackground
-							allowLineWrapping
-							parenthesesAndChangedFileCountStyle={{ color: SESSION_ACTIVITY_COLOR.muted }}
-						/>
-					) : null}
-					{showsRetainedCommittedLineChangeSummary ? (
-						<TaskRetainedCommittedLineChangeIndicator
-							showCommittedChangeBackground
-							allowLineWrapping
-							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
-							taskId={card.id}
-							baseRef={card.baseRef}
-							summary={reviewWorkspaceSnapshot?.taskRetainedCommittedLineChangeSummary}
-						/>
-					) : null}
-				</span>
-			) : null}
-		</div>
-	);
 
 	const directoryCopyButton = (
 		<Tooltip side="bottom" content={card.id} delayDuration={0}>
@@ -1208,7 +1011,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			{...(cardDragBindings?.draggableProps ?? {})}
 			{...(cardDragBindings?.dragHandleProps ?? {})}
 			className={cn(
-				"kb-board-card-shell relative",
+				"kb-board-card-shell group/task-card-shell relative grid grid-cols-[minmax(0,1fr)_3.75rem] items-start gap-x-1",
 				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
 				isRelatedTaskPreviewCopy && "max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11",
 			)}
@@ -1303,22 +1106,23 @@ export const TaskCardBody = memo(function TaskCardBody(
 			}}
 			onPointerLeave={taskStickers.pointerLeave}
 		>
-			{/* 为右下角复制叠层留出横向空间，编辑动作与时长药丸仍可独立命中。 */}
+			{/* 卡面右侧为附着区留位，三种展开状态共享同一摘要宽度。 */}
 			<div
 				className={
 					isCompactRowInFocusViewLeftColumn
 						? // 紧凑密度：与 All projects 行同一风格的平铺行（无边框、无底色，hover 才显底）。
 							cn(
-								"group/card relative rounded-md px-2 py-1.5",
-								showDirectoryCopyButton && "pr-8",
+								"kb-board-card-surface group/card relative flex flex-col rounded-md px-2 py-1.5",
+								isCrossProjectTaskSwitcherRowCopy && "bg-surface-2 ring-1 ring-border",
+
 								historicalSnapshot && "pr-14 sm:pr-10",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
 								isDragging && "bg-surface-3 shadow-lg",
 								isHoverPresentationShown && isCardInteractive && "bg-surface-3",
 							)
 						: cn(
-								"group/card relative rounded-md border border-border-bright bg-surface-2 p-2.5",
-								showDirectoryCopyButton && !isMobileDetailHeaderCopy && "pr-8",
+								"kb-board-card-surface group/card relative flex flex-col rounded-md border border-border-bright bg-surface-2 p-2.5 pt-4",
+
 								isMobileDetailHeaderCopy && "flex flex-col",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3 hover:border-border-bright",
 								isDragging && "shadow-lg",
@@ -1334,26 +1138,27 @@ export const TaskCardBody = memo(function TaskCardBody(
 						sessionSummary={sessionSummary}
 					/>
 				)}
-				{/* 标准密度：agent 图标 + 微型时长药丸合一，钉在卡片上沿；从内容左缘起，避开左上角运行角标。
-				    完整「agent · 模型」进 hover tooltip。紧凑密度不画胶囊，这些项分别并入第 1 行与元信息行。
-				    置顶板分身在末尾多挂一段 stage 标签，胶囊会因此变宽；右侧不远就是 hover 动作组（同在 -top-[6px]），
-				    所以限宽 + 标签 truncate，窄卡上宁可截断 stage 名也不与动作组叠在一起。 */}
-				{isCompactRowInFocusViewLeftColumn ? null : (
-					<div
-						className={
-							isMobileDetailHeaderCopy
-								? "mb-1 flex flex-wrap items-center gap-1 leading-none"
-								: "absolute left-2 -top-[6px] z-20 inline-flex h-4 max-w-[calc(100%-2rem)] items-center gap-1 rounded-full border border-border-bright bg-surface-1 pl-1 pr-1.5 leading-none shadow-sm"
+				{crossProjectTaskSwitcherRowElements?.summaryMetadata ?? (
+					<TaskCardSummaryMetadata
+						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+						projectName={
+							isCrossProjectTaskSwitcherRowCopy
+								? crossProjectTaskSwitcherRowElements?.projectName
+								: workspacePath?.replace(/\/+$/, "").split("/").pop()
 						}
-					>
-						{agentBadge}
-						{taskAgentSettingsLabel ? (
-							<span aria-hidden className="h-2.5 w-px shrink-0 bg-border-bright" />
-						) : null}
-						{elapsedTimePills}
-						{resourceUsagePill}
-						{pinnedMarkerOrTaskPinboardStageLabel}
-					</div>
+						task={card}
+						snapshot={reviewWorkspaceSnapshot}
+						showGitMetadata={!historicalContext && showDirectoryRow}
+						revealTooltip={isHovered}
+						timePills={
+							<>
+								{crossProjectTaskSwitcherRowElements?.promptCacheWarmthPill}
+								{elapsedTimePills}
+								{resourceUsagePill}
+								{pinnedMarkerOrTaskPinboardStageLabel}
+							</>
+						}
+					/>
 				)}
 				<div
 					className={
@@ -1366,9 +1171,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							{statusMarker}
 						</div>
 					) : null}
-					{isCompactRowInFocusViewLeftColumn && agentBadge ? (
-						<span className="mt-[3px] inline-flex shrink-0">{agentBadge}</span>
-					) : null}
+					{agentBadge ? <span className="mt-[3px] inline-flex shrink-0">{agentBadge}</span> : null}
 					<div className={cn("relative min-w-0 flex-1", showTitleEditButton && "group/title")}>
 						{isEditingTitle ? (
 							// 标题语义上仍是单串；改 textarea 只为长标题视觉 wraparound + 随内容自增高
@@ -1414,36 +1217,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 								</p>
 							</>
 						)}
-						<TaskClosureSummaryAndHistory
-							card={card}
-							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
-							isClosed={isTrashCard}
-						/>
-						{showsTaskPinboardPinReasonRowOnThisCopy ? (
-							// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
-							<button
-								type="button"
-								data-task-pinboard-pin-reason=""
-								data-task-pinboard-pin-reason-state={
-									hasTaskPinboardPinReasonText ? "shows_user_written_reason" : "blank_invites_adding_reason"
-								}
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									onEditTaskPinboardPinReason?.(card.id);
-								}}
-								className={cn(
-									"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
-									hasTaskPinboardPinReasonText ? "text-text-secondary" : "italic text-text-tertiary",
-								)}
-								title={hasTaskPinboardPinReasonText ? "Edit pin reason" : "Add pin reason"}
-							>
-								<Pin size={10} className="mt-[2px] shrink-0" />
-								<span className="line-clamp-2">
-									{hasTaskPinboardPinReasonText ? taskPinboardPinReasonTextOrEmpty : "Add pin reason"}
-								</span>
-							</button>
-						) : null}
 						{showTitleEditButton &&
 						!isCompactRowInFocusViewLeftColumn &&
 						!isMobileDetailHeaderCopy &&
@@ -1475,17 +1248,19 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				</div>
 				<div
+					data-task-card-primary-actions=""
 					className={cn(
+						"kb-task-card-primary-actions",
 						usesInFlowActionToolbar
 							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
 							: cn(
-									// 动作显示或获得键盘焦点时覆盖 z-20 摘要胶囊，避免长摘要拦截恢复、归档等按钮。
-									"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
-									// 紧凑密度没有上边框可伸出，动作组覆盖在第 1 行右侧；All projects 切换面板的行例外，叠在首行上方。
+									// 主操作沿卡壳右缘排列，维持与缩略行展开开关相同的坐标。
+									"absolute -right-15 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+									// 紧凑密度动作组放在摘要上方，避免遮住时间药丸。
 									isCrossProjectTaskSwitcherRowCopy
 										? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
 										: isCompactRowInFocusViewLeftColumn
-											? "top-1"
+											? "-top-3"
 											: "-top-[6px]",
 									"focus-within:opacity-100 focus-within:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
 									isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
@@ -1519,7 +1294,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					{onSetTaskShelvingState ? (
 						<Tooltip side="bottom" content={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}>
 							<Button
-								variant="ghost"
+								variant="status-cyan"
 								size="xs"
 								icon={card.taskShelvingState?.isShelved ? <ArchiveRestore size={12} /> : <Archive size={12} />}
 								aria-label={card.taskShelvingState?.isShelved ? "取消搁置" : "搁置任务"}
@@ -1576,7 +1351,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 								onMouseDown={stopEvent}
 								onClick={(event) => {
 									stopEvent(event);
-									taskCommentsDialog.openTaskComments(taskCommentsWorkspaceId, card.id, card.createdAt);
+									taskCommentsDialog.openTaskComments(
+										taskCommentsWorkspaceId,
+										card.id,
+										card.createdAt,
+										event.currentTarget,
+									);
 								}}
 							/>
 						</Tooltip>
@@ -1603,6 +1383,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 								setOpenedQuickActionMenu((current) => (open ? "prompt" : current === "prompt" ? null : current))
 							}
 							icon={<FileText size={12} />}
+							touchAdditionalActionTrigger="long_press_primary_button"
 							primaryLabel="查看原始 Prompt"
 							primaryAccessibleLabel="View original prompt"
 							onPrimaryAction={() => setIsPromptViewerOpen(true)}
@@ -1650,7 +1431,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to validation")}>
 							<Button
 								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
-								variant="ghost"
+								variant="status-gold"
 								size="xs"
 								disabled={isMoveToValidationLoading}
 								aria-label="Move task to validation"
@@ -1671,7 +1452,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}
-								variant="ghost"
+								variant="status-purple"
 								size="xs"
 								disabled={isMoveToReviewLoading}
 								aria-label="Move task to review"
@@ -1690,6 +1471,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 								setOpenedQuickActionMenu((current) => (open ? "done" : current === "done" ? null : current))
 							}
 							icon={isMoveToTrashLoading ? <Spinner size={12} /> : <Archive size={12} />}
+							touchAdditionalActionTrigger="long_press_primary_button"
+							variant="status-green"
 							primaryLabel="结案"
 							primaryAccessibleLabel="结案任务"
 							disabled={isMoveToTrashLoading || !onMoveToTrash}
@@ -1707,9 +1490,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 							content={
 								isHovered ? (
 									<>
-										Restore session
+										重新打开已结案任务
 										<br />
-										in new worktree
+										复用原工作树；已清理时从归档恢复
 									</>
 								) : undefined
 							}
@@ -1736,28 +1519,47 @@ export const TaskCardBody = memo(function TaskCardBody(
 								aria-label="Delete task permanently"
 								onMouseDown={stopEvent}
 								onClick={(event) => {
-									stopEvent(event);
+									event.stopPropagation();
 									onDeleteTask(card.id);
 								}}
 							/>
 						</Tooltip>
 					) : null}
-					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
-					{isMobileDetailHeaderCopy && showDirectoryCopyButton ? (
-						<span data-task-directory-copy-actions="">{directoryCopyButton}</span>
+					{showDirectoryCopyButton ? (
+						<span
+							data-task-directory-copy-actions=""
+							className={cn(
+								"inline-flex group-focus-within/card:opacity-100 group-focus-within/card:pointer-events-auto",
+								isHoverPresentationShown || isMobileDetailHeaderCopy
+									? "opacity-100"
+									: "opacity-0 pointer-events-none",
+							)}
+						>
+							{directoryCopyButton}
+						</span>
 					) : null}
+					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
 				</div>
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
 				) : null}
-				{/* 「机器在等」的徽标：标准密度各占一行；紧凑密度并入元信息行（见下）。 */}
-				{isCompactRowInFocusViewLeftColumn
-					? null
-					: machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
-							<div key={machineWaitingBadgeKey} className="mt-1">
-								{machineWaitingBadgeElement}
-							</div>
-						))}
+				<div
+					data-task-card-status-notices=""
+					className="flex flex-wrap items-center gap-1 text-[10px] empty:hidden [&:not(:empty)]:mt-1"
+				>
+					{crossProjectTaskSwitcherRowElements?.agentStartupProgressStatusNotice}
+					{submissionStatusNotices}
+					{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
+						<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
+							{machineWaitingBadgeElement}
+						</span>
+					))}
+					<AutomaticAgentFailureContinuationNotice
+						summary={sessionSummary}
+						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+						executionForbidden={isTrashCard || !!card.taskShelvingState?.isShelved}
+					/>
+				</div>
 				{historicalSnapshot ? (
 					<div
 						className="mt-1 flex flex-col gap-1 text-xs text-text-secondary"
@@ -1793,11 +1595,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				) : null}
 				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
-				<AutomaticAgentFailureContinuationNotice
-					summary={sessionSummary}
-					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
-					executionForbidden={isTrashCard || !!card.taskShelvingState?.isShelved}
-				/>
 				{sessionActivity ? (
 					<div
 						data-task-card-session-activity=""
@@ -1842,98 +1639,76 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</div>
 					</div>
 				) : null}
-				{isCompactRowInFocusViewLeftColumn ? (
-					// 紧凑密度的元信息行：目录 / git 统计 / 徽标 / 取消自动动作靠左，时长药丸 + 资源占用 + 置顶标记靠右
-					// （与标准密度胶囊里的顺序一致），窄宽度下换行而不截断。
+				{crossProjectTaskSwitcherRowElements?.summaryMetadata ? (
 					<div
-						data-task-card-compact-metadata-row=""
-						data-task-card-secondary-metadata-row=""
-						className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] leading-none"
+						data-task-card-expanded-resource-usage=""
+						className="flex flex-wrap items-center gap-1 empty:hidden [&:not(:empty)]:mt-1"
 					>
-						{crossProjectTaskSwitcherRowElements?.projectName ? (
-							<span className="inline-flex min-w-[min(14ch,100%)] max-w-full items-center gap-1 text-text-tertiary">
-								<ProjectIcon
-									workspaceId={taskWorkspaceId ?? undefined}
-									projectName={crossProjectTaskSwitcherRowElements.projectName}
-									size={14}
-								/>
-								<span className="min-w-0 [overflow-wrap:anywhere]">
-									{crossProjectTaskSwitcherRowElements.projectName}
-								</span>
-							</span>
-						) : null}
-						{showDirectoryRow ? (
-							taskDirectoryRow
-						) : (
-							<>
-								{postDeployVerificationEntryNavigationShortcut}
-								{relatedTasksPreviewShortcut}
-							</>
-						)}
-						{machineWaitingBadges.map(({ machineWaitingBadgeKey, machineWaitingBadgeElement }) => (
-							<span key={machineWaitingBadgeKey} className="inline-flex min-w-0">
-								{machineWaitingBadgeElement}
-							</span>
-						))}
-						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-							<button
-								type="button"
-								className="cursor-pointer rounded-sm border-none bg-transparent p-0 text-[11px] text-accent hover:underline"
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									onCancelAutomaticAction(card.id);
-								}}
-							>
-								{cancelAutomaticActionLabel}
-							</button>
-						) : null}
-						<span className="ml-auto inline-flex shrink-0 items-center gap-1">
-							{crossProjectTaskSwitcherRowElements?.promptCacheWarmthPill}
-							{elapsedTimePills}
-							{resourceUsagePill}
-							{pinnedMarkerOrTaskPinboardStageLabel}
-						</span>
-					</div>
-				) : (
-					<>
-						{showDirectoryRow ? (
-							taskDirectoryRow
-						) : (
-							<>
-								{postDeployVerificationEntryNavigationShortcut}
-								{relatedTasksPreviewShortcut}
-							</>
-						)}
-						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-							<Button
-								size="sm"
-								fill
-								style={{ marginTop: 12 }}
-								onMouseDown={stopEvent}
-								onClick={(event) => {
-									stopEvent(event);
-									onCancelAutomaticAction(card.id);
-								}}
-							>
-								{cancelAutomaticActionLabel}
-							</Button>
-						) : null}
-					</>
-				)}
-				{showDirectoryCopyButton && !isMobileDetailHeaderCopy ? (
-					<div
-						data-task-directory-copy-actions=""
-						className={cn(
-							"absolute bottom-0 right-0 z-10 rounded-md bg-surface-3 px-0.5 shadow-sm",
-							"group-focus-within/card:opacity-100 group-focus-within/card:pointer-events-auto",
-							isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
-						)}
-					>
-						{directoryCopyButton}
+						{resourceUsagePill}
 					</div>
 				) : null}
+				<TaskClosureSummaryAndHistory
+					card={card}
+					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+					isClosed={isTrashCard}
+				/>
+				{showsTaskPinboardPinReasonRowOnThisCopy ? (
+					// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
+					<button
+						type="button"
+						data-task-pinboard-pin-reason=""
+						data-task-pinboard-pin-reason-state={
+							hasTaskPinboardPinReasonText ? "shows_user_written_reason" : "blank_invites_adding_reason"
+						}
+						onMouseDown={stopEvent}
+						onClick={(event) => {
+							stopEvent(event);
+							onEditTaskPinboardPinReason?.(card.id);
+						}}
+						className={cn(
+							"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
+							hasTaskPinboardPinReasonText ? "text-text-secondary" : "italic text-text-tertiary",
+						)}
+						title={hasTaskPinboardPinReasonText ? "Edit pin reason" : "Add pin reason"}
+					>
+						<Pin size={10} className="mt-[2px] shrink-0" />
+						<span className="line-clamp-2">
+							{hasTaskPinboardPinReasonText ? taskPinboardPinReasonTextOrEmpty : "Add pin reason"}
+						</span>
+					</button>
+				) : null}
+				{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+					<Button
+						size="sm"
+						className="mt-2 self-start text-accent"
+						onMouseDown={stopEvent}
+						onClick={(event) => {
+							stopEvent(event);
+							onCancelAutomaticAction(card.id);
+						}}
+					>
+						{cancelAutomaticActionLabel}
+					</Button>
+				) : null}
 			</div>
+			{!historicalContext ? (
+				<div
+					data-task-card-side-attachments=""
+					className={cn(
+						"kb-task-card-side-attachments empty:hidden relative mt-1.5 z-20 flex w-15 flex-col items-stretch gap-1 rounded-md bg-surface-2 p-0.5 text-[10px] transition-opacity motion-reduce:transition-none",
+						!isCompactRowInFocusViewLeftColumn && "mt-3.5",
+						"group-focus-within/task-card-shell:opacity-100 group-focus-within/task-card-shell:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
+						isHoverPresentationShown ||
+							isPromptViewerOpen ||
+							crossProjectTaskSwitcherRowElements?.isKeptExpandedInList
+							? "opacity-100"
+							: "opacity-0 pointer-events-none",
+					)}
+				>
+					{postDeployVerificationEntryNavigationShortcut}
+					{relatedTasksPreviewShortcut}
+				</div>
+			) : null}
 			<TaskCardStickers controller={taskStickers} />
 		</div>
 	);
