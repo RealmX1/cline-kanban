@@ -54,6 +54,7 @@ export interface UsePersistentTerminalSessionResult {
 	findNextInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	findPreviousInTerminal: (query: string, options?: { caseSensitive?: boolean }) => boolean;
 	openTerminalSearch: () => void;
+	captureAgentSessionRestartForFloatingForm: () => (arguments_: string[]) => Promise<void>;
 	refreshTerminal: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	// 「从既有对话迁入」：把选定的那段对话迁进本会话再按 id 续跑（服务端语义见 api-contract 的
 	// adoptExistingAgentConversationAsTaskSessionIdentity）。与 refreshTerminal 共用 isRefreshing / lastError。
@@ -466,6 +467,14 @@ export function usePersistentTerminalSession({
 		findNextInTerminal,
 		findPreviousInTerminal,
 		openTerminalSearch,
+		captureAgentSessionRestartForFloatingForm: () => {
+			const terminal = terminalRef.current;
+			return terminal
+				? terminal.captureAgentSessionRestartForFloatingForm()
+				: async () => {
+						throw new Error("原会话终端尚未就绪，参数已保留。");
+					};
+		},
 		refreshTerminal,
 		adoptExistingAgentConversationAndResume,
 		forceStopHarnessBackgroundSessionAndResumeHere,

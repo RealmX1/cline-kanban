@@ -63,6 +63,7 @@ import {
 import { ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE } from "../core/runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import {
 	isNotifiableUserTurn,
+	isParkedAwaitingDispatchedBackgroundWork,
 	isTaskConversationSessionWithoutTaskLifecycleAuthority,
 	resolveSessionFacets,
 } from "../core/session-activity";
@@ -625,6 +626,19 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 
 	const queueTaskSessionSummaryBroadcast = (workspaceId: string, summary: RuntimeTaskSessionSummary) => {
+		const previousSummary = latestNotificationSummaries.get(`${workspaceId}:${summary.taskId}`);
+		const crossProjectSessionStatusFingerprint = (value: RuntimeTaskSessionSummary) =>
+			JSON.stringify([
+				resolveSessionFacets(value),
+				value.startedAt,
+				value.pid,
+				isParkedAwaitingDispatchedBackgroundWork(value),
+				value.automaticAgentFailureContinuation?.phase,
+			]);
+		const sessionStatusChanged =
+			previousSummary !== undefined &&
+			crossProjectSessionStatusFingerprint(previousSummary) !== crossProjectSessionStatusFingerprint(summary);
+
 		const sessionKey = `${workspaceId}:${summary.taskId}`;
 		const previousEdgeWasObserved = acceptedEdgeBySession.has(sessionKey);
 		const accepted = summary.agentConversationPromptSubmissionAcceptance;
@@ -684,6 +698,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 
 		latestNotificationSummaries.set(`${workspaceId}:${summary.taskId}`, summary);
+		if (sessionStatusChanged) void broadcastRuntimeProjectsUpdated(null);
 		// 「停止生成响应后固定宽限期」回收的归一化边沿检测。刻意挂在这里而不是各 transport 内部：
 		// 终端 / Cline SDK / ACP 三条 summary 流全部经此排队，是唯一的跨 transport 汇聚点；且这一句
 		// 位于下方「0 客户端提前返回」之前，故计时与「有没有人在看」彻底解耦——关标签页 / 切项目 /

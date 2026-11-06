@@ -17,6 +17,8 @@ import type { BoardCard, BoardData } from "../src/types";
 import "../src/styles/globals.css";
 
 const nowMs = Date.now();
+const hasLongMetadata = new URLSearchParams(location.search).has("longMetadata");
+const projectName = hasLongMetadata ? "很长的项目名称-project-with-a-long-name-and-repository-context" : "测试项目";
 setTaskWorkspaceSnapshot({
 	taskId: "layout-task",
 	path: "/isolated/project-a/task-worktree",
@@ -54,7 +56,7 @@ function Harness() {
 	const hover = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({ panelScrollContainerRef: panelRef });
 	const card: BoardCard = {
 		id: "layout-task",
-		title: "统一布局的任务标题",
+		title: hasLongMetadata ? "很长的任务标题：展开后最多显示三行，并且所有元信息始终保持在标题上方，标题仅向下增加内容，无需重新阅读 Project、base branch、dirty 与时间药丸" : "统一布局的任务标题",
 		prompt: "隔离的卡片布局验证",
 		agentId: "codex",
 		baseRef: "main",
@@ -78,6 +80,10 @@ function Harness() {
 		lastHookAt: nowMs,
 		reviewReason: null,
 		exitCode: null,
+		agentConversationPromptSubmissionAcceptance: hasLongMetadata ? {
+			status: "unconfirmed", attemptedAtMs: nowMs, runtimeSessionIncarnationId: "layout-process",
+		} : undefined,
+		agentCurrentWorkPhaseGoal: { goalText: "验证元信息在展开时保持稳定", source: "agent_explicit_declaration", updatedAt: nowMs },
 		latestHookActivity: {
 			activityText: "检查 Task Card 布局",
 			toolName: null,
@@ -108,8 +114,9 @@ function Harness() {
 		taskPinboardPinReason: null,
 		agentResponseGenerationStopped: null,
 		lastConversationProgressObservation: null,
+		agentConversationPromptSubmissionAcceptance: summary.agentConversationPromptSubmissionAcceptance,
 	};
-	const entryInProject = { workspaceId: "project-a", projectName: "测试项目", entry };
+	const entryInProject = { workspaceId: "project-a", projectName, entry };
 	const board: BoardData = { columns: [{ id: "in_progress", title: "In Progress", cards: [card] }] };
 	const expansionState = isKeptExpanded
 		? "kept_expanded_in_list"
@@ -219,7 +226,7 @@ function Harness() {
 											defaultAgentId="codex"
 											buildTaskCardActionHandlerBundleForOtherProjectTaskCard={() => ({})}
 											rowContext={{
-												projectName: "测试项目",
+												projectName,
 												nowMs,
 												inListExpansionState: isKeptExpanded
 													? "kept_expanded_in_list"

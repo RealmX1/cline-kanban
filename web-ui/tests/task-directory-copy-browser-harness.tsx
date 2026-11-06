@@ -20,7 +20,7 @@ createRoot(harnessContainer).render(
 		{renderRoles.map((renderRole, index) => (
 			<div key={renderRole} data-browser-test-card-role={renderRole} className="m-8 w-80">
 				<TaskCardBodyVisualDensityProvider
-					value={index === 0 ? "standard_card_with_floating_capsule" : "compact_row_in_focus_view_left_column"}
+					value={index === 0 ? "standard_bordered_task_card" : "compact_row_in_focus_view_left_column"}
 				>
 					<TaskCardBody
 						card={{

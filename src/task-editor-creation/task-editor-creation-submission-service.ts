@@ -65,6 +65,7 @@ interface TaskEditorCreationSubmissionServiceDependencies {
 	) => Promise<RuntimeTaskCardActionStartAgentSessionResponse>;
 	readDependencyFingerprint: (record: TaskEditorCreationSubmissionRecord) => Promise<unknown>;
 	warn: (message: string) => void;
+	onStatusChanged?: () => void;
 }
 const terminalPhases = new Set(["completed", "stopped", "identity_conflict", "waiting_for_authorization"]);
 const messageOf = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -74,9 +75,16 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 	const executing = new Map<string, Promise<void>>();
 	const completedSubmissionIds = new Set<string>();
 	const reportedUnreadableRecords = new Set<string>();
+	const lastPublishedProgressBySubmissionId = new Map<string, string>();
 	const persistRecord = async (record: TaskEditorCreationSubmissionRecord) => {
 		await writeTaskEditorCreationSubmission(record);
 		if (record.status.phase === "completed") completedSubmissionIds.add(record.status.submissionId);
+		const { cardPersisted, startCompleted, phase, lastError, recoveryCondition } = record.status;
+		const progressFingerprint = JSON.stringify([cardPersisted, startCompleted, phase, lastError, recoveryCondition]);
+		if (lastPublishedProgressBySubmissionId.get(record.status.submissionId) !== progressFingerprint) {
+			lastPublishedProgressBySubmissionId.set(record.status.submissionId, progressFingerprint);
+			deps.onStatusChanged?.();
+		}
 	};
 	const readIncompleteRecords = async () => {
 		const records = await listTaskEditorCreationSubmissions(completedSubmissionIds, (path, error) => {

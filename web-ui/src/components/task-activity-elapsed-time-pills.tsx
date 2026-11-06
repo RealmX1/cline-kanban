@@ -2,12 +2,8 @@ import {
 	resolveLastAgentConversationUserHandoffObservation,
 	resolveLastEffectiveAgentConversationActivityObservation,
 } from "@runtime-agent-conversation-activity-observation";
-import { Activity, Clock, Hourglass, MessagesSquare } from "lucide-react";
+import { Activity, Clock, MessagesSquare } from "lucide-react";
 import { useMemo } from "react";
-import {
-	describePromptSubmissionAcceptance,
-	promptSubmissionAcceptanceLabel,
-} from "@/components/prompt-submission-acceptance-description";
 import { describeTaskConversationSessionActivityObservations } from "@/components/task-conversation-session-activity-description";
 import { Tooltip } from "@/components/ui/tooltip";
 import type { RuntimeCrossProjectTaskSwitcherEntry, RuntimeInProgressTaskDetail } from "@/runtime/types";
@@ -17,6 +13,7 @@ import { formatCompactElapsedSince } from "@/utils/format-compact-elapsed";
 export function TaskActivityElapsedTimePills({
 	task,
 	nowMs,
+	revealTooltip = true,
 }: {
 	task: Pick<
 		RuntimeInProgressTaskDetail,
@@ -34,6 +31,7 @@ export function TaskActivityElapsedTimePills({
 			>
 		>;
 	nowMs: number;
+	revealTooltip?: boolean;
 }): React.ReactElement {
 	const taskCreatedAtTooltipContent = useMemo(
 		() => `创建于 · ${new Date(task.createdAt).toLocaleString()}`,
@@ -50,18 +48,20 @@ export function TaskActivityElapsedTimePills({
 			? `主对话推进 · ${new Date(activity.observedAtMs).toLocaleString()} · ${activity.activityKind} · 证据：${activity.evidenceKind}`
 			: "主对话尚无可信活动时间";
 	return (
-		<span className="ml-1 flex shrink-0 items-center gap-1.5 text-[10px] leading-none text-text-tertiary">
-			<span
-				data-task-created-at-pill=""
-				title={taskCreatedAtTooltipContent}
-				className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap"
-			>
-				<Clock size={10} className="shrink-0" />
-				{formatCompactElapsedSince(task.createdAt, nowMs)}
-			</span>
+		<span className="inline-flex max-w-full flex-wrap items-center gap-1.5 text-[10px] leading-none text-text-secondary">
+			<Tooltip content={revealTooltip ? taskCreatedAtTooltipContent : undefined}>
+				<span
+					data-task-created-at-pill=""
+					title={taskCreatedAtTooltipContent}
+					className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap"
+				>
+					<Clock size={10} className="shrink-0" />
+					{formatCompactElapsedSince(task.createdAt, nowMs)}
+				</span>
+			</Tooltip>
 			{handoff ? (
 				<span
-					className="inline-flex items-center gap-0.5"
+					className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap"
 					title={`交回用户 · ${new Date(handoff.observedAtMs).toLocaleString()}`}
 					data-agent-response-generation-stopped-pill=""
 				>
@@ -74,7 +74,7 @@ export function TaskActivityElapsedTimePills({
 					role="group"
 					tabIndex={0}
 					aria-label="各会话独立活动时间"
-					className="pointer-events-auto inline-flex items-center gap-0.5"
+					className="pointer-events-auto inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap"
 					title={description}
 					data-task-conversation-session-activity-details=""
 					data-last-conversation-progress-pill={activity ? "" : undefined}
@@ -85,17 +85,6 @@ export function TaskActivityElapsedTimePills({
 						: "活动未知"}
 				</span>
 			</Tooltip>
-			{task.agentConversationPromptSubmissionAcceptance?.status === "pending" ||
-			task.agentConversationPromptSubmissionAcceptance?.status === "unconfirmed" ? (
-				<span
-					role="status"
-					title={describePromptSubmissionAcceptance(task.agentConversationPromptSubmissionAcceptance)}
-					className="inline-flex items-center gap-0.5 text-text-secondary"
-				>
-					<Hourglass size={10} />
-					{promptSubmissionAcceptanceLabel(task.agentConversationPromptSubmissionAcceptance)}
-				</span>
-			) : null}
 		</span>
 	);
 }

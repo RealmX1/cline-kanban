@@ -2,7 +2,15 @@ import { type ButtonHTMLAttributes, forwardRef, type ReactNode } from "react";
 
 import { cn } from "@/components/ui/cn";
 
-export type ButtonVariant = "default" | "primary" | "danger" | "ghost";
+export type ButtonVariant =
+	| "default"
+	| "primary"
+	| "danger"
+	| "ghost"
+	| "status-purple"
+	| "status-gold"
+	| "status-green"
+	| "status-cyan";
 export type ButtonSize = "xs" | "sm" | "md";
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -14,6 +22,14 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
+	"status-purple":
+		"text-status-purple bg-status-purple/10 border border-status-purple/30 hover:bg-status-purple/20 active:bg-status-purple/30",
+	"status-gold":
+		"text-status-gold bg-status-gold/10 border border-status-gold/30 hover:bg-status-gold/20 active:bg-status-gold/30",
+	"status-green":
+		"text-status-green bg-status-green/10 border border-status-green/30 hover:bg-status-green/20 active:bg-status-green/30",
+	"status-cyan":
+		"text-status-cyan bg-status-cyan/10 border border-status-cyan/30 hover:bg-status-cyan/20 active:bg-status-cyan/30",
 	default:
 		"bg-surface-2 border border-border-bright text-text-primary hover:bg-surface-3 hover:border-border-bright active:bg-surface-4",
 	primary: "bg-accent text-accent-fg border border-transparent hover:bg-accent-hover active:brightness-90",

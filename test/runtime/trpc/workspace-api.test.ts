@@ -46,6 +46,7 @@ const ensureTaskWorktreeMocks = vi.hoisted(() => ({
 // 真实实现会追加写 ~/.cline/kanban 下的启动诊断日志：测试绝不能污染真实 home。
 vi.mock("../../../src/diagnostics/task-session-start-diagnostics-logger.js", () => ({
 	recordTaskSessionStartDiagnostic: taskSessionStartDiagnosticsMocks.recordTaskSessionStartDiagnostic,
+	measureTaskSessionStartupPhase: async (_context: unknown, run: () => Promise<unknown>) => await run(),
 }));
 
 vi.mock("../../../src/state/discard-task-edit-drafts-for-tasks-removed-from-board.js", async (importOriginal) => {

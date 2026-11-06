@@ -548,10 +548,7 @@ export const runtimeBoardCardSchema = z
 export type RuntimeBoardCard = z.infer<typeof runtimeBoardCardSchema>;
 
 // 编辑器创建提交单独定义，避免与关系草稿的值契约形成初始化环。
-export type {
-	TaskEditorCreationSubmissionRequest,
-	TaskEditorCreationSubmissionStatus,
-} from "./task-editor-creation-submission-contract";
+export type { TaskEditorCreationSubmissionRequest } from "./task-editor-creation-submission-contract";
 
 export const runtimeBoardColumnSchema = z.object({
 	id: runtimeBoardColumnIdSchema,
@@ -739,6 +736,34 @@ export const runtimeCreationResolvedSettingsSchema = z.object({
 });
 export type RuntimeCreationResolvedSettings = z.infer<typeof runtimeCreationResolvedSettingsSchema>;
 
+export const taskEditorCreationSubmissionStatusSchema = z.object({
+	resolvedSettings: runtimeCreationResolvedSettingsSchema.optional(),
+	submissionId: z.string().uuid(),
+	workspaceId: z.string(),
+	taskId: z.string(),
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	cardPersisted: z.boolean(),
+	relationsCompleted: z.boolean(),
+	startRequested: z.boolean(),
+	startCompleted: z.boolean(),
+	phase: z.enum([
+		"saving_card",
+		"saving_relations",
+		"starting_agent",
+		"completed",
+		"waiting_for_dependency",
+		"waiting_for_evidence",
+		"waiting_for_authorization",
+		"stopped",
+		"identity_conflict",
+	]),
+	lastError: z.string().nullable(),
+	recoveryCondition: z.string().nullable(),
+	attemptsInCurrentRecoveryRound: z.number().int().min(0).max(3),
+	acceptedAtEpochMs: z.number(),
+	updatedAtEpochMs: z.number(),
+});
+export type TaskEditorCreationSubmissionStatus = z.infer<typeof taskEditorCreationSubmissionStatusSchema>;
 // 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
 export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
 	codexConfigurationProfileId: z.string().min(1).optional(),
@@ -2029,7 +2054,7 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 
 // --- moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree ---
 // 移入 Done（trash 列）→ 停 agent 会话与详情 shell 终端会话 → 删 worktree（按卡片的 worktreeMode）。
-// 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
+// 会话中断不发起结案；重复结案请求的副作用按原操作幂等处理。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	closure: taskClosureRequestSchema.optional(),
 	taskId: z.string().min(1),
@@ -2318,6 +2343,9 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
+	taskEditorCreationAgentStartupProgress: taskEditorCreationSubmissionStatusSchema.optional(),
+	// ACP 准备摘要的 startedAt 只是连接尝试时刻；没有进程、原生会话或语义活动时仍属启动准备。
+	agentSessionHasNoEstablishedAcpConnection: z.boolean().optional(),
 	taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 	taskConversationSessionActivityObservations: z
 		.array(runtimeTaskConversationSessionActivityObservationSchema)
@@ -5015,6 +5043,7 @@ export const runtimeTaskConversationSessionCreateRequestSchema = runtimeCreation
 	idempotencyKey: z.string().trim().min(1).max(200),
 	sessionRole: z.enum(["by_the_way", "task_collaborator"]),
 	contextSource: z.enum(["creator", "current_main", "fresh"]).default("creator"),
+	contextSourceTaskConversationSessionId: z.string().min(1).optional(),
 	agentId: runtimeAgentIdSchema.optional(),
 	initialMessage: z.string().max(1_000_000).default(""),
 	images: z.array(runtimeTaskImageSchema).optional(),

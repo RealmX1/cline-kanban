@@ -1,3 +1,5 @@
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
@@ -8,7 +10,7 @@ import {
 // 查重提示（§D.3）：规范化标题相等/前缀包含即警告，只提示不阻断（合并入口属 M5）。
 
 import { BookmarkPlus } from "lucide-react";
-import { type ReactElement, useMemo, useState } from "react";
+import { type ReactElement, useId, useMemo, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
 import {
 	buildSaveFindingProvenance,
@@ -18,7 +20,7 @@ import {
 	type SaveFindingTurnAnchor,
 } from "@/components/findings/findings-model";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { saveExploratoryFinding } from "@/runtime/findings-query";
 import type { RuntimeExploratoryFindingEntry } from "@/runtime/types";
@@ -33,7 +35,7 @@ function createFindingId(): string {
 const FINDING_FIELD_CLASS_NAME =
 	"w-full rounded-md border border-border bg-surface-2 px-2 text-xs text-text-primary placeholder:text-text-tertiary focus:border-border-focus focus:outline-none disabled:opacity-60";
 
-export function SaveFindingDialog({
+function SaveFindingDialogForm({
 	workspaceId,
 	conversationSessionTaskId,
 	anchor,
@@ -45,11 +47,13 @@ export function SaveFindingDialog({
 	conversationSessionTaskId: string;
 	// 调用方经 resolveSaveFindingTurnAnchor 解析的结果；null → user_authored_freeform 降级。
 	anchor: SaveFindingTurnAnchor | null;
+	openingRequestIdentity?: unknown;
 	initialBodyMarkdown: string;
 	// 查重比较对象（workspace 级活集合）；未加载到时传空数组（不比较）。
 	existingFindings: RuntimeExploratoryFindingEntry[];
 	onClose: () => void;
 }): ReactElement {
+	const fieldIdPrefix = useId();
 	const [title, setTitle] = useState("");
 	const [bodyMarkdown, setBodyMarkdown] = useState(initialBodyMarkdown);
 	const [isSaving, setIsSaving] = useState(false);
@@ -142,11 +146,11 @@ export function SaveFindingDialog({
 						: "No resolvable turn anchor — saved as a freeform note."}
 				</div>
 				<div>
-					<label htmlFor="save-finding-title" className="mb-1 block text-xs text-text-secondary">
+					<label htmlFor={`${fieldIdPrefix}-title`} className="mb-1 block text-xs text-text-secondary">
 						Title
 					</label>
 					<input
-						id="save-finding-title"
+						id={`${fieldIdPrefix}-title`}
 						value={title}
 						onChange={(event) => setTitle(event.target.value)}
 						placeholder="What was learned?"
@@ -156,11 +160,11 @@ export function SaveFindingDialog({
 					/>
 				</div>
 				<div className="flex min-h-0 flex-1 flex-col">
-					<label htmlFor="save-finding-body" className="mb-1 block text-xs text-text-secondary">
+					<label htmlFor={`${fieldIdPrefix}-body`} className="mb-1 block text-xs text-text-secondary">
 						Finding (markdown)
 					</label>
 					<textarea
-						id="save-finding-body"
+						id={`${fieldIdPrefix}-body`}
 						value={bodyMarkdown}
 						onChange={(event) => setBodyMarkdown(event.target.value)}
 						maxLength={EXPLORATORY_FINDING_BODY_MAX_LENGTH}
@@ -210,3 +214,17 @@ export function SaveFindingDialog({
 		</Dialog>
 	);
 }
+
+export const SaveFindingDialog = hostNonModalFloatingForm(SaveFindingDialogForm, {
+	formKind: "SaveFindingDialog",
+	openingRequestIdentity: (props) => props.openingRequestIdentity,
+	isOpen: () => true,
+	instanceIdentity: (props) => JSON.stringify([props.workspaceId, props.conversationSessionTaskId, props.anchor]),
+	ownership: (props) => ({
+		workspaceId: props.workspaceId,
+		conversationSessionId: props.conversationSessionTaskId,
+		sourceIdentity: JSON.stringify(props.anchor),
+	}),
+	withClose: (props, close) => ({ ...props, onClose: close }),
+	onClosed: (props) => props.onClose(),
+});

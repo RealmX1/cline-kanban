@@ -106,11 +106,13 @@ export function ProjectNavigationPanel({
 	const isMobile = useIsMobile();
 	const [isMobileClosing, setIsMobileClosing] = useState(false);
 	const [projectIdBeingVisuallyEdited, setProjectIdBeingVisuallyEdited] = useState<string | null>(null);
+	const [projectVisualIdentityOpeningRequestSequence, setProjectVisualIdentityOpeningRequestSequence] = useState(0);
 	const projectBeingVisuallyEdited = projects.find((project) => project.id === projectIdBeingVisuallyEdited);
 	const projectVisualIdentityEditor = projectBeingVisuallyEdited ? (
 		<ProjectVisualIdentityEditorDialog
 			key={projectBeingVisuallyEdited.id}
 			project={projectBeingVisuallyEdited}
+			openingRequestSequence={projectVisualIdentityOpeningRequestSequence}
 			onClose={() => setProjectIdBeingVisuallyEdited(null)}
 		/>
 	) : null;
@@ -400,6 +402,7 @@ export function ProjectNavigationPanel({
 									}
 								}}
 								onEditVisualIdentity={(projectId) => {
+									setProjectVisualIdentityOpeningRequestSequence((sequence) => sequence + 1);
 									setProjectIdBeingVisuallyEdited(projectId);
 									if (isMobile) {
 										setIsMobileClosing(false);

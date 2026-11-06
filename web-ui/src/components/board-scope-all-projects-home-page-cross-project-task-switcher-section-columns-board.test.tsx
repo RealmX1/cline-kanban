@@ -239,6 +239,54 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		expect(rowTaskIds(sectionColumnScrollContainer(sectionName)).length).toBeGreaterThan(0);
 	});
 
+	it("启动准备显示独立计数和等待状态，真实会话接管后去掉启动标签且不重复", () => {
+		window.localStorage.setItem("kanban.crossProjectTaskSwitcher.runningSectionExpanded", "true");
+		const progress = {
+			submissionId: "00000000-0000-4000-8000-000000000001",
+			workspaceId: "project-a",
+			taskId: "start",
+			taskIncarnationCreatedAtEpochMs: 123,
+			cardPersisted: true,
+			relationsCompleted: true,
+			startRequested: true,
+			startCompleted: false,
+			phase: "starting_agent" as const,
+			lastError: null,
+			recoveryCondition: null,
+			attemptsInCurrentRecoveryRound: 1,
+			acceptedAtEpochMs: NOW_MS,
+			updatedAtEpochMs: NOW_MS,
+		};
+		const renderEntries = (phase: "starting_agent" | "waiting_for_evidence", live = false) => {
+			const entries = [
+				makeEntry("start", {
+					createdAt: 123,
+					columnId: "in_progress",
+					taskEditorCreationAgentStartupProgress: { ...progress, phase },
+					...(live ? { turnOwner: "agent" as const, liveness: "live" as const } : {}),
+				}),
+				makeEntry("live", { turnOwner: "agent", liveness: "live" }),
+			];
+			renderBoard(makeHost({ projects: [makeProject("project-a", entries)] }));
+		};
+		renderEntries("starting_agent");
+		const running = container.querySelector<HTMLElement>(
+			'[data-testid="cross-project-task-switcher-section-running"]',
+		);
+		expect(running?.textContent).toContain("1 运行中 · 1 正在启动");
+		expect(
+			running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]')?.textContent,
+		).toBe("正在启动");
+		renderEntries("waiting_for_evidence");
+		expect(running?.textContent).toContain("正在核验启动结果");
+		renderEntries("starting_agent", true);
+		expect(running?.textContent).toContain("2 运行中");
+		expect(
+			running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]'),
+		).toBeNull();
+		expect(running?.querySelectorAll('[data-cross-project-task-switcher-task-id="start"]')).toHaveLength(1);
+	});
+
 	it("Recent 空列表保留阶段筛选和显示更早入口", () => {
 		renderBoard(makeHost({ projects: [makeProject("project-a", [])] }));
 		expect(sectionColumnScrollContainer("remaining").textContent).toContain("No recent tasks match these filters.");

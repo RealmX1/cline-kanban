@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import { TaskPromptSubmissionAcceptanceNotice } from "@/components/task-prompt-submission-acceptance-notice";
 import { TooltipProvider } from "@/components/ui/tooltip";
 
 const NOW_MS = Date.now();
@@ -16,18 +17,25 @@ let previousActEnvironment: boolean | undefined;
 function renderElapsedTimePills(
 	taskOverrides: Partial<ComponentProps<typeof TaskActivityElapsedTimePills>["task"]> = {},
 	nowMs = NOW_MS,
+	revealTooltip = true,
 ) {
 	act(() =>
 		root.render(
-			<TaskActivityElapsedTimePills
-				task={{
-					createdAt: CREATED_AT_MS,
-					agentResponseGenerationStopped: null,
-					lastConversationProgressObservation: null,
-					...taskOverrides,
-				}}
-				nowMs={nowMs}
-			/>,
+			<>
+				<TaskPromptSubmissionAcceptanceNotice
+					acceptance={taskOverrides.agentConversationPromptSubmissionAcceptance}
+				/>
+				<TaskActivityElapsedTimePills
+					task={{
+						createdAt: CREATED_AT_MS,
+						agentResponseGenerationStopped: null,
+						lastConversationProgressObservation: null,
+						...taskOverrides,
+					}}
+					nowMs={nowMs}
+					revealTooltip={revealTooltip}
+				/>
+			</>,
 		),
 	);
 	return container.querySelector<HTMLElement>("[data-task-created-at-pill]");
@@ -54,6 +62,16 @@ afterEach(() => {
 });
 
 describe("跨项目精简行的创建时间", () => {
+	it("未悬停卡片时，键盘聚焦仍能打开各会话活动详情", async () => {
+		renderElapsedTimePills({}, NOW_MS, false);
+		const activityDetails = container.querySelector<HTMLElement>(
+			"[data-task-conversation-session-activity-details]",
+		)!;
+		await act(async () => activityDetails.focus());
+		expect(document.activeElement).toBe(activityDetails);
+		expect(document.querySelector('[role="tooltip"]')?.textContent).toContain("主对话尚无可信活动时间");
+	});
+
 	it("未确认接受显示持久的来源、时间、原因，接受后消失", () => {
 		const acceptance = {
 			status: "unconfirmed" as const,

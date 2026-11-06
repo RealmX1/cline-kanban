@@ -151,7 +151,6 @@ function SessionHarness({
 	selectedAgentId?: "codex" | "claude";
 }) {
 	const [board, setBoard] = useState(boardWithTask);
-	const [, setSelectedTaskId] = useState<string | null>(null);
 	const editor = useTaskEditor({
 		board,
 		setBoard,
@@ -165,7 +164,6 @@ function SessionHarness({
 		isNewTaskStartInPlanModeDefaultLoaded: true,
 		ompAgentSessionTransportForNewTasks: "pty_terminal",
 		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
-		setSelectedTaskId,
 	});
 	latestEditor = editor;
 	replaceBroadcastBoard = setBoard;

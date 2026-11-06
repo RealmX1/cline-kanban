@@ -149,6 +149,7 @@ import { resolveTaskTitle } from "../core/task-title.js";
 import { parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
+	measureTaskSessionStartupPhase,
 	recordTaskSessionStartDiagnostic,
 	type TaskSessionStartDiagnosticEvent,
 } from "../diagnostics/task-session-start-diagnostics-logger";
@@ -1191,6 +1192,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				event: TaskSessionStartDiagnosticEvent,
 				phase: string,
 				error: string | null = null,
+				phaseDurationMs?: number,
 			): void => {
 				const summary = latestStartedSummaryForDiagnostics;
 				const facets = summary ? resolveSessionFacets(summary) : null;
@@ -1204,6 +1206,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					requestedTerminalRows: requestedTerminalRowsForDiagnostics,
 					phase,
 					elapsedMs: Date.now() - startRequestReceivedAt,
+					phaseDurationMs,
 					error,
 					session:
 						summary && facets
@@ -1217,6 +1220,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								}
 							: null,
 				});
+			};
+			let currentPhaseStartedAt = Date.now();
+			const enterStartPhase = (phase: string) => {
+				recordStartDiagnostic("phase_completed", startFailurePhase, null, Date.now() - currentPhaseStartedAt);
+				startFailurePhase = phase;
+				currentPhaseStartedAt = Date.now();
 			};
 			try {
 				let body = parseTaskSessionStartRequest(input);
@@ -1275,7 +1284,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				diagnosticTaskId = body.taskId;
 				requestedAgentIdForDiagnostics = body.agentId ?? null;
-				startFailurePhase = "verify_host_task_card_persisted_on_workspace_board";
+				enterStartPhase("verify_host_task_card_persisted_on_workspace_board");
 				const hostTaskCardIdNotYetPersistedOnWorkspaceBoard =
 					await findHostTaskCardIdNotYetPersistedOnWorkspaceBoard(workspaceScope.workspaceId, body);
 				if (hostTaskCardIdNotYetPersistedOnWorkspaceBoard !== null) {
@@ -1297,7 +1306,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart = async (
 					stopJustStartedTaskSessionThroughItsTransport: () => Promise<unknown>,
 				): Promise<RuntimeTaskSessionStartResponse | null> => {
-					startFailurePhase = "reverify_host_task_card_persisted_on_workspace_board_after_session_start";
+					enterStartPhase("reverify_host_task_card_persisted_on_workspace_board_after_session_start");
 					let hostTaskCardIdRemovedFromWorkspaceBoardDuringStart: string | null;
 					try {
 						hostTaskCardIdRemovedFromWorkspaceBoardDuringStart =
@@ -1331,7 +1340,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					taskConversationSessionMetadata?.taskConversationSessionRoleAtCreation ??
 					taskConversationSessionMetadata?.taskConversationSessionRole;
 				const isTaskCollaborator = creationRole === "task_collaborator";
-				startFailurePhase = "resolve_terminal_session_manager";
+				enterStartPhase("resolve_terminal_session_manager");
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				let taskCollaboratorMainContextForkSourceBeforePreparation:
 					| {
@@ -1359,10 +1368,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						sourceNativeSessionId: mainSummary?.agentNativeConversationSessionIdentity?.nativeSessionId,
 					};
 				}
-				startFailurePhase = "load_scoped_runtime_config";
+				enterStartPhase("load_scoped_runtime_config");
 				const requestedClineTaskMode = body.mode ?? "act";
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-				startFailurePhase = "resolve_or_ensure_task_working_directory";
+				enterStartPhase("resolve_or_ensure_task_working_directory");
 				const taskCwd = isHomeAgentSessionId(body.taskId)
 					? workspaceScope.workspacePath
 					: await resolveExistingTaskCwdOrEnsure({
@@ -1395,7 +1404,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					: null;
 				const effectiveAgentId = previousTerminalAgentId ?? body.agentId ?? scopedRuntimeConfig.selectedAgentId;
 				effectiveAgentIdForDiagnostics = effectiveAgentId;
-				startFailurePhase = "validate_task_conversation_session_request";
+				enterStartPhase("validate_task_conversation_session_request");
 				let taskConversationSessionContextForkSourceNativeSessionId: string | undefined;
 				let mainContextForkSourceSummary: RuntimeTaskSessionSummary | undefined;
 				let revalidateMainContextForkSourceBeforeLaunch: (() => Promise<void>) | undefined;
@@ -1459,7 +1468,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					!isResumingExistingConversation &&
 					isForkedTaskConversationSessionContext(taskConversationSessionMetadata)
 				) {
-					startFailurePhase = "inspect_existing_task_conversation_sessions";
+					enterStartPhase("inspect_existing_task_conversation_sessions");
 					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const existingTaskConversationSessionSummaries = [
@@ -1569,7 +1578,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 本次要走哪条通话通道。omp 有 TUI / ACP 两条，解析优先级是
 				// 「请求显式指定（切换 procedure）→ 卡片建卡时固化值 → 全局新任务默认 → catalog 默认」。
 				// 只有可切换的 agent 才为此读一次看板（board.json 读盘不该被塞进每一次启动的热路径）。
-				startFailurePhase = "resolve_agent_session_transport";
+				enterStartPhase("resolve_agent_session_transport");
 				const cardPinnedOmpAgentSessionTransport = canAgentSessionTransportBeSwitched(effectiveAgentId)
 					? (findWorkspaceBoardCard(await loadWorkspaceBoardById(workspaceScope.workspaceId), workspaceTaskId)
 							?.ompAgentSessionTransport ?? null)
@@ -1659,7 +1668,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				await revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
 				// ACP 会话（omp 切到 ACP 时）既不是 PTY 终端 agent 也不是 Cline SDK，走自己的服务。
 				if (resolvedAgentSessionTransport.effectiveSessionTransport === "acp_stdio_subprocess") {
-					startFailurePhase = "start_acp_runtime_session";
+					enterStartPhase("start_acp_runtime_session");
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const previousNativeIdentity =
 						acpTaskSessionService.getSummary(body.taskId)?.agentNativeConversationSessionIdentity ??
@@ -1747,15 +1756,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
 					let nextAcpSummary = acpSummary;
-					startFailurePhase = "capture_initial_turn_checkpoint";
+					enterStartPhase("capture_initial_turn_checkpoint");
 					if (shouldCaptureTurnCheckpoint) {
 						try {
 							const nextTurn = (acpSummary.latestTurnCheckpoint?.turn ?? 0) + 1;
-							const checkpoint = await captureTaskTurnCheckpoint({
-								cwd: taskCwd,
-								taskId: body.taskId,
-								turn: nextTurn,
-							});
+							const checkpoint = await measureTaskSessionStartupPhase(
+								{
+									workspaceId: workspaceScope.workspaceId,
+									taskId: body.taskId,
+									requestedAgentId: requestedAgentIdForDiagnostics,
+									effectiveAgentId: effectiveAgentIdForDiagnostics,
+									phase: "capture_initial_turn_checkpoint_execution",
+								},
+								() =>
+									captureTaskTurnCheckpoint({
+										cwd: taskCwd,
+										taskId: body.taskId,
+										turn: nextTurn,
+									}),
+							);
 							nextAcpSummary = acpTaskSessionService.applyTurnCheckpoint(body.taskId, checkpoint) ?? acpSummary;
 						} catch {
 							// Best effort checkpointing only.
@@ -1775,6 +1794,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						}),
 					);
 					latestStartedSummaryForDiagnostics = nextAcpSummary;
+					enterStartPhase("response_ready");
 					recordStartDiagnostic("response_ready", "response_ready");
 					return { ok: true, summary: nextAcpSummary };
 				}
@@ -1786,7 +1806,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					// If the terminal summary already has a concrete non-Cline agentId,
 					// skip Cline persisted-session probing. That probe can cold-start the
 					// Cline session host and adds multi-second latency to Codex restores.
-					startFailurePhase = "probe_persisted_cline_session";
+					enterStartPhase("probe_persisted_cline_session");
 					const clineSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 					const persistedSession = await clineSessionService
 						.rebindPersistedTaskSession(body.taskId)
@@ -1797,7 +1817,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 
 				if (useClinePath) {
-					startFailurePhase = "resolve_cline_launch_config";
+					enterStartPhase("resolve_cline_launch_config");
 					const hasTaskLevelClineSettingsOverride = body.clineSettings !== undefined;
 					const clineLaunchConfig = await clineProviderService.resolveLaunchConfig({
 						providerIdOverride: body.clineSettings?.providerId ?? undefined,
@@ -1815,7 +1835,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						"forked_from_main_current_turn"
 							? await clineTaskSessionService.loadPersistedTaskSessionMessages(workspaceTaskId)
 							: undefined;
-					startFailurePhase = "start_in_process_cline_runtime_session";
+					enterStartPhase("start_in_process_cline_runtime_session");
 					await beforeAgentProcessLaunch?.();
 					const summary = await clineTaskSessionService.startTaskSession({
 						taskId: body.taskId,
@@ -1859,7 +1879,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					});
 
 					let nextSummary = summary;
-					startFailurePhase = "capture_initial_turn_checkpoint";
+					enterStartPhase("capture_initial_turn_checkpoint");
 					if (shouldCaptureTurnCheckpoint) {
 						try {
 							const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
@@ -1878,6 +1898,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						nextSummary,
 					);
 					latestStartedSummaryForDiagnostics = nextSummary;
+					enterStartPhase("response_ready");
 					recordStartDiagnostic("response_ready", "response_ready");
 
 					return {
@@ -1901,7 +1922,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 				// 从 trash 拖回同样走 `--continue`（见 claudeAdapter），故与「Restart terminal session」同规则：
 				// 恢复既有对话时听会话自己的模型。全新启动不经这里，卡片 override 在那里仍是唯一意图来源。
-				startFailurePhase = "resolve_resumed_terminal_agent_session_model";
+				enterStartPhase("resolve_resumed_terminal_agent_session_model");
 				const startTerminalAgentModelOverrideSettings = body.resumeFromTrash
 					? await resolveResumedTerminalAgentSessionModelOverrideSettings({
 							agentId: resolved.agentId,
@@ -1919,7 +1940,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					: body.terminalAgentModelOverrideSettings?.agentId === resolved.agentId
 						? body.terminalAgentModelOverrideSettings
 						: undefined;
-				startFailurePhase = "start_pty_terminal_runtime_session";
+				enterStartPhase("start_pty_terminal_runtime_session");
 				await revalidateMainContextForkSourceBeforeLaunch?.();
 				const summary = await terminalManager.startTaskSession(
 					{
@@ -1987,7 +2008,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				});
 
 				let nextSummary = summary;
-				startFailurePhase = "capture_initial_turn_checkpoint";
+				enterStartPhase("capture_initial_turn_checkpoint");
 				if (summary.codexConfigurationProfileId)
 					await persistCodexConfigurationProfileBindingForMainTaskSession({
 						workspaceId: workspaceScope.workspaceId,
@@ -1999,11 +2020,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (shouldCaptureTurnCheckpoint) {
 					try {
 						const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
-						const checkpoint = await captureTaskTurnCheckpoint({
-							cwd: taskCwd,
-							taskId: body.taskId,
-							turn: nextTurn,
-						});
+						const checkpoint = await measureTaskSessionStartupPhase(
+							{
+								workspaceId: workspaceScope.workspaceId,
+								taskId: body.taskId,
+								requestedAgentId: requestedAgentIdForDiagnostics,
+								effectiveAgentId: effectiveAgentIdForDiagnostics,
+								phase: "capture_initial_turn_checkpoint_execution",
+							},
+							() =>
+								captureTaskTurnCheckpoint({
+									cwd: taskCwd,
+									taskId: body.taskId,
+									turn: nextTurn,
+								}),
+						);
 						nextSummary = terminalManager.applyTurnCheckpoint(body.taskId, checkpoint) ?? summary;
 					} catch {
 						// Best effort checkpointing only.
@@ -2014,6 +2045,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					nextSummary,
 				);
 				latestStartedSummaryForDiagnostics = nextSummary;
+				enterStartPhase("response_ready");
 				recordStartDiagnostic("response_ready", "response_ready");
 				return {
 					ok: true,

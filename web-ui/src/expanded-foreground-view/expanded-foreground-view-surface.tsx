@@ -4,6 +4,7 @@ import { type ReactNode, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { ExpandedForegroundViewSurfaceController } from "@/expanded-foreground-view/use-expanded-foreground-view-surface";
+import { useIsNonModalFloatingFormWindowPresent } from "@/hooks/use-is-non-modal-floating-form-window-present";
 
 // 只禁用宿主祖先链外的兄弟；宿主自身及随后打开的 Radix portal 继续可交互。
 function suspendBackgroundSiblings(element: HTMLElement): () => void {
@@ -41,6 +42,7 @@ export function ExpandedForegroundViewSurface({
 	children: ReactNode;
 	as?: "div" | "section";
 }) {
+	const hasFloatingFormWindows = useIsNonModalFloatingFormWindowPresent();
 	const closeRef = useRef(controller.close);
 	closeRef.current = controller.close;
 	useEffect(() => {
@@ -76,7 +78,7 @@ export function ExpandedForegroundViewSurface({
 		<FocusScope
 			asChild
 			loop={controller.isExpanded}
-			trapped={controller.isExpanded}
+			trapped={controller.isExpanded && !hasFloatingFormWindows}
 			onMountAutoFocus={(event) => event.preventDefault()}
 			onUnmountAutoFocus={(event) => event.preventDefault()}
 		>

@@ -5,7 +5,7 @@ import {
 	doesPostDeployVerificationDoneEntryGateRequireClosureReasonsForTask,
 	isMoveIntoDoneFailureMessageRejectedByPostDeployVerificationDoneEntryGate,
 } from "@/components/post-deploy-verification/post-deploy-verification-done-entry-gate-precheck";
-import { PostDeployVerificationReviewBeforeMoveIntoDoneWithWorkspaceReadModel } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
+import { PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace } from "@/components/post-deploy-verification/post-deploy-verification-review-before-move-into-done-dialog";
 import { SkipValidationConfirmDialog } from "@/components/skip-validation-confirm-dialog";
 import type { TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { TaskCommentBeforeMoveIntoDoneDialog } from "@/components/task-comment-before-move-into-done-dialog";
@@ -445,9 +445,12 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				}}
 			/>
 			{pendingVerificationReview && normalizeBoardData(pendingVerificationReview.workspaceState.board) ? (
-				<PostDeployVerificationReviewBeforeMoveIntoDoneWithWorkspaceReadModel
+				<PostDeployVerificationReviewBeforeMoveIntoDoneForWorkspace
 					key={`${pendingVerificationReview.workspaceId}:${pendingVerificationReview.taskId}:${pendingVerificationReview.doneEntryFlowIdentity.flowGeneration}`}
 					workspaceId={pendingVerificationReview.workspaceId}
+					onOpenTaskInProject={onOpenTaskInProject}
+					taskCommentToAppendWhenMovingIntoDone={pendingVerificationReview.taskCommentToAppendWhenMovingIntoDone}
+					onNavigateToProjectBoard={onNavigateToProjectBoard}
 					taskId={pendingVerificationReview.taskId}
 					board={normalizeBoardData(pendingVerificationReview.workspaceState.board)!}
 					runtimeRejectionRevision={pendingVerificationReview.runtimeRejectionRevision}
@@ -563,6 +566,8 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 				request={
 					pendingPinReason
 						? {
+								workspaceId: pendingPinReason.workspaceId,
+								taskIncarnationCreatedAtEpochMs: pendingPinReason.taskCard.createdAt,
 								taskId: pendingPinReason.taskCard.id,
 								taskTitle: pendingPinReason.taskCard.title,
 								initialPinReason: pendingPinReason.taskCard.taskPinboardPinReason ?? "",

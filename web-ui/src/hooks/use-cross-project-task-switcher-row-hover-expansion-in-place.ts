@@ -41,6 +41,7 @@ export interface CrossProjectTaskSwitcherRowHoverExpansionTriggerProps {
 	onPointerMove: (event: ReactPointerEvent<HTMLElement>) => void;
 	onPointerLeave: (event: ReactPointerEvent<HTMLElement>) => void;
 	onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void;
+	onPointerDownCapture: () => void;
 	onPointerUp: () => void;
 	onPointerCancel: () => void;
 	onClickCapture: (event: ReactMouseEvent<HTMLElement>) => void;
@@ -152,6 +153,10 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 			touchLongPressRef.current = null;
 		}
 	}, []);
+	useEffect(() => {
+		window.addEventListener("scroll", clearTouchLongPress, true);
+		return () => window.removeEventListener("scroll", clearTouchLongPress, true);
+	}, [clearTouchLongPress]);
 	const scheduleExpandedRowPointerExitCollapse = useCallback(() => {
 		clearPanelPointerExitCollapseTimeout();
 		panelPointerExitCollapseTimeoutIdRef.current = window.setTimeout(() => {
@@ -295,15 +300,32 @@ export function useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 					scheduleExpandedRowPointerExitCollapse();
 				}
 			},
-			onPointerDown: (event) => {
+			onPointerDownCapture: () => {
 				// 新手势开始（任意 pointerType）：上一次长按没被消费的「吞 click」标志作废，免得误吞这次手势的 click。
+				// 子按钮会停止 pointerdown 冒泡，必须在捕获阶段重置。
 				suppressNextRowClickAfterTouchLongPressRef.current = false;
+			},
+			onPointerDown: (event) => {
 				if (event.pointerType !== "touch") {
 					// 已经在点了：不再在按下与抬起之间把这一行换成卡片、抢走这次 click。
 					cancelPendingHoverIntent();
 					return;
 				}
 				clearTouchLongPress();
+				if (
+					rowExpansionStateBeforeHover !== "compact_row" ||
+					isSameCrossProjectTaskSwitcherRow(rowExpandedInPlaceByHoverRef.current?.rowIdentity ?? null, rowIdentity)
+				)
+					return;
+				const interactiveTarget =
+					event.target instanceof Element
+						? event.target.closest("button, a, input, textarea, [role='button']")
+						: null;
+				if (
+					interactiveTarget &&
+					!interactiveTarget.hasAttribute("data-cross-project-task-switcher-compact-row-open-task")
+				)
+					return;
 				touchLongPressRef.current = {
 					startX: event.clientX,
 					startY: event.clientY,

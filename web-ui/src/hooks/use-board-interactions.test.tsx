@@ -226,9 +226,7 @@ function createBoardWithValidationTask(taskId: string): BoardData {
 	};
 }
 
-// Full column set with a single task placed in `columnId`, so the level-triggered effect's
-// facet-driven column mapping (awaiting-review → review, agent-turn → bounce, interrupted → trash)
-// can be observed end-to-end.
+// 五列夹具用于验证 facet 自动流转：待审进入 review，活跃 agent 回到 in_progress，中断保留原列。
 function createBoardWithTaskInColumn(taskId: string, columnId: BoardData["columns"][number]["id"]): BoardData {
 	const columns: BoardData["columns"] = [
 		{ id: "backlog", title: "Backlog", cards: [] },
@@ -1827,21 +1825,24 @@ describe("useBoardInteractions", () => {
 			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
 		});
 
-		it("interrupted 会话从 In Progress 自动移入 Done（trash）（等价旧 state==='interrupted'）", async () => {
-			let currentBoard = createBoardWithTaskInColumn("task-int", "in_progress");
-			const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
-				currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
-			});
-			await renderWithSessions(currentBoard, setBoard, {
-				"task-int": createRunningSession("task-int", {
-					state: "interrupted",
-					reviewReason: "interrupted",
-					pid: null,
-				}),
-			});
-			expect(cardIdsIn(currentBoard, "trash")).toEqual(["task-int"]);
-			expect(cardIdsIn(currentBoard, "in_progress")).toEqual([]);
-		});
+		it.each(["backlog", "in_progress", "review", "validation", "trash"] as const)(
+			"中断会话保留 %s 列，不自动结案",
+			async (columnId) => {
+				let currentBoard = createBoardWithTaskInColumn("task-int", columnId);
+				const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>((nextBoard) => {
+					currentBoard = typeof nextBoard === "function" ? nextBoard(currentBoard) : nextBoard;
+				});
+				await renderWithSessions(currentBoard, setBoard, {
+					"task-int": createRunningSession("task-int", {
+						state: "interrupted",
+						reviewReason: "interrupted",
+						pid: null,
+					}),
+				});
+				expect(cardIdsIn(currentBoard, columnId)).toEqual(["task-int"]);
+				expect(currentBoard.columns.flatMap((column) => column.cards)).toHaveLength(1);
+			},
+		);
 	});
 
 	// B5：Rule A 自动流转的 summary 引用短路。summary 引用跨 tick 稳定（runtime-state-hub merge
@@ -2386,7 +2387,7 @@ describe("useBoardInteractions", () => {
 			);
 		});
 
-		it("tags the interrupted-session autoflow into Done with its own initiator", async () => {
+		it("中断会话不登记自动结案发起方", async () => {
 			mockUnavailableProgrammaticCardMoves();
 			const harness = await renderTrackingBoard(createBoardWithTaskInColumn("task-int", "in_progress"), {
 				initialSessions: {
@@ -2398,10 +2399,9 @@ describe("useBoardInteractions", () => {
 				},
 			});
 
-			expect(cardIdsIn(harness.readBoard(), "trash")).toEqual(["task-int"]);
-			expect(readColumnPlacementInitiator("task-int")).toBe(
-				"web_ui_client_automation_interrupted_session_autoflow_into_done_column",
-			);
+			expect(cardIdsIn(harness.readBoard(), "in_progress")).toEqual(["task-int"]);
+			expect(cardIdsIn(harness.readBoard(), "trash")).toEqual([]);
+			expect(readColumnPlacementInitiator("task-int")).toBeUndefined();
 		});
 
 		it("passes the matching initiator into every animated autoflow attempt", async () => {
@@ -2439,10 +2439,7 @@ describe("useBoardInteractions", () => {
 			expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-to-review", "in_progress", "review", {
 				boardMutationInitiator: "web_ui_client_automation_session_facet_driven_column_autoflow",
 			});
-			expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-interrupted", "in_progress", "trash", {
-				skipTrashWorkflow: true,
-				boardMutationInitiator: "web_ui_client_automation_interrupted_session_autoflow_into_done_column",
-			});
+			expect(tryProgrammaticCardMove).toHaveBeenCalledTimes(1);
 		});
 
 		it("tags the Post-Deploy Verification completion move into Done with the panel-completion initiator", async () => {

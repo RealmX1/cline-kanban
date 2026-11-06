@@ -1,12 +1,13 @@
 import { ChevronLeft, ChevronRight, Circle, CircleDot } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useState } from "react";
-
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import {
 	TASK_START_ONBOARDING_SLIDES,
 	TaskStartAgentOnboardingCarousel,
 } from "@/components/task-start-agent-onboarding-carousel";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
@@ -14,7 +15,7 @@ import type {
 	RuntimeConfigResponse,
 } from "@/runtime/types";
 
-export function StartupOnboardingDialog({
+function StartupOnboardingDialogForm({
 	open,
 	onClose,
 	selectedAgentId,
@@ -134,3 +135,12 @@ export function StartupOnboardingDialog({
 		</Dialog>
 	);
 }
+
+export const StartupOnboardingDialog = hostNonModalFloatingForm(StartupOnboardingDialogForm, {
+	formKind: "StartupOnboardingDialog",
+	isOpen: (props) => props.open,
+	instanceIdentity: () => "startup-onboarding",
+	ownership: (props) => ({ workspaceId: props.workspaceId }),
+	withClose: (props, close) => ({ ...props, open: true, onClose: close }),
+	onClosed: (props) => props.onClose(),
+});

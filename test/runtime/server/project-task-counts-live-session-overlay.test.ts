@@ -9,10 +9,8 @@ import type {
 import type { SessionFacets } from "../../../src/core/session-activity";
 import { applyLiveSessionStateToProjectTaskCounts } from "../../../src/server/project-task-counts-live-session-overlay";
 
-// Stage 3 余区：workspace-registry 的项目计数叠加从 legacy `state` 读 → 双轴 facet 真相源。
-// 本套件锁定「迁移前可见行为基线」：旧 state==="awaiting_review"/"interrupted" 的两条计数调整
-// 在 facet 读下逐项等价；并含 live↔exited 折叠的反向证明（exited 仍记 review，不被偷渡区分）。
-// 纯函数测试，不启动 SDK host（见 AGENTS.md Node22 CI 挂起告警）。
+// 待审按 facet 叠加；中断保留原 Stage，不把会话退出误记为结案。
+// 纯函数测试，不启动 SDK host。
 
 function makeCard(id: string): RuntimeBoardCard {
 	return {
@@ -69,7 +67,7 @@ const USER_REVIEW_FACETS: Pick<SessionFacets, "turnOwner" | "liveness" | "userTu
 	userTurnKind: "review",
 };
 
-describe("applyLiveSessionStateToProjectTaskCounts (legacy state → facet 行为保持)", () => {
+describe("applyLiveSessionStateToProjectTaskCounts", () => {
 	it("无 live session 时原样返回计数", () => {
 		const counts = makeCounts({ in_progress: 2, backlog: 1 });
 		const result = applyLiveSessionStateToProjectTaskCounts(counts, makeBoard({ in_progress: ["a", "b"] }), {});
@@ -106,15 +104,18 @@ describe("applyLiveSessionStateToProjectTaskCounts (legacy state → facet 行�
 		expect(result).toEqual(counts);
 	});
 
-	it("interrupted（非 trash/validation 列）→ 该列 -1、trash +1", () => {
-		const counts = makeCounts({ in_progress: 1 });
-		const result = applyLiveSessionStateToProjectTaskCounts(
-			counts,
-			makeBoard({ in_progress: ["a"] }),
-			sessionsOf(makeSummary({ taskId: "a", state: "interrupted", reviewReason: "interrupted" })),
-		);
-		expect(result).toEqual(makeCounts({ in_progress: 0, trash: 1 }));
-	});
+	it.each(["backlog", "in_progress", "review", "validation", "trash"] as const)(
+		"中断会话保留 %s 的任务计数",
+		(columnId) => {
+			const counts = makeCounts({ [columnId]: 1 });
+			const result = applyLiveSessionStateToProjectTaskCounts(
+				counts,
+				makeBoard({ [columnId]: ["a"] }),
+				sessionsOf(makeSummary({ taskId: "a", state: "interrupted", reviewReason: "interrupted" })),
+			);
+			expect(result).toEqual(counts);
+		},
+	);
 
 	it("interrupted 但已在 validation/trash 列 → 计数不变", () => {
 		const counts = makeCounts({ validation: 1, trash: 1 });
@@ -182,7 +183,7 @@ describe("applyLiveSessionStateToProjectTaskCounts (legacy state → facet 行�
 		expect(result).toEqual(makeCounts({ in_progress: 0, review: 1 }));
 	});
 
-	it("多会话混合：review 调整与 interrupt 调整叠加正确", () => {
+	it("多会话混合：待审调整计数，中断保留原列", () => {
 		const counts = makeCounts({ in_progress: 3 });
 		const result = applyLiveSessionStateToProjectTaskCounts(
 			counts,
@@ -193,6 +194,6 @@ describe("applyLiveSessionStateToProjectTaskCounts (legacy state → facet 行�
 				makeSummary({ taskId: "c", state: "running", pid: 1 }),
 			),
 		);
-		expect(result).toEqual(makeCounts({ in_progress: 1, review: 1, trash: 1 }));
+		expect(result).toEqual(makeCounts({ in_progress: 2, review: 1 }));
 	});
 });

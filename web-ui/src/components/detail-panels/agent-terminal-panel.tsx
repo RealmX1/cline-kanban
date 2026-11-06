@@ -84,6 +84,7 @@ interface AgentTerminalSessionControls {
 	searchOpenRequestKey: number;
 	searchResults: TerminalSearchResultState;
 	stopTerminal: () => Promise<void>;
+	captureAgentSessionRestartForFloatingForm?: () => (arguments_: string[]) => Promise<void>;
 	refreshTerminal: (additionalAgentStartupArgumentsForThisRestart?: string[]) => Promise<void>;
 	adoptExistingAgentConversationAndResume: (initialization: RuntimeTaskAgentSessionInitialization) => Promise<void>;
 	forceStopHarnessBackgroundSessionAndResumeHere: () => Promise<void>;
@@ -416,6 +417,10 @@ function AgentTerminalEmptySessionRecoveryNotice({
 // - Restart：杀掉 agent 进程再从磁盘 transcript 续跑。它会丢掉当前这一轮（还没落盘），所以在活跃回合里
 //   先弹确认。
 function TerminalViewResyncAndAgentSessionRestartButtons({
+	workspaceId,
+	taskId,
+	runtimeSessionIncarnationId,
+	captureAgentSessionRestartForFloatingForm,
 	supportsAdditionalStartupArgumentsForRestart,
 	showAgentSessionRestartButton,
 	canRestartAgentSession,
@@ -427,6 +432,10 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 	iconSize,
 	variant,
 }: {
+	workspaceId: string | null;
+	taskId: string;
+	runtimeSessionIncarnationId?: string | null;
+	captureAgentSessionRestartForFloatingForm?: () => (arguments_: string[]) => Promise<void>;
 	supportsAdditionalStartupArgumentsForRestart: boolean;
 	showAgentSessionRestartButton: boolean;
 	canRestartAgentSession: boolean;
@@ -438,9 +447,13 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 	iconSize: number;
 	variant: "default" | "ghost";
 }): ReactElement {
+	const [restartBoundToOpenedForm, setRestartBoundToOpenedForm] = useState<
+		((arguments_: string[]) => Promise<void>) | null
+	>(null);
 	const [isRestartConfirmOpen, setIsRestartConfirmOpen] = useState(false);
 	const [isAdditionalRestartActionMenuOpen, setIsAdditionalRestartActionMenuOpen] = useState(false);
 	const [isRestartWithArgumentsDialogOpen, setIsRestartWithArgumentsDialogOpen] = useState(false);
+	const [restartWithArgumentsOpeningRequestSequence, setRestartWithArgumentsOpeningRequestSequence] = useState(0);
 	const requestQuickRestart = () => {
 		if (isAgentSessionInActiveTurn) setIsRestartConfirmOpen(true);
 		else void onRestartAgentSession();
@@ -472,7 +485,16 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 					primaryLabel="快捷重启"
 					primaryAccessibleLabel="Restart agent session"
 					onPrimaryAction={requestQuickRestart}
-					additionalAction={{ label: "带参数重启…", onSelect: () => setIsRestartWithArgumentsDialogOpen(true) }}
+					additionalAction={{
+						label: "带参数重启…",
+						onSelect: () => {
+							setRestartWithArgumentsOpeningRequestSequence((sequence) => sequence + 1);
+							setRestartBoundToOpenedForm(
+								() => captureAgentSessionRestartForFloatingForm?.() ?? onRestartAgentSession,
+							);
+							setIsRestartWithArgumentsDialogOpen(true);
+						},
+					}}
 					disabled={!canRestartAgentSession || isRestartingAgentSession}
 				/>
 			) : showAgentSessionRestartButton ? (
@@ -492,10 +514,14 @@ function TerminalViewResyncAndAgentSessionRestartButtons({
 			) : null}
 			{isRestartWithArgumentsDialogOpen ? (
 				<AgentSessionRestartWithAdditionalStartupArgumentsDialog
+					openingRequestSequence={restartWithArgumentsOpeningRequestSequence}
+					workspaceId={workspaceId}
+					conversationSessionId={taskId}
+					runtimeSessionIncarnationId={runtimeSessionIncarnationId}
 					open
 					onOpenChange={setIsRestartWithArgumentsDialogOpen}
 					isAgentSessionInActiveTurn={isAgentSessionInActiveTurn}
-					onRestartAgentSession={onRestartAgentSession}
+					onRestartAgentSession={restartBoundToOpenedForm ?? onRestartAgentSession}
 					disabled={!canRestartAgentSession}
 				/>
 			) : null}
@@ -857,6 +883,7 @@ function AgentTerminalPanelLayout({
 		findPreviousInTerminal,
 		openTerminalSearch,
 		refreshTerminal,
+		captureAgentSessionRestartForFloatingForm,
 		adoptExistingAgentConversationAndResume,
 		forceStopHarnessBackgroundSessionAndResumeHere,
 		resyncTerminalView,
@@ -1029,6 +1056,10 @@ function AgentTerminalPanelLayout({
 									/>
 								</Tooltip>
 								<TerminalViewResyncAndAgentSessionRestartButtons
+									workspaceId={workspaceId}
+									taskId={taskId}
+									runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
+									captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
 									supportsAdditionalStartupArgumentsForRestart={
 										(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
 										"codex"
@@ -1114,6 +1145,10 @@ function AgentTerminalPanelLayout({
 								/>
 							</Tooltip>
 							<TerminalViewResyncAndAgentSessionRestartButtons
+								workspaceId={workspaceId}
+								taskId={taskId}
+								runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
+								captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
 								supportsAdditionalStartupArgumentsForRestart={
 									(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
 									"codex"

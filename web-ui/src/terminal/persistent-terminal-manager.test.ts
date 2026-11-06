@@ -1,6 +1,7 @@
 import { Terminal as HeadlessTerminal } from "@xterm/headless";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SHELL_SESSION_TERMINAL_COLS, TASK_SESSION_TERMINAL_COLS } from "@/runtime/task-session-geometry";
+import * as runtimeTrpcClientQueryModule from "@/runtime/trpc-client";
 import type { RuntimeTerminalWsResizeMessage } from "@/runtime/types";
 import {
 	disposeAllPersistentTerminalsForWorkspace,
@@ -465,6 +466,31 @@ describe("persistent-terminal-manager", () => {
 		expect(newerDisposeSpy).not.toHaveBeenCalled(); // 较新 parked 在最近 2 个内，保留
 		expect(mountedDisposeSpy).not.toHaveBeenCalled(); // mounted 永不被回收
 	});
+
+	it.each([undefined, "new-runtime-incarnation"])(
+		"未捕获打开时的会话代次时阻止带参数重启（当前代次=%s）",
+		async (currentIncarnation) => {
+			const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+			const restart = terminal.captureAgentSessionRestartForFloatingForm();
+			const refresh = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true });
+			const readCurrentSession = vi.fn(async () => ({
+				summary: { taskId: "task-a", runtimeSessionIncarnationId: currentIncarnation },
+			}));
+			const client = vi.spyOn(runtimeTrpcClientQueryModule, "getRuntimeTrpcClient").mockReturnValue({
+				runtime: {
+					getTaskConversationSession: {
+						query: readCurrentSession,
+					},
+				},
+			} as unknown as ReturnType<typeof runtimeTrpcClientQueryModule.getRuntimeTrpcClient>);
+			try {
+				await expect(restart(["--extra-argument"])).rejects.toThrow("暂时无法核对原会话代次");
+				expect(refresh).not.toHaveBeenCalled();
+			} finally {
+				client.mockRestore();
+			}
+		},
+	);
 
 	it("does not resend unchanged resize control frames", () => {
 		const terminal = ensurePersistentTerminal({

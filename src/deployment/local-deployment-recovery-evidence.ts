@@ -12,6 +12,7 @@ import {
 import { localDeploymentEffectProofSchema } from "./local-deployment-execution-contract";
 
 const executeReadOnlyEffectObservation = promisify(execFile);
+const stageRecoveryEvidenceObservationSchema = z.object({ evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/) });
 const runtimeProcessRecoveryObservationSchema = z.object({
 	result: z.object({
 		data: z.object({
@@ -28,6 +29,22 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 	const restriction = await readLocalDeploymentExecutionRestriction(directory);
 	const analysis = summarizeLocalDeploymentExecution(record, restriction);
 	const stage = record.manifest.stages.find((item) => item.stage === analysis.recovery.unfinishedStage);
+	const stageRecoveryEvidenceObservation = (async (): Promise<string> => {
+		if (restriction || record.finishedOutcome || !stage?.readOnlyRecoveryEvidenceObservationCommand)
+			return "not_applicable";
+		try {
+			const command = stage.readOnlyRecoveryEvidenceObservationCommand;
+			const { stdout } = await executeReadOnlyEffectObservation(command[0], command.slice(1), {
+				cwd: record.manifest.sourceCheckoutPath,
+				timeout: 7_000,
+				maxBuffer: 1_048_576,
+			});
+			const observation = stageRecoveryEvidenceObservationSchema.safeParse(JSON.parse(stdout));
+			return observation.success ? observation.data.evidenceSha256 : "unavailable";
+		} catch {
+			return "unavailable";
+		}
+	})();
 	let effectObservation = "not_applicable";
 	let runtimeProcessIdentity: unknown = "not_observed";
 	if (!restriction && !record.finishedOutcome && stage?.effectVerificationCommand) {
@@ -94,6 +111,7 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 				}
 			}),
 	);
+	const stageRecoveryEvidenceSha256 = await stageRecoveryEvidenceObservation;
 	return {
 		evidenceSha256: createHash("sha256")
 			.update(
@@ -104,6 +122,7 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 					unfinishedStage: analysis.recovery.unfinishedStage,
 					restriction,
 					effectObservation,
+					stageRecoveryEvidenceSha256,
 					runtimeProcessIdentity,
 					pendingCommandOriginals,
 				}),

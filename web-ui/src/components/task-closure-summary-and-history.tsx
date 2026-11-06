@@ -4,11 +4,13 @@ import {
 	type TaskClosureRecord,
 } from "@runtime-task-closure-contract";
 import { useCallback, useEffect, useState } from "react";
+import { useNonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import {
 	createTaskClosureFormDraft,
 	resolveTaskClosureFormDetails,
 	TaskClosureFormFields,
 } from "@/components/task-closure-form-fields";
+import { TaskClosureOutcomeCorrectionForm } from "@/components/task-closure-outcome-correction-form";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
 import {
@@ -28,6 +30,7 @@ export function TaskClosureSummaryAndHistory({
 	workspaceId: string | null;
 	isClosed: boolean;
 }) {
+	const floatingFormHost = useNonModalFloatingFormWindowHost();
 	const [open, setOpen] = useState(false);
 	const [history, setHistory] = useState<Awaited<ReturnType<typeof readTaskClosureHistoryInWorkspace>> | null>(null);
 	const [error, setError] = useState<string | null>(null);
@@ -175,8 +178,28 @@ export function TaskClosureSummaryAndHistory({
 						) : (
 							<Button
 								onClick={() => {
-									setDraft(createTaskClosureFormDraft(latestClosed?.details));
-									setEditing(true);
+									if (floatingFormHost && workspaceId) {
+										floatingFormHost.openWindow({
+											formKind: "closure-outcome-correction",
+											instanceIdentity: JSON.stringify([workspaceId, card.id, card.createdAt]),
+											ownership: {
+												workspaceId,
+												taskId: card.id,
+												taskIncarnationCreatedAtEpochMs: card.createdAt,
+											},
+											render: ({ close }) => (
+												<TaskClosureOutcomeCorrectionForm
+													workspaceId={workspaceId}
+													card={{ ...card, taskClosureSummary: latestClosed ?? card.taskClosureSummary }}
+													close={close}
+												/>
+											),
+										});
+										setOpen(false);
+									} else {
+										setDraft(createTaskClosureFormDraft(latestClosed?.details));
+										setEditing(true);
+									}
 								}}
 							>
 								补记或更正结果

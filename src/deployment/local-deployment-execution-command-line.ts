@@ -131,7 +131,9 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 							: null,
 					nextAction: needsMachineEvidence
 						? "按已登记的机器条件自动接续，不请求人工提供机器可取得的信息"
-						: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
+						: result.deploymentOutcome === "quality_validation_failed"
+							? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
+							: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
 					recovery: needsMachineEvidence
 						? {
 								action: "resume_same_run",

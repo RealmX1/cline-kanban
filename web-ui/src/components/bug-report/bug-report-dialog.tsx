@@ -8,9 +8,11 @@ import {
 	collectBugReportDiagnostics,
 	deriveBugReportTitle,
 } from "@/components/bug-report/build-bug-report-content";
+import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import { TaskPromptComposer } from "@/components/task-prompt-composer";
 import { Button } from "@/components/ui/button";
-import { Dialog, DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { DialogBody, DialogFooter, DialogHeader } from "@/components/ui/dialog";
+import { NonModalFormDialog as Dialog } from "@/components/ui/non-modal-form-dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { KANBAN_FORK_GITHUB_ISSUES_URL } from "@/config/issue-reporting-urls";
 import {
@@ -32,9 +34,10 @@ export interface BugReportDialogProps {
 	activeView: string;
 	/** 报告入口在此对话框挂载前获取的页面截图，失败时为 null。 */
 	initialScreenshot: TaskImage | null;
+	openingRequestSequence?: number;
 }
 
-export function BugReportDialog({
+function BugReportDialogForm({
 	open,
 	onOpenChange,
 	devProject,
@@ -42,6 +45,7 @@ export function BugReportDialog({
 	activeView,
 	initialScreenshot,
 }: BugReportDialogProps): ReactElement {
+	const fieldIdPrefix = useId();
 	const [title, setTitle] = useState("");
 	const [description, setDescription] = useState("");
 	const [images, setImages] = useState<TaskImage[]>([]);
@@ -134,20 +138,20 @@ export function BugReportDialog({
 				onOpenChange(isOpen);
 			}}
 			contentClassName="max-w-lg"
-			contentAriaDescribedBy="bug-report-dialog-description"
+			contentAriaDescribedBy={`${fieldIdPrefix}-description-text`}
 		>
 			<DialogHeader title="Report a bug" icon={<Bug size={16} />} />
 			<DialogBody className="flex flex-col gap-4">
-				<p id="bug-report-dialog-description" className="sr-only">
+				<p id={`${fieldIdPrefix}-description-text`} className="sr-only">
 					Report a bug with an automatic screenshot and diagnostic context.
 				</p>
 
 				<div>
-					<label htmlFor="bug-report-title" className="mb-1.5 block text-[12px] text-text-secondary">
+					<label htmlFor={`${fieldIdPrefix}-title`} className="mb-1.5 block text-[12px] text-text-secondary">
 						Title <span className="text-text-tertiary">(optional)</span>
 					</label>
 					<input
-						id="bug-report-title"
+						id={`${fieldIdPrefix}-title`}
 						type="text"
 						value={title}
 						onChange={(event) => setTitle(event.target.value)}
@@ -157,11 +161,11 @@ export function BugReportDialog({
 				</div>
 
 				<div>
-					<label htmlFor="bug-report-description" className="mb-1.5 block text-[12px] text-text-secondary">
+					<label htmlFor={`${fieldIdPrefix}-body`} className="mb-1.5 block text-[12px] text-text-secondary">
 						What went wrong?
 					</label>
 					<TaskPromptComposer
-						id="bug-report-description"
+						id={`${fieldIdPrefix}-body`}
 						value={description}
 						onValueChange={setDescription}
 						images={images}
@@ -216,3 +220,22 @@ export function BugReportDialog({
 		</Dialog>
 	);
 }
+
+export const BugReportDialog = hostNonModalFloatingForm(BugReportDialogForm, {
+	formKind: "BugReportDialog",
+	isOpen: (props) => props.open,
+	openingRequestIdentity: (props) => props.openingRequestSequence,
+	instanceIdentity: (props) => JSON.stringify([props.currentProject?.id, props.activeView]),
+	ownership: (props) => ({
+		workspaceId: props.currentProject?.id,
+		displayLabel: [props.currentProject?.name, props.activeView].filter(Boolean).join(" / "),
+	}),
+	withClose: (props, close) => ({
+		...props,
+		open: true,
+		onOpenChange: (open) => {
+			if (!open) close();
+		},
+	}),
+	onClosed: (props) => props.onOpenChange(false),
+});

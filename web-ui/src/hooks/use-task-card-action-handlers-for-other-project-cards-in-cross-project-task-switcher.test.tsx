@@ -568,6 +568,7 @@ it("跨项目引导等待真实目标看板落定，局部视图卸载后仍能�
 		const [showsAllProjects, setShowsAllProjects] = useState(true);
 		const [observations, setObservations] = useState(0);
 		const navigation = useCrossProjectTaskOpenInProject({
+			navigationCurrentProjectId: currentProjectId,
 			board,
 			currentProjectId,
 			projectIdOwningHydratedBoard: owner,

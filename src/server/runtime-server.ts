@@ -1555,6 +1555,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			readLatestNotificationSummaryTextOfTaskCardFromNotificationLifecycleArchive,
 	});
 	const taskEditorCreationSubmissionApi = createTaskEditorCreationSubmissionService({
+		onStatusChanged: () => {
+			void deps.runtimeStateHub.broadcastRuntimeProjectsUpdated(null);
+		},
 		resolveCreationSettings: async (scope, card) => {
 			const config = await deps.workspaceRegistry.loadScopedRuntimeConfig(scope);
 			const agentId = card.agentId ?? config.selectedAgentId;

@@ -14,6 +14,7 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 	disabled = false,
 	variant = "ghost",
 	size = "xs",
+	touchAdditionalActionTrigger = "separate_menu_button",
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
@@ -25,6 +26,7 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 	disabled?: boolean;
 	variant?: ButtonVariant;
 	size?: ButtonSize;
+	touchAdditionalActionTrigger?: "separate_menu_button" | "long_press_primary_button";
 }) {
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const menuRef = useRef<HTMLDivElement>(null);
@@ -32,6 +34,21 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 	const openingInteractionRef = useRef<"hover" | "touch" | "keyboard">("hover");
 	const restoreTriggerFocusAfterEscapeRef = useRef(false);
 	const closeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	const touchLongPressRef = useRef<{
+		timeoutId: ReturnType<typeof setTimeout>;
+		removeScrollCancellationListener: () => void;
+		pointerId: number;
+		startX: number;
+		startY: number;
+	} | null>(null);
+	const suppressReleasedLongPressClickRef = useRef(false);
+	const cancelTouchLongPress = () => {
+		if (touchLongPressRef.current) {
+			clearTimeout(touchLongPressRef.current.timeoutId);
+			touchLongPressRef.current.removeScrollCancellationListener();
+		}
+		touchLongPressRef.current = null;
+	};
 	const cancelScheduledClose = () => {
 		if (closeTimeoutRef.current !== null) clearTimeout(closeTimeoutRef.current);
 		closeTimeoutRef.current = null;
@@ -39,10 +56,13 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 	useEffect(
 		() => () => {
 			if (closeTimeoutRef.current !== null) clearTimeout(closeTimeoutRef.current);
+			cancelTouchLongPress();
 		},
 		[],
 	);
+
 	useEffect(() => {
+		if (disabled) cancelTouchLongPress();
 		if (!disabled || !open) return;
 		if (closeTimeoutRef.current !== null) clearTimeout(closeTimeoutRef.current);
 		closeTimeoutRef.current = null;
@@ -76,6 +96,50 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 					onMouseDown={(event) => event.stopPropagation()}
 					onPointerDown={(event) => {
 						event.stopPropagation();
+						cancelTouchLongPress();
+						suppressReleasedLongPressClickRef.current = false;
+						if (
+							disabled ||
+							event.pointerType !== "touch" ||
+							touchAdditionalActionTrigger !== "long_press_primary_button"
+						)
+							return;
+						const { pointerId, clientX, clientY } = event;
+						const cancelForScroll = () => cancelTouchLongPress();
+						window.addEventListener("scroll", cancelForScroll, true);
+						touchLongPressRef.current = {
+							pointerId,
+							removeScrollCancellationListener: () =>
+								window.removeEventListener("scroll", cancelForScroll, true),
+							startX: clientX,
+							startY: clientY,
+							timeoutId: setTimeout(() => {
+								cancelTouchLongPress();
+								suppressReleasedLongPressClickRef.current = true;
+								cancelScheduledClose();
+								openingInteractionRef.current = "touch";
+								onOpenChange(true);
+							}, 500),
+						};
+					}}
+					onPointerMove={(event) => {
+						const pendingTouchLongPress = touchLongPressRef.current;
+						if (
+							pendingTouchLongPress?.pointerId === event.pointerId &&
+							Math.hypot(
+								event.clientX - pendingTouchLongPress.startX,
+								event.clientY - pendingTouchLongPress.startY,
+							) > 8
+						)
+							cancelTouchLongPress();
+					}}
+					onPointerUp={cancelTouchLongPress}
+					onPointerCancel={() => {
+						cancelTouchLongPress();
+						suppressReleasedLongPressClickRef.current = false;
+					}}
+					onContextMenu={(event) => {
+						if (touchLongPressRef.current || suppressReleasedLongPressClickRef.current) event.preventDefault();
 					}}
 					onPointerEnter={(event) => {
 						if (event.pointerType === "touch" || disabled) return;
@@ -85,10 +149,18 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 						onOpenChange(true);
 					}}
 					onPointerLeave={(event) => {
-						if (event.pointerType !== "touch") scheduleClose();
+						if (event.pointerType === "touch") return;
+						cancelTouchLongPress();
+						scheduleClose();
 					}}
 					onClick={(event) => {
 						event.stopPropagation();
+						if (suppressReleasedLongPressClickRef.current && event.detail !== 0) {
+							suppressReleasedLongPressClickRef.current = false;
+							event.preventDefault();
+							return;
+						}
+						suppressReleasedLongPressClickRef.current = false;
 						activateOption(onPrimaryAction);
 					}}
 					onKeyDown={(event) => {
@@ -102,25 +174,27 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 					}}
 				/>
 			</RadixPopover.Anchor>
-			<Button
-				icon={<ChevronDown size={12} />}
-				variant={variant}
-				size={size}
-				disabled={disabled}
-				className="hidden [@media(any-pointer:coarse)]:inline-flex [@media(any-pointer:coarse)]:min-h-11 [@media(any-pointer:coarse)]:min-w-8"
-				aria-label={`展开${primaryLabel}附加操作`}
-				aria-haspopup="menu"
-				aria-expanded={open && !disabled}
-				aria-controls={open && !disabled ? menuId : undefined}
-				onMouseDown={(event) => event.stopPropagation()}
-				onPointerDown={(event) => event.stopPropagation()}
-				onClick={(event) => {
-					event.stopPropagation();
-					cancelScheduledClose();
-					openingInteractionRef.current = "touch";
-					onOpenChange(!open);
-				}}
-			/>
+			{touchAdditionalActionTrigger === "separate_menu_button" ? (
+				<Button
+					icon={<ChevronDown size={12} />}
+					variant={variant}
+					size={size}
+					disabled={disabled}
+					className="hidden [@media(any-pointer:coarse)]:inline-flex [@media(any-pointer:coarse)]:min-h-11 [@media(any-pointer:coarse)]:min-w-8"
+					aria-label={`展开${primaryLabel}附加操作`}
+					aria-haspopup="menu"
+					aria-expanded={open && !disabled}
+					aria-controls={open && !disabled ? menuId : undefined}
+					onMouseDown={(event) => event.stopPropagation()}
+					onPointerDown={(event) => event.stopPropagation()}
+					onClick={(event) => {
+						event.stopPropagation();
+						cancelScheduledClose();
+						openingInteractionRef.current = "touch";
+						onOpenChange(!open);
+					}}
+				/>
+			) : null}
 			<RadixPopover.Portal>
 				<RadixPopover.Content
 					data-mobile-focus-view-idle-collapse-suspension=""
@@ -144,6 +218,15 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 					}}
 					onEscapeKeyDown={() => {
 						restoreTriggerFocusAfterEscapeRef.current = true;
+					}}
+					onInteractOutside={(event) => {
+						// 长按抬手会把原生焦点交回主按钮；该手势的释放不能关闭刚打开的菜单。
+						if (
+							suppressReleasedLongPressClickRef.current &&
+							event.target instanceof Node &&
+							triggerRef.current?.contains(event.target)
+						)
+							event.preventDefault();
 					}}
 					onPointerEnter={cancelScheduledClose}
 					onPointerLeave={(event) => {

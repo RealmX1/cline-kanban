@@ -7,8 +7,8 @@ import type { RuntimeBoardColumnId } from "./api-contract";
 // isCardDropDisabled）与 use-board-interactions 的各移列入口；服务端按这里校验，浏览器之后改为直接引用本模块
 // （web-ui 有值引用要同步 tsconfig / vite / vitest 三处 alias）。本模块只依赖列 id 类型，保持可被浏览器零成本引用。
 //
-// 不在这里的：浏览器端由会话 facet 驱动的列自动流转（review ⇄ in_progress、validation → in_progress、
-// 中断会话进 Done）。那些不是用户手势，drag-rules 里也只对「在途程序化移动」放行。
+// 不在这里的：浏览器端由会话 facet 驱动的列自动流转（review ⇄ in_progress、validation → in_progress）。
+// 那些不是用户手势，drag-rules 里也只对「在途程序化移动」放行；会话中断保留原列。
 
 export type TaskCardBoardColumnTransitionRequestedByUserGestureClassification =
 	// 纯看板重新归类：进出 validation 缓冲区。不停会话、不动 worktree。

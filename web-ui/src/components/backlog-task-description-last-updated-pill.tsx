@@ -16,7 +16,7 @@ export function BacklogTaskDescriptionLastUpdatedPill({
 	elapsedNowMs,
 	revealHoverActionTooltip,
 }: {
-	card: BoardCard;
+	card: Pick<BoardCard, "taskDescriptionLastUpdatedAt" | "updatedAt">;
 	elapsedNowMs: number;
 	// 由 TaskCardBody 提供的 hover 门控（只在卡片 hover 时挂 tooltip），契约见那里的注释。
 	revealHoverActionTooltip: (label: string | null) => string | undefined;
