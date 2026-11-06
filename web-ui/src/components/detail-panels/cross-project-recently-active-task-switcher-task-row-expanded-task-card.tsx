@@ -49,7 +49,7 @@ export interface CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion 
  * 以及这一行的激活与展开开关。
  */
 export interface CrossProjectTaskSwitcherFullTaskCardRowContext {
-	// null = 只有一个项目，不显示项目名。
+	// 未显式传入项目名时，共享摘要从现有项目上下文补齐。
 	projectName: string | null;
 	section?: string;
 	promptCacheWarmthEstimate?: CrossProjectTaskSwitcherPromptCacheWarmthEstimate;
@@ -121,7 +121,7 @@ function ExpandedTaskCardUnavailableFallback({
 		<div
 			ref={fallbackElementRefHandingOffToggleKeyboardFocus}
 			data-cross-project-task-switcher-full-task-card-unavailable-fallback=""
-			className="group/fallback relative cursor-pointer rounded-md py-1.5 pl-2 pr-[calc(4rem+0.5rem)] hover:bg-surface-3"
+			className="group/fallback relative cursor-pointer rounded-md px-2 py-1.5 hover:bg-surface-3"
 			onClick={(event) => {
 				if ((event.target as HTMLElement | null)?.closest("button")) {
 					return;

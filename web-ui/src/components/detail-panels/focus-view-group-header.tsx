@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
 import { STAGE_HEADER_HEIGHT_PX } from "@/components/detail-panels/stage-header-rail-geometry";
+import { Tooltip } from "@/components/ui/tooltip";
 
 const HEADER_BUTTON_CLASS_NAME =
 	"inline-flex h-full shrink-0 items-center justify-center rounded-sm hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50";
@@ -39,29 +40,37 @@ export function FocusViewGroupHeader({
 			style={{ height: STAGE_HEADER_HEIGHT_PX }}
 		>
 			{onToggleExpanded ? (
-				<button
-					type="button"
-					className={`${HEADER_BUTTON_CLASS_NAME} w-8`}
-					onClick={onToggleExpanded}
-					disabled={isExpansionDisabled}
-					aria-expanded={isExpanded}
-					aria-label={`${isExpanded ? "收起" : "展开"} ${title}`}
-				>
-					{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-				</button>
+				<Tooltip content={`${isExpanded ? "收起" : "展开"} ${title}`} side="right">
+					<span className="inline-flex h-full shrink-0" tabIndex={isExpansionDisabled ? 0 : undefined}>
+						<button
+							type="button"
+							className={`${HEADER_BUTTON_CLASS_NAME} w-8`}
+							onClick={onToggleExpanded}
+							disabled={isExpansionDisabled}
+							aria-expanded={isExpanded}
+							aria-label={`${isExpanded ? "收起" : "展开"} ${title}`}
+						>
+							{isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+						</button>
+					</span>
+				</Tooltip>
 			) : null}
-			{onJumpToSection ? (
-				<button
-					type="button"
-					aria-label={`跳转到 ${title}`}
-					onClick={onJumpToSection}
-					className={`${HEADER_BUTTON_CLASS_NAME} min-w-0 flex-1 justify-start gap-2 text-left`}
-				>
-					{label}
-				</button>
-			) : (
-				<span className="flex min-w-0 flex-1 items-center gap-2">{label}</span>
-			)}
+			<Tooltip content={title} side="right">
+				{onJumpToSection ? (
+					<button
+						type="button"
+						aria-label={`跳转到 ${title}`}
+						onClick={onJumpToSection}
+						className={`${HEADER_BUTTON_CLASS_NAME} min-w-0 flex-1 justify-start gap-2 text-left`}
+					>
+						{label}
+					</button>
+				) : (
+					<span className="flex min-w-0 flex-1 items-center gap-2" tabIndex={0}>
+						{label}
+					</span>
+				)}
+			</Tooltip>
 			{actions ? <div className="flex h-full shrink-0 items-center gap-1">{actions}</div> : null}
 		</div>
 	);

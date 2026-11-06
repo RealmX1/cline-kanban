@@ -1,9 +1,18 @@
-import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { act, type ReactNode } from "react";
+import { createRoot as createReactRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskVisualizationPreviewPage } from "@/components/task-visualization-preview-page";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type { TaskVisualizationArtifact } from "@/runtime/types";
 import { deliverTaskVisualizationStreamMessage } from "@/stores/task-visualization-browser-bridge";
+
+function createRoot(container: HTMLElement) {
+	const root = createReactRoot(container);
+	return {
+		render: (children: ReactNode) => root.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => root.unmount(),
+	};
+}
 
 const queries = vi.hoisted(() => ({ list: vi.fn(), prepare: vi.fn() }));
 vi.mock("@/runtime/task-visualization-query", () => ({

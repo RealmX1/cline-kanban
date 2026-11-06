@@ -1,5 +1,5 @@
 import * as RadixTooltip from "@radix-ui/react-tooltip";
-import type { ReactNode } from "react";
+import { isValidElement, type ReactNode } from "react";
 
 export function TooltipProvider({ children }: { children: ReactNode }): React.ReactElement {
 	return <RadixTooltip.Provider delayDuration={400}>{children}</RadixTooltip.Provider>;
@@ -20,9 +20,17 @@ export function Tooltip({
 		return <>{children}</>;
 	}
 
+	const trigger =
+		isValidElement<{ disabled?: boolean }>(children) && "disabled" in children.props ? (
+			<span className="inline-flex" tabIndex={children.props.disabled ? 0 : undefined}>
+				{children}
+			</span>
+		) : (
+			children
+		);
 	return (
 		<RadixTooltip.Root delayDuration={delayDuration}>
-			<RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
+			<RadixTooltip.Trigger asChild>{trigger}</RadixTooltip.Trigger>
 			<RadixTooltip.Portal>
 				<RadixTooltip.Content
 					side={side}

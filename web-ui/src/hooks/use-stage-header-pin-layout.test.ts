@@ -2,6 +2,8 @@ import { act, createElement, type ReactNode, useRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { computeScrollTopForJumpingToStageBelowTopRail } from "@/components/detail-panels/stage-header-rail-geometry";
+import { useFocusViewGroupSectionNavigation } from "@/hooks/use-focus-view-stage-section-expansion";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import { useStageHeaderPinLayout } from "@/hooks/use-stage-header-pin-layout";
 
@@ -33,9 +35,13 @@ function toDomRect(rect: Rect): DOMRect {
 function Harness({
 	focusedCardPinState,
 	enabled,
+	usesCrossProjectSourceSelectors = false,
+	focusedCardCloneHeightPx,
 }: {
 	focusedCardPinState: SelectedCardPinState;
 	enabled: boolean;
+	usesCrossProjectSourceSelectors?: boolean;
+	focusedCardCloneHeightPx?: number;
 }): React.ReactElement {
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const layout = useStageHeaderPinLayout({
@@ -44,13 +50,28 @@ function Harness({
 		focusedColumnId: FOCUSED_COLUMN_ID,
 		focusedTaskId: FOCUSED_TASK_ID,
 		focusedCardPinState,
+		focusedCardCloneHeightPx,
 		enabled,
+		sectionElementAttributeName: usesCrossProjectSourceSelectors ? "data-focus-view-group-section-id" : undefined,
+		focusedCardElementSelector: usesCrossProjectSourceSelectors
+			? '[data-focused-source="project-a:focused-card"]'
+			: undefined,
 	});
 	const sections: ReactNode[] = COLUMN_IDS.map((columnId) =>
 		createElement(
 			"div",
-			{ key: columnId, "data-stage-section-id": columnId },
-			columnId === FOCUSED_COLUMN_ID ? createElement("div", { "data-task-id": FOCUSED_TASK_ID }) : null,
+			{
+				key: columnId,
+				[usesCrossProjectSourceSelectors ? "data-focus-view-group-section-id" : "data-stage-section-id"]: columnId,
+			},
+			columnId === FOCUSED_COLUMN_ID
+				? createElement(
+						"div",
+						usesCrossProjectSourceSelectors
+							? { "data-focused-source": "project-a:focused-card" }
+							: { "data-task-id": FOCUSED_TASK_ID },
+					)
+				: null,
 		),
 	);
 	return createElement(
@@ -59,6 +80,31 @@ function Harness({
 		createElement("div", { ref: rootRef, "data-testid": "root" }, ...sections),
 		createElement("span", { "data-testid": "top" }, layout.topPinnedColumnIds.join(",")),
 		createElement("span", { "data-testid": "bottom" }, layout.bottomPinnedColumnIds.join(",")),
+		createElement("span", { "data-testid": "focused-edge" }, layout.focusedCardRailEdge),
+	);
+}
+
+function CrossProjectJumpNavigationHarness(): React.ReactElement {
+	const rootRef = useRef<HTMLDivElement | null>(null);
+	const navigation = useFocusViewGroupSectionNavigation({
+		scrollRootRef: rootRef,
+		orderedColumnIds: COLUMN_IDS,
+		focusedColumnId: FOCUSED_COLUMN_ID,
+		focusedCardElementSelector: `[data-task-id="${FOCUSED_TASK_ID}"]`,
+		focusedCardCloneHeightPx: 400,
+		isStageSectionExpanded: () => true,
+		setStageSectionExpanded: () => {},
+	});
+	return createElement(
+		"div",
+		{ ref: rootRef, "data-testid": "root" },
+		createElement("div", { "data-task-id": FOCUSED_TASK_ID }),
+		createElement("div", { "data-stage-section-id": "c" }),
+		createElement(
+			"button",
+			{ type: "button", onClick: () => navigation.jumpToStageSectionBelowTopRail("c") },
+			"跳转",
+		),
 	);
 }
 
@@ -100,11 +146,12 @@ describe("useStageHeaderPinLayout", () => {
 		});
 		vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
 		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
-			const sectionId = this.getAttribute("data-stage-section-id");
+			const sectionId =
+				this.getAttribute("data-stage-section-id") ?? this.getAttribute("data-focus-view-group-section-id");
 			if (sectionId && sectionRects[sectionId]) {
 				return toDomRect(sectionRects[sectionId]);
 			}
-			if (this.getAttribute("data-task-id") === FOCUSED_TASK_ID) {
+			if (this.getAttribute("data-task-id") === FOCUSED_TASK_ID || this.hasAttribute("data-focused-source")) {
 				return toDomRect(focusedCardRect);
 			}
 			if (this.getAttribute("data-testid") === "root") {
@@ -143,19 +190,120 @@ describe("useStageHeaderPinLayout", () => {
 		expect(readBottom()).toBe("");
 	});
 
+	it("跨项目完整副本按固定标题预算限高，分类不依赖受限副本的反复测量", async () => {
+		sectionRects = {
+			a: { top: -200, bottom: -150, height: 50 },
+			b: { top: -100, bottom: 380, height: 480 },
+			c: { top: 387, bottom: 450, height: 63 },
+			d: { top: 520, bottom: 560, height: 40 },
+			e: { top: 600, bottom: 640, height: 40 },
+		};
+		focusedCardRect = { top: -80, bottom: -20, height: 60 };
+		await act(async () => {
+			root.render(
+				createElement(Harness, {
+					focusedCardPinState: "pinTop",
+					enabled: true,
+					usesCrossProjectSourceSelectors: true,
+					focusedCardCloneHeightPx: 400,
+				}),
+			);
+		});
+		// 500px 视口扣除五个 38px 标题和 20px padding，卡片可见内容高 290px。
+		expect(readTop()).toBe("a,b");
+		expect(readBottom()).toBe("d,e");
+		await dispatchScroll();
+		expect(readTop()).toBe("a,b");
+		expect(readBottom()).toBe("d,e");
+	});
+
+	it("跨项目跳转使用同一受限内容高度，完整副本不会把目标首行推到视口下方", async () => {
+		sectionRects.c = { top: 1000, bottom: 1200, height: 200 };
+		focusedCardRect = { top: 900, bottom: 960, height: 60 };
+		await act(async () => root.render(createElement(CrossProjectJumpNavigationHarness)));
+		await act(async () => container.querySelector("button")!.click());
+		const scrollTop = container.querySelector<HTMLElement>('[data-testid="root"]')!.scrollTop;
+		// 目标上方两个标题 76px + 受限内容 290px + padding 20px，仅计一次 padding。
+		expect(scrollTop).toBe(1000 - (76 + 290 + 20));
+		expect(1000 - scrollTop + 34).toBeLessThan(rootRect.height);
+	});
+
+	it.each([false, true])("跳转落点与实际 rail 分类一致，跨项目选择器=%s", async (usesCrossProjectSourceSelectors) => {
+		const initialTargetTop = 500;
+		const initialScrollTop = 300;
+		const nextScrollTop = computeScrollTopForJumpingToStageBelowTopRail({
+			targetStageIndex: 2,
+			focusedStageIndex: 1,
+			focusedCardViewportTop: 400,
+			focusedCardHeight: 80,
+			targetSectionViewportTop: initialTargetTop,
+			scrollRootViewportTop: 0,
+			currentScrollTop: initialScrollTop,
+		});
+		const scrollDelta = nextScrollTop - initialScrollTop;
+		const targetTop = initialTargetTop - scrollDelta;
+		sectionRects = {
+			a: { top: -100 - scrollDelta, bottom: -60 - scrollDelta, height: 40 },
+			b: { top: 0 - scrollDelta, bottom: 496 - scrollDelta, height: 496 },
+			c: { top: targetTop, bottom: 900 - scrollDelta, height: 400 },
+			d: { top: 904 - scrollDelta, bottom: 1104 - scrollDelta, height: 200 },
+			e: { top: 1108 - scrollDelta, bottom: 1308 - scrollDelta, height: 200 },
+		};
+		focusedCardRect = { top: 400 - scrollDelta, bottom: 480 - scrollDelta, height: 80 };
+		await act(async () => {
+			root.render(
+				createElement(Harness, {
+					focusedCardPinState: focusedCardRect.top <= 0 ? "pinTop" : "hidden",
+					enabled: true,
+					usesCrossProjectSourceSelectors,
+				}),
+			);
+		});
+		const topIds = readTop().split(",");
+		const includesFocusedCard = container.querySelector('[data-testid="focused-edge"]')?.textContent === "pinTop";
+		const railHeight = topIds.length * 38 - 4 + (includesFocusedCard ? 20 + 80 : 0);
+		expect(targetTop + 34).toBeGreaterThanOrEqual(railHeight);
+	});
+
 	it("stacks scrolled-past headers at top and upcoming headers at bottom, current stage in flow", async () => {
 		// a,b above the top; c in view (middle band, clear of the ~92px a+b top rail incl. borders); d,e below the
 		// bottom. Focused card fully visible → no tall entry.
 		sectionRects = {
 			a: { top: -180, bottom: -100, height: 80 },
-			b: { top: -90, bottom: -10, height: 80 },
-			c: { top: 120, bottom: 400, height: 280 },
+			b: { top: -90, bottom: 300, height: 390 },
+			c: { top: 320, bottom: 400, height: 80 },
 			d: { top: 500, bottom: 560, height: 60 },
 			e: { top: 570, bottom: 660, height: 90 },
 		};
+		focusedCardRect = { top: 130, bottom: 210, height: 80 };
 		await renderHarness("hidden");
 		expect(readTop()).toBe("a,b");
 		expect(readBottom()).toBe("d,e");
+	});
+
+	it.each(["top", "bottom"] as const)("焦点卡被 %s 标题栏遮住时，副本跟随真实所属分组", async (edge) => {
+		sectionRects =
+			edge === "top"
+				? {
+						a: { top: -50, bottom: -10, height: 40 },
+						b: { top: 10, bottom: 250, height: 240 },
+						c: { top: 300, bottom: 350, height: 50 },
+						d: { top: 400, bottom: 450, height: 50 },
+						e: { top: 600, bottom: 650, height: 50 },
+					}
+				: {
+						a: { top: 10, bottom: 50, height: 40 },
+						b: { top: 60, bottom: 490, height: 430 },
+						c: { top: 510, bottom: 540, height: 30 },
+						d: { top: 550, bottom: 590, height: 40 },
+						e: { top: 610, bottom: 650, height: 40 },
+					};
+		focusedCardRect = edge === "top" ? { top: 65, bottom: 145, height: 80 } : { top: 400, bottom: 480, height: 80 };
+		await renderHarness("hidden");
+		expect(container.querySelector('[data-testid="focused-edge"]')?.textContent).toBe(
+			edge === "top" ? "pinTop" : "pinBottom",
+		);
+		expect(edge === "top" ? readTop() : readBottom()).toBe(edge === "top" ? "a,b" : "b,c,d,e");
 	});
 
 	it("gives the top edge precedence for a single stage taller than the viewport (no double-claim)", async () => {
@@ -250,5 +398,26 @@ describe("useStageHeaderPinLayout", () => {
 		await renderHarness("hidden");
 		expect(readTop()).toBe("");
 		expect(readBottom()).toBe("");
+	});
+	it("跨项目分组使用唯一源行：标题还在视口内而焦点卡在下方时，所属组进入底沿 rail", async () => {
+		sectionRects = {
+			a: { top: 8, bottom: 42, height: 34 },
+			b: { top: 46, bottom: 900, height: 854 },
+			c: { top: 904, bottom: 938, height: 34 },
+			d: { top: 942, bottom: 976, height: 34 },
+			e: { top: 980, bottom: 1014, height: 34 },
+		};
+		focusedCardRect = { top: 700, bottom: 780, height: 80 };
+		await act(async () =>
+			root.render(
+				createElement(Harness, {
+					focusedCardPinState: "pinBottom",
+					enabled: true,
+					usesCrossProjectSourceSelectors: true,
+				}),
+			),
+		);
+		expect(readTop()).toBe("");
+		expect(readBottom()).toBe("b,c,d,e");
 	});
 });

@@ -1,6 +1,7 @@
 import type { RefObject } from "react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import {
+	computeFocusedCardRailContentMaximumHeight,
 	computeScrollTopAfterCollapsingStageFromTopRail,
 	computeScrollTopForJumpingToStageBelowTopRail,
 } from "@/components/detail-panels/stage-header-rail-geometry";
@@ -27,7 +28,7 @@ import { useBooleanLocalStorageValue } from "@/utils/react-use";
  */
 
 /** 无显式操作时的默认展开态：Done（trash）默认折叠，其余默认展开。 */
-function isStageSectionExpandedByDefault(columnId: BoardDisplayGroupId): boolean {
+function isStageSectionExpandedByDefault(columnId: string): boolean {
 	return columnId !== "trash" && columnId !== "shelved";
 }
 
@@ -37,7 +38,7 @@ export type StageHeaderRailEdge = "pinTop" | "pinBottom";
 type PendingScrollAdjustmentAfterStageSectionToggle =
 	| {
 			kind: "jump_to_stage_section_after_expanding_it_from_stage_header_rail";
-			columnId: BoardDisplayGroupId;
+			columnId: string;
 	  }
 	| {
 			kind: "keep_viewport_steady_after_collapsing_stage_section_from_top_rail";
@@ -84,13 +85,10 @@ export function useFocusViewStageSectionExpansion({
 		LocalStorageKey.FocusViewShelvedSectionExpanded,
 		false,
 	);
-	const [explicitExpandedByColumnId, setExplicitExpandedByColumnId] = useState<
-		Partial<Record<BoardDisplayGroupId, boolean>>
-	>({});
-	const pendingScrollAdjustmentRef = useRef<PendingScrollAdjustmentAfterStageSectionToggle | null>(null);
+	const [explicitExpandedByColumnId, setExplicitExpandedByColumnId] = useState<Partial<Record<string, boolean>>>({});
 
 	const isStageSectionExpanded = useCallback(
-		(columnId: BoardDisplayGroupId): boolean =>
+		(columnId: string): boolean =>
 			columnId === "shelved"
 				? isShelvedSectionExpanded
 				: (explicitExpandedByColumnId[columnId] ?? isStageSectionExpandedByDefault(columnId)),
@@ -98,42 +96,89 @@ export function useFocusViewStageSectionExpansion({
 	);
 
 	const setStageSectionExpanded = useCallback(
-		(columnId: BoardDisplayGroupId, isExpanded: boolean): void => {
+		(columnId: string, isExpanded: boolean): void => {
 			if (columnId === "shelved") setIsShelvedSectionExpanded(isExpanded);
 			setExplicitExpandedByColumnId((previous) => ({ ...previous, [columnId]: isExpanded }));
 		},
 		[setIsShelvedSectionExpanded],
 	);
 
+	return useFocusViewGroupSectionNavigation({
+		scrollRootRef,
+		orderedColumnIds,
+		focusedColumnId,
+		focusedCardElementSelector: `[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`,
+		isStageSectionExpanded,
+		setStageSectionExpanded,
+	});
+}
+
+/** 两种 Focus View 共用跳转、折叠补偿与测量，只由宿主提供分组状态和唯一源行。 */
+export function useFocusViewGroupSectionNavigation({
+	scrollRootRef,
+	orderedColumnIds,
+	focusedColumnId,
+	focusedCardElementSelector,
+	focusedCardCloneHeightPx,
+	sectionElementAttributeName = "data-stage-section-id",
+	isStageSectionExpanded,
+	setStageSectionExpanded,
+}: {
+	scrollRootRef: RefObject<HTMLElement | null>;
+	orderedColumnIds: readonly string[];
+	focusedColumnId: string;
+	focusedCardElementSelector: string;
+	/** 未受视口限高的完整副本自然高度，不包含 rail 外层 padding。 */
+	focusedCardCloneHeightPx?: number;
+	sectionElementAttributeName?: string;
+	isStageSectionExpanded: (columnId: string) => boolean;
+	setStageSectionExpanded: (columnId: string, isExpanded: boolean) => void;
+}) {
+	const pendingScrollAdjustmentRef = useRef<PendingScrollAdjustmentAfterStageSectionToggle | null>(null);
+
 	const measureScrollTopForJumpingToStageBelowTopRail = useCallback(
-		(scrollRoot: HTMLElement, targetColumnId: BoardDisplayGroupId): number | null => {
+		(scrollRoot: HTMLElement, targetColumnId: string): number | null => {
 			const targetSection = scrollRoot.querySelector<HTMLElement>(
-				`[data-stage-section-id="${escapeCssAttributeSelectorValue(targetColumnId)}"]`,
+				`[${sectionElementAttributeName}="${escapeCssAttributeSelectorValue(targetColumnId)}"]`,
 			);
 			if (!targetSection) {
 				return null;
 			}
 			const focusedCardRect = scrollRoot
-				.querySelector<HTMLElement>(`[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`)
+				.querySelector<HTMLElement>(focusedCardElementSelector)
 				?.getBoundingClientRect();
+			const scrollRootRect = scrollRoot.getBoundingClientRect();
+			const naturalFocusedCardHeight = focusedCardCloneHeightPx || focusedCardRect?.height || 0;
 			return computeScrollTopForJumpingToStageBelowTopRail({
 				targetStageIndex: orderedColumnIds.indexOf(targetColumnId),
 				// 焦点卡不在 DOM 里（渐进渲染未挂载等）时按「无焦点条目」计，避免凭空预留一段克隆高度。
 				focusedStageIndex: focusedCardRect ? orderedColumnIds.indexOf(focusedColumnId) : -1,
 				focusedCardViewportTop: focusedCardRect?.top ?? 0,
-				focusedCardHeight: focusedCardRect?.height ?? 0,
+				focusedCardHeight:
+					focusedCardCloneHeightPx === undefined
+						? naturalFocusedCardHeight
+						: Math.min(
+								naturalFocusedCardHeight,
+								computeFocusedCardRailContentMaximumHeight(scrollRootRect.height, orderedColumnIds.length),
+							),
 				targetSectionViewportTop: targetSection.getBoundingClientRect().top,
-				scrollRootViewportTop: scrollRoot.getBoundingClientRect().top,
+				scrollRootViewportTop: scrollRootRect.top,
 				currentScrollTop: scrollRoot.scrollTop,
 			});
 		},
-		[orderedColumnIds, focusedColumnId, focusedTaskId],
+		[
+			orderedColumnIds,
+			focusedColumnId,
+			focusedCardElementSelector,
+			focusedCardCloneHeightPx,
+			sectionElementAttributeName,
+		],
 	);
 
 	// 直接赋值 `scrollTop` 而非 `scrollIntoView`：不会牵动祖先滚动容器，且全局无 `scroll-behavior: smooth`，
 	// 与此前的瞬时跳转观感一致。
 	const jumpToStageSectionBelowTopRail = useCallback(
-		(columnId: BoardDisplayGroupId): void => {
+		(columnId: string): void => {
 			const scrollRoot = scrollRootRef.current;
 			if (!scrollRoot) {
 				return;
@@ -147,14 +192,14 @@ export function useFocusViewStageSectionExpansion({
 	);
 
 	const toggleStageSectionExpandedFromInFlowHeader = useCallback(
-		(columnId: BoardDisplayGroupId): void => {
+		(columnId: string): void => {
 			setStageSectionExpanded(columnId, !isStageSectionExpanded(columnId));
 		},
 		[isStageSectionExpanded, setStageSectionExpanded],
 	);
 
 	const toggleStageSectionExpandedFromStageHeaderRail = useCallback(
-		(columnId: BoardDisplayGroupId, railEdge: StageHeaderRailEdge): void => {
+		(columnId: string, railEdge: StageHeaderRailEdge): void => {
 			const isExpanding = !isStageSectionExpanded(columnId);
 			pendingScrollAdjustmentRef.current = isExpanding
 				? { kind: "jump_to_stage_section_after_expanding_it_from_stage_header_rail", columnId }
@@ -163,15 +208,22 @@ export function useFocusViewStageSectionExpansion({
 							scrollRootRef.current,
 							columnId,
 							measureScrollTopForJumpingToStageBelowTopRail,
+							sectionElementAttributeName,
 						)
 					: null;
 			setStageSectionExpanded(columnId, isExpanding);
 		},
-		[isStageSectionExpanded, setStageSectionExpanded, scrollRootRef, measureScrollTopForJumpingToStageBelowTopRail],
+		[
+			isStageSectionExpanded,
+			setStageSectionExpanded,
+			scrollRootRef,
+			measureScrollTopForJumpingToStageBelowTopRail,
+			sectionElementAttributeName,
+		],
 	);
 
 	const expandStageSectionWithoutScrolling = useCallback(
-		(columnId: BoardDisplayGroupId): void => setStageSectionExpanded(columnId, true),
+		(columnId: string): void => setStageSectionExpanded(columnId, true),
 		[setStageSectionExpanded],
 	);
 
@@ -220,14 +272,12 @@ export function useFocusViewStageSectionExpansion({
 
 function captureScrollAdjustmentForCollapsingStageSectionFromTopRail(
 	scrollRoot: HTMLElement | null,
-	columnId: BoardDisplayGroupId,
-	measureScrollTopForJumpingToStageBelowTopRail: (
-		scrollRoot: HTMLElement,
-		targetColumnId: BoardDisplayGroupId,
-	) => number | null,
+	columnId: string,
+	measureScrollTopForJumpingToStageBelowTopRail: (scrollRoot: HTMLElement, targetColumnId: string) => number | null,
+	sectionElementAttributeName: string,
 ): PendingScrollAdjustmentAfterStageSectionToggle | null {
 	const stageSectionElement = scrollRoot?.querySelector<HTMLElement>(
-		`[data-stage-section-id="${escapeCssAttributeSelectorValue(columnId)}"]`,
+		`[${sectionElementAttributeName}="${escapeCssAttributeSelectorValue(columnId)}"]`,
 	);
 	if (!scrollRoot || !stageSectionElement) {
 		return null;

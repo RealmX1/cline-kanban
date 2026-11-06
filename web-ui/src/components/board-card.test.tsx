@@ -432,8 +432,8 @@ describe("BoardCard", () => {
 					),
 				);
 				expect(container.querySelector("[data-task-directory]")).toBeNull();
-				expect(container.querySelectorAll('[aria-label="定位部署后验证"]')).toHaveLength(1);
-				expect(container.querySelectorAll("[data-related-tasks-preview-trigger]")).toHaveLength(1);
+				expect(document.querySelectorAll('[aria-label="定位部署后验证"]')).toHaveLength(1);
+				expect(document.querySelectorAll("[data-related-tasks-preview-trigger]")).toHaveLength(1);
 			}
 		}
 	});

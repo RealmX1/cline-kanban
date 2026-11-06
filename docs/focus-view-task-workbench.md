@@ -36,9 +36,15 @@
 
 ## 紧凑标题与信息入口
 
-Focus View 的 Stage、Pinned、Running、Cache Warm、Recent 和 Shelved 复用 `FocusViewGroupHeader`，桌面标题高 32px、分组间距 4px。只有箭头切换展开态；已有定位行为的 sticky 标题另设跳转按钮，普通标题为文本。行内与 sticky 孪生标题共享视觉和状态，滚动落点仍以 `stage-header-rail-geometry.ts` 为单一来源。Recent 的筛选与排序收入标题右侧浮层，并显示生效条件数量；首页横列暂保留原呈现。
+Focus View 的 Stage、Pinned、Running、Cache Warm、Recent 和 Shelved 复用 `FocusViewGroupHeader`，桌面标题高 32px、分组间距 4px。只有箭头切换展开态；分组标题使用共享跳转计算，落在此前吸顶标题的下方。行内与 sticky 孪生标题共享视觉和状态，滚动落点仍以 `stage-header-rail-geometry.ts` 为单一来源。Recent 的筛选与排序收入标题右侧浮层，并显示生效条件数量；首页横列暂保留原呈现。
 
-工作台保留无障碍区域名「任务工作台」，每区的模块下拉与内容动作共用一条标题栏。布局菜单位于首个格位，原有工具页签在紧凑标题内通过菜单选择；队列筛选、关系操作和可视化操作可从各自标题菜单访问。`TaskWorkbench.modules` 接受内容或渲染函数，后者将宿主的 `headerNavigationContent` 放入模块原有标题行；已有 `headerContent` 继续承载工具内部导航。没有内容或内部标题时仍提供宿主工具栏，避免空模块失去切换入口。
+工作台保留无障碍区域名「任务工作台」，每区的模块下拉与内容动作共用一条标题栏。布局按钮直接打开「自动／左右／上下」单层单选菜单，沿用持久偏好与重置逻辑。可视化首行保留模块选择以及新标签、全屏、关闭入口，产物选择和刷新位于第二行；任务署名只在独立页和全屏保留。响应式 container 只加在首行工具栏，不加到全屏宿主，避免跨断点时其子元素失去布局。`TaskWorkbench.modules` 接受内容或渲染函数，后者将宿主的 `headerNavigationContent` 放入模块原有标题行；已有 `headerContent` 继续承载工具内部导航。没有内容或内部标题时仍提供宿主工具栏，避免空模块失去切换入口。
+
+All Projects 的 Pinned 与 Project Specific View 一样位于主滚动口之外，最多占面板高度的 50%，内容独立滚动，折叠和显示数量沿用原偏好。其余分组通过 `useStageHeaderPinLayout`、`useFocusViewGroupSectionNavigation` 和 `FocusViewGroupHeaderRails` 共享测量、上下吸顶及滚动补偿；跨项目传入分组属性与 workspace/task 复合身份的源行选择器。Pinned 副本不增加定位源，当前任务副本跟随真实分组标题，分组收起仍保留焦点源行；空 body 不渲染。两种 Focus View 的已删除 Task 入口均位于 Create task 同行右侧。
+
+吸顶标题遮住源卡时也视为越界，焦点副本跟随所属标题，仅补算一次以避免副本高度反馈。悬浮展开卡直接读取同一标题 rail 的实际边界，按剩余可视区域避让及内部滚动，不改源行占位或列表滚动位置。
+
+共享快捷操作的主名称通过上方 Tooltip 显示，附加菜单在下方；二者同时打开时 Escape 仍关闭菜单并回焦主按钮。禁用按钮通过外层触发元素保留说明，卡片 Tooltip 不再在首次悬停后更换触发器。
 
 桌面 TUI 的问答、资源、阶段目标与终端工具集中在 32px 工具栏。创建时间及完整目标在任务信息浮层显示，问答与资源各有独立、可内部滚动的浮层，打开时不改变终端高度。问答仍按所选会话惰性读取，资源仍按任务聚合；任务或会话切换会关闭旧浮层并隔离迟到响应。待答问题、投递失败、停止和取消自动动作保留原有逻辑。
 

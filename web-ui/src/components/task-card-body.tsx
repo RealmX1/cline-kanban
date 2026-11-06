@@ -37,7 +37,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -50,6 +50,7 @@ import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
+import { TaskCardSideAttachments } from "@/components/task-card-side-attachments";
 import { TaskCardStickers } from "@/components/task-card-stickers";
 import { TaskCardSummaryMetadata } from "@/components/task-card-summary-metadata";
 import { TaskClosureSummaryAndHistory } from "@/components/task-closure-summary-and-history";
@@ -355,20 +356,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 
 	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
 	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
+	const sideAttachmentsId = useId();
 	const [isHovered, setIsHovered] = useState(false);
-	// 卡片多数 Tooltip（右上角动作组、行内 Edit、头部药丸、git 状态）content 统一收成
-	// 「hover 时才给」：Radix 在关闭态仍会挂 Root+Trigger（Popper context + state + 一串事件绑定）。
-	// 200 张卡 × 数个 Tooltip = 上千个常驻实例，看板每次重渲都要 reconcile 一遍。`Tooltip` 对 falsy
-	// `content` 直接返回 children，空闲态就退化成裸元素。头部药丸 / git 状态的触发点是不可聚焦的
-	// span，键盘可达性不受门控影响；动作按钮靠 aria-label 保留可访问名。
-	// 目录复制的 ID tooltip 常驻，保证键盘聚焦也能立即看到完整 ID。
-	// 关联预览也保留 Tooltip 触发器，避免模态遮罩触发 mouseleave 后重建按钮，使回焦记录失效。
-	//
-	// 注意这里刻意**不**改成条件挂载整个动作组：未挂载的按钮无法被 Tab 到，而卡壳本身不可聚焦，
-	// backlog 这类没有标题编辑按钮的卡会因此彻底失去键盘可达性。DOM 常驻 + CSS `focus-within`
-	// 才是原本保住 Tab 可达的机制。
-	const revealHoverActionTooltip = (label: string | null): string | undefined =>
-		(isHovered || isRelatedTaskPreviewCopy) && label ? label : undefined;
 	const [isPromptViewerOpen, setIsPromptViewerOpen] = useState(false);
 	const [isEditingTitle, setIsEditingTitle] = useState(false);
 	const [draftTitle, setDraftTitle] = useState(card.title);
@@ -427,7 +416,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 嵌套，也不改标题几何。其他角色不变。
 	const isTitleKeyboardEntryOpeningTaskFromCrossProjectTaskSwitcherRow =
 		(isCrossProjectTaskSwitcherRowCopy || isRelatedTaskPreviewCopy || historicalSnapshot != null) && onClick != null;
-	// 动作组 / 底色 / 复制按钮的 hover 呈现；Tooltip 触发器的挂载见 revealHoverActionTooltip。
+	// 动作组 / 底色 / 复制按钮的 hover 呈现；Tooltip 常驻以覆盖首次悬停和键盘聚焦。
 	const isHoverPresentationShown =
 		historicalSnapshot != null ||
 		isHovered ||
@@ -758,7 +747,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 
 	// ── 两种视觉密度共用的信息项（见 TaskCardBodyVisualDensity）：内容只此一份，密度只决定摆在哪里 ──
 	const agentBadge = taskAgentSettingsLabel ? (
-		<Tooltip content={revealHoverActionTooltip(taskAgentSettingsLabel)}>
+		<Tooltip content={taskAgentSettingsLabel}>
 			<span
 				data-agent-badge=""
 				role="img"
@@ -783,13 +772,13 @@ export const TaskCardBody = memo(function TaskCardBody(
 					taskConversationSessionActivityObservations: sessionActivityObservations,
 				}}
 				nowMs={elapsedNowMs}
-				revealTooltip={isHovered}
+				revealTooltip
 			/>
 			{columnId === "backlog" ? (
 				<BacklogTaskDescriptionLastUpdatedPill
 					card={card}
 					elapsedNowMs={elapsedNowMs}
-					revealHoverActionTooltip={revealHoverActionTooltip}
+					revealHoverActionTooltip={(label) => label ?? undefined}
 				/>
 			) : null}
 		</>
@@ -815,7 +804,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		<TaskCardResourceUsagePill
 			taskCardId={card.id}
 			isTrashCard={isTrashCard}
-			revealHoverActionTooltip={revealHoverActionTooltip}
+			revealHoverActionTooltip={(label) => label ?? undefined}
 			showLeadingSeparator={!crossProjectTaskSwitcherRowElements?.summaryMetadata}
 		/>
 	);
@@ -981,10 +970,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 				taskStickers.cardElementRef.current = element;
 				cardDragBindings?.innerRef(element);
 			}}
+			aria-owns={!historicalContext ? sideAttachmentsId : undefined}
 			{...(cardDragBindings?.draggableProps ?? {})}
 			{...(cardDragBindings?.dragHandleProps ?? {})}
 			className={cn(
-				"kb-board-card-shell group/task-card-shell relative grid grid-cols-[minmax(0,1fr)_3.75rem] items-start gap-x-1",
+				"kb-board-card-shell group/task-card-shell relative min-w-0",
 				isMobileDetailHeaderCopy && "[&_button]:min-h-[44px] [&_button]:min-w-[44px] [&_button_svg]:size-4",
 				isRelatedTaskPreviewCopy && "max-md:[&_button]:min-h-11 max-md:[&_button]:min-w-11",
 			)}
@@ -1079,7 +1069,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			}}
 			onPointerLeave={taskStickers.pointerLeave}
 		>
-			{/* 卡面右侧为附着区留位，三种展开状态共享同一摘要宽度。 */}
+			{/* 各种卡片角色共享完整卡面宽度，附着区独立定位。 */}
 			<div
 				className={
 					isCompactRowInFocusViewLeftColumn
@@ -1122,7 +1112,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 						task={card}
 						snapshot={reviewWorkspaceSnapshot}
 						showGitMetadata={!historicalContext && showDirectoryRow}
-						revealTooltip={isHovered}
 						timePills={
 							<>
 								{crossProjectTaskSwitcherRowElements?.promptCacheWarmthPill}
@@ -1195,10 +1184,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						!isMobileDetailHeaderCopy &&
 						!isRelatedTaskPreviewCopy ? (
 							<TaskCardTitleRowHoverActions>
-								<Tooltip
-									side="bottom"
-									content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
-								>
+								<Tooltip side="bottom" content={onOpenTaskEditor ? "Edit task" : "Edit title"}>
 									<Button
 										icon={<Pencil size={12} />}
 										variant="ghost"
@@ -1228,7 +1214,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
 							: cn(
 									// 主操作沿卡壳右缘排列，维持与缩略行展开开关相同的坐标。
-									"absolute -right-15 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+									"absolute z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
+									isCrossProjectTaskSwitcherRowCopy ? "right-1" : "right-0",
 									// 紧凑密度动作组放在摘要上方，避免遮住时间药丸。
 									isCrossProjectTaskSwitcherRowCopy
 										? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
@@ -1242,10 +1229,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 				>
 					{showTitleEditButton &&
 					(isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy) ? (
-						<Tooltip
-							side="bottom"
-							content={revealHoverActionTooltip(onOpenTaskEditor ? "Edit task" : "Edit title")}
-						>
+						<Tooltip side="bottom" content={onOpenTaskEditor ? "Edit task" : "Edit title"}>
 							<Button
 								icon={<Pencil size={12} />}
 								variant="ghost"
@@ -1280,7 +1264,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{taskPinboardToggle ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip(taskPinboardToggle.tooltip)}>
+						<Tooltip side="bottom" content={taskPinboardToggle.tooltip}>
 							<Button
 								icon={taskPinboardToggle.isPinned ? <PinOff size={12} /> : <Pin size={12} />}
 								variant="ghost"
@@ -1296,7 +1280,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{!taskStickers.readOnly ? (
-						<Tooltip content={revealHoverActionTooltip("添加便签")}>
+						<Tooltip content={"添加便签"}>
 							<Button
 								aria-label="添加便签"
 								variant="ghost"
@@ -1315,7 +1299,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{taskCommentsDialog && taskCommentsWorkspaceId && !historicalContext ? (
-						<Tooltip content={revealHoverActionTooltip("任务评论")}>
+						<Tooltip content={"任务评论"}>
 							<Button
 								aria-label="任务评论"
 								variant="ghost"
@@ -1335,7 +1319,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{historicalContext ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("查看完整 Prompt")}>
+						<Tooltip side="bottom" content={"查看完整 Prompt"}>
 							<Button
 								icon={<FileText size={12} />}
 								variant="ghost"
@@ -1383,10 +1367,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 							(isNeverStartedPlaceholderTaskSessionSummary(sessionSummary) &&
 								taskAgentSessionLaunchHistoryEvidence === "never_launched")) &&
 						onStart) ? (
-						<Tooltip
-							side="bottom"
-							content={revealHoverActionTooltip(columnId === "in_progress" ? "Retry task start" : "Start task")}
-						>
+						<Tooltip side="bottom" content={columnId === "in_progress" ? "Retry task start" : "Start task"}>
 							<Button
 								icon={<Play size={12} />}
 								variant="ghost"
@@ -1401,7 +1382,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{columnId === "review" && !card.taskShelvingState?.isShelved ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to validation")}>
+						<Tooltip side="bottom" content={"Move to validation"}>
 							<Button
 								icon={isMoveToValidationLoading ? <Spinner size={12} /> : <ClipboardCheck size={12} />}
 								variant="status-gold"
@@ -1422,7 +1403,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					!card.taskShelvingState?.isShelved &&
 					sessionSummary?.agentId != null &&
 					!isRuntimeAgentSessionSummaryRenderedAsConversationPanel(sessionSummary) ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("Move to review")}>
+						<Tooltip side="bottom" content={"Move to review"}>
 							<Button
 								icon={isMoveToReviewLoading ? <Spinner size={12} /> : <Eye size={12} />}
 								variant="status-purple"
@@ -1461,13 +1442,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 						<Tooltip
 							side="bottom"
 							content={
-								isHovered ? (
-									<>
-										重新打开已结案任务
-										<br />
-										复用原工作树；已清理时从归档恢复
-									</>
-								) : undefined
+								<>
+									重新打开已结案任务
+									<br />
+									复用原工作树；已清理时从归档恢复
+								</>
 							}
 						>
 							<Button
@@ -1484,7 +1463,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{onDeleteTask ? (
-						<Tooltip side="bottom" content={revealHoverActionTooltip("Delete permanently")}>
+						<Tooltip side="bottom" content={"Delete permanently"}>
 							<Button
 								icon={<Trash2 size={12} />}
 								variant="danger"
@@ -1665,22 +1644,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 				) : null}
 			</div>
 			{!historicalContext ? (
-				<div
-					data-task-card-side-attachments=""
-					className={cn(
-						"kb-task-card-side-attachments empty:hidden relative mt-1.5 z-20 flex w-15 flex-col items-stretch gap-1 rounded-md bg-surface-2 p-0.5 text-[10px] transition-opacity motion-reduce:transition-none",
-						!isCompactRowInFocusViewLeftColumn && "mt-3.5",
-						"group-focus-within/task-card-shell:opacity-100 group-focus-within/task-card-shell:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
-						isHoverPresentationShown ||
-							isPromptViewerOpen ||
-							crossProjectTaskSwitcherRowElements?.isKeptExpandedInList
-							? "opacity-100"
-							: "opacity-0 pointer-events-none",
-					)}
+				<TaskCardSideAttachments
+					id={sideAttachmentsId}
+					cardElementRef={taskStickers.cardElementRef}
+					isCardActive={isHoverPresentationShown || isPromptViewerOpen}
 				>
 					{postDeployVerificationEntryNavigationShortcut}
 					{relatedTasksPreviewShortcut}
-				</div>
+				</TaskCardSideAttachments>
 			) : null}
 			<TaskCardStickers controller={taskStickers} />
 		</div>

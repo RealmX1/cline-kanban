@@ -207,7 +207,7 @@ for (const sessionScenario of ["acp&column=review", "column=trash&auto_review"])
 
 test("Stage 与 sticky 标题共享 32px 几何，首卡操作避让标题", async ({ page }) => {
 	await openWorkbench(page, 1280, 900, "column=review&stage_headers");
-	await page.getByRole("button", { name: "跳转到 Backlog", exact: true }).click();
+	await page.locator(".kb-stage-header-rail").getByRole("button", { name: "跳转到 Backlog", exact: true }).click();
 	const stage = page.locator('[data-stage-section-id="backlog"]');
 	const inlineHeader = stage.locator("[data-focus-view-group-header]");
 	await expect(stage.getByRole("button", { name: "收起 Backlog", exact: true })).toHaveAttribute(
@@ -294,7 +294,7 @@ for (const [width, height] of [
 		await page.getByLabel("工作台格位 1", { exact: true }).selectOption("cross_task_relations");
 		await page.getByLabel("工作台格位 1", { exact: true }).selectOption("exploration_map");
 		await page.getByRole("button", { name: "工作台布局", exact: true }).click();
-		await page.getByLabel("任务专注视图布局").selectOption("agent_above_workbench_below");
+		await page.getByRole("menuitemradio", { name: "上下", exact: true }).click();
 		await page.keyboard.press("Escape");
 		await page.setViewportSize({ width: 1920, height: 1080 });
 		await expect(page.locator("[data-focus-view-panel-arrangement]")).toHaveAttribute(
@@ -320,7 +320,10 @@ for (const [width, height] of [
 		await page.getByRole("button", { name: "重置布局", exact: true }).click();
 		await expect(page.getByLabel("工作台格位 1", { exact: true })).toHaveValue("task_sessions");
 		await page.getByRole("button", { name: "工作台布局", exact: true }).click();
-		await expect(page.getByLabel("任务专注视图布局")).toHaveValue("automatic");
+		await expect(page.getByRole("menuitemradio", { name: "自动", exact: true })).toHaveAttribute(
+			"aria-checked",
+			"true",
+		);
 	});
 }
 
@@ -366,11 +369,11 @@ test("拖动比例和手动布局在刷新后恢复", async ({ page }) => {
 	await page.keyboard.press("ArrowRight");
 	await page.getByLabel("工作台格位 2", { exact: true }).selectOption("exploration_map");
 	await page.getByRole("button", { name: "工作台布局", exact: true }).click();
-	await page.getByLabel("任务专注视图布局").selectOption("agent_above_workbench_below");
+	await page.getByRole("menuitemradio", { name: "上下", exact: true }).click();
 	await page.keyboard.press("Escape");
 	await openWorkbench(page, 1920, 1080);
 	await page.getByRole("button", { name: "工作台布局", exact: true }).click();
-	await expect(page.getByLabel("任务专注视图布局")).toHaveValue("agent_above_workbench_below");
+	await expect(page.getByRole("menuitemradio", { name: "上下", exact: true })).toHaveAttribute("aria-checked", "true");
 	await page.keyboard.press("Escape");
 	await expect(page.getByLabel("工作台格位 2", { exact: true })).toHaveValue("exploration_map");
 	expect(

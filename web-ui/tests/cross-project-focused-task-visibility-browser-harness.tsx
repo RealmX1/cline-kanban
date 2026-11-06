@@ -59,6 +59,7 @@ function Harness() {
 	const [hydratedProjectId, setHydratedProjectId] = useState("project-a");
 	const [selectedTaskId, setSelectedTaskId] = useState<string | null>("recent-20");
 	const [outsideTaskNowInRecent, setOutsideTaskNowInRecent] = useState(false);
+	const [showsPinnedTasks, setShowsPinnedTasks] = useState(false);
 	const [panelMountSequence, setPanelMountSequence] = useState(0);
 	const [actionResult, setActionResult] = useState("");
 	const board = hydratedProjectId === "project-a" ? projectABoard : projectBBoard;
@@ -70,10 +71,10 @@ function Harness() {
 		setSelectedTaskId, handleSelectProject, openBacklogTaskEditor: () => {},
 	});
 	const projects = useMemo(() => [project("project-a", [
-		...recentCards.map((card) => entry(card, "review")),
+		...recentCards.map((card, index) => ({ ...entry(card, "review"), pinnedToTaskPinboardAt: showsPinnedTasks && (index < 7 || index === 20) ? now - index : null })),
 		{ ...entry(runningTask, "in_progress"), turnOwner: "agent" as const, liveness: "live" as const, lastOutputAt: now },
 		...(outsideTaskNowInRecent ? [entry(outsideTask, "review")] : []),
-	]), project("project-b", [])], [outsideTaskNowInRecent]);
+	]), project("project-b", [])], [outsideTaskNowInRecent, showsPinnedTasks]);
 	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({ projects, notificationLogByWorkspaceId: {}, currentProjectId });
 	const { crossProjectRecentlyActiveTaskSwitcherHost: host } = useCrossProjectRecentlyActiveTaskSwitcherHost({
 		crossProjectTaskSwitcherSectionsModel: sectionsModel,
@@ -96,6 +97,7 @@ function Harness() {
 				<button type="button" onClick={() => taskOpening.handleOpenTaskInProject("project-a", "recent-20")}>打开组内任务</button>
 				<button type="button" onClick={() => taskOpening.handleOpenTaskInProject("project-a", "running")}>打开收起任务</button>
 				<button type="button" onClick={() => setOutsideTaskNowInRecent(true)}>移入 Recent</button>
+				<button type="button" onClick={() => setShowsPinnedTasks(true)}>加入置顶</button>
 				<button type="button" onClick={() => setPanelMountSequence((value) => value + 1)}>重新挂载左栏</button>
 				<button type="button" onClick={() => setHydratedProjectId(currentProjectId)}>完成跨项目加载</button>
 				<button type="button" onClick={taskOpening.cancelPendingCrossProjectTaskOpenReturningToOriginTask}>取消跨项目跳转</button>

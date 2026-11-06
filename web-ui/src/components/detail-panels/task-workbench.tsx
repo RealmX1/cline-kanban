@@ -1,7 +1,8 @@
-import * as Popover from "@radix-ui/react-popover";
-import { PanelsTopLeft } from "lucide-react";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { Check, PanelsTopLeft } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
+import { Tooltip } from "@/components/ui/tooltip";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import {
 	type FocusViewDesktopPanelArrangementPreference,
@@ -158,7 +159,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 					const headerNavigationContent = (
 						<div
 							data-task-workbench-header-navigation=""
-							className={cn("min-w-0 shrink-0 items-center gap-1", isMobileModuleLayout ? "hidden" : "flex")}
+							className={cn("min-w-0 items-center gap-1", isMobileModuleLayout ? "hidden" : "flex")}
 						>
 							<select
 								aria-label={`工作台格位 ${slot + 1}`}
@@ -174,44 +175,56 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 							</select>
 							{slot === 0 ? (
 								<>
-									<Popover.Root>
-										<Popover.Trigger asChild>
-											<button
-												type="button"
-												aria-label="工作台布局"
-												className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
-											>
-												<PanelsTopLeft size={14} />
-											</button>
-										</Popover.Trigger>
-										<Popover.Portal>
-											<Popover.Content
+									<DropdownMenu.Root>
+										<Tooltip content="工作台布局" side="top">
+											<DropdownMenu.Trigger asChild>
+												<button
+													type="button"
+													aria-label="工作台布局"
+													className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+												>
+													<PanelsTopLeft size={14} />
+												</button>
+											</DropdownMenu.Trigger>
+										</Tooltip>
+										<DropdownMenu.Portal>
+											<DropdownMenu.Content
 												align="start"
 												sideOffset={4}
 												aria-label="工作台布局选项"
 												data-mobile-focus-view-idle-collapse-suspension=""
-												className="z-50 rounded-md border border-border-bright bg-surface-1 p-2 text-xs text-text-primary"
+												className="z-50 min-w-28 rounded-md border border-border-bright bg-surface-1 p-1 text-xs text-text-primary"
 											>
-												<label className="flex items-center gap-2">
-													布局
-													<select
-														aria-label="任务专注视图布局"
-														className="h-8 rounded-sm bg-surface-2 px-2"
-														value={arrangementPreference}
-														onChange={(event) =>
-															onArrangementPreferenceChange(
-																event.target.value as FocusViewDesktopPanelArrangementPreference,
-															)
-														}
-													>
-														<option value="automatic">自动</option>
-														<option value="agent_left_workbench_right">左右</option>
-														<option value="agent_above_workbench_below">上下</option>
-													</select>
-												</label>
-											</Popover.Content>
-										</Popover.Portal>
-									</Popover.Root>
+												<DropdownMenu.RadioGroup
+													value={arrangementPreference}
+													onValueChange={(value) =>
+														onArrangementPreferenceChange(
+															value as FocusViewDesktopPanelArrangementPreference,
+														)
+													}
+												>
+													{(
+														[
+															["automatic", "自动"],
+															["agent_left_workbench_right", "左右"],
+															["agent_above_workbench_below", "上下"],
+														] as const
+													).map(([value, label]) => (
+														<DropdownMenu.RadioItem
+															key={value}
+															value={value}
+															className="relative flex cursor-pointer items-center rounded-sm py-1.5 pl-7 pr-3 outline-none data-[highlighted]:bg-surface-3"
+														>
+															<DropdownMenu.ItemIndicator className="absolute left-2">
+																<Check size={12} />
+															</DropdownMenu.ItemIndicator>
+															{label}
+														</DropdownMenu.RadioItem>
+													))}
+												</DropdownMenu.RadioGroup>
+											</DropdownMenu.Content>
+										</DropdownMenu.Portal>
+									</DropdownMenu.Root>
 									{queueNotice ? (
 										<button
 											type="button"

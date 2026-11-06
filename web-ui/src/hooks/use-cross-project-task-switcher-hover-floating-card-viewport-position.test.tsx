@@ -67,6 +67,38 @@ describe("悬浮卡片跟随行的布局位移", () => {
 		vi.unstubAllGlobals();
 		observerCallback = undefined;
 	});
+	it.each(["top", "bottom"] as const)("避让 %s 标题栏，标题栏消失后恢复完整可视高度", async (edge) => {
+		rowTop = edge === "top" ? 150 : 330;
+		vi.stubGlobal("IntersectionObserver", LayoutShiftObserver);
+		vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(300);
+		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			const top =
+				this.dataset.kind === "host"
+					? 100
+					: this.dataset.kind === "row"
+						? rowTop
+						: this.dataset.edge === "top"
+							? 100
+							: 360;
+			const height = this.classList.contains("kb-stage-header-rail") ? 40 : this.dataset.kind === "card" ? 233 : 300;
+			return { top, bottom: top + height, left: 0, right: 200, width: 200, height, x: 0, y: top, toJSON() {} };
+		});
+		container = document.createElement("div");
+		const hostElement = document.createElement("div");
+		hostElement.dataset.kind = "host";
+		const headerRail = document.createElement("div");
+		headerRail.className = "kb-stage-header-rail";
+		headerRail.dataset.edge = edge;
+		container.append(hostElement, headerRail);
+		document.body.append(container);
+		root = createRoot(hostElement);
+		act(() => root?.render(<Row host={{ current: hostElement }} />));
+		const floating = hostElement.querySelector<HTMLElement>('[data-kind="floating"]')!;
+		expect(Number.parseFloat(floating.style.maxHeight)).toBe(260);
+		expect(Number.parseFloat(floating.style.top) + rowTop).toBe(edge === "top" ? 140 : 110);
+		await act(async () => headerRail.remove());
+		expect(Number.parseFloat(floating.style.maxHeight)).toBe(300);
+	});
 	it("上方任务异步增高和删除时，即使当前行不重渲染也重新夹取并保留焦点", () => {
 		rowTop = 330;
 		rowRenderCount = 0;
