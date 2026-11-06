@@ -87,6 +87,7 @@ const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnio
 		name: z.string().trim().min(1).max(100),
 		copyFromProfileId: z.string().min(1),
 		idempotencyKey: z.string().min(1).max(200),
+		stateResponseScope: z.enum(["full", "active"]).optional(),
 	}),
 	z.object({
 		action: z.literal("update"),
@@ -98,11 +99,13 @@ const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnio
 			.max(200)
 			.optional(),
 		idempotencyKey: z.string().min(1).max(200),
+		stateResponseScope: z.enum(["full", "active"]).optional(),
 	}),
 	z.object({
 		action: z.literal("set_default"),
 		profileId: z.string().min(1),
 		idempotencyKey: z.string().min(1).max(200),
+		stateResponseScope: z.enum(["full", "active"]).optional(),
 	}),
 	z.object({
 		action: z.literal("bind_session"),
@@ -111,6 +114,7 @@ const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnio
 		conversationSessionId: z.string().min(1),
 		expectedRuntimeSessionIncarnationId: z.string().uuid(),
 		idempotencyKey: z.string().min(1).max(200),
+		stateResponseScope: z.enum(["full", "active"]).optional(),
 	}),
 ]);
 export type CodexConfigurationProfileMutationRequest = z.infer<
@@ -209,9 +213,11 @@ export const codexConfigurationChangeDetailsRequestSchema = z.object({
 	changeId: z.string().min(1),
 	expectedVersion: z.number().int().positive(),
 	targetWriterId: z.string().min(1).optional(),
+	includePropagationHistory: z.boolean().optional(),
 });
 export type CodexConfigurationChangeDetailsRequest = z.infer<typeof codexConfigurationChangeDetailsRequestSchema>;
 export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeComparisonSchema.extend({
+	propagationTargets: z.array(codexConfigurationPropagationTargetSchema).optional(),
 	changeId: z.string(),
 	version: z.number(),
 	fieldLabel: z.string(),
@@ -258,6 +264,7 @@ export const codexConfigurationChangeSchema = z.object({
 	]),
 	acknowledgedAt: z.number().nullable(),
 	eligibleTargetCount: z.number().int().nonnegative(),
+	propagationTargetTotalCount: z.number().int().nonnegative().optional(),
 	targets: z.array(codexConfigurationPropagationTargetSchema),
 });
 export const codexConfigurationSourceObservationSchema = z.object({
@@ -275,6 +282,12 @@ export const codexConfigurationSourceObservationSchema = z.object({
 });
 export type CodexConfigurationSourceObservation = z.infer<typeof codexConfigurationSourceObservationSchema>;
 const codexConfigurationSyncStateObjectSchema = z.object({
+	stateResponseScope: z.enum(["full", "active"]).optional(),
+	storageIdentity: z.string().optional(),
+	storageGeneration: z.number().int().nonnegative().optional(),
+	historyTotalCount: z.number().int().nonnegative().optional(),
+	historyMaximumSequence: z.number().int().nonnegative().optional(),
+	historyProjectionGeneration: z.number().int().nonnegative().optional(),
 	revision: z.number().int().nonnegative(),
 	changes: z.array(codexConfigurationChangeSchema),
 	sourceObservations: z.array(codexConfigurationSourceObservationSchema),
@@ -311,6 +324,12 @@ export interface CodexConfigurationSessionProfileBinding {
 	runtimeSessionIncarnationId?: string;
 }
 export interface CodexConfigurationSyncState {
+	stateResponseScope?: "full" | "active";
+	storageIdentity?: string;
+	storageGeneration?: number;
+	historyTotalCount?: number;
+	historyMaximumSequence?: number;
+	historyProjectionGeneration?: number;
 	revision: number;
 	changes: CodexConfigurationChange[];
 	sourceObservations: CodexConfigurationSourceObservation[];
@@ -325,6 +344,37 @@ export interface CodexConfigurationSyncState {
 		systemWriterEvidence: "not_collected_by_runtime";
 	};
 }
+export const codexConfigurationSyncHistoryRequestSchema = z.object({
+	category: z.enum(["all", "settings", "sources"]).default("all"),
+	search: z.string().max(1000).default(""),
+	limit: z.number().int().min(1).max(100).default(50),
+	cursor: z.string().min(1).max(4096).optional(),
+});
+export type CodexConfigurationSyncHistoryRequest = z.infer<typeof codexConfigurationSyncHistoryRequestSchema>;
+export const codexConfigurationSyncHistoryPageSchema = z.object({
+	changes: z.array(codexConfigurationChangeSchema),
+	sourceObservations: z.array(codexConfigurationSourceObservationSchema),
+	totalCount: z.number().int().nonnegative(),
+	nextCursor: z.string().nullable(),
+	storageIdentity: z.string(),
+	storageGeneration: z.number().int().nonnegative(),
+	historyMaximumSequence: z.number().int().nonnegative(),
+	historyProjectionGeneration: z.number().int().nonnegative(),
+});
+export type CodexConfigurationSyncHistoryPage = z.infer<typeof codexConfigurationSyncHistoryPageSchema>;
+export const codexConfigurationSyncActiveStateSchema = codexConfigurationSyncStateObjectSchema.extend({
+	stateResponseScope: z.literal("active"),
+	storageIdentity: z.string(),
+	storageGeneration: z.number().int().nonnegative(),
+	historyTotalCount: z.number().int().nonnegative(),
+	historyMaximumSequence: z.number().int().nonnegative(),
+	historyProjectionGeneration: z.number().int().nonnegative(),
+});
+export type CodexConfigurationSyncActiveState = z.infer<typeof codexConfigurationSyncActiveStateSchema>;
+export const codexConfigurationSourceObservationRequestSchema = z.object({ observationId: z.string().min(1) });
+export const codexConfigurationMutationReceiptSchema = z
+	.object({ requestDigest: z.string(), changeId: z.string() })
+	.nullable();
 export const codexConfigurationSyncStateSchema: z.ZodType<CodexConfigurationSyncState> =
 	codexConfigurationSyncStateObjectSchema;
 export type CodexConfigurationChange = z.infer<typeof codexConfigurationChangeSchema>;
@@ -333,12 +383,14 @@ export const codexConfigurationChangeMutationRequestSchema = z.object({
 	changeId: z.string().min(1),
 	expectedVersion: z.number().int().positive(),
 	idempotencyKey: z.string().min(1).max(200),
+	stateResponseScope: z.enum(["full", "active"]).optional(),
 });
 export const codexConfigurationBatchActionRequestSchema = z.object({
 	action: z.enum(["approve", "reject", "defer", "confirm_source"]),
+	stateResponseScope: z.enum(["full", "active"]).optional(),
 	items: z
 		.array(
-			codexConfigurationChangeMutationRequestSchema.extend({
+			codexConfigurationChangeMutationRequestSchema.omit({ stateResponseScope: true }).extend({
 				entryKind: z.enum(["settings_proposal", "source_observation"]),
 				expectedSharedValueDigest: z.string().min(1).optional(),
 			}),
@@ -346,6 +398,12 @@ export const codexConfigurationBatchActionRequestSchema = z.object({
 		.min(1)
 		.max(200),
 });
+export const codexConfigurationMutationReceiptRequestSchema = z.object({
+	idempotencyKey: z.string().min(1).max(200),
+	expectedAction: z.enum(["confirm_source", "defer"]).optional(),
+	expectedEntry: codexConfigurationBatchActionRequestSchema.shape.items.element.optional(),
+});
+export type CodexConfigurationMutationReceiptRequest = z.infer<typeof codexConfigurationMutationReceiptRequestSchema>;
 export type CodexConfigurationBatchActionRequest = z.infer<typeof codexConfigurationBatchActionRequestSchema>;
 export const codexConfigurationBatchActionResultSchema = z.object({
 	results: z.array(
@@ -388,6 +446,13 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
+	getActiveState: () => Promise<CodexConfigurationSyncActiveState>;
+	listHistory: (input: CodexConfigurationSyncHistoryRequest) => Promise<CodexConfigurationSyncHistoryPage>;
+	getSourceObservation: (input: { observationId: string }) => Promise<CodexConfigurationSourceObservation | null>;
+	getMutationReceipt: (
+		input: CodexConfigurationMutationReceiptRequest,
+	) => Promise<{ requestDigest: string; changeId: string } | null>;
+
 	getChangeDetails: (input: CodexConfigurationChangeDetailsRequest) => Promise<CodexConfigurationChangeDetails>;
 	mutateProfile: (input: CodexConfigurationProfileMutationRequest) => Promise<CodexConfigurationSyncState>;
 	getState: () => Promise<CodexConfigurationSyncState>;

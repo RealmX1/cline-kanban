@@ -122,7 +122,38 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的视觉密度", () => {
-	it.each(["standard_card_with_floating_capsule", "compact_row_in_focus_view_left_column"] as const)(
+	it.each(["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const)(
+		"%s：元信息在标题之前，接受提示独立于时间药丸",
+		(visualDensity) => {
+			act(() =>
+				root.render(
+					<TaskCardBodyVisualDensityProvider value={visualDensity}>
+						<TaskCardBody
+							card={createCard()}
+							columnId="review"
+							sessionSummary={{
+								...createSummary(),
+								agentConversationPromptSubmissionAcceptance: {
+									status: "pending",
+									attemptedAtMs: NOW,
+									submissionId: "pending-input",
+									runtimeSessionIncarnationId: "test-generation",
+								},
+							}}
+						/>
+					</TaskCardBodyVisualDensityProvider>,
+				),
+			);
+			const metadata = container.querySelector("[data-task-card-secondary-metadata-row]")!;
+			const title = container.querySelector("[data-task-card-title]")!;
+			const notices = container.querySelector("[data-task-card-status-notices]")!;
+			expect(metadata).not.toBeNull();
+			expect(metadata.compareDocumentPosition(title) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+			expect(metadata.querySelector('[role="status"]')).toBeNull();
+			expect(notices?.querySelector('[role="status"]')).not.toBeNull();
+		},
+	);
+	it.each(["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const)(
 		"%s：Kimi 活体中断显示可继续输入，保持实心存活状态点",
 		(visualDensity) => {
 			const summary: RuntimeTaskSessionSummary = {
@@ -181,7 +212,7 @@ describe("TaskCardBody 的视觉密度", () => {
 				unavailableReason: null,
 			},
 		});
-		for (const density of ["standard_card_with_floating_capsule", "compact_row_in_focus_view_left_column"] as const) {
+		for (const density of ["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const) {
 			const host = renderWithDensity(density);
 			const group = host.querySelector("[data-task-card-line-change-statistics-group]");
 			expect(Boolean(group)).toBe(dirty || committed);
@@ -212,14 +243,14 @@ describe("TaskCardBody 的视觉密度", () => {
 				unavailableReason: null,
 			},
 		});
-		for (const density of ["standard_card_with_floating_capsule", "compact_row_in_focus_view_left_column"] as const) {
+		for (const density of ["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const) {
 			const host = renderWithDensity(density, "trash");
 			expect(host.querySelector("[data-task-directory]")?.textContent).toContain("已提交 +123 −45");
 			expect(host.querySelector("[data-task-directory]")?.textContent).not.toContain("0 files");
 		}
 	});
 	it("紧凑行与标准卡片显示同一组信息项（只改排版不改内容）", () => {
-		const standardItems = collectInformationItemsShown(renderWithDensity("standard_card_with_floating_capsule"));
+		const standardItems = collectInformationItemsShown(renderWithDensity("standard_bordered_task_card"));
 		const compactItems = collectInformationItemsShown(renderWithDensity("compact_row_in_focus_view_left_column"));
 		expect(standardItems).toEqual([
 			"agent",
@@ -234,24 +265,30 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(compactItems).toEqual(standardItems);
 	});
 
-	it("紧凑行不画浮动胶囊与卡片边框；时长药丸、置顶标记、目录并入元信息行，取消自动动作变成行内文字按钮", () => {
+	it("紧凑卡片共享摘要，取消自动动作在详情下方", () => {
 		const host = renderWithDensity("compact_row_in_focus_view_left_column");
 		expect(host.querySelector(".-left-2")).toBeNull();
-		expect(host.querySelector(".border-border-bright.bg-surface-2")).toBeNull();
+		expect(host.querySelector(".kb-board-card-surface")?.className).not.toContain("border-border-bright");
 		const metadataRow = host.querySelector("[data-task-card-compact-metadata-row]");
 		expect(metadataRow?.querySelector("[data-task-created-at-pill]")?.textContent).toBe("3d");
 		expect(metadataRow?.querySelector("[data-agent-response-generation-stopped-pill]")).not.toBeNull();
 		expect(metadataRow?.querySelector("[data-task-pinboard-pinned-marker]")).not.toBeNull();
 		expect(metadataRow?.querySelector("[data-task-directory]")).not.toBeNull();
-		const cancelButton = [...(metadataRow?.querySelectorAll("button") ?? [])].find((button) =>
+		const cancelButton = [...host.querySelectorAll("button")].find((button) =>
 			button.textContent?.includes("Cancel"),
 		);
 		expect(cancelButton?.className).toContain("text-accent");
 	});
 
-	it("标准卡片保留浮动胶囊并避开左上角角标，没有紧凑元信息行", () => {
-		const host = renderWithDensity("standard_card_with_floating_capsule");
-		expect(host.querySelector(".left-2 [data-agent-badge]")).not.toBeNull();
-		expect(host.querySelector("[data-task-card-compact-metadata-row]")).toBeNull();
+	it("标准卡片复用同一摘要，Agent 图标与标题同排", () => {
+		const host = renderWithDensity("standard_bordered_task_card");
+		const metadata = host.querySelector("[data-task-card-secondary-metadata-row]")!;
+		expect(metadata.querySelector("[data-agent-badge]")).toBeNull();
+		expect(metadata.querySelector("[data-task-created-at-pill]")).not.toBeNull();
+		expect(
+			host
+				.querySelector("[data-task-card-title]")
+				?.parentElement?.parentElement?.querySelector("[data-agent-badge]"),
+		).not.toBeNull();
 	});
 });

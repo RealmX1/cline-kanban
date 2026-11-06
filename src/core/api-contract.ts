@@ -2061,7 +2061,7 @@ export type RuntimeTaskCardActionMoveBetweenNonTrashColumnsResponse = z.infer<
 
 // --- moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree ---
 // 移入 Done（trash 列）→ 停 agent 会话与详情 shell 终端会话 → 删 worktree（按卡片的 worktreeMode）。
-// 卡片本来就在 Done 时什么副作用都不做（会话中断自动流转进 Done 的卡刻意保留 worktree 供恢复）。
+// 会话中断不发起结案；重复结案请求的副作用按原操作幂等处理。
 export const runtimeTaskCardActionMoveIntoDoneRequestSchema = z.object({
 	closure: taskClosureRequestSchema.optional(),
 	taskId: z.string().min(1),

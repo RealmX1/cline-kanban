@@ -102,6 +102,59 @@ async function expectFullscreenAndNativeWheel(page: Page) {
 	expect(after.viewportY).toBe(0);
 }
 
+test("默认渲染器显示中英文、ANSI 颜色和边框，输入与尺寸变化正常", async ({ page, browserName }, testInfo) => {
+	const viewer = await openTerminalViewer(page);
+	await viewer.sendRestore(
+		"\x1b[32mEnglish 中文\x1b[0m\r\n╭────────╮\r\n│终端测试│\r\n╰────────╯\r\n\x1b[31mANSI 红色\x1b[0m\r\n输入> ",
+	);
+	await expect.poll(async () => (await readTerminalState(page)).connectionReadyCount).toBe(1);
+	const initial = await readTerminalState(page);
+	expect(initial.screenLines.slice(0, 6)).toEqual([
+		"English 中文",
+		"╭────────╮",
+		"│终端测试│",
+		"╰────────╯",
+		"ANSI 红色",
+		"输入> ",
+	]);
+	if (browserName === "firefox" || browserName === "webkit") {
+		const renderedRows = page.locator(".xterm-rows");
+		await expect(renderedRows).toBeVisible();
+		await expect(renderedRows).toContainText("English 中文");
+		await expect(renderedRows).toContainText("╭────────╮");
+		await expect(renderedRows).toContainText("│终端测试│");
+		await expect(renderedRows).toContainText("╰────────╯");
+		await expect(renderedRows).toContainText("ANSI 红色");
+		const redColor = await renderedRows
+			.locator(".xterm-fg-1")
+			.first()
+			.evaluate((span) => getComputedStyle(span).color);
+		const greenColor = await renderedRows
+			.locator(".xterm-fg-2")
+			.first()
+			.evaluate((span) => getComputedStyle(span).color);
+		expect(redColor).not.toBe(greenColor);
+		const rowHeights = await renderedRows
+			.locator(":scope > div")
+			.evaluateAll((rows) => rows.slice(0, 6).map((row) => row.getBoundingClientRect().height));
+		expect(rowHeights[0]).toBeGreaterThan(10);
+		expect(rowHeights[0]).toBeLessThan(30);
+		expect(new Set(rowHeights).size).toBe(1);
+		await expect(page.locator(".xterm-screen canvas")).toHaveCount(0);
+	}
+	await page.screenshot({ path: testInfo.outputPath("terminal-renderer.png") });
+	await page.locator(".xterm-helper-textarea").focus();
+	await page.keyboard.type("renderer input ");
+	await page.keyboard.insertText("中文");
+	await page.keyboard.press("Enter");
+	await expect.poll(() => viewer.newestSocket("io").clientMessages.join("")).toContain("renderer input 中文\r");
+	await page.setViewportSize({ width: 700, height: 480 });
+	await expect.poll(async () => (await readTerminalState(page)).cols).toBeLessThan(initial.cols);
+	expect((await readTerminalState(page)).hasHorizontalOverflow).toBe(false);
+	await expect.poll(() => countClientMessages(viewer.newestSocket("control"), "resize")).toBeGreaterThan(0);
+	expect(viewer.apiRequests).toEqual([]);
+});
+
 for (const role of ["io", "control"] as const) {
 	test(`仅 ${role} 通道断线后成对重连，全屏模式和原生鼠标滚动恢复`, async ({ page }) => {
 		const viewer = await openTerminalViewer(page);

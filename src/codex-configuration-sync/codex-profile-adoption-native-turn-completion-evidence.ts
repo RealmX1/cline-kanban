@@ -1,9 +1,12 @@
-import { open, stat } from "node:fs/promises";
 import {
 	parseTranscriptJsonRecord,
 	readBoundedJsonLines,
 	readTranscriptRecord,
 } from "../agent-session-history/bounded-agent-transcript-reader";
+import {
+	openCodexTranscriptReadSource,
+	statCodexTranscriptReadSource,
+} from "../agent-session-history/codex-transcript-read-source";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "../agent-session-history/persisted-agent-transcript-last-conversation-progress-probe";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { configurationDigest } from "./codex-configuration-field-projection";
@@ -16,9 +19,9 @@ export async function readCodexProfileAdoptionNativeTurnCompletionEvidence(
 	const path = identity?.transcriptPath;
 	if (summary.agentId !== "codex" || identity?.sourceAgentId !== "codex" || !path) return null;
 	try {
-		const before = await stat(path);
+		const before = await statCodexTranscriptReadSource(path, identity.nativeSessionId);
 		if (!before.isFile() || before.size === 0) return null;
-		const handle = await open(path, "r");
+		const handle = await openCodexTranscriptReadSource(path, identity.nativeSessionId);
 		try {
 			const lastByte = Buffer.alloc(1);
 			await handle.read(lastByte, 0, 1, before.size - 1);
@@ -26,7 +29,7 @@ export async function readCodexProfileAdoptionNativeTurnCompletionEvidence(
 		} finally {
 			await handle.close();
 		}
-		const { lines } = await readBoundedJsonLines(path, before.size, 1024 * 1024);
+		const { lines } = await readBoundedJsonLines(path, before.size, 1024 * 1024, "codex", identity.nativeSessionId);
 		let metadataVerified = false;
 		let completedTurnId: string | null = null;
 		let completionRecord: Record<string, unknown> | null = null;
@@ -72,7 +75,7 @@ export async function readCodexProfileAdoptionNativeTurnCompletionEvidence(
 			// 任何后续执行、用户消息、回滚或未知新记录均不能沿用旧的完成事实。
 			completedTurnId = null;
 		}
-		const after = await stat(path);
+		const after = await statCodexTranscriptReadSource(path, identity.nativeSessionId);
 		if (
 			!metadataVerified ||
 			!completedTurnId ||

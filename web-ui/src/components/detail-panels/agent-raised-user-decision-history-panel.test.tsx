@@ -87,6 +87,38 @@ async function renderHistoryPanel() {
 }
 
 describe("AgentRaisedUserDecisionHistoryPanel", () => {
+	it("会话切换关闭浮层，不主动读取新会话，旧响应不能混入新会话", async () => {
+		let finishOldQuery!: (value: { historyEntries: RuntimeAgentRaisedUserDecisionHistoryEntry[] }) => void;
+		listUserDecisionHistoryQueryMock
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						finishOldQuery = resolve;
+					}),
+			)
+			.mockResolvedValue({ historyEntries: [] });
+		const host = await renderHistoryPanel();
+		const renderPopover = (taskId: string) => (
+			<AgentRaisedUserDecisionHistoryPanel
+				workspaceId="workspace-1"
+				taskId={taskId}
+				pendingUserDecisionIdentityForRefresh={null}
+				presentation="toolbar_popover"
+			/>
+		);
+		await act(async () => root?.render(renderPopover("task-1")));
+		await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="展开问答记录"]')!.click());
+		expect(listUserDecisionHistoryQueryMock).toHaveBeenCalledTimes(1);
+		await act(async () => root?.render(renderPopover("task-2")));
+		expect(document.querySelector('[role="dialog"][aria-label="问答记录"]')).toBeNull();
+		expect(listUserDecisionHistoryQueryMock).toHaveBeenCalledTimes(1);
+		await act(async () => finishOldQuery({ historyEntries: [answeredInAgentTerminalEntry] }));
+		await act(async () => host.querySelector<HTMLButtonElement>('[aria-label="展开问答记录"]')!.click());
+		expect(listUserDecisionHistoryQueryMock).toHaveBeenLastCalledWith({ taskId: "task-2" });
+		expect(document.querySelector('[role="dialog"]')?.textContent).toContain("还没有已了结");
+		expect(document.querySelector('[role="dialog"]')?.textContent).not.toContain("交付终态");
+	});
+
 	it("折叠时不读取（服务端会扫描转录），展开后才拉取", async () => {
 		listUserDecisionHistoryQueryMock.mockResolvedValue({ historyEntries: [] });
 		const host = await renderHistoryPanel();

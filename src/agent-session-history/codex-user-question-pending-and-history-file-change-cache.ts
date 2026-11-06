@@ -1,6 +1,7 @@
 import { readdir, stat } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
+import { codexTranscriptNativeStorageRoot, codexTranscriptPathMatchesSession } from "./codex-transcript-read-source";
 import {
 	type RecoveredCodexUserQuestions,
 	recoverCodexUserQuestionsFromKnownConversation,
@@ -30,14 +31,14 @@ async function readCodexTranscriptFilesystemPathSignature(path: string): Promise
 }
 
 async function captureKnownCodexTranscriptFilesystemSnapshot(
-	codexSessionsRootDirectoryPath: string,
+	codexTranscriptStorageRootDirectoryPath: string,
 	input: CodexUserQuestionTranscriptRecoveryInput,
 ): Promise<CodexTranscriptFilesystemSnapshot> {
 	const filesystemSnapshot: CodexTranscriptFilesystemSnapshot = {
 		filesystemPathSignatures: new Map(),
 		discoveryWasComplete: true,
 	};
-	const directoriesToVisit = [codexSessionsRootDirectoryPath];
+	const directoriesToVisit = [codexTranscriptStorageRootDirectoryPath];
 	const knownTranscriptPaths = new Set<string>();
 	if (input.transcriptPath) knownTranscriptPaths.add(resolve(input.transcriptPath));
 	while (directoriesToVisit.length > 0) {
@@ -58,11 +59,7 @@ async function captureKnownCodexTranscriptFilesystemSnapshot(
 			for (const entry of await readdir(directoryPath, { withFileTypes: true })) {
 				const entryPath = join(directoryPath, entry.name);
 				if (entry.isDirectory()) directoriesToVisit.push(entryPath);
-				else if (
-					entry.isFile() &&
-					(entry.name.endsWith(`${input.sessionId}.jsonl`) ||
-						(entry.name.includes(`${input.sessionId}_`) && entry.name.endsWith(".jsonl")))
-				)
+				else if (entry.isFile() && codexTranscriptPathMatchesSession(entry.name, input.sessionId))
 					knownTranscriptPaths.add(entryPath);
 				if (
 					filesystemSnapshot.filesystemPathSignatures.size +
@@ -88,7 +85,6 @@ async function captureKnownCodexTranscriptFilesystemSnapshot(
 		}
 		const signature = await readCodexTranscriptFilesystemPathSignature(transcriptPath);
 		filesystemSnapshot.filesystemPathSignatures.set(transcriptPath, signature);
-		if (signature === null) filesystemSnapshot.discoveryWasComplete = false;
 	}
 	return filesystemSnapshot;
 }
@@ -134,7 +130,13 @@ export function createCodexUserQuestionPendingAndHistoryFileChangeCache(
 			// 每次查询先读取正式绑定；目录未变的旧缓存不能遮住迁移或回退。
 			const resolvedInput = await resolveCodexUserQuestionTranscriptRecoveryStorageBinding(input);
 			const codexHomeDirectoryPath = resolve(resolvedInput.homeDirectoryPath);
-			const codexSessionsRootDirectoryPath = join(codexHomeDirectoryPath, "sessions");
+			const boundTranscriptStorageRoot = resolvedInput.transcriptPath
+				? codexTranscriptNativeStorageRoot(resolve(resolvedInput.transcriptPath))
+				: null;
+			const codexTranscriptStorageRootDirectoryPath =
+				boundTranscriptStorageRoot && dirname(boundTranscriptStorageRoot) === codexHomeDirectoryPath
+					? boundTranscriptStorageRoot
+					: join(codexHomeDirectoryPath, "sessions");
 			const cacheKey = JSON.stringify([
 				codexHomeDirectoryPath,
 				resolvedInput.sessionId,
@@ -153,7 +155,7 @@ export function createCodexUserQuestionPendingAndHistoryFileChangeCache(
 			removeCachedRecovery(cacheKey);
 			for (let stableSnapshotAttempt = 0; stableSnapshotAttempt < 2; stableSnapshotAttempt += 1) {
 				const filesystemSnapshot = await captureKnownCodexTranscriptFilesystemSnapshot(
-					codexSessionsRootDirectoryPath,
+					codexTranscriptStorageRootDirectoryPath,
 					resolvedInput,
 				);
 				const recovered = await recoverCodexUserQuestionsFromKnownConversation(resolvedInput);

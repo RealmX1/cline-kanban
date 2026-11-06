@@ -238,6 +238,7 @@ export interface LocalDeploymentExecutionAnalysis {
 	deploymentOutcome:
 		| "succeeded"
 		| "machine_evidence_pending"
+		| "quality_validation_failed"
 		| "failed"
 		| "rolled_back"
 		| "abandoned"
@@ -295,8 +296,18 @@ export function summarizeLocalDeploymentExecution(
 				),
 		)
 		.map((stage) => stage.stage);
+	const latestUnfinishedCommandResult = record.observations
+		.filter((item) => item.stage === unfinishedStage && ["command_failed", "command_succeeded"].includes(item.kind))
+		.at(-1);
+	const hasQualityValidationFailure =
+		latestUnfinishedCommandResult?.kind === "command_failed" &&
+		latestUnfinishedCommandResult.commandFailureKind === "quality_validation_failed";
 	const deploymentOutcome =
-		record.finishedOutcome ?? (deploymentSucceeded ? "succeeded" : (restriction?.kind ?? "machine_evidence_pending"));
+		record.finishedOutcome ??
+		(deploymentSucceeded
+			? "succeeded"
+			: (restriction?.kind ??
+				(hasQualityValidationFailure ? "quality_validation_failed" : "machine_evidence_pending")));
 	const started = record.observations.filter((item) => item.kind === "command_execution_intent_persisted");
 	const failures = record.observations.filter(
 		(item) => item.kind === "command_failed" || item.kind === "command_not_started",
@@ -332,9 +343,11 @@ export function summarizeLocalDeploymentExecution(
 				deploymentOutcome === "machine_evidence_pending" ? Date.now() + READ_ONLY_RECOVERY_CHECK_INTERVAL_MS : null,
 			condition: restriction
 				? `${restriction.reason}（${restriction.sourceReference}）；不自动恢复权限`
-				: unfinishedStage
-					? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件摘要变化后取得新重试预算"
-					: null,
+				: hasQualityValidationFailure
+					? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
+					: unfinishedStage
+						? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件摘要变化后取得新重试预算"
+						: null,
 		},
 		metrics: {
 			commandAttempts: started.length,
@@ -514,6 +527,7 @@ async function executeOneStage(
 		commandOutputDirectory: string,
 		exitCode: number | null,
 		detail: string,
+		commandFailureKind?: "quality_validation_failed",
 	): Promise<LocalDeploymentObservation> {
 		const observation: LocalDeploymentObservation = {
 			sequence: record.observations.length + 1,
@@ -525,6 +539,7 @@ async function executeOneStage(
 			commandOutputDirectory,
 			exitCode,
 			detail,
+			...(commandFailureKind ? { commandFailureKind } : {}),
 		};
 		record.observations.push(observation);
 		await persistRecord(directory, record, assertLockHeld);
@@ -675,8 +690,17 @@ async function executeOneStage(
 			};
 		}
 		let reportedFailure = false;
+		let qualityValidationFailed = false;
 		try {
-			reportedFailure = JSON.parse(result.stdout).ok === false;
+			const reported: unknown = JSON.parse(result.stdout);
+			if (reported !== null && typeof reported === "object") {
+				reportedFailure = "ok" in reported && reported.ok === false;
+				qualityValidationFailed =
+					result.processWasStarted === true &&
+					reportedFailure &&
+					"status" in reported &&
+					reported.status === "quality_validation_failed";
+			}
 		} catch {
 			/* 普通构建命令可以只输出文本。 */
 		}
@@ -691,11 +715,13 @@ async function executeOneStage(
 			outputDirectory,
 			result.exitCode,
 			result.stderr.slice(-2_000),
+			qualityValidationFailed ? "quality_validation_failed" : undefined,
 		);
 		previousAttempts = record.observations.filter(
 			(item) => item.stage === stage.stage && item.kind === "command_execution_intent_persisted",
 		);
 		if (result.processWasStarted === false) continue;
+		if (qualityValidationFailed) return false;
 		if (LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return await verifyPreviousEffect();
 		if (commandSucceeded) return true;
 	}

@@ -1,3 +1,4 @@
+import { PanelBottomClose } from "lucide-react";
 import { type ReactElement, useCallback, useRef } from "react";
 
 import { TerminalMouseWheelScrollButtons } from "@/components/detail-panels/terminal-mouse-wheel-scroll-buttons";
@@ -90,12 +91,24 @@ export function TerminalVirtualKeyInputBar({
 					))}
 				</div>
 				<div className="flex items-start gap-1">
-					<div className="grid grid-cols-3 gap-0.5">
+					<div className="grid grid-cols-3 grid-cols-[44px_32px_32px] min-[480px]:grid-cols-[44px_40px_40px] gap-0.5">
 						{TERMINAL_VIRTUAL_KEY_BAR_DIRECTIONAL_CLUSTER_ROWS.flatMap((clusterRow, clusterRowIndex) =>
 							clusterRow.map((keyId, columnIndex) =>
 								keyId === null ? (
 									// 倒 T 形的空位。渲染成空 div 而不是靠 col-start 定位，网格结构一眼可读。
-									<div key={`empty-${clusterRowIndex}-${columnIndex}`} aria-hidden="true" />
+									controls?.isEnabled && clusterRowIndex === 0 && columnIndex === 0 ? (
+										<button
+											key="collapse-virtual-key-controls"
+											type="button"
+											onClick={controls.collapseLowerVirtualKeyBar}
+											aria-label="收起下方按键栏"
+											className="inline-flex h-11 w-11 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+										>
+											<PanelBottomClose size={16} />
+										</button>
+									) : (
+										<div key={`empty-${clusterRowIndex}-${columnIndex}`} aria-hidden="true" />
+									)
 								) : (
 									<TerminalVirtualKeyCapButton
 										key={keyId}
@@ -112,7 +125,7 @@ export function TerminalVirtualKeyInputBar({
 						keyDefinition={TERMINAL_CONTROL_KEY_DEFINITIONS_BY_ID[TERMINAL_VIRTUAL_KEY_BAR_SUBMIT_KEY_ID]}
 						onPressKey={handlePressKey}
 						disabled={disabled}
-						className={`${SUBMIT_KEY_CAP_HEIGHT_CLASS_NAME} w-9 min-[480px]:w-12`}
+						className={`${controls?.isEnabled ? "h-[82px]" : SUBMIT_KEY_CAP_HEIGHT_CLASS_NAME} w-9 min-[480px]:w-12`}
 					/>
 				</div>
 				<TerminalMouseWheelScrollButtons
@@ -120,16 +133,6 @@ export function TerminalVirtualKeyInputBar({
 					onScrollByMouseWheelLines={scrollByMouseWheelLines}
 				/>
 			</div>
-			{controls?.isEnabled ? (
-				<button
-					type="button"
-					onClick={controls.collapseLowerVirtualKeyBar}
-					className="min-h-9 self-end px-1 text-xs text-text-secondary"
-					aria-label="收起下方按键栏"
-				>
-					收起按键栏
-				</button>
-			) : null}
 		</div>
 	);
 }

@@ -1,3 +1,5 @@
+import * as Popover from "@radix-ui/react-popover";
+import { SlidersHorizontal } from "lucide-react";
 // 详情视图的 Queue 面板：这个任务（会话）排着哪些「等 agent 这一轮结束再发」的 prompt，以及它们此刻为什么
 // 还没发。数据来自服务端投影（正文截断预览 + 阻塞原因）；投递顺序修改发给服务端，时间排序与复制只读。
 //
@@ -710,7 +712,9 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 	isTaskAgentExecutionDisabled = false,
 	controller,
 	headerContent,
+	headerNavigationContent,
 }: {
+	headerNavigationContent?: ReactNode;
 	isTaskAgentExecutionDisabled?: boolean;
 	controller: QueuedTaskPromptDeliveryQueueController;
 	headerContent?: ReactNode;
@@ -756,43 +760,74 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				? (right.settledAt ?? right.enqueuedAt) - (left.settledAt ?? left.enqueuedAt)
 				: compareQueuedPromptDisplayTimestamps(left, right, displayOrder),
 		);
+	const queueFilterControls = (
+		<>
+			<select
+				aria-label="按消息类型筛选"
+				value={selectedMessageTypeLabel}
+				onChange={(event) => setSelectedMessageTypeLabel(event.target.value)}
+				className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
+			>
+				<option value="all">全部类型</option>
+				{messageTypeLabels.map((label) => (
+					<option key={label} value={label}>
+						{label}
+					</option>
+				))}
+			</select>
+			<select
+				aria-label="队列显示顺序"
+				value={displayOrder}
+				onChange={(event) => {
+					const value = event.target.value;
+					if (
+						value === "delivery_order" ||
+						value === "last_attempt_newest_first" ||
+						value === "enqueued_oldest_first"
+					)
+						setDisplayOrder(value);
+				}}
+				className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
+			>
+				<option value="delivery_order">实际投递顺序</option>
+				<option value="last_attempt_newest_first">最近尝试在前</option>
+				<option value="enqueued_oldest_first">最早入队在前</option>
+			</select>
+		</>
+	);
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
-			<div className="flex shrink-0 flex-wrap items-center justify-between gap-2 px-3 py-2">
+			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 border-b border-border px-2">
+				{headerNavigationContent}
 				{headerContent ?? (
 					<span className="text-xs font-medium uppercase tracking-wide text-text-secondary">Queue</span>
 				)}
-				<select
-					aria-label="按消息类型筛选"
-					value={selectedMessageTypeLabel}
-					onChange={(event) => setSelectedMessageTypeLabel(event.target.value)}
-					className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
-				>
-					<option value="all">全部类型</option>
-					{messageTypeLabels.map((label) => (
-						<option key={label} value={label}>
-							{label}
-						</option>
-					))}
-				</select>
-				<select
-					aria-label="队列显示顺序"
-					value={displayOrder}
-					onChange={(event) => {
-						const value = event.target.value;
-						if (
-							value === "delivery_order" ||
-							value === "last_attempt_newest_first" ||
-							value === "enqueued_oldest_first"
-						)
-							setDisplayOrder(value);
-					}}
-					className="min-w-0 rounded border border-border bg-surface-2 px-2 py-1 text-xs text-text-primary"
-				>
-					<option value="delivery_order">实际投递顺序</option>
-					<option value="last_attempt_newest_first">最近尝试在前</option>
-					<option value="enqueued_oldest_first">最早入队在前</option>
-				</select>
+				{headerNavigationContent ? (
+					<Popover.Root>
+						<Popover.Trigger asChild>
+							<button
+								type="button"
+								aria-label="队列筛选与排序"
+								className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+							>
+								<SlidersHorizontal size={14} />
+							</button>
+						</Popover.Trigger>
+						<Popover.Portal>
+							<Popover.Content
+								aria-label="队列筛选与排序"
+								align="end"
+								sideOffset={4}
+								data-mobile-focus-view-idle-collapse-suspension=""
+								className="z-50 flex max-w-[calc(100vw-1rem)] flex-col gap-2 rounded-md border border-border-bright bg-surface-1 p-2"
+							>
+								{queueFilterControls}
+							</Popover.Content>
+						</Popover.Portal>
+					</Popover.Root>
+				) : (
+					queueFilterControls
+				)}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
 				{!allowDeliveryOrderEditing ? (

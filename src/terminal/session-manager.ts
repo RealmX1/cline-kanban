@@ -40,7 +40,7 @@ import { serializeHostedSessionTerminalModes } from "../agent-session-pty-host/w
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
-import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import {
 	buildCodexConfigurationWriterEnvironment,
 	prepareCodexConfigurationWriterBinding,

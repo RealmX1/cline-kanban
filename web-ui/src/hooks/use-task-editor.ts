@@ -181,16 +181,11 @@ interface UseTaskEditorInput {
 	// 详情页的通道开关改的是**已存在的会话**，与本值无关。
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	newTaskAgentPermissionModeByDefault: RuntimeTaskAgentPermissionMode;
-	setSelectedTaskId: Dispatch<SetStateAction<string | null>>;
 	queueTaskStartAfterEdit?: (taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
 	// Board Scope 往其他项目建卡后（不切项目）：由宿主提示「建到了哪个项目」。
 	onTaskCardsCreatedInOtherProject?: (workspaceId: string, createdTaskCardCount: number) => void;
 	// 「建卡、启动并打开」的目标在其他项目时，启动成功后跨项目打开它。
 	openTaskInOtherProjectAfterStart?: (workspaceId: string, taskId: string) => void;
-}
-
-interface OpenEditTaskOptions {
-	preserveDetailSelection?: boolean;
 }
 
 /** 这次把编辑表单铺成现在这样的那份「种子」：用的是哪份草稿（null = 任务本体），铺进去的是哪些值。 */
@@ -316,7 +311,7 @@ export interface UseTaskEditorResult {
 	editTaskFormSeededFromSavedDraftAt: number | null;
 	handleRevertEditTaskFormToSavedTaskContent: () => void;
 	handleAdoptPromotedTaskEditDraft: (promotedDraft: TaskEditDraft) => void;
-	handleOpenEditTask: (task: BoardCard, options?: OpenEditTaskOptions) => void;
+	handleOpenEditTask: (task: BoardCard) => void;
 	// All projects 面板里点其他项目的 backlog 行：原地编辑那个项目的卡（卡片快照由调用方从服务端读来）。
 	handleOpenEditTaskCardInOtherProject: (workspaceId: string, task: BoardCard) => void;
 	// 正在编辑的卡的物理项目；迁移确认后更新，编辑会话的草稿来源仍固定。
@@ -362,7 +357,6 @@ export function useTaskEditor({
 	isNewTaskStartInPlanModeDefaultLoaded,
 	ompAgentSessionTransportForNewTasks,
 	newTaskAgentPermissionModeByDefault,
-	setSelectedTaskId,
 	queueTaskStartAfterEdit,
 	onTaskCardsCreatedInOtherProject,
 	openTaskInOtherProjectAfterStart,
@@ -1148,11 +1142,8 @@ export function useTaskEditor({
 	);
 
 	const handleOpenEditTask = useCallback(
-		(task: BoardCard, options?: OpenEditTaskOptions) => {
+		(task: BoardCard) => {
 			suspendCurrentTaskEditDraft();
-			if (!options?.preserveDetailSelection) {
-				setSelectedTaskId(null);
-			}
 			setEditingTaskCardInOtherProject(currentProjectId ? { workspaceId: currentProjectId, taskCard: task } : null);
 			openEditTaskFormForTaskCardInWorkspace(currentProjectId, task);
 		},
@@ -1161,7 +1152,6 @@ export function useTaskEditor({
 			currentProjectId,
 			openEditTaskFormForTaskCardInWorkspace,
 			setEditingTaskCardInOtherProject,
-			setSelectedTaskId,
 		],
 	);
 

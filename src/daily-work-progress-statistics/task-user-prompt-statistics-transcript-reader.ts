@@ -8,6 +8,13 @@ import {
 } from "../agent-session-history/bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import {
+	codexTranscriptJsonlPath,
+	codexTranscriptMetadataMatchesPersistentMainConversation,
+	openCodexTranscriptReadSource,
+	readCodexTranscriptSessionMetadata,
+	statCodexTranscriptReadSource,
+} from "../agent-session-history/codex-transcript-read-source";
+import {
 	extractSubmittedUserPromptFromTranscriptRecord,
 	isAcceptedNativeUserInputWithOnlyAttachments,
 } from "../agent-session-history/submitted-user-prompt-transcript-record-parser";
@@ -83,8 +90,10 @@ export function foldTaskUserPromptStatisticsRecord(input: {
 	const { sourceAgentId, record, cursor } = input;
 	const payload = readTranscriptRecord(record.payload);
 	if (sourceAgentId === "codex" && record.type === "session_meta") {
-		const source = readTranscriptRecord(payload?.source);
-		if ((payload?.thread_source !== undefined && payload.thread_source !== "user") || source?.subagent !== undefined)
+		if (
+			typeof payload?.id !== "string" ||
+			!codexTranscriptMetadataMatchesPersistentMainConversation(payload.id, record)
+		)
 			cursor.rejectedDescendantSession = true;
 	}
 	if (cursor.rejectedDescendantSession || record.isSidechain === true) return null;
@@ -198,7 +207,7 @@ function foldTaskUserPromptStatisticsParsedRecord(
 }
 
 function codexRolloutThreadIdFromTranscriptPath(path: string, nativeSessionId: string): string | null {
-	const fileName = basename(path);
+	const fileName = basename(codexTranscriptJsonlPath(path));
 	if (fileName.endsWith(`-${nativeSessionId}.jsonl`)) return nativeSessionId;
 	const resumedMarker = `-${nativeSessionId}_`;
 	const markerIndex = fileName.lastIndexOf(resumedMarker);
@@ -224,6 +233,8 @@ interface CodexTaskUserPromptHistorySegment {
 	rewrittenWithoutAppend: boolean;
 	endByteOffset: number;
 	expectedLocalRecordCount: number | null;
+	metadataRecord: Record<string, unknown>;
+	metadataRecordEndByteOffset: number;
 }
 
 async function readCodexTaskUserPromptHistoryIncrement(
@@ -236,12 +247,7 @@ async function readCodexTaskUserPromptHistoryIncrement(
 		codexHistoryConfirmedSubmissionIds: [...input.cursor.codexHistoryConfirmedSubmissionIds],
 	};
 	const submissions: ConfirmedTaskUserPromptStatisticsSubmission[] = [];
-	const segmentPaths = await measureDailyWorkProgressAsynchronousStage("codex_directory_discovery", () =>
-		(
-			input.codexHistoryReadCache?.listSegmentPaths.bind(input.codexHistoryReadCache) ??
-			listKnownCodexTranscriptSegmentPaths
-		)(codexSessionsDirectoryForKnownTranscript(input.transcriptPath), input.nativeSessionId),
-	);
+	let segmentPaths: string[] | null = null;
 	const segments: CodexTaskUserPromptHistorySegment[] = [];
 	const visitedPaths = new Set<string>();
 	const appendVerifiedSegmentPlan = async (
@@ -253,16 +259,34 @@ async function readCodexTaskUserPromptHistoryIncrement(
 		if (visitedPaths.has(path) || visitedPaths.size >= MAXIMUM_CODEX_HISTORY_SEGMENTS)
 			throw new Error("Codex 历史分段有循环或超过续接预算");
 		visitedPaths.add(path);
-		const metadata = await stat(path);
+		const metadata = await statCodexTranscriptReadSource(path);
 		const cachedHeader = input.codexHistoryReadCache
 			? await input.codexHistoryReadCache.readPrefix(path, input.nativeSessionId, MAXIMUM_TRANSCRIPT_INCREMENT_BYTES)
 			: null;
 		const prefix = cachedHeader
 			? null
-			: await readAppendedCompleteJsonLines(path, 0, MAXIMUM_TRANSCRIPT_INCREMENT_BYTES, "codex_prefix_validation");
-		const first =
+			: await readAppendedCompleteJsonLines(
+					path,
+					0,
+					MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
+					"codex_prefix_validation",
+					"codex",
+				);
+		let first =
 			cachedHeader?.firstRecord ??
 			(prefix?.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null);
+		let metadataRecordEndByteOffset =
+			cachedHeader?.firstRecordEndByteOffset ?? prefix?.firstCompleteLineEndByteOffset ?? 0;
+		if (!first) {
+			const source = await openCodexTranscriptReadSource(path);
+			try {
+				const header = await readCodexTranscriptSessionMetadata(source);
+				first = header.record;
+				metadataRecordEndByteOffset = header.endByteOffset;
+			} finally {
+				await source.close();
+			}
+		}
 		const payload = readTranscriptRecord(first?.payload);
 		if (
 			first?.type !== "session_meta" ||
@@ -285,6 +309,16 @@ async function readCodexTaskUserPromptHistoryIncrement(
 				(base.end_ordinal_exclusive as number) <= 0
 			)
 				throw new Error("Codex 父分段引用不可验证");
+			if (!segmentPaths) {
+				segmentPaths = await measureDailyWorkProgressAsynchronousStage("codex_directory_discovery", () =>
+					(
+						input.codexHistoryReadCache?.listSegmentPaths.bind(input.codexHistoryReadCache) ??
+						listKnownCodexTranscriptSegmentPaths
+					)(codexSessionsDirectoryForKnownTranscript(input.transcriptPath), input.nativeSessionId, {
+						includeCompressedTranscripts: true,
+					}),
+				);
+			}
 			const parentPaths = segmentPaths.filter(
 				(candidate) => codexRolloutThreadIdFromTranscriptPath(candidate, input.nativeSessionId) === base.thread_id,
 			);
@@ -310,6 +344,8 @@ async function readCodexTaskUserPromptHistoryIncrement(
 				input.codexTranscriptPathsRewrittenWithoutAppend?.has(path) === true,
 			endByteOffset: byteBoundary,
 			expectedLocalRecordCount,
+			metadataRecord: first,
+			metadataRecordEndByteOffset,
 		});
 	};
 	try {
@@ -322,7 +358,10 @@ async function readCodexTaskUserPromptHistoryIncrement(
 	let precedingDescendantSessionWasRejected = false;
 	const confirmedSubmissionIds = new Set(cursor.codexHistoryConfirmedSubmissionIds);
 	for (const segment of segments) {
-		const previous = cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath];
+		const segmentCursorKey = codexTranscriptJsonlPath(segment.transcriptPath);
+		const previous =
+			cursor.codexHistorySegmentCursorsByTranscriptPath[segmentCursorKey] ??
+			cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath];
 		const boundedPrefixEndByteOffset = segment.expectedLocalRecordCount === null ? null : segment.endByteOffset;
 		const segmentCursor: z.infer<typeof codexHistorySegmentCursorSchema> =
 			previous &&
@@ -353,12 +392,41 @@ async function readCodexTaskUserPromptHistoryIncrement(
 					};
 		segmentCursor.fileIdentity = segment.fileIdentity;
 		segmentCursor.fileModifiedAtMilliseconds = segment.fileModifiedAtMilliseconds;
-		cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath] = segmentCursor;
+		cursor.codexHistorySegmentCursorsByTranscriptPath[segmentCursorKey] = segmentCursor;
+		if (
+			segment.metadataRecordEndByteOffset > MAXIMUM_TRANSCRIPT_INCREMENT_BYTES &&
+			segmentCursor.nextByteOffset < segment.metadataRecordEndByteOffset
+		) {
+			if (segment.endByteOffset < segment.metadataRecordEndByteOffset)
+				return { cursor, submissions, warning: "Codex 父分段字节边界不是完整记录" };
+			const consumedBytes = Math.min(
+				remainingBytes,
+				segment.metadataRecordEndByteOffset - segmentCursor.nextByteOffset,
+			);
+			segmentCursor.nextByteOffset += consumedBytes;
+			remainingBytes -= consumedBytes;
+			if (segmentCursor.nextByteOffset === segment.metadataRecordEndByteOffset) {
+				segmentCursor.readRecordCount += 1;
+				foldTaskUserPromptStatisticsParsedRecord(
+					input,
+					segmentCursor,
+					segment.metadataRecord,
+					JSON.stringify(segment.metadataRecord),
+				);
+			}
+			if (segment.expectedLocalRecordCount === null) cursor.nextByteOffset = segmentCursor.nextByteOffset;
+		}
 		if (segmentCursor.nextByteOffset < segment.endByteOffset) {
 			if (remainingBytes <= 0) return { cursor, submissions, warning: null };
 			const previousByteOffset = segmentCursor.nextByteOffset;
 			const maximumBytes = Math.min(remainingBytes, segment.endByteOffset - previousByteOffset);
-			const chunk = await readAppendedCompleteJsonLines(segment.transcriptPath, previousByteOffset, maximumBytes);
+			const chunk = await readAppendedCompleteJsonLines(
+				segment.transcriptPath,
+				previousByteOffset,
+				maximumBytes,
+				"transcript_body_read",
+				"codex",
+			);
 			remainingBytes -= maximumBytes;
 			for (const line of chunk.completeLines) {
 				segmentCursor.readRecordCount += 1;
@@ -371,8 +439,8 @@ async function readCodexTaskUserPromptHistoryIncrement(
 							(payload.session_id !== undefined && payload.session_id !== input.nativeSessionId))) ||
 					(typeof record.sessionId === "string" && record.sessionId !== input.nativeSessionId)
 				) {
-					if (previous) cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath] = previous;
-					else delete cursor.codexHistorySegmentCursorsByTranscriptPath[segment.transcriptPath];
+					if (previous) cursor.codexHistorySegmentCursorsByTranscriptPath[segmentCursorKey] = previous;
+					else delete cursor.codexHistorySegmentCursorsByTranscriptPath[segmentCursorKey];
 					return { cursor, submissions, warning: "原生会话身份与转录不匹配" };
 				} else {
 					const submission = measureDailyWorkProgressSynchronousStage("transcript_record_fold", () =>
@@ -445,37 +513,12 @@ export async function readTaskUserPromptStatisticsTranscriptIncrement(
 	const submissions: ConfirmedTaskUserPromptStatisticsSubmission[] = [];
 	try {
 		if (input.sourceAgentId === "codex") {
-			const cachedHeader = input.codexHistoryReadCache
-				? await input.codexHistoryReadCache.readPrefix(
-						input.transcriptPath,
-						input.nativeSessionId,
-						MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
-					)
-				: null;
-			const prefix = cachedHeader
-				? null
-				: await readAppendedCompleteJsonLines(
-						input.transcriptPath,
-						0,
-						MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
-						"codex_prefix_validation",
-					);
-			const first =
-				cachedHeader?.firstRecord ??
-				(prefix?.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null);
-			if (cachedHeader?.rewrittenWithoutAppend) {
-				input = { ...input, codexTranscriptPathsRewrittenWithoutAppend: new Set([resolve(input.transcriptPath)]) };
-				if (Object.keys(cursor.codexHistorySegmentCursorsByTranscriptPath).length === 0)
-					cursor = createEmptyTaskUserPromptStatisticsCursor();
-			}
-			if (
-				(first?.type === "session_meta" && readTranscriptRecord(first.payload)?.history_base != null) ||
-				Object.keys(cursor.codexHistorySegmentCursorsByTranscriptPath).length > 0
-			) {
-				const result = await readCodexTaskUserPromptHistoryIncrement(input);
-				if (result.warning) input.codexHistoryReadCache?.invalidateSession(input.nativeSessionId);
-				return result;
-			}
+			const source = await openCodexTranscriptReadSource(input.transcriptPath, input.nativeSessionId);
+			input = { ...input, transcriptPath: source.nativePath };
+			await source.close();
+			const result = await readCodexTaskUserPromptHistoryIncrement(input);
+			if (result.warning) input.codexHistoryReadCache?.invalidateSession(input.nativeSessionId);
+			return result;
 		}
 		const metadata = await stat(input.transcriptPath);
 		const fileIdentity = `${String(metadata.dev)}:${String(metadata.ino)}`;
@@ -486,6 +529,8 @@ export async function readTaskUserPromptStatisticsTranscriptIncrement(
 			input.transcriptPath,
 			cursor.nextByteOffset,
 			MAXIMUM_TRANSCRIPT_INCREMENT_BYTES,
+			"transcript_body_read",
+			input.sourceAgentId,
 		);
 		for (const line of chunk.completeLines) {
 			const record = parseTranscriptJsonRecord(line);
@@ -493,13 +538,7 @@ export async function readTaskUserPromptStatisticsTranscriptIncrement(
 				cursor.sourceIntegrityWarning = "部分转录记录格式无法识别";
 				continue;
 			}
-			const payload = readTranscriptRecord(record.payload);
-			if (
-				(input.sourceAgentId === "codex" &&
-					record.type === "session_meta" &&
-					payload?.id !== input.nativeSessionId) ||
-				(typeof record.sessionId === "string" && record.sessionId !== input.nativeSessionId)
-			) {
+			if (typeof record.sessionId === "string" && record.sessionId !== input.nativeSessionId) {
 				return { cursor: input.cursor, submissions: [], warning: "原生会话身份与转录不匹配" };
 			}
 			const submission = measureDailyWorkProgressSynchronousStage("transcript_record_fold", () =>

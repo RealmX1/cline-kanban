@@ -221,6 +221,14 @@ function section(name: string): HTMLElement {
 	return element;
 }
 
+function recentFilterPanel(): HTMLElement {
+	if (!document.querySelector('[role="dialog"][aria-label="Recent 筛选与排序"]'))
+		act(() =>
+			section("remaining").querySelector<HTMLButtonElement>('button[aria-label^="Recent 筛选与排序"]')!.click(),
+		);
+	return document.querySelector<HTMLElement>('[role="dialog"][aria-label="Recent 筛选与排序"]')!;
+}
+
 function rowInPlaceExpansionState(row: HTMLElement | null | undefined): string | undefined {
 	return row?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
 }
@@ -340,69 +348,102 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
-	it("启动准备显示独立计数和等待状态，真实会话接管后去掉启动标签且不重复", async () => {
-		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-		readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(
-			makeOtherProjectTaskCardSnapshot("start", "in_progress"),
-		);
-		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
-		const progress = {
-			submissionId: "00000000-0000-4000-8000-000000000001",
-			workspaceId: "project-a",
-			taskId: "start",
-			taskIncarnationCreatedAtEpochMs: 123,
-			cardPersisted: true,
-			relationsCompleted: true,
-			startRequested: true,
-			startCompleted: false,
-			phase: "starting_agent" as const,
-			lastError: null,
-			recoveryCondition: null,
-			attemptsInCurrentRecoveryRound: 1,
-			acceptedAtEpochMs: NOW_MS,
-			updatedAtEpochMs: NOW_MS,
-		};
-		const renderEntries = (phase: "starting_agent" | "waiting_for_evidence", live = false) => {
-			const entries = [
-				makeEntry("start", {
-					createdAt: 123,
-					columnId: "in_progress",
-					taskEditorCreationAgentStartupProgress: { ...progress, phase },
-					...(live ? { turnOwner: "agent" as const, liveness: "live" as const } : {}),
-				}),
-				makeEntry("live", { turnOwner: "agent", liveness: "live" }),
-			];
-			act(() =>
-				root.render(
-					<CrossProjectRecentlyActiveTaskSwitcherPanel
-						host={makeHost({ currentProjectId: null, projects: [makeProject("project-a", entries)] })}
-					/>,
-				),
-			);
-		};
-		renderEntries("starting_agent");
-		const running = section("running");
-		expect(running?.textContent).toContain("1 运行中 · 1 正在启动");
-		expect(
-			running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]')?.textContent,
-		).toBe("正在启动");
-		const startupRow = running.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="start"]');
-		await hoverRowUntilExpandedInPlace(startupRow);
-		expect(startupRow?.querySelector('[role="status"][aria-hidden="true"]')?.className).toContain("invisible");
-		expect(
-			startupRow?.querySelector(
-				'[data-cross-project-task-switcher-hover-floating-card] [data-verification-anchor="task-editor-creation-agent-startup:start"]',
-			)?.textContent,
-		).toBe("正在启动");
-		renderEntries("waiting_for_evidence");
-		expect(running?.textContent).toContain("正在核验启动结果");
-		renderEntries("starting_agent", true);
-		expect(running?.textContent).toContain("2 运行中");
-		expect(
-			running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]'),
-		).toBeNull();
-		expect(running?.querySelectorAll('[data-cross-project-task-switcher-task-id="start"]')).toHaveLength(1);
-	});
+	it.each(["加载中", "已加载"])(
+		"启动准备在标题下显示，三态保留等待状态且真实会话接管后去重：%s",
+		async (snapshotState) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			if (snapshotState === "加载中") {
+				readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+			} else {
+				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(
+					makeOtherProjectTaskCardSnapshot("start", "in_progress"),
+				);
+			}
+			window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
+			const progress = {
+				submissionId: "00000000-0000-4000-8000-000000000001",
+				workspaceId: "project-a",
+				taskId: "start",
+				taskIncarnationCreatedAtEpochMs: 123,
+				cardPersisted: true,
+				relationsCompleted: true,
+				startRequested: true,
+				startCompleted: false,
+				phase: "starting_agent" as const,
+				lastError: null,
+				recoveryCondition: null,
+				attemptsInCurrentRecoveryRound: 1,
+				acceptedAtEpochMs: NOW_MS,
+				updatedAtEpochMs: NOW_MS,
+			};
+			const renderEntries = (
+				phase: "starting_agent" | "waiting_for_evidence" | "waiting_for_dependency",
+				live = false,
+			) => {
+				const entries = [
+					makeEntry("start", {
+						createdAt: 123,
+						columnId: "in_progress",
+						taskEditorCreationAgentStartupProgress: { ...progress, phase },
+						...(live ? { turnOwner: "agent" as const, liveness: "live" as const } : {}),
+					}),
+					makeEntry("live", { turnOwner: "agent", liveness: "live" }),
+				];
+				act(() =>
+					root.render(
+						<CrossProjectRecentlyActiveTaskSwitcherPanel
+							host={makeHost({ currentProjectId: null, projects: [makeProject("project-a", entries)] })}
+						/>,
+					),
+				);
+			};
+			renderEntries("starting_agent");
+			const running = section("running");
+			expect(running?.textContent).toContain("2 · 启动 1");
+			expect(
+				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]')
+					?.textContent,
+			).toBe("正在启动");
+			const startupRow = running.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="start"]');
+			const assertStartupNoticeFollowsTitleInStatusArea = (cardRoot: Element | null) => {
+				const title = cardRoot?.querySelector(
+					"[data-cross-project-task-switcher-row-title], [data-task-card-title]",
+				);
+				const notice = cardRoot?.querySelector(
+					'[data-verification-anchor="task-editor-creation-agent-startup:start"]',
+				);
+				expect(title).not.toBeNull();
+				expect(notice).not.toBeNull();
+				if (!title || !notice) throw new Error("启动提示与任务标题必须同时存在");
+				expect(title.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+				expect(cardRoot?.querySelector("[data-task-card-status-notices]")?.contains(notice)).toBe(true);
+			};
+			assertStartupNoticeFollowsTitleInStatusArea(startupRow);
+			await hoverRowUntilExpandedInPlace(startupRow);
+			expect(startupRow?.querySelector('[role="status"][aria-hidden="true"]')?.className).toContain("invisible");
+			expect(
+				startupRow?.querySelector(
+					'[data-cross-project-task-switcher-hover-floating-card] [data-verification-anchor="task-editor-creation-agent-startup:start"]',
+				)?.textContent,
+			).toBe("正在启动");
+			const fullTaskCard = () =>
+				startupRow?.querySelector('[data-testid="cross-project-task-switcher-full-task-card"]') ?? null;
+			assertStartupNoticeFollowsTitleInStatusArea(fullTaskCard());
+			await act(async () => queryInListExpansionToggle(startupRow)?.click());
+			expect(rowInPlaceExpansionState(startupRow)).toBe("kept_expanded_in_list");
+			assertStartupNoticeFollowsTitleInStatusArea(fullTaskCard());
+			renderEntries("waiting_for_evidence");
+			expect(running?.textContent).toContain("正在核验启动结果");
+			renderEntries("waiting_for_dependency");
+			expect(running?.textContent).toContain("启动等待恢复");
+			renderEntries("starting_agent", true);
+			expect(running?.textContent).toContain("Running2");
+			expect(
+				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]'),
+			).toBeNull();
+			expect(running?.querySelectorAll('[data-cross-project-task-switcher-task-id="start"]')).toHaveLength(1);
+		},
+	);
 
 	it("网络等待进入自动恢复组，确证执行后回到 Running", () => {
 		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
@@ -475,7 +516,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
 		expect(container.querySelector('[data-testid="cross-project-task-switcher-section-backlog"]')).toBeNull();
-		const filters = section("remaining").querySelector('[aria-label="Filter recent tasks by stage"]');
+		const filters = recentFilterPanel().querySelector('[aria-label="Filter recent tasks by stage"]');
 		const filterButton = (label: string) =>
 			[...(filters?.querySelectorAll("button") ?? [])].find((button) => button.textContent === label);
 		expect(filterButton("In progress / Review")?.getAttribute("aria-pressed")).toBe("true");
@@ -515,7 +556,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		act(() =>
 			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost({ focusedTaskInProject: null })} />),
 		);
-		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="Collapse ${title}"]`);
+		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="收起 ${title}"]`);
 		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
 		act(() => toggle?.click());
 		expect(rowTaskIds(section(sectionName))).toEqual([]);
@@ -574,16 +615,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			focusedTaskInProject: { workspaceId: "project-a", taskId: "focused-backlog" },
 		});
 		renderFocusedTask("focused-backlog", "backlog", host);
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
-		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="Collapse Recent"]')?.click());
+		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="收起 Recent"]')?.click());
 		expect(section("remaining").querySelector('button[aria-expanded="false"]')).not.toBeNull();
 		expect(rowTaskIds(section("remaining"))).toEqual(["focused-backlog"]);
 		expect(
@@ -998,6 +1036,163 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(gitMetadataOf("backlog-task")).toBeNull();
 	});
 
+	it.each(["上下文未水合", "卡片不在看板", "服务端未找到卡片", "服务端读取失败", "服务端已加载卡片"])(
+		"当前项目展开时保留推流 Git、dirty 和部署覆盖摘要：%s",
+		async (currentProjectTaskCardAvailability) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+			readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+			if (currentProjectTaskCardAvailability === "服务端未找到卡片") {
+				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue({
+					taskCardLookupOutcome: "task_card_not_found_on_workspace_board",
+					lookedUpTaskId: "streamed-git",
+				});
+			} else if (currentProjectTaskCardAvailability === "服务端读取失败") {
+				readTaskCardWithBoardColumnInWorkspace.mockRejectedValue(new Error("快照暂不可读"));
+			} else if (currentProjectTaskCardAvailability === "服务端已加载卡片") {
+				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(
+					makeOtherProjectTaskCardSnapshot("streamed-git", "review"),
+				);
+			}
+			replaceWorkspaceMetadata({
+				homeGitSummary: null,
+				homeGitStateVersion: 0,
+				taskWorkspaces: [
+					{
+						...makeTaskWorkspaceMetadata("streamed-git", {
+							ahead: 2,
+							behind: 1,
+							changedFiles: 3,
+							additions: 15,
+							deletions: 4,
+						}),
+						taskCommitCoverageInCurrentDeployment: {
+							coverageStatus: "some_known_task_commits_in_current_deployment",
+							knownTaskCommitCount: 2,
+							matchedTaskCommitCountInCurrentDeployment: 1,
+							currentDeploymentId: "deployment-streamed-git",
+							currentDeployedSourceCommit: "abcdef1234567890",
+							currentDeploymentRecordedAtIso: "2026-11-05T00:00:00.000Z",
+							unavailableReason: null,
+							coverageVersion: "streamed-git-v1",
+						},
+					},
+				],
+			});
+			const host = makeHost({
+				projects: [makeProject("project-a", [makeEntry("streamed-git", { baseRef: "main" })])],
+				focusedTaskInProject: null,
+			});
+			const currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null =
+				currentProjectTaskCardAvailability === "卡片不在看板"
+					? {
+							currentProjectDisplayedBoard: { columns: [] },
+							currentProjectTaskSessions: {},
+							currentProjectTaskCardActionHandlers: {},
+							currentProjectWorkspacePath: "/repos/project-a",
+						}
+					: null;
+			await act(async () =>
+				root.render(
+					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						host={host}
+						currentProjectTaskCards={currentProjectTaskCards}
+					/>,
+				),
+			);
+			const queryCurrentProjectTaskRow = () =>
+				section("remaining").querySelector<HTMLElement>(
+					'[data-cross-project-task-switcher-task-id="streamed-git"]',
+				);
+			const compactGitMetadata = queryCurrentProjectTaskRow()?.querySelector("[data-task-directory]");
+			expect(compactGitMetadata?.textContent).toContain("+15");
+			expect(compactGitMetadata?.textContent).toContain("-4");
+			expect(compactGitMetadata?.textContent).toContain("部署 1/2");
+			const compactGitDescription = compactGitMetadata
+				?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")
+				?.getAttribute("title");
+			expect(compactGitDescription).toContain("2 commits ahead of main");
+			await hoverRowUntilExpandedInPlace(queryCurrentProjectTaskRow());
+			expect(rowInPlaceExpansionState(queryCurrentProjectTaskRow())).toBe("expanded_in_place_by_hover");
+			const assertExpandedGitMetadataMatchesCompactRow = () => {
+				const expandedTaskCard = queryCurrentProjectTaskRow()?.querySelector(
+					'[data-testid="cross-project-task-switcher-full-task-card"]',
+				);
+				expect(expandedTaskCard).not.toBeNull();
+				if (currentProjectTaskCardAvailability === "服务端已加载卡片") {
+					expect(expandedTaskCard?.querySelector("[data-task-card-render-role]")).not.toBeNull();
+				} else {
+					expect(
+						expandedTaskCard?.querySelector(
+							"[data-cross-project-task-switcher-full-task-card-unavailable-fallback]",
+						),
+					).not.toBeNull();
+				}
+				const expandedGitMetadata = expandedTaskCard?.querySelector("[data-task-directory]");
+				expect(expandedGitMetadata?.textContent).toBe(compactGitMetadata?.textContent);
+				expect(
+					expandedGitMetadata
+						?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")
+						?.getAttribute("title"),
+				).toBe(compactGitDescription);
+			};
+			assertExpandedGitMetadataMatchesCompactRow();
+			await act(async () => queryInListExpansionToggle(queryCurrentProjectTaskRow())?.click());
+			expect(rowInPlaceExpansionState(queryCurrentProjectTaskRow())).toBe("kept_expanded_in_list");
+			assertExpandedGitMetadataMatchesCompactRow();
+		},
+	);
+
+	it("其他项目同号任务展开兜底只用所属项目轮询，不借当前项目推流", async () => {
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		replaceWorkspaceMetadata({
+			homeGitSummary: null,
+			homeGitStateVersion: 0,
+			taskWorkspaces: [
+				makeTaskWorkspaceMetadata("shared-task-id", {
+					ahead: 2,
+					behind: 1,
+					changedFiles: 3,
+					additions: 15,
+					deletions: 4,
+				}),
+			],
+		});
+		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
+			tasks: [
+				{
+					workspaceId: "project-b",
+					taskId: "shared-task-id",
+					availability: "available",
+					taskWorkspaceMetadata: makeTaskWorkspaceMetadata("shared-task-id", {
+						ahead: 9,
+						behind: 0,
+						changedFiles: 1,
+						additions: 7,
+						deletions: 0,
+					}),
+				},
+			],
+		});
+		const host = makeHost({
+			projects: [makeProject("project-a", []), makeProject("project-b", [makeEntry("shared-task-id")])],
+			focusedTaskInProject: null,
+		});
+		await act(async () =>
+			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} currentProjectTaskCards={null} />),
+		);
+		const row = section("remaining").querySelector<HTMLElement>(
+			'[data-cross-project-task-switcher-task-id="shared-task-id"]',
+		);
+		await act(async () => queryInListExpansionToggle(row)?.click());
+		const fallback = row?.querySelector("[data-cross-project-task-switcher-full-task-card-unavailable-fallback]");
+		expect(fallback).not.toBeNull();
+		expect(fallback?.querySelector("[data-task-directory]")?.textContent).toContain("+7");
+		expect(fallback?.querySelector("[data-task-directory]")?.textContent).not.toContain("+15");
+		expect(
+			fallback?.querySelector("[data-cross-project-task-switcher-row-worktree-git-metadata]")?.getAttribute("title"),
+		).toContain("9 commits ahead of");
+	});
+
 	it("当前项目的行在推流里没有数据（All projects 下不在探测范围）时回落到轮询结果", async () => {
 		fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries.mockResolvedValue({
 			tasks: [
@@ -1106,15 +1301,17 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			onOpenBacklogTaskEditorInProject: vi.fn(),
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
+		expect(
+			container.querySelector(
+				'[data-cross-project-task-switcher-task-id="backlog-task"] [data-backlog-task-description-last-updated-pill]',
+			)?.textContent,
+		).toBe("1m");
 		act(() =>
 			section("remaining")
 				.querySelector<HTMLButtonElement>(
@@ -1704,12 +1901,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "done-pinned");
 
 		// Backlog：原地打开编辑框（与点精简行同一条路径，不是卡体自己的编辑回调）。
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);

@@ -294,7 +294,8 @@ export function createDailyWorkProgressStatisticsCollector(
 			if (!source) continue;
 			if (
 				!["codex", "claude", "omp", "kimi", "cursor"].includes(source.sourceAgentId) ||
-				!source.transcriptPath.endsWith(".jsonl")
+				(!source.transcriptPath.endsWith(".jsonl") &&
+					!(source.sourceAgentId === "codex" && source.transcriptPath.endsWith(".jsonl.zst")))
 			) {
 				temporarilyUnreadableSourceKeys.add(key);
 				state.transcriptCursorsByIdentityKey[key] ??= createEmptyTaskUserPromptStatisticsCursor();

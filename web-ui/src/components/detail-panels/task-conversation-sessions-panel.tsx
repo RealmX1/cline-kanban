@@ -2,6 +2,7 @@ import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { resolveLastAgentConversationUserHandoffObservation } from "@runtime-agent-conversation-activity-observation";
 import { resolveSessionFacets } from "@runtime-session-activity";
 import { FileText, MessageCircleQuestion, Plus } from "lucide-react";
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationSessionNameEditor } from "@/components/conversation-session-name-editor";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
@@ -124,6 +125,7 @@ function readTaskConversationSessionReadReceipts(): Record<string, number> {
 
 export function TaskConversationSessionsPanel({
 	isTaskAgentExecutionDisabled = false,
+	headerNavigationContent,
 	workspaceId,
 	taskCard,
 	workspaceTaskId,
@@ -137,6 +139,7 @@ export function TaskConversationSessionsPanel({
 	onSelectTaskConversationSession,
 	onCreateTaskConversationSession: _onCreateTaskConversationSession,
 }: {
+	headerNavigationContent?: ReactNode;
 	isTaskAgentExecutionDisabled?: boolean;
 	workspaceId?: string | null;
 	taskCard?: BoardCard;
@@ -224,8 +227,8 @@ export function TaskConversationSessionsPanel({
 
 	return (
 		<div className="flex h-full min-h-0 flex-col bg-surface-1">
-			<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
-				<span className="text-xs font-medium">Sessions</span>
+			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 border-b border-border px-2">
+				{headerNavigationContent ?? <span className="text-xs font-medium">Sessions</span>}
 				<Button
 					variant="ghost"
 					size="sm"

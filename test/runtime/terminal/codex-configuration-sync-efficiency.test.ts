@@ -6,12 +6,12 @@ import {
 	createCodexConfigurationSyncService,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-service";
 import {
-	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 	type StoredCodexConfigurationChange,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
+import { prepareIsolatedCodexConfigurationLegacyStorageFixture } from "../../utilities/prepare-isolated-codex-configuration-legacy-storage-fixture";
 import { createTempDir } from "../../utilities/temp-dir";
 
 const persistence = vi.hoisted(() => ({ reads: 0, replacements: 0, syncs: 0, failNextDirectorySync: false }));
@@ -97,6 +97,24 @@ async function prepareWriter() {
 }
 
 describe("Codex 配置扫描和查询的持久化开销", () => {
+	it("相同业务请求跨 active/full 响应范围重放，沿用原幂等回执", async () => {
+		await prepareWriter();
+		const instance = service();
+		const store = await readCodexConfigurationSyncStore();
+		if (!store.defaultCodexConfigurationProfileId) throw new Error("缺少隔离初始 profile");
+		const input = {
+			action: "create" as const,
+			name: "跨响应范围",
+			copyFromProfileId: store.defaultCodexConfigurationProfileId,
+			idempotencyKey: "same-business-request",
+		};
+		const active = await instance.mutateProfile({ ...input, stateResponseScope: "active" });
+		const full = await instance.mutateProfile({ ...input, stateResponseScope: "full" });
+		expect(active.stateResponseScope).toBe("active");
+		expect(full.stateResponseScope).toBe("full");
+		expect(full.profiles?.filter((profile) => profile.name === input.name)).toHaveLength(1);
+		expect(full.revision).toBe(active.revision);
+	});
 	it("无浏览器时启动扫描、目录监听与五秒补扫仍自动收敛", async () => {
 		const binding = await prepareWriter();
 		const updated = vi.fn();
@@ -144,9 +162,7 @@ describe("Codex 配置扫描和查询的持久化开销", () => {
 		const revision = (await readCodexConfigurationSyncStore()).revision;
 		await filesystem.writeFile(join(binding.configurationHomeDirectoryPath, "synthetic-extra.config.toml"), "");
 		await instance.scan();
-		const stored = JSON.parse(
-			await filesystem.readFile(join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json"), "utf8"),
-		);
+		const stored = await readCodexConfigurationSyncStore();
 		expect(stored.revision).toBe(revision);
 		expect(stored.writers[binding.writerId].fileNames).toContain("synthetic-extra.config.toml");
 	});
@@ -154,18 +170,17 @@ describe("Codex 配置扫描和查询的持久化开销", () => {
 		const instance = service();
 		await instance.scan();
 		expect(persistence.replacements).toBe(1);
-		const path = join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json");
-		const previous = JSON.parse(await filesystem.readFile(path, "utf8"));
+		const previous = await readCodexConfigurationSyncStore();
 		previous.schemaVersion = 2;
-		await filesystem.writeFile(path, JSON.stringify(previous));
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(fixture.path, previous);
 		resetPersistenceCounts();
 		await instance.scan();
-		expect(JSON.parse(await filesystem.readFile(path, "utf8")).schemaVersion).toBe(3);
+		expect((await readCodexConfigurationSyncStore()).schemaVersion).toBe(3);
 		expect(persistence.replacements).toBe(1);
 		await instance.scan();
 		expect(persistence.replacements).toBe(1);
 	});
-	it("明确操作在原子替换成功但目录同步失败后，幂等重试仍完成完整持久化", async () => {
+	it("迁移权威清单同步失败后，从持久意图恢复，再幂等保存明确操作", async () => {
 		const operation = vi.fn((store: Awaited<ReturnType<typeof readCodexConfigurationSyncStore>>) => {
 			store.mutationReceipts["synthetic-request"] ??= { requestDigest: "same-digest", changeId: "synthetic-change" };
 		});
@@ -176,8 +191,14 @@ describe("Codex 配置扫描和查询的持久化开销", () => {
 		resetPersistenceCounts();
 		await mutateCodexConfigurationSyncStore(operation);
 		expect(persistence.replacements).toBe(1);
-		expect(persistence.syncs).toBe(process.platform === "win32" ? 1 : 2);
-		expect(operation).toHaveBeenCalledTimes(2);
+		expect((await readCodexConfigurationSyncStore()).mutationReceipts["synthetic-request"]).toEqual({
+			requestDigest: "same-digest",
+			changeId: "synthetic-change",
+		});
+		const generation = (await readCodexConfigurationSyncStore()).storageGeneration;
+		await mutateCodexConfigurationSyncStore(operation);
+		expect((await readCodexConfigurationSyncStore()).storageGeneration).toBe(generation);
+		expect(operation).toHaveBeenCalledTimes(process.platform === "win32" ? 3 : 2);
 	});
 	it("重复和并发查询只读持久状态，不调用观察、原生请求或续接", async () => {
 		await prepareWriter();
@@ -194,7 +215,7 @@ describe("Codex 配置扫描和查询的持久化开销", () => {
 		expect(observe).not.toHaveBeenCalled();
 		expect(native).not.toHaveBeenCalled();
 		expect(resume).not.toHaveBeenCalled();
-		expect(persistence.reads).toBe(10);
+		expect(persistence.reads).toBe(0);
 		expect(persistence.replacements).toBe(0);
 	});
 	it("恢复阻塞时查询仍返回，并保留与观察并发的明确操作", async () => {

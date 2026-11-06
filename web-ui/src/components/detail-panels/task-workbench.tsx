@@ -1,3 +1,5 @@
+import * as Popover from "@radix-ui/react-popover";
+import { PanelsTopLeft } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
@@ -54,7 +56,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	onOpenQueue,
 	mobileModuleLayout,
 }: {
-	modules: Record<Module, ReactNode>;
+	modules: Record<Module, ReactNode | ((headerNavigationContent: ReactNode) => ReactNode)>;
 	moduleLabels?: Record<Module, string>;
 	defaultSlots?: readonly [Module, Module];
 	moduleSlotsStorageKey?: LocalStorageKey;
@@ -126,45 +128,9 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 			aria-label={workbenchTitle}
 			className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-surface-1"
 		>
-			<div
-				className={cn(
-					"min-h-8 shrink-0 flex-wrap items-center gap-2 border-b border-border px-2 py-1 text-xs",
-					isMobileModuleLayout ? "hidden" : "flex",
-				)}
-			>
-				<span className="font-medium">{workbenchTitle}</span>
-				<span className="sr-only" role="status" aria-live="polite">
-					{queueAnnouncement ?? ""}
-				</span>
-				{queueNotice ? (
-					<button
-						type="button"
-						className="text-status-orange"
-						onClick={() => {
-							const promptModule = availableModules.find((module) => module === "prompt_tools");
-							if (promptModule) selectModule(1, promptModule);
-							onOpenQueue?.();
-						}}
-					>
-						{queueNotice}
-					</button>
-				) : null}
-				<label className="ml-auto flex items-center gap-1 text-text-secondary">
-					布局
-					<select
-						aria-label="任务专注视图布局"
-						className="h-6 rounded-sm bg-surface-2 px-1 text-text-primary"
-						value={arrangementPreference}
-						onChange={(event) =>
-							onArrangementPreferenceChange(event.target.value as FocusViewDesktopPanelArrangementPreference)
-						}
-					>
-						<option value="automatic">自动</option>
-						<option value="agent_left_workbench_right">左右</option>
-						<option value="agent_above_workbench_below">上下</option>
-					</select>
-				</label>
-			</div>
+			<span className="sr-only" role="status" aria-live="polite">
+				{queueAnnouncement ?? ""}
+			</span>
 			<div
 				ref={rootRef}
 				data-task-workbench-slots=""
@@ -188,6 +154,86 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 					const isModuleVisible = mobileModuleLayout
 						? mobileModuleLayout.visibleModules.includes(module)
 						: slot !== -1 || module === foregroundModule;
+					const moduleContent: ReactNode | ((headerNavigationContent: ReactNode) => ReactNode) = modules[module];
+					const headerNavigationContent = (
+						<div
+							data-task-workbench-header-navigation=""
+							className={cn("min-w-0 shrink-0 items-center gap-1", isMobileModuleLayout ? "hidden" : "flex")}
+						>
+							<select
+								aria-label={`工作台格位 ${slot + 1}`}
+								className="h-7 w-28 min-w-0 max-w-full rounded-sm bg-surface-2 px-1 text-xs text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+								value={module}
+								onChange={(event) => selectModule(slot as 0 | 1, event.target.value as Module)}
+							>
+								{availableModules.map((option) => (
+									<option key={option} value={option}>
+										{moduleLabels[option]}
+									</option>
+								))}
+							</select>
+							{slot === 0 ? (
+								<>
+									<Popover.Root>
+										<Popover.Trigger asChild>
+											<button
+												type="button"
+												aria-label="工作台布局"
+												className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+											>
+												<PanelsTopLeft size={14} />
+											</button>
+										</Popover.Trigger>
+										<Popover.Portal>
+											<Popover.Content
+												align="start"
+												sideOffset={4}
+												aria-label="工作台布局选项"
+												data-mobile-focus-view-idle-collapse-suspension=""
+												className="z-50 rounded-md border border-border-bright bg-surface-1 p-2 text-xs text-text-primary"
+											>
+												<label className="flex items-center gap-2">
+													布局
+													<select
+														aria-label="任务专注视图布局"
+														className="h-8 rounded-sm bg-surface-2 px-2"
+														value={arrangementPreference}
+														onChange={(event) =>
+															onArrangementPreferenceChange(
+																event.target.value as FocusViewDesktopPanelArrangementPreference,
+															)
+														}
+													>
+														<option value="automatic">自动</option>
+														<option value="agent_left_workbench_right">左右</option>
+														<option value="agent_above_workbench_below">上下</option>
+													</select>
+												</label>
+											</Popover.Content>
+										</Popover.Portal>
+									</Popover.Root>
+									{queueNotice ? (
+										<button
+											type="button"
+											aria-label="打开任务消息队列"
+											className="max-w-20 truncate text-status-orange"
+											onClick={() => {
+												const promptModule = availableModules.find((entry) => entry === "prompt_tools");
+												if (promptModule) selectModule(1, promptModule);
+												onOpenQueue?.();
+											}}
+										>
+											{queueNotice}
+										</button>
+									) : null}
+								</>
+							) : null}
+						</div>
+					);
+					const renderedModuleContent: ReactNode =
+						typeof moduleContent === "function"
+							? moduleContent(isMobileModuleLayout ? undefined : headerNavigationContent)
+							: moduleContent;
 					return (
 						<div
 							key={module}
@@ -205,27 +251,18 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 								display: isModuleVisible ? undefined : "none",
 							}}
 						>
-							<div
-								className={cn(
-									"h-8 shrink-0 items-center border-b border-border px-2",
-									isMobileModuleLayout ? "hidden" : "flex",
-								)}
-							>
-								<select
-									aria-label={`工作台格位 ${slot + 1}`}
-									className="h-6 max-w-full rounded-sm bg-surface-2 px-1 text-xs text-text-primary"
-									value={module}
-									onChange={(event) => selectModule(slot as 0 | 1, event.target.value as Module)}
+							{typeof moduleContent !== "function" || renderedModuleContent == null ? (
+								<div
+									className={cn(
+										"h-8 shrink-0 items-center border-b border-border px-2",
+										isMobileModuleLayout ? "hidden" : "flex",
+									)}
 								>
-									{availableModules.map((option) => (
-										<option key={option} value={option}>
-											{moduleLabels[option]}
-										</option>
-									))}
-								</select>
-							</div>
+									{headerNavigationContent}
+								</div>
+							) : null}
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">
-								{modules[module] ?? (
+								{renderedModuleContent ?? (
 									<p className="p-3 text-xs text-text-secondary">
 										此任务暂无可用的{moduleLabels[module]}内容。
 									</p>

@@ -31,7 +31,10 @@ import {
 	buildCodexAutomaticPluginInstallationGitEnvironment,
 } from "./codex-automatic-plugin-installation-git-environment";
 import { configurationDigest, configurationTable } from "./codex-configuration-field-projection";
-import { readCodexConfigurationSyncStore } from "./codex-configuration-sync-store";
+import {
+	mutateCodexConfigurationSyncActiveStore,
+	readCodexConfigurationSyncLookupStore,
+} from "./codex-configuration-sync-store";
 import {
 	assertCodexConfigurationWriterBindingIdentity,
 	buildCodexConfigurationWriterEnvironment,
@@ -40,6 +43,7 @@ import {
 import { formatCodexConfigurationOverrideTomlValue } from "./codex-native-configuration-override-toml-value";
 import { createCodexPluginRemoteRevisionProbeTransaction } from "./codex-plugin-remote-revision-probe-transaction";
 import { claimCodexSourcePluginInstallationControllerOwnership } from "./codex-source-plugin-installation-controller-ownership";
+import { codexSourceSharedPluginNativeLaunchPreparationIntentSchema as preparationIntentSchema } from "./codex-source-shared-plugin-native-launch-preparation-intent-contract";
 
 const executeFile = promisify(execFile);
 const nativeSegment = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
@@ -114,19 +118,7 @@ const installationStateSchema = z.object({
 	nextEvidenceObservationAtMs: z.number().optional(),
 });
 type InstallationState = z.infer<typeof installationStateSchema>;
-const preparationIntentSchema = z.object({
-	schemaVersion: z.literal(1),
-	intentId: z.string().uuid(),
-	writerId: z.string().uuid(),
-	sourceIdentity: z.string(),
-	baseWriterMarketplaceConfigurationDigest: z.string(),
-	effectiveConfigurationToml: z.string(),
-	sourceInstallationStatePath: z.string(),
-	status: z.enum(["pending", "completed"]),
-	createdAtMs: z.number(),
-	nextEvidenceObservationAtMs: z.number(),
-	failureReason: z.string().optional(),
-});
+
 type PreparationIntent = z.infer<typeof preparationIntentSchema>;
 const nativeInstallMetadataSchema = z.object({
 	source_type: z.literal("git"),
@@ -179,11 +171,34 @@ async function readPreparationIntent(path: string) {
 	return preparationIntentSchema.parse(JSON.parse(await readFile(path, "utf8")));
 }
 async function savePreparationIntent(path: string, intent: PreparationIntent) {
+	if (intent.status === "pending")
+		await mutateCodexConfigurationSyncActiveStore(
+			(store) => {
+				const writer = store.writers[intent.writerId];
+				if (!writer || writer.binding.sourceIdentity !== intent.sourceIdentity)
+					throw new Error("插件恢复意图缺少精确 writer 归属。");
+				writer.pendingSourceSharedPluginInstallationPreparations ??= {};
+				writer.pendingSourceSharedPluginInstallationPreparations[path] = preparationIntentSchema.parse(intent);
+			},
+			{ selection: { scope: "lookup", writerIds: [intent.writerId] } },
+		);
 	await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(preparationIntentSchema.parse(intent)), {
 		lock: null,
 		durable: true,
 		fileMode: 0o600,
 	});
+	if (intent.status === "completed")
+		await mutateCodexConfigurationSyncActiveStore(
+			(store) => {
+				const writer = store.writers[intent.writerId];
+				if (writer?.pendingSourceSharedPluginInstallationPreparations) {
+					delete writer.pendingSourceSharedPluginInstallationPreparations[path];
+					if (!Object.keys(writer.pendingSourceSharedPluginInstallationPreparations).length)
+						delete writer.pendingSourceSharedPluginInstallationPreparations;
+				}
+			},
+			{ selection: { scope: "lookup", writerIds: [intent.writerId] } },
+		);
 }
 function assertNativeAttemptReceiptPaths(attempt: NativeAttempt, sourceDirectory: string) {
 	const directory = join(sourceDirectory, `native-attempt-${attempt.attemptId}`);
@@ -960,7 +975,10 @@ async function reuseLegacyMarketplaceInstallation(input: {
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
-	const store = await readCodexConfigurationSyncStore();
+	// 仅首次迁入共享安装目录时读取同源旧快照，退休 writer 的可用安装也保留复用资格。
+	const store = await readCodexConfigurationSyncLookupStore({
+		legacyMarketplaceInstallationSourceIdentities: [input.binding.sourceIdentity],
+	});
 	for (const writer of Object.values(store.writers)) {
 		if (
 			writer.binding.sourceIdentity !== input.binding.sourceIdentity ||
@@ -1634,12 +1652,54 @@ export function recoverPendingCodexSharedPluginInstallations(
 		recoveryObservationsNotBeforeMs.set(directory, Date.now() + 30_000);
 		const operation = (async () => {
 			const intentsDirectory = join(directory, "native-launch-preparation-intents");
-			for (const name of await readdir(intentsDirectory).catch(() => [] as string[])) {
-				if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
+			const pendingStore = await readCodexConfigurationSyncLookupStore({
+				writerIds: candidates.map((binding) => binding.writerId),
+			});
+			const pendingIntentPaths = new Map<string, unknown>();
+			for (const binding of candidates)
+				for (const [path, intent] of Object.entries(
+					pendingStore.writers[binding.writerId]?.pendingSourceSharedPluginInstallationPreparations ?? {},
+				)) {
+					if (path === intentsDirectory) {
+						for (const name of await readdir(intentsDirectory)) {
+							if (!/^[a-f0-9-]{36}\.json$/.test(name)) continue;
+							const discoveredPath = join(intentsDirectory, name),
+								discovered = await readPreparationIntent(discoveredPath);
+							if (discovered.status === "pending") await savePreparationIntent(discoveredPath, discovered);
+						}
+						await mutateCodexConfigurationSyncActiveStore(
+							(store) => {
+								delete store.writers[binding.writerId]?.pendingSourceSharedPluginInstallationPreparations?.[
+									path
+								];
+							},
+							{ selection: { scope: "lookup", writerIds: [binding.writerId] } },
+						);
+					} else pendingIntentPaths.set(path, intent);
+				}
+			for (const [intentPath, snapshot] of pendingIntentPaths) {
+				if (dirname(intentPath) !== intentsDirectory) continue;
 				try {
-					const intentPath = join(intentsDirectory, name);
+					if (
+						!(await lstat(intentPath).then(
+							(file) => file.isFile(),
+							() => false,
+						))
+					) {
+						const retained = preparationIntentSchema.parse(snapshot);
+						const owner = candidates.find(
+							(binding) =>
+								binding.writerId === retained.writerId && binding.sourceIdentity === retained.sourceIdentity,
+						);
+						if (!owner) continue;
+						await assertCodexConfigurationWriterBindingIdentity(owner);
+						await savePreparationIntent(intentPath, retained);
+					}
 					const intent = await readPreparationIntent(intentPath);
-					if (intent.status === "completed") continue;
+					if (intent.status === "completed") {
+						await savePreparationIntent(intentPath, intent);
+						continue;
+					}
 					if (
 						dirname(intent.sourceInstallationStatePath) !== directory ||
 						!/^source-installation-[a-f0-9]{64}\.json$/.test(

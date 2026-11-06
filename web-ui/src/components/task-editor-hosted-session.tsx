@@ -16,11 +16,9 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			{ id: "backlog", title: "Backlog", cards: props.editingTaskSnapshot ? [props.editingTaskSnapshot] : [] },
 		],
 	}));
-	const [, setSelectedTaskId] = useState<string | null>(null);
 	const controller = useTaskEditor({
 		board,
 		setBoard,
-		setSelectedTaskId,
 		currentProjectId: sourceWorkspaceId,
 		createTaskBranchOptions: props.branchOptions,
 		editTaskBranchOptions: props.branchOptions,

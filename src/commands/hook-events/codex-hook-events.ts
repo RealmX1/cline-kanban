@@ -3,6 +3,12 @@ import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import {
+	codexTranscriptJsonlPath,
+	type NativeTranscriptReadHandle,
+	openCodexTranscriptReadSource,
+	statCodexTranscriptReadSource,
+} from "../../agent-session-history/codex-transcript-read-source";
 import type { RuntimeHookEvent, RuntimeTaskHookActivity } from "../../core/api-contract";
 import { isCodexNativeConversationRewindSignal } from "../../core/codex-native-direct-input-readiness";
 
@@ -104,9 +110,9 @@ async function readFilePrefix(filePath: string, byteLength: number): Promise<str
 	if (byteLength <= 0) {
 		return "";
 	}
-	let handle: Awaited<ReturnType<typeof open>> | null = null;
+	let handle: NativeTranscriptReadHandle | null = null;
 	try {
-		handle = await open(filePath, "r");
+		handle = await openCodexTranscriptReadSource(filePath);
 		const buffer = Buffer.alloc(byteLength);
 		const readResult = await handle.read(buffer, 0, byteLength, 0);
 		return buffer.subarray(0, readResult.bytesRead).toString("utf8");
@@ -121,9 +127,9 @@ async function readFileTail(filePath: string, fileSize: number, maxBytes: number
 	}
 	const byteLength = Math.min(fileSize, maxBytes);
 	const start = Math.max(0, fileSize - byteLength);
-	let handle: Awaited<ReturnType<typeof open>> | null = null;
+	let handle: NativeTranscriptReadHandle | null = null;
 	try {
-		handle = await open(filePath, "r");
+		handle = await openCodexTranscriptReadSource(filePath);
 		const buffer = Buffer.alloc(byteLength);
 		const readResult = await handle.read(buffer, 0, byteLength, start);
 		return buffer.subarray(0, readResult.bytesRead).toString("utf8");
@@ -155,14 +161,20 @@ async function listCodexRolloutFiles(rootPath: string): Promise<string[]> {
 				stack.push(entryPath);
 				continue;
 			}
-			if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(".jsonl")) {
+			if (
+				entry.isFile() &&
+				entry.name.startsWith("rollout-") &&
+				codexTranscriptJsonlPath(entry.name).endsWith(".jsonl")
+			) {
 				files.push(entryPath);
 			}
 		}
 	}
 
-	files.sort((a, b) => b.localeCompare(a));
-	return files;
+	const selected = new Map<string, string>();
+	for (const path of files.sort())
+		if (!selected.has(codexTranscriptJsonlPath(path))) selected.set(codexTranscriptJsonlPath(path), path);
+	return [...selected.values()].sort((a, b) => b.localeCompare(a));
 }
 
 function extractFinalMessageFromRolloutLine(lineRecord: Record<string, unknown>): string | null {
@@ -279,7 +291,7 @@ export async function resolveCodexRolloutFinalMessageForCwd(
 	for (const filePath of rolloutFiles) {
 		let fileStat: Stats;
 		try {
-			fileStat = await stat(filePath);
+			fileStat = await statCodexTranscriptReadSource(filePath);
 		} catch {
 			continue;
 		}
@@ -335,7 +347,7 @@ async function findCodexRolloutFileForCwd(
 	for (const filePath of rolloutFiles) {
 		let fileStat: Stats;
 		try {
-			fileStat = await stat(filePath);
+			fileStat = await statCodexTranscriptReadSource(filePath);
 			if (fileStat.mtimeMs < sessionStartedAtMs - CODEX_ROLLOUT_FILE_FRESH_WINDOW_MS) {
 				continue;
 			}
@@ -895,7 +907,7 @@ export async function startCodexSessionWatcher(
 			}
 			rolloutLogPath = resolvedRolloutPath;
 			try {
-				const initialStat = await stat(rolloutLogPath);
+				const initialStat = await statCodexTranscriptReadSource(rolloutLogPath);
 				rolloutOffset = Math.max(0, initialStat.size - CODEX_ROLLOUT_INITIAL_BACKLOG_BYTES);
 			} catch {
 				rolloutOffset = 0;
@@ -904,7 +916,7 @@ export async function startCodexSessionWatcher(
 
 		let fileStat: Stats;
 		try {
-			fileStat = await stat(rolloutLogPath);
+			fileStat = await statCodexTranscriptReadSource(rolloutLogPath);
 		} catch {
 			rolloutLogPath = "";
 			rolloutOffset = 0;
@@ -919,9 +931,9 @@ export async function startCodexSessionWatcher(
 			return;
 		}
 
-		let handle: Awaited<ReturnType<typeof open>> | null = null;
+		let handle: NativeTranscriptReadHandle | null = null;
 		try {
-			handle = await open(rolloutLogPath, "r");
+			handle = await openCodexTranscriptReadSource(rolloutLogPath);
 			const byteLength = fileStat.size - rolloutOffset;
 			const buffer = Buffer.alloc(byteLength);
 			await handle.read(buffer, 0, byteLength, rolloutOffset);
@@ -962,7 +974,7 @@ export async function startCodexSessionWatcher(
 			state.remainder = "";
 		}
 		if (fileStat.size !== state.offset) {
-			let handle: Awaited<ReturnType<typeof open>> | null = null;
+			let handle: NativeTranscriptReadHandle | null = null;
 			try {
 				handle = await open(logPath, "r");
 				const byteLength = fileStat.size - state.offset;

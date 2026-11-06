@@ -1,7 +1,6 @@
 import {
 	type CrossProjectTaskSwitcherEntryInProject,
 	type CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
-	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
 	isCrossProjectTaskSwitcherEntryRunning,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import {
@@ -12,21 +11,18 @@ import { Pin, PinOff } from "lucide-react";
 import { type ReactElement, type ReactNode, type RefObject, useCallback, useLayoutEffect, useRef } from "react";
 import { CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
 import { CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
-import { CrossProjectTaskSwitcherRowFirstLine } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-first-line";
-import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-prompt-cache-warmth-pill";
-import { CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-worktree-git-metadata";
+import { CrossProjectTaskSwitcherAgentStartupProgressStatusNotice } from "@/components/detail-panels/cross-project-task-switcher-agent-startup-progress-status-notice";
+import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-panels/cross-project-task-switcher-row-agent-and-title";
+import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
-import { ProjectIcon } from "@/components/project-visual-identity";
-import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
 import {
 	CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
 	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
 } from "@/components/task-card-body";
 import { TaskCardCornerStatusIndicators } from "@/components/task-card-corner-status-indicators";
+import { TaskPromptSubmissionAcceptanceNotice } from "@/components/task-prompt-submission-acceptance-notice";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
-import { ColumnIndicator } from "@/components/ui/column-indicator";
-import { resolveBoardColumnTitle } from "@/data/board-data";
 import { useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition } from "@/hooks/use-cross-project-task-switcher-hover-floating-card-viewport-position";
 import type { CrossProjectTaskSwitcherRowHoverExpansionTriggerProps } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
@@ -55,7 +51,7 @@ export type CrossProjectTaskSwitcherRowInPlaceExpansionState =
  * 完整卡片（`fullTaskCard`）由面板按「当前项目读浏览器 board / 其他项目读服务端」备好。
  *
  * 三种形态共用行根节点，精简行与完整卡片的首行同一套度量、
- * 同一个左上角起点，hover 动作组同一个坐标（叠在首行上方）（见 cross-project-recently-active-task-switcher-task-row-first-line.tsx）：
+ * 同一个左上角起点，hover 动作组同一个坐标（叠在首行上方）（见 cross-project-task-switcher-row-agent-and-title.tsx）：
  * 空间充足时卡体左上角对齐原行；底部不足时只有悬浮卡片向上避让。
  *
  * 精简行的结构是「主按钮 + 叠在右上角的 hover 动作组」而不是一整个按钮：按钮里不能嵌按钮。
@@ -154,32 +150,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	const fullTaskCardFrameElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
 
-	const startupProgress = isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry)
-		? entry.taskEditorCreationAgentStartupProgress
-		: undefined;
-
-	const startupStatusLabel =
-		startupProgress?.phase === "waiting_for_evidence"
-			? "正在核验启动结果"
-			: startupProgress?.phase === "waiting_for_dependency"
-				? "启动等待恢复"
-				: "正在启动";
-	const startupStatusExplanation =
-		startupProgress?.lastError ?? startupProgress?.recoveryCondition ?? "任务已保存，等待 Agent 进程启动";
-	const startupStatus = startupProgress ? (
-		<span
-			role="status"
-			aria-hidden={isHoverFloatingCardVisible || undefined}
-			className={cn("relative px-2 py-1 text-xs text-status-orange", isHoverFloatingCardVisible && "invisible")}
-			title={startupStatusExplanation}
-			data-verification-anchor={
-				isHoverFloatingCardVisible ? undefined : `task-editor-creation-agent-startup:${entry.taskId}`
-			}
-		>
-			{startupStatusLabel}
-		</span>
-	) : null;
-
 	return (
 		<div
 			ref={rowElementRef}
@@ -197,7 +167,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			{...rowContainerAttributes}
 			{...rowHoverExpansionTriggerProps}
 		>
-			{startupStatus}
 			{/* 普通形态角标跟随行，悬浮形态跟随浮层卡体。 */}
 			{!isHoverFloatingCardVisible ? (
 				<TaskCardCornerStatusIndicators
@@ -216,22 +185,36 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						isHoverFloatingCardVisible && "invisible pointer-events-none",
 					)}
 				>
-					<div className="relative flex min-w-0 flex-1 flex-col gap-0.5 py-1.5 pl-2 pr-2 text-left">
+					<div className="relative flex min-w-0 flex-1 flex-col py-1.5 pl-2 pr-[calc(4rem+0.5rem)] text-left">
 						<button
 							type="button"
+							data-cross-project-task-switcher-compact-row-open-task=""
 							onClick={onOpen}
 							aria-current={isFocused ? "true" : undefined}
 							className="absolute inset-0 cursor-pointer rounded-md focus-visible:outline-2 focus-visible:outline-accent"
 							aria-label={`打开任务：${entry.title}`}
 						/>
 						<div className="pointer-events-none relative">
-							<CrossProjectTaskSwitcherRowFirstLine agentId={entry.agentId} title={entry.title} />
+							<CrossProjectTaskSwitcherRowSummaryMetadata
+								entryInProject={entryInProject}
+								currentProjectId={currentProjectId}
+								projectName={showsProjectName ? projectName : null}
+								nowMs={nowMs}
+								section={section}
+								promptCacheWarmthEstimate={promptCacheWarmthEstimate}
+							/>
 						</div>
-						{/* 换行而不是截断：时长药丸必须完整显示，窄宽度下整组药丸折到下一行。 */}
-						<span
-							data-task-card-secondary-metadata-row=""
-							className="pointer-events-none relative flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] leading-none text-text-tertiary"
+						<div className="pointer-events-none relative">
+							<CrossProjectTaskSwitcherRowAgentAndTitle agentId={entry.agentId} title={entry.title} />
+						</div>
+						<div
+							data-task-card-status-notices=""
+							className="pointer-events-none relative flex flex-wrap gap-1 text-[10px] leading-snug text-text-secondary empty:hidden"
 						>
+							<CrossProjectTaskSwitcherAgentStartupProgressStatusNotice
+								entryInProject={entryInProject}
+								isHiddenByHoverFloatingCard={isHoverFloatingCardVisible}
+							/>
 							{entry.automaticAgentFailureContinuation &&
 							entry.automaticAgentFailureContinuation.phase !== "recovered" ? (
 								<span className="max-w-full break-words text-status-orange">
@@ -245,48 +228,11 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 									等待自动恢复
 								</span>
 							) : null}
-							{showsProjectName ? (
-								<span className="inline-flex min-w-[min(14ch,100%)] max-w-full items-center gap-1">
-									<ProjectIcon workspaceId={workspaceId} projectName={projectName} size={14} />
-									<span className="min-w-0 [overflow-wrap:anywhere]">{projectName}</span>
-								</span>
-							) : null}
-							<span className="pointer-events-auto contents">
-								<CrossProjectRecentlyActiveTaskSwitcherTaskRowWorktreeGitMetadata
-									entryInProject={entryInProject}
-									currentProjectId={currentProjectId}
-								/>
-							</span>
-							{section === "pinned" || section === "shelved" ? (
-								<span className="inline-flex shrink-0 items-center gap-0.5">
-									<ColumnIndicator columnId={entry.columnId} size={10} />
-									{resolveBoardColumnTitle(entry.columnId)}
-								</span>
-							) : null}
-							{/* 与完整卡片元信息行右侧同一组、同一顺序：Cache warm 药丸、时长药丸、置顶标记。 */}
-							<span className="ml-auto flex shrink-0 items-center gap-1">
-								{promptCacheWarmthEstimate ? (
-									<CrossProjectTaskSwitcherRowPromptCacheWarmthPill
-										promptCacheWarmthEstimate={promptCacheWarmthEstimate}
-										nowMs={nowMs}
-									/>
-								) : null}
-								<TaskActivityElapsedTimePills task={entry} nowMs={nowMs} />
-								{isPinned && section !== "pinned" ? (
-									<span
-										data-cross-project-task-switcher-row-pinned-marker=""
-										className="inline-flex shrink-0 text-accent"
-										title={
-											entry.taskPinboardPinReason
-												? `Pinned to Pinboard · ${entry.taskPinboardPinReason}`
-												: "Pinned to Pinboard"
-										}
-									>
-										<Pin size={10} />
-									</span>
-								) : null}
-							</span>
-						</span>
+
+							<TaskPromptSubmissionAcceptanceNotice
+								acceptance={entry.agentConversationPromptSubmissionAcceptance}
+							/>
+						</div>
 						{section === "pinned" && entry.taskPinboardPinReason ? (
 							<span
 								className="pointer-events-none relative truncate text-[11px] text-text-secondary"
@@ -365,16 +311,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 								}
 								hasUnreadHandoffNotification={isUnreadHandoff}
 							/>
-						) : null}
-						{isHoverFloatingCardVisible && startupProgress ? (
-							<span
-								role="status"
-								className="relative px-2 py-1 text-xs text-status-orange"
-								title={startupStatusExplanation}
-								data-verification-anchor={`task-editor-creation-agent-startup:${entry.taskId}`}
-							>
-								{startupStatusLabel}
-							</span>
 						) : null}
 						{fullTaskCard}
 					</div>

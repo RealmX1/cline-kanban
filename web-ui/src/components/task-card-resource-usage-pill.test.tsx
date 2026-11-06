@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BoardCard } from "@/components/board-card";
+import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskResourceUsagePillTooltipContent } from "@/components/task-card-resource-usage-pill";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeLiveTaskResourceUsageSnapshot } from "@/runtime/types";
@@ -131,6 +132,32 @@ describe("卡片头部资源占用药丸", () => {
 		act(() => replaceTaskResourceUsageSnapshots([snapshot({ survivedSessionRootExitProcessCount: 2 })]));
 
 		expect(resourceUsagePill(host)?.className).toContain("text-status-orange");
+	});
+
+	it("跨项目行共用摘要时，当前项目的资源占用保留在展开详情且不改变摘要", () => {
+		act(() =>
+			root.render(
+				<TaskCardBody
+					card={createCard()}
+					columnId="in_progress"
+					renderRole="expanded_card_copy_in_cross_project_task_switcher_row"
+					crossProjectTaskSwitcherRowElementsMergedIntoCardCopy={{
+						projectName: "当前项目",
+						summaryMetadata: <div data-shared-row-summary="">原地复用的摘要</div>,
+						promptCacheWarmthPill: null,
+						inListExpansionToggle: null,
+						isPresentedAsHoveredFromFirstFrame: false,
+					}}
+				/>,
+			),
+		);
+		const detail = container.querySelector("[data-task-card-expanded-resource-usage]");
+		expect(detail?.childNodes).toHaveLength(0);
+		act(() => replaceTaskResourceUsageSnapshots([snapshot()]));
+		expect(detail?.textContent).toBe("1.2G 35%");
+		expect(container.querySelector("[data-shared-row-summary]")?.textContent).toBe("原地复用的摘要");
+		act(() => replaceTaskResourceUsageSnapshots([]));
+		expect(detail?.childNodes).toHaveLength(0);
 	});
 
 	it("会话全部结束、推来空列表后消失", () => {

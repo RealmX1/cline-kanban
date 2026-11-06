@@ -64,6 +64,8 @@ kanban codex-conversation-storage rollback-stopped --project-path <主仓库路�
 
 lineage 迁移限制为最多 256 个分片、合计 512 MiB 与最多 100,000 个扫描条目；缺失、歧义、循环、边界错误或未验证的压缩分片均保留原绑定。普通 resume 在本次隔离 0.164 案例中原地追加；同 ID 的新分片通过真实 `thread/revert(beforeTurnId)` 后续聊验证，不能把固定的最初迁移路径当成当前路径。
 
+只读消费者的 `.jsonl.zst` 兼容独立于上述迁移写入门禁：共享源按解压后的 JSONL 字节读取，私有快照不能成为原生存储指针；已有迁移和原生写入策略不因只读兼容而放宽。缓存、分页、问答及统计边界见 [Codex 压缩转录完整读取](codex-compressed-transcript-read-compatibility.md)。
+
 原库记录通过原生归档保留，不物理删除。备份与迁移记录在 `~/.cline/kanban/codex-conversation-storage-migrations/`，以来源目录和 UUID 的 SHA256 命名；应随原用户目录和专用目录一并备份。不要为了重试删除原生锁文件、迁移记录或备份。
 
 外置 `sqlite_home` / `CODEX_SQLITE_HOME` 的旧历史目前拒绝自动迁移，防止从错误数据库复制；旧会话仍可在原配置下继续。版本升级后也需先补兼容验证，再扩展历史迁移支持，不能单纯去掉版本闸门。

@@ -7,12 +7,12 @@ import { mergeObservedCodexConfigurationWriter } from "../../../src/codex-config
 import { describeCodexConfigurationSettingDifferences } from "../../../src/codex-configuration-sync/codex-configuration-observation-records";
 import { createCodexConfigurationSyncService } from "../../../src/codex-configuration-sync/codex-configuration-sync-service";
 import {
-	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
+import { prepareIsolatedCodexConfigurationLegacyStorageFixture } from "../../utilities/prepare-isolated-codex-configuration-legacy-storage-fixture";
 import { createTempDir } from "../../utilities/temp-dir";
 
 let fixture: ReturnType<typeof createTempDir>;
@@ -191,10 +191,7 @@ describe("配置审批与来源提示", () => {
 			acknowledgedAt: 42,
 			targets: [],
 		});
-		await writeFile(
-			join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json"),
-			JSON.stringify(store),
-		);
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(fixture.path, store);
 		expect((await readCodexConfigurationSyncStore()).sourceObservations[0]).toMatchObject({
 			acknowledgedAt: 42,
 			reminderDisposition: "confirmed",
@@ -291,10 +288,7 @@ describe("配置审批与来源提示", () => {
 			acknowledgedAt: null,
 			targets: [],
 		});
-		await writeFile(
-			join(getCodexConfigurationSyncDirectory(), "configuration-sync-state.json"),
-			JSON.stringify(store),
-		);
+		await prepareIsolatedCodexConfigurationLegacyStorageFixture(fixture.path, store);
 		const migrated = await readCodexConfigurationSyncStore();
 		expect(migrated.changes[0]).toMatchObject({
 			recordKind: "historical_record",

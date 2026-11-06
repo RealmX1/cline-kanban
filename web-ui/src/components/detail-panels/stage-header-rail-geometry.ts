@@ -10,9 +10,9 @@
  */
 
 /** stage 卡头槽高（与 `ColumnSection` / rail 条目卡头内联 `height` 一致）。 */
-export const STAGE_HEADER_HEIGHT_PX = 40;
-/** rail 条目间距（复刻 scrollport 的 `gap-2` = 8px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
-export const STAGE_RAIL_GAP_PX = 8;
+export const STAGE_HEADER_HEIGHT_PX = 32;
+/** rail 条目间距（复刻 scrollport 的 `gap-1` = 4px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
+export const STAGE_RAIL_GAP_PX = 4;
 /**
  * 每个 rail 条目外框 `border border-border` 的上下边框之和（1px 上 + 1px 下）。渲染侧 `StageHeaderRailEntry`
  * 的外层 `<div className="bg-surface-1 rounded-lg border border-border">` 使条目真实高度比卡头槽高多这 2px；
@@ -20,12 +20,12 @@ export const STAGE_RAIL_GAP_PX = 8;
  */
 export const STAGE_SECTION_BORDER_PX = 2;
 /**
- * 焦点条目在焦点卡克隆外层 `<div style={{ padding: 8 }}>` 的上下 padding 之和（8px 上 + 8px 下）。仅焦点条目
+ * 焦点卡克隆外层 `pt-3 pb-2` 的上下 padding 之和（12px 上 + 8px 下），顶部避让悬停操作组。仅焦点条目
  * （`withCard`）挂此包裹层；`focusedCardHeight` 取真实卡 border box（`getBoundingClientRect().height` 不含其
  * `marginBottom: 6`，与 rail 内 sticky 卡头副本的 `marginBottom: 0` 一致），故焦点条目真实高
- * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 16px 会使焦点条目严重低估、吞掉相邻随流卡头。
+ * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 20px 会使焦点条目严重低估、吞掉相邻随流卡头。
  */
-export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 16;
+export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 20;
 
 /** 一个不含焦点卡克隆的普通 rail 条目所占的纵向空间（条目自身高 + 其下的堆叠间距）。 */
 const PLAIN_STAGE_RAIL_ENTRY_STRIDE_PX = STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX + STAGE_RAIL_GAP_PX;

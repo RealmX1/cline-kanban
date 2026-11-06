@@ -1,9 +1,13 @@
-import { act, createRef } from "react";
+import { act, createRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentTerminalPanel, describeState, getStateTagStyle } from "@/components/detail-panels/agent-terminal-panel";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import {
+	MobileFocusViewCollapsibleControlsProvider,
+	useMobileFocusViewCollapsibleControls,
+} from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
@@ -35,29 +39,32 @@ const {
 }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
-	usePersistentTerminalSession: () => ({
-		containerRef: { current: null },
-		lastError: null,
-		hasRenderedAnyTerminalContent: mockHasRenderedAnyTerminalContent(),
-		isStopping: false,
-		isRefreshing: mockIsRefreshing(),
-		isResyncingTerminalView: false,
-		automaticStaleSessionResumePhase: mockAutomaticStaleSessionResumePhase(),
-		isSearchOpen: false,
-		searchOpenRequestKey: 0,
-		searchResults: { resultCount: 0, resultIndex: -1 },
-		isScrolledAwayFromLatest: false,
-		clearTerminal: vi.fn(),
-		closeTerminalSearch: vi.fn(),
-		findNextInTerminal: vi.fn(() => false),
-		findPreviousInTerminal: vi.fn(() => false),
-		openTerminalSearch: vi.fn(),
-		refreshTerminal: mockRefreshTerminal,
-		resyncTerminalView: mockResyncTerminalView,
-		scrollTerminalToLatest: vi.fn(),
-		focusTerminalInputAfterShortcutInsertion: mockFocusTerminalInputAfterShortcutInsertion,
-		stopTerminal: vi.fn(async () => {}),
-	}),
+	usePersistentTerminalSession: () => {
+		const [isSearchOpen, setIsSearchOpen] = useState(false);
+		return {
+			containerRef: { current: null },
+			lastError: null,
+			hasRenderedAnyTerminalContent: mockHasRenderedAnyTerminalContent(),
+			isStopping: false,
+			isRefreshing: mockIsRefreshing(),
+			isResyncingTerminalView: false,
+			automaticStaleSessionResumePhase: mockAutomaticStaleSessionResumePhase(),
+			isSearchOpen,
+			searchOpenRequestKey: 0,
+			searchResults: { resultCount: 0, resultIndex: -1 },
+			isScrolledAwayFromLatest: false,
+			clearTerminal: vi.fn(),
+			closeTerminalSearch: () => setIsSearchOpen(false),
+			findNextInTerminal: vi.fn(() => false),
+			findPreviousInTerminal: vi.fn(() => false),
+			openTerminalSearch: () => setIsSearchOpen(true),
+			refreshTerminal: mockRefreshTerminal,
+			resyncTerminalView: mockResyncTerminalView,
+			scrollTerminalToLatest: vi.fn(),
+			focusTerminalInputAfterShortcutInsertion: mockFocusTerminalInputAfterShortcutInsertion,
+			stopTerminal: vi.fn(async () => {}),
+		};
+	},
 }));
 
 vi.mock("@/runtime/task-conversation-history-query", () => ({
@@ -159,6 +166,52 @@ describe("AgentTerminalPanel", () => {
 			root.unmount();
 		});
 		container.remove();
+	});
+
+	it("手机导航收起时，取消自动动作默认可用，搜索可见且不联动上方导航", async () => {
+		mockUseIsMobile.mockReturnValue(true);
+		const toolbarHost = document.body.appendChild(document.createElement("div"));
+		const onCancelAutomaticAction = vi.fn();
+		function MobileTerminalSearchHarness() {
+			const controls = useMobileFocusViewCollapsibleControls({ enabled: true, focusedTaskIdentity: "task-1" });
+			return (
+				<MobileFocusViewCollapsibleControlsProvider value={controls}>
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={createSummary("codex")}
+							showSessionToolbar={false}
+							headerInformationContent={<span>会话信息</span>}
+							mobileHeaderToolbarElement={toolbarHost}
+							onCancelAutomaticAction={onCancelAutomaticAction}
+							cancelAutomaticActionLabel="取消自动动作"
+						/>
+					</TooltipProvider>
+				</MobileFocusViewCollapsibleControlsProvider>
+			);
+		}
+		try {
+			await act(async () => root.render(<MobileTerminalSearchHarness />));
+			expect(container.querySelector<HTMLElement>("[data-mobile-focus-view-terminal-toolbar]")?.hidden).toBe(true);
+			const cancelAutomaticAction = container.querySelector<HTMLButtonElement>('[aria-label="取消自动动作"]');
+			expect(cancelAutomaticAction).not.toBeNull();
+			expect(cancelAutomaticAction!.closest('[hidden], [role="dialog"]')).toBeNull();
+			await act(async () => cancelAutomaticAction!.click());
+			expect(onCancelAutomaticAction).toHaveBeenCalledTimes(1);
+			await act(async () =>
+				toolbarHost.querySelector<HTMLButtonElement>('[aria-label="终端工具与更多信息"]')!.click(),
+			);
+			await act(async () =>
+				document.querySelector<HTMLButtonElement>('button[aria-label="Find in terminal"]')!.click(),
+			);
+			const searchInput = container.querySelector<HTMLInputElement>('input[aria-label="Find in terminal"]');
+			expect(searchInput).not.toBeNull();
+			expect(searchInput!.closest("[hidden]")).toBeNull();
+			expect(container.querySelector<HTMLElement>("[data-mobile-focus-view-terminal-toolbar]")?.hidden).toBe(true);
+		} finally {
+			toolbarHost.remove();
+		}
 	});
 
 	it.each([true, false])("重启立即显示等待提示，长等待显示时长，完成后清理（完整工具栏=%s）", (showSessionToolbar) => {

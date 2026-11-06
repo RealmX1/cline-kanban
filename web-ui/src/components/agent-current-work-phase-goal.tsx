@@ -1,7 +1,13 @@
 import { resolveAgentCurrentWorkPhaseGoalForDisplay } from "@runtime-session-activity";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 
-export function AgentCurrentWorkPhaseGoal({ summary }: { summary: RuntimeTaskSessionSummary | null | undefined }) {
+export function AgentCurrentWorkPhaseGoal({
+	summary,
+	isFullGoalTextVisible = false,
+}: {
+	summary: RuntimeTaskSessionSummary | null | undefined;
+	isFullGoalTextVisible?: boolean;
+}) {
 	const goal = resolveAgentCurrentWorkPhaseGoalForDisplay(summary);
 	if (!goal) return null;
 	return (
@@ -12,7 +18,7 @@ export function AgentCurrentWorkPhaseGoal({ summary }: { summary: RuntimeTaskSes
 			title={goal.goalText}
 		>
 			<span className="shrink-0 text-text-tertiary">{goal.isHistorical ? "上次阶段目标" : "当前阶段目标"}</span>
-			<span className="line-clamp-2 break-words">{goal.goalText}</span>
+			<span className={isFullGoalTextVisible ? "break-words" : "line-clamp-2 break-words"}>{goal.goalText}</span>
 		</div>
 	);
 }

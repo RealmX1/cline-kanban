@@ -22,12 +22,16 @@ import {
 	readTranscriptRecord,
 } from "./bounded-agent-transcript-reader";
 
+import { codexTranscriptJsonlPath } from "./codex-transcript-read-source";
+import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
+
 interface SessionFileCandidate {
 	agentId: RuntimeResumableAgentSessionSourceAgentId;
 	filePath: string;
 	modifiedAt: string;
 	mtimeMs: number;
 	size: number;
+	fileVersion: string;
 }
 
 interface IndexedAvailableAgentSession {
@@ -46,6 +50,7 @@ interface IndexedAvailableAgentSession {
 interface CachedParsedSession {
 	signature: string;
 	session: IndexedAvailableAgentSession | null;
+	transcriptWasTruncated: boolean;
 }
 
 interface ParsedSessionResult {
@@ -135,12 +140,12 @@ function addPreviewTurn(
 	}
 }
 
-function getCachedParsedSession(cacheKey: string, signature: string): IndexedAvailableAgentSession | null | undefined {
+function getCachedParsedSession(cacheKey: string, signature: string): CachedParsedSession | undefined {
 	const cached = parsedSessionCache.get(cacheKey);
 	if (cached?.signature !== signature) return undefined;
 	parsedSessionCache.delete(cacheKey);
 	parsedSessionCache.set(cacheKey, cached);
-	return cached.session;
+	return cached;
 }
 
 function cacheParsedSession(cacheKey: string, value: CachedParsedSession): void {
@@ -179,7 +184,12 @@ async function collectSessionFiles(
 				}
 				continue;
 			}
-			if (!entry.isFile() || extname(entry.name).toLowerCase() !== ".jsonl" || !includeFile(entryPath)) {
+			if (
+				!entry.isFile() ||
+				(extname(entry.name).toLowerCase() !== ".jsonl" &&
+					!(agentId === "codex" && entry.name.endsWith(".jsonl.zst"))) ||
+				!includeFile(entryPath)
+			) {
 				continue;
 			}
 			try {
@@ -190,6 +200,7 @@ async function collectSessionFiles(
 					modifiedAt: metadata.mtime.toISOString(),
 					mtimeMs: metadata.mtimeMs,
 					size: metadata.size,
+					fileVersion: `${metadata.dev}:${metadata.ino}:${metadata.ctimeMs}`,
 				});
 			} catch {
 				// A transcript can disappear while the agent rotates history. Ignore that race.
@@ -222,20 +233,21 @@ async function parseAvailableAgentSession(
 	maximumBytesToRead: number,
 ): Promise<ParsedSessionResult> {
 	const cacheKey = `${candidate.agentId}:${candidate.filePath}`;
-	const signature = `${candidate.mtimeMs}:${candidate.size}:${maximumBytesToRead}`;
+	const signature = `${candidate.fileVersion}:${candidate.mtimeMs}:${candidate.size}:${maximumBytesToRead}`;
 	const cachedSession = getCachedParsedSession(cacheKey, signature);
 	if (cachedSession !== undefined) {
 		return {
-			session: cachedSession,
-			transcriptWasTruncated: candidate.size > maximumBytesToRead,
+			session: cachedSession.session,
+			transcriptWasTruncated: cachedSession.transcriptWasTruncated,
 		};
 	}
 
 	let sourceSessionId = basename(candidate.filePath, ".jsonl");
 	if (candidate.agentId === "codex") {
-		const idMatch = /([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/iu.exec(
-			candidate.filePath,
-		);
+		const idMatch =
+			/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(?:_[0-9a-f-]{36})?\.jsonl$/iu.exec(
+				codexTranscriptJsonlPath(candidate.filePath),
+			);
 		sourceSessionId = idMatch?.[1] ?? sourceSessionId;
 	}
 	let sessionTitle = "Untitled session";
@@ -246,12 +258,15 @@ async function parseAvailableAgentSession(
 	let modelId: string | null = null;
 	let lastUpdatedAt = candidate.modifiedAt;
 	let rejectedWorkerSession = false;
+	let codexMetadataVerified = false;
 	const previewConversationTurns: RuntimeAvailableAgentSessionPreviewTurn[] = [];
 
 	const { lines, transcriptWasTruncated } = await readBoundedJsonLines(
 		candidate.filePath,
 		candidate.size,
 		maximumBytesToRead,
+		candidate.agentId,
+		candidate.agentId === "codex" && SESSION_UUID_PATTERN.test(sourceSessionId) ? sourceSessionId : undefined,
 	);
 	for (const line of lines) {
 		const record = parseTranscriptJsonRecord(line);
@@ -288,14 +303,18 @@ async function parseAvailableAgentSession(
 				continue;
 			}
 			if (record.type === "session_meta") {
-				const source = readTranscriptRecord(payload.source);
+				const declaredId = readString(payload.id);
 				if (
-					(readString(payload.thread_source) ?? "user").toLowerCase() !== "user" ||
-					readTranscriptRecord(source?.subagent)
+					!declaredId ||
+					!transcriptMetadataMatchesNativeConversationIdentity(
+						{ sourceAgentId: "codex", nativeSessionId: declaredId },
+						record,
+					)
 				) {
 					rejectedWorkerSession = true;
 					break;
 				}
+				codexMetadataVerified = true;
 				sourceSessionId = readString(payload.id) ?? sourceSessionId;
 				sessionTitle = readString(payload.title) ?? readString(payload.thread_name) ?? sessionTitle;
 				sessionWorkingDirectoryPath = readString(payload.cwd) ?? sessionWorkingDirectoryPath;
@@ -330,8 +349,13 @@ async function parseAvailableAgentSession(
 		}
 	}
 
-	if (rejectedWorkerSession || !SESSION_UUID_PATTERN.test(sourceSessionId) || previewConversationTurns.length === 0) {
-		cacheParsedSession(cacheKey, { signature, session: null });
+	if (
+		rejectedWorkerSession ||
+		(candidate.agentId === "codex" && !codexMetadataVerified) ||
+		!SESSION_UUID_PATTERN.test(sourceSessionId) ||
+		previewConversationTurns.length === 0
+	) {
+		cacheParsedSession(cacheKey, { signature, session: null, transcriptWasTruncated });
 		return { session: null, transcriptWasTruncated };
 	}
 	if (sessionTitle === "Untitled session") {
@@ -355,7 +379,7 @@ async function parseAvailableAgentSession(
 		previewConversationTurns,
 		sourceFilePath: candidate.filePath,
 	};
-	cacheParsedSession(cacheKey, { signature, session });
+	cacheParsedSession(cacheKey, { signature, session, transcriptWasTruncated });
 	return { session, transcriptWasTruncated };
 }
 
@@ -463,11 +487,13 @@ export async function listAvailableAgentSessions(
 			const candidate = candidates[candidateIndex];
 			candidateIndex += 1;
 			const desiredMaximumBytesToRead = Math.min(
-				candidate.size,
+				candidate.agentId === "codex" && candidate.filePath.endsWith(".jsonl.zst")
+					? Number.POSITIVE_INFINITY
+					: candidate.size,
 				availableAgentSessionIndexLimits.maximumTranscriptBytesPerFile,
 			);
 			const cacheKey = `${candidate.agentId}:${candidate.filePath}`;
-			const desiredSignature = `${candidate.mtimeMs}:${candidate.size}:${desiredMaximumBytesToRead}`;
+			const desiredSignature = `${candidate.fileVersion}:${candidate.mtimeMs}:${candidate.size}:${desiredMaximumBytesToRead}`;
 			const hasDesiredCachedResult = parsedSessionCache.get(cacheKey)?.signature === desiredSignature;
 			if (hasDesiredCachedResult) {
 				batch.push({ candidate, maximumBytesToRead: desiredMaximumBytesToRead });

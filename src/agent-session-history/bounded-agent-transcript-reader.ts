@@ -1,6 +1,6 @@
 // agent 落盘转录（JSONL）的**有界**读取原语，与「读它干什么」无关。
 //
-// 两个消费者共用这一份，避免各写一套读法后在边界行为上悄悄分叉：
+// 多个消费者共用这一份，避免各写一套读法后在边界行为上悄悄分叉；主要入口包括：
 //   - available-agent-session-index.ts —— 全盘扫描出「可续跑的历史会话」列表（标题 / 预览 / cwd）。
 //   - persisted-agent-transcript-last-conversation-progress-probe.ts —— 只问一件事：这个任务的对话
 //     上一次真正往前走是什么时候（卡片药丸 B 的权威来源）。
@@ -12,6 +12,8 @@
 
 import { open } from "node:fs/promises";
 import { resolve } from "node:path";
+import { openCodexTranscriptHistoryReadSource } from "./codex-transcript-history-read-source";
+import { openCodexTranscriptReadSource, readCodexTranscriptSessionMetadata } from "./codex-transcript-read-source";
 
 // 把一段可能在任意字节处被切开的 buffer 还原成「完整的 JSON 行」。
 // boundary 说明这段 buffer 贴着文件的哪一端，据此决定丢掉哪一侧的半行：
@@ -39,22 +41,30 @@ export async function readBoundedJsonLines(
 	filePath: string,
 	fileSize: number,
 	maximumBytesToRead: number,
+	sourceAgentId?: string,
+	nativeSessionId?: string,
 ): Promise<{
 	lines: string[];
 	transcriptWasTruncated: boolean;
 }> {
-	const boundedMaximumBytesToRead = Math.max(0, Math.min(fileSize, maximumBytesToRead));
-	if (boundedMaximumBytesToRead === 0) {
-		return { lines: [], transcriptWasTruncated: fileSize > 0 };
-	}
-	const fileHandle = await open(filePath, "r");
+	const isCodex = sourceAgentId === "codex" || filePath.endsWith(".jsonl.zst");
+	const fileHandle = isCodex
+		? nativeSessionId
+			? await openCodexTranscriptHistoryReadSource(filePath, nativeSessionId)
+			: await openCodexTranscriptReadSource(filePath)
+		: await open(filePath, "r");
 	try {
+		if (isCodex) fileSize = (await fileHandle.stat()).size;
+		const boundedMaximumBytesToRead = Math.max(0, Math.min(fileSize, maximumBytesToRead));
+		if (boundedMaximumBytesToRead === 0) return { lines: [], transcriptWasTruncated: fileSize > 0 };
 		if (boundedMaximumBytesToRead >= fileSize) {
 			const buffer = Buffer.allocUnsafe(fileSize);
 			const { bytesRead } = await fileHandle.read(buffer, 0, fileSize, 0);
 			return {
-				lines: buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u).filter(Boolean),
-				transcriptWasTruncated: false,
+				lines: isCodex
+					? splitCompleteJsonLines(buffer.subarray(0, bytesRead), "file_start")
+					: buffer.subarray(0, bytesRead).toString("utf8").split(/\r?\n/u).filter(Boolean),
+				transcriptWasTruncated: isCodex && bytesRead > 0 && buffer[bytesRead - 1] !== 10,
 			};
 		}
 
@@ -66,13 +76,15 @@ export async function readBoundedJsonLines(
 			fileHandle.read(headBuffer, 0, headByteCount, 0),
 			fileHandle.read(tailBuffer, 0, tailByteCount, fileSize - tailByteCount),
 		]);
-		return {
-			lines: [
-				...splitCompleteJsonLines(headBuffer.subarray(0, headBytesRead), "file_start"),
-				...splitCompleteJsonLines(tailBuffer.subarray(0, tailBytesRead), "file_end"),
-			],
-			transcriptWasTruncated: true,
-		};
+		const lines = [
+			...splitCompleteJsonLines(headBuffer.subarray(0, headBytesRead), "file_start"),
+			...splitCompleteJsonLines(tailBuffer.subarray(0, tailBytesRead), "file_end"),
+		];
+		if (isCodex && parseTranscriptJsonRecord(lines[0] ?? "")?.type !== "session_meta") {
+			const metadata = await readCodexTranscriptSessionMetadata(fileHandle);
+			lines.unshift(JSON.stringify(metadata.record));
+		}
+		return { lines, transcriptWasTruncated: true };
 	} finally {
 		await fileHandle.close();
 	}

@@ -66,6 +66,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
    - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
    - Install dependencies using the repo's documented command.
    - Git 依赖构建陈旧时，先核对 lockfile 的精确 commit。可从已有本地对象用 `git archive <精确 SHA>` 导出到持久隔离目录，再用服务所用 Node 构建，并只调整当前 task 的私有依赖映射；不要用依赖仓库的浮动 HEAD 或改写主仓库共享 `node_modules`。恢复回执保存来源 SHA、构建命令和隔离路径。
+   - **源码检查先自动复用**：固定候选后按 [自动复用源码验证证据](references/source-validation-evidence-reuse.md) 调用随包工具，自动发现同仓库、同完整树的 base-branch-sync／RVF 原件并校验，按本次冻结计划只补跑缺项。正常路径只读取工具摘要；不要要求 Agent 逐条人工核对证据包。没有新增同步测试记录不等于没有验证，须追溯被采用的 RVF 原件。源码目录含背景 WIP 时改用干净隔离候选，不把 WIP 纳入已测树。
    - Build using the repo's production build command.
    - Link or install the CLI only after a successful build.
    - Confirm the executable path and version after link/install.
@@ -84,7 +85,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 
 5. Validate behavior and state.
    - 永久通知档案是部署健康检查的一部分：对实际运行实例调用 `notificationIntelligence.listArchive`，要求 HTTP 成功且返回有效分页结果；500 或原生模块加载失败即部署验证失败，不能仅以首页可打开 / CLI 版本正确宣告成功。复用任务已登记的档案 API 自动验证，不读取或更改 BYOK 密钥。
-   - Run focused tests for the local changes and runtime-sensitive paths.
+   - 源码检查消费准备阶段的 `source-validation-evidence-reuse-report.json`；已覆盖项不重跑。候选、计划或相关环境变化时由同一工具重验并只补缺项。报告不替代本次构建、ABI 或真实实例验证。
    - Verify runtime data counts and task/worktree mappings before declaring success.
    - For task systems, inspect a known task's worktree and session metadata, not just the card list.
    - Confirm installed agents are detected through the runtime API/UI, not only through the interactive shell.
@@ -116,6 +117,7 @@ Report:
 - Which service/process is now running and how it was launched.
 - 现在运行的 build 对应的源 commit(NEW),以及 `kanban deployment record` 的记录结果:部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)、本次 `deploymentId`、本次部署上线的任务(逐个列出),以及本次 Post-Deploy Verification 组的一行计数摘要(验证任务总数 / 本次上线 / 早先已上线待核对 / 未上线或无从归属 / 延续 / 已在 Done 只读展示 / authored 验证项数,均取自 `record` 输出,积压不逐条列出)。
 - Validation commands and results.
+- 源码验证工具的复用／补跑／待证计数及持久报告路径；未出现缺口时不逐条展开原始记录或完整测试日志。
 - Any residual risk, especially tasks that lost live processes and need manual resume.
 
 Never say uncommitted work is safe just because task metadata was restored. Verify the actual worktree diff.

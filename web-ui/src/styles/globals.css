@@ -450,7 +450,7 @@ body,
 	padding: 0 8px;
 	display: flex;
 	flex-direction: column;
-	gap: 8px;
+	gap: 4px;
 	pointer-events: none;
 	background: var(--color-surface-0);
 }
@@ -1372,4 +1372,37 @@ body,
 	--color-project-identity-rose: #BE123C;
 	--color-project-identity-purple: #7E22CE;
 	--color-project-identity-indigo: #4338CA;
+}
+
+/* 卡片外缘始终预留 4rem，触屏主操作留在卡底，附着按钮仍在外缘。 */
+@media (hover: none), (pointer: coarse) {
+	.kb-task-card-primary-actions {
+		position: static;
+		order: 99;
+		margin-top: 0.5rem;
+		display: flex;
+		flex-wrap: wrap;
+		opacity: 1;
+		pointer-events: auto;
+	}
+	.kb-task-card-primary-actions button,
+	.kb-task-card-side-attachments button {
+		min-height: 44px;
+		min-width: 44px;
+	}
+	.kb-task-card-primary-actions [data-task-directory-copy-actions],
+	.kb-task-card-side-attachments {
+		opacity: 1;
+		pointer-events: auto;
+	}
+	.kb-board-card-surface { min-height: 100px; }
+}
+
+.kb-task-card-side-attachments [data-related-tasks-preview-trigger] {
+	width: 100%;
+	max-width: 100%;
+}
+.kb-task-card-side-attachments [data-related-tasks-preview-trigger] > span {
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
