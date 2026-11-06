@@ -1683,7 +1683,7 @@ export function CardDetailView({
 			taskConversationSessionId={selectedTaskConversationSessionId}
 			taskCreatedAtEpochMs={selection.card.createdAt}
 			summary={activeTaskConversationSessionSummary}
-			hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showClineAgentChatPanel}
+			hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showAgentConversationChatPanel}
 			pendingUserDecisionIdentityForRefresh={
 				pendingUserDecision.decision
 					? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
@@ -1860,7 +1860,7 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-			{(isDoneTaskReadOnly || showClineAgentChatPanel) && !isMobile ? (
+			{(isDoneTaskReadOnly || showAgentConversationChatPanel) && !isMobile ? (
 				<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
 					{sessionInformationActions}
 				</div>
@@ -1939,10 +1939,12 @@ export function CardDetailView({
 						<>
 							<MobileFocusedTaskCardHeader
 								terminalToolbarHostRef={
-									showClineAgentChatPanel || isDoneTaskReadOnly ? undefined : setMobileHeaderToolbarElement
+									showAgentConversationChatPanel || isDoneTaskReadOnly
+										? undefined
+										: setMobileHeaderToolbarElement
 								}
 								sessionInformationContent={
-									showClineAgentChatPanel || isDoneTaskReadOnly ? sessionInformationActions : undefined
+									showAgentConversationChatPanel || isDoneTaskReadOnly ? sessionInformationActions : undefined
 								}
 								currentWorkPhaseGoalContent={
 									<AgentCurrentWorkPhaseGoal

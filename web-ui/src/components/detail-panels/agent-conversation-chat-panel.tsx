@@ -3,7 +3,7 @@ import { AgentConversationThinkingIndicator } from "@/components/detail-panels/a
 
 import { getRuntimeAgentCatalogEntry, resolveRuntimeAgentSessionTransportFromSummary } from "@runtime-agent-catalog";
 import { canAgentSessionTransportBeSwitched } from "@runtime-agent-session-transport-selection";
-import { BookmarkPlus } from "lucide-react";
+import { BookmarkPlus, X } from "lucide-react";
 import React, {
 	type ReactElement,
 	useCallback,
@@ -26,10 +26,9 @@ import {
 import { AgentConversationChatComposer } from "@/components/detail-panels/agent-conversation-chat-composer";
 import { AgentConversationChatMessageItem } from "@/components/detail-panels/agent-conversation-chat-message-item";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
+import { TaskTerminalActionsMenu } from "@/components/detail-panels/task-terminal-actions-menu";
 import { buildSaveFindingBodyPrefill, resolveSaveFindingTurnAnchor } from "@/components/findings/findings-model";
 import { SaveFindingDialog } from "@/components/findings/save-finding-dialog";
-import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 import { useAgentConversationChatPanelController } from "@/hooks/use-agent-conversation-chat-panel-controller";
 import type { AgentConversationChatActionResult } from "@/hooks/use-agent-conversation-chat-runtime-actions";
 import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
@@ -372,61 +371,92 @@ export const AgentConversationChatPanel = React.forwardRef<
 					/>
 				</div>
 			) : null}
-			<div
-				ref={scrollContainerRef}
-				className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto px-2 py-3"
-				onScroll={handleMessageListScroll}
-			>
-				{hiddenOlderMessageCount > 0 ? (
-					<button
-						type="button"
-						onClick={() => {
-							const container = scrollContainerRef.current;
-							if (container && pendingOlderMessageBackfillScrollHeightRef.current === null) {
-								pendingOlderMessageBackfillScrollHeightRef.current = container.scrollHeight;
-							}
-							revealOlderMessages();
-						}}
-						className="mx-auto rounded px-2 py-1 text-center text-xs text-fg-muted hover:text-fg-default"
-					>
-						{`Show ${hiddenOlderMessageCount} earlier message${hiddenOlderMessageCount === 1 ? "" : "s"}`}
-					</button>
-				) : null}
-				{visibleMessages.map((message) => {
-					const turnNumber = turnNumberByMessageId.get(message.id);
-					// 包装 div 承载 per-message DOM 锚（首个 turn 边界之前的旁白消息无 turn 不挂）。
-					// user 消息的 ml-auto 右对齐在 block 级包装内照常生效（margin auto 不依赖 flex 上下文）。
-					const isSaveableMessage =
-						(message.role === "assistant" || message.role === "user") && message.content.trim().length > 0;
-					return (
-						<div
-							key={message.id}
-							data-turn-anchor={turnNumber !== undefined ? `T${turnNumber}` : undefined}
-							className="group relative"
+			<div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+				<div
+					ref={scrollContainerRef}
+					className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-x-hidden overflow-y-auto px-2 py-3"
+					onScroll={handleMessageListScroll}
+				>
+					{hiddenOlderMessageCount > 0 ? (
+						<button
+							type="button"
+							onClick={() => {
+								const container = scrollContainerRef.current;
+								if (container && pendingOlderMessageBackfillScrollHeightRef.current === null) {
+									pendingOlderMessageBackfillScrollHeightRef.current = container.scrollHeight;
+								}
+								revealOlderMessages();
+							}}
+							className="mx-auto rounded px-2 py-1 text-center text-xs text-fg-muted hover:text-fg-default"
 						>
-							<AgentConversationChatMessageItem
-								message={message}
-								taskId={taskId}
-								onResolveUserDecision={onResolveUserDecision}
-								resolveConversationAnchor={resolveConversationAnchor}
-								onConversationAnchorClick={onConversationAnchorClick}
-							/>
-							{canSaveMessageAsFinding && isSaveableMessage ? (
-								<button
-									type="button"
-									title="Save as finding"
-									aria-label="Save as finding"
-									onMouseDown={handleSaveFindingButtonMouseDown}
-									onClick={() => handleOpenSaveFinding(message, turnNumber)}
-									className="absolute top-1 right-1 z-10 flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface-2 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus-visible:opacity-100 max-md:opacity-100"
-								>
-									<BookmarkPlus size={13} />
-								</button>
-							) : null}
-						</div>
-					);
-				})}
-				{showAgentProgressIndicator ? <AgentConversationThinkingIndicator /> : null}
+							{`Show ${hiddenOlderMessageCount} earlier message${hiddenOlderMessageCount === 1 ? "" : "s"}`}
+						</button>
+					) : null}
+					{visibleMessages.map((message) => {
+						const turnNumber = turnNumberByMessageId.get(message.id);
+						// 包装 div 承载 per-message DOM 锚（首个 turn 边界之前的旁白消息无 turn 不挂）。
+						// user 消息的 ml-auto 右对齐在 block 级包装内照常生效（margin auto 不依赖 flex 上下文）。
+						const isSaveableMessage =
+							(message.role === "assistant" || message.role === "user") && message.content.trim().length > 0;
+						return (
+							<div
+								key={message.id}
+								data-turn-anchor={turnNumber !== undefined ? `T${turnNumber}` : undefined}
+								className="group relative"
+							>
+								<AgentConversationChatMessageItem
+									message={message}
+									taskId={taskId}
+									onResolveUserDecision={onResolveUserDecision}
+									resolveConversationAnchor={resolveConversationAnchor}
+									onConversationAnchorClick={onConversationAnchorClick}
+								/>
+								{canSaveMessageAsFinding && isSaveableMessage ? (
+									<button
+										type="button"
+										title="Save as finding"
+										aria-label="Save as finding"
+										onMouseDown={handleSaveFindingButtonMouseDown}
+										onClick={() => handleOpenSaveFinding(message, turnNumber)}
+										className="absolute top-1 right-1 z-10 flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface-2 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100 hover:text-text-primary focus-visible:opacity-100 max-md:opacity-100"
+									>
+										<BookmarkPlus size={13} />
+									</button>
+								) : null}
+							</div>
+						);
+					})}
+					{showAgentProgressIndicator ? <AgentConversationThinkingIndicator /> : null}
+				</div>
+				{showActionFooter || showCancelAutomaticAction ? (
+					<div className="absolute bottom-[max(0.5rem,env(safe-area-inset-bottom))] right-[max(0.5rem,env(safe-area-inset-right))] z-20 flex flex-col items-end gap-1">
+						{showCancelAutomaticAction ? (
+							<button
+								type="button"
+								aria-label={cancelAutomaticActionLabel ?? undefined}
+								title={cancelAutomaticActionLabel ?? undefined}
+								onClick={onCancelAutomaticAction}
+								className="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md border border-border-bright bg-surface-2/80 px-2 text-xs text-text-primary hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:h-11 max-[769px]:w-11 max-[769px]:px-0"
+							>
+								<X size={16} />
+								<span className="max-[769px]:hidden">{cancelAutomaticActionLabel}</span>
+							</button>
+						) : null}
+						<TaskTerminalActionsMenu
+							key={JSON.stringify([workspaceId, taskId, taskColumnId, summary?.runtimeSessionIncarnationId])}
+							taskId={taskId}
+							taskColumnId={taskColumnId}
+							onCommit={showReviewActions ? onCommit : undefined}
+							onOpenPr={showReviewActions ? onOpenPr : undefined}
+							isCommitLoading={isCommitLoading}
+							isOpenPrLoading={isOpenPrLoading}
+							onMoveToTrash={showMoveToTrash ? onMoveToTrash : undefined}
+							onMoveToValidation={showMoveToValidation ? onMoveToValidation : undefined}
+							isMoveToTrashLoading={isMoveToTrashLoading}
+							isMoveToValidationLoading={isMoveToValidationLoading}
+						/>
+					</div>
+				) : null}
 			</div>
 			{panelError ? (
 				<div className="border-t border-status-red/30 bg-status-red/10 px-2 py-2 text-xs text-status-red">
@@ -455,47 +485,6 @@ export const AgentConversationChatPanel = React.forwardRef<
 					workspaceId={workspaceId}
 				/>
 			</div>
-			{showActionFooter ? (
-				<div className="flex flex-col gap-2 px-3 pb-3">
-					{showReviewActions ? (
-						<div className="flex gap-2">
-							<Button
-								variant="primary"
-								size="sm"
-								fill
-								disabled={isCommitLoading || isOpenPrLoading}
-								onClick={onCommit}
-							>
-								{isCommitLoading ? "..." : "Commit"}
-							</Button>
-							<Button
-								variant="primary"
-								size="sm"
-								fill
-								disabled={isCommitLoading || isOpenPrLoading}
-								onClick={onOpenPr}
-							>
-								{isOpenPrLoading ? "..." : "Open PR"}
-							</Button>
-						</div>
-					) : null}
-					{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-						<Button variant="default" fill onClick={onCancelAutomaticAction}>
-							{cancelAutomaticActionLabel}
-						</Button>
-					) : null}
-					{showMoveToValidation && onMoveToValidation ? (
-						<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
-							{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
-						</Button>
-					) : null}
-					{showMoveToTrash && onMoveToTrash ? (
-						<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-							{isMoveToTrashLoading ? <Spinner size={14} /> : "结案任务"}
-						</Button>
-					) : null}
-				</div>
-			) : null}
 			{saveFindingDraft && workspaceId ? (
 				<SaveFindingDialog
 					openingRequestIdentity={saveFindingDraft}

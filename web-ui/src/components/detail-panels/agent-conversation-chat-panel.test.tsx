@@ -1287,7 +1287,7 @@ describe("AgentConversationChatPanel", () => {
 		await act(async () =>
 			renderPanel(
 				root,
-				<ClineAgentChatPanel
+				<AgentConversationChatPanel
 					taskId="task-1"
 					agentId="omp"
 					summary={createSummary("awaiting_review", null, {
@@ -1331,7 +1331,7 @@ describe("AgentConversationChatPanel", () => {
 		await act(async () =>
 			renderPanel(
 				root,
-				<ClineAgentChatPanel
+				<AgentConversationChatPanel
 					taskId="task-1"
 					agentId="omp"
 					summary={createSummary("running", null, {
