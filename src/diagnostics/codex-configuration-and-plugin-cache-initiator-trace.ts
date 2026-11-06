@@ -5,7 +5,7 @@ import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { assertCodexConfigurationWriterBindingIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "../codex-configuration-sync/codex-source-shared-plugin-installation-directories";
 import {
@@ -77,7 +77,9 @@ export function recordKnownCodexConfigurationNativeRequest(input: {
 			]);
 			await runWithCodexDirectoryVolumeSystemQueriesDisabled(async () => {
 				await assertCodexConfigurationWriterBindingIdentity(writerBinding);
-				const stored = (await readCodexConfigurationSyncStore()).writers[writerBinding.writerId];
+				const stored = (await readCodexConfigurationSyncStore({ writerIds: [writerBinding.writerId] })).writers[
+					writerBinding.writerId
+				];
 				if (!stored || !isDeepStrictEqual(stored.binding, writerBinding)) throw new Error("持久绑定不符");
 			});
 			recordCodexConfigurationInitiatorTrace({
