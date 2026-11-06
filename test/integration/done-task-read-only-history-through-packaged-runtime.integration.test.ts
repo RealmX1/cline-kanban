@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compress } from "zstd-stream";
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
@@ -25,7 +26,7 @@ describe(
 	"Done 会话历史的真实打包运行时",
 	{
 		timeout: computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts({
-			runtimeColdStartCount: 1,
+			runtimeColdStartCount: 2,
 			testBodyTimeoutBudgetMs: 30_000,
 		}),
 	},
@@ -167,23 +168,25 @@ describe(
 					js: 'import { createRequire as createDoneHistoryRequire } from "node:module"; const require = createDoneHistoryRequire(import.meta.url);',
 				},
 			});
-			const child = children.register(
-				spawn(
-					process.execPath,
-					[packagedCliPath, "--host", "127.0.0.1", "--port", "auto", "--no-open", "--skip-shutdown-cleanup"],
-					{
-						cwd: repository.repositoryPath,
-						stdio: ["ignore", "pipe", "pipe"],
-						env: fixture.createIsolatedChildProcessEnvironment({
-							PATH: "/usr/bin:/bin",
-							KANBAN_RUNTIME_PORT: undefined,
-							DO_NOT_TRACK: "1",
-						}),
-					},
-				),
-			);
+			const startRuntime = () =>
+				children.register(
+					spawn(
+						process.execPath,
+						[packagedCliPath, "--host", "127.0.0.1", "--port", "auto", "--no-open", "--skip-shutdown-cleanup"],
+						{
+							cwd: repository.repositoryPath,
+							stdio: ["ignore", "pipe", "pipe"],
+							env: fixture.createIsolatedChildProcessEnvironment({
+								PATH: "/usr/bin:/bin",
+								KANBAN_RUNTIME_PORT: undefined,
+								DO_NOT_TRACK: "1",
+							}),
+						},
+					),
+				);
+			let child = startRuntime();
 			try {
-				const origin = new URL((await waitForRuntimeServerStartupBannerOrSigkillChild(child)).runtimeUrl).origin;
+				let origin = new URL((await waitForRuntimeServerStartupBannerOrSigkillChild(child)).runtimeUrl).origin;
 				const client = (workspaceId: string) =>
 					createTRPCProxyClient<RuntimeAppRouter>({
 						links: [
@@ -193,7 +196,7 @@ describe(
 							}),
 						],
 					});
-				const api = client(workspace.workspaceId);
+				let api = client(workspace.workspaceId);
 				// 启动水合可能清理旧条目，查询前重新注入真实 sessions.json，覆盖历史串写且卡号相同的场景。
 				await writeFile(sessionsPath, JSON.stringify(sessions));
 				const beforeBoard = await readFile(boardPath, "utf8");
@@ -233,6 +236,25 @@ describe(
 				expect(await readFile(boardPath, "utf8")).toBe(beforeBoard);
 				expect(await readFile(sessionsPath, "utf8")).toBe(beforeSessions);
 				expect(await api.runtime.getTaskPromptDeliveryQueue.query({})).toEqual(beforeQueue);
+				expect(existsSync(deletedWorktreePath)).toBe(false);
+				// 浏览器持有的逻辑游标要跨过真实运行时进程重启与原生格式转换。
+				await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+				const mainTranscriptPath = sessions[mainSessionId]?.agentNativeConversationSessionIdentity?.transcriptPath;
+				if (!mainTranscriptPath) throw new Error("缺少主会话转录绑定");
+				await writeFile(`${mainTranscriptPath}.zst`, await compress(await readFile(mainTranscriptPath)));
+				await unlink(mainTranscriptPath);
+				child = startRuntime();
+				origin = new URL((await waitForRuntimeServerStartupBannerOrSigkillChild(child)).runtimeUrl).origin;
+				api = client(workspace.workspaceId);
+				const persistedBeforeRead = await readFile(sessionsPath, "utf8");
+				const resumedOlder = await api.runtime.getTaskConversationHistoryPage.query({
+					workspaceTaskId: taskId,
+					taskConversationSessionId: mainSessionId,
+					cursor: latest.nextCursor,
+				});
+				expect(resumedOlder.availability).toBe("available");
+				expect(resumedOlder.messages).toEqual(older.messages);
+				expect(await readFile(sessionsPath, "utf8")).toBe(persistedBeforeRead);
 				expect(existsSync(deletedWorktreePath)).toBe(false);
 			} finally {
 				await children.sigkillEveryStillRunningChildProcessAndWaitForExit();

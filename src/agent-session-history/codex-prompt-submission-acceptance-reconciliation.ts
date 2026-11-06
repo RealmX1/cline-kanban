@@ -1,11 +1,15 @@
 import { createHash } from "node:crypto";
-import { open, stat } from "node:fs/promises";
 import type {
 	RuntimeAgentConversationPromptSubmissionAcceptance,
 	RuntimeSubmittedPromptTextNormalization,
 	RuntimeTaskSessionSummary,
 } from "../core/api-contract";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
+import {
+	openCodexTranscriptHistoryReadSource,
+	statCodexTranscriptHistoryReadSource,
+} from "./codex-transcript-history-read-source";
+import { readCodexTranscriptSessionMetadata } from "./codex-transcript-read-source";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 import { extractSubmittedUserPromptFromTranscriptRecord } from "./submitted-user-prompt-transcript-record-parser";
 
@@ -122,7 +126,7 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 	try {
 		const path = identity.transcriptPath;
 		if (!path) return defer("native_evidence_unavailable");
-		const metadata = await stat(path);
+		const metadata = await statCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 		if (!metadata.isFile()) return defer("native_evidence_unavailable");
 		const fileIdentity = `${metadata.dev}:${metadata.ino}`;
 		let cursor = verification.transcriptCursor;
@@ -139,14 +143,23 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 		cursor = { ...cursor };
 		const maximumReadBytes = input.maximumReadBytes ?? 256 * 1024;
 		const buffer = Buffer.allocUnsafe(Math.min(maximumReadBytes, Math.max(0, metadata.size - cursor.nextByteOffset)));
-		const handle = await open(path, "r");
+		const handle = await openCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 		let bytesRead: number;
 		try {
+			const first = (await readCodexTranscriptSessionMetadata(handle)).record;
+			const metadataPayload = readTranscriptRecord(first.payload);
+			if (
+				!transcriptMetadataMatchesNativeConversationIdentity(identity, first) ||
+				metadataPayload?.cwd !== summary.workspacePath ||
+				!["cli", "vscode"].includes(String(metadataPayload.source))
+			)
+				return defer("native_identity_changed");
+			cursor.verifiedSessionMetadata = true;
 			({ bytesRead } = await handle.read(buffer, 0, buffer.length, cursor.nextByteOffset));
 		} finally {
 			await handle.close();
 		}
-		const latest = await stat(path);
+		const latest = await statCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 		if (`${latest.dev}:${latest.ino}` !== fileIdentity || latest.size < metadata.size)
 			return defer("native_evidence_unavailable");
 		const matches = [...(verification.matchingNativeMessages ?? [])];
@@ -242,7 +255,11 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 		verification.nextCheckAtMs = null;
 		result.accepted = { eventId: match.eventId, acceptedAtMs: match.acceptedAtMs };
 		return result;
-	} catch {
-		return defer("native_evidence_unavailable");
+	} catch (error) {
+		return defer(
+			error instanceof Error && /身份|归属/.test(error.message)
+				? "native_identity_changed"
+				: "native_evidence_unavailable",
+		);
 	}
 }

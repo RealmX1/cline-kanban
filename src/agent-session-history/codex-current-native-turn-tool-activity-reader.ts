@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { open, stat } from "node:fs/promises";
 import { resolveCurrentAgentProcessUserTurnIdleRetentionStarted } from "../core/agent-conversation-activity-observation";
 import type {
 	RuntimeLastEffectiveAgentConversationActivityObservation,
@@ -11,6 +10,11 @@ import {
 } from "../core/codex-native-agent-turn-execution-observation";
 import { LAST_CONVERSATION_PROGRESS_FUTURE_OBSERVATION_TOLERANCE_MS } from "../core/last-conversation-progress-observation";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
+import {
+	openCodexTranscriptHistoryReadSource,
+	statCodexTranscriptHistoryReadSource,
+} from "./codex-transcript-history-read-source";
+import { readCodexTranscriptSessionMetadata } from "./codex-transcript-read-source";
 import type { NativeAgentConversationTranscriptActivityObservation } from "./native-agent-conversation-transcript-activity";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 
@@ -50,7 +54,7 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 		input.execution.executionStatus === "unknown"
 	)
 		return null;
-	const metadata = await stat(path);
+	const metadata = await statCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 	if (!metadata.isFile()) return null;
 	const fileIdentity = `${metadata.dev}:${metadata.ino}`;
 	const retention = resolveCurrentAgentProcessUserTurnIdleRetentionStarted(input.summary);
@@ -89,14 +93,23 @@ export async function readCodexCurrentNativeTurnToolActivity(input: {
 				};
 	const remainingBytes = Math.max(0, metadata.size - cursor.nextByteOffset);
 	const buffer = Buffer.allocUnsafe(Math.min(remainingBytes, input.maximumReadBytes));
-	const handle = await open(path, "r");
+	const handle = await openCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 	let bytesRead: number;
 	try {
+		const first = (await readCodexTranscriptSessionMetadata(handle)).record;
+		const metadataPayload = readTranscriptRecord(first.payload);
+		if (
+			!transcriptMetadataMatchesNativeConversationIdentity(identity, first) ||
+			metadataPayload?.cwd !== input.summary.workspacePath ||
+			!["cli", "vscode"].includes(String(metadataPayload.source))
+		)
+			return null;
+		cursor.verifiedSessionMetadata = true;
 		({ bytesRead } = await handle.read(buffer, 0, buffer.length, cursor.nextByteOffset));
 	} finally {
 		await handle.close();
 	}
-	const latestMetadata = await stat(path);
+	const latestMetadata = await statCodexTranscriptHistoryReadSource(path, identity.nativeSessionId);
 	if (`${latestMetadata.dev}:${latestMetadata.ino}` !== fileIdentity || latestMetadata.size < metadata.size)
 		return null;
 	const events: NativeAgentConversationTranscriptActivityObservation[] = [];

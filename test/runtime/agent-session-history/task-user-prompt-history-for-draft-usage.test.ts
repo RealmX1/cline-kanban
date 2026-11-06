@@ -1,8 +1,10 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MAX_INCREMENTAL_READ_BYTES } from "agent-conversation-exploration-thread-graph/harness-claude-code";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compress } from "zstd-stream";
 
 const fixtures = vi.hoisted(() => ({ currentPath: "", oldPath: "" }));
 vi.mock("../../../src/state/workspace-state", () => ({
@@ -74,6 +76,43 @@ afterEach(async () => {
 });
 
 describe("真实用户提示提取与历史会话发现", () => {
+	it.each(["jsonl", "zstandard"] as const)("%s：旧路径消失后用已绑定 UUID 完整流读当前指针", async (format) => {
+		const directory = await mkdtemp(join(tmpdir(), "prompt-usage-current-native-pointer-"));
+		directories.push(directory);
+		const home = join(directory, "codex-home");
+		const sessions = join(home, "sessions");
+		await mkdir(sessions, { recursive: true });
+		fixtures.currentPath = join(sessions, "missing-current.jsonl");
+		fixtures.oldPath = join(directory, "old.jsonl");
+		await writeFile(fixtures.oldPath, `${JSON.stringify({ type: "session_meta", payload: { id: "old" } })}\n`);
+		const current = join(sessions, `current-segment.jsonl${format === "zstandard" ? ".zst" : ""}`);
+		const content = Buffer.from(
+			`${[
+				{ type: "session_meta", payload: { id: "current", source: "cli" } },
+				buildCodexResponseItemUserTranscriptRecord(["当前指针头部用户提示"], "first"),
+				...Array.from({ length: 4 }, () => ({
+					type: "event_msg",
+					payload: { type: "agent_message", message: "x".repeat(DEFAULT_MAX_INCREMENTAL_READ_BYTES / 2) },
+				})),
+				buildCodexResponseItemUserTranscriptRecord(["当前指针尾部用户提示"], "last"),
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		await writeFile(current, format === "zstandard" ? await compress(content) : content);
+		const database = new Database(join(home, "state_5.sqlite"));
+		try {
+			database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)");
+			database.prepare("INSERT INTO threads VALUES (?, ?)").run("current", current);
+		} finally {
+			database.close();
+		}
+		const history = await readTaskUserPromptHistoryForDraftUsage({ workspaceId: "workspace", taskId: "task" });
+		const prompts = [];
+		for await (const prompt of history.prompts) prompts.push(prompt.text);
+		expect(prompts).toEqual(["当前指针头部用户提示", "当前指针尾部用户提示"]);
+		expect(history.warnings).toEqual([]);
+	});
 	it("排除工具结果、系统通知及 Codex 注入的上下文", () => {
 		expect(
 			extractSubmittedUserPromptFromTranscriptRecord("claude", {
@@ -197,11 +236,11 @@ describe("真实用户提示提取与历史会话发现", () => {
 		const padding = `${JSON.stringify({ type: "event_msg", payload: { type: "agent_message", message: "x".repeat(DEFAULT_MAX_INCREMENTAL_READ_BYTES - 512) } })}\n`;
 		await writeFile(
 			fixtures.oldPath,
-			`${padding}${padding}${JSON.stringify({ type: "event_msg", timestamp: "2026-10-17T10:00:00Z", payload: { type: "user_message", message: "旧会话中间的用户提示" } })}\n${padding}${padding}`,
+			`${JSON.stringify({ type: "session_meta", payload: { id: "old", source: "cli" } })}\n${padding}${padding}${JSON.stringify({ type: "event_msg", timestamp: "2026-10-17T10:00:00Z", payload: { type: "user_message", message: "旧会话中间的用户提示" } })}\n${padding}${padding}`,
 		);
 		await writeFile(
 			fixtures.currentPath,
-			`${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "当前会话用户提示" } })}\n`,
+			`${JSON.stringify({ type: "session_meta", payload: { id: "current", source: "cli" } })}\n${JSON.stringify({ type: "event_msg", payload: { type: "user_message", message: "当前会话用户提示" } })}\n`,
 		);
 		const history = await readTaskUserPromptHistoryForDraftUsage({ workspaceId: "workspace", taskId: "task" });
 		const prompts = [];
