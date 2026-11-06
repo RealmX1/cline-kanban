@@ -45,9 +45,17 @@ plugins/.kanban-source-installation-coordination/
 
 普通原生进程通过 `-c marketplaces={...}` 读取同一安装树的本地 marketplace 视图，避免各 app-server 绕过协调器自行异步 Git 升级。原始磁盘 Git 来源配置保持原样，本地／curated 等其他条目保留。完整 table 覆盖还避免原生 dotted key 对带点名称的引号处理差异。
 
-主、侧会话的自然换代通过同步原生入口检查真实 revision；同源辅助进程在完整缓存可用时只复核目录与来源，不执行升级。正常 prompt 提交路径不加入同步升级。真实更新仍可替换最终目录；仅来源与 revision 未变化时不应发生无意义替换。原生流程可能产生临时 materialization／clone，不能把它们当作最终插件重装。
+全新主、侧会话通过同步原生入口检查真实 revision。恢复既有对话时，已完成安装的 marketplace revision、完整来源、插件实际路径及持久目录身份均吻合，才允许直接复用本地插件；这一分支不执行原生升级或远端 revision 查询。缺少完成记录、来源变化或缓存不完整时继续同步补齐；接管旧安装树时，为同步核验后复用的插件补记实际路径与目录身份，供后续恢复使用。同源辅助进程遇到尚未完成的刷新请求且缓存完成事实仍匹配时，共用该请求并只核验本地缓存；无待刷新请求时沿用原有核验流程，正常 prompt 提交路径不加入同步升级。
+
+快速恢复仍持有来源域锁，先核验 writer、实际 executable、目录归属和在途原生写入者，再复核缓存。复用不代表远端更新完成：安装状态保存单调递增的刷新请求序号与已完成序号，准备意图绑定对应请求；同一完整来源的并发恢复合并到尚未完成的一轮刷新。新增字段兼容旧记录，未提供的安装序号视为零。
+
+首次登记刷新后至少等待 30 秒，由现有配置补扫器调用持久恢复入口接续，不新增调度器、不启动会话或投递 prompt。新刷新序号会清除旧轮次的 marketplace 已检查阶段，保留插件完成事实和失败重试预算；恢复会重核验意图与当前 writer 配置，只有覆盖本轮请求的原生更新、插件补全和可信远端核验实际完成，才推进已完成序号。另一进程重启后仍可接续，已被同一轮刷新覆盖的准备意图只复核本地完成事实，不重复联网或安装。失败继续使用既有三次尝试、证据变化重试和机器等待规则。
+
+真实更新仍可替换最终目录；来源与 revision 未变化时不应发生无意义替换。用户修改脚本、原生定义／内容哈希、禁用、撤销及批准门禁保持原有语义，不因快速恢复自动恢复脚本或重新签名。原生流程可能产生临时 materialization／clone，不能把它们当作最终插件重装。
 
 同一来源锁内，相同插件 URL/ref 的远端 revision 核验复用一次结果（含未知结果）；来源 URL/ref 改变或原生 marketplace／插件安装改变事实后重新核验。缓存不跨启动事务。未知 revision 只允许沿用完整缓存并保持待更新，不写成更新成功。启动诊断逐项记录来源锁等待、原生更新、插件安装和 revision 查询耗时。
+
+`codex_verified_installed_plugins_reused_for_resume` 记录恢复时命中的本地完成证据；`codex_deferred_remote_plugin_update_already_completed` 记录后台合并后直接收口的准备意图。`codex_shared_plugin_launch_preparation` 仍记录整个插件准备耗时，配置副本准备和前端 1 秒停留防抖不属于本次提速范围。
 
 同步 CLI 的 Git 操作保留原生 Automatic 环境隔离：去除仓库作用域 `GIT_*`，使用私有普通 cwd 与发现上界，禁止交互提示及可选写锁，保留认证和只读 Trace2。私有 cwd 出现 `.git` 发现标记时不执行命令，不能借此继承任务仓库的本地 Git 配置。
 
@@ -78,5 +86,19 @@ npm run web:typecheck
 ```
 
 真实运行实例还需在部署后观察自然换代采用的新绑定与辅助进程；当前任务不部署、不替换旧活进程，不把隔离测试或 `hooks/list=trusted` 冒充真实实例的 hook 执行事实。
+
+## 恢复提速的部署后验证
+
+| 行为 | 部署前覆盖 | 部署后待验 |
+| --- | --- | --- |
+| 完整缓存恢复不阻塞于远端更新 | 真实 Codex、Git Trace2、目录身份与内容摘要对照；辅助启动不额外升级 | 已部署运行实例的自然恢复确实命中复用，整个插件准备区间没有同步联网或安装 |
+| 并发、断网及跨进程接续 | 两份恢复意图共享一轮刷新；断网保留未完成序号，另一进程恢复后只更新一次 | 无需重复制造同类故障 |
+| 身份、输入与 UI 等待状态 | 原生会话身份与不重发 prompt 回归；桌面和手机自动化浏览器检查 | 无新增独占部署断言 |
+
+任务 `5917d` 注册自动脚本 `def36579-19b0-4b37-8439-32bfa9df1cfb`，定义在 `docs/verification-definitions/codex-conversation-resume-installed-plugin-reuse.json`。资产位于 `~/.cline/kanban/verifications/def36579-19b0-4b37-8439-32bfa9df1cfb/`，`cleanup.mode=automatic`；部署记录后挂载 1 项自动检查、0 项人工检查。
+
+脚本读取指定运行实例的只读诊断与新鲜心跳，只接受当前实例拥有的会话代际；再按该代的完整插件准备区间核对日志。尚无自然恢复样本时明确非零退出，不启动或重启用户任务，不把后台稍后的合法更新误算成启动阻塞。旧实例 dry-run 按预期未通过，无崩溃、超时或残留；部署与生产耗时仍待验证。
+
+兜底清理：`kanban verification cleanup --verification-id def36579-19b0-4b37-8439-32bfa9df1cfb`。本次使用持久业务诊断，无需删除临时源码插桩。
 
 原生依据：[同步升级 CLI](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/cli/src/marketplace_cmd.rs)、[marketplace 更新](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/core-plugins/src/marketplace_upgrade.rs)、[Git 隔离策略](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/core-plugins/src/git_policy.rs)。
