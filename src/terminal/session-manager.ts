@@ -76,6 +76,7 @@ import {
 } from "../codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
+	assertRuntimeAgentIsNotRetired,
 	canAgentResumeByRecordedNativeConversationSessionId,
 	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
 	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
@@ -5432,6 +5433,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
 	): Promise<RuntimeTaskSessionSummary> {
+		assertRuntimeAgentIsNotRetired(request.agentId);
 		if (!["durable_record_rebuilt_resume", "auto_restart_after_pty_exit"].includes(taskSessionStartOrigin)) {
 			this.automaticFailureContinuationCoordinators.get(request.taskId)?.cancel("session_replaced");
 			const entry = this.entries.get(request.taskId);

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ProjectNavigationPanel } from "@/components/project-navigation-panel";
 import { useProjectNavigationLayout } from "@/resize/use-project-navigation-layout";
-import type { RuntimeClineProviderSettings, RuntimeProjectSummary } from "@/runtime/types";
+import type { RuntimeProjectSummary } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
 vi.mock("@/resize/layout-customizations", () => ({
@@ -43,19 +43,6 @@ const PROJECTS: RuntimeProjectSummary[] = [
 		crossProjectTaskSwitcherEntries: [],
 	},
 ];
-
-const CLINE_OAUTH_SETTINGS: RuntimeClineProviderSettings = {
-	providerId: null,
-	modelId: "cline-sonnet",
-	baseUrl: null,
-	reasoningEffort: null,
-	apiKeyConfigured: false,
-	oauthProvider: "cline",
-	oauthAccessTokenConfigured: true,
-	oauthRefreshTokenConfigured: true,
-	oauthAccountId: "acc-1",
-	oauthExpiresAt: 1_800_000_000_000,
-};
 
 function getSidebar(container: HTMLElement): HTMLElement {
 	const sidebar = container.querySelector("aside");
@@ -141,8 +128,6 @@ describe("ProjectNavigationPanel width persistence", () => {
 					onActiveSectionChange={() => {}}
 					canShowAgentSection
 					selectedAgentId={null}
-					clineProviderSettings={null}
-					featurebaseFeedbackState={undefined}
 					onSelectProject={() => {}}
 					onGetPermanentDeletionPreview={async () => {
 						throw new Error("Permanent deletion preview was not expected in this test.");
@@ -201,8 +186,8 @@ describe("ProjectNavigationPanel width persistence", () => {
 
 	it("renders beta hint card with report issue in the projects view", () => {
 		renderPanel();
-		expect(container.textContent).toContain("Kanban is in beta. Help us improve by sharing your experience.");
-		expect(container.textContent).toContain("Report issue");
+		expect(container.textContent).toContain("Kanban 仍在测试阶段，欢迎反馈使用体验。");
+		expect(container.textContent).toContain("报告问题");
 	});
 
 	it("lists the task search shortcut in the always-visible shortcut hints", () => {
@@ -266,21 +251,6 @@ describe("ProjectNavigationPanel width persistence", () => {
 			projectRow?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
 		});
 		expect(onSelectProject).toHaveBeenCalledExactlyOnceWith("project-1");
-	});
-
-	it("shows send feedback instead of report issue when Cline OAuth is available", () => {
-		renderPanel({
-			selectedAgentId: "cline",
-			clineProviderSettings: CLINE_OAUTH_SETTINGS,
-			featurebaseFeedbackState: {
-				authState: "ready",
-				widgetOpenCount: 0,
-				openFeedbackWidget: vi.fn(async () => {}),
-			},
-		});
-		expect(container.textContent).toContain("Kanban is in beta. Help us improve by sharing your experience.");
-		expect(container.textContent).toContain("Send feedback");
-		expect(container.textContent).not.toContain("Report issue");
 	});
 
 	it("persists terminal tips dismissal", () => {

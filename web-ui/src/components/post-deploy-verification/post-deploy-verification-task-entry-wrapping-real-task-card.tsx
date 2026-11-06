@@ -45,7 +45,6 @@ export type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
 			currentProjectWorkspacePath: string | null;
 			onActivateTaskCardOpeningTaskDetail: (card: BoardCard) => void;
 			defaultAgentId: RuntimeAgentId | null;
-			defaultClineModelId: string | null;
 	  }
 	| {
 			realTaskCardRenderingInputsBoardSourceKind: "runtime_board_snapshot_of_workspace_not_hydrated_in_browser";
@@ -54,7 +53,6 @@ export type RealTaskCardRenderingInputsForPostDeployVerificationPanelEntries =
 			workspacePathOwningRuntimeBoardSnapshot: string | null;
 			onActivateTaskCardOpeningTaskInItsProject: (card: BoardCard) => void;
 			defaultAgentId: RuntimeAgentId | null;
-			defaultClineModelId: string | null;
 	  };
 
 export interface PostDeployVerificationTaskEntryWrappingRealTaskCardProps {
@@ -197,7 +195,6 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 						onActivateCard: realTaskCardRenderingInputs.onActivateTaskCardOpeningTaskInItsProject,
 						workspacePath: realTaskCardRenderingInputs.workspacePathOwningRuntimeBoardSnapshot,
 						defaultAgentId: realTaskCardRenderingInputs.defaultAgentId,
-						defaultClineModelId: realTaskCardRenderingInputs.defaultClineModelId,
 					})}
 				/>
 			</TaskCardBodyVisualDensityProvider>
@@ -215,7 +212,6 @@ function PostDeployVerificationTaskEntryRealTaskCardOrRemovedFallback({
 					onActivateCard: realTaskCardRenderingInputs.onActivateTaskCardOpeningTaskDetail,
 					workspacePath: realTaskCardRenderingInputs.currentProjectWorkspacePath,
 					defaultAgentId: realTaskCardRenderingInputs.defaultAgentId,
-					defaultClineModelId: realTaskCardRenderingInputs.defaultClineModelId,
 				})}
 			/>
 		</TaskCardBodyVisualDensityProvider>

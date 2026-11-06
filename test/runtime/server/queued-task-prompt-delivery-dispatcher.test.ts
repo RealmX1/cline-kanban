@@ -21,8 +21,12 @@ import type {
 import type { TaskChatInputDeliveryOutcomeObserver } from "../../../src/terminal/session-manager";
 
 const testRuntimeHome = { path: "" };
+const persistedWorkspaceStateMocks = vi.hoisted(() => ({
+	loadPersistedWorkspaceStateById: vi.fn(),
+}));
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
+	loadPersistedWorkspaceStateById: persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById,
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));
@@ -194,6 +198,11 @@ async function readStates() {
 }
 
 beforeEach(async () => {
+	persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockReset();
+	persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+		board: { columns: [] },
+		sessions: {},
+	});
 	testRuntimeHome.path = await mkdtemp(join(tmpdir(), "kanban-queued-prompt-dispatcher-"));
 	await mkdir(join(testRuntimeHome.path, "workspaces", WORKSPACE_ID), { recursive: true });
 });
@@ -689,5 +698,39 @@ describe("queued-task-prompt-delivery-dispatcher — 投影随会话状态刷新
 		harness.observe(generatingSummary(1));
 		await harness.dispatcher.whenIdle();
 		expect(harness.broadcasts).toHaveLength(broadcastCount);
+	});
+});
+
+describe("缺少内存摘要时的退役身份兜底", () => {
+	it.each(["card", "session"] as const)("从持久 %s 身份显示 agent_retired，保持条目未投递", async (source) => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [{ cards: [{ id: TASK_ID, agentId: source === "card" ? "cline" : "codex" }] }] },
+			sessions: source === "session" ? { [TASK_ID]: stoppedSummary(1, { agentId: "cline" }) } : {},
+		});
+		const harness = createHarness();
+		try {
+			await harness.enqueue("retired-cline-prompt", "旧待发消息");
+			const projected = await harness.dispatcher.buildProjectedEntriesByTaskId(WORKSPACE_ID);
+			expect(projected[TASK_ID]?.[0]?.dispatchBlockReason).toBe("agent_retired");
+			expect(harness.sends).toEqual([]);
+		} finally {
+			await harness.dispatcher.stop();
+		}
+	});
+
+	it("当前 Codex 会话优先于旧 Cline 卡片身份", async () => {
+		persistedWorkspaceStateMocks.loadPersistedWorkspaceStateById.mockResolvedValue({
+			board: { columns: [{ cards: [{ id: TASK_ID, agentId: "cline" }] }] },
+			sessions: {},
+		});
+		const harness = createHarness();
+		try {
+			harness.setSummary(generatingSummary(1));
+			await harness.enqueue("active-codex-prompt", "等待当前会话");
+			const projected = await harness.dispatcher.buildProjectedEntriesByTaskId(WORKSPACE_ID);
+			expect(projected[TASK_ID]?.[0]?.dispatchBlockReason).toBe("agent_still_generating");
+		} finally {
+			await harness.dispatcher.stop();
+		}
 	});
 });

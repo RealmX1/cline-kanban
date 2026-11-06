@@ -6,7 +6,6 @@ import { resolve } from "node:path";
 import { Command, Option } from "commander";
 import ora, { type Ora } from "ora";
 import packageJson from "../package.json" with { type: "json" };
-import { disposeCliTelemetryService } from "./cline-sdk/cline-telemetry-service.js";
 import { registerCodexConversationStorageCommand } from "./commands/codex-conversation-storage";
 import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
@@ -812,7 +811,6 @@ async function runMainCommand(options: CliOptions, shouldAutoOpenBrowser: boolea
 		runPendingAutoUpdateOnShutdown();
 		const exitOutcome = await runtime.shutdown(trigger);
 		printHostedAgentSessionsLeftRunningAfterRuntimeExit(trigger, exitOutcome.detachedHostedAgentSessionCount);
-		await disposeCliTelemetryService().catch(() => {});
 	};
 
 	const gracefulShutdown = installGracefulShutdownHandlers({
@@ -1009,7 +1007,7 @@ async function run(): Promise<void> {
 		captureNodeException(error, { area: "startup" });
 	} finally {
 		if (!isServerStyleInvocation || invocationFailed || !runtimeServerStartedByThisInvocation) {
-			await Promise.allSettled([disposeCliTelemetryService(), flushNodeTelemetry(DEFAULT_CLI_TELEMETRY_FLUSH_MS)]);
+			await flushNodeTelemetry(DEFAULT_CLI_TELEMETRY_FLUSH_MS);
 			// 空写回调在此前已排队的 JSON / 错误正文之后执行，避免 process.exit 截断 pipe 输出。
 			await Promise.allSettled(
 				[process.stdout, process.stderr].map(

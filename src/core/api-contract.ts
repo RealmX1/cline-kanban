@@ -173,18 +173,6 @@ export const runtimeWorkspaceFileSearchResponseSchema = z.object({
 });
 export type RuntimeWorkspaceFileSearchResponse = z.infer<typeof runtimeWorkspaceFileSearchResponseSchema>;
 
-export const runtimeSlashCommandSchema = z.object({
-	name: z.string(),
-	instructions: z.string(),
-	description: z.string().optional(),
-});
-export type RuntimeSlashCommand = z.infer<typeof runtimeSlashCommandSchema>;
-
-export const runtimeSlashCommandsResponseSchema = z.object({
-	commands: z.array(runtimeSlashCommandSchema),
-});
-export type RuntimeSlashCommandsResponse = z.infer<typeof runtimeSlashCommandsResponseSchema>;
-
 const runtimeTrimmedNonEmptyStringSchema = z
 	.string()
 	.transform((value) => value.trim())
@@ -395,7 +383,7 @@ function normalizeRuntimeTaskCommentEntries(
 	return normalizedEntries.length > 0 ? normalizedEntries : undefined;
 }
 
-// Kanban 与一个 agent 通话的方式（PTY / 进程内 Cline SDK / ACP 子进程）。canonical zod 源放在
+// 当前通话方式为 PTY / ACP；另保留旧通道标识用于读取历史。canonical zod 源放在
 // api-contract（契约叶子模块），src/core/agent-catalog.ts 由此派生 TS 类型并挂到 catalog 条目上，
 // 避免 api-contract → agent-catalog 的反向依赖。
 // 定义位置必须留在 runtimeBoardCardSchema **之前**：卡片的 ompAgentSessionTransport 字段在模块求值
@@ -403,7 +391,7 @@ function normalizeRuntimeTaskCommentEntries(
 export const runtimeAgentSessionTransportSchema = z.enum([
 	// PTY 里跑一个 CLI，靠刮 TUI 输出 + agent 侧 hook 回调 `kanban hooks` 判状态。
 	"pty_terminal",
-	// 在 Kanban 服务进程内直接实例化 @clinebot/core，订阅结构化事件。
+	// 已退役的历史通道，不具有启动资格。
 	"in_process_cline_sdk",
 	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
 	"acp_stdio_subprocess",
@@ -1149,7 +1137,7 @@ export type RuntimeTaskAwaitingDispatchedBackgroundWork = z.infer<
 // pending-user-decision-carry-forward-implementation-plan.md。
 //
 // 铁律：以下字段全部是 metadata-only sidecar——不参与三 facet、不进 superRefine、不影响
-// projectLegacyState。写入一律经两个 updateSummary 漏斗（cline-sdk/cline-session-state.ts、
+// projectLegacyState。写入一律经两个 updateSummary 漏斗（acp-client-session/acp-session-state.ts、
 // terminal/session-manager.ts），绝不手写 `state:`，也绝不裸写单个 facet 字段。
 
 // 「agent 停止生成响应」这一**离散状态转移**的信号来源（置信度降序）。
@@ -1812,7 +1800,6 @@ export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema
 	autoReviewEnabled: z.boolean().optional(),
 	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 	agentId: runtimeAgentIdSchema.optional(),
-	clineSettings: runtimeTaskClineSettingsSchema.optional(),
 	taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
 	baseRef: z.string(),
 	parentSessionId: z.string().optional(),
@@ -2183,12 +2170,6 @@ export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	autoReviewEnabled: z.boolean().optional(),
 	autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 	agentId: runtimeAgentIdSchema.nullable().optional(),
-	clineProviderId: z.string().nullable().optional(),
-	clineModelId: z.string().nullable().optional(),
-	clineReasoningEffort: z
-		.union([runtimeClineReasoningEffortSchema, z.literal("default")])
-		.nullable()
-		.optional(),
 	taskAgentSessionInitializationId: z.string().nullable().optional(),
 	taskAgentSessionInitializationMode: runtimeTaskAgentSessionInitializationReuseModeSchema.optional(),
 	parentSessionId: z.string().nullable().optional(),
@@ -2219,7 +2200,6 @@ export const runtimeTaskCardFieldValuePatchSchema = z.object({
 	agentId: runtimeAgentIdSchema.nullable().optional(),
 	ompAgentSessionTransport: runtimeAgentSessionTransportSchema.nullable().optional(),
 	taskConversationMode: runtimeTaskConversationModeSchema.nullable().optional(),
-	clineSettings: runtimeTaskClineSettingsSchema.nullable().optional(),
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.nullable().optional(),
 	taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.nullable().optional(),
 	baseRef: z.string().optional(),
@@ -2573,15 +2553,6 @@ export const runtimeWorkspaceMetadataSchema = z.object({
 });
 export type RuntimeWorkspaceMetadata = z.infer<typeof runtimeWorkspaceMetadataSchema>;
 
-export const runtimeClineMcpServerAuthStatusSchema = z.object({
-	serverName: z.string(),
-	oauthSupported: z.boolean(),
-	oauthConfigured: z.boolean(),
-	lastError: z.string().nullable(),
-	lastAuthenticatedAt: z.number().nullable(),
-});
-export type RuntimeClineMcpServerAuthStatus = z.infer<typeof runtimeClineMcpServerAuthStatusSchema>;
-
 // 应用内通知中心的「已派生」feed 条目：后端在发送时把最小持久化条目补齐成前端可直接渲染的形态。
 // taskTitle/repoName/isDone 一律后端派生——跨 repo 聚合下客户端只加载活跃 repo 的 board，拿不到
 // 其它 repo 的 board 自行解析。id = `${taskId}:${triggeredAt}`（append 幂等键）。
@@ -2624,7 +2595,6 @@ export const runtimeStateStreamSnapshotMessageSchema = z.object({
 	projects: z.array(runtimeProjectSummarySchema),
 	workspaceState: runtimeWorkspaceStateResponseSchema.nullable(),
 	workspaceMetadata: runtimeWorkspaceMetadataSchema.nullable(),
-	clineSessionContextVersion: z.number().int().nonnegative(),
 	// 跨全部 workspace 聚合的通知 feed（铃铛/日志用），随首帧快照下发；空时为 []。
 	notificationLog: z.array(runtimeNotificationFeedEntrySchema),
 });
@@ -2698,20 +2668,6 @@ export const runtimeStateStreamTaskChatClearedMessageSchema = z.object({
 	taskId: z.string(),
 });
 export type RuntimeStateStreamTaskChatClearedMessage = z.infer<typeof runtimeStateStreamTaskChatClearedMessageSchema>;
-
-export const runtimeStateStreamMcpAuthUpdatedMessageSchema = z.object({
-	type: z.literal("mcp_auth_updated"),
-	statuses: z.array(runtimeClineMcpServerAuthStatusSchema),
-});
-export type RuntimeStateStreamMcpAuthUpdatedMessage = z.infer<typeof runtimeStateStreamMcpAuthUpdatedMessageSchema>;
-
-export const runtimeStateStreamClineSessionContextUpdatedMessageSchema = z.object({
-	type: z.literal("cline_session_context_updated"),
-	version: z.number().int().nonnegative(),
-});
-export type RuntimeStateStreamClineSessionContextUpdatedMessage = z.infer<
-	typeof runtimeStateStreamClineSessionContextUpdatedMessageSchema
->;
 
 export const runtimeStateStreamErrorMessageSchema = z.object({
 	type: z.literal("error"),
@@ -3097,6 +3053,7 @@ export type QueuedTaskPromptDeliveryState = z.infer<typeof queuedTaskPromptDeliv
 // 出队被什么挡住。服务端给枚举值、前端只做措辞映射——判据全在运行时侧（会话 facet、恢复守卫、
 // PTY 单飞槽），前端复算必然漂移。
 export const queuedTaskPromptDispatchBlockReasonSchema = z.enum([
+	"agent_retired",
 	"session_report_execution_qualification_pending",
 	"awaiting_native_independent_user_turn_query_retry",
 	// kanban 重启跨过来的条目，人还没在重启后看见过它。**唯一一条不会自行解除**的阻塞。
@@ -3576,8 +3533,6 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	runtimeStateStreamTaskReadyForReviewMessageSchema,
 	runtimeStateStreamTaskChatMessageSchema,
 	runtimeStateStreamTaskChatClearedMessageSchema,
-	runtimeStateStreamMcpAuthUpdatedMessageSchema,
-	runtimeStateStreamClineSessionContextUpdatedMessageSchema,
 	runtimeStateStreamNotificationLogUpdatedMessageSchema,
 	runtimeStateStreamExploratoryFindingsUpdatedMessageSchema,
 	runtimeStateStreamExplorationThreadGraphUpdatedMessageSchema,
@@ -4003,281 +3958,6 @@ export const runtimeProjectShortcutSchema = z.object({
 });
 export type RuntimeProjectShortcut = z.infer<typeof runtimeProjectShortcutSchema>;
 
-export const runtimeClineOauthProviderSchema = z.enum(["cline", "oca", "openai-codex"]);
-export type RuntimeClineOauthProvider = z.infer<typeof runtimeClineOauthProviderSchema>;
-
-export const runtimeClineProviderSettingsSchema = z.object({
-	providerId: z.string().nullable(),
-	modelId: z.string().nullable(),
-	baseUrl: z.string().nullable(),
-	reasoningEffort: runtimeClineReasoningEffortSchema.nullable().optional(),
-	apiKeyConfigured: z.boolean(),
-	oauthProvider: runtimeClineOauthProviderSchema.nullable(),
-	oauthAccessTokenConfigured: z.boolean(),
-	oauthRefreshTokenConfigured: z.boolean(),
-	oauthAccountId: z.string().nullable(),
-	oauthExpiresAt: z.number().int().positive().nullable(),
-});
-export type RuntimeClineProviderSettings = z.infer<typeof runtimeClineProviderSettingsSchema>;
-
-export const runtimeClineAccountProfileSchema = z.object({
-	accountId: z.string().nullable(),
-	email: z.string().nullable(),
-	displayName: z.string().nullable(),
-});
-export type RuntimeClineAccountProfile = z.infer<typeof runtimeClineAccountProfileSchema>;
-
-export const runtimeClineAccountProfileResponseSchema = z.object({
-	profile: runtimeClineAccountProfileSchema.nullable(),
-	error: z.string().optional(),
-});
-export type RuntimeClineAccountProfileResponse = z.infer<typeof runtimeClineAccountProfileResponseSchema>;
-
-export const runtimeClineKanbanAccessResponseSchema = z.object({
-	enabled: z.boolean(),
-	error: z.string().optional(),
-});
-export type RuntimeClineKanbanAccessResponse = z.infer<typeof runtimeClineKanbanAccessResponseSchema>;
-
-export const runtimeClineAccountOrganizationSchema = z.object({
-	organizationId: z.string(),
-	name: z.string(),
-	active: z.boolean(),
-	roles: z.array(z.string()),
-});
-export type RuntimeClineAccountOrganization = z.infer<typeof runtimeClineAccountOrganizationSchema>;
-
-export const runtimeClineAccountOrganizationsResponseSchema = z.object({
-	organizations: z.array(runtimeClineAccountOrganizationSchema),
-	error: z.string().optional(),
-});
-export type RuntimeClineAccountOrganizationsResponse = z.infer<typeof runtimeClineAccountOrganizationsResponseSchema>;
-
-export const runtimeClineAccountBalanceResponseSchema = z.object({
-	balance: z.number().nullable(),
-	activeAccountLabel: z.string().nullable(),
-	activeOrganizationId: z.string().nullable(),
-	error: z.string().optional(),
-});
-export type RuntimeClineAccountBalanceResponse = z.infer<typeof runtimeClineAccountBalanceResponseSchema>;
-
-export const runtimeClineAccountSwitchRequestSchema = z.object({
-	organizationId: z.string().nullable(),
-});
-export type RuntimeClineAccountSwitchRequest = z.infer<typeof runtimeClineAccountSwitchRequestSchema>;
-
-export const runtimeClineAccountSwitchResponseSchema = z.object({
-	ok: z.boolean(),
-	error: z.string().optional(),
-});
-export type RuntimeClineAccountSwitchResponse = z.infer<typeof runtimeClineAccountSwitchResponseSchema>;
-
-export const runtimeFeaturebaseTokenResponseSchema = z.object({
-	featurebaseJwt: z.string(),
-});
-export type RuntimeFeaturebaseTokenResponse = z.infer<typeof runtimeFeaturebaseTokenResponseSchema>;
-
-export const runtimeClineProviderCatalogItemSchema = z.object({
-	id: z.string(),
-	name: z.string(),
-	oauthSupported: z.boolean(),
-	enabled: z.boolean(),
-	defaultModelId: z.string().nullable(),
-	baseUrl: z.string().nullable(),
-	supportsBaseUrl: z.boolean(),
-	env: z.array(z.string()).optional(),
-});
-export type RuntimeClineProviderCatalogItem = z.infer<typeof runtimeClineProviderCatalogItemSchema>;
-
-export const runtimeClineProviderCatalogResponseSchema = z.object({
-	providers: z.array(runtimeClineProviderCatalogItemSchema),
-});
-export type RuntimeClineProviderCatalogResponse = z.infer<typeof runtimeClineProviderCatalogResponseSchema>;
-
-export const runtimeClineProviderModelsRequestSchema = z.object({
-	providerId: z.string(),
-});
-export type RuntimeClineProviderModelsRequest = z.infer<typeof runtimeClineProviderModelsRequestSchema>;
-
-export const runtimeClineProviderModelSchema = z.object({
-	id: z.string(),
-	name: z.string(),
-	supportsVision: z.boolean().optional(),
-	supportsAttachments: z.boolean().optional(),
-	supportsReasoningEffort: z.boolean().optional(),
-});
-export type RuntimeClineProviderModel = z.infer<typeof runtimeClineProviderModelSchema>;
-
-export const runtimeClineProviderModelsResponseSchema = z.object({
-	providerId: z.string(),
-	models: z.array(runtimeClineProviderModelSchema),
-});
-export type RuntimeClineProviderModelsResponse = z.infer<typeof runtimeClineProviderModelsResponseSchema>;
-
-export const runtimeClineProviderCapabilitySchema = z.enum([
-	"streaming",
-	"tools",
-	"reasoning",
-	"vision",
-	"prompt-cache",
-]);
-export type RuntimeClineProviderCapability = z.infer<typeof runtimeClineProviderCapabilitySchema>;
-
-export const runtimeClineAddProviderRequestSchema = z.object({
-	providerId: z.string(),
-	name: z.string(),
-	baseUrl: z.string(),
-	apiKey: z.string().nullable().optional(),
-	headers: z.record(z.string(), z.string()).optional(),
-	timeoutMs: z.number().int().positive().optional(),
-	models: z.array(z.string()),
-	defaultModelId: z.string().nullable().optional(),
-	modelsSourceUrl: z.string().nullable().optional(),
-	capabilities: z.array(runtimeClineProviderCapabilitySchema).optional(),
-});
-export type RuntimeClineAddProviderRequest = z.infer<typeof runtimeClineAddProviderRequestSchema>;
-
-export const runtimeClineAddProviderResponseSchema = runtimeClineProviderSettingsSchema;
-export type RuntimeClineAddProviderResponse = z.infer<typeof runtimeClineAddProviderResponseSchema>;
-
-export const runtimeClineUpdateProviderRequestSchema = z.object({
-	providerId: z.string(),
-	name: z.string().optional(),
-	baseUrl: z.string().optional(),
-	apiKey: z.string().nullable().optional(),
-	headers: z.record(z.string(), z.string()).nullable().optional(),
-	timeoutMs: z.number().int().positive().nullable().optional(),
-	models: z.array(z.string()).optional(),
-	defaultModelId: z.string().nullable().optional(),
-	modelsSourceUrl: z.string().nullable().optional(),
-	capabilities: z.array(runtimeClineProviderCapabilitySchema).optional(),
-});
-export type RuntimeClineUpdateProviderRequest = z.infer<typeof runtimeClineUpdateProviderRequestSchema>;
-
-export const runtimeClineUpdateProviderResponseSchema = runtimeClineProviderSettingsSchema;
-export type RuntimeClineUpdateProviderResponse = z.infer<typeof runtimeClineUpdateProviderResponseSchema>;
-
-export const runtimeClineOauthLoginRequestSchema = z.object({
-	provider: runtimeClineOauthProviderSchema,
-	baseUrl: z.string().nullable().optional(),
-});
-export type RuntimeClineOauthLoginRequest = z.infer<typeof runtimeClineOauthLoginRequestSchema>;
-
-export const runtimeClineOauthLoginResponseSchema = z.object({
-	ok: z.boolean(),
-	provider: runtimeClineOauthProviderSchema,
-	settings: runtimeClineProviderSettingsSchema.optional(),
-	error: z.string().optional(),
-});
-export type RuntimeClineOauthLoginResponse = z.infer<typeof runtimeClineOauthLoginResponseSchema>;
-
-export const runtimeClineDeviceAuthStartResponseSchema = z.object({
-	deviceCode: z.string(),
-	userCode: z.string(),
-	verificationUrl: z.string(),
-	expiresInSeconds: z.number(),
-	pollIntervalSeconds: z.number(),
-});
-export type RuntimeClineDeviceAuthStartResponse = z.infer<typeof runtimeClineDeviceAuthStartResponseSchema>;
-
-export const runtimeClineDeviceAuthCompleteRequestSchema = z.object({
-	deviceCode: z.string(),
-	expiresInSeconds: z.number(),
-	pollIntervalSeconds: z.number(),
-	baseUrl: z.string().nullable().optional(),
-});
-export type RuntimeClineDeviceAuthCompleteRequest = z.infer<typeof runtimeClineDeviceAuthCompleteRequestSchema>;
-
-export const runtimeClineDeviceAuthCompleteResponseSchema = runtimeClineOauthLoginResponseSchema;
-export type RuntimeClineDeviceAuthCompleteResponse = z.infer<typeof runtimeClineDeviceAuthCompleteResponseSchema>;
-
-export const runtimeClineProviderSettingsSaveRequestSchema = z.object({
-	providerId: z.string(),
-	modelId: z.string().nullable().optional(),
-	apiKey: z.string().nullable().optional(),
-	baseUrl: z.string().nullable().optional(),
-	reasoningEffort: runtimeClineReasoningEffortSchema.nullable().optional(),
-	region: z.string().nullable().optional(),
-	aws: z
-		.object({
-			accessKey: z.string().nullable().optional(),
-			secretKey: z.string().nullable().optional(),
-			sessionToken: z.string().nullable().optional(),
-			region: z.string().nullable().optional(),
-			profile: z.string().nullable().optional(),
-			authentication: z.enum(["iam", "api-key", "profile"]).nullable().optional(),
-			endpoint: z.string().nullable().optional(),
-		})
-		.optional(),
-	gcp: z
-		.object({
-			projectId: z.string().nullable().optional(),
-			region: z.string().nullable().optional(),
-		})
-		.optional(),
-});
-export type RuntimeClineProviderSettingsSaveRequest = z.infer<typeof runtimeClineProviderSettingsSaveRequestSchema>;
-
-export const runtimeClineProviderSettingsSaveResponseSchema = runtimeClineProviderSettingsSchema;
-export type RuntimeClineProviderSettingsSaveResponse = z.infer<typeof runtimeClineProviderSettingsSaveResponseSchema>;
-
-const runtimeClineMcpServerBaseSchema = z.object({
-	name: z.string(),
-	disabled: z.boolean(),
-});
-
-export const runtimeClineMcpServerSchema = z.discriminatedUnion("type", [
-	runtimeClineMcpServerBaseSchema.extend({
-		type: z.literal("stdio"),
-		command: z.string(),
-		args: z.array(z.string()).optional(),
-		cwd: z.string().optional(),
-		env: z.record(z.string(), z.string()).optional(),
-	}),
-	runtimeClineMcpServerBaseSchema.extend({
-		type: z.literal("sse"),
-		url: z.string().url(),
-		headers: z.record(z.string(), z.string()).optional(),
-	}),
-	runtimeClineMcpServerBaseSchema.extend({
-		type: z.literal("streamableHttp"),
-		url: z.string().url(),
-		headers: z.record(z.string(), z.string()).optional(),
-	}),
-]);
-export type RuntimeClineMcpServer = z.infer<typeof runtimeClineMcpServerSchema>;
-
-export const runtimeClineMcpSettingsResponseSchema = z.object({
-	path: z.string(),
-	servers: z.array(runtimeClineMcpServerSchema),
-});
-export type RuntimeClineMcpSettingsResponse = z.infer<typeof runtimeClineMcpSettingsResponseSchema>;
-
-export const runtimeClineMcpSettingsSaveRequestSchema = z.object({
-	servers: z.array(runtimeClineMcpServerSchema),
-});
-export type RuntimeClineMcpSettingsSaveRequest = z.infer<typeof runtimeClineMcpSettingsSaveRequestSchema>;
-
-export const runtimeClineMcpSettingsSaveResponseSchema = runtimeClineMcpSettingsResponseSchema;
-export type RuntimeClineMcpSettingsSaveResponse = z.infer<typeof runtimeClineMcpSettingsSaveResponseSchema>;
-
-export const runtimeClineMcpAuthStatusResponseSchema = z.object({
-	statuses: z.array(runtimeClineMcpServerAuthStatusSchema),
-});
-export type RuntimeClineMcpAuthStatusResponse = z.infer<typeof runtimeClineMcpAuthStatusResponseSchema>;
-
-export const runtimeClineMcpOAuthRequestSchema = z.object({
-	serverName: z.string(),
-});
-export type RuntimeClineMcpOAuthRequest = z.infer<typeof runtimeClineMcpOAuthRequestSchema>;
-
-export const runtimeClineMcpOAuthResponseSchema = z.object({
-	serverName: z.string(),
-	authorized: z.literal(true),
-	message: z.string(),
-});
-export type RuntimeClineMcpOAuthResponse = z.infer<typeof runtimeClineMcpOAuthResponseSchema>;
-
 export const runtimeCommandRunRequestSchema = z.object({
 	command: z.string(),
 });
@@ -4507,7 +4187,6 @@ export const runtimeConfigResponseSchema = z.object({
 	detectedCommands: z.array(z.string()),
 	agents: z.array(runtimeAgentDefinitionSchema),
 	shortcuts: z.array(runtimeProjectShortcutSchema),
-	clineProviderSettings: runtimeClineProviderSettingsSchema,
 	commitPromptTemplate: z.string(),
 	openPrPromptTemplate: z.string(),
 	commitPromptTemplateDefault: z.string(),
@@ -4599,7 +4278,6 @@ export const runtimeTaskSessionStartRequestSchema = z
 		// 重投一次原始 prompt 等于凭空多一轮。与 resumeFromTrash 的区别是后者还带回收/垃圾桶语义。
 		resumePriorAgentConversationWithoutResendingPrompt: z.boolean().optional(),
 		expectedExistingMainSessionHandoverTargetBinding: taskMainSessionHandoverExistingTargetBindingSchema.optional(),
-		clineSettings: runtimeTaskClineSettingsSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 		taskAgentSessionInitialization: runtimeTaskAgentSessionInitializationSchema.optional(),
 		parentSessionId: z.string().optional(),
@@ -5625,18 +5303,6 @@ export const runtimeTerminalInputBoxStashResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTerminalInputBoxStashResponse = z.infer<typeof runtimeTerminalInputBoxStashResponseSchema>;
-
-export const runtimeTaskChatReloadRequestSchema = z.object({
-	taskId: z.string(),
-});
-export type RuntimeTaskChatReloadRequest = z.infer<typeof runtimeTaskChatReloadRequestSchema>;
-
-export const runtimeTaskChatReloadResponseSchema = z.object({
-	ok: z.boolean(),
-	summary: runtimeTaskSessionSummarySchema.nullable(),
-	error: z.string().optional(),
-});
-export type RuntimeTaskChatReloadResponse = z.infer<typeof runtimeTaskChatReloadResponseSchema>;
 
 export const runtimeTaskChatAbortRequestSchema = z.object({
 	taskId: z.string(),

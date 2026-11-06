@@ -4,7 +4,7 @@
 //   ACP        —— toolCallStatus（协议自带的 ToolCallStatus）与 streamType（见 acp-session-state.ts）
 // 组件直接读某一侧的字段，另一侧就静默地永远不转圈 / 思考块永不自动展开——这正是 ACP 会话上
 // 曾经发生的事。把两套标记收敛到这里的两个谓词，新增通道时只改这一个文件。
-import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
+import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
 
 // Cline SDK 在工具开始时写、完成时改写的标记。
 const CLINE_TOOL_CALL_STARTED_HOOK_EVENT_NAME = "tool_call_start";
@@ -16,7 +16,7 @@ const ACP_TOOL_CALL_STATUSES_STILL_RUNNING: ReadonlySet<string> = new Set(["pend
 // ACP 侧 reasoning 消息「仍在流」的 streamType（收束时由回合边界改写成 "reasoning"）。
 const ACP_REASONING_STREAM_TYPE_WHILE_STREAMING = "reasoning_streaming";
 
-export function isAgentChatToolMessageStillRunning(message: ClineChatMessage): boolean {
+export function isAgentChatToolMessageStillRunning(message: AgentConversationChatMessage): boolean {
 	if (message.meta?.hookEventName === CLINE_TOOL_CALL_STARTED_HOOK_EVENT_NAME) {
 		return true;
 	}
@@ -24,7 +24,7 @@ export function isAgentChatToolMessageStillRunning(message: ClineChatMessage): b
 	return typeof toolCallStatus === "string" && ACP_TOOL_CALL_STATUSES_STILL_RUNNING.has(toolCallStatus);
 }
 
-export function isAgentChatReasoningMessageStillStreaming(message: ClineChatMessage): boolean {
+export function isAgentChatReasoningMessageStillStreaming(message: AgentConversationChatMessage): boolean {
 	return (
 		message.meta?.hookEventName === CLINE_REASONING_STREAMING_HOOK_EVENT_NAME ||
 		message.meta?.streamType === ACP_REASONING_STREAM_TYPE_WHILE_STREAMING

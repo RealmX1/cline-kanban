@@ -826,85 +826,6 @@ describe("source task commands", { timeout: SOURCE_TASK_COMMANDS_TEST_TIMEOUT_MS
 			await integrationFixture.cleanup();
 		}
 	});
-
-	it("treats create-time reasoning inherit as no explicit override", async (testContext) => {
-		const integrationFixture = createTaskCommandExitIntegrationFixture();
-		const repository = integrationFixture.createRepository("project-task-cline-reasoning");
-		const projectPath = repository.repositoryPath;
-
-		try {
-			writeFileSync(join(projectPath, "README.md"), "# Task Cline Reasoning Test\n", "utf8");
-			commitAllRepositoryFiles(repository, projectPath, "init");
-
-			const port = String(await getAvailablePort());
-			const env = createCliChildProcessEnvironmentWithPinnedTimeouts(integrationFixture.gitFixture, {
-				KANBAN_RUNTIME_PORT: port,
-			});
-			const serverProcess = await startRuntimeServerForProject({
-				projectPath,
-				gitFixture: integrationFixture.gitFixture,
-				port,
-			});
-
-			try {
-				const inheritedCreate = await runCliCommandAndCollectOutput({
-					testContext,
-					args: [
-						"task",
-						"create",
-						"--start-in-plan-mode",
-						"false",
-						"--prompt",
-						"Create a task that inherits workspace reasoning",
-						"--project-path",
-						projectPath,
-						"--cline-reasoning-effort",
-						"inherit",
-					],
-					cwd: projectPath,
-					env,
-				});
-				expect(inheritedCreate.exitCode).toBe(0);
-
-				const inheritedPayload = JSON.parse(inheritedCreate.stdout) as {
-					ok?: boolean;
-					task?: { clineSettings?: Record<string, unknown> };
-				};
-				expect(inheritedPayload.ok).toBe(true);
-				expect(inheritedPayload.task?.clineSettings).toBeUndefined();
-
-				const defaultCreate = await runCliCommandAndCollectOutput({
-					testContext,
-					args: [
-						"task",
-						"create",
-						"--start-in-plan-mode",
-						"false",
-						"--prompt",
-						"Create a task that uses model default reasoning",
-						"--project-path",
-						projectPath,
-						"--cline-reasoning-effort",
-						"default",
-					],
-					cwd: projectPath,
-					env,
-				});
-				expect(defaultCreate.exitCode).toBe(0);
-
-				const defaultPayload = JSON.parse(defaultCreate.stdout) as {
-					ok?: boolean;
-					task?: { clineSettings?: Record<string, unknown> };
-				};
-				expect(defaultPayload.ok).toBe(true);
-				expect(defaultPayload.task?.clineSettings).toEqual({});
-			} finally {
-				await stopRuntimeServer(serverProcess);
-			}
-		} finally {
-			await integrationFixture.cleanup();
-		}
-	});
 });
 
 // 12 张卡的 task list 要逐卡算 git 状态，沿用原来的 15s 作软档。
@@ -1524,9 +1445,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 		}
 	});
 
-	// 回归：cline 走 in_process_cline_sdk（进程内 SDK 起会话），catalog 里那个 binary 名只是名义值。
-	// 照着它查 PATH 会让「只装了 SDK」这种完全合法的部署收到一条「不装就启动失败」的假告警。
-	it("SDK 内置通道的 agent 不因 PATH 上没有同名二进制而误报未安装", async (testContext) => {
+	// 已退役身份不能通过新建预览获得执行资格。
+	it("新建预览明确拒绝已退役 Cline", async (testContext) => {
 		const integrationFixture = createTaskCommandExitIntegrationFixture();
 		const repository = integrationFixture.createRepository("project-sdk-agent-binary-probe");
 		const projectPath = repository.repositoryPath;
@@ -1559,15 +1479,8 @@ describe("task create 预览与解析回执", { timeout: TASK_CREATE_PREVIEW_REC
 				exitTwoTierDeadline: HEAVY_MODULE_GRAPH_COMMAND_STYLE_CLI_EXIT_FROM_SPAWN_TWO_TIER_DEADLINE,
 			});
 
-			expect(preview.exitCode).toBe(0);
-			const previewPayload = JSON.parse(preview.stdout) as {
-				resolvedSettings: { effectiveAgentId: { value: string } };
-				warnings: { code: string }[];
-			};
-			expect(previewPayload.resolvedSettings.effectiveAgentId.value).toBe("cline");
-			expect(previewPayload.warnings.map((warning) => warning.code)).not.toContain(
-				"resolved_agent_binary_is_not_installed",
-			);
+			expect(preview.exitCode).toBe(1);
+			expect(preview.stderr + preview.stdout).toContain("Cline agent 已退役");
 		} finally {
 			await integrationFixture.cleanup();
 		}

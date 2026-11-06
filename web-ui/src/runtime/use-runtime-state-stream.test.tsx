@@ -384,7 +384,6 @@ describe("useRuntimeStateStream", () => {
 				projects: [],
 				workspaceState: null,
 				workspaceMetadata: null,
-				clineSessionContextVersion: 0,
 				notificationLog: [feedEntry("ws-a", "t1", 1), feedEntry("ws-b", "t2", 2)],
 			});
 		});
@@ -470,7 +469,6 @@ describe("useRuntimeStateStream", () => {
 				projects: [],
 				workspaceState: null,
 				workspaceMetadata: null,
-				clineSessionContextVersion: 0,
 				notificationLog: [],
 			});
 
@@ -559,7 +557,6 @@ describe("useRuntimeStateStream", () => {
 				projects: [],
 				workspaceState: null,
 				workspaceMetadata: null,
-				clineSessionContextVersion: 0,
 				notificationLog: [],
 			});
 		await act(async () => {
@@ -644,7 +641,6 @@ describe("useRuntimeStateStream", () => {
 					revision: 1,
 				},
 				workspaceMetadata: null,
-				clineSessionContextVersion: 0,
 				notificationLog: [],
 			});
 		});
@@ -700,7 +696,6 @@ describe("useRuntimeStateStream", () => {
 			projects: projectIds.map(buildProjectSummary),
 			workspaceState: null,
 			workspaceMetadata: null,
-			clineSessionContextVersion: 0,
 			notificationLog: [],
 		});
 

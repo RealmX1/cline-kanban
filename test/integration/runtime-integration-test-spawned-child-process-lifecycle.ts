@@ -43,7 +43,7 @@ export function computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts(input: 
 
 const SIGKILLED_CHILD_PROCESS_EXIT_CONFIRMATION_TIMEOUT_MS = 5_000;
 
-const RUNTIME_SERVER_STARTUP_BANNER_PATTERN = /Cline Kanban running at (http:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/;
+const RUNTIME_SERVER_STARTUP_BANNER_PATTERN = /Cline Kanban running at (https?:\/\/127\.0\.0\.1:\d+(?:\/[^\s]*)?)/;
 
 // 被信号结束的子进程 exitCode 为 null、signalCode 有值；runtime 优雅关停后会 reraise SIGINT，只看 exitCode 会白等到超时。
 export function hasChildProcessExited(child: ChildProcess): boolean {

@@ -152,6 +152,17 @@ function request(overrides: Record<string, unknown> = {}) {
 }
 
 describe("Agent 侧会话创建与回报", () => {
+	it("核对任务归属后明确拒绝从旧 Cline 会话 fork，不启动其他进程", async () => {
+		const f = await fixture();
+		f.state.sessions["host-task"] = summary("host-task", {
+			agentId: "cline",
+			sessionTransport: "in_process_cline_sdk",
+		});
+		const response = await f.service.create(scope, request({ agentId: "cline" }), human);
+		expect(response.ok).toBe(false);
+		expect(response.error).toContain("Cline agent 已退役");
+		expect(f.startSession).not.toHaveBeenCalled();
+	});
 	it("新建侧会话沿用自己的默认配置，不继承宿主任务的推理覆盖", async () => {
 		const f = await fixture();
 		f.card.codexReasoningEffortOverride = "ultra";

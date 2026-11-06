@@ -47,7 +47,10 @@ export default defineConfig({
 				__dirname,
 				"../src/core/agent-session-transport-selection.ts",
 			),
-			"@runtime-cline-tool-call-display": resolve(__dirname, "../src/cline-sdk/cline-tool-call-display.ts"),
+			"@runtime-agent-conversation-tool-call-display": resolve(
+				__dirname,
+				"../src/agent-conversation/agent-conversation-tool-call-display.ts",
+			),
 			"@runtime-home-agent-session": resolve(__dirname, "../src/core/home-agent-session.ts"),
 			// dd2db 1b Relations 面板要用 kind 注册表（值引用），所以 tsconfig / vite / vitest 三处同步。
 			"@runtime-inter-work-unit-recorded-relation-projection-contract": resolve(

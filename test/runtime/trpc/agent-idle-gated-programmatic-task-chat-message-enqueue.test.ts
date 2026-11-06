@@ -161,6 +161,28 @@ afterEach(async () => {
 });
 
 describe("enqueueAgentIdleGatedProgrammaticTaskChatMessage", () => {
+	it("旧 Cline 卡以实际目标会话判定退役，不阻挡用户已显式启动的 Codex", async () => {
+		testWorkspaceState.board.columns[0].cards[0].agentId = "cline";
+		expect(
+			await enqueueAgentIdleGatedProgrammaticTaskChatMessage(createDeps().deps, WORKSPACE_ID, request()),
+		).toMatchObject({ ok: true });
+	});
+	it("退役的实际目标明确拒绝且不创建账本或队列", async () => {
+		testWorkspaceState.sessions[TASK_ID] = {
+			...createSessionSummary(TASK_ID),
+			agentId: "cline",
+			sessionTransport: "in_process_cline_sdk",
+		};
+		const response = await enqueueAgentIdleGatedProgrammaticTaskChatMessage(
+			createDeps().deps,
+			WORKSPACE_ID,
+			request(),
+		);
+		expect(response.ok).toBe(false);
+		expect(response.error).toContain("Cline agent 已退役");
+		expect(await readLedgerRecord()).toBeNull();
+		expect(await readEntries()).toEqual([]);
+	});
 	it.each([undefined, TASK_ID])("legacy 主会话未落盘时仍可排队，显式目标为 %s", async (attemptId) => {
 		testWorkspaceState.sessions = {};
 		const summary = createSessionSummary(TASK_ID);

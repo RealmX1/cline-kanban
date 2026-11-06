@@ -4,7 +4,6 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskCardFieldValuePatch,
-	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -27,7 +26,6 @@ export interface TaskEditorSubmittedTaskCardFieldValues {
 	baseRef: string;
 	worktreeMode: RuntimeTaskWorktreeMode;
 	agentId: RuntimeAgentId | undefined;
-	clineSettings: RuntimeTaskClineSettings | undefined;
 	terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	taskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 }
@@ -93,9 +91,6 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 	}
 	if (submitted.agentId !== seed.agentId) {
 		patch.agentId = submitted.agentId ?? null;
-	}
-	if (!areOptionalStructuredFieldValuesEqual(submitted.clineSettings, seed.clineSettings)) {
-		patch.clineSettings = submitted.clineSettings ?? null;
 	}
 	if (
 		!areOptionalStructuredFieldValuesEqual(

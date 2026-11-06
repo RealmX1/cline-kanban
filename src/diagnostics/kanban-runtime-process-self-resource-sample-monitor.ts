@@ -11,7 +11,6 @@ import { appendDiagnosticEventToRotatingJsonlJournal } from "./rotating-jsonl-di
 const KANBAN_RUNTIME_PROCESS_SELF_RESOURCE_SAMPLE_INTERVAL_MS = 5 * 60_000;
 
 export interface KanbanRuntimeProcessSelfResourceSampleContext {
-	countLiveInProcessClineSdkSessions: () => number;
 	countLiveSessionsWithOsProcess: () => number;
 }
 
@@ -20,7 +19,6 @@ export function buildKanbanRuntimeProcessSelfResourceSamplePayload(input: {
 	resourceUsage: NodeJS.ResourceUsage;
 	previousResourceUsage: NodeJS.ResourceUsage | null;
 	processUptimeSeconds: number;
-	liveInProcessClineSdkSessionCount: number;
 	liveSessionWithOsProcessCount: number;
 }): Record<string, unknown> {
 	const { memoryUsage, resourceUsage, previousResourceUsage } = input;
@@ -40,7 +38,6 @@ export function buildKanbanRuntimeProcessSelfResourceSamplePayload(input: {
 		cpuTimeSecondsConsumedSincePreviousSample:
 			previousCpuMicrosecondsTotal === null ? null : (cpuMicrosecondsTotal - previousCpuMicrosecondsTotal) / 1e6,
 		processUptimeSeconds: Math.round(input.processUptimeSeconds),
-		liveInProcessClineSdkSessionCount: input.liveInProcessClineSdkSessionCount,
 		liveSessionWithOsProcessCount: input.liveSessionWithOsProcessCount,
 		sampleIntervalMs: KANBAN_RUNTIME_PROCESS_SELF_RESOURCE_SAMPLE_INTERVAL_MS,
 	};
@@ -60,7 +57,6 @@ export function startKanbanRuntimeProcessSelfResourceSampleMonitor(
 					resourceUsage,
 					previousResourceUsage,
 					processUptimeSeconds: process.uptime(),
-					liveInProcessClineSdkSessionCount: context.countLiveInProcessClineSdkSessions(),
 					liveSessionWithOsProcessCount: context.countLiveSessionsWithOsProcess(),
 				}),
 			);

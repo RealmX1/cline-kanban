@@ -13,12 +13,7 @@ function createValidationOnlyTransportDependencies(validationError: Error) {
 	const dependencies = {
 		getScopedTerminalManager: async () => ({ submitTaskChatInputWhenReady, getSummary: () => null }),
 		getScopedAcpTaskSessionService: async () => ({ getSummary: () => null }),
-		getScopedClineTaskSessionService: async () => ({
-			sendTaskSessionInput: async () => null,
-			rebindPersistedTaskSession: async () => null,
-		}),
 		loadScopedRuntimeConfig: async () => ({}),
-		resolveClineTaskSessionLaunchConfig: vi.fn(),
 		validateBeforeTerminalWrite: async () => {
 			throw validationError;
 		},

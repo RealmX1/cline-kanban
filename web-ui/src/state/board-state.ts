@@ -584,7 +584,6 @@ export function addTaskToColumnWithResult(
 			agentId: draft.agentId,
 			workspaceDefaultAgentIdForNewTasks: draft.workspaceDefaultAgentIdForNewTasks,
 			ompAgentSessionTransportForNewTasks: draft.ompAgentSessionTransportForNewTasks,
-			clineSettings: draft.clineSettings,
 			terminalAgentModelOverrideSettings: draft.terminalAgentModelOverrideSettings,
 			taskAgentSessionInitialization: draft.taskAgentSessionInitialization,
 			taskConversationMode: draft.taskConversationMode ?? undefined,
@@ -922,79 +921,6 @@ export function updateTaskTitle(
 		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
 		codexReasoningEffortOverride: selection.card.codexReasoningEffortOverride,
 		baseRef: selection.card.baseRef,
-	});
-}
-
-export function applyTaskDetailClineSettingsSelection(
-	board: BoardData,
-	taskId: string,
-	settings: {
-		agentId?: RuntimeAgentId;
-		clineSettings?: RuntimeTaskClineSettings | null;
-	},
-): { board: BoardData; updated: boolean } {
-	const selection = findCardSelection(board, taskId);
-	if (!selection) {
-		return { board, updated: false };
-	}
-
-	const hasExplicitTaskAgentSettings =
-		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
-	if (!hasExplicitTaskAgentSettings) {
-		return { board, updated: false };
-	}
-
-	return updateTask(board, taskId, {
-		prompt: selection.card.prompt,
-		startInPlanMode: selection.card.startInPlanMode,
-		autoReviewEnabled: selection.card.autoReviewEnabled,
-		autoReviewMode: selection.card.autoReviewMode,
-		images: selection.card.images,
-		agentId: settings.agentId,
-		clineSettings: settings.clineSettings ?? undefined,
-		terminalAgentModelOverrideSettings: selection.card.terminalAgentModelOverrideSettings,
-		codexReasoningEffortOverride: selection.card.codexReasoningEffortOverride,
-		baseRef: selection.card.baseRef,
-	});
-}
-
-export function applyTaskDetailClineSettingsChange(
-	board: BoardData,
-	taskId: string,
-	change: {
-		providerId: string;
-		modelId: string;
-		reasoningEffort: RuntimeClineReasoningEffort | "";
-	},
-	defaults: {
-		providerId?: string | null;
-		modelId?: string | null;
-	},
-): { board: BoardData; updated: boolean } {
-	const selection = findCardSelection(board, taskId);
-	if (!selection) {
-		return { board, updated: false };
-	}
-
-	const hasExplicitTaskAgentSettings =
-		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
-	if (!hasExplicitTaskAgentSettings) {
-		return { board, updated: false };
-	}
-
-	const nextTaskProviderId = change.providerId.trim() || defaults.providerId?.trim() || "";
-	const nextTaskModelId = change.modelId.trim() || defaults.modelId?.trim() || "";
-	if (!nextTaskProviderId || !nextTaskModelId) {
-		return { board, updated: false };
-	}
-
-	return applyTaskDetailClineSettingsSelection(board, taskId, {
-		agentId: "cline",
-		clineSettings: {
-			providerId: nextTaskProviderId,
-			modelId: nextTaskModelId,
-			...(change.reasoningEffort ? { reasoningEffort: change.reasoningEffort } : {}),
-		},
 	});
 }
 

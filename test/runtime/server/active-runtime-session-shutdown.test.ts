@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { applySessionFacets } from "../../../src/core/session-activity";
-import { stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace } from "../../../src/server/active-runtime-session-shutdown";
+import {
+	countAcpTaskSessionsInterruptedByRuntimeExit,
+	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
+} from "../../../src/server/active-runtime-session-shutdown";
 import { persistSafelyStoppedRuntimeSessionsByWorkspaceId } from "../../../src/server/safely-stopped-runtime-session-persistence";
 import { loadWorkspaceContext, loadWorkspaceState, saveWorkspaceState } from "../../../src/state/workspace-state";
 import { TerminalSessionManager } from "../../../src/terminal/session-manager";
@@ -40,9 +43,8 @@ describe("active runtime session shutdown", () => {
 		const terminalManager = new TerminalSessionManager();
 		terminalManager.hydrateFromRecord({ "terminal-exited": terminalExitedAwaitingUser });
 
-		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+		const result = await stopActiveTerminalAndAcpRuntimeSessionsForWorkspace({
 			terminalManager,
-			clineTaskSessionService: null,
 			acpTaskSessionService: null,
 		});
 
@@ -55,46 +57,6 @@ describe("active runtime session shutdown", () => {
 				userTurnKind: terminalExitedAwaitingUser.userTurnKind,
 				updatedAt: terminalExitedAwaitingUser.updatedAt,
 			}),
-		]);
-	});
-
-	it("separates sessions actually stopped from every loaded summary that must be safely persisted", async () => {
-		const terminalRunning = createSummary("terminal-running", "running", "codex");
-		const clineRunning = createSummary("cline-running", "running", "cline");
-		const clineIdle = createSummary("cline-idle", "idle", "cline");
-		const safelyStoppedClineRunning = {
-			...clineRunning,
-			state: "interrupted" as const,
-			turnOwner: "user" as const,
-			liveness: "interrupted" as const,
-			userTurnKind: "interrupted" as const,
-		};
-		const stopTaskSessionForSafeShutdown = vi.fn(async () => safelyStoppedClineRunning);
-
-		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
-			terminalManager: {
-				listSummaries: () => [terminalRunning],
-				markInterruptedAndStopAll: () => [terminalRunning],
-				detachHostedPtySessionsForRuntimeHandover: async () => {
-					throw new Error("detach must not be used without the detach disposition");
-				},
-			},
-			clineTaskSessionService: {
-				listSummaries: () => [clineRunning, clineIdle],
-				stopTaskSessionForSafeShutdown,
-			},
-			acpTaskSessionService: null,
-		});
-
-		expect(stopTaskSessionForSafeShutdown).toHaveBeenCalledWith("cline-running");
-		expect(result.stoppedRuntimeSessionSummaries.map((summary) => summary.taskId).sort()).toEqual([
-			"cline-running",
-			"terminal-running",
-		]);
-		expect(result.runtimeSessionSummariesForSafePersistence.map((summary) => summary.taskId).sort()).toEqual([
-			"cline-idle",
-			"cline-running",
-			"terminal-running",
 		]);
 	});
 
@@ -116,13 +78,12 @@ describe("active runtime session shutdown", () => {
 		);
 		const stopTaskSession = vi.fn(async () => ({ ...acpRunning, state: "interrupted" as const }));
 
-		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+		const result = await stopActiveTerminalAndAcpRuntimeSessionsForWorkspace({
 			terminalManager: {
 				listSummaries: () => [terminalHosted, terminalInProcess],
 				markInterruptedAndStopAll,
 				detachHostedPtySessionsForRuntimeHandover,
 			},
-			clineTaskSessionService: null,
 			acpTaskSessionService: { listSummaries: () => [acpRunning], stopTaskSession },
 			hostedAgentSessionDisposition: "detach_hosted_agent_sessions_for_successor_runtime",
 			readHostedSessionOrphanReclamationEligibleAtEpochMs: () => 1_900_000_000_000,
@@ -155,9 +116,8 @@ describe("active runtime session shutdown", () => {
 		};
 		const stopTaskSession = vi.fn(async () => safelyStoppedAcpRunning);
 
-		const result = await stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace({
+		const result = await stopActiveTerminalAndAcpRuntimeSessionsForWorkspace({
 			terminalManager: null,
-			clineTaskSessionService: null,
 			acpTaskSessionService: {
 				listSummaries: () => [acpRunning, acpIdle],
 				stopTaskSession,
@@ -208,5 +168,77 @@ describe("active runtime session shutdown", () => {
 			if (previousHome === undefined) delete process.env.HOME;
 			else process.env.HOME = previousHome;
 		}
+	});
+});
+
+it("separates sessions actually stopped from every loaded summary that must be safely persisted", async () => {
+	const terminalRunning = createSummary("terminal-running", "running", "codex");
+	const acpRunning = createSummary("acp-running", "running", "omp");
+	const acpIdle = createSummary("acp-idle", "idle", "omp");
+	const safelyStoppedAcpRunning = {
+		...acpRunning,
+		state: "interrupted" as const,
+		turnOwner: "user" as const,
+		liveness: "interrupted" as const,
+		userTurnKind: "interrupted" as const,
+	};
+	const stopTaskSession = vi.fn(async () => safelyStoppedAcpRunning);
+
+	const result = await stopActiveTerminalAndAcpRuntimeSessionsForWorkspace({
+		terminalManager: {
+			listSummaries: () => [terminalRunning],
+			markInterruptedAndStopAll: () => [terminalRunning],
+			detachHostedPtySessionsForRuntimeHandover: async () => {
+				throw new Error("detach must not be used without the detach disposition");
+			},
+		},
+		acpTaskSessionService: {
+			listSummaries: () => [acpRunning, acpIdle],
+			stopTaskSession,
+		},
+	});
+
+	expect(stopTaskSession).toHaveBeenCalledWith("acp-running");
+	expect(result.stoppedRuntimeSessionSummaries.map((summary) => summary.taskId).sort()).toEqual([
+		"acp-running",
+		"terminal-running",
+	]);
+	expect(result.runtimeSessionSummariesForSafePersistence.map((summary) => summary.taskId).sort()).toEqual([
+		"acp-idle",
+		"acp-running",
+		"terminal-running",
+	]);
+});
+
+describe("运行时退出将中断的 ACP 会话计数", () => {
+	it.each(["starting", "live", "retrying", "exited", "interrupted"] as const)(
+		"按实际 %s facet 判断，不使用 legacy state 或 PID",
+		(liveness) => {
+			const summary = {
+				...createSummary("acp-session", "idle", "omp"),
+				turnOwner: "agent" as const,
+				liveness,
+				userTurnKind: null,
+			};
+			expect(countAcpTaskSessionsInterruptedByRuntimeExit([{ listSummaries: () => [summary] }])).toBe(
+				["starting", "live", "retrying"].includes(liveness) ? 1 : 0,
+			);
+		},
+	);
+	it("统计全部 ACP workspace，包含未登记 PTY workspace 的会话", () => {
+		const services = new Map([
+			["acp-only-workspace", { listSummaries: () => [createSummary("acp-only", "running", "omp")] }],
+			[
+				"other-workspace",
+				{
+					listSummaries: () => [
+						createSummary("acp-review", "awaiting_review", "omp"),
+						createSummary("acp-stopped", "idle", "omp"),
+					],
+				},
+			],
+		]);
+		expect(countAcpTaskSessionsInterruptedByRuntimeExit(services.values())).toBe(2);
+		expect(countAcpTaskSessionsInterruptedByRuntimeExit([])).toBe(0);
 	});
 });

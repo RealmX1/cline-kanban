@@ -23,8 +23,6 @@ export type RuntimeAgentNativeConversationSessionIdentityCaptureMethod =
 	| "managed_agent_extension_ingest"
 	// kanban 在 spawn 前自己分配 id，再让 agent 以该 id 开局（Cursor：`--resume <新 UUID>`）。
 	| "kanban_assigned_before_agent_launch"
-	// 进程内 SDK 自己管对话历史，不经原生 id 续跑（Cline）。
-	| "in_process_sdk_owns_conversation_history"
 	// 没有任何采集路径：续跑只能落到 agent 自己的「最近一段」。
 	| "not_captured";
 
@@ -88,18 +86,6 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 		sessionTransport: "pty_terminal",
 		nativeConversationSessionIdentityCaptureMethod: "agent_hook_stdin_session_id",
 		restorationContinuationGuardDisarmSignal: "terminal_submission_edge_without_reliable_user_prompt_submit_hook",
-		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
-	},
-	{
-		id: "cline",
-		label: "Cline",
-		binary: "cline",
-		baseArgs: [],
-		autonomousArgs: ["--auto-approve-all"],
-		installUrl: "https://github.com/cline/cline",
-		sessionTransport: "in_process_cline_sdk",
-		nativeConversationSessionIdentityCaptureMethod: "in_process_sdk_owns_conversation_history",
-		restorationContinuationGuardDisarmSignal: "agent_user_prompt_submit_hook",
 		nativeConversationHarnessBackgroundSessionDaemonOwnershipInspectionMethod: "not_applicable",
 	},
 	{
@@ -195,7 +181,6 @@ export const RUNTIME_AGENT_CATALOG: RuntimeAgentCatalogEntry[] = [
 // Temporarily keep launch support scoped to the core agent set.
 // Re-enable additional CLIs by uncommenting entries below when ready.
 export const RUNTIME_LAUNCH_SUPPORTED_AGENT_IDS: readonly RuntimeAgentId[] = [
-	"cline",
 	"claude",
 	"codex",
 	"cursor",
@@ -213,6 +198,12 @@ export function isRuntimeAgentLaunchSupported(agentId: RuntimeAgentId): boolean 
 	return RUNTIME_LAUNCH_SUPPORTED_AGENT_ID_SET.has(agentId);
 }
 
+export const CLINE_AGENT_RETIRED_EXECUTION_ERROR = "Cline agent 已退役，历史数据保留；请选择其他已安装的 Agent。";
+
+export function assertRuntimeAgentIsNotRetired(agentId: RuntimeAgentId | null | undefined): void {
+	if (agentId === "cline") throw new Error(CLINE_AGENT_RETIRED_EXECUTION_ERROR);
+}
+
 export function getRuntimeLaunchSupportedAgentCatalog(): RuntimeAgentCatalogEntry[] {
 	return RUNTIME_AGENT_CATALOG.filter((entry) => isRuntimeAgentLaunchSupported(entry.id));
 }
@@ -226,6 +217,8 @@ export function getRuntimeAgentCatalogEntry(agentId: RuntimeAgentId): RuntimeAge
 //（主页侧栏按全局 selectedAgentId 预判、设置页展示默认命令行）；凡手上有 summary 的读点，
 // 一律走下面的 resolveRuntimeAgentSessionTransportFromSummary。
 export function getRuntimeAgentSessionTransport(agentId: RuntimeAgentId): RuntimeAgentSessionTransport {
+	// 仅供旧摘要解释历史通道；执行入口必须单独拒绝已退役身份。
+	if (agentId === "cline") return "in_process_cline_sdk";
 	return getRuntimeAgentCatalogEntry(agentId)?.sessionTransport ?? "pty_terminal";
 }
 
@@ -272,13 +265,6 @@ export function isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
 		return false;
 	}
 	return resolveRuntimeAgentSessionTransportFromSummary(summary) === "acp_stdio_subprocess";
-}
-
-// 该 agent 的模型 / provider 是否由 Kanban 的 Cline provider 设置决定。会话面板里的 Cline 专属控件
-// （provider 模型选择器、Cline slash 命令）只对这类会话成立：ACP agent（omp）自带模型与命令体系，
-// 在它的面板上保存模型只会写到与该任务无关的全局 Cline provider 配置。
-export function isRuntimeAgentModelSelectedThroughClineProviderSettings(agentId: RuntimeAgentId | null): boolean {
-	return agentId !== null && getRuntimeAgentSessionTransport(agentId) === "in_process_cline_sdk";
 }
 
 // 这个 agent 的原生会话 id 是否由 kanban 在 spawn 前分配（而不是事后从 hook / 扩展 / ACP 观测）。

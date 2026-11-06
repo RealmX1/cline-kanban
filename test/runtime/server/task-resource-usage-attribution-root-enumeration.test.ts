@@ -42,7 +42,6 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 					makeSummary({ taskId: "__home_terminal__", pid: 1003, agentId: null, workspacePath: "/Users/u/repo" }),
 				]),
 			],
-			listClineSessionSources: () => [],
 			listAcpSessionSources: () => [],
 		});
 
@@ -88,7 +87,6 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 					}),
 				]),
 			],
-			listClineSessionSources: () => [],
 			listAcpSessionSources: () => [],
 		});
 
@@ -101,9 +99,6 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 	it("skips sessions without a live pid, which covers every in-process Cline SDK session", () => {
 		const { roots } = enumerateTaskResourceUsageAttributionRoots({
 			listTerminalSessionSources: () => [source("repo", [makeSummary({ pid: null })])],
-			listClineSessionSources: () => [
-				source("repo", [makeSummary({ taskId: "cc111", pid: null, agentId: "cline" })]),
-			],
 			listAcpSessionSources: () => [],
 		});
 
@@ -116,7 +111,6 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 			listTerminalSessionSources: () => [
 				source("repo", [makeSummary({ taskId: "om001", pid: 3000, agentId: "omp" })]),
 			],
-			listClineSessionSources: () => [],
 			listAcpSessionSources: () => [
 				source("repo", [
 					makeSummary({ taskId: "om001", pid: 3001, agentId: "omp", sessionTransport: "acp_stdio_subprocess" }),
@@ -133,17 +127,17 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 	it("maps each task working directory to its card so Kanban-spawned processes can be attributed by cwd", () => {
 		const { taskWorkingDirectoryAttributions } = enumerateTaskResourceUsageAttributionRoots({
 			listTerminalSessionSources: () => [],
-			listClineSessionSources: () => [
+			listAcpSessionSources: () => [
 				source("repo", [
 					makeSummary({
 						taskId: "cc111",
+						agentId: "omp",
+						sessionTransport: "acp_stdio_subprocess",
 						pid: null,
-						agentId: "cline",
 						workspacePath: "/Users/u/.cline/worktrees/cc111/repo",
 					}),
 				]),
 			],
-			listAcpSessionSources: () => [],
 		});
 
 		expect(taskWorkingDirectoryAttributions).toEqual([
@@ -164,7 +158,6 @@ describe("enumerateTaskResourceUsageAttributionRoots", () => {
 					makeSummary({ taskId: "bb222", workspacePath: "/Users/u/repo" }),
 				]),
 			],
-			listClineSessionSources: () => [],
 			listAcpSessionSources: () => [],
 		});
 

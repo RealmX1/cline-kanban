@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
 	getTaskAgentNavbarHint,
-	isClineProviderAuthenticated,
-	isNativeClineAgentSelected,
 	isTaskAgentSetupSatisfied,
 	selectLatestTaskChatMessageForTask,
 	selectTaskChatMessagesForTask,
@@ -52,17 +50,6 @@ function createRuntimeConfigResponse(
 			},
 		],
 		shortcuts: [],
-		clineProviderSettings: {
-			providerId: "cline",
-			modelId: "sonnet",
-			baseUrl: null,
-			apiKeyConfigured: false,
-			oauthProvider: "cline",
-			oauthAccessTokenConfigured: true,
-			oauthRefreshTokenConfigured: true,
-			oauthAccountId: "acct_123",
-			oauthExpiresAt: 123,
-		},
 		commitPromptTemplate: "",
 		openPrPromptTemplate: "",
 		commitPromptTemplateDefault: "",
@@ -94,85 +81,6 @@ function createLatestTaskChatMessage(taskId: string): RuntimeStateStreamTaskChat
 }
 
 describe("native-agent helpers", () => {
-	it("treats cline as the native chat agent", () => {
-		expect(isNativeClineAgentSelected("cline")).toBe(true);
-		expect(isNativeClineAgentSelected("codex")).toBe(false);
-	});
-
-	it("treats selected cline as task-ready when cline authentication is configured", () => {
-		expect(isTaskAgentSetupSatisfied(createRuntimeConfigResponse("cline"))).toBe(true);
-		expect(isTaskAgentSetupSatisfied(null)).toBeNull();
-	});
-
-	it("requires setup when cline is selected and cline authentication is missing", () => {
-		const config = createRuntimeConfigResponse("cline", {
-			agents: [
-				{
-					id: "cline",
-					label: "Cline",
-					binary: "cline",
-					command: "cline",
-					defaultArgs: [],
-					installed: true,
-					configured: true,
-				},
-			],
-			clineProviderSettings: {
-				providerId: null,
-				modelId: null,
-				baseUrl: null,
-				apiKeyConfigured: false,
-				oauthProvider: null,
-				oauthAccessTokenConfigured: false,
-				oauthRefreshTokenConfigured: false,
-				oauthAccountId: null,
-				oauthExpiresAt: null,
-			},
-		});
-		expect(isTaskAgentSetupSatisfied(config)).toBe(false);
-	});
-
-	it("falls back to other installed launch-supported agents when cline auth is missing", () => {
-		const config = createRuntimeConfigResponse("cline", {
-			agents: [
-				{
-					id: "cline",
-					label: "Cline",
-					binary: "cline",
-					command: "cline",
-					defaultArgs: [],
-					installed: true,
-					configured: true,
-				},
-				{
-					id: "codex",
-					label: "OpenAI Codex",
-					binary: "codex",
-					command: "codex",
-					defaultArgs: [],
-					installed: true,
-					configured: false,
-				},
-			],
-			clineProviderSettings: {
-				providerId: null,
-				modelId: null,
-				baseUrl: null,
-				apiKeyConfigured: false,
-				oauthProvider: null,
-				oauthAccessTokenConfigured: false,
-				oauthRefreshTokenConfigured: false,
-				oauthAccountId: null,
-				oauthExpiresAt: null,
-			},
-		});
-		expect(isTaskAgentSetupSatisfied(config)).toBe(true);
-	});
-
-	it("does not show the navbar setup hint when cline is configured through the native SDK path", () => {
-		expect(getTaskAgentNavbarHint(createRuntimeConfigResponse("cline"))).toBeUndefined();
-	});
-
 	it("shows the navbar setup hint when no task agent path is ready", () => {
 		const config = createRuntimeConfigResponse("cline", {
 			agents: [
@@ -186,17 +94,6 @@ describe("native-agent helpers", () => {
 					configured: true,
 				},
 			],
-			clineProviderSettings: {
-				providerId: null,
-				modelId: null,
-				baseUrl: null,
-				apiKeyConfigured: false,
-				oauthProvider: null,
-				oauthAccessTokenConfigured: false,
-				oauthRefreshTokenConfigured: false,
-				oauthAccountId: null,
-				oauthExpiresAt: null,
-			},
 		});
 		expect(getTaskAgentNavbarHint(config)).toBe("No agent configured");
 		expect(
@@ -204,35 +101,6 @@ describe("native-agent helpers", () => {
 				shouldUseNavigationPath: true,
 			}),
 		).toBeUndefined();
-	});
-
-	it("checks for a provider selection when determining cline authentication", () => {
-		expect(
-			isClineProviderAuthenticated({
-				providerId: null,
-				modelId: null,
-				baseUrl: null,
-				apiKeyConfigured: true,
-				oauthProvider: null,
-				oauthAccessTokenConfigured: false,
-				oauthRefreshTokenConfigured: false,
-				oauthAccountId: null,
-				oauthExpiresAt: null,
-			}),
-		).toBe(false);
-		expect(
-			isClineProviderAuthenticated({
-				providerId: "anthropic",
-				modelId: null,
-				baseUrl: null,
-				apiKeyConfigured: true,
-				oauthProvider: null,
-				oauthAccessTokenConfigured: false,
-				oauthRefreshTokenConfigured: false,
-				oauthAccountId: null,
-				oauthExpiresAt: null,
-			}),
-		).toBe(true);
 	});
 
 	it("ignores non-launch agents when checking native CLI availability", () => {

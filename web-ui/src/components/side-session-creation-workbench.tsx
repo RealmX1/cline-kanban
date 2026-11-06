@@ -413,7 +413,6 @@ function SideSessionCreationWorkbenchForm({
 									requestedAgentSessionTransport: undefined,
 								})
 							}
-							onClineSettingsChange={() => undefined}
 							terminalAgentModelOverrideSettings={request.terminalAgentModelOverrideSettings}
 							onTerminalAgentModelOverrideSettingsChange={(terminalAgentModelOverrideSettings) =>
 								update({ terminalAgentModelOverrideSettings })

@@ -78,7 +78,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onRequestProgrammaticCardMoveReady,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
-	defaultClineModelId,
 	defaultAgentId,
 }: {
 	data: BoardData;
@@ -107,7 +106,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 	onRequestProgrammaticCardMoveReady?: (requestMove: RequestProgrammaticCardMove | null) => void;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCard) => Promise<string | null>;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
 	const dragOccurredRef = useRef(false);
@@ -447,7 +445,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 					onRevealCanonicalCardInItsStage={requestRevealCanonicalTaskCard}
 					onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
 					workspacePath={workspacePath}
-					defaultClineModelId={defaultClineModelId}
 					defaultAgentId={defaultAgentId}
 				/>
 				<section
@@ -508,7 +505,6 @@ export const KanbanBoard = memo(function KanbanBoard({
 									programmaticCardMoveInFlight={programmaticCardMoveInFlight}
 									workspacePath={workspacePath}
 									resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
-									defaultClineModelId={defaultClineModelId}
 									defaultAgentId={defaultAgentId}
 									onCardClick={activateCardUnlessDragged}
 								/>

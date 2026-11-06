@@ -8,6 +8,7 @@ export interface TerminalSessionListener {
 }
 
 export interface TerminalSessionService {
+	getSummary(taskId: string): RuntimeTaskSessionSummary | null;
 	attach(taskId: string, listener: TerminalSessionListener): (() => void) | null;
 	getRestoreSnapshot(taskId: string): Promise<TerminalRestoreSnapshot | null>;
 	recoverStaleSession(taskId: string): RuntimeTaskSessionSummary | null;

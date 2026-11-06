@@ -1,6 +1,6 @@
 import { projectUniqueNativeInProgressWorkPhaseGoal } from "../core/agent-current-work-phase-goal";
 // 协议翻译层：把一条 ACP SessionUpdate 变成 summary facet 补丁 + 聊天消息 mutation。
-// 单一入口 applyAcpSessionUpdate，对位 src/cline-sdk/cline-event-adapter.ts。
+// 单一入口 applyAcpSessionUpdate。
 //
 // 三条从 Cline 侧原样继承的铁律（那边的注释已论证，此处同样适用）：
 //  1. 绝不裸写单个 userTurnKind —— 必须经 deriveAcpFacetPatch 发完整 {turnOwner, liveness, userTurnKind}

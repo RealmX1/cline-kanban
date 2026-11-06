@@ -19,7 +19,6 @@ import type {
 	RuntimeAgentId,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
-	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
 	RuntimeTaskEditDraft,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
@@ -353,7 +352,6 @@ interface HookSnapshot {
 	newTaskBranchRef: string;
 	newTaskWorktreeMode: RuntimeTaskWorktreeMode;
 	newTaskAgentId: RuntimeAgentId | undefined;
-	newTaskClineSettings: RuntimeTaskClineSettings | undefined;
 	newTaskTerminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	newTaskAgentSessionInitialization: RuntimeTaskAgentSessionInitialization | undefined;
 	newTaskConversationMode: RuntimeTaskConversationMode;
@@ -396,7 +394,6 @@ interface HookSnapshot {
 	setEditTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
 	setEditTaskAgentSessionInitialization: (value: RuntimeTaskAgentSessionInitialization | undefined) => void;
 	setNewTaskAgentId: (value: RuntimeAgentId | undefined) => void;
-	setNewTaskClineSettings: (value: RuntimeTaskClineSettings | undefined) => void;
 	setNewTaskTerminalAgentModelOverrideSettings: (
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
 		options?: { rememberSelectionForFutureCreateTasks?: boolean },
@@ -479,7 +476,6 @@ function HookHarness({
 			newTaskBranchRef: editor.newTaskBranchRef,
 			newTaskWorktreeMode: editor.newTaskWorktreeMode,
 			newTaskAgentId: editor.newTaskAgentId,
-			newTaskClineSettings: editor.newTaskClineSettings,
 			newTaskTerminalAgentModelOverrideSettings: editor.newTaskTerminalAgentModelOverrideSettings,
 			newTaskAgentSessionInitialization: editor.newTaskAgentSessionInitialization,
 			newTaskConversationMode: editor.newTaskConversationMode,
@@ -522,7 +518,6 @@ function HookHarness({
 			setEditTaskWorktreeMode: editor.setEditTaskWorktreeMode,
 			setEditTaskAgentSessionInitialization: editor.setEditTaskAgentSessionInitialization,
 			setNewTaskAgentId: editor.setNewTaskAgentId,
-			setNewTaskClineSettings: editor.setNewTaskClineSettings,
 			setNewTaskTerminalAgentModelOverrideSettings: editor.setNewTaskTerminalAgentModelOverrideSettings,
 			setNewTaskAgentSessionInitialization: editor.setNewTaskAgentSessionInitialization,
 			setNewTaskConversationMode: editor.setNewTaskConversationMode,
@@ -565,7 +560,6 @@ function HookHarness({
 		editor.newTaskStartInPlanMode,
 		editor.newTaskBranchRef,
 		editor.newTaskAgentId,
-		editor.newTaskClineSettings,
 		editor.newTaskTerminalAgentModelOverrideSettings,
 		editor.newTaskAgentSessionInitialization,
 		editor.newTaskConversationMode,
@@ -2222,60 +2216,6 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).board.columns[0]?.cards).toHaveLength(1);
 	});
 
-	it("keeps the create dialog open when requested after creating a task", async () => {
-		let latestSnapshot: HookSnapshot | null = null;
-
-		await act(async () => {
-			root.render(
-				<HookHarness
-					initialBoard={createBoard()}
-					onSnapshot={(snapshot) => {
-						latestSnapshot = snapshot;
-					}}
-				/>,
-			);
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).handleOpenCreateTask();
-		});
-
-		await act(async () => {});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).setNewTaskPrompt("Create another task");
-		});
-		await act(async () => {
-			requireSnapshot(latestSnapshot).setNewTaskAgentId("codex");
-			requireSnapshot(latestSnapshot).setNewTaskClineSettings({
-				providerId: "provider-abc",
-				modelId: "model-xyz",
-				reasoningEffort: "low",
-			});
-		});
-
-		await act(async () => {});
-		expect(requireSnapshot(latestSnapshot).newTaskPrompt).toBe("Create another task");
-		expect(requireSnapshot(latestSnapshot).newTaskBranchRef).toBe("main");
-		expect(requireSnapshot(latestSnapshot).newTaskWorktreeMode).toBe("branch");
-
-		let createdTaskId: string | null = null;
-		await act(async () => {
-			createdTaskId = requireSnapshot(latestSnapshot).handleCreateTask({ keepDialogOpen: true });
-		});
-
-		const snapshot = requireSnapshot(latestSnapshot);
-		expect(createdTaskId).toBeTruthy();
-		expect(snapshot.isInlineTaskCreateOpen).toBe(true);
-		expect(snapshot.newTaskPrompt).toBe("");
-		expect(snapshot.newTaskBranchRef).toBe("main");
-		expect(snapshot.newTaskWorktreeMode).toBe("branch");
-		expect(snapshot.newTaskAgentId).toBeUndefined();
-		expect(snapshot.newTaskClineSettings).toBeUndefined();
-		expect(snapshot.board.columns[0]?.cards[0]?.baseRef).toBe("main");
-		expect(snapshot.board.columns[0]?.cards.some((card) => card.prompt === "Create another task")).toBe(true);
-	});
-
 	it("单次模型覆盖只用于本次任务，下一次读取 Agent 默认配置", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 
@@ -2664,86 +2604,6 @@ describe("useTaskEditor", () => {
 		expect(requireSnapshot(latestSnapshot).newTaskImages).toEqual([]);
 	});
 
-	it("persists reasoning-only task overrides when model/provider stay inherited", async () => {
-		let latestSnapshot: HookSnapshot | null = null;
-
-		await act(async () => {
-			root.render(
-				<HookHarness
-					initialBoard={createBoard()}
-					onSnapshot={(snapshot) => {
-						latestSnapshot = snapshot;
-					}}
-				/>,
-			);
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).handleOpenCreateTask();
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).setNewTaskPrompt("Reasoning override only");
-			requireSnapshot(latestSnapshot).setNewTaskClineSettings({
-				reasoningEffort: "low",
-			});
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).handleCreateTask();
-		});
-
-		const createdCard = requireSnapshot(latestSnapshot).board.columns[0]?.cards[0];
-		expect(createdCard?.clineSettings).toEqual({
-			reasoningEffort: "low",
-		});
-	});
-
-	it("preserves per-task agent/model override fields on each split task", async () => {
-		let latestSnapshot: HookSnapshot | null = null;
-
-		await act(async () => {
-			root.render(
-				<HookHarness
-					initialBoard={createBoard()}
-					onSnapshot={(snapshot) => {
-						latestSnapshot = snapshot;
-					}}
-				/>,
-			);
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).handleOpenCreateTask();
-		});
-
-		await act(async () => {
-			requireSnapshot(latestSnapshot).setNewTaskAgentId("codex");
-			requireSnapshot(latestSnapshot).setNewTaskClineSettings({
-				providerId: "provider-abc",
-				modelId: "model-xyz",
-				reasoningEffort: "medium",
-			});
-		});
-
-		let createdTaskIds: string[] = [];
-		await act(async () => {
-			createdTaskIds = requireSnapshot(latestSnapshot).handleCreateTasks(["Task A", "Task B", "Task C"]);
-		});
-
-		expect(createdTaskIds).toHaveLength(3);
-		const backlogCards = requireSnapshot(latestSnapshot).board.columns[0]?.cards ?? [];
-		expect(backlogCards).toHaveLength(3);
-		for (const card of backlogCards) {
-			expect(card.agentId).toBe("codex");
-			expect(card.clineSettings).toEqual({
-				providerId: "provider-abc",
-				modelId: "model-xyz",
-				reasoningEffort: "medium",
-			});
-		}
-	});
-
 	it("persists session initialization on create and loads it with worktree mode in the shared backlog editor", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		await act(async () => {
@@ -2821,7 +2681,6 @@ describe("useTaskEditor", () => {
 				onBranchRefChange={vi.fn()}
 				worktreeMode="branch"
 				onWorktreeModeChange={vi.fn()}
-				onClineSettingsChange={vi.fn()}
 			/>
 		);
 	}
@@ -2941,7 +2800,6 @@ describe("useTaskEditor", () => {
 					onWorktreeModeChange={onWorktreeModeChange}
 					agentId="claude"
 					onAgentIdChange={vi.fn()}
-					onClineSettingsChange={vi.fn()}
 					taskAgentSessionInitialization={{
 						sourceAgentId: "claude",
 						sourceSessionId: "11111111-2222-4333-8444-555555555555",
