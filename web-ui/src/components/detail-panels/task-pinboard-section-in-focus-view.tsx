@@ -1,6 +1,7 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-import { ChevronDown, ChevronRight, ChevronUp, Pin } from "lucide-react";
+import { ChevronDown, ChevronUp, Pin } from "lucide-react";
 import { type ReactElement, useState } from "react";
+import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
 
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
@@ -67,29 +68,19 @@ export function TaskPinboardSectionInFocusView({
 	return (
 		<div
 			data-task-pinboard-container="focus-view-section"
-			className="mx-2 mt-2 flex min-h-0 flex-col rounded-lg border border-border bg-surface-1"
+			className="mx-2 mt-1 flex min-h-0 flex-col rounded-lg border border-border bg-surface-1"
 			// EXPERIMENT_NODE: Pinned 固定区的高度上限比例（50% 面板高），决定展开全部后给 stage 列表留多少空间。
 			style={{ maxHeight: "50%" }}
 		>
-			<div className="flex h-10 shrink-0 items-center">
-				<button
-					type="button"
-					onClick={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
-					aria-expanded={!collapsed}
-					className="mx-1 flex h-8 min-w-0 flex-1 cursor-pointer items-center gap-2 rounded-md border-none bg-transparent px-2 text-left text-text-primary hover:bg-surface-0"
-				>
-					{collapsed ? (
-						<ChevronRight size={16} className="shrink-0 text-text-secondary" />
-					) : (
-						<ChevronDown size={16} className="shrink-0 text-text-secondary" />
-					)}
-					<Pin size={13} className="shrink-0 text-accent" />
-					<span className="truncate text-sm font-semibold">Pinned</span>
-					<span className="text-xs text-text-tertiary">{pinnedTasks.length}</span>
-				</button>
-			</div>
+			<FocusViewGroupHeader
+				title="Pinned"
+				count={pinnedTasks.length}
+				icon={<Pin size={13} className="text-accent" />}
+				isExpanded={!collapsed}
+				onToggleExpanded={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
+			/>
 			{collapsed ? null : (
-				<div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2">
+				<div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2 pt-3">
 					{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div key={card.id} className="mb-1.5 last:mb-0">
 							<TaskCardBody

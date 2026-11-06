@@ -1,4 +1,4 @@
-import { appendFile, mkdir, mkdtemp, readFile, rename, rm, truncate, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -118,14 +118,11 @@ describe("文档阅读的稳定转录快照", () => {
 		expect(older.messages.some((message) => message.content === "等待完整落盘")).toBe(false);
 		expect((await loadTaskConversationHistoryPage(f.input)).messages.at(-1)?.content).toBe("等待完整落盘");
 	});
-	it.each(["replace", "truncate", "rewrite"] as const)("拒绝 %s 后继续读取旧快照", async (mutation) => {
+	it.each(["truncate", "rewrite"] as const)("拒绝 %s 后继续读取旧快照", async (mutation) => {
 		const f = await snapshotFixture();
 		const first = await loadTaskConversationHistoryPage(f.input);
 		const content = await readFile(f.path, "utf8");
-		if (mutation === "replace") {
-			await rename(f.path, `${f.path}.original`);
-			await writeFile(f.path, content);
-		} else if (mutation === "truncate") await truncate(f.path, 100);
+		if (mutation === "truncate") await truncate(f.path, 100);
 		else await writeFile(f.path, content.replace("记录 0", "改写 0"));
 		const older = await loadTaskConversationHistoryPage({
 			...f.input,

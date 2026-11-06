@@ -1,5 +1,6 @@
+import * as Popover from "@radix-ui/react-popover";
 import { ChevronDown, ChevronUp, History, RotateCw } from "lucide-react";
-import { type ReactElement, useState } from "react";
+import { type ReactElement, useEffect, useState } from "react";
 import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
 import { AgentRaisedUserDecisionQuestionPrompt } from "@/components/detail-panels/agent-raised-user-decision-question-content";
 import { Button } from "@/components/ui/button";
@@ -188,18 +189,82 @@ export function AgentRaisedUserDecisionHistoryPanel({
 	workspaceId,
 	taskId,
 	pendingUserDecisionIdentityForRefresh,
+	presentation = "inline",
 }: {
+	presentation?: "inline" | "toolbar_popover";
 	workspaceId: string | null;
 	taskId: string;
 	pendingUserDecisionIdentityForRefresh: string | null;
 }): ReactElement {
-	const [isHistoryVisible, setIsHistoryVisible] = useState(false);
+	const queryIdentity = JSON.stringify([workspaceId, taskId]);
+	const [visibleHistoryIdentity, setVisibleHistoryIdentity] = useState<string | null>(null);
+	const isHistoryVisible = visibleHistoryIdentity === queryIdentity;
+	const setIsHistoryVisible = (value: boolean | ((previous: boolean) => boolean)) =>
+		setVisibleHistoryIdentity((previous) =>
+			(typeof value === "function" ? value(previous === queryIdentity) : value) ? queryIdentity : null,
+		);
+	useEffect(() => setVisibleHistoryIdentity(null), [queryIdentity]);
 	const { historyEntries, isLoading, refresh, transcriptRecoveryNotice } = useAgentRaisedUserDecisionHistory({
 		workspaceId,
 		taskId,
 		isHistoryVisible,
 		pendingUserDecisionIdentityForRefresh,
 	});
+	const historyContent = (
+		<div className="max-h-[50vh] space-y-2 overflow-y-auto border-t border-border px-3 py-2">
+			{historyEntries === null ? (
+				<p className="text-xs text-text-secondary">正在读取问答记录…</p>
+			) : historyEntries.length === 0 ? (
+				<p className="text-xs text-text-secondary">这个任务里还没有已了结的 agent 提问。</p>
+			) : (
+				historyEntries.map((entry) => (
+					<AgentRaisedUserDecisionHistoryEntryCard key={entry.historyEntryId} entry={entry} />
+				))
+			)}
+		</div>
+	);
+	if (presentation === "toolbar_popover")
+		return (
+			<Popover.Root open={isHistoryVisible} onOpenChange={setIsHistoryVisible}>
+				<Popover.Trigger asChild>
+					<button
+						type="button"
+						aria-label={isHistoryVisible ? "收起问答记录" : "展开问答记录"}
+						className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-sm px-2 text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:h-11 max-[769px]:w-11 max-[769px]:px-0"
+					>
+						<History size={14} />
+						<span className="max-[769px]:hidden">问答{historyEntries ? `（${historyEntries.length}）` : ""}</span>
+					</button>
+				</Popover.Trigger>
+				<Popover.Portal>
+					<Popover.Content
+						aria-label="问答记录"
+						align="start"
+						sideOffset={4}
+						data-mobile-focus-view-idle-collapse-suspension=""
+						className="z-50 max-h-[min(70dvh,var(--radix-popover-content-available-height))] w-[32rem] max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain rounded-md border border-border-bright bg-surface-1 text-text-primary max-[769px]:[&_button]:min-h-11 max-[769px]:[&_button]:min-w-11"
+					>
+						<div className="flex items-center justify-between px-3 py-1 text-xs">
+							<span>问答记录{historyEntries ? `（${historyEntries.length}）` : ""}</span>
+							<Button
+								variant="ghost"
+								size="xs"
+								icon={<RotateCw size={12} />}
+								disabled={isLoading}
+								onClick={() => void refresh()}
+								aria-label="刷新问答记录"
+							/>
+						</div>
+						{transcriptRecoveryNotice ? (
+							<p role="status" className="px-3 py-2 text-xs text-text-secondary">
+								{transcriptRecoveryNotice}
+							</p>
+						) : null}
+						{historyContent}
+					</Popover.Content>
+				</Popover.Portal>
+			</Popover.Root>
+		);
 	return (
 		<section className="shrink-0 border-b border-border" aria-label="问答记录">
 			{transcriptRecoveryNotice ? (
@@ -234,19 +299,7 @@ export function AgentRaisedUserDecisionHistoryPanel({
 					aria-label={isHistoryVisible ? "收起问答记录" : "展开问答记录"}
 				/>
 			</div>
-			{isHistoryVisible ? (
-				<div className="max-h-[50vh] space-y-2 overflow-y-auto border-t border-border px-3 py-2">
-					{historyEntries === null ? (
-						<p className="text-xs text-text-secondary">正在读取问答记录…</p>
-					) : historyEntries.length === 0 ? (
-						<p className="text-xs text-text-secondary">这个任务里还没有已了结的 agent 提问。</p>
-					) : (
-						historyEntries.map((entry) => (
-							<AgentRaisedUserDecisionHistoryEntryCard key={entry.historyEntryId} entry={entry} />
-						))
-					)}
-				</div>
-			) : null}
+			{isHistoryVisible ? historyContent : null}
 		</section>
 	);
 }

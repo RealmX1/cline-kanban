@@ -1,3 +1,5 @@
+import * as Popover from "@radix-ui/react-popover";
+import { Ellipsis } from "lucide-react";
 import { ReferenceRelationModelingEditor } from "@/components/detail-panels/reference-relation-modeling-editor";
 import { useReferenceRelationModelingEditor } from "@/hooks/use-reference-relation-modeling-editor";
 // dd2db 1b：任务详情（Focus View 右栏）里的 Relations 可折叠 section——当前卡的一度记录型关系邻域。
@@ -366,10 +368,12 @@ function RelationNeighborhoodHeaderSummaryBadge({
 export function WorkUnitRelationNeighborhoodPanel({
 	workspaceId,
 	kanbanBoardCardTaskId,
+	headerNavigationContent,
 	initiallyExpanded = false,
 	taskIncarnationCreatedAtEpochMs,
 	detachedForeground = false,
 }: {
+	headerNavigationContent?: ReactNode;
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string;
 	initiallyExpanded?: boolean;
@@ -421,6 +425,48 @@ export function WorkUnitRelationNeighborhoodPanel({
 		});
 	};
 
+	const relationHeaderActions = (
+		<>
+			{isRelationNeighborhoodPanelExpanded && workspaceId ? (
+				<Button
+					size="xs"
+					variant="ghost"
+					onClick={() => {
+						setIsModelingEditorOpen((value) => !value);
+						controller.refetchRelationNeighborhood();
+					}}
+				>
+					{isModelingEditorOpen ? "查看关系摘要" : "关系图与建模"}
+				</Button>
+			) : null}
+			{isRelationNeighborhoodPanelExpanded && workspaceId && !isModelingEditorOpen && !isHistoricalRoot ? (
+				<Button
+					variant="ghost"
+					size="xs"
+					className="mr-0.5"
+					icon={<Plus size={11} />}
+					title="Add a relation from this task to another task"
+					onClick={() => {
+						setAddReferenceRelationOpeningRequestSequence((sequence) => sequence + 1);
+						setIsAddReferenceRelationDialogOpen(true);
+					}}
+				>
+					Add relation
+				</Button>
+			) : null}
+			{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
+				<Button
+					variant="ghost"
+					size="xs"
+					className="mr-1"
+					icon={controller.isRelationNeighborhoodRefetchInFlight ? <Spinner size={11} /> : <RefreshCw size={11} />}
+					aria-label="刷新关系"
+					disabled={controller.isRelationNeighborhoodRefetchInFlight}
+					onClick={controller.refetchRelationNeighborhood}
+				/>
+			) : null}
+		</>
+	);
 	return (
 		<ExpandedForegroundViewSurface
 			controller={surface}
@@ -431,7 +477,8 @@ export function WorkUnitRelationNeighborhoodPanel({
 				isModelingEditorOpen ? "min-h-0 shrink" : "shrink-0",
 			)}
 		>
-			<div className="flex h-8 shrink-0 items-center hover:bg-surface-3">
+			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 px-2 hover:bg-surface-3">
+				{headerNavigationContent}
 				<button
 					type="button"
 					onClick={() => {
@@ -444,6 +491,13 @@ export function WorkUnitRelationNeighborhoodPanel({
 					}}
 					className="flex h-full min-w-0 flex-1 items-center gap-1.5 px-2 text-left"
 					aria-expanded={isRelationNeighborhoodPanelExpanded}
+					aria-label={
+						headerNavigationContent
+							? isRelationNeighborhoodPanelExpanded
+								? "收起关系内容"
+								: "展开关系内容"
+							: undefined
+					}
 				>
 					{isRelationNeighborhoodPanelExpanded ? (
 						<ChevronDown size={14} className="shrink-0 text-text-secondary" />
@@ -451,7 +505,9 @@ export function WorkUnitRelationNeighborhoodPanel({
 						<ChevronRight size={14} className="shrink-0 text-text-secondary" />
 					)}
 					<Waypoints size={13} className="shrink-0 text-text-tertiary" />
-					<span className="text-xs font-medium text-text-primary">Relations</span>
+					{!headerNavigationContent ? (
+						<span className="text-xs font-medium text-text-primary">Relations</span>
+					) : null}
 					<RelationNeighborhoodHeaderSummaryBadge controller={controller} />
 				</button>
 				{!surface.isExpanded ? (
@@ -469,46 +525,32 @@ export function WorkUnitRelationNeighborhoodPanel({
 						<Maximize2 size={14} />
 					</Button>
 				) : null}
-				{isRelationNeighborhoodPanelExpanded && workspaceId ? (
-					<Button
-						size="xs"
-						variant="ghost"
-						onClick={() => {
-							setIsModelingEditorOpen((value) => !value);
-							controller.refetchRelationNeighborhood();
-						}}
-					>
-						{isModelingEditorOpen ? "查看关系摘要" : "关系图与建模"}
-					</Button>
-				) : null}
-				{isRelationNeighborhoodPanelExpanded && workspaceId && !isModelingEditorOpen && !isHistoricalRoot ? (
-					<Button
-						variant="ghost"
-						size="xs"
-						className="mr-0.5"
-						icon={<Plus size={11} />}
-						title="Add a relation from this task to another task"
-						onClick={() => {
-							setAddReferenceRelationOpeningRequestSequence((sequence) => sequence + 1);
-							setIsAddReferenceRelationDialogOpen(true);
-						}}
-					>
-						Add relation
-					</Button>
-				) : null}
-				{isRelationNeighborhoodPanelExpanded && !isModelingEditorOpen ? (
-					<Button
-						variant="ghost"
-						size="xs"
-						className="mr-1"
-						icon={
-							controller.isRelationNeighborhoodRefetchInFlight ? <Spinner size={11} /> : <RefreshCw size={11} />
-						}
-						aria-label="刷新关系"
-						disabled={controller.isRelationNeighborhoodRefetchInFlight}
-						onClick={controller.refetchRelationNeighborhood}
-					/>
-				) : null}
+				{headerNavigationContent ? (
+					<Popover.Root>
+						<Popover.Trigger asChild>
+							<button
+								type="button"
+								aria-label="更多关系操作"
+								className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+							>
+								<Ellipsis size={14} />
+							</button>
+						</Popover.Trigger>
+						<Popover.Portal>
+							<Popover.Content
+								aria-label="更多关系操作"
+								align="end"
+								sideOffset={4}
+								data-mobile-focus-view-idle-collapse-suspension=""
+								className="z-50 flex max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-md border border-border-bright bg-surface-1 p-2"
+							>
+								{relationHeaderActions}
+							</Popover.Content>
+						</Popover.Portal>
+					</Popover.Root>
+				) : (
+					relationHeaderActions
+				)}
 			</div>
 			{workspaceId ? (
 				<WorkUnitRelationAddReferenceRelationDialog

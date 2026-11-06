@@ -328,7 +328,7 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 }
 
 // --- 结案：停 agent 会话与详情 shell 终端、删 worktree ---
-// 浏览器端「会话中断自动流转进 Done」刻意不走这里：那条要保留 worktree 供恢复。
+// 会话中断保留原列；只有显式结案动作进入此流程。
 export async function moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktreeThroughRuntime(input: {
 	workspaceId: string;
 	taskId: string;

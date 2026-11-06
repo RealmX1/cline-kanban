@@ -8,8 +8,8 @@ import { z } from "zod";
 import { ensureCodexConfigurationInitializationSnapshot } from "../codex-configuration-sync/codex-configuration-initialization-snapshot";
 import {
 	getCodexConfigurationSyncDirectory,
-	mutateCodexConfigurationSyncStore,
-	readCodexConfigurationSyncStore,
+	mutateCodexConfigurationSyncActiveStore as mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
 } from "../codex-configuration-sync/codex-configuration-sync-store";
 import { resolveVerifiedCodexConfigurationSourceIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import { codexConfigurationWriterBindingSchema } from "../core/codex-configuration-sync-contract";

@@ -167,6 +167,10 @@ try {
 	);
 
 	await copyFile(
+		"src/codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
+		join(stagingDirectoryPath, "codex-configuration-sync-database-worker.mjs"),
+	);
+	await copyFile(
 		"src/notifications/notification-lifecycle-database-worker.mjs",
 		join(stagingDirectoryPath, "notification-lifecycle-database-worker.mjs"),
 	);

@@ -6,11 +6,11 @@ import type {
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeLastConversationProgressObservation,
 } from "../core/api-contract";
+import { parseTranscriptJsonRecord, readBoundedJsonLines } from "./bounded-agent-transcript-reader";
 import {
-	parseTranscriptJsonRecord,
-	readBoundedJsonLines,
-	readTranscriptRecord,
-} from "./bounded-agent-transcript-reader";
+	codexTranscriptMetadataMatchesPersistentMainConversation,
+	statCodexTranscriptReadSource,
+} from "./codex-transcript-read-source";
 import { parseNativeAgentConversationTranscriptActivity } from "./native-agent-conversation-transcript-activity";
 
 export const MAX_TRANSCRIPT_BYTES_PER_PROBE_FILE = 256 * 1024;
@@ -42,17 +42,11 @@ export interface PersistedAgentTranscriptProbeInput {
 }
 
 export function transcriptMetadataMatchesNativeConversationIdentity(
-	identity: RuntimeAgentNativeConversationSessionIdentity,
+	identity: Pick<RuntimeAgentNativeConversationSessionIdentity, "sourceAgentId" | "nativeSessionId">,
 	record: Record<string, unknown>,
 ): boolean {
 	if (identity.sourceAgentId === "codex" && record.type === "session_meta") {
-		const payload = readTranscriptRecord(record.payload);
-		const source = readTranscriptRecord(payload?.source);
-		return (
-			payload?.id === identity.nativeSessionId &&
-			(payload.thread_source === undefined || payload.thread_source === "user") &&
-			source?.subagent === undefined
-		);
+		return codexTranscriptMetadataMatchesPersistentMainConversation(identity.nativeSessionId, record);
 	}
 	if (identity.sourceAgentId === "omp" && record.type === "session") return record.id === identity.nativeSessionId;
 	return typeof record.sessionId !== "string" || record.sessionId === identity.nativeSessionId;
@@ -72,7 +66,10 @@ export async function probePersistedAgentTranscriptLastConversationProgress(
 	)
 		return null;
 	try {
-		const metadata = await stat(filePath);
+		const metadata =
+			identity.sourceAgentId === "codex"
+				? await statCodexTranscriptReadSource(filePath, identity.nativeSessionId)
+				: await stat(filePath);
 		if (!metadata.isFile()) return null;
 		const cacheKey = `${identity.sourceAgentId}:${identity.nativeSessionId}:${filePath}`;
 		const signature = `${metadata.dev}:${metadata.ino}:${metadata.mtimeMs}:${metadata.size}`;
@@ -82,7 +79,13 @@ export async function probePersistedAgentTranscriptLastConversationProgress(
 			probeResultCacheByFilePath.set(cacheKey, cached);
 			return cached.observation;
 		}
-		const { lines } = await readBoundedJsonLines(filePath, metadata.size, MAX_TRANSCRIPT_BYTES_PER_PROBE_FILE);
+		const { lines } = await readBoundedJsonLines(
+			filePath,
+			metadata.size,
+			MAX_TRANSCRIPT_BYTES_PER_PROBE_FILE,
+			identity.sourceAgentId,
+			identity.nativeSessionId,
+		);
 		let observedAtMs: number | null = null;
 		let rejectedIdentity = false;
 		for (const line of lines) {

@@ -19,7 +19,7 @@ import {
 import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
-	readCodexConfigurationSyncStore,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
 	type StoredCodexConfigurationChange,
 } from "./codex-configuration-sync-store";
 import {
@@ -30,8 +30,8 @@ import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "./cod
 
 // 所选提案可能来自已退休 writer；不能把 observe 的活跃集合当作审批的卷资格集合。
 export async function prepareCodexConfigurationProposalIdentityVolumeObservations(changeIds: Iterable<string>) {
-	const store = await readCodexConfigurationSyncStore();
 	const selectedChangeIds = new Set(changeIds);
+	const store = await readCodexConfigurationSyncStore({ changeIds: [...selectedChangeIds] });
 	const paths = new Set<string>();
 	for (const change of store.changes) {
 		if (!selectedChangeIds.has(change.changeId)) continue;

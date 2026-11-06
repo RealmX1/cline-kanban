@@ -227,11 +227,34 @@ test("桌面保持原视图且无手机滚轮悬浮栏", async ({ page }) => {
 test("阅读视图滚动当前文档，不向隐藏 TUI 发送输入", async ({ page }) => {
 	const fixture = await openIsolatedMobileFocusView(page, 390);
 	await page.getByRole("button", { name: "展开上方导航与工具", exact: true }).tap();
-	await page.getByRole("button", { name: "Read the transcript as a document", exact: true }).tap();
-	const documentScroller = page.locator(".kb-terminal-transcript-reader-scroll-area");
+	await page.route("**/api/trpc/runtime.getTaskConversationHistoryPage*", (route) =>
+		route.fulfill({
+			json: [
+				{
+					result: {
+						data: {
+							availability: "available",
+							nextCursor: null,
+							notice: null,
+							messages: Array.from({ length: 60 }, (_, index) => ({
+								id: `native-message-${index}`,
+								role: "assistant",
+								createdAt: index + 1,
+								content: `原生会话记录 ${index}\n\n完整的持久转录正文，用于验证文档滚动不投递 TUI 输入。`,
+							})),
+						},
+					},
+				},
+			],
+		}),
+	);
+	await page.getByRole("button", { name: "终端工具与更多信息", exact: true }).tap();
+	await page.getByRole("button", { name: "以文档阅读会话记录", exact: true }).tap();
+	await page.keyboard.press("Escape");
+	const documentScroller = page.locator("[data-transcript-document-scroll-container]");
 	await expect.poll(() => documentScroller.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
 	await page.getByRole("button", { name: "收起上方导航与工具", exact: true }).tap();
-	await expect(page.getByRole("textbox", { name: "Filter transcript lines" })).toBeHidden();
+	await expect(page.getByRole("textbox", { name: "搜索已加载记录" })).toBeHidden();
 	const original = await documentScroller.evaluate((element) => element.scrollTop);
 	const inputCount = fixture.receivedInputs.length;
 	await page.getByRole("button", { name: upLabel }).tap();

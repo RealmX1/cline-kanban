@@ -221,6 +221,14 @@ function section(name: string): HTMLElement {
 	return element;
 }
 
+function recentFilterPanel(): HTMLElement {
+	if (!document.querySelector('[role="dialog"][aria-label="Recent 筛选与排序"]'))
+		act(() =>
+			section("remaining").querySelector<HTMLButtonElement>('button[aria-label^="Recent 筛选与排序"]')!.click(),
+		);
+	return document.querySelector<HTMLElement>('[role="dialog"][aria-label="Recent 筛选与排序"]')!;
+}
+
 function rowInPlaceExpansionState(row: HTMLElement | null | undefined): string | undefined {
 	return row?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
 }
@@ -391,7 +399,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			};
 			renderEntries("starting_agent");
 			const running = section("running");
-			expect(running?.textContent).toContain("1 运行中 · 1 正在启动");
+			expect(running?.textContent).toContain("2 · 启动 1");
 			expect(
 				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]')
 					?.textContent,
@@ -429,7 +437,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			renderEntries("waiting_for_dependency");
 			expect(running?.textContent).toContain("启动等待恢复");
 			renderEntries("starting_agent", true);
-			expect(running?.textContent).toContain("2 运行中");
+			expect(running?.textContent).toContain("Running2");
 			expect(
 				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]'),
 			).toBeNull();
@@ -508,7 +516,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
 		expect(container.querySelector('[data-testid="cross-project-task-switcher-section-backlog"]')).toBeNull();
-		const filters = section("remaining").querySelector('[aria-label="Filter recent tasks by stage"]');
+		const filters = recentFilterPanel().querySelector('[aria-label="Filter recent tasks by stage"]');
 		const filterButton = (label: string) =>
 			[...(filters?.querySelectorAll("button") ?? [])].find((button) => button.textContent === label);
 		expect(filterButton("In progress / Review")?.getAttribute("aria-pressed")).toBe("true");
@@ -548,7 +556,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		act(() =>
 			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost({ focusedTaskInProject: null })} />),
 		);
-		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="Collapse ${title}"]`);
+		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="收起 ${title}"]`);
 		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
 		act(() => toggle?.click());
 		expect(rowTaskIds(section(sectionName))).toEqual([]);
@@ -607,16 +615,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			focusedTaskInProject: { workspaceId: "project-a", taskId: "focused-backlog" },
 		});
 		renderFocusedTask("focused-backlog", "backlog", host);
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
-		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="Collapse Recent"]')?.click());
+		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="收起 Recent"]')?.click());
 		expect(section("remaining").querySelector('button[aria-expanded="false"]')).not.toBeNull();
 		expect(rowTaskIds(section("remaining"))).toEqual(["focused-backlog"]);
 		expect(
@@ -1296,12 +1301,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			onOpenBacklogTaskEditorInProject: vi.fn(),
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
@@ -1899,12 +1901,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "done-pinned");
 
 		// Backlog：原地打开编辑框（与点精简行同一条路径，不是卡体自己的编辑回调）。
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);

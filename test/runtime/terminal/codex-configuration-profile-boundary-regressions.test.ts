@@ -21,6 +21,7 @@ import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-confi
 import { prepareCodexRemoteConversationLaunchPlan } from "../../../src/codex-native-session-control-host/codex-remote-conversation-launch-plan";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
+import { prepareIsolatedCodexConfigurationLegacyStorageFixture } from "../../utilities/prepare-isolated-codex-configuration-legacy-storage-fixture";
 import { requireDefinedTestFixtureValue } from "../../utilities/require-defined-test-fixture-value";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -177,6 +178,10 @@ describe("Codex profile 跨代与配置边界回归", () => {
 				delete store.writers[first.writerId].lastObservedFields[fieldKey];
 				delete store.writers[first.writerId].localExceptionOverrides;
 			});
+			await prepareIsolatedCodexConfigurationLegacyStorageFixture(
+				fixture.path,
+				await readCodexConfigurationSyncStore(),
+			);
 			const migrated = await readCodexConfigurationSyncStore();
 			const group =
 				fieldName === "model"

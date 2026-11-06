@@ -31,7 +31,6 @@ import {
 	type AgentConversationChatPanelHandle,
 } from "@/components/detail-panels/agent-conversation-chat-panel";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
-import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
@@ -45,6 +44,7 @@ import { ReadOnlyTaskConversationHistoryPanel } from "@/components/detail-panels
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskEditorCreationProgressNotice } from "@/components/detail-panels/task-editor-creation-progress-notice";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { TaskSessionInformationActions } from "@/components/detail-panels/task-session-information-actions";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
@@ -576,6 +576,7 @@ function DetailUtilityTabList({
 	queuedPromptTaskId,
 	queuedPromptCountIndicator,
 	emitsQueueTabAnchor,
+	compact = false,
 }: {
 	activeTab: DetailUtilityTab;
 	onTabChange: (tab: DetailUtilityTab) => void;
@@ -584,7 +585,29 @@ function DetailUtilityTabList({
 	// 窄屏下顶部 MobileDetailTabBar 才是常驻可见的那份页签，锚点挂在那边；这里再挂一份会让 spotlight
 	// 命中到一个可能被 display:none 藏起来的元素上。
 	emitsQueueTabAnchor: boolean;
+	compact?: boolean;
 }): React.ReactElement {
+	if (compact)
+		return (
+			<select
+				aria-label="工具内部导航"
+				value={activeTab}
+				onChange={(event) => onTabChange(event.target.value as DetailUtilityTab)}
+				className="h-7 min-w-0 flex-1 rounded-sm bg-surface-2 px-1 text-xs text-text-primary"
+				{...(emitsQueueTabAnchor
+					? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+					: {})}
+			>
+				{DETAIL_UTILITY_TABS.map((tab) => (
+					<option key={tab.id} value={tab.id}>
+						{tab.label}
+						{tab.id === "queue" && queuedPromptCountIndicator.pendingCount > 0
+							? ` (${queuedPromptCountIndicator.pendingCount})`
+							: ""}
+					</option>
+				))}
+			</select>
+		);
 	return (
 		<div
 			role="tablist"
@@ -903,6 +926,7 @@ export function CardDetailView({
 	const mobileControls = mobileFocusViewControls ?? localMobileFocusViewControls;
 	const mobileFocusViewIdleCollapseController = mobileControls.idleCollapseController;
 	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
+	const [mobileHeaderToolbarElement, setMobileHeaderToolbarElement] = useState<HTMLDivElement | null>(null);
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const [workbenchModuleSelectionRequest, setWorkbenchModuleSelectionRequest] = useState<{
@@ -968,8 +992,9 @@ export function CardDetailView({
 			(foregroundBelongsToThisTask && foregroundView.target.viewKind === "task_visualization"),
 		onAutomaticPreview: showAutomaticVisualizationPreview,
 	});
-	const taskVisualizationPanel = (
+	const taskVisualizationPanel = (headerNavigationContent?: ReactNode) => (
 		<TaskVisualizationArtifactsPanel
+			headerNavigationContent={headerNavigationContent}
 			workspaceId={currentProjectId}
 			taskId={selection.card.id}
 			taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
@@ -1481,10 +1506,11 @@ export function CardDetailView({
 		},
 		[enqueuePromptForDeliveryAfterCurrentTurn],
 	);
-	const detailUtilityTabs = (
+	const detailUtilityTabs = (compact = false) => (
 		<>
 			<PostDeployVerificationEntryNavigationButton taskId={selection.card.id} />
 			<DetailUtilityTabList
+				compact={compact}
 				activeTab={detailUtilityTab}
 				onTabChange={handleDetailUtilityTabChange}
 				queuedPromptTaskId={selectedTaskConversationSessionId}
@@ -1497,9 +1523,10 @@ export function CardDetailView({
 			</span>
 		</>
 	);
-	const detailUtilityPanel =
+	const detailUtilityPanel = (headerNavigationContent?: ReactNode) =>
 		detailUtilityTab === "prompts" || detailUtilityTab === "commands" ? (
 			<PromptLibraryPanel
+				headerNavigationContent={headerNavigationContent}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				entryKind={detailUtilityTab === "commands" ? "reusable_command" : "draft_prompt"}
 				taskId={selectedTaskConversationSessionId}
@@ -1508,14 +1535,15 @@ export function CardDetailView({
 				onQueuePromptForAfterCurrentTurn={
 					currentProjectId && !isDoneTaskReadOnly ? handleQueuePromptForAfterCurrentTurn : undefined
 				}
-				headerContent={detailUtilityTabs}
+				headerContent={detailUtilityTabs(Boolean(headerNavigationContent))}
 				taskIdsOnBoard={promptLibraryIdentifiersStillOwnedByBoardTasks}
 			/>
 		) : (
 			<QueuedTaskPromptDeliveryQueuePanel
+				headerNavigationContent={headerNavigationContent}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				controller={queuedPromptQueueController}
-				headerContent={detailUtilityTabs}
+				headerContent={detailUtilityTabs(Boolean(headerNavigationContent))}
 			/>
 		);
 
@@ -1543,56 +1571,58 @@ export function CardDetailView({
 					userTurnKind: null,
 				}
 			: null);
-	const taskConversationSessionsPanel = mainSessionSummaryForSessionsPanel ? (
-		<TaskConversationSessionsPanel
-			isTaskAgentExecutionDisabled={isDoneTaskReadOnly || !onCreateTaskConversationSession}
-			key={JSON.stringify([currentProjectId, selection.card.id])}
-			workspaceId={currentProjectId}
-			taskCard={selection.card}
-			workspaceTaskId={selection.card.id}
-			mainSessionSummary={mainSessionSummaryForSessionsPanel}
-			mainSessionUserMessagePreview={selection.card.prompt}
-			mainSessionOriginalPromptCard={selection.card}
-			effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId ?? "codex"}
-			agents={runtimeConfig?.agents}
-			taskSessions={taskSessions}
-			selectedTaskConversationSessionId={selectedTaskConversationSessionId}
-			onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
-			onCreateTaskConversationSession={async ({
-				agentId,
-				sessionRole,
-				initialUserQuestion,
-				contextSource,
-				codexConfigurationProfileId,
-				expectedTaskIncarnationCreatedAtEpochMs,
-				contextSourceTaskConversationSessionId,
-			}) => {
-				if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
-					return { ok: false, message: "请先恢复任务，再创建会话。" };
-				const result = await onCreateTaskConversationSession({
-					...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
+	const taskConversationSessionsPanel = (headerNavigationContent?: ReactNode) =>
+		mainSessionSummaryForSessionsPanel ? (
+			<TaskConversationSessionsPanel
+				headerNavigationContent={headerNavigationContent}
+				isTaskAgentExecutionDisabled={isDoneTaskReadOnly || !onCreateTaskConversationSession}
+				key={JSON.stringify([currentProjectId, selection.card.id])}
+				workspaceId={currentProjectId}
+				taskCard={selection.card}
+				workspaceTaskId={selection.card.id}
+				mainSessionSummary={mainSessionSummaryForSessionsPanel}
+				mainSessionUserMessagePreview={selection.card.prompt}
+				mainSessionOriginalPromptCard={selection.card}
+				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId ?? "codex"}
+				agents={runtimeConfig?.agents}
+				taskSessions={taskSessions}
+				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
+				onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
+				onCreateTaskConversationSession={async ({
 					agentId,
 					sessionRole,
 					initialUserQuestion,
 					contextSource,
-					...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
-						? { expectedTaskIncarnationCreatedAtEpochMs }
-						: {}),
-					...(contextSourceTaskConversationSessionId ? { contextSourceTaskConversationSessionId } : {}),
-					mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
-					mainSessionOriginUserMessagePreview: selection.card.prompt,
-				});
-				if (
-					result.ok &&
-					result.taskConversationSessionId &&
-					latestFocusedTaskIdentityForSessionCreation.current === focusedTaskIdentityForSessionCreation
-				) {
-					setSelectedTaskConversationSessionId(result.taskConversationSessionId);
-				}
-				return result;
-			}}
-		/>
-	) : null;
+					codexConfigurationProfileId,
+					expectedTaskIncarnationCreatedAtEpochMs,
+					contextSourceTaskConversationSessionId,
+				}) => {
+					if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
+						return { ok: false, message: "请先恢复任务，再创建会话。" };
+					const result = await onCreateTaskConversationSession({
+						...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
+						agentId,
+						sessionRole,
+						initialUserQuestion,
+						contextSource,
+						...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
+							? { expectedTaskIncarnationCreatedAtEpochMs }
+							: {}),
+						...(contextSourceTaskConversationSessionId ? { contextSourceTaskConversationSessionId } : {}),
+						mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
+						mainSessionOriginUserMessagePreview: selection.card.prompt,
+					});
+					if (
+						result.ok &&
+						result.taskConversationSessionId &&
+						latestFocusedTaskIdentityForSessionCreation.current === focusedTaskIdentityForSessionCreation
+					) {
+						setSelectedTaskConversationSessionId(result.taskConversationSessionId);
+					}
+					return result;
+				}}
+			/>
+		) : null;
 	const isMainTaskConversationSessionSelected =
 		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card);
 	// 探索地图与本会话 Findings 使用现有工作台模块；Done 也展示持久资产，不依赖实时聊天投影。
@@ -1602,9 +1632,10 @@ export function CardDetailView({
 	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
 	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
 	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
-	const explorationThreadGraphPanel =
+	const explorationThreadGraphPanel = (headerNavigationContent?: ReactNode) =>
 		explorationThreadGraph !== undefined && currentProjectId ? (
 			<ExplorationThreadGraphPanel
+				headerNavigationContent={headerNavigationContent}
 				initiallyExpanded={!isMobile}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				workspaceId={currentProjectId}
@@ -1626,8 +1657,9 @@ export function CardDetailView({
 		) : null;
 	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
 	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
-	const workUnitRelationNeighborhoodPanel = (
+	const workUnitRelationNeighborhoodPanel = (headerNavigationContent?: ReactNode) => (
 		<WorkUnitRelationNeighborhoodPanel
+			headerNavigationContent={headerNavigationContent}
 			initiallyExpanded={!isMobile}
 			workspaceId={currentProjectId}
 			kanbanBoardCardTaskId={selection.card.id}
@@ -1638,6 +1670,27 @@ export function CardDetailView({
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedAgentConversationChatMessages : null);
 
+	const sessionInformationActions = (
+		<TaskSessionInformationActions
+			key={JSON.stringify([
+				currentProjectId,
+				selection.card.id,
+				selection.card.createdAt,
+				selectedTaskConversationSessionId,
+			])}
+			workspaceId={currentProjectId}
+			taskId={selection.card.id}
+			taskConversationSessionId={selectedTaskConversationSessionId}
+			taskCreatedAtEpochMs={selection.card.createdAt}
+			summary={activeTaskConversationSessionSummary}
+			hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showClineAgentChatPanel}
+			pendingUserDecisionIdentityForRefresh={
+				pendingUserDecision.decision
+					? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+					: null
+			}
+		/>
+	);
 	const agentSessionContent = isDoneTaskReadOnly ? (
 		<ReadOnlyTaskConversationHistoryPanel
 			key={JSON.stringify([currentProjectId, selection.card.id, selectedTaskConversationSessionId])}
@@ -1743,6 +1796,15 @@ export function CardDetailView({
 			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
 			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showSessionToolbar={false}
+			mobileHeaderToolbarElement={mobileHeaderToolbarElement}
+			headerInformationContent={sessionInformationActions}
+			narrowMobileInformationContent={
+				<TaskResourceUsageDetailPanel
+					key={JSON.stringify([currentProjectId, selection.card.id, selectedTaskConversationSessionId])}
+					taskCardId={selection.card.id}
+					presentation="toolbar_popover"
+				/>
+			}
 			autoFocus={!taskLookupWorkbenchContent}
 			showMoveToTrash={isMainTaskConversationSessionSelected && showMoveToTrashActions}
 			onMoveToTrash={onMoveToTrash}
@@ -1798,15 +1860,11 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
-				<div data-task-created-at-details="" className="px-3 py-1 text-xs text-text-secondary">
-					任务创建于{" "}
-					<time dateTime={new Date(selection.card.createdAt).toISOString()}>
-						{new Date(selection.card.createdAt).toLocaleString()}
-					</time>
+			{(isDoneTaskReadOnly || showClineAgentChatPanel) && !isMobile ? (
+				<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
+					{sessionInformationActions}
 				</div>
-				<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
-			</div>
+			) : null}
 			{pendingUserDecision.transcriptRecoveryNotice ? (
 				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
 					{pendingUserDecision.transcriptRecoveryNotice}
@@ -1836,18 +1894,6 @@ export function CardDetailView({
 					}
 				/>
 			) : null}
-			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
-				<AgentRaisedUserDecisionHistoryPanel
-					workspaceId={currentProjectId}
-					taskId={selectedTaskConversationSessionId}
-					pendingUserDecisionIdentityForRefresh={
-						pendingUserDecision.decision
-							? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
-							: null
-					}
-				/>
-				<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
-			</div>
 			{agentSessionContent}
 		</div>
 	);
@@ -1892,6 +1938,18 @@ export function CardDetailView({
 					{isMobile && !taskLookupWorkbenchContent ? (
 						<>
 							<MobileFocusedTaskCardHeader
+								terminalToolbarHostRef={
+									showClineAgentChatPanel || isDoneTaskReadOnly ? undefined : setMobileHeaderToolbarElement
+								}
+								sessionInformationContent={
+									showClineAgentChatPanel || isDoneTaskReadOnly ? sessionInformationActions : undefined
+								}
+								currentWorkPhaseGoalContent={
+									<AgentCurrentWorkPhaseGoal
+										summary={activeTaskConversationSessionSummary}
+										isFullGoalTextVisible
+									/>
+								}
 								onBackToBoard={onBackToBoard}
 								navigationAndToolsControls={mobileControls}
 								key={mobileFocusedTaskIdentity}
@@ -2315,13 +2373,18 @@ export function CardDetailView({
 												modules={{
 													task_sessions: taskConversationSessionsPanel,
 													cross_task_relations: workUnitRelationNeighborhoodPanel,
-													exploration_map:
-														explorationThreadGraphPanel || sessionFindingsSection ? (
-															<>
-																{explorationThreadGraphPanel}
-																{sessionFindingsSection}
-															</>
-														) : null,
+													exploration_map: (headerNavigationContent) => (
+														<>
+															{explorationThreadGraph !== undefined && currentProjectId ? (
+																explorationThreadGraphPanel(headerNavigationContent)
+															) : (
+																<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
+																	{headerNavigationContent ?? "探索地图"}
+																</div>
+															)}
+															{sessionFindingsSection}
+														</>
+													),
 													prompt_tools: detailUtilityPanel,
 													task_visualizations: taskVisualizationPanel,
 												}}

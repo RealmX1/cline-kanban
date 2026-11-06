@@ -4,7 +4,7 @@ import {
 	type CodexConfigurationTaskSourceContext,
 	codexConfigurationTaskSourceIdentityKey,
 } from "./codex-configuration-change-presentation";
-import { readCodexConfigurationSyncStore } from "./codex-configuration-sync-store";
+import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "./codex-configuration-sync-store";
 
 export async function readCodexConfigurationTaskSourceContext(
 	workspaces: Array<{ workspaceId: string; workspacePath: string | null }>,

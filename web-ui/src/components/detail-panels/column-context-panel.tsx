@@ -1,12 +1,13 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-import { ChevronDown, ChevronRight, Play, RotateCcw, Trash2 } from "lucide-react";
+import { Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
-import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
+import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
+import { FocusViewStageGroupHeaderActions } from "@/components/detail-panels/focus-view-stage-group-header-actions";
 import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
 import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
@@ -15,6 +16,7 @@ import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-v
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
+import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useFocusViewStageSectionExpansion } from "@/hooks/use-focus-view-stage-section-expansion";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
@@ -96,17 +98,6 @@ function ColumnSection({
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
-	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
-	const canClearTrash = column.id === "trash" && onClearTrash;
-	const latestTrashCard =
-		column.id === "trash"
-			? column.cards.reduce<BoardCardModel | null>((latestCard, card) => {
-					if (!latestCard || card.updatedAt > latestCard.updatedAt) {
-						return card;
-					}
-					return latestCard;
-				}, null)
-			: null;
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null);
 	const selectedIndex = column.cards.findIndex((card) => card.id === selectedCardId);
@@ -166,97 +157,26 @@ function ColumnSection({
 
 	return (
 		<div className="bg-surface-1 rounded-lg shrink-0 border border-border" data-stage-section-id={column.id}>
-			<div
-				style={{
-					display: "flex",
-					alignItems: "center",
-					height: 40,
-					background: "var(--color-surface-1)",
-				}}
-			>
-				<button
-					type="button"
-					onClick={onToggleOpen}
-					aria-expanded={open}
-					className="hover:bg-surface-0 rounded-md"
-					style={{
-						height: 32,
-						flex: "1 1 auto",
-						minWidth: 0,
-						display: "flex",
-						alignItems: "center",
-						gap: 8,
-						padding: "0 8px",
-						margin: "0 4px",
-						background: "none",
-						border: "none",
-						cursor: "pointer",
-						color: "inherit",
-						textAlign: "left",
-					}}
-				>
-					{open ? (
-						<ChevronDown size={16} className="text-text-secondary" style={{ flexShrink: 0 }} />
-					) : (
-						<ChevronRight size={16} className="text-text-secondary" style={{ flexShrink: 0 }} />
-					)}
-					<StageHeaderLabel columnId={column.id} title={column.title} count={column.cards.length} />
-				</button>
-				{canRequestStartAllReadyBacklogTasks ? (
-					<Button
-						icon={<Play size={14} />}
-						variant="ghost"
-						size="sm"
-						onClick={onRequestStartAllReadyBacklogTasks}
-						disabled={column.cards.length === 0}
-						aria-label="Start all ready backlog tasks"
-						title={column.cards.length > 0 ? "Start all ready backlog tasks" : "Backlog is empty"}
-						style={{ marginRight: 4 }}
+			<FocusViewGroupHeader
+				title={column.title}
+				count={column.cards.length}
+				icon={<ColumnIndicator columnId={column.id} />}
+				isExpanded={open}
+				onToggleExpanded={onToggleOpen}
+				actions={
+					<FocusViewStageGroupHeaderActions
+						column={column}
+						onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+						onClearTrash={onClearTrash}
+						onRestoreFromTrashTask={onRestoreFromTrashTask}
 					/>
-				) : null}
-				{column.id === "trash" && onRestoreFromTrashTask ? (
-					<Button
-						icon={<RotateCcw size={14} />}
-						variant="ghost"
-						size="sm"
-						onClick={() => {
-							if (latestTrashCard) {
-								onRestoreFromTrashTask(latestTrashCard.id);
-							}
-						}}
-						disabled={!latestTrashCard}
-						aria-label="重新打开最近结案的任务"
-						title={latestTrashCard ? "重新打开最近结案的任务" : "暂无已结案任务"}
-						style={{ marginRight: 4 }}
-					/>
-				) : null}
-				{canClearTrash ? (
-					<Button
-						icon={<Trash2 size={14} />}
-						variant="ghost"
-						size="sm"
-						className="text-status-red hover:text-status-red"
-						onClick={onClearTrash}
-						disabled={column.cards.length === 0}
-						aria-label="Clear done"
-						title={column.cards.length > 0 ? "永久删除已结案任务" : "暂无已结案任务"}
-						style={{ marginRight: 4 }}
-					/>
-				) : null}
-			</div>
+				}
+			/>
 			<div style={{ display: isBodyHidden ? "none" : "block" }}>
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
 					{(provided) => {
 						return (
-							<div
-								ref={provided.innerRef}
-								{...provided.droppableProps}
-								style={{
-									display: "flex",
-									flexDirection: "column",
-									padding: 8,
-								}}
-							>
+							<div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-col px-2 pb-2 pt-3">
 								{isCollapsedFocusedPeek
 									? // 折叠焦点 stage 的 peek：焦点卡渲染为非拖拽的裸 TaskCardBody（不包 <Draggable>、
 										// 不传 index/drag）。此前它经 BoardCard 走 draggableIndex 从 0 起算的循环，得到假的
@@ -553,7 +473,7 @@ export function ColumnContextPanel({
 						<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
 							<div
 								ref={scrollContainerRef}
-								className="kb-detail-task-list-scroll flex flex-col gap-2 p-2"
+								className="kb-detail-task-list-scroll flex flex-col gap-1 p-2"
 								data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
 								style={{
 									flex: "1 1 0",
@@ -609,6 +529,8 @@ export function ColumnContextPanel({
 							</div>
 						</DragDropContext>
 						<StageHeaderRails
+							onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+							onClearTrash={onClearTrash}
 							selection={selection}
 							displayGroups={displayGroups}
 							focusedDisplayGroupId={focusedDisplayGroupId}

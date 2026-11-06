@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
-import { type FileHandle, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { z } from "zod";
+import { type NativeTranscriptReadHandle, openCodexTranscriptReadSource } from "./codex-transcript-read-source";
 
 const TRANSCRIPT_PREFIX_HASH_CHUNK_BYTES = 64 * 1024;
 export const nativeTranscriptFilePrefixSnapshotSchema = z.object({
@@ -9,7 +10,9 @@ export const nativeTranscriptFilePrefixSnapshotSchema = z.object({
 	inodeId: z.number(),
 	createdAtMs: z.number(),
 	endByteOffset: z.number().int().nonnegative(),
+	observedFileByteLength: z.number().int().nonnegative().optional(),
 	prefixSha256: z.string().regex(/^[a-f0-9]{64}$/),
+	codexLogicalContent: z.literal(true).optional(),
 });
 type NativeTranscriptFilePrefixSnapshot = z.infer<typeof nativeTranscriptFilePrefixSnapshotSchema>;
 
@@ -29,7 +32,8 @@ function matchesSnapshotFile(metadata: Stats, snapshot: NativeTranscriptFilePref
 	);
 }
 
-async function hashTranscriptFilePrefix(handle: FileHandle, endByteOffset: number): Promise<string> {
+async function hashTranscriptFilePrefix(handle: NativeTranscriptReadHandle, endByteOffset: number): Promise<string> {
+	if (handle.hashPrefix) return handle.hashPrefix(endByteOffset);
 	const hash = createHash("sha256");
 	const chunk = Buffer.alloc(TRANSCRIPT_PREFIX_HASH_CHUNK_BYTES);
 	for (let position = 0; position < endByteOffset; ) {
@@ -41,7 +45,11 @@ async function hashTranscriptFilePrefix(handle: FileHandle, endByteOffset: numbe
 	return hash.digest("hex");
 }
 
-export async function captureNativeTranscriptFilePrefixSnapshot(handle: FileHandle, fixedEndByteOffset?: number) {
+export async function captureNativeTranscriptFilePrefixSnapshot(
+	handle: NativeTranscriptReadHandle,
+	fixedEndByteOffset?: number,
+	codexLogicalContent = false,
+) {
 	const metadata = await handle.stat();
 	let endByteOffset = fixedEndByteOffset ?? metadata.size;
 	if (endByteOffset > metadata.size) throw new NativeTranscriptSnapshotInvalidError();
@@ -71,15 +79,36 @@ export async function captureNativeTranscriptFilePrefixSnapshot(handle: FileHand
 		inodeId: metadata.ino,
 		createdAtMs: metadata.birthtimeMs,
 		endByteOffset,
+		observedFileByteLength: metadata.size,
 		prefixSha256: await hashTranscriptFilePrefix(handle, endByteOffset),
+		...(codexLogicalContent ? { codexLogicalContent: true as const } : {}),
 	};
 }
 
 export async function assertNativeTranscriptFilePrefixSnapshot(
-	handle: FileHandle,
+	handle: NativeTranscriptReadHandle,
 	path: string,
 	snapshot: NativeTranscriptFilePrefixSnapshot,
+	allowEquivalentCodexContent = false,
 ): Promise<void> {
+	if (allowEquivalentCodexContent || snapshot.codexLogicalContent) {
+		if (
+			(await handle.stat()).size < snapshot.endByteOffset ||
+			(await hashTranscriptFilePrefix(handle, snapshot.endByteOffset)) !== snapshot.prefixSha256
+		)
+			throw new NativeTranscriptSnapshotInvalidError();
+		const current = await openCodexTranscriptReadSource(path);
+		try {
+			if (
+				(await current.stat()).size < snapshot.endByteOffset ||
+				(await hashTranscriptFilePrefix(current, snapshot.endByteOffset)) !== snapshot.prefixSha256
+			)
+				throw new NativeTranscriptSnapshotInvalidError();
+		} finally {
+			await current.close();
+		}
+		return;
+	}
 	if (
 		!matchesSnapshotFile(await handle.stat(), snapshot) ||
 		!matchesSnapshotFile(await stat(path), snapshot) ||

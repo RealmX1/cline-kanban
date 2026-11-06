@@ -45,6 +45,7 @@ export function useCodexConfigurationChangeDetails(
 					{
 						changeId: change.changeId,
 						expectedVersion: change.version,
+						includePropagationHistory: true,
 						...(targetWriterId ? { targetWriterId } : {}),
 					},
 					signal,
@@ -85,6 +86,7 @@ export function useCodexConfigurationChangeDetails(
 		expanded,
 		setExpanded,
 		comparison: currentResult?.details ?? preview,
+		propagationTargets: currentResult?.details?.propagationTargets,
 		sourceEvidence: currentResult?.details?.sourceEvidence ?? change.sourceEvidence,
 		loading: expanded && !currentResult,
 		error: currentResult?.error,

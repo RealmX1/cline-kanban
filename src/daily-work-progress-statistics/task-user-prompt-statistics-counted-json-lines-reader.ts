@@ -1,5 +1,9 @@
 import { open } from "node:fs/promises";
 import {
+	type NativeTranscriptReadHandle,
+	openCodexTranscriptReadSource,
+} from "../agent-session-history/codex-transcript-read-source";
+import {
 	type DailyWorkProgressCollectionCostStage,
 	measureDailyWorkProgressAsynchronousStage,
 	measureDailyWorkProgressSynchronousStage,
@@ -13,18 +17,22 @@ export async function readCountedTaskUserPromptStatisticsJsonLines(
 	previousByteOffset: number,
 	maximumBytes: number,
 	stage: DailyWorkProgressCollectionCostStage = "transcript_body_read",
+	sourceAgentId?: string,
 ) {
 	return measureDailyWorkProgressAsynchronousStage(stage, async () => {
-		const handle = await open(path, "r");
+		const handle: NativeTranscriptReadHandle =
+			sourceAgentId === "codex" ? await openCodexTranscriptReadSource(path) : await open(path, "r");
 		try {
 			const metadata = await handle.stat();
 			const start = metadata.size < previousByteOffset ? 0 : previousByteOffset;
 			const readByteCount = Math.min(maximumBytes, Math.max(0, metadata.size - start));
 			const buffer = Buffer.allocUnsafe(readByteCount);
 			const bytesRead = readByteCount > 0 ? (await handle.read(buffer, 0, readByteCount, start)).bytesRead : 0;
-			if (readByteCount > 0) recordDailyWorkProgressFileRead(bytesRead);
+			if (readByteCount > 0 && !handle.physicalReadBytesReportedToCollectionCostRecorder)
+				recordDailyWorkProgressFileRead(bytesRead);
 			return measureDailyWorkProgressSynchronousStage("transcript_decode", () => {
 				const lastNewline = buffer.subarray(0, bytesRead).lastIndexOf(0x0a);
+				const firstNewline = buffer.subarray(0, bytesRead).indexOf(0x0a);
 				const nextByteOffset = lastNewline < 0 ? start : start + lastNewline + 1;
 				return {
 					completeLines:
@@ -36,6 +44,7 @@ export async function readCountedTaskUserPromptStatisticsJsonLines(
 									.split(/\r?\n/u)
 									.filter(Boolean),
 					nextByteOffset,
+					firstCompleteLineEndByteOffset: firstNewline < 0 ? null : start + firstNewline + 1,
 					fileSizeBytes: metadata.size,
 					fileModifiedAtMilliseconds: metadata.mtimeMs,
 					fileWasTruncated: metadata.size < previousByteOffset,

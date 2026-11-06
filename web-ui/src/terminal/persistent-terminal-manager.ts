@@ -47,7 +47,7 @@ import {
 	type TerminalScrollbackTranscriptLogicalLine,
 } from "@/terminal/terminal-scrollback-transcript-extraction";
 import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focus-handoff-to-agent-entry";
-import { isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
+import { isFirefox, isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
 import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
 const SHIFT_ENTER_SEQUENCE = "\n";
@@ -318,6 +318,7 @@ class PersistentTerminal {
 	private connectionReady = false;
 	private restoreCompleted = false;
 	private terminalRestoreGeneration = 0;
+	private pendingScrollToBottomAnimationFrameRestoreGeneration: number | null = null;
 	private hasRenderedAnyTerminalContent = false;
 	// 「用户打开 / 回到这个任务时把已经不在的 PTY agent 会话接回来」：资格、停留门槛、按活体计的闩与跨实例
 	// 冷却都在调度器里（见 stale-agent-terminal-session-automatic-resume-scheduler.ts），本类只在各个
@@ -512,10 +513,11 @@ class PersistentTerminal {
 			this.refreshScrolledAwayFromLatest();
 		});
 
-		if (!isSafari) {
+		if (!isSafari && !isFirefox) {
 			// Safari 走 xterm 的 DOM 渲染器：它在 Cmd +/- 缩放时始终清晰（Safari 不改变
 			// window.devicePixelRatio，WebGL canvas 缓冲区不会按新 DPR 重新光栅化、文字发虚），
 			// 同时也规避了较新 Safari 的 WebGL 渲染破损（xterm.js #5816）。
+			// Firefox 同样走 DOM，避免抗指纹保护破坏 WebGL 字形图集、把文字显示成彩色竖线（#4746）。
 			try {
 				const webglAddon = new WebglAddon();
 				webglAddon.onContextLoss(() => {
@@ -1101,8 +1103,15 @@ class PersistentTerminal {
 		if (!shouldKeepScrolledToBottom) {
 			return;
 		}
-		const restoreGenerationBeforeScheduledScroll = this.terminalRestoreGeneration;
+		// 连续输出在同一帧只滚动一次，保留最后一次请求所属的恢复代次。
+		const hasPendingScrollToBottomAnimationFrame = this.pendingScrollToBottomAnimationFrameRestoreGeneration !== null;
+		this.pendingScrollToBottomAnimationFrameRestoreGeneration = this.terminalRestoreGeneration;
+		if (hasPendingScrollToBottomAnimationFrame) {
+			return;
+		}
 		window.requestAnimationFrame(() => {
+			const restoreGenerationBeforeScheduledScroll = this.pendingScrollToBottomAnimationFrameRestoreGeneration;
+			this.pendingScrollToBottomAnimationFrameRestoreGeneration = null;
 			if (this.disposed || restoreGenerationBeforeScheduledScroll !== this.terminalRestoreGeneration) {
 				return;
 			}
