@@ -97,6 +97,8 @@ const installationStateSchema = z.object({
 	pluginKeys: z.array(z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]*@[a-zA-Z0-9][a-zA-Z0-9._-]*$/)),
 	phase: z.enum(["checking_marketplaces", "installing_plugins", "ready", "waiting_for_evidence"]),
 	attemptCount: z.number().int().nonnegative(),
+	remoteRevisionRefreshRequestSequenceNumber: z.number().int().nonnegative().default(0),
+	completedRemoteRevisionRefreshRequestSequenceNumber: z.number().int().nonnegative().default(0),
 	retryEvidenceFingerprint: z.string().optional(),
 	failureReason: z.string().optional(),
 	automaticRecoveryCondition: z.literal("native_owner_exited_or_source_network_binary_or_directory_facts_changed"),
@@ -384,6 +386,30 @@ async function installedPlugin(binding: CodexConfigurationWriterBinding, pluginK
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
 	}
+}
+
+async function hasCompletedPluginInstallationsForActivatedMarketplaceRevisions(
+	binding: CodexConfigurationWriterBinding,
+	state: InstallationState,
+	marketplaces: MarketplaceSource[],
+	pluginKeys: string[],
+) {
+	for (const marketplace of marketplaces) {
+		const metadata = await marketplaceMetadata(binding, marketplace);
+		if (!metadata || metadata.revision !== state.completedMarketplaceRevisions[marketplace.name]) return false;
+	}
+	for (const key of pluginKeys) {
+		const installed = await installedPlugin(binding, key);
+		const completed = state.completedPluginInstallations[key];
+		if (
+			!installed ||
+			!completed ||
+			installed.installedPath !== completed.installedPath ||
+			installed.directoryIdentity !== completed.directoryIdentity
+		)
+			return false;
+	}
+	return true;
 }
 
 type MarketplacePluginSourceSpec =
@@ -1094,6 +1120,7 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 	nativeLaunchArguments: string[];
 	workingDirectory?: string;
 	recoverPreparationIntentPath?: string;
+	deferRemotePluginUpdatesUntilAfterConversationResume?: boolean;
 }) {
 	const { binding } = input;
 	const shared = binding.sourceSharedPluginInstallationDirectoriesBinding;
@@ -1260,6 +1287,8 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							pluginKeys,
 							phase: "checking_marketplaces",
 							attemptCount: 0,
+							remoteRevisionRefreshRequestSequenceNumber: 0,
+							completedRemoteRevisionRefreshRequestSequenceNumber: 0,
 							completedMarketplaceNames: [],
 							completedMarketplaceRevisions: {},
 							pluginKeysRequiringInstallation: [],
@@ -1269,6 +1298,10 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							updatedAtMs: Date.now(),
 						};
 					}
+					state.remoteRevisionRefreshRequestSequenceNumber = Math.max(
+						state.remoteRevisionRefreshRequestSequenceNumber,
+						preparationIntent.remoteRevisionRefreshRequestSequenceNumber ?? 0,
+					);
 					const remoteRevisionProbes = createCodexPluginRemoteRevisionProbeTransaction((url, ref) =>
 						measureTaskSessionStartupPhase(
 							{ ...diagnosticContext, phase: "codex_plugin_remote_revision_query" },
@@ -1323,8 +1356,71 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 						]);
 					};
 					const mustCheckNativeRevision =
-						binding.purpose === "native_session" && !input.recoverPreparationIntentPath;
+						(binding.purpose === "native_session" && !input.recoverPreparationIntentPath) ||
+						(Boolean(input.recoverPreparationIntentPath) &&
+							state.remoteRevisionRefreshRequestSequenceNumber >
+								state.completedRemoteRevisionRefreshRequestSequenceNumber);
 					await rejectWhileNativeWriterLives();
+					const deferRemoteRefresh =
+						!input.recoverPreparationIntentPath &&
+						(input.deferRemotePluginUpdatesUntilAfterConversationResume ||
+							(binding.purpose === "auxiliary_process" &&
+								state.remoteRevisionRefreshRequestSequenceNumber >
+									state.completedRemoteRevisionRefreshRequestSequenceNumber));
+					const deferredRefreshAlreadyCompleted =
+						preparationIntent.remoteRevisionRefreshRequestSequenceNumber !== undefined &&
+						preparationIntent.remoteRevisionRefreshRequestSequenceNumber <=
+							state.completedRemoteRevisionRefreshRequestSequenceNumber;
+					const localVerificationStartedAt = performance.now();
+					if (
+						(deferRemoteRefresh || deferredRefreshAlreadyCompleted) &&
+						(await hasCompletedPluginInstallationsForActivatedMarketplaceRevisions(
+							binding,
+							state,
+							marketplaces,
+							pluginKeys,
+						))
+					) {
+						if (deferRemoteRefresh) {
+							if (
+								state.remoteRevisionRefreshRequestSequenceNumber <=
+								state.completedRemoteRevisionRefreshRequestSequenceNumber
+							) {
+								state.remoteRevisionRefreshRequestSequenceNumber =
+									state.completedRemoteRevisionRefreshRequestSequenceNumber + 1;
+								// 新请求必须有本轮 marketplace 核验，不能沿用此前失败轮次的阶段。
+								state.completedMarketplaceNames = [];
+								state.nextEvidenceObservationAtMs = Date.now() + 30_000;
+								await saveState(statePath, state);
+							}
+							preparationIntent.remoteRevisionRefreshRequestSequenceNumber =
+								state.remoteRevisionRefreshRequestSequenceNumber;
+						}
+						const localVerificationDurationMs = Math.round(performance.now() - localVerificationStartedAt);
+						void recordTaskSessionStartDiagnostic({
+							...diagnosticContext,
+							event: "phase_completed",
+							phase: deferRemoteRefresh
+								? "codex_verified_installed_plugins_reused_for_resume"
+								: "codex_deferred_remote_plugin_update_already_completed",
+							elapsedMs: localVerificationDurationMs,
+							phaseDurationMs: localVerificationDurationMs,
+							error: null,
+							session: null,
+						});
+						return {
+							arguments: nativeReadOnlyMarketplaceArguments(
+								binding,
+								marketplaces,
+								input.nativeLaunchArguments,
+								configuration,
+							),
+							status: deferRemoteRefresh ? ("ready_with_pending_native_update" as const) : ("ready" as const),
+							statePath,
+							nativeUpgradeCount,
+							nativePluginInstallationCount,
+						};
+					}
 					if (
 						!mustCheckNativeRevision &&
 						state.attemptCount === 0 &&
@@ -1470,8 +1566,16 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 									installed &&
 									(!state.pluginKeysRequiringInstallation.includes(key) ||
 										completed?.directoryIdentity === installed.directoryIdentity)
-								)
+								) {
+									if (
+										completed?.installedPath !== installed.installedPath ||
+										completed.directoryIdentity !== installed.directoryIdentity
+									) {
+										state.completedPluginInstallations[key] = installed;
+										await saveState(statePath, state);
+									}
 									continue;
+								}
 								if (installed && !sourceDiffers) {
 									const reused = await reuseCompletedPluginInstallationFromSourceDomain({
 										binding,
@@ -1519,6 +1623,8 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 							if (await remoteRevisionProbes.hasUnverifiedRevisionProbes())
 								throw new Error("插件远端 revision 尚不可核验，保留完整缓存与待更新状态。");
 							state.phase = "ready";
+							state.completedRemoteRevisionRefreshRequestSequenceNumber =
+								state.remoteRevisionRefreshRequestSequenceNumber;
 							delete state.failureReason;
 							delete state.activeNativeAttempt;
 							await saveState(statePath, state);
@@ -1708,7 +1814,16 @@ export function recoverPendingCodexSharedPluginInstallations(
 					)
 						throw new Error("Codex 插件准备意图指向了未绑定的安装记录。");
 					const state = await readState(intent.sourceInstallationStatePath);
-					if ((state?.nextEvidenceObservationAtMs ?? intent.nextEvidenceObservationAtMs) > Date.now()) continue;
+					const deferredRemoteRefreshAlreadyCompleted =
+						intent.remoteRevisionRefreshRequestSequenceNumber !== undefined &&
+						state !== undefined &&
+						intent.remoteRevisionRefreshRequestSequenceNumber <=
+							state.completedRemoteRevisionRefreshRequestSequenceNumber;
+					if (
+						!deferredRemoteRefreshAlreadyCompleted &&
+						(state?.nextEvidenceObservationAtMs ?? intent.nextEvidenceObservationAtMs) > Date.now()
+					)
+						continue;
 					const binding = candidates.find(
 						(candidate) =>
 							candidate.writerId === intent.writerId && candidate.sourceIdentity === intent.sourceIdentity,

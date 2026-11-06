@@ -11,5 +11,6 @@ export const codexSourceSharedPluginNativeLaunchPreparationIntentSchema = z.obje
 	status: z.enum(["pending", "completed"]),
 	createdAtMs: z.number(),
 	nextEvidenceObservationAtMs: z.number(),
+	remoteRevisionRefreshRequestSequenceNumber: z.number().int().positive().optional(),
 	failureReason: z.string().optional(),
 });

@@ -6420,6 +6420,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					environment: { ...process.env, ...request.env, ...launch.env },
 					nativeLaunchArguments: launch.args,
 					workingDirectory: request.cwd,
+					deferRemotePluginUpdatesUntilAfterConversationResume: Boolean(
+						request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+					),
 				};
 				const preparedPluginInstallation = await measureTaskSessionStartupPhase(
 					{

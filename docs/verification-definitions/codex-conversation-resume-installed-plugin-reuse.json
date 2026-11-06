@@ -1,0 +1,16 @@
+{
+	"verificationId": "def36579-19b0-4b37-8439-32bfa9df1cfb",
+	"kind": "automated_script",
+	"label": "真实 Codex 恢复命中完整插件复用，启动区间无同步联网或安装",
+	"guidance": null,
+	"script": {
+		"entrypoint": "verify-observed-codex-installed-plugin-reuse.mjs",
+		"interpreter": "node",
+		"timeoutMs": 20000
+	},
+	"cleanup": {
+		"mode": "automatic",
+		"assetsDir": null,
+		"manualSteps": []
+	}
+}

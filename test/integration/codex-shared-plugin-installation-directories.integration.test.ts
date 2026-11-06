@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -15,12 +15,14 @@ import {
 import * as remoteRevisionProbeTransaction from "../../src/codex-configuration-sync/codex-plugin-remote-revision-probe-transaction";
 import * as sourceInstallationControllerOwnership from "../../src/codex-configuration-sync/codex-source-plugin-installation-controller-ownership";
 import {
+	prepareAuxiliaryCodexConfigurationLaunch,
 	prepareCodexSharedPluginInstallationForNativeLaunch,
 	recoverPendingCodexSharedPluginInstallations,
 } from "../../src/codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import type { CodexConfigurationWriterBinding } from "../../src/core/codex-configuration-sync-contract";
 import { readProcessCommandLinesForProcessIds } from "../../src/diagnostics/posix-process-table-with-resource-columns-reader";
+import { lockedFileSystem } from "../../src/fs/locked-file-system";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { requireDefinedTestFixtureValue } from "../utilities/require-defined-test-fixture-value";
 import {
@@ -245,8 +247,12 @@ async function createNativeInstallationFixture() {
 				};
 			}),
 		);
-	const managedLaunch = (binding: CodexConfigurationWriterBinding) =>
+	const managedLaunch = (
+		binding: CodexConfigurationWriterBinding,
+		options: { deferRemotePluginUpdatesUntilAfterConversationResume?: boolean } = {},
+	) =>
 		prepareCodexSharedPluginInstallationForNativeLaunch({
+			...options,
 			binding,
 			binary,
 			environment: { ...environment, ...buildCodexConfigurationWriterEnvironment(binding) },
@@ -327,6 +333,237 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			expect((await probeCount()) - before).toBe(1);
 			expect((await native.managedLaunch(await native.writer())).status).toBe("ready");
 			expect((await probeCount()) - before).toBe(2);
+		});
+
+		it("恢复完整插件缓存不查询远端，并持久保留后台更新意图", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.managedLaunch(await native.writer());
+			const synchronousBinding = await native.writer();
+			const synchronousPreparationStartedAt = performance.now();
+			const synchronousPreparation = await native.managedLaunch(synchronousBinding);
+			const synchronousPreparationDurationMs = performance.now() - synchronousPreparationStartedAt;
+			const legacyStatePath = requireDefinedTestFixtureValue(synchronousPreparation.statePath);
+			const legacyState = JSON.parse(await readFile(legacyStatePath, "utf8"));
+			delete legacyState.remoteRevisionRefreshRequestSequenceNumber;
+			delete legacyState.completedRemoteRevisionRefreshRequestSequenceNumber;
+			await writeFile(legacyStatePath, JSON.stringify(legacyState));
+			const before = await native.snapshot();
+			const gitBefore = await native.gitLifecycleCounts();
+			const binding = await native.writer();
+			const resumePreparationStartedAt = performance.now();
+			const result = await native.managedLaunch(binding, {
+				deferRemotePluginUpdatesUntilAfterConversationResume: true,
+			});
+			const resumePreparationDurationMs = performance.now() - resumePreparationStartedAt;
+			expect(result).toMatchObject({
+				status: "ready_with_pending_native_update",
+				nativeUpgradeCount: 0,
+				nativePluginInstallationCount: 0,
+			});
+			expect(await native.gitLifecycleCounts()).toEqual(gitBefore);
+			expect(await native.snapshot()).toEqual(before);
+			const statePath = requireDefinedTestFixtureValue(result.statePath);
+			const intentDirectory = join(statePath, "..", "native-launch-preparation-intents");
+			const intents = await Promise.all(
+				(await readdir(intentDirectory)).map(async (name) =>
+					JSON.parse(await readFile(join(intentDirectory, name), "utf8")),
+				),
+			);
+			expect(intents.filter((intent) => intent.status === "pending")).toMatchObject([
+				{ writerId: binding.writerId, remoteRevisionRefreshRequestSequenceNumber: 1 },
+			]);
+			const coordinationDirectory = join(statePath, "..");
+			const attemptsBeforeAuxiliaryLaunch = (await readdir(coordinationDirectory)).filter((name) =>
+				name.startsWith("native-attempt-"),
+			);
+			const script = join(native.pluginRepository.repositoryPath, "record-hook.py");
+			await writeFile(script, `${await readFile(script, "utf8")}\n# 辅助启动不得提前消费这份远端更新\n`);
+			native.pluginRepository.commitAllRepositoryFilesAtDate({
+				message: "推进冷却期间的插件修订",
+				authorAndCommitterIsoDate: "2026-10-04T00:00:00Z",
+			});
+			const gitBeforeAuxiliaryLaunch = await native.gitLifecycleCounts();
+			await prepareAuxiliaryCodexConfigurationLaunch({
+				binary: native.binary,
+				cwd: native.root,
+				environment: { ...native.environment, ...buildCodexConfigurationWriterEnvironment(binding) },
+				nativeLaunchArguments: [],
+			});
+			expect(await native.gitLifecycleCounts()).toEqual(gitBeforeAuxiliaryLaunch);
+			expect(await native.snapshot()).toEqual(before);
+			expect((await readdir(coordinationDirectory)).filter((name) => name.startsWith("native-attempt-"))).toEqual(
+				attemptsBeforeAuxiliaryLaunch,
+			);
+			expect(JSON.parse(await readFile(statePath, "utf8"))).toMatchObject({
+				remoteRevisionRefreshRequestSequenceNumber: 1,
+				completedRemoteRevisionRefreshRequestSequenceNumber: 0,
+			});
+			const pendingIntentsAfterAuxiliaryLaunch = await Promise.all(
+				(await readdir(intentDirectory)).map(async (name) =>
+					JSON.parse(await readFile(join(intentDirectory, name), "utf8")),
+				),
+			);
+			expect(pendingIntentsAfterAuxiliaryLaunch.filter((intent) => intent.status === "pending")).toMatchObject([
+				{ remoteRevisionRefreshRequestSequenceNumber: 1 },
+				{ remoteRevisionRefreshRequestSequenceNumber: 1 },
+			]);
+			await recordNativeVerificationEvidence(
+				"conversation-resume-local-installation-reuse",
+				{ synchronousPreparationDurationMs, resumePreparationDurationMs, gitBefore, result, intents },
+				native,
+			);
+		});
+
+		it("旧同步失败后的新刷新必须重新核验 marketplace，不能复用旧检查阶段", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.managedLaunch(await native.writer());
+			const before = await native.snapshot();
+			const unavailablePluginRepositoryPath = `${native.pluginRepository.repositoryPath}-unavailable`;
+			await rename(native.pluginRepository.repositoryPath, unavailablePluginRepositoryPath);
+			let statePath: string;
+			const binding = await native.writer();
+			try {
+				const failedRefresh = await native.managedLaunch(binding);
+				expect(failedRefresh.status).toBe("ready_with_pending_native_update");
+				statePath = requireDefinedTestFixtureValue(failedRefresh.statePath);
+				const waiting = JSON.parse(await readFile(statePath, "utf8"));
+				expect(waiting).toMatchObject({
+					phase: "waiting_for_evidence",
+					attemptCount: 3,
+					remoteRevisionRefreshRequestSequenceNumber: 0,
+					completedRemoteRevisionRefreshRequestSequenceNumber: 0,
+					completedMarketplaceNames: [marketplaceName],
+				});
+				const skill = join(
+					native.marketplaceRepository.repositoryPath,
+					"plugins",
+					"skills-example",
+					"skills",
+					"example",
+					"SKILL.md",
+				);
+				await writeFile(skill, `${await readFile(skill, "utf8")}\n新刷新请求之前已推进的本地插件\n`);
+				native.marketplaceRepository.commitAllRepositoryFilesAtDate({
+					message: "推进新刷新请求之前的 marketplace 修订",
+					authorAndCommitterIsoDate: "2026-10-05T00:00:00Z",
+				});
+				const gitBeforeResume = await native.gitLifecycleCounts();
+				expect(
+					(await native.managedLaunch(binding, { deferRemotePluginUpdatesUntilAfterConversationResume: true }))
+						.status,
+				).toBe("ready_with_pending_native_update");
+				expect(await native.gitLifecycleCounts()).toEqual(gitBeforeResume);
+				const deferred = JSON.parse(await readFile(statePath, "utf8"));
+				expect(deferred.remoteRevisionRefreshRequestSequenceNumber).toBe(1);
+				await writeFile(statePath, JSON.stringify({ ...deferred, nextEvidenceObservationAtMs: 0 }));
+			} finally {
+				await rename(unavailablePluginRepositoryPath, native.pluginRepository.repositoryPath);
+			}
+			await recoverPendingCodexSharedPluginInstallations([binding], native.environment);
+			const recovered = JSON.parse(await readFile(statePath, "utf8"));
+			expect(recovered).toMatchObject({
+				phase: "ready",
+				remoteRevisionRefreshRequestSequenceNumber: 1,
+				completedRemoteRevisionRefreshRequestSequenceNumber: 1,
+			});
+			expect(recovered.completedMarketplaceRevisions[marketplaceName]).toBe(
+				native.marketplaceRepository.runGit(["rev-parse", "HEAD"]).stdout.trim(),
+			);
+			expect((await native.snapshot())[1]?.payloadDigest).not.toBe(before[1]?.payloadDigest);
+			await recordNativeVerificationEvidence("new-refresh-after-unsequenced-failure", recovered, native);
+		});
+
+		it("并发恢复合并远端刷新，断网保留未知状态且另一进程恢复后只更新一次", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.managedLaunch(await native.writer());
+			const before = await native.snapshot();
+			const bindings = [await native.writer(), await native.writer()];
+			const results = await Promise.all(
+				bindings.map((binding) =>
+					native.managedLaunch(binding, { deferRemotePluginUpdatesUntilAfterConversationResume: true }),
+				),
+			);
+			expect(results.map((result) => result.status)).toEqual([
+				"ready_with_pending_native_update",
+				"ready_with_pending_native_update",
+			]);
+			const statePath = requireDefinedTestFixtureValue(results[0]?.statePath);
+			const directory = join(statePath, "..");
+			const state = JSON.parse(await readFile(statePath, "utf8"));
+			expect(state).toMatchObject({
+				remoteRevisionRefreshRequestSequenceNumber: 1,
+				completedRemoteRevisionRefreshRequestSequenceNumber: 0,
+			});
+			const attemptsBefore = (await readdir(directory)).filter((name) => name.startsWith("native-attempt-"));
+			const script = join(native.pluginRepository.repositoryPath, "record-hook.py");
+			await writeFile(script, `${await readFile(script, "utf8")}\n# 后台刷新应采用这份新修订\n`);
+			native.pluginRepository.commitAllRepositoryFilesAtDate({
+				message: "推进待后台刷新的插件修订",
+				authorAndCommitterIsoDate: "2026-10-04T00:00:00Z",
+			});
+			await writeFile(statePath, JSON.stringify({ ...state, nextEvidenceObservationAtMs: 0 }));
+			const recoveryEntryPath = join(native.root, "recover-deferred-plugin-revision-refresh.mjs");
+			await writeFile(
+				recoveryEntryPath,
+				`import {recoverPendingCodexSharedPluginInstallations} from ${JSON.stringify(new URL("../../src/codex-configuration-sync/codex-source-shared-plugin-installation-coordinator.ts", import.meta.url).href)};\nawait recoverPendingCodexSharedPluginInstallations(${JSON.stringify(bindings)}, process.env);\n`,
+			);
+			const recoverInSeparateProcess = async () => {
+				const recovery = children.register(
+					spawn(process.execPath, ["--import", "tsx", recoveryEntryPath], {
+						cwd: process.cwd(),
+						env: native.environment,
+						stdio: ["ignore", "ignore", "pipe"],
+					}),
+				);
+				let recoveryError = "";
+				recovery.stderr?.on("data", (bytes) => {
+					recoveryError += bytes.toString();
+				});
+				await waitForChildProcessExitWithinLoadSensitiveTwoTierDeadline({ annotate: async () => {} }, recovery, {
+					waitedForDescription: "独立进程接续并合并 Codex 插件远端刷新",
+					softDeadlineMsExpectedOnUncontendedHost: 15_000,
+					hardDeadlineMsOnlyExplainedByRealHangOrRegression: 60_000,
+				});
+				expect(recovery.exitCode, recoveryError).toBe(0);
+			};
+			const unavailablePluginRepositoryPath = `${native.pluginRepository.repositoryPath}-unavailable`;
+			await rename(native.pluginRepository.repositoryPath, unavailablePluginRepositoryPath);
+			try {
+				await recoverInSeparateProcess();
+				const waiting = JSON.parse(await readFile(statePath, "utf8"));
+				expect(waiting).toMatchObject({
+					phase: "waiting_for_evidence",
+					attemptCount: 3,
+					completedRemoteRevisionRefreshRequestSequenceNumber: 0,
+				});
+				expect(await native.snapshot()).toEqual(before);
+				await writeFile(statePath, JSON.stringify({ ...waiting, nextEvidenceObservationAtMs: 0 }));
+			} finally {
+				await rename(unavailablePluginRepositoryPath, native.pluginRepository.repositoryPath);
+			}
+			await recoverInSeparateProcess();
+			const recoveredState = JSON.parse(await readFile(statePath, "utf8"));
+			expect(recoveredState).toMatchObject({
+				phase: "ready",
+				remoteRevisionRefreshRequestSequenceNumber: 1,
+				completedRemoteRevisionRefreshRequestSequenceNumber: 1,
+			});
+			const intents = await Promise.all(
+				(await readdir(join(directory, "native-launch-preparation-intents"))).map(async (name) =>
+					JSON.parse(await readFile(join(directory, "native-launch-preparation-intents", name), "utf8")),
+				),
+			);
+			expect(intents.every((intent) => intent.status === "completed")).toBe(true);
+			// 一次 marketplace 核验与一次 Git 插件更新；另一份已覆盖意图不能重复启动安装。
+			expect((await readdir(directory)).filter((name) => name.startsWith("native-attempt-"))).toHaveLength(
+				attemptsBefore.length + 2,
+			);
+			expect((await native.snapshot())[0]?.payloadDigest).not.toBe(before[0]?.payloadDigest);
+			await recordNativeVerificationEvidence(
+				"deferred-plugin-revision-refresh-after-process-restart",
+				recoveredState,
+				native,
+			);
 		});
 
 		it("插件远端 revision 未知只沿用完整缓存并标为待更新，来源恢复后自动重验", async () => {
@@ -800,8 +1037,13 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			otherProfileConfiguration.plugins = { [`skills-example@${marketplaceName}`]: { enabled: true } };
 			await writeFile(otherProfileConfigurationPath, stringify(otherProfileConfiguration));
 			const attemptsBefore = (await readdir(directory)).filter((name) => name.startsWith("native-attempt-"));
-			const staleTimestamp = new Date(Date.now() - 60_000);
-			await utimes(join(directory, "native-source-installation.lock"), staleTimestamp, staleTimestamp);
+			const releaseKernelLockAfterControllerExit = await lockedFileSystem.acquireLock({
+				path: join(native.sourceHome, "plugins"),
+				type: "directory",
+				lockfilePath: join(directory, "native-source-installation.lock"),
+				retries: 0,
+			});
+			await releaseKernelLockAfterControllerExit();
 			const request = (requestedBinding = binding) =>
 				prepareCodexSharedPluginInstallationForNativeLaunch({
 					binding: requestedBinding,
@@ -916,6 +1158,21 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 					"utf8",
 				),
 			).toBe(originalMetadata);
+			const statePath = requireDefinedTestFixtureValue(launch.statePath);
+			const adopted = JSON.parse(await readFile(statePath, "utf8"));
+			expect(Object.keys(adopted.completedPluginInstallations)).toHaveLength(configuredPluginNames.length);
+			const gitBeforeResume = await native.gitLifecycleCounts();
+			expect(
+				await native.managedLaunch(await native.writer(), {
+					deferRemotePluginUpdatesUntilAfterConversationResume: true,
+				}),
+			).toMatchObject({
+				status: "ready_with_pending_native_update",
+				nativeUpgradeCount: 0,
+				nativePluginInstallationCount: 0,
+			});
+			expect(await native.gitLifecycleCounts()).toEqual(gitBeforeResume);
+			expect(await native.snapshot()).toEqual(before);
 		});
 
 		it("断网保留完整缓存，三次后只观察，连接恢复后自动重验且不重复安装", async () => {
@@ -995,7 +1252,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 					},
 				};
 				await writeFile(path, stringify(configuration));
-				const result = await native.managedLaunch(binding);
+				const result = await native.managedLaunch(binding, {
+					deferRemotePluginUpdatesUntilAfterConversationResume: true,
+				});
 				expect(result).toMatchObject({ status: "ready", nativeUpgradeCount: 1, nativePluginInstallationCount: 3 });
 				const metadata = JSON.parse(
 					await readFile(
@@ -1040,18 +1299,20 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			const script = join(pluginPath, "record-hook.py");
 			const changedScript = `${await readFile(script, "utf8")}\n# 实际脚本变化，必须重新确认\n`;
 			await writeFile(script, changedScript);
-			const stable = await native.managedLaunch(binding);
+			const stable = await native.managedLaunch(binding, {
+				deferRemotePluginUpdatesUntilAfterConversationResume: true,
+			});
 			expect(stable.nativePluginInstallationCount).toBe(0);
 			expect((await stat(pluginPath)).ino).toBe(originalIdentity);
 			expect(await readFile(script, "utf8")).toBe(changedScript);
 			expect((await hooks()).trustStatus).toBe("modified");
 			configuration.hooks = { state: { [initial.key]: { enabled: false, trusted_hash, trusted_content_hash } } };
 			await writeFile(path, stringify(configuration));
-			await native.managedLaunch(binding);
+			await native.managedLaunch(binding, { deferRemotePluginUpdatesUntilAfterConversationResume: true });
 			expect((await hooks()).enabled).toBe(false);
 			configuration.hooks = { state: { [initial.key]: { enabled: true } } };
 			await writeFile(path, stringify(configuration));
-			await native.managedLaunch(binding);
+			await native.managedLaunch(binding, { deferRemotePluginUpdatesUntilAfterConversationResume: true });
 			expect((await hooks()).trustStatus).toBe("untrusted");
 			expect(parse(await readFile(path, "utf8")).hooks).toEqual(configuration.hooks);
 		});
@@ -1091,7 +1352,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 				processId: held.pid,
 			};
 			await writeFile(statePath, JSON.stringify(state));
-			await expect(native.managedLaunch(binding)).rejects.toThrow(/原生插件安装所有者仍在执行/);
+			await expect(
+				native.managedLaunch(binding, { deferRemotePluginUpdatesUntilAfterConversationResume: true }),
+			).rejects.toThrow(/原生插件安装所有者仍在执行/);
 			expect(await native.snapshot()).toEqual(before);
 		});
 
@@ -1140,7 +1403,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			await writeFile(sourceConfigurationPath, stringify(configured));
 			expect(await native.snapshot()).toEqual(before);
 			const binding = await native.writer();
-			const repaired = await native.managedLaunch(binding);
+			const repaired = await native.managedLaunch(binding, {
+				deferRemotePluginUpdatesUntilAfterConversationResume: true,
+			});
 			expect(repaired.nativePluginInstallationCount).toBe(1);
 			const after = await native.snapshot();
 			expect(
