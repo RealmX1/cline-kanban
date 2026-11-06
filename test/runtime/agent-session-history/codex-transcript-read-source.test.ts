@@ -94,7 +94,9 @@ describe("Codex 普通与压缩转录的共享只读源", () => {
 			}),
 		);
 		try {
-			expect(cache.inspect().maximumObservedConcurrentDecodes).toBe(2);
+			// 小文件可能在下一个请求就绪前已解码完成；此处只约束并发上限。
+			expect(cache.inspect().maximumObservedConcurrentDecodes).toBeLessThanOrEqual(2);
+			expect(cache.inspect().completedDecodeCount).toBe(8);
 			expect(cache.inspect().cachedDecodedBytes).toBeLessThanOrEqual(4 * 1024);
 		} finally {
 			await Promise.all(sources.map((source) => source.close()));
@@ -134,6 +136,7 @@ describe("Codex 普通与压缩转录的共享只读源", () => {
 		let queued: ReturnType<typeof readCodexDecodedTranscriptChunks> | null = null;
 		try {
 			await Promise.all([first.next(), second.next()]);
+			expect(cache.inspect().maximumObservedConcurrentDecodes).toBe(2);
 			queued = readCodexDecodedTranscriptChunks(handle, `${path}.zst`, size, () => {}, AbortSignal.timeout(20));
 			await expect(queued.next()).rejects.toThrow();
 		} finally {
