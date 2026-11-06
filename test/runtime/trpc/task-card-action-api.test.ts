@@ -1799,7 +1799,7 @@ describe("taskCardAction.updateTaskCardFieldValues", () => {
 				taskId: "task-a",
 				taskCardFieldUpdate: {
 					taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
-					kanbanCliTaskCardFieldUpdateRawInput: { title: "renamed", clineReasoningEffort: "high" },
+					kanbanCliTaskCardFieldUpdateRawInput: { title: "renamed" },
 				},
 			},
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
@@ -1808,7 +1808,7 @@ describe("taskCardAction.updateTaskCardFieldValues", () => {
 		expect(response.taskCardSnapshotAfterAction.taskCard).toMatchObject({
 			title: "renamed",
 			prompt: "prompt of task-a",
-			clineSettings: { providerId: "anthropic", modelId: "claude-sonnet", reasoningEffort: "high" },
+			clineSettings: { providerId: "anthropic", modelId: "claude-sonnet" },
 		});
 		expect(harness.callOrder).toEqual(["boardWrite:kanban_cli_task_update"]);
 	});
@@ -1837,7 +1837,6 @@ describe("taskCardAction.updateTaskCardFieldValues", () => {
 					taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
 					taskCardFieldValuePatch: {
 						autoReviewEnabled: false,
-						clineSettings: null,
 						taskAgentSessionInitialization: null,
 					},
 				},
@@ -1853,7 +1852,7 @@ describe("taskCardAction.updateTaskCardFieldValues", () => {
 			autoReviewMode: "pr",
 			prompt: "prompt of task-r",
 		});
-		expect(updatedCard.clineSettings).toBeUndefined();
+		expect(updatedCard.clineSettings).toEqual({ providerId: "anthropic" });
 		expect(updatedCard.parentSessionId).toBeUndefined();
 		expect(updatedCard.taskAgentSessionInitialization).toBeUndefined();
 		expect(response.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard).toBe("review");

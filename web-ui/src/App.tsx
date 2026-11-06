@@ -64,7 +64,6 @@ import { UpdateNotificationController } from "@/components/update-notification-c
 import { createInitialBoardData } from "@/data/board-data";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { createIdleTaskSession } from "@/hooks/app-utils";
-import { KanbanAccessBlockedFallback } from "@/hooks/kanban-access-blocked-fallback";
 import { RuntimeDisconnectedFallback } from "@/hooks/runtime-disconnected-fallback";
 import { useAllProjectsFocusViewAdjacentTaskKeyboardNavigation } from "@/hooks/use-all-projects-focus-view-adjacent-task-keyboard-navigation";
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
@@ -82,11 +81,9 @@ import { useDetailTaskNavigation } from "@/hooks/use-detail-task-navigation";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
 import { useExplorationThreadGraph } from "@/hooks/use-exploration-thread-graph";
 import { useExploratoryFindings } from "@/hooks/use-exploratory-findings";
-import { useFeaturebaseFeedbackWidget } from "@/hooks/use-featurebase-feedback-widget";
 import { useGitActions } from "@/hooks/use-git-actions";
 import { useHomeSidebarAgentPanel } from "@/hooks/use-home-sidebar-agent-panel";
 import { useIsMobile } from "@/hooks/use-is-mobile";
-import { useKanbanAccessGate } from "@/hooks/use-kanban-access-gate";
 import { useMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import { useNotificationCenter } from "@/hooks/use-notification-center";
 import { useNotificationTaskFocus } from "@/hooks/use-notification-task-focus";
@@ -124,16 +121,15 @@ import {
 	selectTaskChatMessagesForTask,
 } from "@/runtime/native-agent";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import type { RuntimeClineReasoningEffort, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { useRuntimeProjectConfig } from "@/runtime/use-runtime-project-config";
 import type { StreamedTaskSessionSummariesApplier } from "@/runtime/use-runtime-state-stream";
 import { useTerminalConnectionReady } from "@/runtime/use-terminal-connection-ready";
 import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/runtime/use-user-interface-preferences-shared-across-browser-origins";
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
-import { applyTaskDetailClineSettingsChange, findCardSelection } from "@/state/board-state";
+import { findCardSelection } from "@/state/board-state";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
-import { withWebUiBoardMutationInitiatorRecordedForChangedTaskCards } from "@/state/web-ui-board-mutation-initiator-records-pending-until-successful-save-state";
 import {
 	prunePendingTaskCardCommandBoardOverlayEntriesSatisfiedByBoard,
 	usePendingTaskCardCommandBoardOverlayEntries,
@@ -213,13 +209,11 @@ export default function App(): ReactElement {
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		taskReadyForReviewEvents,
-		latestMcpAuthStatuses,
 		exploratoryFindings: pushedExploratoryFindings,
 		latestExplorationThreadGraphUpdate,
 		queuedTaskPromptDeliveryProjectionsByTaskId: pushedQueuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
-		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
@@ -281,25 +275,17 @@ export default function App(): ReactElement {
 		refreshKey: streamSnapshotGeneration,
 		pushedProjectedEntriesByTaskId: pushedQueuedTaskPromptDeliveryProjectionsByTaskId,
 	});
-	const { isBlocked: isKanbanAccessBlocked, refresh: refreshKanbanAccess } = useKanbanAccessGate({
-		workspaceId: projectRuntimeWorkspaceId,
-	});
 	const isTaskAgentReady = isTaskAgentSetupSatisfied(runtimeProjectConfig);
 	const settingsWorkspaceId = isCurrentProjectRuntimeUnavailable
 		? null
 		: (navigationCurrentProjectId ?? currentProjectId);
 	const { config: settingsRuntimeProjectConfig, refresh: refreshSettingsRuntimeProjectConfig } =
 		useRuntimeProjectConfig(settingsWorkspaceId);
-	const featurebaseFeedbackState = useFeaturebaseFeedbackWidget({
-		workspaceId: settingsWorkspaceId,
-		clineProviderSettings: settingsRuntimeProjectConfig?.clineProviderSettings ?? null,
-	});
 	const {
 		isStartupOnboardingDialogOpen,
 		handleOpenStartupOnboardingDialog,
 		handleCloseStartupOnboardingDialog,
 		handleSelectOnboardingAgent,
-		handleOnboardingClineSetupSaved,
 	} = useStartupOnboarding({
 		currentProjectId: projectRuntimeWorkspaceId,
 		runtimeProjectConfig,
@@ -738,8 +724,6 @@ export default function App(): ReactElement {
 		setNewTaskWorktreeMode,
 		newTaskAgentId,
 		setNewTaskAgentId,
-		newTaskClineSettings,
-		setNewTaskClineSettings,
 		newTaskTerminalAgentModelOverrideSettings,
 		setNewTaskTerminalAgentModelOverrideSettings,
 		newTaskAgentSessionInitialization,
@@ -774,8 +758,6 @@ export default function App(): ReactElement {
 		setEditTaskWorktreeMode,
 		editTaskAgentId,
 		setEditTaskAgentId,
-		editTaskClineSettings,
-		setEditTaskClineSettings,
 		editTaskTerminalAgentModelOverrideSettings,
 		setEditTaskTerminalAgentModelOverrideSettings,
 		editTaskAgentSessionInitialization,
@@ -985,7 +967,6 @@ export default function App(): ReactElement {
 		currentProjectId: projectRuntimeWorkspaceId,
 		hasNoProjects,
 		runtimeProjectConfig,
-		clineSessionContextVersion,
 		taskSessions: sessions,
 		workspaceGit,
 		latestTaskChatMessage,
@@ -1162,8 +1143,7 @@ export default function App(): ReactElement {
 			: selectedTaskId !== null || pendingCrossProjectTaskOpen?.originatedFromFocusView || taskLookupWorkbench.isOpen
 				? "task_focus"
 				: "kanban_board",
-		isTaskSwitcherSectionModelActive:
-			isBoardScopeAllProjectsSelected && !isRuntimeDisconnected && !isKanbanAccessBlocked,
+		isTaskSwitcherSectionModelActive: isBoardScopeAllProjectsSelected && !isRuntimeDisconnected,
 		projects,
 		notificationLogByWorkspaceId,
 		currentProjectId,
@@ -1312,7 +1292,6 @@ export default function App(): ReactElement {
 		handleCardSelect,
 		handleOpenTaskInProject,
 		defaultAgentIdOfCurrentProject: runtimeProjectConfig?.selectedAgentId ?? null,
-		defaultClineModelIdOfCurrentProject: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
 		resolveTaskWorkspaceAbsoluteDirectoryPath,
 		onStartTask: handleStartTaskFromBoard,
 		onMoveToTrashTask: handleMoveReviewCardToTrash,
@@ -1588,7 +1567,6 @@ export default function App(): ReactElement {
 		host: crossProjectRecentlyActiveTaskSwitcherHost,
 		isFocusViewActive:
 			!isRuntimeDisconnected &&
-			!isKanbanAccessBlocked &&
 			(selectedTaskId !== null || pendingCrossProjectTaskOpen?.originatedFromFocusView === true),
 	});
 	// All projects 首页分区列看板里，当前项目的行展开成完整卡片时与主看板同数据、同动作。
@@ -1694,45 +1672,6 @@ export default function App(): ReactElement {
 		selectedCard?.card.id,
 		latestTaskChatMessage,
 	);
-	const defaultTaskClineProviderId =
-		runtimeProjectConfig?.clineProviderSettings?.providerId ??
-		runtimeProjectConfig?.clineProviderSettings?.oauthProvider ??
-		null;
-	const handleClineTaskSettingsChangedForTask = useCallback(
-		({
-			providerId,
-			modelId,
-			reasoningEffort,
-		}: {
-			providerId: string;
-			modelId: string;
-			reasoningEffort: RuntimeClineReasoningEffort | "";
-		}) => {
-			if (!selectedCard) {
-				return;
-			}
-			const taskId = selectedCard.card.id;
-			setBoard(
-				withWebUiBoardMutationInitiatorRecordedForChangedTaskCards("web_ui_user_gesture", (currentBoard) => {
-					const result = applyTaskDetailClineSettingsChange(
-						currentBoard,
-						taskId,
-						{
-							providerId,
-							modelId,
-							reasoningEffort,
-						},
-						{
-							providerId: defaultTaskClineProviderId,
-							modelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
-						},
-					);
-					return result.updated ? result.board : currentBoard;
-				}),
-			);
-		},
-		[defaultTaskClineProviderId, runtimeProjectConfig, selectedCard, setBoard],
-	);
 
 	useEffect(() => {
 		const openAnalysisSettings = () => {
@@ -1773,8 +1712,6 @@ export default function App(): ReactElement {
 						canShowAgentSection={!hasNoProjects && projectRuntimeWorkspaceId !== null}
 						agentSectionContent={homeSidebarAgentPanel}
 						selectedAgentId={settingsRuntimeProjectConfig?.selectedAgentId ?? null}
-						clineProviderSettings={settingsRuntimeProjectConfig?.clineProviderSettings ?? null}
-						featurebaseFeedbackState={featurebaseFeedbackState}
 						onSelectProject={(projectId) => {
 							handleSelectProjectNarrowingToSingleProjectScope(projectId);
 						}}
@@ -2079,9 +2016,6 @@ export default function App(): ReactElement {
 														isFocusViewChromeShown ? undefined : handleProgrammaticCardMoveReady
 													}
 													onDragEnd={handleDragEnd}
-													defaultClineModelId={
-														runtimeProjectConfig?.clineProviderSettings?.modelId ?? null
-													}
 													defaultAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 												/>
 											</div>
@@ -2208,12 +2142,12 @@ export default function App(): ReactElement {
 									onSendReviewComments={(taskId: string, text: string) => {
 										void handleSendReviewComments(taskId, text);
 									}}
-									onSendClineChatMessage={sendTaskChatMessage}
-									onCancelClineChatTurn={cancelTaskChatTurn}
+									onSendAgentConversationChatMessage={sendTaskChatMessage}
+									onCancelAgentConversationChatTurn={cancelTaskChatTurn}
 									onResolveTaskAgentUserDecision={resolveTaskAgentUserDecision}
-									onLoadClineChatMessages={fetchTaskChatMessages}
-									latestClineChatMessage={latestSelectedTaskChatMessage}
-									streamedClineChatMessages={selectedTaskChatMessages}
+									onLoadAgentConversationChatMessages={fetchTaskChatMessages}
+									latestAgentConversationChatMessage={latestSelectedTaskChatMessage}
+									streamedAgentConversationChatMessages={selectedTaskChatMessages}
 									onMoveToTrash={handleMoveToTrash}
 									isMoveToTrashLoading={
 										moveToTrashLoadingById[selectedCardRenderedInFocusView.card.id] ?? false
@@ -2239,8 +2173,6 @@ export default function App(): ReactElement {
 									isBottomTerminalExpanded={isDetailTerminalExpanded}
 									onBottomTerminalToggleExpand={handleToggleExpandDetailTerminal}
 									isDocumentVisible={isDocumentVisible}
-									onClineSettingsSaved={refreshRuntimeProjectConfig}
-									onTaskClineSettingsChanged={handleClineTaskSettingsChangedForTask}
 								/>
 							</div>
 						) : null}
@@ -2256,7 +2188,6 @@ export default function App(): ReactElement {
 					open={isSettingsOpen}
 					workspaceId={settingsWorkspaceId}
 					initialConfig={settingsRuntimeProjectConfig}
-					liveMcpAuthStatuses={latestMcpAuthStatuses}
 					initialSection={settingsInitialSection}
 					openingRequestSequence={settingsOpeningRequestSequence}
 					onOpenChange={(nextOpen) => {
@@ -2269,7 +2200,6 @@ export default function App(): ReactElement {
 						refreshRuntimeProjectConfig();
 						refreshSettingsRuntimeProjectConfig();
 					}}
-					onAccountSwitched={refreshKanbanAccess}
 				/>
 				<DebugDialog
 					open={isDebugDialogOpen}
@@ -2400,8 +2330,6 @@ export default function App(): ReactElement {
 					onWorktreeModeChange={editingTaskId ? setEditTaskWorktreeMode : setNewTaskWorktreeMode}
 					agentId={editingTaskId ? editTaskAgentId : newTaskAgentId}
 					onAgentIdChange={editingTaskId ? setEditTaskAgentId : setNewTaskAgentId}
-					clineSettings={editingTaskId ? editTaskClineSettings : newTaskClineSettings}
-					onClineSettingsChange={editingTaskId ? setEditTaskClineSettings : setNewTaskClineSettings}
 					terminalAgentModelOverrideSettings={
 						editingTaskId ? editTaskTerminalAgentModelOverrideSettings : newTaskTerminalAgentModelOverrideSettings
 					}
@@ -2418,9 +2346,6 @@ export default function App(): ReactElement {
 					}
 					agents={runtimeProjectConfig?.agents ?? []}
 					defaultAgentId={taskEditorDefaultAgentId}
-					defaultProviderId={defaultTaskClineProviderId}
-					defaultModelId={runtimeProjectConfig?.clineProviderSettings?.modelId ?? null}
-					defaultReasoningEffort={runtimeProjectConfig?.clineProviderSettings?.reasoningEffort ?? null}
 				/>
 				<ClearTrashDialog
 					open={isClearTrashDialogOpen}
@@ -2443,11 +2368,8 @@ export default function App(): ReactElement {
 					onClose={handleCloseStartupOnboardingDialog}
 					selectedAgentId={runtimeProjectConfig?.selectedAgentId ?? null}
 					agents={runtimeProjectConfig?.agents ?? []}
-					clineProviderSettings={runtimeProjectConfig?.clineProviderSettings ?? null}
 					workspaceId={currentProjectId}
-					runtimeConfig={runtimeProjectConfig ?? null}
 					onSelectAgent={handleSelectOnboardingAgent}
-					onClineSetupSaved={handleOnboardingClineSetupSaved}
 				/>
 
 				<AddProjectDialog
@@ -2510,7 +2432,6 @@ export default function App(): ReactElement {
 							},
 							onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
 							defaultAgentId: runtimeProjectConfig?.selectedAgentId ?? null,
-							defaultClineModelId: runtimeProjectConfig?.clineProviderSettings?.modelId ?? null,
 						}}
 						onSelectTask={() =>
 							setSelectedTaskId(
@@ -2650,13 +2571,7 @@ export default function App(): ReactElement {
 						<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
 							<PostDeployVerificationTaskClosureFormHost />
 							<SideSessionCreationWorkbench />
-							{isRuntimeDisconnected ? (
-								<RuntimeDisconnectedFallback />
-							) : isKanbanAccessBlocked ? (
-								<KanbanAccessBlockedFallback />
-							) : (
-								renderedApplicationView
-							)}
+							{isRuntimeDisconnected ? <RuntimeDisconnectedFallback /> : renderedApplicationView}
 						</TaskCommentsDialogProvider>
 					</LayoutCustomizationsProvider>
 				</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>

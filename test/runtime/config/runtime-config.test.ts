@@ -67,6 +67,36 @@ function writeFakeCommand(binDir: string, command: string): void {
 }
 
 describe.sequential("runtime-config auto agent selection", () => {
+	it.each([
+		["cline", "kimi", "kimi"],
+		["cline", "omp", "omp"],
+		["cline", "", "codex"],
+		["codex", "claude", "codex"],
+	] as const)(
+		"旧默认 %s 在已安装 %s 时解析为 %s，保留原始配置",
+		async (storedAgentId, installedCommand, expectedAgentId) => {
+			const isolatedHome = createTempDir("kanban-retired-cline-default-home-");
+			const isolatedBinaryDirectory = createTempDir("kanban-retired-cline-default-binaries-");
+			try {
+				if (installedCommand) writeFakeCommand(isolatedBinaryDirectory.path, installedCommand);
+				const configDirectory = join(isolatedHome.path, ".cline", "kanban");
+				mkdirSync(configDirectory, { recursive: true });
+				const configPath = join(configDirectory, "config.json");
+				const originalConfig = JSON.stringify({ selectedAgentId: storedAgentId });
+				writeFileSync(configPath, originalConfig);
+				await withTemporaryEnv(
+					{ home: isolatedHome.path, pathPrefix: isolatedBinaryDirectory.path, replacePath: true },
+					async () => {
+						expect((await loadGlobalRuntimeConfig()).selectedAgentId).toBe(expectedAgentId);
+						expect(readFileSync(configPath, "utf8")).toBe(originalConfig);
+					},
+				);
+			} finally {
+				isolatedHome.cleanup();
+				isolatedBinaryDirectory.cleanup();
+			}
+		},
+	);
 	it("热接管选择跨全局、项目和并发设置更新保留，全量保存省略字段也不清除它", async () => {
 		const isolatedHome = createTempDir("kanban-pty-host-preference-home-");
 		const isolatedProject = createTempDir("kanban-pty-host-preference-project-");
@@ -203,7 +233,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 				process.env.SHELL = "/definitely-not-a-shell";
 				await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin, replacePath: true }, async () => {
 					const state = await loadRuntimeConfig(tempProject);
-					expect(state.selectedAgentId).toBe("cline");
+					expect(state.selectedAgentId).toBe("codex");
 					expect(existsSync(join(tempHome, ".cline", "kanban", "config.json"))).toBe(false);
 				});
 			} finally {
@@ -290,7 +320,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 
 			await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin }, async () => {
 				const state = await loadRuntimeConfig(tempProject);
-				expect(state.selectedAgentId).toBe("cline");
+				expect(state.selectedAgentId).toBe("claude");
 			});
 		} finally {
 			cleanupBin();
@@ -321,9 +351,9 @@ describe.sequential("runtime-config auto agent selection", () => {
 				"utf8",
 			);
 
-			await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin }, async () => {
+			await withTemporaryEnv({ home: tempHome, pathPrefix: tempBin, replacePath: true }, async () => {
 				const state = await loadRuntimeConfig(tempProject);
-				expect(state.selectedAgentId).toBe("cline");
+				expect(state.selectedAgentId).toBe("codex");
 			});
 		} finally {
 			cleanupBin();
@@ -346,7 +376,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 			await withTemporaryEnv({ home: tempHome }, async () => {
 				const current = await loadRuntimeConfig(tempProject);
 				await saveRuntimeConfig(tempProject, {
-					selectedAgentId: "cline",
+					selectedAgentId: "codex",
 					selectedShortcutLabel: null,
 					agentAutonomousModeEnabled: true,
 					ompAgentSessionTransportForNewTasks: "pty_terminal" as const,
@@ -372,7 +402,7 @@ describe.sequential("runtime-config auto agent selection", () => {
 					commitPromptTemplate?: string;
 					openPrPromptTemplate?: string;
 				};
-				expect(globalPayload.selectedAgentId).toBeUndefined();
+				expect(globalPayload.selectedAgentId).toBe("codex");
 				expect(globalPayload.agentAutonomousModeEnabled).toBeUndefined();
 				expect(globalPayload.newTaskStartInPlanModeByDefault).toBeUndefined();
 				expect(globalPayload.readyForReviewNotificationsEnabled).toBeUndefined();

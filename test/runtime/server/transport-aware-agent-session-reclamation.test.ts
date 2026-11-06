@@ -3,7 +3,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
-import type { ClineTaskSessionService } from "../../../src/cline-sdk/cline-task-session-service";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import {
 	collectDescendantPidsFromParentTable,
@@ -74,10 +73,6 @@ function stubTerminalManager(forceStop = vi.fn(async () => {})): TerminalSession
 	return { forceStopTaskSession: forceStop } as unknown as TerminalSessionManager;
 }
 
-function stubClineService(stop = vi.fn(async () => null)): ClineTaskSessionService {
-	return { stopTaskSession: stop } as unknown as ClineTaskSessionService;
-}
-
 function stubAcpService(
 	stopForReclamation = vi.fn(async () => ({
 		rootPid: ROOT_PID,
@@ -90,7 +85,6 @@ function stubAcpService(
 
 function createExecutor(overrides: {
 	terminalManager?: TerminalSessionManager | null;
-	clineService?: ClineTaskSessionService | null;
 	acpService?: AcpTaskSessionService | null;
 	descendantPids?: number[];
 	alivePids?: Set<number>;
@@ -99,7 +93,6 @@ function createExecutor(overrides: {
 	return createTransportAwareAgentSessionReclamationExecutor({
 		now: () => NOW + 10,
 		getTerminalManager: () => overrides.terminalManager ?? null,
-		getClineTaskSessionService: () => overrides.clineService ?? null,
 		getAcpTaskSessionService: () => overrides.acpService ?? null,
 		snapshotDescendantPids: async () => overrides.descendantPids ?? [],
 		isProcessAlive: (pid) => alivePids.has(pid),
@@ -168,23 +161,6 @@ describe("pty_terminal", () => {
 		const outcome = await createExecutor({ terminalManager: null })(makeRequest());
 		expect(outcome.rootProcessExitConfirmed).toBe(true);
 		expect(outcome.failureReason).toBeNull();
-	});
-});
-
-describe("in_process_cline_sdk", () => {
-	it("stop SDK 会话并释放 MCP tool bundle；退出确认语义随 transport 收窄", async () => {
-		const stop = vi.fn(async () => null);
-		const outcome = await createExecutor({ clineService: stubClineService(stop) })(
-			makeRequest({ agentId: "cline", sessionTransport: "in_process_cline_sdk" }, { pid: null }),
-		);
-
-		expect(stop).toHaveBeenCalledWith("task-a");
-		expect(outcome.sessionTransport).toBe("in_process_cline_sdk");
-		expect(outcome.releasedResources).toEqual(["cline_sdk_session", "cline_mcp_tool_bundle"]);
-		// 这条 transport 没有 OS 进程；true 表示「SDK 会话已 stop 且 bundle 已释放」，
-		// 读它必须同时读 sessionTransport。
-		expect(outcome.rootProcessExitConfirmed).toBe(true);
-		expect(outcome.survivingDescendantPids).toEqual([]);
 	});
 });
 

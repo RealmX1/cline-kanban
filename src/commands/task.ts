@@ -4,6 +4,7 @@ import { createTRPCProxyClient, httpBatchLink, type TRPCClient } from "@trpc/cli
 import type { Command } from "commander";
 import packageJson from "../../package.json" with { type: "json" };
 import { loadRuntimeConfig } from "../config/runtime-config";
+import { assertRuntimeAgentIsNotRetired } from "../core/agent-catalog";
 import {
 	AGENT_WORK_DELEGATION_SELECTION_CAVEAT,
 	INDEPENDENT_TASK_CREATION_GUIDANCE,
@@ -20,7 +21,6 @@ import type {
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAgentSessionInitializationReuseMode,
 	RuntimeTaskCardActionMoveIntoDoneResponse,
-	RuntimeTaskClineSettings,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskWorkspaceGitStatus,
 	RuntimeTaskWorktreeMode,
@@ -29,7 +29,6 @@ import type {
 import {
 	POST_DEPLOY_VERIFICATION_DONE_ENTRY_REQUIRES_UNCHECKED_ITEM_CLOSURE_REASONS_ERROR_MESSAGE_PREFIX,
 	runtimeAgentIdSchema,
-	runtimeClineReasoningEffortSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationReuseModeSchema,
 	runtimeTaskWorktreeModeSchema,
@@ -50,12 +49,7 @@ import { buildKanbanRuntimeUrl, getKanbanRuntimeOrigin, getRuntimeFetch } from "
 import { resolveSessionFacets } from "../core/session-activity";
 import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../core/task-agent-permission-mode";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/task-board-mutations";
-import {
-	buildTaskAgentSessionInitialization,
-	buildTaskClineSettingsForCreate,
-	cloneTaskClineSettings,
-	type ParsedTaskClineReasoningEffort,
-} from "../core/task-card-field-patch-resolution";
+import { buildTaskAgentSessionInitialization } from "../core/task-card-field-patch-resolution";
 import {
 	resolveTaskClosureOutcomeForBoardColumn,
 	TASK_CLOSURE_OUTCOME_LABELS,
@@ -230,45 +224,10 @@ function parseAgentId(value: string | undefined): RuntimeAgentId | null | undefi
 	}
 	const result = runtimeAgentIdSchema.safeParse(value);
 	if (result.success) {
+		assertRuntimeAgentIsNotRetired(result.data);
 		return result.data;
 	}
 	throw new Error(`Invalid agent ID "${value}". Expected one of: ${VALID_AGENT_IDS.join(", ")}, default.`);
-}
-
-function parseOptionalStringOrDefault(value: string | undefined): string | null | undefined {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === "default") {
-		return null;
-	}
-	return value;
-}
-
-function parseTaskClineReasoningEffort(value: string | undefined): ParsedTaskClineReasoningEffort {
-	if (value === undefined) {
-		return undefined;
-	}
-	if (value === "inherit") {
-		return null;
-	}
-	if (value === "default") {
-		return "default";
-	}
-	const result = runtimeClineReasoningEffortSchema.safeParse(value);
-	if (result.success) {
-		return result.data;
-	}
-	throw new Error("Invalid Cline reasoning effort. Expected one of: default, low, medium, high, xhigh, inherit.");
-}
-
-function formatTaskClineSettings(settings?: RuntimeTaskClineSettings): JsonRecord {
-	if (settings === undefined) {
-		return {};
-	}
-	return {
-		clineSettings: cloneTaskClineSettings(settings) ?? {},
-	};
 }
 
 function resolveTaskCommandTarget(input: TaskCommandTarget, commandName: string): ResolvedTaskCommandTarget {
@@ -446,7 +405,7 @@ function formatTaskRecordWithSessionSummary(
 		autoReviewMode: task.autoReviewMode ?? "commit",
 		taskCommentEntries: task.taskCommentEntries ?? [],
 		...(task.agentId ? { agentId: task.agentId } : {}),
-		...formatTaskClineSettings(task.clineSettings),
+		...(task.clineSettings ? { clineSettings: task.clineSettings } : {}),
 		createdAt: task.createdAt,
 		updatedAt: task.updatedAt,
 		// Backlog 的排序键（只在 Description 内容变化时推进）；老卡片缺字段时按同一回落规则解析后透出。
@@ -693,7 +652,6 @@ interface TaskCreateCommandInput {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId;
-	clineSettings?: RuntimeTaskClineSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	parentSessionId?: string;
 	worktreeMode?: RuntimeTaskWorktreeMode;
@@ -714,7 +672,6 @@ function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreat
 		autoReviewEnabled: input.autoReviewEnabled,
 		autoReviewMode: input.autoReviewMode,
 		agentId: input.agentId,
-		clineSettings: input.clineSettings,
 		taskAgentSessionInitialization: input.taskAgentSessionInitialization,
 		parentSessionId: input.parentSessionId,
 		worktreeMode: input.worktreeMode,
@@ -865,7 +822,6 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 			autoReviewEnabled: input.autoReviewEnabled,
 			autoReviewMode: input.autoReviewMode,
 			agentId: input.agentId,
-			clineSettings: input.clineSettings,
 			taskAgentSessionInitialization: input.taskAgentSessionInitialization,
 			baseRef: resolvedBaseRef,
 			parentSessionId: input.parentSessionId,
@@ -897,7 +853,6 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 			autoReviewEnabled: created.autoReviewEnabled === true,
 			autoReviewMode: created.autoReviewMode ?? "commit",
 			...(created.agentId ? { agentId: created.agentId } : {}),
-			...formatTaskClineSettings(created.clineSettings),
 			...(created.taskAgentSessionInitialization
 				? { taskAgentSessionInitialization: created.taskAgentSessionInitialization }
 				: {}),
@@ -920,9 +875,6 @@ async function updateTaskCommand(input: {
 	autoReviewEnabled?: boolean;
 	autoReviewMode?: "commit" | "pr";
 	agentId?: RuntimeAgentId | null;
-	clineProviderId?: string | null;
-	clineModelId?: string | null;
-	clineReasoningEffort?: ParsedTaskClineReasoningEffort;
 	taskAgentSessionInitializationId?: string | null;
 	taskAgentSessionInitializationMode?: RuntimeTaskAgentSessionInitializationReuseMode;
 	parentSessionId?: string | null;
@@ -938,9 +890,6 @@ async function updateTaskCommand(input: {
 		input.autoReviewEnabled === undefined &&
 		input.autoReviewMode === undefined &&
 		input.agentId === undefined &&
-		input.clineProviderId === undefined &&
-		input.clineModelId === undefined &&
-		input.clineReasoningEffort === undefined &&
 		input.taskAgentSessionInitializationId === undefined &&
 		input.taskAgentSessionInitializationMode === undefined &&
 		input.parentSessionId === undefined &&
@@ -968,9 +917,6 @@ async function updateTaskCommand(input: {
 				autoReviewEnabled: input.autoReviewEnabled,
 				autoReviewMode: input.autoReviewMode,
 				agentId: input.agentId,
-				clineProviderId: input.clineProviderId,
-				clineModelId: input.clineModelId,
-				clineReasoningEffort: input.clineReasoningEffort,
 				taskAgentSessionInitializationId: input.taskAgentSessionInitializationId,
 				taskAgentSessionInitializationMode: input.taskAgentSessionInitializationMode,
 				parentSessionId: input.parentSessionId,
@@ -2217,19 +2163,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		)
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
-		.option("--agent-id <id>", "Agent override: cline | claude | codex | droid | gemini | opencode | default.")
-		.option(
-			"--cline-provider <id>",
-			'Cline provider override (e.g. anthropic, openai, cline). Use "default" for workspace default.',
-		)
-		.option(
-			"--cline-model <id>",
-			'Cline model override (e.g. claude-sonnet-4-20250514). Use "default" for workspace default.',
-		)
-		.option(
-			"--cline-reasoning-effort <level>",
-			"Cline reasoning effort override: default | low | medium | high | xhigh.",
-		)
+		.option("--agent-id <id>", "Agent override: claude | codex | droid | gemini | opencode | default.")
 		.option("--agent-session-initialization-id <uuid>", "Existing Claude, Codex, or Cursor session UUID.")
 		.option(
 			"--agent-session-initialization-mode <mode>",
@@ -2259,9 +2193,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
-				clineProvider?: string;
-				clineModel?: string;
-				clineReasoningEffort?: string;
 				agentSessionInitializationId?: string;
 				agentSessionInitializationMode?: string;
 				parentSessionId?: string;
@@ -2284,11 +2215,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 						autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 						autoReviewMode: options.autoReviewMode,
 						agentId: parseAgentId(options.agentId) ?? undefined,
-						clineSettings: buildTaskClineSettingsForCreate({
-							providerId: parseOptionalStringOrDefault(options.clineProvider) ?? undefined,
-							modelId: parseOptionalStringOrDefault(options.clineModel) ?? undefined,
-							reasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
-						}),
 						taskAgentSessionInitialization:
 							buildTaskAgentSessionInitialization({
 								agentId: parseAgentId(options.agentId),
@@ -2326,19 +2252,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		)
 		.option("--auto-review-enabled [value]", "Enable auto-review behavior (true|false). Flag-only implies true.")
 		.option("--auto-review-mode <mode>", "Auto-review mode: commit | pr.", parseAutoReviewMode)
-		.option(
-			"--agent-id <id>",
-			'Agent override: cline | claude | codex | droid | gemini | opencode. Use "default" to clear.',
-		)
-		.option(
-			"--cline-provider <id>",
-			'Cline provider override (e.g. anthropic, openai, cline). Use "default" to clear.',
-		)
-		.option("--cline-model <id>", 'Cline model override (e.g. claude-sonnet-4-20250514). Use "default" to clear.')
-		.option(
-			"--cline-reasoning-effort <level>",
-			'Cline reasoning effort override: default | low | medium | high | xhigh. Use "inherit" to clear.',
-		)
+		.option("--agent-id <id>", 'Agent override: claude | codex | droid | gemini | opencode. Use "default" to clear.')
 		.option(
 			"--agent-session-initialization-id <uuid>",
 			'Existing Claude, Codex, or Cursor session UUID. Use "inherit" to clear.',
@@ -2368,9 +2282,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				autoReviewEnabled?: unknown;
 				autoReviewMode?: "commit" | "pr";
 				agentId?: string;
-				clineProvider?: string;
-				clineModel?: string;
-				clineReasoningEffort?: string;
 				agentSessionInitializationId?: string;
 				agentSessionInitializationMode?: string;
 				parentSessionId?: string;
@@ -2391,9 +2302,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 							autoReviewEnabled: parseOptionalBooleanOption(options.autoReviewEnabled, "--auto-review-enabled"),
 							autoReviewMode: options.autoReviewMode,
 							agentId: parseAgentId(options.agentId),
-							clineProviderId: parseOptionalStringOrDefault(options.clineProvider),
-							clineModelId: parseOptionalStringOrDefault(options.clineModel),
-							clineReasoningEffort: parseTaskClineReasoningEffort(options.clineReasoningEffort),
 							taskAgentSessionInitializationId: parseOptionalStringOrInherit(
 								options.agentSessionInitializationId,
 							),

@@ -50,7 +50,7 @@
 			"plugins": ["grit/no-console.grit", "grit/no-process-exit.grit"]
 		},
 		{
-			"includes": ["src/**/*.ts", "src/**/*.tsx", "!src/cline-sdk/**/*.ts"],
+			"includes": ["src/**/*.ts", "src/**/*.tsx"],
 			"linter": {
 				"rules": {
 					"style": {
@@ -59,8 +59,8 @@
 							"options": {
 								"patterns": [
 									{
-										"group": ["@clinebot/core", "@clinebot/core/**"],
-										"message": "Import Cline SDK packages only through src/cline-sdk/sdk-provider-boundary.ts or src/cline-sdk/sdk-runtime-boundary.ts."
+										"group": ["@clinebot/*", "@clinebot/*/**"],
+										"message": "Cline SDK 已退役，禁止重新引入其依赖。"
 									}
 								]
 							}
@@ -79,8 +79,8 @@
 							"options": {
 								"patterns": [
 									{
-										"group": ["@clinebot/core", "@clinebot/core/**"],
-										"message": "Import Cline SDK packages only through src/cline-sdk/sdk-provider-boundary.ts or src/cline-sdk/sdk-runtime-boundary.ts."
+										"group": ["@clinebot/*", "@clinebot/*/**"],
+										"message": "Cline SDK 已退役，禁止重新引入其依赖。"
 									},
 									{
 										"group": ["**/inter-work-unit-relation-ledger/**"],

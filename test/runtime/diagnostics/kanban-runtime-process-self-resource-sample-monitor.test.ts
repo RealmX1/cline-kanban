@@ -21,7 +21,6 @@ describe("buildKanbanRuntimeProcessSelfResourceSamplePayload", () => {
 			resourceUsage: resourceUsage(12_000_000, 3_000_000),
 			previousResourceUsage: resourceUsage(10_000_000, 2_500_000),
 			processUptimeSeconds: 3600.4,
-			liveInProcessClineSdkSessionCount: 2,
 			liveSessionWithOsProcessCount: 17,
 		});
 
@@ -33,7 +32,6 @@ describe("buildKanbanRuntimeProcessSelfResourceSamplePayload", () => {
 			cumulativeSystemCpuTimeSeconds: 3,
 			cpuTimeSecondsConsumedSincePreviousSample: 2.5,
 			processUptimeSeconds: 3600,
-			liveInProcessClineSdkSessionCount: 2,
 			liveSessionWithOsProcessCount: 17,
 		});
 	});
@@ -45,7 +43,6 @@ describe("buildKanbanRuntimeProcessSelfResourceSamplePayload", () => {
 				resourceUsage: resourceUsage(1, 1),
 				previousResourceUsage: null,
 				processUptimeSeconds: 1,
-				liveInProcessClineSdkSessionCount: 0,
 				liveSessionWithOsProcessCount: 0,
 			}).cpuTimeSecondsConsumedSincePreviousSample,
 		).toBeNull();

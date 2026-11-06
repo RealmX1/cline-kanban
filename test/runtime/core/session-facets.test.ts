@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import { createTaskEntryFromPersistedSession } from "../../../src/cline-sdk/cline-message-repository";
 import {
 	type RuntimeAgentId,
 	type RuntimeTaskConnectionRetry,
@@ -939,38 +938,6 @@ describe("spawn 失败写点（state:failed）", () => {
 		expect(failed.liveness).toBe("failed");
 		expect(failed.userTurnKind).toBe("error");
 		expect(projectLegacyState(facetsOf(failed))).toBe("failed");
-	});
-});
-
-// 回归：createTaskEntryFromPersistedSession（resume/rebind 共享构造点）此前 spread
-// createDefaultSummary 的 idle facet 后只覆写 state/reviewReason，未重 stamp，导致「非 idle state
-// + idle facet」不一致 summary 经 emitSummary(entry.summary) 广播/落盘。现经 applySessionFacets 修复。
-describe("构造点回归：createTaskEntryFromPersistedSession 重 stamp facet 与 state 自洽", () => {
-	it("resume 覆写 state=awaiting_review/reviewReason=attention → user/needs_input，投影回 awaiting_review", () => {
-		const entry = createTaskEntryFromPersistedSession("task-resume", [], {
-			state: "awaiting_review",
-			reviewReason: "attention",
-		});
-		expect(entry.summary.turnOwner).toBe("user");
-		expect(entry.summary.liveness).not.toBe("none");
-		expect(entry.summary.userTurnKind).not.toBe(null);
-		expect(projectLegacyState(facetsOf(entry.summary))).toBe("awaiting_review");
-	});
-
-	it("rebind 覆写 state=failed/reviewReason=error → user/failed/error，投影回 failed", () => {
-		const entry = createTaskEntryFromPersistedSession("task-rebind", [], {
-			state: "failed",
-			reviewReason: "error",
-		});
-		expect(entry.summary.turnOwner).toBe("user");
-		expect(entry.summary.liveness).toBe("failed");
-		expect(entry.summary.userTurnKind).toBe("error");
-		expect(projectLegacyState(facetsOf(entry.summary))).toBe("failed");
-	});
-
-	it("未覆写 state（默认 idle）→ idle facet 自洽", () => {
-		const entry = createTaskEntryFromPersistedSession("task-idle", []);
-		expect(projectLegacyState(facetsOf(entry.summary))).toBe("idle");
 	});
 });
 

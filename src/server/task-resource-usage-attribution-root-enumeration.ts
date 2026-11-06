@@ -68,7 +68,6 @@ export interface TaskResourceUsageAttributionRootEnumeration {
 
 export interface TaskResourceUsageAttributionSessionSourceGetters {
 	listTerminalSessionSources: () => TaskResourceUsageAttributionSessionSource[];
-	listClineSessionSources: () => TaskResourceUsageAttributionSessionSource[];
 	listAcpSessionSources: () => TaskResourceUsageAttributionSessionSource[];
 }
 
@@ -132,11 +131,7 @@ export function enumerateTaskResourceUsageAttributionRoots(
 		}
 	>();
 
-	const allSources = [
-		...getters.listTerminalSessionSources(),
-		...getters.listClineSessionSources(),
-		...getters.listAcpSessionSources(),
-	];
+	const allSources = [...getters.listTerminalSessionSources(), ...getters.listAcpSessionSources()];
 	const workspaceIdByWorkspacePath = new Map<string, string>();
 	for (const sessionSource of allSources) {
 		if (sessionSource.workspacePath) {

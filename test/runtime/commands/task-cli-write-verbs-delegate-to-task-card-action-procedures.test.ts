@@ -332,15 +332,7 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 			taskCardSnapshotAfterAction: createTaskCardSnapshot("review"),
 		};
 
-		const { output } = await runKanbanTaskCommand([
-			"update",
-			"--task-id",
-			"task-1",
-			"--title",
-			"renamed",
-			"--cline-reasoning-effort",
-			"default",
-		]);
+		const { output } = await runKanbanTaskCommand(["update", "--task-id", "task-1", "--title", "renamed"]);
 
 		expect(harness.taskCardActionRequests).toEqual([
 			{
@@ -351,12 +343,30 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 						taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
 						kanbanCliTaskCardFieldUpdateRawInput: expect.objectContaining({
 							title: "renamed",
-							clineReasoningEffort: "default",
 						}),
 					},
 				},
 			},
 		]);
 		expect(output).toEqual({ ok: true, task: expectedFormattedTaskRecord("review"), workspacePath: "/fake/repo" });
+	});
+});
+
+describe("Cline 专属命令参数退役", () => {
+	it.each(["create", "update"])("task %s 不再接受或宣传 --cline-model", async (commandName) => {
+		const program = new Command().exitOverride().configureOutput({ writeErr: () => {} });
+		registerTaskCommand(program);
+		const task = program.commands.find((command) => command.name() === "task");
+		const command = task?.commands.find((entry) => entry.name() === commandName);
+		expect(command).toBeDefined();
+		expect(command?.options.some((option) => option.long === "--cline-model")).toBe(false);
+		expect(command?.helpInformation()).not.toContain("--cline-model");
+		const requiredArguments =
+			commandName === "create"
+				? ["--prompt", "旧模型参数", "--start-in-plan-mode", "false"]
+				: ["--task-id", "task-1"];
+		await expect(
+			program.parseAsync(["node", "kanban", "task", commandName, ...requiredArguments, "--cline-model", "default"]),
+		).rejects.toMatchObject({ code: "commander.unknownOption" });
 	});
 });

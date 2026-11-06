@@ -111,7 +111,6 @@ function render(column: BoardColumnId = "validation") {
 						currentProjectWorkspacePath: null,
 						onActivateTaskCardOpeningTaskDetail: vi.fn(),
 						defaultAgentId: null,
-						defaultClineModelId: null,
 					}}
 					isSubmittingClosure={false}
 					onCancel={cancel}

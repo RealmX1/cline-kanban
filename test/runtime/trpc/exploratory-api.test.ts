@@ -91,10 +91,6 @@ function makeHarness(options: HarnessOptions) {
 		return mutated;
 	});
 	const api = createExploratoryApi({
-		getScopedClineTaskSessionService: async () => {
-			throw new Error("不应被调用：投影加载走 loader mock");
-		},
-		loadBoardCardAgentId: async () => null,
 		onExploratoryFindingsUpdated: (workspaceId, findings) => {
 			findingsBroadcasts.push({ workspaceId, findings });
 		},

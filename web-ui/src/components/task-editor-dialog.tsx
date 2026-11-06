@@ -63,10 +63,8 @@ import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
-	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
-	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -135,17 +133,9 @@ export interface TaskCreateFormSnapshot {
 	branchRef: string;
 	worktreeMode: RuntimeTaskWorktreeMode;
 	agentId: RuntimeAgentId | undefined;
-	clineSettings: RuntimeTaskClineSettings | undefined;
 	terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	projectWorkspaceId?: string | null;
-}
-
-function isSameClineSettings(
-	left: RuntimeTaskClineSettings | undefined,
-	right: RuntimeTaskClineSettings | undefined,
-): boolean {
-	return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 function isSameTerminalAgentModelOverrideSettings(
@@ -175,7 +165,6 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		JSON.stringify(current.taskAgentSessionInitialization) !==
 			JSON.stringify(baseline.taskAgentSessionInitialization) ||
 		current.agentId !== baseline.agentId ||
-		!isSameClineSettings(current.clineSettings, baseline.clineSettings) ||
 		!isSameTerminalAgentModelOverrideSettings(
 			current.terminalAgentModelOverrideSettings,
 			baseline.terminalAgentModelOverrideSettings,
@@ -283,15 +272,10 @@ export function TaskEditorDialogForm({
 	onWorktreeModeChange,
 	agentId,
 	onAgentIdChange,
-	clineSettings,
-	onClineSettingsChange,
 	terminalAgentModelOverrideSettings,
 	onTerminalAgentModelOverrideSettingsChange,
 	agents,
 	defaultAgentId,
-	defaultProviderId,
-	defaultModelId,
-	defaultReasoningEffort,
 	taskEditorMode = "create",
 	creatingTaskName,
 	onCreatingTaskNameChange,
@@ -365,8 +349,6 @@ export function TaskEditorDialogForm({
 	onWorktreeModeChange: (value: RuntimeTaskWorktreeMode) => void;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
-	clineSettings?: RuntimeTaskClineSettings | undefined;
-	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	onTerminalAgentModelOverrideSettingsChange?: (
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
@@ -376,12 +358,6 @@ export function TaskEditorDialogForm({
 	agents?: RuntimeAgentDefinition[];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
-	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
-	defaultProviderId?: string | null;
-	/** Default Cline model ID from runtimeConfig.clineProviderSettings.modelId */
-	defaultModelId?: string | null;
-	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
-	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 	taskEditorMode?: "create" | "edit";
 	creatingTaskName?: string;
 	onCreatingTaskNameChange?: (value: string) => void;
@@ -683,7 +659,6 @@ export function TaskEditorDialogForm({
 		autoReviewMode,
 		worktreeMode,
 		agentId,
-		clineSettings,
 		terminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization,
 		mode,
@@ -1387,7 +1362,6 @@ export function TaskEditorDialogForm({
 		branchRef,
 		worktreeMode,
 		agentId,
-		clineSettings,
 		terminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization,
 		projectWorkspaceId: targetWorkspaceId,
@@ -1794,7 +1768,6 @@ export function TaskEditorDialogForm({
 														branchRef,
 														worktreeMode,
 														agentId,
-														clineSettings,
 														terminalAgentModelOverrideSettings,
 														taskAgentSessionInitialization,
 													} satisfies TaskEditDraftComparableValues
@@ -1922,16 +1895,11 @@ export function TaskEditorDialogForm({
 											workspaceId={targetWorkspaceId}
 											agentId={agentId}
 											onAgentIdChange={onAgentIdChange ?? (() => undefined)}
-											allowAgentSelection={Boolean(onAgentIdChange && onClineSettingsChange)}
-											clineSettings={clineSettings}
-											onClineSettingsChange={onClineSettingsChange}
+											allowAgentSelection={Boolean(onAgentIdChange)}
 											terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
 											onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
 											agents={agents}
 											defaultAgentId={defaultAgentId}
-											defaultProviderId={defaultProviderId}
-											defaultModelId={defaultModelId}
-											defaultReasoningEffort={defaultReasoningEffort}
 											startInPlanMode={startInPlanMode}
 											onStartInPlanModeChange={onStartInPlanModeChange}
 											startInPlanModeDisabled={startInPlanModeDisabled}

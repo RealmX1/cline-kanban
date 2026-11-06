@@ -25,7 +25,7 @@ import type { BoardCard, BoardColumn, BoardColumnId, CardSelection } from "@/typ
 const mockUseRuntimeWorkspaceChanges = vi.fn();
 const {
 	mockAgentTerminalPanel,
-	mockClineAgentChatPanel,
+	mockAgentConversationChatPanel,
 	mockDiffViewerPanel,
 	mockClineAppendToDraft,
 	mockClineSendText,
@@ -45,7 +45,7 @@ const {
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
 		}): ReactNode => null,
 	),
-	mockClineAgentChatPanel: vi.fn((..._args: unknown[]) => null),
+	mockAgentConversationChatPanel: vi.fn((..._args: unknown[]) => null),
 	mockReadOnlyTaskConversationHistoryPanel: vi.fn((_props: unknown) => <div data-testid="read-only-task-history" />),
 	mockDiffViewerPanel: vi.fn((..._args: unknown[]) => null),
 	mockClineAppendToDraft: vi.fn(),
@@ -87,15 +87,15 @@ vi.mock("@/hooks/use-agent-raised-pending-user-decision", () => ({
 	useAgentRaisedPendingUserDecision: (input: unknown) => mockUseAgentRaisedPendingUserDecision(input),
 }));
 
-vi.mock("@/components/detail-panels/cline-agent-chat-panel", () => ({
-	ClineAgentChatPanel: forwardRef((props: unknown, ref) => {
-		mockClineAgentChatPanel(props);
+vi.mock("@/components/detail-panels/agent-conversation-chat-panel", () => ({
+	AgentConversationChatPanel: forwardRef((props: unknown, ref) => {
+		mockAgentConversationChatPanel(props);
 		useImperativeHandle(ref, () => ({
 			appendToDraft: mockClineAppendToDraft,
 			sendText: mockClineSendText,
 			focusAgentInputAfterShortcutInsertion: mockClineFocusAfterShortcutInsertion,
 		}));
-		return <div data-testid="cline-agent-chat-panel" />;
+		return <div data-testid="agent-conversation-chat-panel" />;
 	}),
 }));
 
@@ -492,7 +492,7 @@ describe("CardDetailView", () => {
 		);
 		expect(container.querySelector('[data-testid="read-only-task-history"]')).not.toBeNull();
 		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
-		expect(mockClineAgentChatPanel).not.toHaveBeenCalled();
+		expect(mockAgentConversationChatPanel).not.toHaveBeenCalled();
 		expect(container.textContent).toContain("Main session");
 		expect(container.textContent).toContain("Relations");
 		expect(container.textContent).toContain("Findings");
@@ -627,7 +627,7 @@ describe("CardDetailView", () => {
 		mockAgentTerminalPanel.mockClear();
 		mockAgentTerminalPanel.mockImplementation(() => null);
 		mockReadOnlyTaskConversationHistoryPanel.mockClear();
-		mockClineAgentChatPanel.mockClear();
+		mockAgentConversationChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
@@ -672,7 +672,7 @@ describe("CardDetailView", () => {
 		});
 		mockUseRuntimeWorkspaceChanges.mockReset();
 		mockAgentTerminalPanel.mockClear();
-		mockClineAgentChatPanel.mockClear();
+		mockAgentConversationChatPanel.mockClear();
 		mockDiffViewerPanel.mockClear();
 		mockClineAppendToDraft.mockClear();
 		mockClineSendText.mockClear();
@@ -1328,13 +1328,42 @@ describe("CardDetailView", () => {
 		expect(onCloseGitHistory).toHaveBeenCalledTimes(1);
 	});
 
-	it("renders native chat panel for cline agent", async () => {
+	it("旧 Cline 卡片可打开并显示退役说明，不挂载可执行聊天面板", async () => {
+		const selection = createSelection();
+		selection.card.agentId = "cline";
+		selection.card.clineSettings = { providerId: "anthropic", modelId: "legacy-model" };
+		await act(async () =>
+			root.render(
+				<CardDetailView
+					selection={selection}
+					currentProjectId="workspace-1"
+					selectedAgentId="codex"
+					sessionSummary={null}
+					taskSessions={{}}
+					onSessionSummary={() => {}}
+					onCardSelect={() => {}}
+					onTaskDragEnd={() => {}}
+					onMoveToTrash={() => {}}
+					bottomTerminalOpen={false}
+					bottomTerminalTaskId={null}
+					bottomTerminalSummary={null}
+					onBottomTerminalClose={() => {}}
+				/>,
+			),
+		);
+		expect(container.textContent).toContain("Cline agent 已退役");
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeNull();
+		expect(selection.card.agentId).toBe("cline");
+		expect(selection.card.clineSettings.modelId).toBe("legacy-model");
+	});
+	it("ACP 会话渲染共享聊天面板", async () => {
 		await act(async () => {
 			root.render(
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1349,7 +1378,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
 		expect(container.querySelector('[data-testid="agent-terminal-panel"]')).toBeNull();
 	});
 
@@ -1362,7 +1391,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={selection}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1377,10 +1407,10 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeNull();
 	});
 
-	it("shows cline chat panel when task session agentId is cline even if global agent is claude", async () => {
+	it("全局选择 Claude 时仍按既有 ACP 会话显示聊天面板", async () => {
 		await act(async () => {
 			root.render(
 				<CardDetailView
@@ -1390,7 +1420,8 @@ describe("CardDetailView", () => {
 					sessionSummary={{
 						taskId: "task-1",
 						state: "running",
-						agentId: "cline",
+						agentId: "omp",
+						sessionTransport: "acp_stdio_subprocess",
 						workspacePath: null,
 						pid: null,
 						startedAt: null,
@@ -1415,7 +1446,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
 	});
 
 	it("shows terminal panel when task session agentId is claude even if global agent is cline", async () => {
@@ -1424,7 +1455,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={{
 						taskId: "task-1",
 						state: "running",
@@ -1453,7 +1485,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeNull();
 		expect(mockAgentTerminalPanel).toHaveBeenCalled();
 	});
 
@@ -1485,7 +1517,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
 		expect(mockAgentTerminalPanel).not.toHaveBeenCalled();
 	});
 
@@ -1516,7 +1548,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeNull();
 		expect(mockAgentTerminalPanel).toHaveBeenCalled();
 	});
 
@@ -1545,7 +1577,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeInstanceOf(HTMLDivElement);
 	});
 
 	it("keeps reading the live session transport instead of the pinned card value", async () => {
@@ -1578,7 +1610,7 @@ describe("CardDetailView", () => {
 			);
 		});
 
-		expect(container.querySelector('[data-testid="cline-agent-chat-panel"]')).toBeNull();
+		expect(container.querySelector('[data-testid="agent-conversation-chat-panel"]')).toBeNull();
 		expect(mockAgentTerminalPanel).toHaveBeenCalled();
 	});
 
@@ -1738,7 +1770,7 @@ describe("CardDetailView", () => {
 			window.history.replaceState(null, "", originalUrl);
 			expect(
 				getLastMockFirstArg<{ taskId: string }>(
-					sessionTransport === "acp_stdio_subprocess" ? mockClineAgentChatPanel : mockAgentTerminalPanel,
+					sessionTransport === "acp_stdio_subprocess" ? mockAgentConversationChatPanel : mockAgentTerminalPanel,
 				).taskId,
 			).toBe(targetSessionId);
 			const promptProps = getLastMockFirstArg<{ onFillInput: (text: string) => void }>(mockPromptLibraryPanel);
@@ -1771,7 +1803,8 @@ describe("CardDetailView", () => {
 					selection={createSelection()}
 					currentProjectId="workspace-1"
 					isTaskChangesSidebarOpen
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1807,7 +1840,8 @@ describe("CardDetailView", () => {
 					selection={createSelection()}
 					currentProjectId="workspace-1"
 					isTaskChangesSidebarOpen
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1843,7 +1877,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1867,7 +1902,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelection()}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -1912,7 +1948,8 @@ describe("CardDetailView", () => {
 					<CardDetailView
 						selection={createSelection()}
 						currentProjectId="workspace-1"
-						selectedAgentId="cline"
+						selectedAgentId="omp"
+						runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 						sessionSummary={null}
 						taskSessions={{}}
 						onSessionSummary={() => {}}
@@ -2002,7 +2039,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelectionInColumn("in_progress")}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -2021,7 +2059,7 @@ describe("CardDetailView", () => {
 		const panelProps = getLastMockFirstArg<{
 			showMoveToTrash?: boolean;
 			showMoveToValidation?: boolean;
-		}>(mockClineAgentChatPanel);
+		}>(mockAgentConversationChatPanel);
 		expect(panelProps.showMoveToTrash).toBe(false);
 		expect(panelProps.showMoveToValidation).toBe(false);
 	});
@@ -2035,7 +2073,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelectionInColumn("review")}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -2055,7 +2094,7 @@ describe("CardDetailView", () => {
 			onMoveToTrash?: () => void;
 			showMoveToTrash?: boolean;
 			showMoveToValidation?: boolean;
-		}>(mockClineAgentChatPanel);
+		}>(mockAgentConversationChatPanel);
 		expect(panelProps.showMoveToTrash).toBe(true);
 		expect(panelProps.showMoveToValidation).toBe(true);
 
@@ -2076,7 +2115,8 @@ describe("CardDetailView", () => {
 				<CardDetailView
 					selection={createSelectionInColumn("validation")}
 					currentProjectId="workspace-1"
-					selectedAgentId="cline"
+					selectedAgentId="omp"
+					runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 					sessionSummary={null}
 					taskSessions={{}}
 					onSessionSummary={() => {}}
@@ -2095,7 +2135,7 @@ describe("CardDetailView", () => {
 			onMoveToTrash?: () => void;
 			showMoveToTrash?: boolean;
 			showMoveToValidation?: boolean;
-		}>(mockClineAgentChatPanel);
+		}>(mockAgentConversationChatPanel);
 		expect(panelProps.showMoveToTrash).toBe(true);
 		expect(panelProps.showMoveToValidation).toBe(false);
 
@@ -2113,7 +2153,8 @@ describe("CardDetailView", () => {
 					<CardDetailView
 						selection={createSelectionWithSiblingCards()}
 						currentProjectId="workspace-1"
-						selectedAgentId="cline"
+						selectedAgentId="omp"
+						runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 						sessionSummary={null}
 						taskSessions={{}}
 						onSessionSummary={() => {}}
@@ -2173,7 +2214,8 @@ describe("CardDetailView", () => {
 					<CardDetailView
 						selection={pinnedSelection}
 						currentProjectId="workspace-1"
-						selectedAgentId="cline"
+						selectedAgentId="omp"
+						runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 						sessionSummary={null}
 						taskSessions={{}}
 						onSessionSummary={() => {}}
@@ -2286,7 +2328,8 @@ describe("CardDetailView", () => {
 					<CardDetailView
 						selection={createSelectionInColumn("in_progress")}
 						currentProjectId="workspace-1"
-						selectedAgentId="cline"
+						selectedAgentId="omp"
+						runtimeConfig={createRuntimeConfigWithOmpSessionTransportDefault("acp_stdio_subprocess")}
 						sessionSummary={sessionSummary}
 						taskSessions={{ "task-1": sessionSummary }}
 						onCreateTaskConversationSession={async () => ({ ok: true })}
@@ -2308,23 +2351,32 @@ describe("CardDetailView", () => {
 		// cline 会话（conversation 面板形态）→ refreshKey 非 null，构成为
 		// `{checkpoint.turn}:{checkpoint.commit}:{turnOwner}:{liveness}:{streamSnapshotGeneration}`（无 updatedAt；
 		// 末段是流重连代数，本测试未传该 prop = 0）。
-		await renderView(createSessionSummary("task-1", { agentId: "cline" }));
+		await renderView(createSessionSummary("task-1", { agentId: "omp", sessionTransport: "acp_stdio_subprocess" }));
 		expect(lastRefreshKey()).toBe("0::agent:live:0");
 
 		// 流式期间 summary 每 ~150ms 批次推进 updatedAt → refreshKey 必须不变（重拉风暴反回归）。
-		await renderView(createSessionSummary("task-1", { agentId: "cline", updatedAt: 2 }));
+		await renderView(
+			createSessionSummary("task-1", { agentId: "omp", sessionTransport: "acp_stdio_subprocess", updatedAt: 2 }),
+		);
 		expect(lastRefreshKey()).toBe("0::agent:live:0");
 
 		// 回合结束（turnOwner agent→user）→ 边沿重拉（投影 in-progress 判定与该 facet 同源）。
 		await renderView(
-			createSessionSummary("task-1", { agentId: "cline", updatedAt: 3, turnOwner: "user", userTurnKind: "review" }),
+			createSessionSummary("task-1", {
+				agentId: "omp",
+				sessionTransport: "acp_stdio_subprocess",
+				updatedAt: 3,
+				turnOwner: "user",
+				userTurnKind: "review",
+			}),
 		);
 		expect(lastRefreshKey()).toBe("0::user:live:0");
 
 		// checkpoint 异步落地（turn/commit 变化）→ 边沿重拉。
 		await renderView(
 			createSessionSummary("task-1", {
-				agentId: "cline",
+				agentId: "omp",
+				sessionTransport: "acp_stdio_subprocess",
 				updatedAt: 4,
 				turnOwner: "user",
 				userTurnKind: "review",

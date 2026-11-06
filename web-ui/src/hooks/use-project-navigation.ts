@@ -61,7 +61,6 @@ export interface UseProjectNavigationResult {
 	taskChatMessagesByTaskId: ReturnType<typeof useRuntimeStateStream>["taskChatMessagesByTaskId"];
 	latestTaskReadyForReview: ReturnType<typeof useRuntimeStateStream>["latestTaskReadyForReview"];
 	taskReadyForReviewEvents: ReturnType<typeof useRuntimeStateStream>["taskReadyForReviewEvents"];
-	latestMcpAuthStatuses: ReturnType<typeof useRuntimeStateStream>["latestMcpAuthStatuses"];
 	exploratoryFindings: ReturnType<typeof useRuntimeStateStream>["exploratoryFindings"];
 	latestExplorationThreadGraphUpdate: ReturnType<typeof useRuntimeStateStream>["latestExplorationThreadGraphUpdate"];
 	queuedTaskPromptDeliveryProjectionsByTaskId: ReturnType<
@@ -69,7 +68,6 @@ export interface UseProjectNavigationResult {
 	>["queuedTaskPromptDeliveryProjectionsByTaskId"];
 	streamSnapshotGeneration: ReturnType<typeof useRuntimeStateStream>["streamSnapshotGeneration"];
 	notificationLogByWorkspaceId: ReturnType<typeof useRuntimeStateStream>["notificationLogByWorkspaceId"];
-	clineSessionContextVersion: ReturnType<typeof useRuntimeStateStream>["clineSessionContextVersion"];
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
 	hasReceivedSnapshot: boolean;
@@ -120,13 +118,11 @@ export function useProjectNavigation({
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		taskReadyForReviewEvents,
-		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
 		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
-		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,
@@ -361,13 +357,11 @@ export function useProjectNavigation({
 		taskChatMessagesByTaskId,
 		latestTaskReadyForReview,
 		taskReadyForReviewEvents,
-		latestMcpAuthStatuses,
 		exploratoryFindings,
 		latestExplorationThreadGraphUpdate,
 		queuedTaskPromptDeliveryProjectionsByTaskId,
 		streamSnapshotGeneration,
 		notificationLogByWorkspaceId,
-		clineSessionContextVersion,
 		streamError,
 		isRuntimeDisconnected,
 		hasReceivedSnapshot,

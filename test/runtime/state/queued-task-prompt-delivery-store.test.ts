@@ -24,6 +24,7 @@ import { getThisRuntimeProcessInstanceId } from "../../../src/state/runtime-proc
 const testRuntimeHome = { path: "" };
 vi.mock("../../../src/state/workspace-state", () => ({
 	getRuntimeHomePath: () => testRuntimeHome.path,
+	loadPersistedWorkspaceStateById: async () => ({ board: { columns: [] }, sessions: {} }),
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(testRuntimeHome.path, "workspaces", workspaceId),
 	getWorkspacesRootPath: () => join(testRuntimeHome.path, "workspaces"),
 }));

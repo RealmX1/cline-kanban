@@ -79,7 +79,6 @@ describe("web ui new backlog task cards persisted before agent session start", (
 			const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
 			const workspaceApi = createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: vi.fn(),
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
 				broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: vi.fn(),

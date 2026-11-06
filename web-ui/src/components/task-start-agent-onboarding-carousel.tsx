@@ -2,17 +2,8 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { Check } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-import { ClineSetupSection } from "@/components/shared/cline-setup-section";
 import { cn } from "@/components/ui/cn";
-import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
-import { isClineProviderAuthenticated } from "@/runtime/native-agent";
-import type {
-	RuntimeAgentDefinition,
-	RuntimeAgentId,
-	RuntimeClineProviderSettings,
-	RuntimeConfigResponse,
-} from "@/runtime/types";
+import type { RuntimeAgentDefinition, RuntimeAgentId } from "@/runtime/types";
 
 interface BaseOnboardingSlide {
 	kind: "media" | "agent-selection";
@@ -73,7 +64,7 @@ export const TASK_START_ONBOARDING_SLIDES: OnboardingSlide[] = [
 	},
 ];
 
-const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
+const ONBOARDING_AGENT_IDS: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "kimi", "omp", "droid", "kiro"];
 const FALLBACK_ONBOARDING_SLIDE: OnboardingSlide = {
 	kind: "agent-selection",
 	title: "",
@@ -96,14 +87,6 @@ const ONBOARDING_MEDIA_FRAME_HEIGHT_PX = ONBOARDING_MEDIA_FRAME_REFERENCE_SLIDE?
 
 function isMediaOnboardingSlide(slide: OnboardingSlide): slide is MediaOnboardingSlide {
 	return slide.kind === "media";
-}
-
-function AgentStatusBadge({ label, statusClassName }: { label: string; statusClassName: string }): ReactElement {
-	return (
-		<span className={cn("inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium", statusClassName)}>
-			{label}
-		</span>
-	);
 }
 
 function OnboardingMedia({
@@ -280,9 +263,6 @@ function OnboardingMedia({
 }
 
 function resolveInstallInstructions(agentId: RuntimeAgentId): string {
-	if (agentId === "cline") {
-		return "Built-in agent with support for any LLM provider. No CLI install needed.";
-	}
 	if (agentId === "claude") {
 		return "Anthropic's coding agent CLI with access to Claude models.";
 	}
@@ -319,30 +299,21 @@ function getInstallLinkLabel(agentId: RuntimeAgentId): string {
 
 export function TaskStartAgentOnboardingCarousel({
 	open,
-	workspaceId,
-	runtimeConfig,
 	selectedAgentId,
 	agents,
-	clineProviderSettings,
 	activeSlideIndex,
 	onSelectAgent,
-	onClineSetupSaved,
 	onDoneActionChange,
 }: {
 	open: boolean;
-	workspaceId: string | null;
-	runtimeConfig: RuntimeConfigResponse | null;
 	selectedAgentId: RuntimeAgentId | null;
 	agents: RuntimeAgentDefinition[];
-	clineProviderSettings: RuntimeClineProviderSettings | null;
 	activeSlideIndex: number;
 	onSelectAgent?: (agentId: RuntimeAgentId) => Promise<AgentSelectionResult>;
-	onClineSetupSaved?: () => void;
 	onDoneActionChange?: (action: (() => Promise<OnboardingDoneResult>) | null) => void;
 }): ReactElement {
 	const [activeAgentId, setActiveAgentId] = useState<RuntimeAgentId | null>(selectedAgentId);
 	const [selectionError, setSelectionError] = useState<string | null>(null);
-	const [clineSetupError, setClineSetupError] = useState<string | null>(null);
 	const selectionSavePromiseRef = useRef<Promise<AgentSelectionResult> | null>(null);
 
 	useEffect(() => {
@@ -351,13 +322,6 @@ export function TaskStartAgentOnboardingCarousel({
 
 	const currentSlide =
 		TASK_START_ONBOARDING_SLIDES[activeSlideIndex] ?? TASK_START_ONBOARDING_SLIDES[0] ?? FALLBACK_ONBOARDING_SLIDE;
-	const clineAuthenticated = isClineProviderAuthenticated(clineProviderSettings);
-	const clineSettings = useRuntimeSettingsClineController({
-		open,
-		workspaceId,
-		selectedAgentId: activeAgentId ?? selectedAgentId ?? "cline",
-		config: runtimeConfig,
-	});
 	const onboardingAgents = useMemo(
 		() =>
 			ONBOARDING_AGENT_IDS.map((agentId) => {
@@ -421,22 +385,8 @@ export function TaskStartAgentOnboardingCarousel({
 				return { ok: false, message };
 			}
 		}
-		if (activeAgentId !== "cline") {
-			return { ok: true };
-		}
-		if (!clineSettings.hasUnsavedChanges) {
-			return { ok: true };
-		}
-		setClineSetupError(null);
-		const saveResult = await clineSettings.saveProviderSettings();
-		if (!saveResult.ok) {
-			const message = saveResult.message ?? "Could not save Cline provider settings.";
-			setClineSetupError(message);
-			return { ok: false, message };
-		}
-		onClineSetupSaved?.();
 		return { ok: true };
-	}, [activeAgentId, clineSettings, onClineSetupSaved]);
+	}, []);
 
 	useEffect(() => {
 		onDoneActionChange?.(handleDoneAction);
@@ -514,22 +464,10 @@ export function TaskStartAgentOnboardingCarousel({
 									</RadixCheckbox.Root>
 									<span className="text-[13px] text-text-primary">{agent.label}</span>
 								</span>
-								{agent.id === "cline" ? (
-									clineAuthenticated ? (
-										<AgentStatusBadge
-											label="Authenticated"
-											statusClassName="bg-status-green/10 text-status-green"
-										/>
-									) : null
-								) : agent.installed ? (
-									<AgentStatusBadge label="Detected" statusClassName="bg-status-green/10 text-status-green" />
-								) : (
-									<AgentStatusBadge label="Not installed" statusClassName="bg-surface-3 text-text-secondary" />
-								)}
 							</div>
 							<p className="mt-2 mb-0 text-[12px] text-text-secondary">
 								{resolveInstallInstructions(agent.id)}
-								{agent.id !== "cline" && agent.installUrl ? (
+								{agent.installUrl ? (
 									<>
 										{" "}
 										<a
@@ -543,22 +481,6 @@ export function TaskStartAgentOnboardingCarousel({
 									</>
 								) : null}
 							</p>
-							{agent.id === "cline" ? (
-								<div className="mt-2">
-									<ClineSetupSection
-										controller={clineSettings}
-										controlsDisabled={false}
-										showMcpSettings={false}
-										onError={setClineSetupError}
-										onSaved={onClineSetupSaved}
-									/>
-									{clineSetupError ? (
-										<div className="mt-2 rounded-md border border-status-red/30 bg-status-red/5 p-2 text-[12px] text-text-primary">
-											{clineSetupError}
-										</div>
-									) : null}
-								</div>
-							) : null}
 						</div>
 					))}
 					{selectionError ? (

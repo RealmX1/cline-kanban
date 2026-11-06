@@ -31,7 +31,6 @@ export function TaskPinboardStripOnKanbanBoard({
 	onRevealCanonicalCardInItsStage,
 	onEditTaskPinboardPinReason,
 	workspacePath,
-	defaultClineModelId,
 	defaultAgentId,
 }: {
 	pinnedTasks: TaskPinnedToTaskPinboard[];
@@ -41,7 +40,6 @@ export function TaskPinboardStripOnKanbanBoard({
 	onRevealCanonicalCardInItsStage: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): ReactElement | null {
 	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(
@@ -90,7 +88,6 @@ export function TaskPinboardStripOnKanbanBoard({
 									handlers,
 									onActivateCard,
 									workspacePath,
-									defaultClineModelId,
 									defaultAgentId,
 								})}
 							/>
