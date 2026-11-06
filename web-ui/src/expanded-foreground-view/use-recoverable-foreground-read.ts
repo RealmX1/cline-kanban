@@ -16,103 +16,189 @@ export function isTransientForegroundReadFailure(error: unknown): boolean {
 	);
 }
 
+async function readWithForegroundDeadline<T>(read: (signal: AbortSignal) => Promise<T>, owner: AbortSignal) {
+	const request = new AbortController();
+	const cancelRequest = () => request.abort(owner.reason);
+	owner.addEventListener("abort", cancelRequest, { once: true });
+	const deadline = setTimeout(() => request.abort(new Error("读取超时，请在运行时恢复后重试。")), 8_000);
+	let rejectCancelledRead: () => void = () => undefined;
+	try {
+		// 即使读取方忽略 AbortSignal，也结束本次等待；迟到结果不能重新进入当前视图。
+		return await Promise.race([
+			new Promise<never>((_, reject) => {
+				rejectCancelledRead = () => reject(request.signal.reason);
+				request.signal.addEventListener("abort", rejectCancelledRead, { once: true });
+			}),
+			read(request.signal),
+		]);
+	} finally {
+		clearTimeout(deadline);
+		owner.removeEventListener("abort", cancelRequest);
+		request.signal.removeEventListener("abort", rejectCancelledRead);
+	}
+}
+
 export function useRecoverableForegroundRead<T>({
 	identity,
 	read,
 	enabled = true,
 	refreshIntervalMs,
 	initialReadDebounceMs = 0,
+	retainErrorDuringRefetch = false,
+	retainedValueScopeIdentity,
+	isDataEqual,
+	workspaceId,
 }: {
 	identity: string;
 	read: (signal: AbortSignal) => Promise<T>;
 	enabled?: boolean;
 	refreshIntervalMs?: number;
 	initialReadDebounceMs?: number;
+	retainErrorDuringRefetch?: boolean;
+	retainedValueScopeIdentity?: string;
+	isDataEqual?: (previous: T, next: T) => boolean;
+	workspaceId?: string;
 }) {
-	const [refreshSequence, setRefreshSequence] = useState(0);
-	const [result, setResult] = useState<{ identity: string; value: T | null; error: string | null; loading: boolean }>({
+	const [result, setResult] = useState<{
+		identity: string;
+		retainedValueScopeIdentity?: string;
+		value: T | null;
+		error: string | null;
+		failure: Error | null;
+		loading: boolean;
+		retryBudgetExhausted: boolean;
+	}>({
 		identity,
+		retainedValueScopeIdentity,
 		value: null,
 		error: null,
+		failure: null,
 		loading: enabled,
+		retryBudgetExhausted: false,
 	});
-	const loadingRef = useRef(false);
-	const refresh = useCallback(() => setRefreshSequence((current) => current + 1), []);
+	const requestRefreshRef = useRef<() => Promise<void>>(() => Promise.resolve());
+	const refresh = useCallback(() => requestRefreshRef.current(), []);
 	useEffect(() => {
 		if (!enabled) return;
-		const abort = new AbortController();
-		let pendingRetry: ReturnType<typeof setTimeout> | undefined;
-		let pendingTimeout: ReturnType<typeof setTimeout> | undefined;
-		loadingRef.current = true;
-		setResult((current) => ({
-			identity,
-			value: current.identity === identity ? current.value : null,
-			error: null,
-			loading: true,
-		}));
-		const attempt = async (attemptNumber: number) => {
-			const requestAbort = new AbortController();
-			const cancelRequest = () => requestAbort.abort();
-			abort.signal.addEventListener("abort", cancelRequest, { once: true });
-			pendingTimeout = setTimeout(cancelRequest, 8_000);
+		const owner = new AbortController();
+		let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+		let runningRead: Promise<void> | null = null;
+		let refreshRequestedDuringRead = false;
+		const markReading = () =>
+			setResult((current) => {
+				const retain =
+					current.identity === identity ||
+					(retainedValueScopeIdentity !== undefined &&
+						current.retainedValueScopeIdentity === retainedValueScopeIdentity);
+				return {
+					identity,
+					retainedValueScopeIdentity,
+					value: retain ? current.value : null,
+					error: retain && retainErrorDuringRefetch ? current.error : null,
+					failure: retain && retainErrorDuringRefetch ? current.failure : null,
+					loading: true,
+					retryBudgetExhausted: false,
+				};
+			});
+		const attempt = async (attemptNumber: number): Promise<boolean> => {
+			markReading();
 			try {
-				const value = await read(requestAbort.signal);
-				if (abort.signal.aborted) return;
-				setResult({ identity, value, error: null, loading: false });
-				loadingRef.current = false;
+				const value = await readWithForegroundDeadline(read, owner.signal);
+				if (owner.signal.aborted) return false;
+				setResult((current) => ({
+					identity,
+					retainedValueScopeIdentity,
+					value: current.value !== null && isDataEqual?.(current.value, value) ? current.value : value,
+					error: null,
+					failure: null,
+					loading: false,
+					retryBudgetExhausted: false,
+				}));
+				return true;
 			} catch (error) {
-				if (abort.signal.aborted) return;
-				if (attemptNumber < 2 && isTransientForegroundReadFailure(error)) {
-					pendingRetry = setTimeout(() => void attempt(attemptNumber + 1), attemptNumber === 0 ? 400 : 1_200);
-				} else {
+				if (owner.signal.aborted) return false;
+				const failure = error instanceof Error ? error : new Error(String(error));
+				const willRetry = attemptNumber < 2 && isTransientForegroundReadFailure(error);
+				if (retainErrorDuringRefetch || !willRetry) {
 					setResult((current) => ({
 						...current,
-						error: error instanceof Error ? error.message : String(error),
+						error: failure.message,
+						failure,
 						loading: false,
+						retryBudgetExhausted: !willRetry,
 					}));
-					loadingRef.current = false;
 				}
-			} finally {
-				clearTimeout(pendingTimeout);
-				abort.signal.removeEventListener("abort", cancelRequest);
+				if (!willRetry) return false;
+				await new Promise<void>((resolve) => {
+					const finishWait = () => {
+						clearTimeout(pendingTimer);
+						owner.signal.removeEventListener("abort", finishWait);
+						resolve();
+					};
+					owner.signal.addEventListener("abort", finishWait, { once: true });
+					pendingTimer = setTimeout(finishWait, attemptNumber === 0 ? 400 : 1_200);
+				});
+				return owner.signal.aborted ? false : await attempt(attemptNumber + 1);
 			}
 		};
-		// 归属切换和旧请求取消仍立即生效，只将首次读取推迟到输入安静窗口后。
-		const pendingInitialRead =
-			initialReadDebounceMs > 0 ? setTimeout(() => void attempt(0), initialReadDebounceMs) : undefined;
-		if (initialReadDebounceMs <= 0) void attempt(0);
-		return () => {
-			abort.abort();
-			clearTimeout(pendingInitialRead);
-			clearTimeout(pendingRetry);
-			clearTimeout(pendingTimeout);
-			loadingRef.current = false;
+		const requestRefresh = (): Promise<void> => {
+			if (owner.signal.aborted) return Promise.resolve();
+			if (runningRead) {
+				refreshRequestedDuringRead = true;
+				return runningRead;
+			}
+			clearTimeout(pendingTimer);
+			runningRead = (async () => {
+				let succeeded: boolean;
+				do {
+					refreshRequestedDuringRead = false;
+					succeeded = await attempt(0);
+				} while (succeeded && refreshRequestedDuringRead && !owner.signal.aborted);
+				runningRead = null;
+				// 耗尽预算后等待显式恢复事件；轮询不能悄悄开启无界重试。
+				if (succeeded && refreshIntervalMs && !owner.signal.aborted) {
+					pendingTimer = setTimeout(refreshWhenVisible, refreshIntervalMs);
+				}
+			})();
+			return runningRead;
 		};
-	}, [identity, read, enabled, refreshSequence, initialReadDebounceMs]);
-	useEffect(() => {
-		if (!enabled) return;
 		const refreshWhenVisible = () => {
-			if (document.visibilityState === "visible") refresh();
+			if (document.visibilityState === "visible") void requestRefresh();
 		};
+		requestRefreshRef.current = requestRefresh;
 		window.addEventListener("online", refreshWhenVisible);
 		document.addEventListener("visibilitychange", refreshWhenVisible);
 		const unsubscribe = subscribeToTaskVisualizationBrowserEvents((message) => {
-			if (message.type === "stream_reconnected") refreshWhenVisible();
+			if (message.type === "stream_reconnected" && (!workspaceId || workspaceId === message.workspaceId)) {
+				refreshWhenVisible();
+			}
 		});
-		const interval = refreshIntervalMs
-			? setInterval(() => {
-					if (!loadingRef.current) refreshWhenVisible();
-				}, refreshIntervalMs)
-			: undefined;
+		markReading();
+		if (initialReadDebounceMs > 0) pendingTimer = setTimeout(() => void requestRefresh(), initialReadDebounceMs);
+		else void requestRefresh();
 		return () => {
+			requestRefreshRef.current = () => Promise.resolve();
+			owner.abort();
+			clearTimeout(pendingTimer);
 			window.removeEventListener("online", refreshWhenVisible);
 			document.removeEventListener("visibilitychange", refreshWhenVisible);
 			unsubscribe();
-			clearInterval(interval);
 		};
-	}, [enabled, refresh, refreshIntervalMs]);
-	return {
-		...(result.identity === identity ? result : { identity, value: null, error: null, loading: enabled }),
-		refresh,
-	};
+	}, [
+		identity,
+		read,
+		enabled,
+		initialReadDebounceMs,
+		refreshIntervalMs,
+		retainErrorDuringRefetch,
+		retainedValueScopeIdentity,
+		isDataEqual,
+		workspaceId,
+	]);
+	const visibleResult =
+		result.identity === identity ||
+		(retainedValueScopeIdentity !== undefined && result.retainedValueScopeIdentity === retainedValueScopeIdentity)
+			? result
+			: { identity, value: null, error: null, failure: null, loading: enabled, retryBudgetExhausted: false };
+	return { ...visibleResult, loading: enabled && visibleResult.loading, refresh };
 }

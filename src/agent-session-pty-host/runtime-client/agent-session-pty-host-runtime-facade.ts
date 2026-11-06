@@ -382,6 +382,16 @@ export class AgentSessionPtyHostRuntimeFacade {
 		);
 	}
 
+	retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges(
+		workspaceId: string,
+		evidenceFingerprint: string,
+	): Promise<void> {
+		return this.hostedSessionHookSpoolDrainCoordinator.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges(
+			workspaceId,
+			evidenceFingerprint,
+		);
+	}
+
 	// runtime 退出流程的第一步（handover 与信号停止都是）：此后的 spawn 一律以 AgentSessionPtyHostRefusesNewSpawnsWhileRuntimeShutsDownError 失败。
 	refuseNewSpawnsBecauseRuntimeIsShuttingDown(): void {
 		this.newSpawnsRefusedBecauseRuntimeIsShuttingDown = true;

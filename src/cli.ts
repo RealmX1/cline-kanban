@@ -582,6 +582,11 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 							workspaceId,
 							taskId,
 						),
+					retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges: (workspaceId, evidenceFingerprint) =>
+						agentSessionPtyHostRuntimeFacade.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges(
+							workspaceId,
+							evidenceFingerprint,
+						),
 				}
 			: undefined,
 		warn: (message) => {

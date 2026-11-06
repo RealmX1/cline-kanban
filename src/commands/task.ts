@@ -755,7 +755,7 @@ async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRec
 		workspaceId: registeredWorkspace?.workspaceId ?? null,
 		isProjectRegisteredInKanban: registeredWorkspace !== null,
 		wasProjectPathExplicitlyRequested: (input.projectPath ?? "").trim().length > 0,
-		repositoryGitInfo: registeredWorkspace?.git ?? detectGitRepositoryInfo(workspaceRepoPath),
+		repositoryGitInfo: registeredWorkspace?.git ?? (await detectGitRepositoryInfo(workspaceRepoPath)),
 		existingBoardColumns,
 		runtimeConfig: await loadRuntimeConfig(workspaceRepoPath),
 		requested: toTaskCreateRequestedSettings(input),

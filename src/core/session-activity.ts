@@ -309,6 +309,7 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 // 缺省时两者相同。只影响「本轮何时开始 / 停止生成」两个边沿章，updatedAt 仍是写入墙钟。
 export interface SummaryWriteDomainEventTiming {
 	domainEventObservedAtEpochMs?: number;
+	hookEventDeliveryIdempotencyKey?: string;
 }
 
 // 原生接受核验可能落后于无工具回合的完成 hook。完成信号证明发生过工作，提交状态仍保持待确认。

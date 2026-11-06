@@ -56,6 +56,193 @@ beforeEach(() => {
 	});
 });
 describe("智能通知状态机", () => {
+	it.each(["capture", "enrichment"])("持久登记要求不把档案失败当作完成（失败阶段=%s）", async (failureStage) => {
+		const archive = getNotificationLifecycleArchive();
+		const capture = vi.spyOn(archive, "capture");
+		const update = vi.spyOn(archive, "update");
+		const error = new Error("通知档案暂不可写");
+		if (failureStage === "capture") capture.mockRejectedValueOnce(error);
+		else update.mockRejectedValueOnce(error);
+		const publish = vi.fn(async () => undefined);
+		const publishUnarchived = vi.fn(async () => undefined);
+		const service = createNotificationAssessmentService({ publish, publishUnarchived, getSummary: () => undefined });
+		const notification = {
+			workspaceId: "assessment",
+			taskId: "task",
+			candidateId: `durable-registration-${failureStage}`,
+			userTurnKind: "review" as const,
+		};
+		const options = { waitForAssessmentCompletion: false, requireDurableRegistration: true };
+		try {
+			await expect(service.enqueue(notification, options)).rejects.toThrow(error);
+			expect(publishUnarchived).not.toHaveBeenCalled();
+			expect(modelRequest).not.toHaveBeenCalled();
+			expect((await archive.get(notification.candidateId))?.candidate.notificationProcessingStatus).toBe(
+				failureStage === "capture" ? undefined : "captured",
+			);
+			modelRequest.mockResolvedValue({
+				status: "completed",
+				parsedJsonObject: { decision: "completed_turn_or_user_handoff", reason: "完成", summaryText: "完成" },
+			});
+			await service.enqueue(notification, options);
+			await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+			expect(modelRequest).toHaveBeenCalledTimes(1);
+		} finally {
+			service.close();
+			capture.mockRestore();
+			update.mockRestore();
+		}
+	});
+	it("关闭或同候选登记未结束时，不确认持久登记", async () => {
+		let finishCapture: () => void = () => undefined;
+		let observeCaptureStarted: () => void = () => undefined;
+		const captureStarted = new Promise<void>((resolve) => {
+			observeCaptureStarted = resolve;
+		});
+		const archive = getNotificationLifecycleArchive();
+		const originalCapture = archive.capture.bind(archive);
+		const capture = vi.spyOn(archive, "capture").mockImplementationOnce(async (notification) => {
+			observeCaptureStarted();
+			await new Promise<void>((resolve) => {
+				finishCapture = resolve;
+			});
+			return await originalCapture(notification);
+		});
+		modelRequest.mockResolvedValue({
+			status: "completed",
+			parsedJsonObject: { decision: "completed_turn_or_user_handoff", reason: "完成", summaryText: "完成" },
+		});
+		const publish = vi.fn(async () => undefined);
+		const service = createNotificationAssessmentService({ publish, getSummary: () => undefined });
+		const notification = {
+			workspaceId: "assessment",
+			taskId: "task",
+			candidateId: "concurrent-durable-registration",
+			userTurnKind: "review" as const,
+		};
+		const options = { waitForAssessmentCompletion: false, requireDurableRegistration: true };
+		const first = service.enqueue(notification, options);
+		try {
+			await captureStarted;
+			await expect(service.enqueue(notification, options)).rejects.toThrow("登记");
+		} finally {
+			finishCapture();
+			await first;
+			await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+			service.close();
+			capture.mockRestore();
+		}
+		await expect(service.enqueue(notification, options)).rejects.toThrow("关闭");
+	});
+	it.each(["eligible", "evaluating"])("持久登记后在 %s 阶段重启，保留候选且不重复评估或发布", async (phase) => {
+		const settings = notificationIntelligenceSettingsSchema.parse({ assessmentEnabled: true });
+		let finishSettingsRead: (value: typeof settings) => void = () => undefined;
+		const assessmentSettings = new Promise<typeof settings>((resolve) => {
+			finishSettingsRead = resolve;
+		});
+		let finishAssessment: (value: unknown) => void = () => undefined;
+		const assessmentResponse = new Promise<unknown>((resolve) => {
+			finishAssessment = resolve;
+		});
+		const completedResponse = {
+			status: "completed",
+			parsedJsonObject: { decision: "completed_turn_or_user_handoff", reason: "完成", summaryText: "完成" },
+		};
+		if (phase === "eligible") {
+			settingsRead.mockResolvedValueOnce(settings).mockImplementationOnce(() => assessmentSettings);
+			modelRequest.mockResolvedValue(completedResponse);
+		} else modelRequest.mockImplementation(() => assessmentResponse);
+		const publish = vi.fn(async () => undefined);
+		const dependencies = { publish, getSummary: () => undefined };
+		const first = createNotificationAssessmentService(dependencies);
+		const notification = {
+			workspaceId: "assessment",
+			taskId: "task",
+			candidateId: `registration-restart-${phase}`,
+			userTurnKind: "review" as const,
+		};
+		let restarted: ReturnType<typeof createNotificationAssessmentService> | undefined;
+		try {
+			await first.enqueue(notification, { waitForAssessmentCompletion: false, requireDurableRegistration: true });
+			if (phase === "evaluating") await vi.waitFor(() => expect(modelRequest).toHaveBeenCalledTimes(1));
+			expect(
+				(await getNotificationLifecycleArchive().get(notification.candidateId))?.candidate
+					.notificationProcessingStatus,
+			).toBe(phase);
+			expect(publish).not.toHaveBeenCalled();
+			first.close();
+			finishSettingsRead(settings);
+			if (phase === "eligible") await vi.waitFor(() => expect(resolveAssessmentCredential).toHaveBeenCalledTimes(1));
+			await closeDefaultNotificationLifecycleArchive();
+			restarted = createNotificationAssessmentService(dependencies);
+			await restarted.recover();
+			if (phase === "evaluating") {
+				const archive = getNotificationLifecycleArchive();
+				const deferred = await archive.get(notification.candidateId);
+				expect(deferred?.candidate.notificationProcessingStatus).toBe("deferred");
+				expect(deferred?.events).toContainEqual(
+					expect.objectContaining({
+						eventType: "notification_deferred",
+						details: { reason: "runtime_restarted_during_assessment" },
+					}),
+				);
+				await archive.update(
+					notification.candidateId,
+					{ deferredNotificationFallbackDeadlineAt: 1 },
+					"test_deadline_elapsed",
+					{},
+				);
+				await restarted.recover();
+			}
+			await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+			finishAssessment(completedResponse);
+			await restarted.recover();
+			await restarted.enqueue(notification, {
+				waitForAssessmentCompletion: false,
+				requireDurableRegistration: true,
+			});
+			expect(modelRequest).toHaveBeenCalledTimes(1);
+			expect(publish).toHaveBeenCalledTimes(1);
+		} finally {
+			first.close();
+			restarted?.close();
+			finishSettingsRead(settings);
+			finishAssessment(completedResponse);
+		}
+	});
+	it("持久登记后可先返回，模型挂起期间不阻塞 hook 且同一候选只评估一次", async () => {
+		let finishAssessment: (result: unknown) => void = () => undefined;
+		modelRequest.mockImplementation(
+			() =>
+				new Promise((resolve) => {
+					finishAssessment = resolve;
+				}),
+		);
+		const publish = vi.fn(async () => undefined);
+		const service = createNotificationAssessmentService({ publish, getSummary: () => undefined });
+		const notification = {
+			workspaceId: "assessment",
+			taskId: "task",
+			candidateId: "background-hook-assessment",
+			userTurnKind: "review" as const,
+		};
+		try {
+			await service.enqueue(notification, { waitForAssessmentCompletion: false });
+			const registered = await getNotificationLifecycleArchive().get(notification.candidateId);
+			expect(registered?.candidate.notificationProcessingStatus).toMatch(/eligible|evaluating/u);
+			await vi.waitFor(() => expect(modelRequest).toHaveBeenCalledTimes(1));
+			expect(publish).not.toHaveBeenCalled();
+			await service.enqueue(notification, { waitForAssessmentCompletion: false });
+			expect(modelRequest).toHaveBeenCalledTimes(1);
+			finishAssessment({
+				status: "completed",
+				parsedJsonObject: { decision: "completed_turn_or_user_handoff", reason: "完成", summaryText: "完成" },
+			});
+			await vi.waitFor(() => expect(publish).toHaveBeenCalledTimes(1));
+		} finally {
+			service.close();
+		}
+	});
 	it("凭据读取异常只保留一次基础提醒，持久失败态阻止重启后重试", async () => {
 		resolveAssessmentCredential.mockRejectedValue(new Error("credential store locked"));
 		const publishUnarchived = vi.fn(async () => undefined);
