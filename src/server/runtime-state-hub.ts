@@ -153,7 +153,8 @@ export interface RuntimeStateHub {
 			NotificationAssessmentInput,
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
-	) => void;
+		options?: { requireDurableRegistration: boolean },
+	) => Promise<void>;
 	// 通知中心：某 workspace 的日志变更（mark-visited / clear / board 变更导致 isDone 刷新）后，
 	// 重建该 workspace 的派生 feed 并全局广播给所有客户端（铃铛跨 repo 聚合）。
 	broadcastNotificationLogUpdated: (workspaceId: string) => Promise<void>;
@@ -1075,10 +1076,14 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			NotificationAssessmentInput,
 			"candidateId" | "summary" | "finalMessage" | "agentEventDeliveredLateToRuntimeByMilliseconds"
 		>,
+		options?: { requireDurableRegistration: boolean },
 	) => {
 		if (evidence?.summary)
 			latestNotificationSummaries.set(`${workspaceId}:${evidence.summary.taskId}`, evidence.summary);
-		void notificationAssessment.enqueue({ workspaceId, taskId, userTurnKind, ...evidence });
+		return notificationAssessment.enqueue(
+			{ workspaceId, taskId, userTurnKind, ...evidence },
+			{ waitForAssessmentCompletion: false, requireDurableRegistration: options?.requireDurableRegistration },
+		);
 	};
 
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {

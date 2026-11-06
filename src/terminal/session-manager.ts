@@ -8818,6 +8818,55 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	recordRecoveredHistoricalHookReviewLifecycleEvent(
+		taskId: string,
+		evidence: {
+			runtimeSessionIncarnationId: string;
+			agentTurnSequence: number;
+			capturedAtEpochMs: number;
+			deliveryIdempotencyKey: string;
+		},
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry ||
+			entry.active ||
+			entry.summary.runtimeSessionIncarnationId !== evidence.runtimeSessionIncarnationId ||
+			(entry.summary.agentResponseGenerationTurnSequence ?? 0) !== evidence.agentTurnSequence ||
+			evidence.agentTurnSequence <= 0 ||
+			resolveSessionFacets(entry.summary).turnOwner !== null ||
+			!["none", "exited"].includes(resolveSessionFacets(entry.summary).liveness) ||
+			(entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0) > evidence.capturedAtEpochMs ||
+			(entry.summary.agentResponseGenerationTurnStarted?.startedAt ?? 0) > evidence.capturedAtEpochMs
+		)
+			return null;
+		// 只补历史交棒；已退出的旧进程不获得新的待命锚点，也不启动或续跑 agent。
+		const summary = updateSummary(
+			entry,
+			{
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+				reviewReason: "hook",
+				currentAgentProcessUserTurnIdleRetentionStarted: null,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: evidence.capturedAtEpochMs,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: evidence.agentTurnSequence,
+				},
+				lastAppliedHookReviewLifecycleEventDelivery: {
+					deliveryIdempotencyKey: evidence.deliveryIdempotencyKey,
+					capturedAtEpochMs: evidence.capturedAtEpochMs,
+					runtimeSessionIncarnationId: evidence.runtimeSessionIncarnationId,
+				},
+			},
+			now(),
+			{ domainEventObservedAtEpochMs: evidence.capturedAtEpochMs },
+		);
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	// 切换前先保存协作会话的目标通道。启动失败仍保留新意图，后续明确发送不得复活旧 ACP。
 	applyTaskConversationSessionTargetTransport(
 		taskId: string,
@@ -10746,7 +10795,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		) {
 			this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, true);
 		}
-		return updateSummary(entry, transition.patch, now(), domainEventTiming);
+		return updateSummary(
+			entry,
+			{
+				...transition.patch,
+				...(event.type === "hook.to_review" &&
+				domainEventTiming?.hookEventDeliveryIdempotencyKey &&
+				entry.summary.runtimeSessionIncarnationId
+					? {
+							lastAppliedHookReviewLifecycleEventDelivery: {
+								deliveryIdempotencyKey: domainEventTiming.hookEventDeliveryIdempotencyKey,
+								capturedAtEpochMs: Math.min(domainEventTiming.domainEventObservedAtEpochMs ?? now(), now()),
+								runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+							},
+						}
+					: {}),
+			},
+			now(),
+			domainEventTiming,
+		);
 	}
 
 	private ensureStallScanRunning(): void {

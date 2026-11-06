@@ -74,4 +74,40 @@ describe("前台只读请求的有界恢复与归属", () => {
 		await act(async () => resolveOld("迟到的目标 A"));
 		expect(latest).toMatchObject({ identity: "b", value: "目标 B" });
 	});
+	it("底层读取忽略取消时仍有界结束，并在在线事件后恢复", async () => {
+		const signals: AbortSignal[] = [];
+		const read = vi.fn((signal: AbortSignal) => {
+			signals.push(signal);
+			return new Promise<string>(() => undefined);
+		});
+		await act(async () => root.render(<Harness identity="a" read={read} observe={observe} />));
+		await act(async () => vi.advanceTimersByTimeAsync(25_600));
+		expect(read).toHaveBeenCalledTimes(3);
+		expect(signals.every((signal) => signal.aborted)).toBe(true);
+		expect(latest).toMatchObject({ loading: false, value: null });
+		expect(latest?.error).toContain("超时");
+		read.mockResolvedValue("已恢复");
+		await act(async () => window.dispatchEvent(new Event("online")));
+		expect(latest).toMatchObject({ value: "已恢复", error: null, loading: false });
+	});
+	it("在途刷新只合并一次补读，不取消当前读取或并行堆积", async () => {
+		const completions: ((value: string) => void)[] = [];
+		const signals: AbortSignal[] = [];
+		const read = vi.fn((signal: AbortSignal) => {
+			signals.push(signal);
+			return new Promise<string>((resolve) => completions.push(resolve));
+		});
+		await act(async () => root.render(<Harness identity="a" read={read} observe={observe} />));
+		await act(async () => {
+			void latest?.refresh();
+			void latest?.refresh();
+			window.dispatchEvent(new Event("online"));
+		});
+		expect(read).toHaveBeenCalledTimes(1);
+		expect(signals[0]?.aborted).toBe(false);
+		await act(async () => completions[0]?.("第一份"));
+		expect(read).toHaveBeenCalledTimes(2);
+		await act(async () => completions[1]?.("补读结果"));
+		expect(latest).toMatchObject({ value: "补读结果", loading: false });
+	});
 });

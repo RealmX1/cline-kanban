@@ -63,6 +63,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **工作区 JSON 是已提交快照的投影**：读取和缓存必须识别快照日志与 `workspaceStateSnapshotCommitId`；后续写入先恢复投影再比较 revision，不重做业务变更。新旧写锁协议切换须核验旧写入者退出，回退先投影日志；见 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md`。
+- **普通主会话完成事件的持久受理不等于应用**：投递回执与 facet 同一次权威快照提交；恢复保留原代、原回合与原捕获时间，不重开 agent 或付费维护。通知对账不冒充送达，见 `docs/high-load-workspace-read-and-hook-lifecycle-event-recovery.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
