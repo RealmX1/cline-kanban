@@ -34,13 +34,15 @@ function createCard(taskId: string, prompt: string, createdAt: number): RuntimeB
 	};
 }
 
-function createBoard(columns: Partial<Record<"backlog" | "review" | "trash", RuntimeBoardCard[]>>): RuntimeBoardData {
+function createBoard(
+	columns: Partial<Record<"backlog" | "review" | "validation" | "trash", RuntimeBoardCard[]>>,
+): RuntimeBoardData {
 	return {
 		columns: [
 			{ id: "backlog", title: "Backlog", cards: columns.backlog ?? [] },
 			{ id: "in_progress", title: "In Progress", cards: [] },
 			{ id: "review", title: "Review", cards: columns.review ?? [] },
-			{ id: "validation", title: "Validation", cards: [] },
+			{ id: "validation", title: "Validation", cards: columns.validation ?? [] },
 			{ id: "trash", title: "Done", cards: columns.trash ?? [] },
 		],
 	};
@@ -79,7 +81,6 @@ describe("kanban web ui page load nonce and board mutation initiator annotations
 			);
 			const workspaceApi = createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: vi.fn(),
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
 				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
 				broadcastRuntimeProjectsUpdated: vi.fn(),
@@ -106,7 +107,8 @@ describe("kanban web ui page load nonce and board mutation initiator annotations
 					createCard("u0001", "edited by the user, amended", 1_000),
 					createCard("n0003", "created without an annotation", 3_000),
 				],
-				trash: [createCard("r0002", "completed by auto review in PR mode", 2_000)],
+				// 验证普通 Stage 移动的来源；进入 Done 必须通过专用结案 action。
+				validation: [createCard("r0002", "completed by auto review in PR mode", 2_000)],
 			});
 
 			// 1) runtime 不认识的 nonce（例如 runtime 重启过）：可重试错误，board 不写。
@@ -138,9 +140,9 @@ describe("kanban web ui page load nonce and board mutation initiator annotations
 					},
 					{
 						taskId: "r0002",
-						annotatedBoardMutationKind: "task_card_moved_to_trash_column",
+						annotatedBoardMutationKind: "task_card_moved_between_non_trash_board_columns",
 						fromColumnId: "review",
-						toColumnId: "trash",
+						toColumnId: "validation",
 						boardMutationInitiator: "web_ui_client_automation_auto_review_pull_request_mode_completion",
 					},
 				],
@@ -161,7 +163,7 @@ describe("kanban web ui page load nonce and board mutation initiator annotations
 					],
 					[
 						"r0002",
-						"task_card_moved_to_trash_column",
+						"task_card_moved_between_non_trash_board_columns",
 						{
 							kanbanActorKind: "kanban_web_ui_client_side_automation_with_verified_page_load_nonce",
 							boardMutationInitiator: "web_ui_client_automation_auto_review_pull_request_mode_completion",

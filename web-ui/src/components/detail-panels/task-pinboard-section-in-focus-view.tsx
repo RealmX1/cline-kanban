@@ -32,7 +32,6 @@ export function TaskPinboardSectionInFocusView({
 	onRevealCanonicalCardInItsStage,
 	onEditTaskPinboardPinReason,
 	workspacePath,
-	defaultClineModelId,
 	defaultAgentId,
 }: {
 	pinnedTasks: TaskPinnedToTaskPinboard[];
@@ -43,7 +42,6 @@ export function TaskPinboardSectionInFocusView({
 	onRevealCanonicalCardInItsStage: (taskId: string) => void;
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): ReactElement | null {
 	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(
@@ -108,7 +106,6 @@ export function TaskPinboardSectionInFocusView({
 									handlers,
 									onActivateCard,
 									workspacePath,
-									defaultClineModelId,
 									defaultAgentId,
 								})}
 							/>

@@ -139,7 +139,6 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 			const broadcastRuntimeWorkspaceStateUpdated = vi.fn();
 			const workspaceApi = createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: vi.fn(),
-				getScopedClineTaskSessionService: vi.fn(),
 				loadScopedRuntimeConfig: vi.fn(),
 				broadcastRuntimeWorkspaceStateUpdated,
 				broadcastRuntimeProjectsUpdated: vi.fn(),
@@ -204,7 +203,6 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 					startInPlanMode: true,
 					taskAgentPermissionMode: "ask_for_every_tool_use",
 					baseRef: "main",
-					clineSettings: { providerId: "anthropic", modelId: "claude-sonnet" },
 					ompAgentSessionTransportForNewTasks: "pty_terminal",
 					workspaceDefaultAgentIdForNewTasks: "claude",
 				},
@@ -226,10 +224,7 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 			});
 			expect(updated.taskCardSnapshotAfterAction.taskCard.title).toBe("renamed follow-up");
 			expect(updated.taskCardSnapshotAfterAction.taskCard.prompt).toBe("follow-up spawned by the acting card");
-			expect(updated.taskCardSnapshotAfterAction.taskCard.clineSettings).toEqual({
-				providerId: "anthropic",
-				modelId: "claude-sonnet",
-			});
+			expect(updated.taskCardSnapshotAfterAction.taskCard.taskAgentPermissionMode).toBe("ask_for_every_tool_use");
 			expect(updated.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard).toBe("backlog");
 			expect(updated.taskCardSnapshotAfterAction.taskSessionSummaryPersistedInWorkspaceSessionsFile).toBeNull();
 
@@ -316,6 +311,14 @@ describe("kanban CLI task board mutations through the runtime procedure", () => 
 				]),
 			);
 			for (const event of capturedWithinFunnel) {
+				if (event.eventPayload.taskMutationIntentKind === "task_closure_operation_progress_changed") {
+					expect(event.eventKind).toBe("task_card_field_value_changed");
+					expect(event.actor).toEqual({
+						kanbanActorKind: "kanban_runtime_system_component",
+						kanbanRuntimeSystemComponentName: "task-closure-preservation",
+					});
+					continue;
+				}
 				expect(event.actor).toEqual({
 					kanbanActorKind: "kanban_board_card_work_unit",
 					actingKanbanBoardCardWorkUnit: {

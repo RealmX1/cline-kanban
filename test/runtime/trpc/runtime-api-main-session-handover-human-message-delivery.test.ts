@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
-import type { ClineTaskSessionService } from "../../../src/cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import {
@@ -326,11 +325,6 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 			loadScopedRuntimeConfig: async () => runtimeConfig,
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: async () => manager,
-			getScopedClineTaskSessionService: async () =>
-				({
-					sendTaskSessionInput: async () => null,
-					rebindPersistedTaskSession: async () => null,
-				}) as unknown as ClineTaskSessionService,
 			getScopedAcpTaskSessionService: async () => acpService as unknown as AcpTaskSessionService,
 			resolveInteractiveShellCommand: () => ({ binary: "zsh", args: [] }),
 			runCommand: vi.fn(),

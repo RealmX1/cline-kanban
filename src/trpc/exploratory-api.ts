@@ -6,11 +6,7 @@
 // agent-conversation-exploration-thread-graph 建模，宿主胶水见 docs/exploratory-mode-host-integration.md。
 
 import { TRPCError } from "@trpc/server";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
-import {
-	type ConversationSessionTurnProjectionScope,
-	loadConversationSessionTurnProjection,
-} from "../conversation-tree/load-conversation-session-turn-projection";
+import { loadConversationSessionTurnProjection } from "../conversation-tree/load-conversation-session-turn-projection";
 import type {
 	RuntimeArchiveExploratoryFindingRequest,
 	RuntimeArchiveExploratoryFindingResponse,
@@ -41,10 +37,6 @@ import {
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
 
 export interface CreateExploratoryApiDependencies {
-	getScopedClineTaskSessionService: (
-		scope: ConversationSessionTurnProjectionScope,
-	) => Promise<ClineTaskSessionService>;
-	loadBoardCardAgentId: (scope: ConversationSessionTurnProjectionScope, taskId: string) => Promise<string | null>;
 	// findings 集合变更广播出口（runtime-server 注入 runtime-state-hub 的
 	// broadcastExploratoryFindingsUpdated）。只在变更落盘成功后调用
 	// （durable-write-before-ack，蓝图 §D.3）；幂等空转（dedup / 已处目标态）不广播。
@@ -282,7 +274,7 @@ export function createExploratoryApi(deps: CreateExploratoryApiDependencies): Ru
 				}
 				let snapshot: Awaited<ReturnType<typeof loadConversationSessionTurnProjection>>;
 				try {
-					snapshot = await loadConversationSessionTurnProjection(deps, scope, link.conversationSessionTaskId);
+					snapshot = await loadConversationSessionTurnProjection();
 				} catch {
 					// link 声明的会话投影完全加载不出来（会话不存在）→ 整份拒绝。
 					return {

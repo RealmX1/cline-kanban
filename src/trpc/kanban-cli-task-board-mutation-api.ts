@@ -73,7 +73,6 @@ export async function applyKanbanCliTaskBoardMutation(
 						autoReviewEnabled: fieldValues.autoReviewEnabled,
 						autoReviewMode: fieldValues.autoReviewMode,
 						agentId: fieldValues.agentId,
-						clineSettings: fieldValues.clineSettings,
 						taskAgentSessionInitialization: fieldValues.taskAgentSessionInitialization,
 						baseRef: fieldValues.baseRef,
 						parentSessionId: fieldValues.parentSessionId,

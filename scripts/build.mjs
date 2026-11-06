@@ -24,16 +24,9 @@ const builtWebUiDirectoryPath = resolve("web-ui/dist");
  */
 const external = ["node-pty", "better-sqlite3", "@napi-rs/keyring", "sharp"];
 
-/** Bake OTEL telemetry env vars into the bundle at build time. */
+/** 仅固定打包运行模式；Kanban telemetry 在运行时读取配置。 */
 const define = {
 	"process.env.NODE_ENV": '"production"',
-	"process.env.OTEL_TELEMETRY_ENABLED": JSON.stringify(process.env.OTEL_TELEMETRY_ENABLED ?? ""),
-	"process.env.OTEL_EXPORTER_OTLP_ENDPOINT": JSON.stringify(process.env.OTEL_EXPORTER_OTLP_ENDPOINT ?? ""),
-	"process.env.OTEL_METRICS_EXPORTER": JSON.stringify(process.env.OTEL_METRICS_EXPORTER ?? ""),
-	"process.env.OTEL_LOGS_EXPORTER": JSON.stringify(process.env.OTEL_LOGS_EXPORTER ?? ""),
-	"process.env.OTEL_EXPORTER_OTLP_PROTOCOL": JSON.stringify(process.env.OTEL_EXPORTER_OTLP_PROTOCOL ?? ""),
-	"process.env.OTEL_METRIC_EXPORT_INTERVAL": JSON.stringify(process.env.OTEL_METRIC_EXPORT_INTERVAL ?? ""),
-	"process.env.OTEL_EXPORTER_OTLP_HEADERS": JSON.stringify(process.env.OTEL_EXPORTER_OTLP_HEADERS ?? ""),
 };
 
 /**
@@ -128,7 +121,6 @@ try {
 			banner: { js: `#!/usr/bin/env node\n${cjsShimBanner}` },
 		}).then((result) => {
 			const forbidden = Object.keys(result.metafile.inputs).filter((path) =>
-				path.includes("node_modules/@clinebot/") ||
 				path.includes("node_modules/@sentry/") ||
 				path.startsWith("src/server/") ||
 				path.startsWith("src/trpc/") ||

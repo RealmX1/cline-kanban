@@ -22,7 +22,6 @@ interface StageRailFocusedCardProps {
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	taskCardActionHandlers: TaskCardActionHandlerBundle;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
 
@@ -60,7 +59,6 @@ function StageHeaderRailEntry({
 	taskSessions,
 	taskCardActionHandlers,
 	workspacePath,
-	defaultClineModelId,
 	defaultAgentId,
 }: StageRailFocusedCardProps & {
 	column: BoardDisplayGroup;
@@ -153,7 +151,6 @@ function StageHeaderRailEntry({
 							selected: true,
 							handlers: taskCardActionHandlers,
 							workspacePath,
-							defaultClineModelId,
 							defaultAgentId,
 						})}
 					/>

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
+import { assertRuntimeAgentIsNotRetired, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
 import { doesAgentSupportSessionTransport } from "../core/agent-session-transport-selection";
 import type {
 	QueuedTaskPromptDeliveryEntry,
@@ -210,12 +210,10 @@ function assertTaskAllowsExecution(board: RuntimeBoardData, taskId: string, inca
 
 function requireSession(sessions: Record<string, RuntimeTaskSessionSummary>, sessionId: string, taskId: string) {
 	const summary = sessions[sessionId];
-	if (
-		!summary ||
-		!doesConversationSessionBelongToTask(summary, taskId) ||
-		!summary.agentId ||
-		!isRuntimeAgentLaunchSupported(summary.agentId)
-	)
+	if (!summary || !doesConversationSessionBelongToTask(summary, taskId) || !summary.agentId)
+		throw new Error("目标会话不存在、不属于同一任务或不是可用的 Agent 会话。");
+	assertRuntimeAgentIsNotRetired(summary.agentId);
+	if (!isRuntimeAgentLaunchSupported(summary.agentId))
 		throw new Error("目标会话不存在、不属于同一任务或不是可用的 Agent 会话。");
 	return summary;
 }
@@ -1123,6 +1121,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				if (creator.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way")
 					throw new Error("By the way 保持只读，不能创建可执行会话。");
 				const agentId = input.agentId ?? creator.agentId;
+				assertRuntimeAgentIsNotRetired(agentId);
 				if (!agentId || !isRuntimeAgentLaunchSupported(agentId)) throw new Error("所选 Agent 不支持启动。");
 				if (input.sessionRole === "by_the_way" && !["claude", "codex"].includes(agentId))
 					throw new Error("所选 Agent 不支持只读 By the way。");
@@ -1255,6 +1254,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				}
 				assertTaskAllowsExecution(state.board, input.taskId);
 				const agentId = input.agentId ?? creator.agentId;
+				assertRuntimeAgentIsNotRetired(agentId);
 				if (!agentId || !isRuntimeAgentLaunchSupported(agentId)) throw new Error("所选 Agent 不支持启动。");
 				if (input.sessionRole === "by_the_way" && !["claude", "codex"].includes(agentId))
 					throw new Error("所选 Agent 不支持只读 By the way。");

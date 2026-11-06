@@ -26,10 +26,13 @@ import { flushSync } from "react-dom";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { showAppToast } from "@/components/app-toaster";
+import {
+	AgentConversationChatPanel,
+	type AgentConversationChatPanelHandle,
+} from "@/components/detail-panels/agent-conversation-chat-panel";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
 import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
-import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
@@ -58,9 +61,9 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import type { ExpandedForegroundViewTarget } from "@/expanded-foreground-view/expanded-foreground-view-navigation";
+import type { AgentConversationChatActionResult } from "@/hooks/use-agent-conversation-chat-runtime-actions";
+import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
-import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
-import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useFocusViewDesktopPanelArrangement } from "@/hooks/use-focus-view-desktop-panel-arrangement";
@@ -93,7 +96,6 @@ import {
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
-	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
 	RuntimeExploratoryFindingEntry,
 	RuntimeTaskChatMessage,
@@ -736,12 +738,12 @@ export function CardDetailView({
 	moveToReviewLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
-	onSendClineChatMessage,
-	onCancelClineChatTurn,
+	onSendAgentConversationChatMessage,
+	onCancelAgentConversationChatTurn,
 	onResolveTaskAgentUserDecision,
-	onLoadClineChatMessages,
-	latestClineChatMessage,
-	streamedClineChatMessages,
+	onLoadAgentConversationChatMessages,
+	latestAgentConversationChatMessage,
+	streamedAgentConversationChatMessages,
 	onMoveToTrash,
 	isMoveToTrashLoading,
 	onMoveToValidation,
@@ -762,8 +764,6 @@ export function CardDetailView({
 	isBottomTerminalExpanded,
 	onBottomTerminalToggleExpand,
 	isDocumentVisible = true,
-	onClineSettingsSaved,
-	onTaskClineSettingsChanged,
 	isTaskChangesSidebarOpen = false,
 	isFocusViewTaskListSidebarHidden = false,
 	isFocusViewWorkbenchSidebarHidden = false,
@@ -826,20 +826,20 @@ export function CardDetailView({
 	moveToReviewLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
-	onSendClineChatMessage?: (
+	onSendAgentConversationChatMessage?: (
 		taskId: string,
 		text: string,
 		options?: { mode?: RuntimeTaskSessionMode },
-	) => Promise<ClineChatActionResult>;
-	onCancelClineChatTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
+	) => Promise<AgentConversationChatActionResult>;
+	onCancelAgentConversationChatTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
 	onResolveTaskAgentUserDecision?: (
 		taskId: string,
 		decisionId: string,
 		optionId: string | null,
 	) => Promise<{ ok: boolean; message?: string }>;
-	onLoadClineChatMessages?: (taskId: string) => Promise<ClineChatMessage[] | null>;
-	latestClineChatMessage?: ClineChatMessage | null;
-	streamedClineChatMessages?: ClineChatMessage[] | null;
+	onLoadAgentConversationChatMessages?: (taskId: string) => Promise<AgentConversationChatMessage[] | null>;
+	latestAgentConversationChatMessage?: AgentConversationChatMessage | null;
+	streamedAgentConversationChatMessages?: AgentConversationChatMessage[] | null;
 	onMoveToTrash: () => void;
 	isMoveToTrashLoading?: boolean;
 	onMoveToValidation?: () => void;
@@ -860,12 +860,6 @@ export function CardDetailView({
 	isBottomTerminalExpanded?: boolean;
 	onBottomTerminalToggleExpand?: () => void;
 	isDocumentVisible?: boolean;
-	onClineSettingsSaved?: () => void;
-	onTaskClineSettingsChanged?: (settings: {
-		providerId: string;
-		modelId: string;
-		reasoningEffort: RuntimeClineReasoningEffort | "";
-	}) => void;
 	isTaskChangesSidebarOpen?: boolean;
 	onCreateTaskConversationSession?: (input: {
 		codexConfigurationProfileId?: string;
@@ -1043,11 +1037,9 @@ export function CardDetailView({
 	const { startDrag: startRightPromptResize } = useResizeDrag();
 	const detailLayoutRef = useRef<HTMLDivElement | null>(null);
 
-	const hasExplicitTaskClineSettings =
-		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
 	const detailDiffRowRef = useRef<HTMLDivElement | null>(null);
-	const clineAgentChatPanelRef = useRef<ClineAgentChatPanelHandle | null>(null);
+	const agentConversationChatPanelRef = useRef<AgentConversationChatPanelHandle | null>(null);
 	const terminalShortcutInputFocusHandleRef = useRef<AgentInputShortcutInsertionFocusHandle>(null);
 
 	const handleSeparatorMouseDown = useResizeHandler(
@@ -1186,7 +1178,7 @@ export function CardDetailView({
 	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
 	// 直接持有结构化消息，渲染成会话面板；只有 PTY 终端 agent 才渲染 xterm。
 	// 有活会话时读会话自己盖的通道章（omp 可在 TUI ⇄ ACP 之间切换，agentId 判不出来）。
-	const showClineAgentChatPanel = activeTaskConversationSessionSummary
+	const showAgentConversationChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
 	// ── 会话 turn 投影（姊妹蓝图 §2.2）──────────────────────────────────
@@ -1204,7 +1196,7 @@ export function CardDetailView({
 	// 重算与 git 子进程轮询（本仓 AGENTS.md 记载过同类事件循环停摆事故）。上述三类
 	// 边沿与 updatedAt 在同一个广播批次里到达，去掉它不引入任何可感知延迟。
 	const turnProjectionConversationSessionTaskId =
-		showClineAgentChatPanel && !isDoneTaskReadOnly ? selectedTaskConversationSessionId : null;
+		showAgentConversationChatPanel && !isDoneTaskReadOnly ? selectedTaskConversationSessionId : null;
 	const turnProjectionRefreshFacets = activeTaskConversationSessionSummary
 		? resolveSessionFacets(activeTaskConversationSessionSummary)
 		: null;
@@ -1231,7 +1223,7 @@ export function CardDetailView({
 					width: "100%",
 					flex: `0 0 ${stackedAgentPanelHeightRatio * 100}%`,
 				}
-			: showClineAgentChatPanel
+			: showAgentConversationChatPanel
 				? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 				: {
 						display: isDiffExpanded ? "none" : "flex",
@@ -1243,7 +1235,7 @@ export function CardDetailView({
 		? { display: "none" }
 		: isWorkbenchBelowAgent
 			? { flex: "1 1 0", width: "100%", minHeight: 0 }
-			: showClineAgentChatPanel
+			: showAgentConversationChatPanel
 				? { width: isDiffExpanded ? "100%" : diffPanelPercent }
 				: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
 	const availablePaths = useMemo(() => {
@@ -1382,14 +1374,14 @@ export function CardDetailView({
 	const injectTextIntoActiveInput = useCallback(
 		(formatted: string) => {
 			if (isDoneTaskReadOnly) return;
-			if (showClineAgentChatPanel) {
-				clineAgentChatPanelRef.current?.appendToDraft(formatted);
+			if (showAgentConversationChatPanel) {
+				agentConversationChatPanelRef.current?.appendToDraft(formatted);
 				setIsDiffExpanded(false);
 				return;
 			}
 			onAddReviewComments?.(selectedTaskConversationSessionId, formatted);
 		},
-		[onAddReviewComments, selectedTaskConversationSessionId, showClineAgentChatPanel, isDoneTaskReadOnly],
+		[onAddReviewComments, selectedTaskConversationSessionId, showAgentConversationChatPanel, isDoneTaskReadOnly],
 	);
 	const handleFillPromptIntoActiveInput = useCallback(
 		(text: string) => {
@@ -1398,33 +1390,35 @@ export function CardDetailView({
 			flushSync(() => {
 				setIsDiffExpanded(false);
 				if (isMobile) setMobileTab("chat");
-				if (showClineAgentChatPanel) {
-					clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+				if (showAgentConversationChatPanel) {
+					agentConversationChatPanelRef.current?.appendToDraft(text, {
+						preserveInsertedTextBoundaryWhitespace: true,
+					});
 				} else {
 					injectTextIntoActiveInput(text);
 				}
 			});
-			if (showClineAgentChatPanel) {
-				clineAgentChatPanelRef.current?.focusAgentInputAfterShortcutInsertion();
+			if (showAgentConversationChatPanel) {
+				agentConversationChatPanelRef.current?.focusAgentInputAfterShortcutInsertion();
 			} else {
 				terminalShortcutInputFocusHandleRef.current?.focusAgentInputAfterShortcutInsertion();
 			}
 		},
-		[injectTextIntoActiveInput, showClineAgentChatPanel, isDoneTaskReadOnly, isMobile],
+		[injectTextIntoActiveInput, showAgentConversationChatPanel, isDoneTaskReadOnly, isMobile],
 	);
 
 	const handleSendDiffComments = useCallback(
 		(formatted: string) => {
 			if (isDoneTaskReadOnly) return;
-			if (showClineAgentChatPanel) {
-				void clineAgentChatPanelRef.current?.sendText(formatted);
+			if (showAgentConversationChatPanel) {
+				void agentConversationChatPanelRef.current?.sendText(formatted);
 				setIsDiffExpanded(false);
 				return;
 			}
 			onSendReviewComments?.(selection.card.id, formatted);
 			setIsDiffExpanded(false);
 		},
-		[onSendReviewComments, selection.card.id, showClineAgentChatPanel, isDoneTaskReadOnly],
+		[onSendReviewComments, selection.card.id, showAgentConversationChatPanel, isDoneTaskReadOnly],
 	);
 
 	const promptLibraryProjectId = currentProjectId ?? "__unknown_project__";
@@ -1642,7 +1636,7 @@ export function CardDetailView({
 	);
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
-		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
+		(isMainTaskConversationSessionSelected ? streamedAgentConversationChatMessages : null);
 
 	const agentSessionContent = isDoneTaskReadOnly ? (
 		<ReadOnlyTaskConversationHistoryPanel
@@ -1652,9 +1646,13 @@ export function CardDetailView({
 			taskConversationSessionId={selectedTaskConversationSessionId}
 			onRestoreTask={onRestoreTaskFromTrash ? () => onRestoreTaskFromTrash(selection.card.id) : undefined}
 		/>
-	) : showClineAgentChatPanel ? (
-		<ClineAgentChatPanel
-			ref={clineAgentChatPanelRef}
+	) : effectiveTaskConversationSessionAgentId === "cline" ? (
+		<div role="status" className="p-4 text-sm text-text-secondary">
+			Cline agent 已退役。旧卡片和会话数据仍保留；请选择其他 Agent 开始新会话。
+		</div>
+	) : showAgentConversationChatPanel ? (
+		<AgentConversationChatPanel
+			ref={agentConversationChatPanelRef}
 			taskId={selectedTaskConversationSessionId}
 			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			summary={activeTaskConversationSessionSummary}
@@ -1669,17 +1667,12 @@ export function CardDetailView({
 			}
 			showComposerModeToggle={false}
 			workspaceId={currentProjectId}
-			runtimeConfig={runtimeConfig}
-			taskClineSettings={selection.card.clineSettings}
-			taskHasExplicitClineSettings={hasExplicitTaskClineSettings}
-			onClineSettingsSaved={onClineSettingsSaved}
-			onTaskClineSettingsChanged={onTaskClineSettingsChanged}
-			onSendMessage={onSendClineChatMessage}
-			onCancelTurn={onCancelClineChatTurn}
+			onSendMessage={onSendAgentConversationChatMessage}
+			onCancelTurn={onCancelAgentConversationChatTurn}
 			onResolveUserDecision={onResolveTaskAgentUserDecision}
-			onLoadMessages={onLoadClineChatMessages}
+			onLoadMessages={onLoadAgentConversationChatMessages}
 			incomingMessages={activeTaskConversationSessionMessages}
-			incomingMessage={isMainTaskConversationSessionSelected ? latestClineChatMessage : null}
+			incomingMessage={isMainTaskConversationSessionSelected ? latestAgentConversationChatMessage : null}
 			onCommit={
 				isMainTaskConversationSessionSelected && onAgentCommitTask
 					? () => onAgentCommitTask(selection.card.id)
@@ -1915,7 +1908,6 @@ export function CardDetailView({
 									selected: true,
 									workspacePath,
 									defaultAgentId: selectedAgentId,
-									defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
 									handlers: {
 										onStartTask,
 										onEditTask,
@@ -1993,7 +1985,6 @@ export function CardDetailView({
 										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 										moveToTrashLoadingById={moveToTrashLoadingById}
 										panelWidth="100%"
-										defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
 										defaultAgentId={selectedAgentId}
 									/>
 								</div>
@@ -2052,7 +2043,7 @@ export function CardDetailView({
 											onMouseDown={
 												isWorkbenchBelowAgent
 													? handleStackedAgentSeparatorMouseDown
-													: showClineAgentChatPanel
+													: showAgentConversationChatPanel
 														? handleAgentDiffSeparatorMouseDown
 														: handleTerminalDiffSeparatorMouseDown
 											}
@@ -2114,13 +2105,13 @@ export function CardDetailView({
 																	viewMode="unified"
 																	onAddToTerminal={
 																		!isDoneTaskReadOnly &&
-																		(onAddReviewComments || showClineAgentChatPanel)
+																		(onAddReviewComments || showAgentConversationChatPanel)
 																			? injectTextIntoActiveInput
 																			: undefined
 																	}
 																	onSendToTerminal={
 																		!isDoneTaskReadOnly &&
-																		(onSendReviewComments || showClineAgentChatPanel)
+																		(onSendReviewComments || showAgentConversationChatPanel)
 																			? handleSendDiffComments
 																			: undefined
 																	}
@@ -2225,13 +2216,13 @@ export function CardDetailView({
 																				viewMode={isDiffExpanded ? "split" : "unified"}
 																				onAddToTerminal={
 																					!isDoneTaskReadOnly &&
-																					(onAddReviewComments || showClineAgentChatPanel)
+																					(onAddReviewComments || showAgentConversationChatPanel)
 																						? injectTextIntoActiveInput
 																						: undefined
 																				}
 																				onSendToTerminal={
 																					!isDoneTaskReadOnly &&
-																					(onSendReviewComments || showClineAgentChatPanel)
+																					(onSendReviewComments || showAgentConversationChatPanel)
 																						? handleSendDiffComments
 																						: undefined
 																				}

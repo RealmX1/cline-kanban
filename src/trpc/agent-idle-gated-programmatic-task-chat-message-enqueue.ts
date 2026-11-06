@@ -1,3 +1,4 @@
+import { CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "../core/agent-catalog";
 import { isNativeIndependentUserTurnSubmissionKnownNotStarted } from "../core/queued-task-prompt-native-independent-user-turn-query-recovery";
 import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 // `kanban task message --deliver-when-agent-idle` 在 runtime 侧的两个入口：程序化入队、以及排队期间的取消。
@@ -106,6 +107,8 @@ export async function enqueueAgentIdleGatedProgrammaticTaskChatMessage(
 				deps.getTaskSessionSummary,
 			)
 		: null;
+	if ((destinationSummary?.agentId ?? addressedConversationSession?.agentId ?? card?.agentId) === "cline")
+		return { ok: false, error: CLINE_AGENT_RETIRED_EXECUTION_ERROR };
 	const destinationSessionId = destinationSummary?.taskId;
 	const reportOrigin = request.taskConversationSessionReportOrigin;
 	if (

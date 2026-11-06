@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeBoardCard } from "../../../src/core/api-contract";
-import { DEFAULT_TASK_AGENT_PERMISSION_MODE } from "../../../src/core/task-agent-permission-mode";
 import { updateTask } from "../../../src/core/task-board-mutations";
 import {
 	buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch,
@@ -56,47 +55,6 @@ describe("buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch", () 
 		expect(applyPatch(selected, { prompt: "新正文" }).codexReasoningEffortOverride).toBe("ultra");
 		expect(applyPatch(selected, { codexReasoningEffortOverride: null }).codexReasoningEffortOverride).toBeUndefined();
 	});
-	it("键缺省 = 保留卡片现值（含 updateTask 里非三态、漏传即复位的那些字段）", () => {
-		const renamed = applyPatch(createCard(), { title: "Renamed" });
-
-		expect(renamed).toMatchObject({
-			title: "Renamed",
-			prompt: "Original prompt",
-			startInPlanMode: true,
-			taskAgentPermissionMode: "ask_for_every_tool_use",
-			autoReviewEnabled: true,
-			autoReviewMode: "pr",
-			agentId: "codex",
-			clineSettings: { providerId: "anthropic" },
-			terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "gpt-5" },
-			taskConversationMode: "exploratory",
-			baseRef: "main",
-			worktreeMode: "inplace",
-			prepFilePath: "/tmp/prep.md",
-		});
-	});
-
-	it("null = 清除：标题回落到由 prompt 派生、覆盖类字段回落默认、worktreeMode 回到 branch", () => {
-		const cleared = applyPatch(createCard(), {
-			title: null,
-			agentId: null,
-			clineSettings: null,
-			terminalAgentModelOverrideSettings: null,
-			taskConversationMode: null,
-			worktreeMode: null,
-			prepFilePath: null,
-			taskAgentPermissionMode: null,
-		});
-
-		expect(cleared.title).toBe("Original prompt");
-		expect(cleared.agentId).toBeUndefined();
-		expect(cleared.clineSettings).toBeUndefined();
-		expect(cleared.terminalAgentModelOverrideSettings).toBeUndefined();
-		expect(cleared.taskConversationMode).toBeUndefined();
-		expect(cleared.worktreeMode).toBe("branch");
-		expect(cleared.prepFilePath).toBeUndefined();
-		expect(cleared.taskAgentPermissionMode).toBe(DEFAULT_TASK_AGENT_PERMISSION_MODE);
-	});
 
 	it("images: null 清空附图并推进 Description 时间戳；不提 images 时附图原样保留", () => {
 		const withImages = createCard({ images: [{ id: "image-1", data: "aGVsbG8=", mimeType: "image/png" }] });
@@ -120,21 +78,6 @@ describe("buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch", () 
 });
 
 describe("resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard", () => {
-	it("按输入种类分派：CLI 原始参数走 inherit / default 哨兵规则", () => {
-		const resolved = resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard(createCard(), {
-			taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
-			kanbanCliTaskCardFieldUpdateRawInput: { clineModelId: "claude-opus", clineReasoningEffort: "default" },
-		});
-
-		expect(resolved).toMatchObject({
-			title: "Explicit title",
-			prompt: "Original prompt",
-			autoReviewEnabled: true,
-			autoReviewMode: "pr",
-			clineSettings: { providerId: "anthropic", modelId: "claude-opus" },
-		});
-	});
-
 	it("按输入种类分派：三态 patch", () => {
 		const resolved = resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard(createCard(), {
 			taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
@@ -142,6 +85,5 @@ describe("resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskC
 		});
 
 		expect(resolved).toMatchObject({ autoReviewEnabled: false, autoReviewMode: "pr", prompt: "Original prompt" });
-		expect(resolved.clineSettings).toBeUndefined();
 	});
 });

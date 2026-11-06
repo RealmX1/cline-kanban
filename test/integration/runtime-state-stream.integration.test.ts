@@ -27,6 +27,7 @@ import type {
 	RuntimeWorkspaceStateResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "../../src/core/api-contract";
+import { mutateWorkspaceState } from "../../src/state/workspace-state";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
@@ -36,6 +37,7 @@ import type {
 	LoadSensitiveDeadlineAnnotatingTestContext,
 	LoadSensitiveWallClockTwoTierDeadline,
 } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -1188,6 +1190,23 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 		const projectPath = repository.repositoryPath;
 		writeFileSync(join(projectPath, "README.md"), "seed\n", "utf8");
 		commitAllRepositoryFiles(repository, projectPath, "seed project");
+		const taskId = "metadata-stream-task";
+		const trashTaskId = "metadata-trash-task";
+		const baseRef = repository.runGit(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim();
+		const board = createReviewBoard(taskId, "Metadata stream task", trashTaskId);
+		for (const column of board.columns) for (const card of column.cards) card.baseRef = baseRef;
+		// 预置历史 Done 卡；整板 saveState 不具有创建结案历史的权限。
+		const previousHomeDirectoryPath = process.env.HOME;
+		process.env.HOME = integrationFixture.homeDirectoryPath;
+		try {
+			await mutateWorkspaceState(projectPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
+				board,
+				value: undefined,
+			}));
+		} finally {
+			if (previousHomeDirectoryPath === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHomeDirectoryPath;
+		}
 
 		const port = await getAvailablePort();
 		const server = await startKanbanServer({
@@ -1211,21 +1230,6 @@ describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE
 				workspaceId,
 			});
 			expect(stateResponse.status).toBe(200);
-
-			const taskId = "metadata-stream-task";
-			const trashTaskId = "metadata-trash-task";
-			const baseRef = repository.runGit(["rev-parse", "--abbrev-ref", "HEAD"]).stdout.trim();
-			const board = createReviewBoard(taskId, "Metadata stream task", trashTaskId);
-			const reviewColumn = board.columns.find((column) => column.id === "review");
-			const trashColumn = board.columns.find((column) => column.id === "trash");
-			if (!reviewColumn || !reviewColumn.cards[0]) {
-				throw new Error("Expected seeded review card.");
-			}
-			reviewColumn.cards[0].baseRef = baseRef;
-			if (!trashColumn || !trashColumn.cards[0]) {
-				throw new Error("Expected seeded trash card.");
-			}
-			trashColumn.cards[0].baseRef = baseRef;
 
 			const saveResponse = await requestJson<RuntimeWorkspaceStateResponse>({
 				baseUrl: `http://127.0.0.1:${port}`,

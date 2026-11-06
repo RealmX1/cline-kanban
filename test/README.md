@@ -13,6 +13,8 @@ Git repository mutation safety 基础设施集中在 `test/git-repository-mutati
 
 fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 temp，清除继承的全部 `GIT_*`，禁用 system config、交互和宿主 hooks，并限制 cwd、git-dir、common-dir、worktree、remote、alternates 与 cleanup 都留在 fixture root。integration 子进程需要访问测试仓库时，使用 fixture 的 `createIsolatedChildProcessEnvironment`，不得原样继承 `process.env`。
 
+验证已有 Done 卡的历史投影时，在隔离 HOME 下经 `mutateWorkspaceState` 预置初态；整板 `workspace.saveState` 受结案保护，不能用它创建结案历史。参见 `runtime-state-stream.integration.test.ts` 的元数据用例。
+
 ## 静态策略与宿主仓 canary
 
 `npm run test:policy` 使用轻量 TypeScript AST 检查测试源文件：
