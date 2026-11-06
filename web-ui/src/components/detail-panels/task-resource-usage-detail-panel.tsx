@@ -1,3 +1,4 @@
+import * as Popover from "@radix-ui/react-popover";
 import { ChevronDown, ChevronUp, MemoryStick } from "lucide-react";
 import { type ReactElement, useState } from "react";
 
@@ -32,15 +33,130 @@ function formatTokenCountCompact(tokenCount: number): string {
 	return String(tokenCount);
 }
 
-export function TaskResourceUsageDetailPanel({ taskCardId }: { taskCardId: string }): ReactElement | null {
+export function TaskResourceUsageDetailPanel({
+	taskCardId,
+	presentation = "inline",
+}: {
+	taskCardId: string;
+	presentation?: "inline" | "toolbar_popover";
+}): ReactElement | null {
 	const snapshot = useTaskResourceUsageSnapshotValue(taskCardId);
 	const [isBreakdownVisible, setIsBreakdownVisible] = useState(false);
 	if (!snapshot || snapshot.attributedProcessCount === 0) {
-		return null;
+		return presentation === "toolbar_popover" ? (
+			<button
+				type="button"
+				aria-label="资源占用暂不可用"
+				disabled
+				className="inline-flex h-7 shrink-0 items-center justify-center gap-1 px-2 text-xs text-text-secondary opacity-50 max-[769px]:h-11 max-[769px]:w-11 max-[769px]:px-0"
+			>
+				<MemoryStick size={14} />
+				<span className="max-[769px]:hidden">资源</span>
+			</button>
+		) : null;
 	}
 	const classificationRows = Object.entries(
 		snapshot.residentSetSizeKibibytesSumUpperBoundByProcessClassification,
 	).sort((left, right) => right[1] - left[1]);
+	const breakdownContent = (
+		<div className="space-y-2 border-t border-border px-3 py-2 text-[11px] text-text-secondary tabular-nums">
+			<table className="w-full">
+				<tbody>
+					{classificationRows.map(([classification, residentSetSizeKibibytes]) => (
+						<tr key={classification}>
+							<td className="py-0.5 pr-2">{PROCESS_CLASSIFICATION_LABEL[classification] ?? classification}</td>
+							<td className="py-0.5 pr-2 text-right">
+								{snapshot.processCountByProcessClassification[classification] ?? 0}
+							</td>
+							<td className="py-0.5 text-right">
+								{formatResourceUsageKibibytesCompact(residentSetSizeKibibytes)}
+							</td>
+						</tr>
+					))}
+				</tbody>
+			</table>
+			{snapshot.mcpServerInstances.length > 0 ? (
+				<p>
+					MCP：
+					{snapshot.mcpServerInstances
+						.map(
+							(instance) =>
+								`${instance.mcpServerInstanceLabel} ${formatResourceUsageKibibytesCompact(instance.residentSetSizeKibibytesSum)}`,
+						)
+						.join("，")}
+				</p>
+			) : null}
+			{snapshot.agentHarnessRootPhysicalFootprintBytes !== null ? (
+				<p>
+					harness 根进程 footprint（整机真实代价，每 10 分钟采一次）：
+					{formatResourceUsageKibibytesCompact(Math.round(snapshot.agentHarnessRootPhysicalFootprintBytes / 1024))}
+				</p>
+			) : null}
+			{snapshot.modelTokenUsageAcrossTaskSessions ? (
+				<p>
+					模型 token（{snapshot.modelTokenUsageAcrossTaskSessions.sessionCount} 个会话累计）：输入{" "}
+					{formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeInputTokens)} · 缓存写{" "}
+					{formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeCacheCreationInputTokens)}{" "}
+					· 缓存读{" "}
+					{formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeCacheReadInputTokens)} ·
+					输出 {formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeOutputTokens)}
+				</p>
+			) : null}
+			{snapshot.latestWorktreeDiskUsageBytes != null ? (
+				<p>
+					worktree 磁盘（不含软链的依赖，最近一次测量）：
+					{formatResourceUsageKibibytesCompact(Math.round(snapshot.latestWorktreeDiskUsageBytes / 1024))}
+				</p>
+			) : null}
+			{snapshot.survivedSessionRootExitProcessCount > 0 ? (
+				<p className="text-status-orange">
+					会话已结束、仍在运行的残留进程 {snapshot.survivedSessionRootExitProcessCount} 个，合计{" "}
+					{formatResourceUsageKibibytesCompact(snapshot.survivedSessionRootExitResidentSetSizeKibibytesSum)}
+					——通常是 agent 用后台方式启动、会话结束时没被一并结束的命令。
+				</p>
+			) : null}
+			<p className="text-text-tertiary">RSS 求和含多个进程共享的页，是上界。</p>
+		</div>
+	);
+	if (presentation === "toolbar_popover")
+		return (
+			<Popover.Root open={isBreakdownVisible} onOpenChange={setIsBreakdownVisible}>
+				<Popover.Trigger asChild>
+					<button
+						type="button"
+						aria-label={isBreakdownVisible ? "收起资源占用明细" : "展开资源占用明细"}
+						title={`资源占用 · ${snapshot.attributedProcessCount} 个进程 · RSS 上界 ${formatResourceUsageKibibytesCompact(snapshot.residentSetSizeKibibytesSumUpperBound)}`}
+						className="inline-flex h-7 shrink-0 items-center justify-center gap-1 rounded-sm px-2 text-xs text-text-secondary tabular-nums hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:h-11 max-[769px]:min-w-11 max-[769px]:px-0"
+					>
+						<MemoryStick size={14} />
+						<span className="max-[769px]:hidden">
+							{formatResourceUsageKibibytesCompact(snapshot.residentSetSizeKibibytesSumUpperBound)}
+						</span>
+						{snapshot.survivedSessionRootExitProcessCount > 0 ? (
+							<span className="text-status-orange">{snapshot.survivedSessionRootExitProcessCount}</span>
+						) : null}
+					</button>
+				</Popover.Trigger>
+				<Popover.Portal>
+					<Popover.Content
+						aria-label="资源占用"
+						align="start"
+						sideOffset={4}
+						data-mobile-focus-view-idle-collapse-suspension=""
+						className="z-50 max-h-[min(70dvh,var(--radix-popover-content-available-height))] w-96 max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain rounded-md border border-border-bright bg-surface-1 text-text-primary"
+					>
+						<p className="px-3 py-2 text-xs">
+							资源占用 · {snapshot.attributedProcessCount} 个进程 · RSS 上界{" "}
+							{formatResourceUsageKibibytesCompact(snapshot.residentSetSizeKibibytesSumUpperBound)}
+							{snapshot.cpuPercentOfOneCoreOverLastSampleInterval !== null
+								? ` · CPU ${Math.round(snapshot.cpuPercentOfOneCoreOverLastSampleInterval)}%`
+								: ""}
+						</p>
+						{breakdownContent}
+					</Popover.Content>
+				</Popover.Portal>
+			</Popover.Root>
+		);
 	return (
 		<section className="shrink-0 border-b border-border" aria-label="资源占用">
 			<div className="flex items-center gap-2 px-3 py-1">
@@ -67,75 +183,7 @@ export function TaskResourceUsageDetailPanel({ taskCardId }: { taskCardId: strin
 					aria-label={isBreakdownVisible ? "收起资源占用明细" : "展开资源占用明细"}
 				/>
 			</div>
-			{isBreakdownVisible ? (
-				<div className="space-y-2 border-t border-border px-3 py-2 text-[11px] text-text-secondary tabular-nums">
-					<table className="w-full">
-						<tbody>
-							{classificationRows.map(([classification, residentSetSizeKibibytes]) => (
-								<tr key={classification}>
-									<td className="py-0.5 pr-2">
-										{PROCESS_CLASSIFICATION_LABEL[classification] ?? classification}
-									</td>
-									<td className="py-0.5 pr-2 text-right">
-										{snapshot.processCountByProcessClassification[classification] ?? 0}
-									</td>
-									<td className="py-0.5 text-right">
-										{formatResourceUsageKibibytesCompact(residentSetSizeKibibytes)}
-									</td>
-								</tr>
-							))}
-						</tbody>
-					</table>
-					{snapshot.mcpServerInstances.length > 0 ? (
-						<p>
-							MCP：
-							{snapshot.mcpServerInstances
-								.map(
-									(instance) =>
-										`${instance.mcpServerInstanceLabel} ${formatResourceUsageKibibytesCompact(instance.residentSetSizeKibibytesSum)}`,
-								)
-								.join("，")}
-						</p>
-					) : null}
-					{snapshot.agentHarnessRootPhysicalFootprintBytes !== null ? (
-						<p>
-							harness 根进程 footprint（整机真实代价，每 10 分钟采一次）：
-							{formatResourceUsageKibibytesCompact(
-								Math.round(snapshot.agentHarnessRootPhysicalFootprintBytes / 1024),
-							)}
-						</p>
-					) : null}
-					{snapshot.modelTokenUsageAcrossTaskSessions ? (
-						<p>
-							模型 token（{snapshot.modelTokenUsageAcrossTaskSessions.sessionCount} 个会话累计）：输入{" "}
-							{formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeInputTokens)} ·
-							缓存写{" "}
-							{formatTokenCountCompact(
-								snapshot.modelTokenUsageAcrossTaskSessions.cumulativeCacheCreationInputTokens,
-							)}{" "}
-							· 缓存读{" "}
-							{formatTokenCountCompact(
-								snapshot.modelTokenUsageAcrossTaskSessions.cumulativeCacheReadInputTokens,
-							)}{" "}
-							· 输出 {formatTokenCountCompact(snapshot.modelTokenUsageAcrossTaskSessions.cumulativeOutputTokens)}
-						</p>
-					) : null}
-					{snapshot.latestWorktreeDiskUsageBytes != null ? (
-						<p>
-							worktree 磁盘（不含软链的依赖，最近一次测量）：
-							{formatResourceUsageKibibytesCompact(Math.round(snapshot.latestWorktreeDiskUsageBytes / 1024))}
-						</p>
-					) : null}
-					{snapshot.survivedSessionRootExitProcessCount > 0 ? (
-						<p className="text-status-orange">
-							会话已结束、仍在运行的残留进程 {snapshot.survivedSessionRootExitProcessCount} 个，合计{" "}
-							{formatResourceUsageKibibytesCompact(snapshot.survivedSessionRootExitResidentSetSizeKibibytesSum)}
-							——通常是 agent 用后台方式启动、会话结束时没被一并结束的命令。
-						</p>
-					) : null}
-					<p className="text-text-tertiary">RSS 求和含多个进程共享的页，是上界。</p>
-				</div>
-			) : null}
+			{isBreakdownVisible ? breakdownContent : null}
 		</section>
 	);
 }

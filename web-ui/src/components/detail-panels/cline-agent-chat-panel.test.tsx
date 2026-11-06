@@ -89,6 +89,15 @@ function renderPanel(root: Root, panel: ReactElement): void {
 	root.render(<TooltipProvider>{panel}</TooltipProvider>);
 }
 
+async function openTaskActionsMenu(container: HTMLElement): Promise<HTMLElement> {
+	const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="任务操作"]');
+	expect(trigger).not.toBeNull();
+	await act(async () => trigger!.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+	const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="任务操作"]');
+	expect(menu).not.toBeNull();
+	return menu!;
+}
+
 function getMessageList(container: HTMLElement): HTMLDivElement {
 	const messageList = container.querySelector("div.overflow-y-auto");
 	expect(messageList).toBeInstanceOf(HTMLDivElement);
@@ -1318,10 +1327,14 @@ describe("ClineAgentChatPanel", () => {
 
 		expect(container.textContent).not.toContain("Commit");
 		expect(container.textContent).not.toContain("Open PR");
-		expect(container.textContent).toContain("结案任务");
+		expect(container.textContent).not.toContain("结案任务");
+		const menu = await openTaskActionsMenu(container);
+		expect(menu.textContent).not.toContain("Commit");
+		expect(menu.textContent).not.toContain("打开 PR");
+		expect(menu.textContent).toContain("结案任务");
 	});
 
-	it("renders Move Card To Validation above 结案任务 for review/in-progress", async () => {
+	it("ACP 的 Validation 与结案动作进入菜单，保留顺序及回调", async () => {
 		const onMoveToValidation = vi.fn();
 		const onMoveToTrash = vi.fn();
 
@@ -1330,7 +1343,11 @@ describe("ClineAgentChatPanel", () => {
 				root,
 				<ClineAgentChatPanel
 					taskId="task-1"
-					summary={createSummary("awaiting_review")}
+					agentId="omp"
+					summary={createSummary("awaiting_review", null, {
+						agentId: "omp",
+						sessionTransport: "acp_stdio_subprocess",
+					})}
 					onLoadMessages={async () => []}
 					taskColumnId="review"
 					onMoveToTrash={onMoveToTrash}
@@ -1342,15 +1359,14 @@ describe("ClineAgentChatPanel", () => {
 			await Promise.resolve();
 		});
 
-		const buttons = Array.from(container.querySelectorAll("button"));
-		const validationButton = buttons.find((button) => button.textContent?.includes("Move Card To Validation"));
-		const doneButton = buttons.find((button) => button.textContent?.includes("结案任务"));
-		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
-		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
-		if (!(validationButton instanceof HTMLButtonElement) || !(doneButton instanceof HTMLButtonElement)) {
-			throw new Error("Expected both footer buttons");
-		}
-		// Validation button is rendered before (above) the Done button in document order.
+		expect(container.querySelector('[role="menuitem"]')).toBeNull();
+		const menu = await openTaskActionsMenu(container);
+		const menuItems = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+		const validationButton = menuItems.find((item) => item.textContent === "移至 Validation")!;
+		const doneButton = menuItems.find((item) => item.textContent === "结案任务")!;
+		expect(validationButton).toBeInstanceOf(HTMLElement);
+		expect(doneButton).toBeInstanceOf(HTMLElement);
+		// Validation 动作继续排在结案之前。
 		expect(validationButton.compareDocumentPosition(doneButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
 		await act(async () => {
@@ -1358,6 +1374,92 @@ describe("ClineAgentChatPanel", () => {
 		});
 		expect(onMoveToValidation).toHaveBeenCalledTimes(1);
 		expect(onMoveToTrash).not.toHaveBeenCalled();
+	});
+
+	it("ACP 菜单保留合格 Git 操作，取消自动动作独立可见且不重建输入框", async () => {
+		const onCommit = vi.fn();
+		const onOpenPr = vi.fn();
+		const onCancelAutomaticAction = vi.fn();
+		setTaskWorkspaceSnapshot({
+			taskId: "task-1",
+			path: "/tmp/worktree",
+			branch: "task-1",
+			isDetached: false,
+			headCommit: "abc1234",
+			baseCommit: null,
+			commitsAheadOfBaseRef: null,
+			commitsBehindBaseRef: null,
+			changedFiles: 1,
+			additions: 1,
+			deletions: 0,
+		});
+		await act(async () =>
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("awaiting_review", null, {
+						agentId: "omp",
+						sessionTransport: "acp_stdio_subprocess",
+					})}
+					onLoadMessages={async () => []}
+					taskColumnId="review"
+					onCommit={onCommit}
+					onOpenPr={onOpenPr}
+					onMoveToTrash={() => {}}
+					showMoveToTrash
+					onCancelAutomaticAction={onCancelAutomaticAction}
+					cancelAutomaticActionLabel="取消自动动作"
+				/>,
+			),
+		);
+		const composer = container.querySelector("textarea");
+		const cancelAutomaticAction = container.querySelector<HTMLButtonElement>('[aria-label="取消自动动作"]');
+		expect(cancelAutomaticAction).not.toBeNull();
+		await act(async () => cancelAutomaticAction!.click());
+		expect(onCancelAutomaticAction).toHaveBeenCalledTimes(1);
+		expect(container.querySelector("textarea")).toBe(composer);
+		for (const [label, callback] of [
+			["Commit", onCommit],
+			["打开 PR", onOpenPr],
+		] as const) {
+			const menu = await openTaskActionsMenu(container);
+			const menuItem = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+				(item) => item.textContent === label,
+			);
+			expect(menuItem).not.toBeNull();
+			await act(async () => menuItem!.click());
+			expect(callback).toHaveBeenCalledTimes(1);
+			expect(container.querySelector("textarea")).toBe(composer);
+		}
+	});
+
+	it("ACP 仅有取消自动动作资格时仍保留默认入口和回调", async () => {
+		const onCancelAutomaticAction = vi.fn();
+		await act(async () =>
+			renderPanel(
+				root,
+				<ClineAgentChatPanel
+					taskId="task-1"
+					agentId="omp"
+					summary={createSummary("running", null, {
+						agentId: "omp",
+						sessionTransport: "acp_stdio_subprocess",
+					})}
+					onLoadMessages={async () => []}
+					taskColumnId="in_progress"
+					onCancelAutomaticAction={onCancelAutomaticAction}
+					cancelAutomaticActionLabel="取消自动动作"
+				/>,
+			),
+		);
+		const cancelAutomaticAction = container.querySelector<HTMLButtonElement>('[aria-label="取消自动动作"]');
+		expect(cancelAutomaticAction).not.toBeNull();
+		expect(container.querySelector('[aria-label="任务操作"]')).toBeNull();
+		expect(cancelAutomaticAction!.closest('[hidden], [role="menu"]')).toBeNull();
+		await act(async () => cancelAutomaticAction!.click());
+		expect(onCancelAutomaticAction).toHaveBeenCalledTimes(1);
 	});
 
 	it("shows only 结案任务 (no Validation) for validation-column cards", async () => {
@@ -1378,8 +1480,9 @@ describe("ClineAgentChatPanel", () => {
 			await Promise.resolve();
 		});
 
-		expect(container.textContent).toContain("结案任务");
-		expect(container.textContent).not.toContain("Move Card To Validation");
+		const menu = await openTaskActionsMenu(container);
+		expect(menu.textContent).toContain("结案任务");
+		expect(menu.textContent).not.toContain("移至 Validation");
 	});
 
 	it("renders the Cline provider model picker for native Cline SDK sessions", async () => {

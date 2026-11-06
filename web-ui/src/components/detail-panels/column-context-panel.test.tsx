@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -557,9 +557,9 @@ describe("ColumnContextPanel", () => {
 		expect(expandedFocused?.getAttribute("data-card-variant")).toBe("draggable");
 		expect(expandedFocused?.getAttribute("data-draggable-index")).toBe("1");
 
-		// Collapse the focused stage via its header toggle (the button carrying the "Review" label).
-		const reviewToggle = [...container.querySelectorAll("button")].find((button) =>
-			button.textContent?.includes("Review"),
+		// 收起 the focused stage via its header toggle (the button carrying the "Review" label).
+		const reviewToggle = [...container.querySelectorAll("button")].find(
+			(button) => button.getAttribute("aria-label") === "收起 Review",
 		);
 		expect(reviewToggle).toBeInstanceOf(HTMLButtonElement);
 		await act(async () => {
@@ -635,7 +635,7 @@ describe("ColumnContextPanel", () => {
  * 必须先给 `getBoundingClientRect` 铺一层受控几何——否则 jsdom 下 `rootRect.bottom <= rootRect.top`
  * 使 `useStageHeaderPinLayout` 返回空布局、rails 根本不渲染，这些断言会全部落空。
  *
- * 版图（滚动口视口 [0, 500]；section 折叠后只剩 40px 卡头 + 2px 外框）：
+ * 版图（滚动口视口 [0, 500]；section 折叠后只剩 32px 卡头 + 2px 外框）：
  *   backlog     [-300, -100]  整段在视口上沿之上 → 钉顶
  *   in_progress [ -80,  150]  横跨视口上沿（卡片仍露在视口里）→ 钉顶
  *   review      [ 200,  400]  随流（焦点卡 [210, 290] 完整可见 → focusedCardPinState = hidden）
@@ -645,7 +645,7 @@ describe("ColumnContextPanel", () => {
  */
 describe("ColumnContextPanel pinned stage header rails", () => {
 	const FOCUSED_TASK_ID = "task-review";
-	const COLLAPSED_STAGE_SECTION_HEIGHT = 42;
+	const COLLAPSED_STAGE_SECTION_HEIGHT = 34;
 	const SCROLL_ROOT_RECT = { top: 0, height: 500 };
 	const FOCUSED_CARD_RECT = { top: 210, height: 80 };
 	const EXPANDED_SECTION_RECTS: Record<string, { top: number; height: number }> = {
@@ -706,7 +706,7 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		return scrollRoot;
 	};
 
-	const renderPanel = async (): Promise<void> => {
+	const renderPanel = async (overrides: Partial<ComponentProps<typeof ColumnContextPanel>> = {}): Promise<void> => {
 		await act(async () => {
 			root.render(
 				<ColumnContextPanel
@@ -714,6 +714,7 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 					onCardSelect={() => {}}
 					taskSessions={{}}
 					onTaskDragEnd={() => {}}
+					{...overrides}
 				/>,
 			);
 		});
@@ -775,20 +776,47 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const rails = container.querySelectorAll('[data-testid="stage-header-rail"]');
 		expect([...rails].map((rail) => rail.getAttribute("data-edge"))).toEqual(["top", "bottom"]);
 		for (const title of ["Backlog", "In Progress", "Validation", "Done"]) {
-			expect(railButton(`Jump to ${title}`)).toBeInstanceOf(HTMLButtonElement);
+			expect(railButton(`跳转到 ${title}`)).toBeInstanceOf(HTMLButtonElement);
 		}
 		// 嵌套 <button> 是非法 HTML，浏览器会重整 DOM、内层控件行为不可预期；折叠与跳转必须是同级按钮。
 		expect(container.querySelectorAll('[data-testid="stage-header-rail"] button button').length).toBe(0);
 	});
 
+	it("行内与 sticky 标题保留相同的分组动作和回调", async () => {
+		const startReadyBacklogTasks = vi.fn();
+		const restoreLatestDoneTask = vi.fn();
+		const clearDoneTasks = vi.fn();
+		await renderPanel({
+			onRequestStartAllReadyBacklogTasks: startReadyBacklogTasks,
+			onRestoreFromTrashTask: restoreLatestDoneTask,
+			onClearTrash: clearDoneTasks,
+		});
+		for (const [label, callback, expectedArguments] of [
+			["Start all ready backlog tasks", startReadyBacklogTasks, []],
+			["重新打开最近结案的任务", restoreLatestDoneTask, ["task-done"]],
+			["Clear done", clearDoneTasks, []],
+		] as const) {
+			const inlineAction = container.querySelector<HTMLButtonElement>(
+				`[data-stage-section-id] button[aria-label="${label}"]`,
+			);
+			const pinnedAction = railButton(label);
+			expect(inlineAction).not.toBeNull();
+			expect(pinnedAction).not.toBeNull();
+			expect(pinnedAction!.disabled).toBe(inlineAction!.disabled);
+			await act(async () => pinnedAction!.click());
+			if (expectedArguments.length > 0) expect(callback).toHaveBeenLastCalledWith(...expectedArguments);
+			expect(callback).toHaveBeenCalledTimes(1);
+		}
+	});
+
 	it("shows the real fold state on the pinned twin header instead of a hard-coded expanded chevron", async () => {
 		await renderPanel();
 
-		expect(railButton("Collapse Backlog")?.getAttribute("aria-expanded")).toBe("true");
-		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
-		expect(railButton("Collapse Validation")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("收起 Backlog")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("收起 In Progress")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("收起 Validation")?.getAttribute("aria-expanded")).toBe("true");
 		// Done 默认折叠——钉住条目必须如实呈现，而不是永远显示「已展开」。
-		expect(railButton("Expand Done")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("展开 Done")?.getAttribute("aria-expanded")).toBe("false");
 		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("false");
 	});
 
@@ -800,8 +828,8 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		});
 
 		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
-		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
-		expect(railButton("Collapse In Progress")).toBeNull();
+		expect(railButton("展开 In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("收起 In Progress")).toBeNull();
 	});
 
 	it("collapses a stage whose cards are still in view from the top rail and docks its header at the rail slot", async () => {
@@ -809,15 +837,15 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Collapse In Progress")?.click();
+			railButton("收起 In Progress")?.click();
 		});
 
 		// 折叠真的发生了，且与行内卡头是同一份状态……
 		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
-		expect(railButton("Expand In Progress")?.getAttribute("aria-expanded")).toBe("false");
-		// ……卡头停回它的 rail 槽位（其上只有 backlog 一条：50px）：1000 + (−80 − 0) − 50 = 870，
-		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 188px、视口落进 review 中段。
-		expect(scrollRoot.scrollTop).toBe(870);
+		expect(railButton("展开 In Progress")?.getAttribute("aria-expanded")).toBe("false");
+		// ……卡头停回它的 rail 槽位（其上只有 backlog 一条：50px）：1000 + (−80 − 0) − 38 = 882，
+		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 196px、视口落进 review 中段。
+		expect(scrollRoot.scrollTop).toBe(882);
 	});
 
 	it("collapses a stage that is entirely above the viewport from the top rail without moving the visible content", async () => {
@@ -825,12 +853,12 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Collapse Backlog")?.click();
+			railButton("收起 Backlog")?.click();
 		});
 
 		expect(inFlowHeaderButton("backlog")?.getAttribute("aria-expanded")).toBe("false");
-		// backlog 从 200 折到 42，变矮 158：等量补偿，视口里的内容零位移。
-		expect(scrollRoot.scrollTop).toBe(1000 - 158);
+		// backlog 从 200 折到 34，变矮 166：等量补偿，视口里的内容零位移。
+		expect(scrollRoot.scrollTop).toBe(1000 - 166);
 	});
 
 	it("collapses a stage from the bottom rail without scrolling (its cards are all below the viewport)", async () => {
@@ -838,11 +866,11 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Collapse Validation")?.click();
+			railButton("收起 Validation")?.click();
 		});
 
 		expect(inFlowHeaderButton("validation")?.getAttribute("aria-expanded")).toBe("false");
-		expect(railButton("Expand Validation")?.getAttribute("aria-expanded")).toBe("false");
+		expect(railButton("展开 Validation")?.getAttribute("aria-expanded")).toBe("false");
 		expect(scrollRoot.scrollTop).toBe(1000);
 	});
 
@@ -851,14 +879,14 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Expand Done")?.click();
+			railButton("展开 Done")?.click();
 		});
 
 		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("true");
-		// 目标 index 4 → 基值 R = 4 × 50 = 200；焦点 stage（review，index 2）在目标之上，且以基值试算时
-		// 焦点卡会落到视口上沿之上（210 − 500 + 200 = −90 ≤ 0）→ 预留克隆 16 + 80。
-		// scrollTop = 1000 + (500 − 0) − (200 + 16 + 80) = 1204。
-		expect(scrollRoot.scrollTop).toBe(1204);
+		// 目标 index 4 → 基值 R = 4 × 38 = 152；焦点 stage（review，index 2）在目标之上，且以基值试算时
+		// 焦点卡会落到视口上沿之上（210 − 500 + 152 = −138 ≤ 0）→ 预留克隆 20 + 80。
+		// scrollTop = 1000 + (500 − 0) − (152 + 20 + 80) = 1248。
+		expect(scrollRoot.scrollTop).toBe(1248);
 	});
 
 	it("parks the jumped-to stage below the top rail instead of under it", async () => {
@@ -866,16 +894,16 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Jump to In Progress")?.click();
+			railButton("跳转到 In Progress")?.click();
 		});
 
-		// 目标之上只有 backlog 一个条目：R = 40 + 2 + 8 = 50；焦点卡在 review（不在目标之上）→ 无克隆项。
-		// scrollTop = 1000 + (−80 − 0) − 50 = 870。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
+		// 目标之上只有 backlog 一个条目：R = 32 + 2 + 4 = 38；焦点卡在 review（不在目标之上）→ 无克隆项。
+		// scrollTop = 1000 + (−80 − 0) − 38 = 882。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
 		// 滚动口顶沿，正好落在不透明 rail 之下。
-		expect(scrollRoot.scrollTop).toBe(870);
+		expect(scrollRoot.scrollTop).toBe(882);
 		expect(scrollIntoViewMock).not.toHaveBeenCalledWith({ block: "start", inline: "nearest" });
 		// 跳转不改折叠状态。
-		expect(railButton("Collapse In Progress")?.getAttribute("aria-expanded")).toBe("true");
+		expect(railButton("收起 In Progress")?.getAttribute("aria-expanded")).toBe("true");
 	});
 
 	it("reserves the focused card clone when the focused stage would pin above the jump target", async () => {
@@ -883,12 +911,12 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		const scrollRoot = scrollRootWithWritableScrollTop(1000);
 
 		await act(async () => {
-			railButton("Jump to Validation")?.click();
+			railButton("跳转到 Validation")?.click();
 		});
 
-		// 目标 index 3 → 基值 R = 150；焦点 stage（index 2）在目标之上，试算 210 − 420 + 150 = −60 ≤ 0
-		// → 预留 16 + 80。scrollTop = 1000 + 420 − (150 + 16 + 80) = 1174。
-		expect(scrollRoot.scrollTop).toBe(1174);
+		// 目标 index 3 → 基值 R = 114；焦点 stage（index 2）在目标之上，试算 210 − 420 + 114 = −96 ≤ 0
+		// → 预留 20 + 80。scrollTop = 1000 + 420 − (114 + 20 + 80) = 1206。
+		expect(scrollRoot.scrollTop).toBe(1206);
 	});
 });
 

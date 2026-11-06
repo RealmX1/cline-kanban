@@ -1,8 +1,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { TaskSessionInformationActions } from "@/components/detail-panels/task-session-information-actions";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import {
 	replaceTaskResourceUsageSnapshots,
 	resetTaskResourceUsageSnapshotStore,
@@ -31,6 +33,63 @@ afterEach(() => {
 });
 
 describe("TaskResourceUsageDetailPanel", () => {
+	it("没有终端工具的会话可经窄屏更多菜单打开任务资源明细", async () => {
+		replaceTaskResourceUsageSnapshots([
+			{
+				workspaceId: "repo",
+				attributedTaskCardId: "ab12c",
+				sampledAtEpochMs: 1,
+				attributedProcessCount: 1,
+				residentSetSizeKibibytesSumUpperBound: 300_000,
+				cpuPercentOfOneCoreOverLastSampleInterval: 12,
+				survivedSessionRootExitProcessCount: 0,
+				survivedSessionRootExitResidentSetSizeKibibytesSum: 0,
+				agentHarnessRootPhysicalFootprintBytes: null,
+				processCountByProcessClassification: { agent_harness_root_process: 1 },
+				residentSetSizeKibibytesSumUpperBoundByProcessClassification: { agent_harness_root_process: 300_000 },
+				mcpServerInstances: [],
+			},
+		]);
+		await act(async () =>
+			root.render(
+				<TooltipProvider>
+					<TaskSessionInformationActions
+						workspaceId="repo"
+						taskId="ab12c"
+						taskConversationSessionId="ab12c-side-session"
+						taskCreatedAtEpochMs={1}
+						summary={null}
+						pendingUserDecisionIdentityForRefresh={null}
+					/>
+				</TooltipProvider>,
+			),
+		);
+		const moreInformationTrigger = container.querySelector<HTMLButtonElement>('button[aria-label="会话更多信息"]')!;
+		await act(async () => moreInformationTrigger.click());
+		const moreInformation = document.querySelector('[role="dialog"][aria-label="会话更多信息"]');
+		expect(moreInformation).not.toBeNull();
+		const resourceDetailsTrigger = moreInformation!.querySelector<HTMLButtonElement>(
+			'button[aria-label="展开资源占用明细"]',
+		)!;
+		await act(async () => resourceDetailsTrigger.click());
+		const resourceDetails = document.querySelector('[role="dialog"][aria-label="资源占用"]');
+		expect(resourceDetails?.textContent).toContain("CPU 12%");
+		expect(document.activeElement).toBe(resourceDetails);
+		const closeResourceDetails = new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+		await act(async () => resourceDetails!.dispatchEvent(closeResourceDetails));
+		expect(closeResourceDetails.defaultPrevented).toBe(true);
+		expect(document.querySelector('[role="dialog"][aria-label="资源占用"]')).toBeNull();
+		expect(document.querySelector('[role="dialog"][aria-label="会话更多信息"]')).toBe(moreInformation);
+		await vi.waitFor(() => expect(document.activeElement).toBe(resourceDetailsTrigger));
+		await act(async () =>
+			resourceDetailsTrigger.dispatchEvent(
+				new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+			),
+		);
+		expect(document.querySelector('[role="dialog"][aria-label="会话更多信息"]')).toBeNull();
+		await vi.waitFor(() => expect(document.activeElement).toBe(moreInformationTrigger));
+	});
+
 	it("stays hidden until the task has attributed processes", () => {
 		act(() => root.render(<TaskResourceUsageDetailPanel taskCardId="ab12c" />));
 

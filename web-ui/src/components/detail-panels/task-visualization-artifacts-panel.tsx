@@ -1,4 +1,6 @@
-import { ExternalLink, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
+import * as Popover from "@radix-ui/react-popover";
+import { Ellipsis, ExternalLink, Maximize2, Minimize2, RefreshCw, X } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
@@ -13,11 +15,13 @@ export function TaskVisualizationArtifactsPanel({
 	workspaceId,
 	taskId,
 	controller,
+	headerNavigationContent,
 	onClosePreview,
 	taskIncarnationCreatedAtEpochMs,
 	detachedForeground = false,
 	initialSelection,
 }: {
+	headerNavigationContent?: ReactNode;
 	workspaceId: string | null;
 	taskId: string;
 	controller: ReturnType<typeof useTaskVisualizationArtifacts>;
@@ -292,24 +296,70 @@ export function TaskVisualizationArtifactsPanel({
 		setHasAlignedExpandedSelection(isExpanded);
 		controller.selectArtifact(artifact);
 	};
+	const visualizationHeaderActions = (
+		<>
+			{validPrepared ? (
+				<a
+					href={
+						target && workspaceId
+							? buildExpandedForegroundViewUrl(buildProjectTaskDeepLinkUrl(workspaceId, taskId), {
+									...target,
+									revisionId: validPrepared.artifact.revisionId,
+								})
+							: validPrepared.viewerRelativeUrl
+					}
+					target="_blank"
+					rel="noopener noreferrer"
+					className="inline-flex h-7 items-center gap-1 rounded-sm px-2 text-xs text-text-primary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+				>
+					<ExternalLink size={14} />
+					新标签
+				</a>
+			) : null}
+			<Button
+				variant="ghost"
+				size="sm"
+				className="h-7 px-2"
+				aria-label={isExpanded ? "退出全屏预览" : "全屏预览"}
+				onClick={isExpanded ? surface.close : surface.open}
+			>
+				{isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+			</Button>
+			{onClosePreview ? (
+				<Button
+					variant="ghost"
+					size="sm"
+					className="h-7 px-2"
+					aria-label="收起可视化预览"
+					onClick={() => {
+						if (isExpanded) surface.close();
+						onClosePreview();
+					}}
+				>
+					<X size={14} />
+				</Button>
+			) : null}
+		</>
+	);
 	return (
 		<ExpandedForegroundViewSurface
 			controller={surface}
 			title="任务可视化"
 			className="flex min-h-0 min-w-0 flex-1 flex-col bg-surface-1"
 		>
-			<div
-				role="note"
-				aria-label="可视化任务署名"
-				data-verification-anchor={`task-visualization-task-attribution:${workspaceId}:${taskId}`}
-				className="flex shrink-0 flex-wrap items-baseline gap-x-2 gap-y-0.5 border-b border-border px-3 py-2 text-xs"
-			>
-				<span className="shrink-0 text-text-secondary">
-					任务 <code className="select-text text-text-primary">{taskId}</code>
-				</span>
-				<span className="min-w-0 break-words text-text-primary">{taskTitle ?? "任务名暂不可用"}</span>
-			</div>
-			<div className="flex min-h-9 shrink-0 flex-wrap items-center gap-1.5 border-b border-border px-2 py-1">
+			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 border-b border-border px-2">
+				{headerNavigationContent}
+				<div
+					role="note"
+					aria-label="可视化任务署名"
+					data-verification-anchor={`task-visualization-task-attribution:${workspaceId}:${taskId}`}
+					className="flex max-w-24 min-w-0 items-center gap-1 overflow-hidden text-xs"
+				>
+					<span className="min-w-0 truncate text-text-secondary">
+						任务 <code className="select-text text-text-primary">{taskId}</code>
+					</span>
+					<span className="min-w-0 truncate text-text-primary">{taskTitle ?? "任务名暂不可用"}</span>
+				</div>
 				<select
 					ref={selectorRef}
 					aria-label="选择可视化"
@@ -343,47 +393,32 @@ export function TaskVisualizationArtifactsPanel({
 				>
 					<RefreshCw size={14} />
 				</Button>
-				{validPrepared ? (
-					<a
-						href={
-							target && workspaceId
-								? buildExpandedForegroundViewUrl(buildProjectTaskDeepLinkUrl(workspaceId, taskId), {
-										...target,
-										revisionId: validPrepared.artifact.revisionId,
-									})
-								: validPrepared.viewerRelativeUrl
-						}
-						target="_blank"
-						rel="noopener noreferrer"
-						className="inline-flex h-7 items-center gap-1 rounded-sm px-2 text-xs text-text-primary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
-					>
-						<ExternalLink size={14} />
-						新标签
-					</a>
-				) : null}
-				<Button
-					variant="ghost"
-					size="sm"
-					className="h-7 px-2"
-					aria-label={isExpanded ? "退出全屏预览" : "全屏预览"}
-					onClick={isExpanded ? surface.close : surface.open}
-				>
-					{isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-				</Button>
-				{onClosePreview ? (
-					<Button
-						variant="ghost"
-						size="sm"
-						className="h-7 px-2"
-						aria-label="收起可视化预览"
-						onClick={() => {
-							if (isExpanded) surface.close();
-							onClosePreview();
-						}}
-					>
-						<X size={14} />
-					</Button>
-				) : null}
+				{headerNavigationContent ? (
+					<Popover.Root>
+						<Popover.Trigger asChild>
+							<button
+								type="button"
+								aria-label="更多可视化操作"
+								className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+							>
+								<Ellipsis size={14} />
+							</button>
+						</Popover.Trigger>
+						<Popover.Portal>
+							<Popover.Content
+								aria-label="更多可视化操作"
+								align="end"
+								sideOffset={4}
+								data-mobile-focus-view-idle-collapse-suspension=""
+								className="z-50 flex max-w-[calc(100vw-1rem)] flex-col gap-1 rounded-md border border-border-bright bg-surface-1 p-2"
+							>
+								{visualizationHeaderActions}
+							</Popover.Content>
+						</Popover.Portal>
+					</Popover.Root>
+				) : (
+					visualizationHeaderActions
+				)}
 			</div>
 			{controller.error ? (
 				<div
