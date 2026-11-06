@@ -25,6 +25,14 @@ import {
 	parseTranscriptJsonRecord,
 	readAppendedCompleteJsonLines,
 } from "agent-conversation-exploration-thread-graph/harness-claude-code";
+import { openCodexTranscriptHistoryReadSource } from "./codex-transcript-history-read-source";
+import {
+	codexTranscriptJsonlPath,
+	type NativeTranscriptReadHandle,
+	openCodexTranscriptReadSource,
+	readCodexTranscriptCompleteLinesFromSource,
+	statCodexTranscriptReadSource,
+} from "./codex-transcript-read-source";
 
 // 寻找超长行结尾换行时的单次读取块大小：跳过超长行只占常量内存。
 const OVERSIZED_TRANSCRIPT_LINE_NEWLINE_SCAN_CHUNK_BYTES = 1024 * 1024;
@@ -200,11 +208,16 @@ export function summarizeCodexRolloutTokenUsage(
 interface IncrementallyReadTranscriptFileState<TAccumulatorState> {
 	nextByteOffset: number;
 	accumulatorState: TAccumulatorState;
+	sourceFileIdentity?: string;
 }
 
 // 从 scanStartByteOffset 起找第一个换行，返回它之后的偏移；读到（扫描开始时的）文件尾仍没有换行就返回 null。
-async function findByteOffsetAfterNextNewline(filePath: string, scanStartByteOffset: number): Promise<number | null> {
-	const fileHandle = await open(filePath, "r");
+async function findByteOffsetAfterNextNewline(
+	filePath: string,
+	scanStartByteOffset: number,
+	codexSource?: NativeTranscriptReadHandle,
+): Promise<number | null> {
+	const fileHandle = codexSource ?? (await open(filePath, "r"));
 	try {
 		const fileSizeBytesWhenScanStarted = (await fileHandle.stat()).size;
 		const scanChunkBuffer = Buffer.allocUnsafe(OVERSIZED_TRANSCRIPT_LINE_NEWLINE_SCAN_CHUNK_BYTES);
@@ -227,7 +240,7 @@ async function findByteOffsetAfterNextNewline(filePath: string, scanStartByteOff
 		}
 		return null;
 	} finally {
-		await fileHandle.close();
+		if (!codexSource) await fileHandle.close();
 	}
 }
 
@@ -240,10 +253,13 @@ async function readTranscriptFileIncrementally<
 	createAccumulatorState: () => TAccumulatorState,
 	accumulate: (state: TAccumulatorState, records: Record<string, unknown>[]) => void,
 	maxIncrementalReadBytes: number,
+	codexSource?: NativeTranscriptReadHandle,
 ): Promise<void> {
 	for (;;) {
 		const chunkStartByteOffset = fileState.nextByteOffset;
-		const readResult = await readAppendedCompleteJsonLines(filePath, chunkStartByteOffset, maxIncrementalReadBytes);
+		const readResult = await (codexSource
+			? readCodexTranscriptCompleteLinesFromSource(codexSource, chunkStartByteOffset, maxIncrementalReadBytes)
+			: readAppendedCompleteJsonLines(filePath, chunkStartByteOffset, maxIncrementalReadBytes));
 		if (readResult.fileWasTruncated) {
 			fileState.nextByteOffset = 0;
 			fileState.accumulatorState = createAccumulatorState();
@@ -265,6 +281,7 @@ async function readTranscriptFileIncrementally<
 		const byteOffsetAfterOversizedLine = await findByteOffsetAfterNextNewline(
 			filePath,
 			chunkStartByteOffset + maxIncrementalReadBytes,
+			codexSource,
 		);
 		if (byteOffsetAfterOversizedLine === null) {
 			// 这一行还没写完：本轮停在它的行首，等它写完（文件签名随之变化）下一轮再跳。
@@ -334,25 +351,44 @@ export function createAgentConversationModelTokenUsageIncrementalReader(
 		},
 		readCodexCumulativeTokenUsage: async (
 			rolloutPath: string,
+			nativeSessionId?: string,
 		): Promise<AgentConversationModelTokenUsageTotals | null> => {
-			let fileState = codexFileStates.get(rolloutPath);
+			const logicalPath = codexTranscriptJsonlPath(rolloutPath);
+			let fileState = codexFileStates.get(logicalPath);
 			if (!fileState) {
 				fileState = { nextByteOffset: 0, accumulatorState: createCodexRolloutTokenUsageAccumulatorState() };
-				codexFileStates.set(rolloutPath, fileState);
+				codexFileStates.set(logicalPath, fileState);
 			}
-			await readTranscriptFileIncrementally(
-				rolloutPath,
-				fileState,
-				createCodexRolloutTokenUsageAccumulatorState,
-				accumulateCodexRolloutRecordsIntoTokenUsage,
-				maxIncrementalReadBytes,
-			);
+			const source = nativeSessionId
+				? await openCodexTranscriptHistoryReadSource(rolloutPath, nativeSessionId)
+				: await openCodexTranscriptReadSource(rolloutPath);
+			try {
+				const metadata = await source.stat();
+				const sourceFileIdentity = `${metadata.dev}:${metadata.ino}`;
+				if (fileState.sourceFileIdentity && fileState.sourceFileIdentity !== sourceFileIdentity) {
+					fileState.nextByteOffset = 0;
+					fileState.accumulatorState = createCodexRolloutTokenUsageAccumulatorState();
+				}
+				fileState.sourceFileIdentity = sourceFileIdentity;
+				await readTranscriptFileIncrementally(
+					rolloutPath,
+					fileState,
+					createCodexRolloutTokenUsageAccumulatorState,
+					accumulateCodexRolloutRecordsIntoTokenUsage,
+					maxIncrementalReadBytes,
+					source,
+				);
+			} finally {
+				await source.close();
+			}
 			return summarizeCodexRolloutTokenUsage(fileState.accumulatorState);
 		},
 		// 供调用方决定要不要重读（大小 / 修改时间没变就跳过）。
-		readTranscriptFileSignature: async (filePath: string): Promise<string | null> => {
+		readTranscriptFileSignature: async (filePath: string, nativeSessionId?: string): Promise<string | null> => {
 			try {
-				const fileStats = await stat(filePath);
+				const fileStats = nativeSessionId
+					? await statCodexTranscriptReadSource(filePath, nativeSessionId)
+					: await stat(filePath).catch(() => statCodexTranscriptReadSource(filePath));
 				return `${fileStats.size}:${fileStats.mtimeMs}`;
 			} catch {
 				return null;

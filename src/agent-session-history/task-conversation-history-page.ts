@@ -1,9 +1,6 @@
 import { createHash } from "node:crypto";
-import { type FileHandle, open, realpath, stat } from "node:fs/promises";
-import { createRequire } from "node:module";
+import { open, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
-import Database from "better-sqlite3";
 import { z } from "zod";
 import {
 	inferCodexHomeDirectoryPathFromTranscriptPath,
@@ -20,6 +17,14 @@ import { resolveSessionFacets } from "../core/session-activity";
 import { doesConversationSessionBelongToTask } from "../core/task-main-conversation-session-binding";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
+import { readCodexThreadRolloutPath } from "./codex-native-transcript-current-pointer";
+import {
+	codexTranscriptJsonlPath,
+	type NativeTranscriptReadHandle,
+	openCodexTranscriptReadSource,
+	readCodexTranscriptSessionMetadata,
+	statCodexTranscriptReadSource,
+} from "./codex-transcript-read-source";
 import { parseAcceptedKimiMainUserMessage } from "./kimi-native-conversation-activity-reader";
 import {
 	assertNativeTranscriptFilePrefixSnapshot,
@@ -35,7 +40,14 @@ const HISTORY_MESSAGES_PER_PAGE = 100;
 const TRANSCRIPT_READ_CHUNK_BYTES = 64 * 1024;
 const MAXIMUM_TRANSCRIPT_RECORD_BYTES = 8 * 1024 * 1024;
 const MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES = 16 * 1024 * 1024;
+const snapshotFilesSchema = z
+	.array(z.object({ segmentThreadId: z.string().nullable(), filePrefix: nativeTranscriptFilePrefixSnapshotSchema }))
+	.min(1)
+	.max(32);
 const historyCursorSchema = z.object({
+	internalVersion: z.literal(2).optional(),
+	nativeSessionId: z.string().optional(),
+	codexContentSnapshotFiles: snapshotFilesSchema.optional(),
 	sourceRevision: z.string(),
 	beforeByteOffset: z.number().int().nonnegative(),
 	branchTrackingEnabled: z.boolean(),
@@ -43,16 +55,7 @@ const historyCursorSchema = z.object({
 	newerEnvelope: z.object({ kind: z.string(), fingerprint: z.string() }).nullable(),
 	segmentThreadId: z.string().nullable(),
 	segmentRevision: z.string().nullable(),
-	stableSnapshotFiles: z
-		.array(
-			z.object({
-				segmentThreadId: z.string().nullable(),
-				filePrefix: nativeTranscriptFilePrefixSnapshotSchema,
-			}),
-		)
-		.min(1)
-		.max(32)
-		.optional(),
+	stableSnapshotFiles: snapshotFilesSchema.optional(),
 });
 type HistoryCursor = z.infer<typeof historyCursorSchema>;
 const retainedMessagesCursorSchema = z.object({
@@ -68,7 +71,7 @@ const codexHistoryBaseSchema = z.object({
 function codexTranscriptSegmentSearchRoot(transcriptPath: string): string {
 	let directory = dirname(transcriptPath);
 	while (dirname(directory) !== directory) {
-		if (basename(directory) === "sessions") return directory;
+		if (["sessions", "archived_sessions"].includes(basename(directory))) return directory;
 		directory = dirname(directory);
 	}
 	return dirname(transcriptPath);
@@ -197,12 +200,19 @@ function projectNativeHistoryRecord(
 }
 
 // 按 LF 的字节边界倒读，U+2028/U+2029 只是 JSON 正文，不能被 readline 当成换行。
-async function* readCompleteTranscriptLinesBackwards(handle: FileHandle, beforeByteOffset: number) {
+async function* readCompleteTranscriptLinesBackwards(
+	handle: NativeTranscriptReadHandle,
+	beforeByteOffset: number,
+	firstRecordEndByteOffset = 0,
+) {
 	let endOffset = beforeByteOffset;
 	let incompletePrefix = Buffer.alloc(0);
 	let bytesReadForPage = 0;
-	while (endOffset > 0 && bytesReadForPage < MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES) {
-		const startOffset = Math.max(0, endOffset - TRANSCRIPT_READ_CHUNK_BYTES);
+	while (endOffset > firstRecordEndByteOffset && bytesReadForPage < MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES) {
+		const startOffset = Math.max(
+			firstRecordEndByteOffset,
+			endOffset - (handle.streamingRangeReads ? MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES : TRANSCRIPT_READ_CHUNK_BYTES),
+		);
 		const chunk = Buffer.alloc(endOffset - startOffset);
 		const { bytesRead } = await handle.read(chunk, 0, chunk.length, startOffset);
 		if (bytesRead !== chunk.length) throw new Error("会话记录读取期间发生变化，请刷新后重试。");
@@ -223,13 +233,14 @@ async function* readCompleteTranscriptLinesBackwards(handle: FileHandle, beforeB
 		if (incompletePrefix.length > MAXIMUM_TRANSCRIPT_RECORD_BYTES)
 			throw new Error("单条会话记录过大，无法完整展示这一页。");
 		endOffset = startOffset;
-		if (startOffset === 0 && incompletePrefix.length > 0)
-			yield { text: incompletePrefix.toString("utf8"), startOffset: 0 };
+		if (startOffset === firstRecordEndByteOffset && incompletePrefix.length > 0)
+			yield { text: incompletePrefix.toString("utf8"), startOffset: firstRecordEndByteOffset };
 	}
+	if (endOffset <= firstRecordEndByteOffset && firstRecordEndByteOffset > 0) yield { text: "", startOffset: 0 };
 }
 
 async function assertNativeTranscriptIdentity(
-	handle: FileHandle,
+	handle: NativeTranscriptReadHandle,
 	summary: RuntimeTaskSessionSummary,
 	expectedNativeSessionId = summary.agentNativeConversationSessionIdentity?.nativeSessionId,
 ): Promise<Record<string, unknown> | null> {
@@ -241,6 +252,14 @@ async function assertNativeTranscriptIdentity(
 	if (!identity) throw new Error("缺少可信原生会话身份，无法读取历史。");
 	// 这两个来源已经逐次通过精确 chat/state/index 归属和原生导出路径核验；导出正文自身没有 session header。
 	if (identity.sourceAgentId === "cursor" || identity.sourceAgentId === "kimi") return null;
+	if (identity.sourceAgentId === "codex") {
+		const metadata = await readCodexTranscriptSessionMetadata(handle).catch(() => {
+			throw new Error("无法核实这份记录的完整原生会话身份。");
+		});
+		if (!transcriptMetadataMatchesNativeConversationIdentity(identity, metadata.record))
+			throw new Error("原生会话身份与记录不匹配。");
+		return readTranscriptRecord(metadata.record.payload);
+	}
 	let prefix = Buffer.alloc(0);
 	let position = 0;
 	while (position < MAXIMUM_TRANSCRIPT_PAGE_READ_BYTES) {
@@ -333,56 +352,6 @@ export interface LoadTaskConversationHistoryPageInput {
 	onVerifiedTranscriptSegment?: (transcriptPath: string) => void;
 }
 
-const requireNodeModule = createRequire(import.meta.url);
-
-function isBetterSqliteNativeAbiMismatch(error: unknown): boolean {
-	return error instanceof Error && error.message.includes("NODE_MODULE_VERSION");
-}
-
-function isBuiltinSqliteDatabaseUnavailable(error: unknown): boolean {
-	return error instanceof Error && error.message.includes("unable to open database file");
-}
-
-// 共享安装的 better-sqlite3 可能只对应另一个 Node ABI。打不开时改读运行时自带 sqlite 的同一只读指针；库文件缺失仍交给唯一历史入口回退。
-function readCodexThreadRolloutPath(databasePath: string, nativeSessionId: string): string | undefined {
-	let nativeCodexStateDatabase: Database.Database | null = null;
-	try {
-		nativeCodexStateDatabase = new Database(databasePath, { readonly: true, fileMustExist: true });
-		const row = nativeCodexStateDatabase
-			.prepare("SELECT rollout_path FROM threads WHERE id = ?")
-			.get(nativeSessionId);
-		if (!row) return undefined;
-		return z.object({ rollout_path: z.string() }).parse(row).rollout_path;
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "SQLITE_CANTOPEN") return undefined;
-		if (!isBetterSqliteNativeAbiMismatch(error)) throw error;
-		return readCodexThreadRolloutPathWithBuiltinSqlite(databasePath, nativeSessionId);
-	} finally {
-		nativeCodexStateDatabase?.close();
-	}
-}
-
-function readCodexThreadRolloutPathWithBuiltinSqlite(
-	databasePath: string,
-	nativeSessionId: string,
-): string | undefined {
-	let database: DatabaseSync | null = null;
-	try {
-		const { DatabaseSync: BuiltinDatabaseSync } = requireNodeModule("node:sqlite") as {
-			DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => DatabaseSync;
-		};
-		database = new BuiltinDatabaseSync(databasePath, { readOnly: true });
-		const row = database.prepare("SELECT rollout_path FROM threads WHERE id = ?").get(nativeSessionId);
-		if (!row) return undefined;
-		return z.object({ rollout_path: z.string() }).parse(row).rollout_path;
-	} catch (error) {
-		if (isBuiltinSqliteDatabaseUnavailable(error)) return undefined;
-		throw error;
-	} finally {
-		database?.close();
-	}
-}
-
 async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summary: RuntimeTaskSessionSummary) {
 	const nativeConversationIdentity = summary.agentNativeConversationSessionIdentity;
 	if (
@@ -415,6 +384,7 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 			await listKnownCodexTranscriptSegmentPaths(
 				join(authoritativeCodexConversationStorageHomeDirectoryPath, "sessions"),
 				nativeConversationIdentity.nativeSessionId,
+				{ includeCompressedTranscripts: true },
 			)
 		).filter((path) => !basename(path).includes(`${nativeConversationIdentity.nativeSessionId}_`));
 		if (candidates.length !== 1)
@@ -422,6 +392,12 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 		authoritativeTranscriptPath = candidates[0];
 	}
 	if (!authoritativeTranscriptPath) throw new Error("缺少可信原生历史入口。");
+	const resolvedSource = await openCodexTranscriptReadSource(authoritativeTranscriptPath);
+	try {
+		authoritativeTranscriptPath = resolvedSource.nativePath;
+	} finally {
+		await resolvedSource.close();
+	}
 	const transcriptPathRelativeToAuthoritativeHome = relative(
 		await realpath(authoritativeCodexConversationStorageHomeDirectoryPath),
 		await realpath(authoritativeTranscriptPath),
@@ -514,12 +490,15 @@ export async function loadTaskConversationHistoryPage(
 			"binding_pending",
 		);
 	}
-	let handle: FileHandle | null = null;
+	let handle: NativeTranscriptReadHandle | null = null;
 	try {
 		const identity = summary.agentNativeConversationSessionIdentity;
 		if (!identity?.transcriptPath) return buildUnavailableTaskConversationHistoryPage("缺少当前绑定的会话记录。");
 		try {
-			handle = await open(identity.transcriptPath, "r");
+			handle =
+				identity.sourceAgentId === "codex"
+					? await openCodexTranscriptReadSource(identity.transcriptPath, identity.nativeSessionId)
+					: await open(identity.transcriptPath, "r");
 		} catch (error) {
 			if (
 				!request.cursor &&
@@ -534,11 +513,15 @@ export async function loadTaskConversationHistoryPage(
 		let metadata = await handle.stat();
 		if (!metadata.isFile()) return buildUnavailableTaskConversationHistoryPage("会话记录不是可读取的文件。");
 		const rootMetadata = metadata;
+		const rootNativePath = handle.nativePath ?? identity.transcriptPath;
 		const usesStableSnapshot = request.transcriptReadConsistency === "stable_snapshot";
+		const decodedCursor = decodeTaskConversationHistoryCursor(request.cursor);
+		const usesCodexLogicalCursor =
+			identity.sourceAgentId === "codex" && (!decodedCursor || decodedCursor.internalVersion === 2);
 		const sourceRevision = createHash("sha256")
 			.update(
 				JSON.stringify(
-					usesStableSnapshot
+					usesCodexLogicalCursor
 						? [
 								card.id,
 								card.createdAt,
@@ -546,34 +529,61 @@ export async function loadTaskConversationHistoryPage(
 								summary.workspacePath,
 								identity.sourceAgentId,
 								identity.nativeSessionId,
-								identity.transcriptPath,
+								codexTranscriptJsonlPath(identity.transcriptPath),
+								usesStableSnapshot,
 							]
-						: [card.id, summary.taskId, identity, metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs],
+						: usesStableSnapshot
+							? [
+									card.id,
+									card.createdAt,
+									summary.taskId,
+									summary.workspacePath,
+									identity.sourceAgentId,
+									identity.nativeSessionId,
+									identity.transcriptPath,
+								]
+							: [card.id, summary.taskId, identity, metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs],
 				),
 			)
 			.digest("hex");
-		const decodedCursor = decodeTaskConversationHistoryCursor(request.cursor);
 		if (
 			decodedCursor &&
 			(decodedCursor.sourceRevision !== sourceRevision ||
+				(decodedCursor.nativeSessionId !== undefined &&
+					decodedCursor.nativeSessionId !== identity.nativeSessionId) ||
 				Boolean(decodedCursor.stableSnapshotFiles) !== usesStableSnapshot)
 		)
 			return buildUnavailableTaskConversationHistoryPage(
 				"会话记录已变化，请刷新后重新加载历史。",
 				"snapshot_invalid",
 			);
-		const stableSnapshotFiles = usesStableSnapshot
-			? (decodedCursor?.stableSnapshotFiles ?? [
-					{ segmentThreadId: null, filePrefix: await captureNativeTranscriptFilePrefixSnapshot(handle) },
-				])
-			: undefined;
+		const stableSnapshotFiles =
+			usesStableSnapshot || usesCodexLogicalCursor
+				? ((usesStableSnapshot ? decodedCursor?.stableSnapshotFiles : decodedCursor?.codexContentSnapshotFiles) ?? [
+						{
+							segmentThreadId: null,
+							filePrefix: await captureNativeTranscriptFilePrefixSnapshot(
+								handle,
+								undefined,
+								identity.sourceAgentId === "codex",
+							),
+						},
+					])
+				: undefined;
 		const rootFilePrefix = stableSnapshotFiles?.find((entry) => entry.segmentThreadId === null)?.filePrefix;
 		if (usesStableSnapshot && !rootFilePrefix) throw new NativeTranscriptSnapshotInvalidError();
 		if (rootFilePrefix)
-			await assertNativeTranscriptFilePrefixSnapshot(handle, identity.transcriptPath, rootFilePrefix);
+			await assertNativeTranscriptFilePrefixSnapshot(
+				handle,
+				rootNativePath,
+				rootFilePrefix,
+				identity.sourceAgentId === "codex",
+			);
 		let segmentMetadata = await assertNativeTranscriptIdentity(handle, summary);
-		input.onVerifiedTranscriptSegment?.(identity.transcriptPath);
+		input.onVerifiedTranscriptSegment?.(handle.nativePath ?? identity.transcriptPath);
 		const cursor: HistoryCursor = decodedCursor ?? {
+			internalVersion: 2,
+			nativeSessionId: identity.nativeSessionId,
 			sourceRevision,
 			beforeByteOffset: rootFilePrefix?.endByteOffset ?? metadata.size,
 			branchTrackingEnabled: false,
@@ -581,9 +591,10 @@ export async function loadTaskConversationHistoryPage(
 			newerEnvelope: null,
 			segmentThreadId: null,
 			segmentRevision: null,
-			stableSnapshotFiles,
+			stableSnapshotFiles: usesStableSnapshot ? stableSnapshotFiles : undefined,
+			codexContentSnapshotFiles: usesCodexLogicalCursor && !usesStableSnapshot ? stableSnapshotFiles : undefined,
 		};
-		const verifiedSnapshotPaths = new Map<string | null, string>([[null, identity.transcriptPath]]);
+		const verifiedSnapshotPaths = new Map<string | null, string>([[null, rootNativePath]]);
 		const knownCodexSegmentPaths = new Map<string, string[]>();
 		const findParentSegment = async (
 			threadId: string,
@@ -599,14 +610,15 @@ export async function loadTaskConversationHistoryPage(
 				let paths = knownCodexSegmentPaths.get(nativeSessionId);
 				if (!paths) {
 					paths = await listKnownCodexTranscriptSegmentPaths(
-						codexTranscriptSegmentSearchRoot(identity.transcriptPath as string),
+						codexTranscriptSegmentSearchRoot(rootNativePath),
 						nativeSessionId,
+						{ includeCompressedTranscripts: true },
 					);
 					knownCodexSegmentPaths.set(nativeSessionId, paths);
 				}
 				for (const path of paths)
 					if (
-						basename(path).endsWith(
+						basename(codexTranscriptJsonlPath(path)).endsWith(
 							threadId === nativeSessionId
 								? `-${nativeSessionId}.jsonl`
 								: `-${nativeSessionId}_${threadId}.jsonl`,
@@ -636,7 +648,7 @@ export async function loadTaskConversationHistoryPage(
 				if (!parentSegment || ancestorPaths.has(parentSegment.path)) break;
 				const { path: parentPath, nativeSessionId: expectedNativeSessionId } = parentSegment;
 				ancestorPaths.add(parentPath);
-				const ancestorHandle = await open(parentPath, "r");
+				const ancestorHandle = await openCodexTranscriptReadSource(parentPath);
 				try {
 					ancestorMetadata = await assertNativeTranscriptIdentity(
 						ancestorHandle,
@@ -656,13 +668,14 @@ export async function loadTaskConversationHistoryPage(
 							filePrefix: await captureNativeTranscriptFilePrefixSnapshot(
 								ancestorHandle,
 								base.data.end_byte_offset,
+								true,
 							),
 						};
 						stableSnapshotFiles.push(snapshot);
 					}
 					if (snapshot.filePrefix.endByteOffset !== base.data.end_byte_offset)
 						throw new NativeTranscriptSnapshotInvalidError();
-					await assertNativeTranscriptFilePrefixSnapshot(ancestorHandle, parentPath, snapshot.filePrefix);
+					await assertNativeTranscriptFilePrefixSnapshot(ancestorHandle, parentPath, snapshot.filePrefix, true);
 					verifiedSnapshotPaths.set(base.data.thread_id, parentPath);
 					input.onVerifiedTranscriptSegment?.(parentPath);
 				} finally {
@@ -694,7 +707,7 @@ export async function loadTaskConversationHistoryPage(
 			visitedSegmentPaths.add(parentPath);
 			await handle.close();
 			handle = null;
-			handle = await open(parentPath, "r");
+			handle = await openCodexTranscriptReadSource(parentPath);
 			metadata = await handle.stat();
 			segmentMetadata = await assertNativeTranscriptIdentity(handle, summary, expectedParentNativeSessionId);
 			if (
@@ -719,7 +732,7 @@ export async function loadTaskConversationHistoryPage(
 				);
 				if (!segmentSnapshot || segmentSnapshot.filePrefix.endByteOffset !== selectedSegmentEndByteOffset)
 					throw new NativeTranscriptSnapshotInvalidError();
-				await assertNativeTranscriptFilePrefixSnapshot(handle, parentPath, segmentSnapshot.filePrefix);
+				await assertNativeTranscriptFilePrefixSnapshot(handle, parentPath, segmentSnapshot.filePrefix, true);
 				verifiedSnapshotPaths.set(selectedSegmentThreadId, parentPath);
 			}
 		}
@@ -727,7 +740,17 @@ export async function loadTaskConversationHistoryPage(
 			return buildUnavailableTaskConversationHistoryPage("历史分页位置超过该分段的有效范围。");
 		const segmentRevision = createHash("sha256")
 			.update(
-				JSON.stringify([metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs, selectedSegmentEndByteOffset]),
+				JSON.stringify(
+					usesCodexLogicalCursor
+						? [
+								identity.nativeSessionId,
+								selectedSegmentThreadId,
+								stableSnapshotFiles?.find((entry) => entry.segmentThreadId === selectedSegmentThreadId)
+									?.filePrefix.prefixSha256,
+								selectedSegmentEndByteOffset,
+							]
+						: [metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs, selectedSegmentEndByteOffset],
+				),
 			)
 			.digest("hex");
 		if (!usesStableSnapshot && cursor.segmentRevision !== null && cursor.segmentRevision !== segmentRevision)
@@ -735,7 +758,13 @@ export async function loadTaskConversationHistoryPage(
 		cursor.segmentRevision = segmentRevision;
 		const newestMessagesFirst: RuntimeTaskChatMessage[] = [];
 		let notice: string | null = null;
-		for await (const line of readCompleteTranscriptLinesBackwards(handle, cursor.beforeByteOffset)) {
+		const metadataEndByteOffset =
+			identity.sourceAgentId === "codex" ? (await readCodexTranscriptSessionMetadata(handle)).endByteOffset : 0;
+		for await (const line of readCompleteTranscriptLinesBackwards(
+			handle,
+			cursor.beforeByteOffset,
+			metadataEndByteOffset,
+		)) {
 			cursor.beforeByteOffset = line.startOffset;
 			if (!line.text.trim()) continue;
 			const record = parseTranscriptJsonRecord(line.text);
@@ -806,23 +835,35 @@ export async function loadTaskConversationHistoryPage(
 			} else notice = "更早的会话分段不可用，当前展示的历史尚不完整。";
 		}
 		const latestMetadata = await handle.stat();
-		const latestRootMetadata = await stat(identity.transcriptPath);
+		const latestRootMetadata =
+			identity.sourceAgentId === "codex"
+				? await statCodexTranscriptReadSource(rootNativePath)
+				: await stat(identity.transcriptPath);
 		if (
 			!usesStableSnapshot &&
 			(latestMetadata.size !== metadata.size ||
-				latestMetadata.mtimeMs !== metadata.mtimeMs ||
-				latestRootMetadata.dev !== rootMetadata.dev ||
-				latestRootMetadata.ino !== rootMetadata.ino ||
 				latestRootMetadata.size !== rootMetadata.size ||
-				latestRootMetadata.mtimeMs !== rootMetadata.mtimeMs)
+				(!usesCodexLogicalCursor &&
+					(latestMetadata.mtimeMs !== metadata.mtimeMs ||
+						latestRootMetadata.dev !== rootMetadata.dev ||
+						latestRootMetadata.ino !== rootMetadata.ino ||
+						latestRootMetadata.mtimeMs !== rootMetadata.mtimeMs)) ||
+				(usesCodexLogicalCursor &&
+					(rootFilePrefix?.observedFileByteLength ?? rootFilePrefix?.endByteOffset) !== rootMetadata.size))
 		)
 			return buildUnavailableTaskConversationHistoryPage("会话记录读取期间发生变化，请刷新后重试。");
 		for (const snapshot of stableSnapshotFiles ?? []) {
 			const path = verifiedSnapshotPaths.get(snapshot.segmentThreadId);
 			if (!path) throw new NativeTranscriptSnapshotInvalidError();
-			const snapshotHandle = await open(path, "r");
+			const snapshotHandle =
+				identity.sourceAgentId === "codex" ? await openCodexTranscriptReadSource(path) : await open(path, "r");
 			try {
-				await assertNativeTranscriptFilePrefixSnapshot(snapshotHandle, path, snapshot.filePrefix);
+				await assertNativeTranscriptFilePrefixSnapshot(
+					snapshotHandle,
+					path,
+					snapshot.filePrefix,
+					identity.sourceAgentId === "codex",
+				);
 			} finally {
 				await snapshotHandle.close();
 			}

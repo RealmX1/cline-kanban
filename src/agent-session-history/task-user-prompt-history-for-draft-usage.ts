@@ -1,11 +1,21 @@
 import { createHash } from "node:crypto";
 import { stat } from "node:fs/promises";
 import { setImmediate } from "node:timers/promises";
-import { readAppendedCompleteJsonLines } from "agent-conversation-exploration-thread-graph/harness-claude-code";
+import {
+	DEFAULT_MAX_INCREMENTAL_READ_BYTES,
+	readAppendedCompleteJsonLines,
+} from "agent-conversation-exploration-thread-graph/harness-claude-code";
 import type { RuntimeAgentNativeConversationSessionIdentity } from "../core/api-contract";
 import { runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { loadPersistedWorkspaceSessionsById } from "../state/workspace-state";
 import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
+import {
+	openCodexTranscriptReadSource,
+	readCodexTranscriptCompleteLines,
+	readCodexTranscriptSessionMetadata,
+	statCodexTranscriptReadSource,
+} from "./codex-transcript-read-source";
+import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 import { extractSubmittedUserPromptFromTranscriptRecord } from "./submitted-user-prompt-transcript-record-parser";
 
 export interface TaskUserPromptForDraftUsage {
@@ -95,16 +105,48 @@ export async function readTaskUserPromptHistoryForDraftUsage(input: {
 	async function* prompts(): AsyncGenerator<TaskUserPromptForDraftUsage> {
 		for (const identity of identities.values()) {
 			const path = identity.transcriptPath;
-			if (!path || !path.endsWith(".jsonl")) {
+			if (
+				!path ||
+				(!path.endsWith(".jsonl") && !(identity.sourceAgentId === "codex" && path.endsWith(".jsonl.zst")))
+			) {
 				warnings.push(`unsupported_or_missing_transcript:${identity.sourceAgentId}:${identity.nativeSessionId}`);
 				continue;
 			}
 			try {
-				const signatureBeforeRead = await stat(path);
+				const signatureBeforeRead =
+					identity.sourceAgentId === "codex"
+						? await statCodexTranscriptReadSource(path, identity.nativeSessionId)
+						: await stat(path);
+				if (identity.sourceAgentId === "codex") {
+					const source = await openCodexTranscriptReadSource(path, identity.nativeSessionId);
+					try {
+						const first = (await readCodexTranscriptSessionMetadata(source)).record;
+						const payload = readTranscriptRecord(first.payload);
+						if (
+							payload?.id !== identity.nativeSessionId ||
+							(payload.session_id !== undefined && payload.session_id !== identity.nativeSessionId)
+						)
+							throw new Error("原生会话身份不匹配");
+						if (!transcriptMetadataMatchesNativeConversationIdentity(identity, first)) {
+							warnings.push(`descendant_session_excluded:${identity.nativeSessionId}`);
+							continue;
+						}
+					} finally {
+						await source.close();
+					}
+				}
 				let offset = 0;
 				let rejectedDescendantSession = false;
 				while (offset < signatureBeforeRead.size && !input.isCancelled?.()) {
-					const chunk = await readAppendedCompleteJsonLines(path, offset);
+					const chunk =
+						identity.sourceAgentId === "codex"
+							? await readCodexTranscriptCompleteLines(
+									path,
+									offset,
+									DEFAULT_MAX_INCREMENTAL_READ_BYTES,
+									identity.nativeSessionId,
+								)
+							: await readAppendedCompleteJsonLines(path, offset);
 					if (chunk.nextByteOffset <= offset) {
 						if (chunk.appendedBytesRemainBeyondIncrementalReadBudget)
 							warnings.push(`transcript_line_exceeds_read_budget:${identity.nativeSessionId}`);
@@ -113,6 +155,8 @@ export async function readTaskUserPromptHistoryForDraftUsage(input: {
 					for (const line of chunk.completeLines) {
 						const record = parseTranscriptJsonRecord(line);
 						if (!record) continue;
+						if (!transcriptMetadataMatchesNativeConversationIdentity(identity, record))
+							throw new Error("原生会话身份不匹配");
 						if (identity.sourceAgentId === "codex" && record.type === "session_meta") {
 							const payload = readTranscriptRecord(record.payload);
 							const source = readTranscriptRecord(payload?.source);

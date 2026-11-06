@@ -470,7 +470,10 @@ describe.each([false, true])("人工 prompt 统计的原生证据，缓存=%s", 
 		const directory = await mkdtemp(join(tmpdir(), "work-progress-transcript-reader-"));
 		try {
 			const transcriptPath = join(directory, "native-session.jsonl");
-			await writeFile(transcriptPath, `${JSON.stringify(record("event_msg", "继续"))}\n`);
+			await writeFile(
+				transcriptPath,
+				transcriptJsonLines([codexSegmentMetadata(null, "native-session"), record("event_msg", "继续")]),
+			);
 			const source = {
 				transcriptPath,
 				nativeSessionId: "native-session",
@@ -502,7 +505,7 @@ describe.each([false, true])("人工 prompt 统计的原生证据，缓存=%s", 
 			const firstAt = Date.parse("2026-10-23T12:00:00Z");
 			await writeFile(
 				transcriptPath,
-				`${[record("event_msg", "继续"), record("event_msg", "继续", "2026-10-23T12:01:00Z")].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+				`${[codexSegmentMetadata(null, "native-session"), record("event_msg", "继续"), record("event_msg", "继续", "2026-10-23T12:01:00Z")].map((entry) => JSON.stringify(entry)).join("\n")}\n`,
 			);
 			const result = await readTaskUserPromptStatisticsTranscriptIncrement({
 				transcriptPath,

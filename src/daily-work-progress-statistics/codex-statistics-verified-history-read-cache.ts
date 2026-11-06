@@ -4,6 +4,12 @@ import {
 	parseTranscriptJsonRecord,
 	readTranscriptRecord,
 } from "../agent-session-history/bounded-agent-transcript-reader";
+import {
+	codexTranscriptJsonlPath,
+	codexTranscriptPathMatchesSession,
+	openCodexTranscriptReadSource,
+	readCodexTranscriptSessionMetadata,
+} from "../agent-session-history/codex-transcript-read-source";
 import { countDailyWorkProgressCollectionCost } from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { readCountedTaskUserPromptStatisticsJsonLines } from "./task-user-prompt-statistics-counted-json-lines-reader";
 
@@ -17,7 +23,14 @@ type CodexStatisticsFileIdentityAndChangeMetadata = Awaited<
 	ReturnType<typeof readCodexStatisticsFileIdentityAndChangeMetadata>
 >;
 async function readCodexStatisticsFileIdentityAndChangeMetadata(path: string) {
-	const value = await stat(path, { bigint: true });
+	const value = await stat(path, { bigint: true }).catch(async () => {
+		const source = await openCodexTranscriptReadSource(path);
+		try {
+			return stat(source.nativePath, { bigint: true });
+		} finally {
+			await source.close();
+		}
+	});
 	return {
 		fingerprint: `${value.dev}:${value.ino}:${value.size}:${value.mtimeNs}:${value.ctimeNs}`,
 		size: value.size,
@@ -27,6 +40,7 @@ interface CodexStatisticsVerifiedSegmentHeader {
 	nativeSessionId: string;
 	metadata: CodexStatisticsFileIdentityAndChangeMetadata;
 	firstRecord: Record<string, unknown>;
+	firstRecordEndByteOffset: number;
 }
 interface CodexDirectoryInventorySnapshot {
 	fingerprint: string;
@@ -62,7 +76,11 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 				headers.delete(path);
 				headers.set(path, cached);
 				countDailyWorkProgressCollectionCost("codex_verified_history_cache_hits");
-				return { firstRecord: cached.firstRecord, rewrittenWithoutAppend: false };
+				return {
+					firstRecord: cached.firstRecord,
+					firstRecordEndByteOffset: cached.firstRecordEndByteOffset,
+					rewrittenWithoutAppend: false,
+				};
 			}
 			headers.delete(path);
 			if (cached) countDailyWorkProgressCollectionCost("codex_verified_history_cache_invalidations");
@@ -71,8 +89,20 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 				0,
 				maximumBytes,
 				"codex_prefix_validation",
+				"codex",
 			);
-			const first = prefix.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null;
+			let firstRecordEndByteOffset = prefix.firstCompleteLineEndByteOffset ?? 0;
+			let first = prefix.completeLines[0] ? parseTranscriptJsonRecord(prefix.completeLines[0]) : null;
+			if (!first) {
+				const source = await openCodexTranscriptReadSource(path);
+				try {
+					const header = await readCodexTranscriptSessionMetadata(source);
+					first = header.record;
+					firstRecordEndByteOffset = header.endByteOffset;
+				} finally {
+					await source.close();
+				}
+			}
 			const payload = readTranscriptRecord(first?.payload);
 			if (
 				first?.type === "session_meta" &&
@@ -101,6 +131,23 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 							type: first.type,
 							payload: {
 								id: nativeSessionId,
+								source:
+									typeof payload?.source === "string"
+										? payload.source.slice(0, 128)
+										: {
+												...(readTranscriptRecord(payload?.source)?.subagent !== undefined
+													? { subagent: true }
+													: {}),
+												...(readTranscriptRecord(payload?.source)?.internal !== undefined
+													? { internal: true }
+													: {}),
+											},
+								thread_source:
+									payload?.thread_source === undefined
+										? undefined
+										: payload.thread_source === "user"
+											? "user"
+											: true,
 								session_id: payload?.session_id,
 								history_mode: payload?.history_mode === "paginated" ? "paginated" : null,
 								history_base: boundedHistoryBase,
@@ -108,14 +155,18 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 						}
 					: first;
 			if (firstRecord?.type === "session_meta") {
-				headers.set(path, { nativeSessionId, metadata, firstRecord });
+				headers.set(path, { nativeSessionId, metadata, firstRecord, firstRecordEndByteOffset });
 				while (headers.size > MAXIMUM_CACHED_SEGMENT_HEADERS) {
 					const oldest = headers.keys().next().value;
 					if (oldest === undefined) break;
 					headers.delete(oldest);
 				}
 			}
-			return { firstRecord, rewrittenWithoutAppend: cached !== undefined && metadata.size <= cached.metadata.size };
+			return {
+				firstRecord,
+				firstRecordEndByteOffset,
+				rewrittenWithoutAppend: cached !== undefined && metadata.size <= cached.metadata.size,
+			};
 		},
 		async listSegmentPaths(root: string, nativeSessionId: string): Promise<string[]> {
 			const pendingDirectories = [resolve(root)];
@@ -173,11 +224,7 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 						snapshot.fileNames.length,
 					);
 					matchingPaths = snapshot.fileNames
-						.filter(
-							(name) =>
-								name.endsWith(`${nativeSessionId}.jsonl`) ||
-								(name.includes(`${nativeSessionId}_`) && name.endsWith(".jsonl")),
-						)
+						.filter((name) => codexTranscriptPathMatchesSession(name, nativeSessionId))
 						.map((name) => join(directory, name));
 					if (
 						directories.get(directory) === snapshot &&
@@ -204,7 +251,10 @@ export function createCodexStatisticsVerifiedHistoryReadCache() {
 				}
 				for (const matchingPath of matchingPaths) paths.push(matchingPath);
 			}
-			return paths;
+			const selected = new Map<string, string>();
+			for (const path of paths.sort())
+				if (!selected.has(codexTranscriptJsonlPath(path))) selected.set(codexTranscriptJsonlPath(path), path);
+			return [...selected.values()];
 		},
 	};
 }

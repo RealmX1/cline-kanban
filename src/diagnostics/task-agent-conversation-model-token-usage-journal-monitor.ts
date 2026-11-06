@@ -11,6 +11,7 @@ import {
 	type AgentConversationModelTokenUsageTotals,
 	createAgentConversationModelTokenUsageIncrementalReader,
 } from "../agent-session-history/agent-conversation-model-token-usage-incremental-reader";
+import { codexTranscriptJsonlPath } from "../agent-session-history/codex-transcript-read-source";
 import type { RuntimeLiveTaskResourceUsageSnapshot, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { resolveSessionCategoryAndAttributedTaskCardId } from "../server/task-resource-usage-attribution-root-enumeration";
 import type {
@@ -64,15 +65,27 @@ export function createTaskAgentConversationModelTokenUsageJournalMonitor(
 			for (const { workspaceId, summary } of deps.listSessionSummariesWithWorkspace()) {
 				const identity = summary.agentNativeConversationSessionIdentity;
 				const transcriptPath = identity?.transcriptPath;
-				if (!identity || !transcriptPath || handledTranscriptPaths.has(transcriptPath)) {
+				const transcriptReadCacheKey =
+					identity?.sourceAgentId === "codex" && transcriptPath
+						? codexTranscriptJsonlPath(transcriptPath)
+						: transcriptPath;
+				if (
+					!identity ||
+					!transcriptPath ||
+					!transcriptReadCacheKey ||
+					handledTranscriptPaths.has(transcriptReadCacheKey)
+				) {
 					continue;
 				}
 				if (identity.sourceAgentId !== "claude" && identity.sourceAgentId !== "codex") {
 					continue;
 				}
-				handledTranscriptPaths.add(transcriptPath);
-				const signature = await reader.readTranscriptFileSignature(transcriptPath);
-				const lastRecordedSignature = lastRecordedSignatureByTranscriptPath.get(transcriptPath);
+				handledTranscriptPaths.add(transcriptReadCacheKey);
+				const signature = await reader.readTranscriptFileSignature(
+					transcriptPath,
+					identity.sourceAgentId === "codex" ? identity.nativeSessionId : undefined,
+				);
+				const lastRecordedSignature = lastRecordedSignatureByTranscriptPath.get(transcriptReadCacheKey);
 				if (signature === null || signature === lastRecordedSignature) {
 					continue;
 				}
@@ -105,9 +118,13 @@ export function createTaskAgentConversationModelTokenUsageJournalMonitor(
 							},
 							deps.appendJournalEvent,
 						);
-						latestTokenUsageByTranscriptPath.set(transcriptPath, { workspaceId, attributedTaskCardId, totals });
+						latestTokenUsageByTranscriptPath.set(transcriptReadCacheKey, {
+							workspaceId,
+							attributedTaskCardId,
+							totals,
+						});
 					} else {
-						const totals = await reader.readCodexCumulativeTokenUsage(transcriptPath);
+						const totals = await reader.readCodexCumulativeTokenUsage(transcriptPath, identity.nativeSessionId);
 						if (totals !== null) {
 							recordTaskAgentConversationModelTokenUsageCumulativeSnapshotToJournal(
 								{
@@ -118,14 +135,14 @@ export function createTaskAgentConversationModelTokenUsageJournalMonitor(
 								},
 								deps.appendJournalEvent,
 							);
-							latestTokenUsageByTranscriptPath.set(transcriptPath, {
+							latestTokenUsageByTranscriptPath.set(transcriptReadCacheKey, {
 								workspaceId,
 								attributedTaskCardId,
 								totals,
 							});
 						}
 					}
-					lastRecordedSignatureByTranscriptPath.set(transcriptPath, signature);
+					lastRecordedSignatureByTranscriptPath.set(transcriptReadCacheKey, signature);
 				} catch {
 					// 单个 transcript 读失败不影响其余会话；下个 tick 重试。
 				}
