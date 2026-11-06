@@ -1,6 +1,6 @@
 import type { ReactElement } from "react";
 
-import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
+import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
 import type { RuntimeAgentRaisedDecisionOption, RuntimeAgentRaisedDecisionQuestion } from "@/runtime/types";
 import { preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks } from "@/utils/preserve-agent-authored-line-breaks-as-markdown-hard-breaks";
 
@@ -29,7 +29,7 @@ export function AgentRaisedUserDecisionQuestionPrompt({
 					) : null}
 				</div>
 			) : null}
-			<ClineMarkdownContent
+			<AgentConversationMarkdownContent
 				content={preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks(question.questionMarkdown)}
 			/>
 		</div>
@@ -46,7 +46,7 @@ export function AgentRaisedUserDecisionOptionText({
 			<span className="block text-sm font-medium text-text-primary">{option.label}</span>
 			{option.description ? (
 				<span className="block text-text-secondary">
-					<ClineMarkdownContent
+					<AgentConversationMarkdownContent
 						content={preserveAgentAuthoredLineBreaksAsMarkdownHardBreaks(option.description)}
 					/>
 				</span>

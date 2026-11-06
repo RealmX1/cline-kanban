@@ -1,6 +1,6 @@
-import pLimit from "p-limit";
 import type { RuntimeBoardColumnId, RuntimeTaskWorkspaceMetadata, RuntimeTaskWorktreeMode } from "../core/api-contract";
 import { computeWorktreeGitChangeToken } from "./git-change-token";
+import { workspaceMetadataGitSpawnConcurrencyLimiter } from "./git-concurrency";
 import { getGitSyncSummary, probeGitWorkspaceState } from "./git-sync";
 import { runGit } from "./git-utils";
 import { refreshTaskCommitIntegrationProvenance } from "./task-commit-integration-provenance";
@@ -52,9 +52,7 @@ export const TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANG
  * 各自的定时器 burst 叠加，总并发 git spawn 也被钳成 WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT。
  * 廉价 fs-stat 门控（computeWorktreeGitChangeToken）留在限流器**之外**，只有门控判定需要真探针后才入队。
  */
-const WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT = 4;
-
-export const workspaceMetadataGitSpawnConcurrencyLimiter = pLimit(WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT);
+export { workspaceMetadataGitSpawnConcurrencyLimiter } from "./git-concurrency";
 
 // 探针需要的卡片字段（取自 board 卡片）。
 export interface TaskWorktreeGitMetadataProbeTarget {

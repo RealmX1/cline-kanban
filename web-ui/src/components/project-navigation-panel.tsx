@@ -2,7 +2,6 @@ import * as Collapsible from "@radix-ui/react-collapsible";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { AlertTriangle, ChevronDown, ChevronUp, Ellipsis, ExternalLink, Info, Lightbulb, Plus, X } from "lucide-react";
 import { type MouseEvent as ReactMouseEvent, type ReactNode, useCallback, useEffect, useRef, useState } from "react";
-import { canShowFeaturebaseFeedbackButton } from "@/components/featurebase-feedback-button";
 import { PermanentProjectDataDeletionDialog } from "@/components/permanent-project-data-deletion-dialog";
 import { ProjectIcon } from "@/components/project-visual-identity";
 import { ProjectVisualIdentityEditorDialog } from "@/components/project-visual-identity-editor-dialog";
@@ -12,11 +11,9 @@ import { cn } from "@/components/ui/cn";
 import { Kbd } from "@/components/ui/kbd";
 import { Spinner } from "@/components/ui/spinner";
 import { KANBAN_FORK_GITHUB_ISSUES_URL } from "@/config/issue-reporting-urls";
-import type { FeaturebaseFeedbackState } from "@/hooks/use-featurebase-feedback-widget";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import type {
 	RuntimeAgentId,
-	RuntimeClineProviderSettings,
 	RuntimeProjectPermanentDeletionPreview,
 	RuntimeProjectPermanentDeletionRequest,
 	RuntimeProjectPermanentDeletionResult,
@@ -55,8 +52,6 @@ export function ProjectNavigationPanel({
 	canShowAgentSection,
 	agentSectionContent,
 	selectedAgentId,
-	clineProviderSettings,
-	featurebaseFeedbackState,
 	onSelectProject,
 	onGetPermanentDeletionPreview,
 	onPermanentlyDeleteProjectData,
@@ -76,8 +71,6 @@ export function ProjectNavigationPanel({
 	canShowAgentSection: boolean;
 	agentSectionContent?: ReactNode;
 	selectedAgentId?: RuntimeAgentId | null;
-	clineProviderSettings?: RuntimeClineProviderSettings | null;
-	featurebaseFeedbackState?: FeaturebaseFeedbackState;
 	onSelectProject: (projectId: string) => void;
 	onGetPermanentDeletionPreview: (projectId: string) => Promise<RuntimeProjectPermanentDeletionPreview | null>;
 	onPermanentlyDeleteProjectData: (
@@ -91,11 +84,6 @@ export function ProjectNavigationPanel({
 	setSidebarCollapsed: (collapsed: boolean, persist?: boolean) => void;
 }): React.ReactElement {
 	const sortedProjects = [...projects].sort((a, b) => a.path.localeCompare(b.path));
-	const shouldShowFeaturebaseFeedback = canShowFeaturebaseFeedbackButton({
-		selectedAgentId,
-		clineProviderSettings,
-		featurebaseFeedbackState,
-	});
 
 	const [pendingPermanentProjectDataDeletion, setPendingPermanentProjectDataDeletion] =
 		useState<RuntimeProjectSummary | null>(null);
@@ -433,10 +421,7 @@ export function ProjectNavigationPanel({
 						) : null}
 					</div>
 					<ShortcutsCard />
-					<ProjectSupportFooter
-						shouldShowFeaturebaseFeedback={shouldShowFeaturebaseFeedback}
-						featurebaseFeedbackState={featurebaseFeedbackState}
-					/>
+					<ProjectSupportFooter />
 				</>
 			) : (
 				<div className="flex flex-1 min-h-0 flex-col">
@@ -536,40 +521,22 @@ function TerminalAgentHints(): React.ReactElement {
 	);
 }
 
-function ProjectSupportFooter({
-	shouldShowFeaturebaseFeedback,
-	featurebaseFeedbackState,
-}: {
-	shouldShowFeaturebaseFeedback: boolean;
-	featurebaseFeedbackState?: FeaturebaseFeedbackState;
-}): React.ReactElement {
-	const isOpening = featurebaseFeedbackState?.authState === "loading";
-
-	const handleAction = () => {
-		if (shouldShowFeaturebaseFeedback) {
-			void featurebaseFeedbackState?.openFeedbackWidget();
-		} else {
-			window.open(KANBAN_FORK_GITHUB_ISSUES_URL, "_blank");
-		}
-	};
-
-	const actionLabel = shouldShowFeaturebaseFeedback ? (isOpening ? "Opening..." : "Send feedback") : "Report issue";
+function ProjectSupportFooter(): React.ReactElement {
+	const handleAction = () => window.open(KANBAN_FORK_GITHUB_ISSUES_URL, "_blank");
+	const actionLabel = "报告问题";
 
 	return (
 		<div style={{ padding: "4px 12px 12px" }}>
 			<div className="flex items-start gap-2 rounded-md border border-border bg-surface-2 px-3 py-2.5">
 				<Info size={14} className="mt-px shrink-0 text-text-tertiary" />
 				<div className="flex flex-col gap-1.5">
-					<p className="m-0 text-xs text-text-secondary">
-						Kanban is in beta. Help us improve by sharing your experience.
-					</p>
+					<p className="m-0 text-xs text-text-secondary">Kanban 仍在测试阶段，欢迎反馈使用体验。</p>
 					<button
 						type="button"
 						className="m-0 flex cursor-pointer items-center gap-1 self-start border-none bg-transparent p-0 text-xs font-semibold text-text-secondary hover:text-text-primary active:text-text-tertiary disabled:cursor-default disabled:opacity-50"
-						disabled={shouldShowFeaturebaseFeedback && isOpening}
 						onClick={handleAction}
 					>
-						{actionLabel} {!isOpening && <ExternalLink size={11} />}
+						{actionLabel} <ExternalLink size={11} />
 					</button>
 				</div>
 			</div>

@@ -3,6 +3,7 @@ import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session
 import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
+import { assertRuntimeAgentIsNotRetired, CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "../core/agent-catalog";
 import { runtimeAutomaticAgentFailureContinuationActionRequestSchema } from "../core/api-contract";
 import { isRetiredRvfAutomaticMessageSource } from "../core/retired-rvf-automatic-message-history";
 import {
@@ -48,10 +49,6 @@ import {
 	supportsPersistedAgentTranscriptLastConversationModelProbe,
 } from "../agent-session-history/persisted-agent-transcript-last-conversation-model-probe";
 import { loadTaskConversationHistoryPage } from "../agent-session-history/task-conversation-history-page";
-import { createClineMcpRuntimeService } from "../cline-sdk/cline-mcp-runtime-service";
-import { createClineMcpSettingsService } from "../cline-sdk/cline-mcp-settings-service";
-import { createClineProviderService } from "../cline-sdk/cline-provider-service";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import { updateGlobalRuntimeConfig, updateRuntimeConfig } from "../config/runtime-config";
 import {
@@ -92,15 +89,6 @@ import type {
 import {
 	parseAgentSessionTransportSwitchRequest,
 	parseAnswerAgentRaisedPendingUserDecisionRequest,
-	parseClineAccountSwitchRequest,
-	parseClineAddProviderRequest,
-	parseClineDeviceAuthCompleteRequest,
-	parseClineMcpOAuthRequest,
-	parseClineMcpSettingsSaveRequest,
-	parseClineOauthLoginRequest,
-	parseClineProviderModelsRequest,
-	parseClineProviderSettingsSaveRequest,
-	parseClineUpdateProviderRequest,
 	parseCommandRunRequest,
 	parseContinueConnectionRetrySessionsRequest,
 	parseDismissConnectionRetrySessionsRequest,
@@ -110,7 +98,6 @@ import {
 	parseTaskChatAbortRequest,
 	parseTaskChatCancelRequest,
 	parseTaskChatMessagesRequest,
-	parseTaskChatReloadRequest,
 	parseTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	parseTaskParkAwaitingDispatchedBackgroundWorkRequest,
 	parseTaskSessionInputRequest,
@@ -145,7 +132,6 @@ import {
 } from "../core/task-main-conversation-session-binding";
 import { getTaskMessageInjectionLedgerPath } from "../core/task-message-injection-ledger";
 import { isTaskCardShelved } from "../core/task-shelving-state";
-import { resolveTaskTitle } from "../core/task-title.js";
 import { parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -297,17 +283,12 @@ export interface CreateRuntimeApiDependencies {
 		stopRequestScope?: TaskSessionStopRequestScope,
 	) => Promise<void>;
 	getScopedTerminalManager: (scope: RuntimeTrpcWorkspaceScope) => Promise<TerminalSessionManager>;
-	getScopedClineTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<ClineTaskSessionService>;
 	getScopedAcpTaskSessionService: (scope: RuntimeTrpcWorkspaceScope) => Promise<AcpTaskSessionService>;
 	resolveInteractiveShellCommand: () => { binary: string; args: string[] };
 	runCommand: (command: string, cwd: string) => Promise<RuntimeCommandRunResponse>;
-	broadcastClineMcpAuthStatusesUpdated?: (
-		statuses: Awaited<ReturnType<ReturnType<typeof createClineMcpRuntimeService>["getAuthStatuses"]>>,
-	) => void;
 	broadcastTaskChatCleared?: (workspaceId: string, taskId: string) => void;
 	broadcastNotificationLogUpdated?: (workspaceId: string) => Promise<void> | void;
 	broadcastRuntimeWorkspaceStateUpdated?: (workspaceId: string, workspacePath: string) => Promise<void> | void;
-	bumpClineSessionContextVersion?: () => void;
 	prepareForStateReset?: () => Promise<void>;
 	getUpdateStatus: () => RuntimeUpdateStatusResponse;
 	runUpdateNow: () => Promise<RuntimeRunUpdateResponse>;
@@ -350,7 +331,7 @@ async function resolveExistingTaskCwdOrEnsure(options: {
 	}
 }
 
-const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["cline", "claude", "codex"]);
+const byTheWaySessionSupportedAgentIds: ReadonlySet<RuntimeAgentId> = new Set(["claude", "codex"]);
 
 async function persistTaskCollaborationSessionBeforeReturningLaunchResponse(
 	workspacePath: string,
@@ -566,7 +547,7 @@ async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(
 // 卡片根本不写该字段），于是新 runtime 起来后这个 task 只剩一条 agentId 为 null 的空壳 summary。
 // 卡片是唯一在硬中断中幸存的载体，所以「用的是哪个 agent」必须在**启动那一刻**就写到这里。
 //
-// 三条 transport（PTY / Cline SDK / ACP）都要写：三者都会遇到同一种中断。
+// PTY 与 ACP 都要写：两者会遇到同一种中断。
 // 失败一律吞掉——卡片没同步只是少一条回填源，绝不该连累会话启动本身。
 async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
 	workspaceScope: RuntimeTrpcWorkspaceScope;
@@ -609,21 +590,9 @@ async function persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard(options: {
 }
 
 export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrpcContext["runtimeApi"] {
-	const clineProviderService = createClineProviderService();
-	const clineMcpSettingsService = createClineMcpSettingsService();
-	const clineMcpRuntimeService = createClineMcpRuntimeService({
-		onAuthStatusesChanged: (statuses) => {
-			deps.broadcastClineMcpAuthStatusesUpdated?.(statuses);
-		},
-	});
-	const debugResetTargetPaths = [
-		join(homedir(), ".cline", "data"),
-		join(homedir(), ".cline", "kanban"),
-		join(homedir(), ".cline", "worktrees"),
-	] as const;
+	const debugResetTargetPaths = [join(homedir(), ".cline", "kanban"), join(homedir(), ".cline", "worktrees")] as const;
 
-	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) =>
-		buildRuntimeConfigResponse(runtimeConfig, clineProviderService.getProviderSettingsSummary());
+	const buildConfigResponse = (runtimeConfig: RuntimeConfigState) => buildRuntimeConfigResponse(runtimeConfig);
 	const serializeSessionStartupAgainstTaskClosure = async <Response>(
 		workspaceScope: RuntimeTrpcWorkspaceScope,
 		resolveOwningTaskCardId: () => string | null | Promise<string | null>,
@@ -697,7 +666,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			terminalAgentModelOverrideSettings: settings
 				? settings.terminalAgentModelOverrideSettings
 				: card.terminalAgentModelOverrideSettings,
-			clineSettings: settings ? settings.clineSettings : card.clineSettings,
 			taskConversationMode: summary.taskConversationMode,
 		};
 	};
@@ -731,7 +699,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
 		const effectiveAgentId =
 			terminalManager.getSummary(taskId)?.agentId ?? card.agentId ?? scopedRuntimeConfig.selectedAgentId;
-		if (effectiveAgentId === "cline" || isRuntimeAgentSessionDrivenByAcpProtocol(effectiveAgentId)) {
+		if (isRuntimeAgentSessionDrivenByAcpProtocol(effectiveAgentId)) {
 			return false;
 		}
 		const resolvedConfig =
@@ -1099,24 +1067,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				);
 			return buildConfigResponse(nextRuntimeConfig);
 		},
-		saveClineProviderSettings: async (_workspaceScope, input) => {
-			const body = parseClineProviderSettingsSaveRequest(input);
-			const response = clineProviderService.saveProviderSettings(body);
-			deps.bumpClineSessionContextVersion?.();
-			return response;
-		},
-		addClineProvider: async (_workspaceScope, input) => {
-			const body = parseClineAddProviderRequest(input);
-			const response = await clineProviderService.addCustomProvider(body);
-			deps.bumpClineSessionContextVersion?.();
-			return response;
-		},
-		updateClineProvider: async (_workspaceScope, input) => {
-			const body = parseClineUpdateProviderRequest(input);
-			const response = await clineProviderService.updateCustomProvider(body);
-			deps.bumpClineSessionContextVersion?.();
-			return response;
-		},
 		// 阶段目标只允许写调用者所属的当前对话，主卡与旁支对话分别保存。
 		setCurrentWorkPhaseGoal: async (workspaceScope, input, evidence) => {
 			const intent = await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
@@ -1369,8 +1319,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				enterStartPhase("load_scoped_runtime_config");
-				const requestedClineTaskMode = body.mode ?? "act";
 				const scopedRuntimeConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
+				assertRuntimeAgentIsNotRetired(body.agentId);
+				if (body.resumeFromTrash)
+					assertRuntimeAgentIsNotRetired(
+						terminalManager.getSummary(body.taskId)?.agentId ??
+							owningCard?.mostRecentlyLaunchedAgentSessionAgentId ??
+							owningCard?.agentId,
+					);
 				enterStartPhase("resolve_or_ensure_task_working_directory");
 				const taskCwd = isHomeAgentSessionId(body.taskId)
 					? workspaceScope.workspacePath
@@ -1394,16 +1350,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   2. body.agentId — the card's current per-task agent override.
 				//   3. scopedRuntimeConfig.selectedAgentId — the workspace-level default.
 				//
-				// clineSettings (which LLM model and reasoning profile the Cline agent uses):
-				//   Always taken from the card's current override object. There is no
-				//   session-level persistence for these;
-				//   if the user changes the model on the card, the next session launch
-				//   (including trash-restore) uses the updated values.
 				const previousTerminalAgentId = body.resumeFromTrash
 					? (terminalManager.getSummary(body.taskId)?.agentId ?? null)
 					: null;
 				const effectiveAgentId = previousTerminalAgentId ?? body.agentId ?? scopedRuntimeConfig.selectedAgentId;
 				effectiveAgentIdForDiagnostics = effectiveAgentId;
+				assertRuntimeAgentIsNotRetired(effectiveAgentId);
 				enterStartPhase("validate_task_conversation_session_request");
 				let taskConversationSessionContextForkSourceNativeSessionId: string | undefined;
 				let mainContextForkSourceSummary: RuntimeTaskSessionSummary | undefined;
@@ -1469,13 +1421,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					isForkedTaskConversationSessionContext(taskConversationSessionMetadata)
 				) {
 					enterStartPhase("inspect_existing_task_conversation_sessions");
-					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 					const existingTaskConversationSessionSummaries = [
 						...(typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : []),
-						...(typeof clineTaskSessionService.listSummaries === "function"
-							? clineTaskSessionService.listSummaries()
-							: []),
 						...acpTaskSessionService.listSummaries(),
 					];
 					// worktree 准备可能跨数秒；按最新的主责任绑定核对客户端声明的父会话。
@@ -1626,7 +1574,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								body.terminalAgentModelOverrideSettings?.agentId === effectiveAgentId
 									? body.terminalAgentModelOverrideSettings
 									: undefined,
-							clineSettings: body.clineSettings,
 						},
 					};
 					body.taskConversationSessionMetadata = taskConversationSessionMetadata;
@@ -1666,7 +1613,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							}
 						: undefined;
 				await revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
-				// ACP 会话（omp 切到 ACP 时）既不是 PTY 终端 agent 也不是 Cline SDK，走自己的服务。
+				// ACP 会话（omp 切到 ACP 时）走独立的协议服务。
 				if (resolvedAgentSessionTransport.effectiveSessionTransport === "acp_stdio_subprocess") {
 					enterStartPhase("start_acp_runtime_session");
 					const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
@@ -1730,7 +1677,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					// 就既不弹错误也不提示重试，用户对着一张什么都没在跑的卡以为切换成功了。切换的失败口径是
 					// 「停在已停止并如实报错」，这里如实回 ok:false 正是它的前提；不重试、不回滚、不降级回旧通道。
 					//
-					// 判据复用 facet 权威的 isSessionInActiveTurn（与 PTY / Cline 侧同一套双轴口径），不新写一套
+					// 判据复用 facet 权威的 isSessionInActiveTurn，与 PTY 保持同一套双轴口径。
 					// state 字符串比较：failed（起不来）与 interrupted（刚起就被拆）都不算「起来了」。
 					if (!isSessionInActiveTurn(resolveSessionFacets(acpSummary))) {
 						const acpStartFailureMessage =
@@ -1797,114 +1744,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					enterStartPhase("response_ready");
 					recordStartDiagnostic("response_ready", "response_ready");
 					return { ok: true, summary: nextAcpSummary };
-				}
-
-				let useClinePath = effectiveAgentId === "cline";
-				const shouldProbePersistedClineSession =
-					body.resumeFromTrash && !useClinePath && previousTerminalAgentId === null;
-				if (shouldProbePersistedClineSession) {
-					// If the terminal summary already has a concrete non-Cline agentId,
-					// skip Cline persisted-session probing. That probe can cold-start the
-					// Cline session host and adds multi-second latency to Codex restores.
-					enterStartPhase("probe_persisted_cline_session");
-					const clineSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-					const persistedSession = await clineSessionService
-						.rebindPersistedTaskSession(body.taskId)
-						.catch(() => null);
-					if (persistedSession) {
-						useClinePath = true;
-					}
-				}
-
-				if (useClinePath) {
-					enterStartPhase("resolve_cline_launch_config");
-					const hasTaskLevelClineSettingsOverride = body.clineSettings !== undefined;
-					const clineLaunchConfig = await clineProviderService.resolveLaunchConfig({
-						providerIdOverride: body.clineSettings?.providerId ?? undefined,
-						modelIdOverride: body.clineSettings?.modelId ?? undefined,
-						...(hasTaskLevelClineSettingsOverride
-							? {
-									reasoningEffortOverride: body.clineSettings?.reasoningEffort ?? null,
-								}
-							: {}),
-					});
-					const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-					const resolvedClineTitle = resolveTaskTitle(body.taskTitle?.trim(), body.prompt);
-					const clineForkInitialMessages =
-						body.taskConversationSessionMetadata?.taskConversationSessionContextSource ===
-						"forked_from_main_current_turn"
-							? await clineTaskSessionService.loadPersistedTaskSessionMessages(workspaceTaskId)
-							: undefined;
-					enterStartPhase("start_in_process_cline_runtime_session");
-					await beforeAgentProcessLaunch?.();
-					const summary = await clineTaskSessionService.startTaskSession({
-						taskId: body.taskId,
-						taskConversationSessionMetadata: body.taskConversationSessionMetadata,
-						taskConversationMode: body.taskConversationMode,
-						cwd: taskCwd,
-						prompt: body.prompt,
-						taskTitle: resolvedClineTitle.length > 0 ? resolvedClineTitle : undefined,
-						initialMessages: clineForkInitialMessages,
-						images: body.images,
-						resumeFromTrash: body.resumeFromTrash,
-						providerId: clineLaunchConfig.providerId,
-						modelId: clineLaunchConfig.modelId,
-						mode:
-							body.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
-								? "plan"
-								: requestedClineTaskMode,
-						startInPlanMode: body.startInPlanMode,
-						apiKey: clineLaunchConfig.apiKey,
-						baseUrl: clineLaunchConfig.baseUrl,
-						reasoningEffort: clineLaunchConfig.reasoningEffort,
-					});
-					latestStartedSummaryForDiagnostics = summary;
-					recordStartDiagnostic("runtime_started", startFailurePhase);
-					const clineStartRejectedBecauseHostTaskCardRemovedDuringStart =
-						await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(
-							async () => await clineTaskSessionService.stopTaskSession(body.taskId),
-						);
-					if (clineStartRejectedBecauseHostTaskCardRemovedDuringStart) {
-						return clineStartRejectedBecauseHostTaskCardRemovedDuringStart;
-					}
-					// 记 summary 的 agentId 而不是 effectiveAgentId：`shouldProbePersistedClineSession` 那条
-					// 分支会在 effectiveAgentId 仍是别的 agent 时把 useClinePath 翻成 true，此时真正跑起来的
-					// 是 Cline，卡片上必须记下这个事实。
-					await persistMostRecentlyLaunchedAgentSessionAgentIdOntoCard({
-						workspaceScope,
-						workspaceTaskId,
-						taskId: body.taskId,
-						agentId: summary.agentId ?? effectiveAgentId,
-						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
-					});
-
-					let nextSummary = summary;
-					enterStartPhase("capture_initial_turn_checkpoint");
-					if (shouldCaptureTurnCheckpoint) {
-						try {
-							const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
-							const checkpoint = await captureTaskTurnCheckpoint({
-								cwd: taskCwd,
-								taskId: body.taskId,
-								turn: nextTurn,
-							});
-							nextSummary = clineTaskSessionService.applyTurnCheckpoint(body.taskId, checkpoint) ?? summary;
-						} catch {
-							// Best effort checkpointing only.
-						}
-					}
-					await persistTaskCollaborationSessionBeforeReturningLaunchResponse(
-						workspaceScope.workspacePath,
-						nextSummary,
-					);
-					latestStartedSummaryForDiagnostics = nextSummary;
-					enterStartPhase("response_ready");
-					recordStartDiagnostic("response_ready", "response_ready");
-
-					return {
-						ok: true,
-						summary: nextSummary,
-					};
 				}
 
 				const resolvedConfig =
@@ -2121,12 +1960,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 为什么这里同样是「既存会话」的问题：本 procedure 下游是 `resumeFromTrash: true` → `--continue`，
 				// 续的就是那条已经存在的会话，不是新开一条。
 				//
-				// 为什么观测值必须压过 `card.agentId`：`startTaskSession` 的 `shouldProbePersistedClineSession`
-				// 分支会在 `card.agentId` 仍是别的 agent 时探测到持久化的 Cline 会话并改走 Cline，此时真正跑起来
-				// 的与卡片意图天然不一致（只有 `mostRecentlyLaunchedAgentSessionAgentId` 记下了这个事实）。旧顺序
-				// 让 `card.agentId` 胜出，会直接**骗过下面那道「非 PTY agent 一律拒绝刷新」的能力谓词闸门**——
-				// 闸门看到的是 PTY agent，于是放行，把一个 Cline 会话用 PTY agent 重启掉。
-				//
 				// `card.agentId` 表达的是「下次想用谁启动」的意图，可能还没有任何会话兑现过它（用户改了卡片 agent
 				// 但尚未重启，既存会话的身份仍是上一次跑起来的那个），故只作为观测值缺席时的兜底。
 				const effectiveAgentId =
@@ -2147,6 +1980,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   仍照读是为了不依赖这个隐含前提——那正是本次改动之前那批硬编码分叉的成因）；
 				//   硬中断后没有活体 summary ⇒ 按「下次启动该走哪条通道」解析（卡片固化 → 全局默认 →
 				//   catalog 默认），与 card-detail-view 无活会话时的面板分流同一套优先级。
+				assertRuntimeAgentIsNotRetired(effectiveAgentId);
 				const effectiveSessionTransport =
 					sideSessionLaunchSettings?.sessionTransport ??
 					(currentSummary
@@ -2357,20 +2191,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					);
 				});
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const relatedTaskConversationSessionIds = new Set<string>([body.taskId]);
-				const clineTaskSessionSummaries =
-					typeof clineTaskSessionService.listSummaries === "function"
-						? clineTaskSessionService.listSummaries()
-						: [];
 				const terminalTaskSessionSummaries =
 					typeof terminalManager.listSummaries === "function" ? terminalManager.listSummaries() : [];
-				for (const summary of [
-					...clineTaskSessionSummaries,
-					...terminalTaskSessionSummaries,
-					...acpTaskSessionService.listSummaries(),
-				]) {
+				for (const summary of [...terminalTaskSessionSummaries, ...acpTaskSessionService.listSummaries()]) {
 					if (summary.taskConversationSessionMetadata?.workspaceTaskId === body.taskId) {
 						relatedTaskConversationSessionIds.add(summary.taskId);
 					}
@@ -2393,13 +2218,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						);
 					});
 					const acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
-					const clineSummary = acpSummary
-						? null
-						: await clineTaskSessionService.stopTaskSession(taskConversationSessionId);
-					const terminalSummary =
-						clineSummary || acpSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					const terminalSummary = acpSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
 					if (taskConversationSessionId === body.taskId) {
-						summary = acpSummary ?? clineSummary ?? terminalSummary ?? summary;
+						summary = acpSummary ?? terminalSummary ?? summary;
 					}
 				}
 				return {
@@ -2623,23 +2444,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								return false;
 							return (await runtimeApi.startTaskSession(workspaceScope, resumeRequest)).ok;
 						}
-						if (sessionTransport === "in_process_cline_sdk") {
-							const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
-							const reboundSummary = await clineService.rebindPersistedTaskSession(taskId);
-							if (!reboundSummary) {
-								return false;
-							}
-							if (resolveSessionFacets(reboundSummary).liveness !== "interrupted") {
-								return true;
-							}
-							// 被回收 / 被中断的 Cline 会话：reloadTaskSession 是既有的「停掉残留会话并用空
-							// prompt 重新起一个」路径（reloadTaskChatSession 用的同一条），跑完活体不再是
-							// interrupted，sendTaskSessionInput 才会受理。
-							const reloadedSummary = await clineService.reloadTaskSession(taskId);
-							return (
-								reloadedSummary !== null && resolveSessionFacets(reloadedSummary).liveness !== "interrupted"
-							);
-						}
+						if (sessionTransport === "in_process_cline_sdk") throw new Error(CLINE_AGENT_RETIRED_EXECUTION_ERROR);
 						return await resumeTerminalTaskSessionForPendingUserDecisionAnswerDelivery(workspaceScope, taskId);
 					},
 					deliverTaskSessionInput: async ({
@@ -2669,10 +2474,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										.catch(() => resolveAcceptance(false));
 								});
 							}
-							if (sessionTransport === "in_process_cline_sdk") {
-								const clineService = await deps.getScopedClineTaskSessionService(workspaceScope);
-								return (await clineService.sendTaskSessionInput(taskId, text)) !== null;
-							}
+							if (sessionTransport === "in_process_cline_sdk")
+								throw new Error(CLINE_AGENT_RETIRED_EXECUTION_ERROR);
 							// 终端 agent：submitTaskChatInputWhenReady 要求 entry.active 存在，故必须在
 							// ensureTaskSessionReadyForDelivery 之后调用（见交付顺序注释）。
 							// 与 RVF followup 那条路径一样交出争用能力：这条投递同样绝不能插进人类打了一半的那一行，
@@ -3107,15 +2910,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			try {
 				const body = parseTaskSessionInputRequest(input);
 				const payloadText = body.appendNewline ? `${body.text}\n` : body.text;
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const clineSummary = await clineTaskSessionService.sendTaskSessionInput(body.taskId, payloadText);
-				if (clineSummary) {
-					return {
-						ok: true,
-						summary: clineSummary,
-					};
-				}
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const currentSummary =
+					terminalManager.getSummary(body.taskId) ??
+					(await deps.getScopedAcpTaskSessionService(workspaceScope)).getSummary(body.taskId);
+				assertRuntimeAgentIsNotRetired(currentSummary?.agentId);
+				if (!currentSummary) {
+					const persistedState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+					const card = findWorkspaceBoardCard(persistedState.board, body.taskId);
+					assertRuntimeAgentIsNotRetired(persistedState.sessions[body.taskId]?.agentId ?? card?.agentId);
+				}
 				const summary = terminalManager.writeInput(body.taskId, Buffer.from(payloadText, "utf8"));
 				if (!summary) {
 					return {
@@ -3167,82 +2971,19 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		getTaskChatMessages: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskChatMessagesRequest(input);
-				// ACP 会话与 Cline 会话共用同一条聊天通道；先问 ACP（它对非 ACP 任务返回空），再回落 Cline。
+				// 结构化聊天消息只由当前 ACP 会话提供。
 				// 判据必须是「ACP 账本里有这条会话、且它盖的是 ACP 通道章」：omp 的 TUI 与 ACP 两条通道
 				// 共用 agentId="omp"，只看账本里有没有 entry 会让一条切回 TUI 的会话继续读 ACP 的旧消息表。
 				const acpTaskSessionService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 				if (isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acpTaskSessionService.getSummary(body.taskId))) {
 					return { ok: true, messages: acpTaskSessionService.listMessages(body.taskId) };
 				}
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const summary = clineTaskSessionService.getSummary(body.taskId);
-				const messages = await clineTaskSessionService.loadTaskSessionMessages(body.taskId);
-				if (!summary && messages.length === 0) {
-					return {
-						ok: false,
-						messages: [],
-						error: "Task chat session is not available.",
-					};
-				}
-				return {
-					ok: true,
-					messages,
-				};
+				return { ok: false, messages: [], error: "结构化会话消息不可用；Cline agent 已退役。" };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {
 					ok: false,
 					messages: [],
-					error: message,
-				};
-			}
-		},
-		getClineSlashCommands: async (workspaceScope) => {
-			if (!workspaceScope) {
-				return {
-					commands: [],
-				};
-			}
-			const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-			return {
-				commands: await clineTaskSessionService.listSlashCommands(workspaceScope.workspacePath),
-			};
-		},
-		reloadTaskChatSession: async (workspaceScope, input) => {
-			try {
-				const body = parseTaskChatReloadRequest(input);
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				let summary = await clineTaskSessionService.reloadTaskSession(body.taskId);
-				if (!summary && isHomeAgentSessionId(body.taskId)) {
-					const clineLaunchConfig = await clineProviderService.resolveLaunchConfig();
-					summary = await clineTaskSessionService.startTaskSession({
-						taskId: body.taskId,
-						cwd: workspaceScope.workspacePath,
-						prompt: "",
-						resumeFromPersistence: true,
-						providerId: clineLaunchConfig.providerId,
-						modelId: clineLaunchConfig.modelId,
-						apiKey: clineLaunchConfig.apiKey,
-						baseUrl: clineLaunchConfig.baseUrl,
-						reasoningEffort: clineLaunchConfig.reasoningEffort,
-					});
-				}
-				if (!summary) {
-					return {
-						ok: false,
-						summary: null,
-						error: "Task chat session is not available.",
-					};
-				}
-				return {
-					ok: true,
-					summary,
-				};
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					ok: false,
-					summary: null,
 					error: message,
 				};
 			}
@@ -3255,19 +2996,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (acpSummary) {
 					return { ok: true, summary: acpSummary };
 				}
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const summary = await clineTaskSessionService.abortTaskSession(body.taskId);
-				if (!summary) {
-					return {
-						ok: false,
-						summary: null,
-						error: "Task chat session is not running.",
-					};
-				}
-				return {
-					ok: true,
-					summary,
-				};
+				return { ok: false, summary: null, error: "会话未运行；Cline agent 已退役。" };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {
@@ -3302,19 +3031,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (acpSummary) {
 					return { ok: true, summary: acpSummary };
 				}
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const summary = await clineTaskSessionService.cancelTaskTurn(body.taskId);
-				if (!summary) {
-					return {
-						ok: false,
-						summary: null,
-						error: "Task chat session turn is not running.",
-					};
-				}
-				return {
-					ok: true,
-					summary,
-				};
+				return { ok: false, summary: null, error: "会话未运行；Cline agent 已退役。" };
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {
@@ -3323,32 +3040,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					error: message,
 				};
 			}
-		},
-		getClineProviderCatalog: async (_workspaceScope) => {
-			return await clineProviderService.getProviderCatalog();
-		},
-		getClineAccountProfile: async (_workspaceScope) => {
-			return await clineProviderService.getClineAccountProfile();
-		},
-		getClineKanbanAccess: async (_workspaceScope) => {
-			return await clineProviderService.getClineKanbanAccess();
-		},
-		getFeaturebaseToken: async (_workspaceScope) => {
-			return await clineProviderService.getFeaturebaseToken();
-		},
-		getClineAccountBalance: async (_workspaceScope) => {
-			return await clineProviderService.getClineAccountBalance();
-		},
-		getClineAccountOrganizations: async (_workspaceScope) => {
-			return await clineProviderService.getClineAccountOrganizations();
-		},
-		switchClineAccount: async (_workspaceScope, input) => {
-			const body = parseClineAccountSwitchRequest(input);
-			return await clineProviderService.switchClineAccount(body.organizationId);
-		},
-		getClineProviderModels: async (_workspaceScope, input) => {
-			const body = parseClineProviderModelsRequest(input);
-			return await clineProviderService.getProviderModels(body.providerId);
 		},
 		getTerminalAgentModelSelectionOptions: async (_workspaceScope, input) => {
 			const body = parseTerminalAgentModelSelectionOptionsRequest(input);
@@ -3389,60 +3080,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				},
 			});
 		},
-		getClineMcpAuthStatuses: async (_workspaceScope) => {
-			const statuses = await clineMcpRuntimeService.getAuthStatuses();
-			return {
-				statuses,
-			};
-		},
-		runClineMcpServerOAuth: async (_workspaceScope, input) => {
-			const body = parseClineMcpOAuthRequest(input);
-			const response = await clineMcpRuntimeService.authorizeServer({
-				serverName: body.serverName,
-				onAuthorizationUrl: (url: string) => {
-					openInBrowser(url);
-				},
-			});
-			deps.bumpClineSessionContextVersion?.();
-			return response;
-		},
-		getClineMcpSettings: async (_workspaceScope) => {
-			return clineMcpSettingsService.loadSettings();
-		},
-		saveClineMcpSettings: async (_workspaceScope, input) => {
-			const body = parseClineMcpSettingsSaveRequest(input);
-			const response = await clineMcpSettingsService.saveSettings(body);
-			deps.bumpClineSessionContextVersion?.();
-			return response;
-		},
-		runClineProviderOAuthLogin: async (_workspaceScope, input) => {
-			const body = parseClineOauthLoginRequest(input);
-			const response = await clineProviderService.runOauthLogin({
-				providerId: body.provider,
-				baseUrl: body.baseUrl,
-			});
-			if (response.ok) {
-				deps.bumpClineSessionContextVersion?.();
-			}
-			return response;
-		},
-		startClineDeviceAuth: async () => {
-			return await clineProviderService.startDeviceAuth();
-		},
-		completeClineDeviceAuth: async (_workspaceScope, input) => {
-			const body = parseClineDeviceAuthCompleteRequest(input);
-			const response = await clineProviderService.completeDeviceAuth({
-				deviceCode: body.deviceCode,
-				expiresInSeconds: body.expiresInSeconds,
-				pollIntervalSeconds: body.pollIntervalSeconds,
-				baseUrl: body.baseUrl,
-			});
-			if (response.ok) {
-				deps.bumpClineSessionContextVersion?.();
-			}
-			return response;
-		},
-		// 三 transport 分派的实现体在 task-chat-message-send-across-session-transports.ts。
+		// ACP 与 PTY 分派的实现体在 task-chat-message-send-across-session-transports.ts。
 		// 搬出去是因为排队投递 dispatcher 也要用同一条出口，而它由 turn 结束边沿驱动、手上没有请求，
 		// 拿不到这个每请求新建的 runtimeApi 闭包。
 		sendTaskChatMessage: async (workspaceScope, input, kanbanRequestOriginActorEvidence) => {
@@ -3607,7 +3245,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					{
 						recordManagedTaskPromptDeliveries: deps.recordManagedTaskPromptDeliveries,
 						getScopedTerminalManager: deps.getScopedTerminalManager,
-						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
 						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
 						loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
 						programmaticInjectionLedgerTaskId: addressedTaskId,
@@ -3624,7 +3261,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									},
 								}
 							: {}),
-						resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
 						...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
 					},
 					workspaceScope,
@@ -3702,10 +3338,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					{
 						recordManagedTaskPromptDeliveries: deps.recordManagedTaskPromptDeliveries,
 						getScopedTerminalManager: deps.getScopedTerminalManager,
-						getScopedClineTaskSessionService: deps.getScopedClineTaskSessionService,
 						getScopedAcpTaskSessionService: deps.getScopedAcpTaskSessionService,
 						loadScopedRuntimeConfig: deps.loadScopedRuntimeConfig,
-						resolveClineTaskSessionLaunchConfig: async () => await clineProviderService.resolveLaunchConfig(),
 						...(deps.broadcastTaskChatCleared ? { broadcastTaskChatCleared: deps.broadcastTaskChatCleared } : {}),
 						onProgrammaticTerminalDeliverySettled: (outcome) => {
 							settleTerminalDeliveryOutcome(outcome);

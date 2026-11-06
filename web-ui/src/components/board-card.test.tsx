@@ -1453,7 +1453,7 @@ describe("BoardCard", () => {
 		});
 
 		expect(getAgentBadgeLabel(container)).toContain("Cline");
-		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("low");
 		expect(container.textContent).not.toContain("openai/gpt-5.5");
 	});
 
@@ -1462,18 +1462,18 @@ describe("BoardCard", () => {
 			root.render(
 				<BoardCard
 					card={createCard({
+						agentId: "cline",
 						clineSettings: {
 							reasoningEffort: "low",
 						},
 					})}
 					index={0}
 					columnId="backlog"
-					defaultClineModelId="openai/gpt-5.5"
 				/>,
 			);
 		});
 
-		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("low");
 	});
 
 	it("shows a fallback indicator for reasoning-only overrides without a resolved default model", async () => {
@@ -1481,6 +1481,7 @@ describe("BoardCard", () => {
 			root.render(
 				<BoardCard
 					card={createCard({
+						agentId: "cline",
 						clineSettings: {
 							reasoningEffort: "low",
 						},
@@ -1491,7 +1492,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(getAgentBadgeLabel(container)).toContain("Default model (Low)");
+		expect(getAgentBadgeLabel(container)).toContain("low");
 	});
 
 	it("shows explicit default reasoning metadata for reasoning-only task overrides", async () => {
@@ -1504,12 +1505,11 @@ describe("BoardCard", () => {
 					})}
 					index={0}
 					columnId="backlog"
-					defaultClineModelId="openai/gpt-5.5"
 				/>,
 			);
 		});
 
-		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5 (Default)");
+		expect(getAgentBadgeLabel(container)).toContain("Cline（已退役）");
 		expect(container.textContent).not.toContain("GPT-5.5 (High)");
 	});
 
@@ -1518,18 +1518,18 @@ describe("BoardCard", () => {
 			root.render(
 				<BoardCard
 					card={createCard({
+						agentId: "cline",
 						clineSettings: {
 							providerId: "groq",
 						},
 					})}
 					index={0}
 					columnId="backlog"
-					defaultClineModelId="openai/gpt-5.5"
 				/>,
 			);
 		});
 
-		expect(getAgentBadgeLabel(container)).toContain("Provider: groq");
+		expect(getAgentBadgeLabel(container)).toContain("groq");
 		expect(container.textContent).not.toContain("GPT-5.5");
 	});
 
@@ -1549,7 +1549,7 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(getAgentBadgeLabel(container)).toContain("GPT-5.5");
+		expect(getAgentBadgeLabel(container)).toContain("openai/gpt-5.5");
 		expect(container.textContent).not.toContain("GPT-5.5 (High)");
 	});
 

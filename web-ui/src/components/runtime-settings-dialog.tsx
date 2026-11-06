@@ -5,11 +5,7 @@ import * as RadixCheckbox from "@radix-ui/react-checkbox";
 import * as RadixPopover from "@radix-ui/react-popover";
 import * as RadixSelect from "@radix-ui/react-select";
 import * as RadixSwitch from "@radix-ui/react-switch";
-import {
-	getRuntimeAgentCatalogEntry,
-	getRuntimeAgentSessionTransport,
-	getRuntimeLaunchSupportedAgentCatalog,
-} from "@runtime-agent-catalog";
+import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
 import { areRuntimeProjectShortcutsEqual } from "@runtime-shortcuts";
 import {
 	Bell,
@@ -33,8 +29,6 @@ import { CodexConfigurationSyncSettings } from "@/components/codex-configuration
 import { hostNonModalFloatingForm } from "@/components/host-non-modal-floating-form";
 import { useNonModalFloatingFormWindowSession } from "@/components/non-modal-floating-form-window-host-provider";
 import { NotificationIntelligenceSettingsSection } from "@/components/notification-intelligence-settings";
-import { AccountOrganizationSection } from "@/components/shared/account-organization-section";
-import { ClineSetupSection } from "@/components/shared/cline-setup-section";
 import {
 	getRuntimeShortcutIconComponent,
 	getRuntimeShortcutPickerOption,
@@ -56,8 +50,6 @@ import {
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notification-intelligence-settings-draft";
-import { useRuntimeSettingsClineController } from "@/hooks/use-runtime-settings-cline-controller";
-import { useRuntimeSettingsClineMcpController } from "@/hooks/use-runtime-settings-cline-mcp-controller";
 import { useTaskAssistanceModelProviderRoutingSettingsDraft } from "@/hooks/use-task-assistance-model-provider-routing-settings-draft";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
@@ -65,7 +57,6 @@ import { openFileOnHost } from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
-	RuntimeClineMcpServerAuthStatus,
 	RuntimeConfigResponse,
 	RuntimeProjectShortcut,
 } from "@/runtime/types";
@@ -110,10 +101,6 @@ function buildDisplayedAgentCommand(
 	newTaskDefaultsToBypassPermissions: boolean,
 	newTaskAgentSessionTransport: RuntimeAgentSessionTransport,
 ): string {
-	// 进程内 SDK agent 根本不起子进程，没有命令行可展示。
-	if (getRuntimeAgentSessionTransport(agentId) === "in_process_cline_sdk") {
-		return "";
-	}
 	const catalogEntry = getRuntimeAgentCatalogEntry(agentId);
 	const transportArgs = agentId === "omp" && newTaskAgentSessionTransport === "acp_stdio_subprocess" ? ["acp"] : [];
 	const baseArgs = catalogEntry?.baseArgs ?? [];
@@ -132,11 +119,10 @@ const GIT_PROMPT_VARIANT_OPTIONS: Array<{ value: TaskGitAction; label: string }>
 
 export type RuntimeSettingsSection = "shortcuts" | "codex-configuration-sync";
 
-const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["cline", "claude", "codex", "omp", "droid", "kiro"];
+const SETTINGS_AGENT_ORDER: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "kimi", "omp", "droid", "kiro"];
 
 type SettingsNavId =
 	| "general"
-	| "cline"
 	| "git-prompts"
 	| "notifications"
 	| "task-analysis"
@@ -149,10 +135,8 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
 	id: SettingsNavId;
 	label: string;
 	icon: React.ReactNode;
-	clineOnly?: boolean;
 }> = [
 	{ id: "general", label: "General", icon: <SlidersHorizontal size={16} /> },
-	{ id: "cline", label: "Cline", icon: <Bot size={16} />, clineOnly: true },
 	{ id: "git-prompts", label: "Git Prompts", icon: <GitCommit size={16} /> },
 	{ id: "notifications", label: "Notifications", icon: <Bell size={16} /> },
 	{ id: "task-analysis", label: "AI 任务分析", icon: <Bot size={16} /> },
@@ -206,9 +190,8 @@ function AgentRow({
 	disabled: boolean;
 }): React.ReactElement {
 	const installUrl = getRuntimeAgentCatalogEntry(agent.id)?.installUrl;
-	const isNativeCline = agent.id === "cline";
 	const isInstalled = agent.installed === true;
-	const isInstallStatusPending = !isNativeCline && agent.installed === null;
+	const isInstallStatusPending = agent.installed === null;
 
 	return (
 		<div
@@ -239,7 +222,7 @@ function AgentRow({
 				<div className="min-w-0">
 					<div className="flex items-center gap-2">
 						<span className="text-[13px] text-text-primary">{agent.label}</span>
-						{!isNativeCline && isInstalled ? (
+						{isInstalled ? (
 							<span className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium bg-status-green/10 text-status-green">
 								Installed
 							</span>
@@ -254,7 +237,7 @@ function AgentRow({
 					) : null}
 				</div>
 			</div>
-			{!isNativeCline && agent.installed === false && installUrl ? (
+			{agent.installed === false && installUrl ? (
 				<a
 					href={installUrl}
 					target="_blank"
@@ -264,7 +247,7 @@ function AgentRow({
 				>
 					Install
 				</a>
-			) : !isNativeCline && agent.installed === false ? (
+			) : agent.installed === false ? (
 				<Button size="sm" disabled>
 					Install
 				</Button>
@@ -402,23 +385,19 @@ function RuntimeSettingsDialogForm({
 	open,
 	workspaceId,
 	initialConfig = null,
-	liveMcpAuthStatuses = null,
 	onOpenChange,
 	onSaved,
-	onAccountSwitched,
 	initialSection,
 }: {
 	open: boolean;
 	workspaceId: string | null;
 	initialConfig?: RuntimeConfigResponse | null;
-	liveMcpAuthStatuses?: RuntimeClineMcpServerAuthStatus[] | null;
 	onOpenChange: (open: boolean) => void;
 	onSaved?: () => void;
-	onAccountSwitched?: () => void;
 	initialSection?: RuntimeSettingsSection | null;
 	openingRequestSequence?: number;
 }): React.ReactElement {
-	const { config, isLoading, isSaving, save, refresh } = useRuntimeConfig(open, workspaceId, initialConfig);
+	const { config, isLoading, isSaving, save } = useRuntimeConfig(open, workspaceId, initialConfig);
 	const floatingFormSession = useNonModalFloatingFormWindowSession();
 	const sectionRequestedByOpening =
 		(floatingFormSession?.revealDetail as { initialSection?: RuntimeSettingsSection | null } | undefined)
@@ -492,13 +471,13 @@ function RuntimeSettingsDialogForm({
 				id: agent.id,
 				label: agent.label,
 				binary: agent.binary,
-				installed: agent.id === "cline" ? true : agent.installed,
+				installed: agent.installed,
 			})) ??
 			getRuntimeLaunchSupportedAgentCatalog().map((agent) => ({
 				id: agent.id,
 				label: agent.label,
 				binary: agent.binary,
-				installed: agent.id === "cline" ? true : null,
+				installed: null,
 			}));
 		const orderIndexByAgentId = new Map(SETTINGS_AGENT_ORDER.map((agentId, index) => [agentId, index] as const));
 		const orderedAgents = [...agents].sort((left, right) => {
@@ -517,10 +496,7 @@ function RuntimeSettingsDialogForm({
 		}));
 	}, [agentAutonomousModeEnabled, config?.agents, ompAgentSessionTransportForNewTasks]);
 	const displayedAgents = useMemo(() => supportedAgents, [supportedAgents]);
-	const navItems = useMemo(
-		() => SETTINGS_NAV_ITEMS.filter((item) => !item.clineOnly || selectedAgentId === "cline"),
-		[selectedAgentId],
-	);
+	const navItems = useMemo(() => SETTINGS_NAV_ITEMS, [selectedAgentId]);
 	const configuredAgentId = config?.selectedAgentId ?? null;
 	const firstInstalledAgentId = displayedAgents.find((agent) => agent.installed)?.id;
 	const fallbackAgentId = firstInstalledAgentId ?? displayedAgents[0]?.id ?? "claude";
@@ -543,18 +519,6 @@ function RuntimeSettingsDialogForm({
 	const initialShortcuts = config?.shortcuts ?? [];
 	const initialCommitPromptTemplate = config?.commitPromptTemplate ?? "";
 	const initialOpenPrPromptTemplate = config?.openPrPromptTemplate ?? "";
-	const clineSettings = useRuntimeSettingsClineController({
-		open,
-		workspaceId,
-		selectedAgentId,
-		config,
-	});
-	const clineMcpSettings = useRuntimeSettingsClineMcpController({
-		open,
-		workspaceId,
-		selectedAgentId,
-		liveAuthStatuses: liveMcpAuthStatuses,
-	});
 	const hasUnsavedChanges = useMemo(() => {
 		if (!config) {
 			return false;
@@ -595,12 +559,6 @@ function RuntimeSettingsDialogForm({
 			return true;
 		}
 		if (notificationSettings.hasUnsavedChanges || taskAnalysisSettings.hasUnsavedChanges) return true;
-		if (clineSettings.hasUnsavedChanges) {
-			return true;
-		}
-		if (clineMcpSettings.hasUnsavedChanges) {
-			return true;
-		}
 		if (draftThemeId !== initialThemeId) {
 			return true;
 		}
@@ -625,8 +583,6 @@ function RuntimeSettingsDialogForm({
 		codexModelCapacityErrorAutoContinuationEnabled,
 		programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 		postDeployVerificationForceCompleteEnabled,
-		clineMcpSettings.hasUnsavedChanges,
-		clineSettings.hasUnsavedChanges,
 		notificationSettings.hasUnsavedChanges,
 		taskAnalysisSettings.hasUnsavedChanges,
 		commitPromptTemplate,
@@ -755,11 +711,7 @@ function RuntimeSettingsDialogForm({
 		}
 	});
 
-	useEffect(() => {
-		if (activeSection === "cline" && selectedAgentId !== "cline") {
-			setActiveSection("general");
-		}
-	}, [activeSection, selectedAgentId]);
+	useEffect(() => {}, [activeSection, selectedAgentId]);
 
 	const handleBodyScroll = useCallback(() => {
 		if (isScrollingProgrammatically.current) return;
@@ -852,22 +804,6 @@ function RuntimeSettingsDialogForm({
 			const nextPermission = await requestBrowserNotificationPermission();
 			setNotificationPermission(nextPermission);
 		}
-		if (selectedAgentId === "cline" && clineSettings.providerId.trim().length === 0) {
-			setSaveError("Choose a Cline provider before saving.");
-			return;
-		}
-		if (selectedAgentId === "cline") {
-			const clineProviderSaveResult = await clineSettings.saveProviderSettings();
-			if (!clineProviderSaveResult.ok) {
-				setSaveError(clineProviderSaveResult.message ?? "Could not save Cline provider settings.");
-				return;
-			}
-			const clineMcpSaveResult = await clineMcpSettings.saveMcpSettings();
-			if (!clineMcpSaveResult.ok) {
-				setSaveError(clineMcpSaveResult.message ?? "Could not save Cline MCP settings.");
-				return;
-			}
-		}
 		await notificationSettings.save();
 		await taskAnalysisSettings.save();
 		const saved = await save({
@@ -950,11 +886,6 @@ function RuntimeSettingsDialogForm({
 		},
 		[runtimeHostRemoteEditorAccessIdentity, storedOpenTargetApplicationId, workspaceId],
 	);
-
-	const handleClineSetupSaved = useCallback(() => {
-		refresh();
-		onSaved?.();
-	}, [onSaved, refresh]);
 
 	const handleDialogOpenChange = useCallback(
 		(nextOpen: boolean) => {
@@ -1097,36 +1028,6 @@ function RuntimeSettingsDialogForm({
 					</div>
 
 					{/* ---- Cline ---- */}
-					{selectedAgentId === "cline" ? (
-						<>
-							<div data-settings-section="cline" />
-							<div className="sticky top-0 -mx-5 px-5 pt-4 pb-2 bg-surface-1 z-10">
-								<h2 className="flex items-center gap-2 text-base font-semibold text-text-primary m-0">
-									<Bot size={16} className="text-text-secondary" />
-									Cline
-								</h2>
-							</div>
-							<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
-								<ClineSetupSection
-									controller={clineSettings}
-									mcpController={clineMcpSettings}
-									controlsDisabled={controlsDisabled}
-									workspaceId={workspaceId}
-									accountSection={
-										clineSettings.providerId.trim() === "cline" ? (
-											<AccountOrganizationSection
-												workspaceId={workspaceId}
-												open={open}
-												onAccountSwitched={onAccountSwitched}
-											/>
-										) : null
-									}
-									onError={setSaveError}
-									onSaved={handleClineSetupSaved}
-								/>
-							</div>
-						</>
-					) : null}
 
 					{/* ---- Git Prompts ---- */}
 					<div data-settings-section="git-prompts" />

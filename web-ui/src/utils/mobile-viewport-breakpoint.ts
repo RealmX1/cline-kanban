@@ -1,7 +1,7 @@
 // 「当前视口是否为移动端」这一事实的单一真源。
 //
 // 该断点此前散落在四处各写各的：`use-is-mobile.ts` 的媒体查询串、`globals.css` 的三段
-// `@media` 规则、`cline-chat-composer.tsx` 里一次性的裸 `matchMedia`。数值与 Tailwind 默认
+// `@media` 规则、`agent-conversation-chat-composer.tsx` 里一次性的裸 `matchMedia`。数值与 Tailwind 默认
 // 的 `md` 同为 768px 属于巧合而非显式对齐，故这里把数值与查询串一并导出。
 //
 // CSS 侧无法 import 本模块，`globals.css` 的 `@media (max-width: 768px)` 仍是手写的平行副本；

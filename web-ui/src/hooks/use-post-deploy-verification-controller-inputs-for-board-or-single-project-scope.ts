@@ -51,7 +51,6 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 	handleCardSelect: (taskId: string) => void;
 	handleOpenTaskInProject: (repoId: string, taskId: string) => void;
 	defaultAgentIdOfCurrentProject: RuntimeAgentId | null;
-	defaultClineModelIdOfCurrentProject: string | null;
 	// 主看板同一组 handler（参照 Focus View column-context-panel），条目上的「移入 Done」因此同样过门禁。
 	resolveTaskWorkspaceAbsoluteDirectoryPath: TaskCardActionHandlerBundle["resolveTaskWorkspaceAbsoluteDirectoryPath"];
 	onStartTask: (taskId: string) => void;
@@ -80,7 +79,6 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 		handleCardSelect,
 		handleOpenTaskInProject,
 		defaultAgentIdOfCurrentProject,
-		defaultClineModelIdOfCurrentProject,
 		resolveTaskWorkspaceAbsoluteDirectoryPath,
 		onStartTask,
 		onMoveToTrashTask,
@@ -160,7 +158,6 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 						openTaskOfPostDeployVerificationWorkspaceInItsProject(card.id),
 					// All projects 首页的跨项目卡也用当前项目的默认值（其他项目的设置不在浏览器里）。
 					defaultAgentId: defaultAgentIdOfCurrentProject,
-					defaultClineModelId: defaultClineModelIdOfCurrentProject,
 				};
 			}
 			return {
@@ -186,14 +183,12 @@ export function usePostDeployVerificationControllerInputsForBoardOrSingleProject
 				currentProjectWorkspacePath,
 				onActivateTaskCardOpeningTaskDetail: (card) => handleCardSelect(card.id),
 				defaultAgentId: defaultAgentIdOfCurrentProject,
-				defaultClineModelId: defaultClineModelIdOfCurrentProject,
 			};
 		}, [
 			boardSourceKind,
 			currentProjectTaskSessions,
 			currentProjectWorkspacePath,
 			defaultAgentIdOfCurrentProject,
-			defaultClineModelIdOfCurrentProject,
 			handleCardSelect,
 			moveToReviewLoadingById,
 			moveToTrashLoadingById,

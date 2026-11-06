@@ -1,7 +1,7 @@
 import { ArrowDownToLine, ChevronDown, ChevronRight, RotateCcw, Search } from "lucide-react";
 import { type MutableRefObject, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ClineChatMessageItem } from "@/components/detail-panels/cline-chat-message-item";
-import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
+import { AgentConversationChatMessageItem } from "@/components/detail-panels/agent-conversation-chat-message-item";
+import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -241,12 +241,12 @@ export function TaskConversationTranscriptDocumentReaderPanel({
 													{message.content}
 												</pre>
 											) : (
-												<ClineMarkdownContent content={message.content} />
+												<AgentConversationMarkdownContent content={message.content} />
 											)
 										) : null}
 									</>
 								) : (
-									<ClineChatMessageItem message={message} />
+									<AgentConversationChatMessageItem message={message} />
 								)}
 							</div>
 						);

@@ -6,7 +6,6 @@
 // 消息历史一律原样保留；UI 侧需要明确告诉用户这一点。
 
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeAgentSessionReclamationOutcome, RuntimeAgentSessionTransport } from "../core/api-contract";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
@@ -64,7 +63,6 @@ export function createDryRunAgentSessionReclamationExecutor(options: { now?: () 
 
 export interface TransportAwareAgentSessionReclamationDependencies {
 	getTerminalManager: (workspaceId: string) => TerminalSessionManager | null;
-	getClineTaskSessionService: (workspaceId: string) => ClineTaskSessionService | null;
 	getAcpTaskSessionService: (workspaceId: string) => AcpTaskSessionService | null;
 	now?: () => number;
 	gracefulTimeoutMs?: number;
@@ -126,33 +124,6 @@ export function createTransportAwareAgentSessionReclamationExecutor(
 		};
 	};
 
-	const reclaimClineSdkSession = async (
-		request: AgentSessionReclamationRequest,
-	): Promise<RuntimeAgentSessionReclamationOutcome> => {
-		const outcome = buildBaseOutcome(request, "in_process_cline_sdk");
-		const service = dependencies.getClineTaskSessionService(request.workspaceId);
-		if (!service) {
-			return {
-				...outcome,
-				completedAt: now(),
-				rootProcessExitConfirmed: true,
-				descendantProcessesExitConfirmed: true,
-			};
-		}
-		// Cline 在 Kanban 进程内跑，没有 OS 进程可杀。stopTaskSession 会 stop SDK 会话，
-		// 其 finally 释放该任务的 MCP tool bundle（那才是这条 transport 上真正占内存的东西）。
-		await service.stopTaskSession(request.record.taskId);
-		return {
-			...outcome,
-			completedAt: now(),
-			// 语义收窄（见 api-contract 的字段注释）：此处表示「SDK 会话已 stop 且 tool bundle 已释放」，
-			// **不是**「有个进程死了」。读这个字段必须同时读 sessionTransport。
-			rootProcessExitConfirmed: true,
-			descendantProcessesExitConfirmed: true,
-			releasedResources: ["cline_sdk_session", "cline_mcp_tool_bundle"],
-		};
-	};
-
 	const reclaimAcpSubprocessSession = async (
 		request: AgentSessionReclamationRequest,
 	): Promise<RuntimeAgentSessionReclamationOutcome> => {
@@ -195,7 +166,11 @@ export function createTransportAwareAgentSessionReclamationExecutor(
 			case "pty_terminal":
 				return await reclaimPtyTerminalSession(request);
 			case "in_process_cline_sdk":
-				return await reclaimClineSdkSession(request);
+				return {
+					...buildBaseOutcome(request, "in_process_cline_sdk"),
+					completedAt: now(),
+					failureReason: "Cline agent 已退役，无可回收的执行通道。",
+				};
 			case "acp_stdio_subprocess":
 				return await reclaimAcpSubprocessSession(request);
 		}

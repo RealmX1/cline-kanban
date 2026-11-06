@@ -8,32 +8,16 @@
 
 ## 1. turn 编号权威与同源边界分类器
 
-turn 编号权威是 `src/conversation-tree/conversation-turn-projection.ts`（纯函数：从消息流切段、
-与 checkpoint 序数对齐、产出投影签名）。web-ui 的 `deriveTurnBoundariesFromChatMessages`
-**直接相对路径复用**它的 `classifyConversationTurnBoundaryMessage`——改边界分类规则必须意识到
-两侧同源，且它有「checkpoint 捕获时机同源单测」义务（checkpoint 在「进入 awaiting user review」
-边沿按 `latestTurnCheckpoint.turn + 1` 捕获，见 `cline-task-session-service.ts` 的
-`captureReviewCheckpoint`）。self-injection 轮次（RVF 程序化投递）在 Cline 消息面无可靠标记，
-投影不硬猜，偏移由 `turnCheckpointAlignmentConfidence` 显式降级吸收。
+turn 边界分类器仍在 `src/conversation-tree/conversation-turn-projection.ts`，浏览器共享同源分类逻辑。
 
-**投影加载链只有一条**：`src/conversation-tree/load-conversation-session-turn-projection.ts`
-（双廉价信号判定 Cline → 加载消息 → 枚举 checkpoint refs → 派生）。投影 query
-（`conversation-tree-api.ts`）与 findings 建议通道的 provenance 校验（`exploratory-api.ts`）共用它——
-要改加载/判定逻辑只改这一处，绝不在任一调用方各写一份。
+Cline 结构化消息源已退役。`load-conversation-session-turn-projection.ts` 对旧 findings 出处锚查询返回 `unavailable_live_terminal_pty` 和空投影，不加载 SDK、不伪造历史对齐。此前 ACP 也没有接入该投影源，本次不扩展其行为。现有 findings 和出处字段继续保留。
 
-投影 query（`conversationTree.getConversationSessionTurnProjection`）对非 Cline 会话返回
-`unavailable_live_terminal_pty`，**ACP 也落这一档**。加载链的 Cline 判定先用 in-memory summary +
-看板卡片 agentId 双廉价信号，**绝不为终端任务调 `loadTaskSessionMessages`**（对非活会话会 boot
-Cline SDK host，AGENTS.md 记载的 CI 卡死诱因）。
-
-注意：本投影层是 Kanban 自己的（Cline SDK 结构化消息源）。PTY 会话（Claude Code / Codex）的
-turn 序列来源是核心包的 `/harness-claude-code` transcript 投影，两者是不同的数据源；B.2 的
-thread graph 面板以核心包的 projection view 为准，本投影层继续只服务 findings 出处锚与会话树。
+PTY 会话（Claude Code / Codex）的 thread graph 继续由独立核心包读取原生转录，与上述旧结构化投影无关。
 
 ## 2. 会话模式标记与指令注入
 
 `taskConversationMode`（operational 缺省 / exploratory）声明在卡片上（建卡/编辑时声明，
-legacy 卡片零迁移），启动请求从卡片快照带进来，三条 transport（terminal / cline-sdk / acp）
+legacy 卡片零迁移），启动请求从卡片快照带进来，两条可执行 transport（terminal / acp）
 在建会话时盖章进 `summary.taskConversationMode`——**活会话不热切换**，卡片改模式只影响
 下一次启动。它同时是 B.2 thread graph 维护作业的开关（`=== "exploratory"` 才触发）。
 

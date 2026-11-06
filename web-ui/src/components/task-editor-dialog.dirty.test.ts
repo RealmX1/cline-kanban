@@ -16,7 +16,6 @@ function baseline(overrides: Partial<TaskCreateFormSnapshot> = {}): TaskCreateFo
 		branchRef: "main",
 		worktreeMode: "branch",
 		agentId: undefined,
-		clineSettings: undefined,
 		terminalAgentModelOverrideSettings: undefined,
 		...overrides,
 	};
@@ -83,25 +82,6 @@ describe("hasTaskCreateFormEdits", () => {
 
 	it("detects an agent change", () => {
 		expect(hasTaskCreateFormEdits(baseline({ agentId: "claude" }), baseline())).toBe(true);
-	});
-
-	it("detects cline settings being set", () => {
-		expect(
-			hasTaskCreateFormEdits(
-				baseline({ clineSettings: { providerId: "anthropic", modelId: "claude-opus-4-8" } }),
-				baseline(),
-			),
-		).toBe(true);
-	});
-
-	it("treats structurally-equal cline settings as unchanged", () => {
-		const settings = { providerId: "anthropic", modelId: "claude-opus-4-8" };
-		expect(
-			hasTaskCreateFormEdits(
-				baseline({ clineSettings: { ...settings } }),
-				baseline({ clineSettings: { ...settings } }),
-			),
-		).toBe(false);
 	});
 
 	it("detects a terminal-agent model override change", () => {

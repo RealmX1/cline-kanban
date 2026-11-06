@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import type { TerminalSessionManager } from "../../../src/terminal/session-manager";
@@ -140,6 +141,50 @@ describe("hook 有效会话活动的证据边界", () => {
 			expect(manager.transitionToReview).toHaveBeenCalledOnce();
 			expect(manager.recordAgentLifecycleHookConversationProgress).toHaveBeenCalledOnce();
 			expect(manager.transitionToRunning).not.toHaveBeenCalled();
+		},
+	);
+
+	it.each(
+		["Stop", "AfterAgent", "agent-turn-complete"].flatMap((hookEventName) =>
+			["original", "replacement", "unknown"].map((submissionIdentity) => ({ hookEventName, submissionIdentity })),
+		),
+	)(
+		"持久 $hookEventName 入口只允许受理前同毫秒原提交（身份=$submissionIdentity）",
+		async ({ hookEventName, submissionIdentity }) => {
+			const incarnation = randomUUID();
+			const { api, manager } = setup({
+				runtimeSessionIncarnationId: incarnation,
+				agentConversationPromptSubmissionAcceptance: {
+					status: "pending",
+					attemptedAtMs: 2_000,
+					submissionId: submissionIdentity === "replacement" ? "new-submission" : "original-submission",
+					runtimeSessionIncarnationId: incarnation,
+				},
+			});
+			const confirmApplication = vi.fn().mockResolvedValue(undefined);
+			const result = await api.ingestRecoverableLifecycleEvent(
+				{
+					workspaceId: "isolated",
+					taskId: "main-session",
+					event: "to_review",
+					metadata: { source: "claude", hookEventName },
+					hookRuntimeSessionIncarnationId: incarnation,
+					hookEventDeliveryIdempotencyKey: randomUUID(),
+					hookEventCapturedAtEpochMs: 2_000,
+				},
+				{
+					isRecovery: false,
+					canRecordHistoricalAgentTurnCompletion: false,
+					unacceptedPromptSubmissionIdObservedBeforeAdmission:
+						submissionIdentity === "unknown" ? undefined : "original-submission",
+					confirmApplication,
+				},
+			);
+			const shouldApply = submissionIdentity === "original";
+			expect(result.ok).toBe(shouldApply);
+			expect(manager.transitionToReview).toHaveBeenCalledTimes(shouldApply ? 1 : 0);
+			expect(manager.recordAgentLifecycleHookConversationProgress).toHaveBeenCalledTimes(shouldApply ? 1 : 0);
+			expect(confirmApplication).toHaveBeenCalledTimes(shouldApply ? 1 : 0);
 		},
 	);
 

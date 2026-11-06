@@ -5,15 +5,6 @@ import {
 	type RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 	type RuntimeAuthoredVerificationDefinitionInputFile,
 	type RuntimeAuthoredVerificationDefinitionsFile,
-	type RuntimeClineAccountSwitchRequest,
-	type RuntimeClineAddProviderRequest,
-	type RuntimeClineDeviceAuthCompleteRequest,
-	type RuntimeClineMcpOAuthRequest,
-	type RuntimeClineMcpSettingsSaveRequest,
-	type RuntimeClineOauthLoginRequest,
-	type RuntimeClineProviderModelsRequest,
-	type RuntimeClineProviderSettingsSaveRequest,
-	type RuntimeClineUpdateProviderRequest,
 	type RuntimeCommandRunRequest,
 	type RuntimeConfigSaveRequest,
 	type RuntimeContinueConnectionRetrySessionsRequest,
@@ -31,7 +22,6 @@ import {
 	type RuntimeTaskChatAbortRequest,
 	type RuntimeTaskChatCancelRequest,
 	type RuntimeTaskChatMessagesRequest,
-	type RuntimeTaskChatReloadRequest,
 	type RuntimeTaskChatSendRequest,
 	type RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	type RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
@@ -53,15 +43,6 @@ import {
 	runtimeAnswerAgentRaisedPendingUserDecisionRequestSchema,
 	runtimeAuthoredVerificationDefinitionInputFileSchema,
 	runtimeAuthoredVerificationDefinitionsFileSchema,
-	runtimeClineAccountSwitchRequestSchema,
-	runtimeClineAddProviderRequestSchema,
-	runtimeClineDeviceAuthCompleteRequestSchema,
-	runtimeClineMcpOAuthRequestSchema,
-	runtimeClineMcpSettingsSaveRequestSchema,
-	runtimeClineOauthLoginRequestSchema,
-	runtimeClineProviderModelsRequestSchema,
-	runtimeClineProviderSettingsSaveRequestSchema,
-	runtimeClineUpdateProviderRequestSchema,
 	runtimeCommandRunRequestSchema,
 	runtimeConfigSaveRequestSchema,
 	runtimeContinueConnectionRetrySessionsRequestSchema,
@@ -79,7 +60,6 @@ import {
 	runtimeTaskChatAbortRequestSchema,
 	runtimeTaskChatCancelRequestSchema,
 	runtimeTaskChatMessagesRequestSchema,
-	runtimeTaskChatReloadRequestSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
@@ -496,17 +476,6 @@ export function parseTaskChatAbortRequest(value: unknown): RuntimeTaskChatAbortR
 	};
 }
 
-export function parseTaskChatReloadRequest(value: unknown): RuntimeTaskChatReloadRequest {
-	const parsed = parseWithSchema(runtimeTaskChatReloadRequestSchema, value);
-	const taskId = parsed.taskId.trim();
-	if (!taskId) {
-		throw new Error("Task chat taskId cannot be empty.");
-	}
-	return {
-		taskId,
-	};
-}
-
 export function parseTaskAgentUserDecisionResolveRequest(value: unknown): RuntimeTaskAgentUserDecisionResolveRequest {
 	const parsed = parseWithSchema(runtimeTaskAgentUserDecisionResolveRequestSchema, value);
 	const taskId = parsed.taskId.trim();
@@ -531,224 +500,6 @@ export function parseTaskChatCancelRequest(value: unknown): RuntimeTaskChatCance
 	}
 	return {
 		taskId,
-	};
-}
-
-export function parseClineProviderModelsRequest(value: unknown): RuntimeClineProviderModelsRequest {
-	const parsed = parseWithSchema(runtimeClineProviderModelsRequestSchema, value);
-	const providerId = parsed.providerId.trim();
-	if (!providerId) {
-		throw new Error("Provider ID cannot be empty.");
-	}
-	return {
-		providerId,
-	};
-}
-
-export function parseClineAddProviderRequest(value: unknown): RuntimeClineAddProviderRequest {
-	const parsed = parseWithSchema(runtimeClineAddProviderRequestSchema, value);
-	const providerId = parsed.providerId.trim().toLowerCase().replace(/\s+/g, "-");
-	if (!providerId) {
-		throw new Error("Provider ID cannot be empty.");
-	}
-	const name = parsed.name.trim();
-	if (!name) {
-		throw new Error("Provider name cannot be empty.");
-	}
-	const baseUrl = parsed.baseUrl.trim();
-	if (!baseUrl) {
-		throw new Error("Base URL cannot be empty.");
-	}
-	const models = [...new Set(parsed.models.map((model) => model.trim()).filter((model) => model.length > 0))];
-	const modelsSourceUrl = parsed.modelsSourceUrl?.trim() || null;
-	if (models.length === 0 && !modelsSourceUrl) {
-		throw new Error("Add at least one model or set a model source URL.");
-	}
-	const headers = parsed.headers
-		? Object.fromEntries(
-				Object.entries(parsed.headers)
-					.map(([key, entry]) => [key.trim(), entry.trim()] as const)
-					.filter(([key]) => key.length > 0),
-			)
-		: undefined;
-
-	return {
-		providerId,
-		name,
-		baseUrl,
-		apiKey: parsed.apiKey?.trim() || null,
-		...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
-		...(parsed.timeoutMs !== undefined ? { timeoutMs: parsed.timeoutMs } : {}),
-		models,
-		defaultModelId: parsed.defaultModelId?.trim() || null,
-		modelsSourceUrl,
-		capabilities: parsed.capabilities ? [...new Set(parsed.capabilities)] : undefined,
-	};
-}
-
-export function parseClineUpdateProviderRequest(value: unknown): RuntimeClineUpdateProviderRequest {
-	const parsed = parseWithSchema(runtimeClineUpdateProviderRequestSchema, value);
-	const providerId = parsed.providerId.trim().toLowerCase().replace(/\s+/g, "-");
-	if (!providerId) {
-		throw new Error("Provider ID cannot be empty.");
-	}
-
-	const headers =
-		parsed.headers === undefined
-			? undefined
-			: parsed.headers === null
-				? null
-				: Object.fromEntries(
-						Object.entries(parsed.headers)
-							.map(([key, entry]) => [key.trim(), entry.trim()] as const)
-							.filter(([key]) => key.length > 0),
-					);
-	const models = parsed.models?.map((model) => model.trim()).filter((model) => model.length > 0);
-
-	return {
-		providerId,
-		...(parsed.name !== undefined ? { name: parsed.name.trim() } : {}),
-		...(parsed.baseUrl !== undefined ? { baseUrl: parsed.baseUrl.trim() } : {}),
-		...(parsed.apiKey !== undefined ? { apiKey: parsed.apiKey?.trim() || null } : {}),
-		...(headers !== undefined ? { headers } : {}),
-		...(parsed.timeoutMs !== undefined ? { timeoutMs: parsed.timeoutMs } : {}),
-		...(models !== undefined ? { models: [...new Set(models)] } : {}),
-		...(parsed.defaultModelId !== undefined ? { defaultModelId: parsed.defaultModelId?.trim() || null } : {}),
-		...(parsed.modelsSourceUrl !== undefined ? { modelsSourceUrl: parsed.modelsSourceUrl?.trim() || null } : {}),
-		...(parsed.capabilities ? { capabilities: [...new Set(parsed.capabilities)] } : {}),
-	};
-}
-
-export function parseClineProviderSettingsSaveRequest(value: unknown): RuntimeClineProviderSettingsSaveRequest {
-	const parsed = parseWithSchema(runtimeClineProviderSettingsSaveRequestSchema, value);
-	const providerId = parsed.providerId.trim();
-	if (!providerId) {
-		throw new Error("Provider ID cannot be empty.");
-	}
-
-	const aws =
-		parsed.aws === undefined
-			? undefined
-			: {
-					...(parsed.aws.accessKey !== undefined ? { accessKey: parsed.aws.accessKey?.trim() || null } : {}),
-					...(parsed.aws.secretKey !== undefined ? { secretKey: parsed.aws.secretKey?.trim() || null } : {}),
-					...(parsed.aws.sessionToken !== undefined
-						? { sessionToken: parsed.aws.sessionToken?.trim() || null }
-						: {}),
-					...(parsed.aws.region !== undefined ? { region: parsed.aws.region?.trim() || null } : {}),
-					...(parsed.aws.profile !== undefined ? { profile: parsed.aws.profile?.trim() || null } : {}),
-					...(parsed.aws.authentication !== undefined ? { authentication: parsed.aws.authentication } : {}),
-					...(parsed.aws.endpoint !== undefined ? { endpoint: parsed.aws.endpoint?.trim() || null } : {}),
-				};
-	const gcp =
-		parsed.gcp === undefined
-			? undefined
-			: {
-					...(parsed.gcp.projectId !== undefined ? { projectId: parsed.gcp.projectId?.trim() || null } : {}),
-					...(parsed.gcp.region !== undefined ? { region: parsed.gcp.region?.trim() || null } : {}),
-				};
-	return {
-		...parsed,
-		providerId,
-		...(parsed.region !== undefined ? { region: parsed.region?.trim() || null } : {}),
-		...(aws ? { aws } : {}),
-		...(gcp ? { gcp } : {}),
-	};
-}
-
-export function parseClineMcpSettingsSaveRequest(value: unknown): RuntimeClineMcpSettingsSaveRequest {
-	const parsed = parseWithSchema(runtimeClineMcpSettingsSaveRequestSchema, value);
-	const normalizedServers = parsed.servers.map((server) => {
-		const name = server.name.trim();
-		if (!name) {
-			throw new Error("MCP server name cannot be empty.");
-		}
-
-		if (server.type === "stdio") {
-			const command = server.command.trim();
-			if (!command) {
-				throw new Error(`MCP server "${name}" requires a command.`);
-			}
-			const args = server.args?.map((value) => value.trim()).filter((value) => value.length > 0);
-			const cwd = server.cwd?.trim() || undefined;
-			const env = server.env
-				? Object.fromEntries(
-						Object.entries(server.env)
-							.map(([key, entry]) => [key.trim(), entry.trim()] as const)
-							.filter(([key, entry]) => key.length > 0 && entry.length > 0),
-					)
-				: undefined;
-
-			return {
-				name,
-				disabled: server.disabled,
-				type: "stdio" as const,
-				command,
-				...(args && args.length > 0 ? { args } : {}),
-				...(cwd ? { cwd } : {}),
-				...(env && Object.keys(env).length > 0 ? { env } : {}),
-			};
-		}
-
-		const url = server.url.trim();
-		if (!url) {
-			throw new Error(`MCP server "${name}" requires a URL.`);
-		}
-		const headers = server.headers
-			? Object.fromEntries(
-					Object.entries(server.headers)
-						.map(([key, entry]) => [key.trim(), entry.trim()] as const)
-						.filter(([key, entry]) => key.length > 0 && entry.length > 0),
-				)
-			: undefined;
-
-		return {
-			name,
-			disabled: server.disabled,
-			type: server.type,
-			url,
-			...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
-		};
-	});
-
-	const seen = new Set<string>();
-	for (const server of normalizedServers) {
-		const dedupeKey = server.name.toLowerCase();
-		if (seen.has(dedupeKey)) {
-			throw new Error(`MCP server "${server.name}" is duplicated.`);
-		}
-		seen.add(dedupeKey);
-	}
-
-	return {
-		servers: normalizedServers,
-	};
-}
-
-export function parseClineMcpOAuthRequest(value: unknown): RuntimeClineMcpOAuthRequest {
-	const parsed = parseWithSchema(runtimeClineMcpOAuthRequestSchema, value);
-	const serverName = parsed.serverName.trim();
-	if (!serverName) {
-		throw new Error("MCP server name cannot be empty.");
-	}
-	return {
-		serverName,
-	};
-}
-
-export function parseClineOauthLoginRequest(value: unknown): RuntimeClineOauthLoginRequest {
-	const parsed = parseWithSchema(runtimeClineOauthLoginRequestSchema, value);
-	return {
-		...parsed,
-		baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl.trim() || null : parsed.baseUrl,
-	};
-}
-
-export function parseClineDeviceAuthCompleteRequest(value: unknown): RuntimeClineDeviceAuthCompleteRequest {
-	const parsed = parseWithSchema(runtimeClineDeviceAuthCompleteRequestSchema, value);
-	return {
-		...parsed,
-		baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl.trim() || null : parsed.baseUrl,
 	};
 }
 
@@ -812,10 +563,6 @@ export function parseTerminalWsClientMessage(value: unknown): RuntimeTerminalWsC
 
 export function parseDirectoryListRequest(value: unknown): RuntimeDirectoryListRequest {
 	return parseWithSchema(runtimeDirectoryListRequestSchema, value);
-}
-
-export function parseClineAccountSwitchRequest(value: unknown): RuntimeClineAccountSwitchRequest {
-	return parseWithSchema(runtimeClineAccountSwitchRequestSchema, value);
 }
 
 // 读盘校验 last-deployed-source-commit.json（plan 1a）。校验失败即 throw；

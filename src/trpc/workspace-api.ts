@@ -1,6 +1,5 @@
 import { TRPCError } from "@trpc/server";
 import pLimit from "p-limit";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeBoardData,
@@ -23,7 +22,7 @@ import {
 	parseWorktreeDeleteRequest,
 	parseWorktreeEnsureRequest,
 } from "../core/api-validation";
-import { isSessionInActiveTurn, resolveSessionFacets } from "../core/session-activity";
+import { resolveSessionFacets } from "../core/session-activity";
 import { addTaskToColumn } from "../core/task-board-mutations";
 import { resolveTaskCreateBaseRef } from "../core/task-create-base-ref-resolution";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
@@ -171,10 +170,6 @@ async function deleteTurnCheckpointRefsForTasksRemovedFromSavedBoard(
 
 export interface CreateWorkspaceApiDependencies {
 	ensureTerminalManagerForWorkspace: (workspaceId: string, repoPath: string) => Promise<TerminalSessionManager>;
-	getScopedClineTaskSessionService: (scope: {
-		workspaceId: string;
-		workspacePath: string;
-	}) => Promise<ClineTaskSessionService>;
 	loadScopedRuntimeConfig: (scope: { workspaceId: string; workspacePath: string }) => Promise<RuntimeConfigState>;
 	broadcastRuntimeWorkspaceStateUpdated: (workspaceId: string, workspacePath: string) => Promise<void> | void;
 	broadcastRuntimeProjectsUpdated: (preferredCurrentProjectId: string | null) => Promise<void> | void;
@@ -237,34 +232,6 @@ function normalizeRequiredTaskWorkspaceScopeInput(input: {
 
 // Stage 2：决策型「活跃回合」判据改读 facet（不再读 legacy state）。等价于旧
 // `state ∈ {running, awaiting_review}`，但绕开 projectLegacyState 对 live↔exited 的有损投影。
-function isActiveTaskSessionState(summary: RuntimeTaskSessionSummary | null): boolean {
-	return summary != null && isSessionInActiveTurn(resolveSessionFacets(summary));
-}
-
-function selectLastTurnSummary(
-	terminalSummary: RuntimeTaskSessionSummary | null,
-	clineSummary: RuntimeTaskSessionSummary | null,
-): RuntimeTaskSessionSummary | null {
-	if (!terminalSummary) {
-		return clineSummary;
-	}
-	if (!clineSummary) {
-		return terminalSummary;
-	}
-	const terminalIsActive = isActiveTaskSessionState(terminalSummary);
-	const clineIsActive = isActiveTaskSessionState(clineSummary);
-	if (terminalIsActive !== clineIsActive) {
-		return clineIsActive ? clineSummary : terminalSummary;
-	}
-	if (terminalSummary.updatedAt !== clineSummary.updatedAt) {
-		return terminalSummary.updatedAt > clineSummary.updatedAt ? terminalSummary : clineSummary;
-	}
-	if (clineSummary.agentId === "cline" && terminalSummary.agentId !== "cline") {
-		return clineSummary;
-	}
-	return terminalSummary;
-}
-
 function createEmptyGitSummaryErrorResponse(error: unknown): RuntimeGitSummaryResponse {
 	const message = error instanceof Error ? error.message : String(error);
 	return {
@@ -457,11 +424,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 					workspaceScope.workspaceId,
 					workspaceScope.workspacePath,
 				);
-				const clineTaskSessionService = await deps.getScopedClineTaskSessionService(workspaceScope);
-				const summary = selectLastTurnSummary(
-					terminalManager.getSummary(mainTaskConversationSessionId),
-					clineTaskSessionService.getSummary(mainTaskConversationSessionId),
-				);
+				const summary = terminalManager.getSummary(mainTaskConversationSessionId);
 				const fromCheckpoint = summary?.previousTurnCheckpoint;
 				const toCheckpoint = summary?.latestTurnCheckpoint;
 				if (!toCheckpoint) {

@@ -1,3 +1,4 @@
+import { CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "./agent-catalog";
 // 排队 prompt 一次投递的回执 → 队列条目该去哪儿。**纯函数、零 IO**。
 //
 // 路由表是这套特性里最不能凭感觉改的一张表，因为它的两个方向后果不对称：
@@ -120,6 +121,9 @@ export function routeQueuedTaskPromptDeliveryTerminalOutcome(receipt: {
 export function routeQueuedTaskPromptDeliveryRejectedBeforeTransportAccepted(
 	errorMessage: string | undefined,
 ): QueuedTaskPromptDeliverySettlement {
+	if (errorMessage === CLINE_AGENT_RETIRED_EXECUTION_ERROR) {
+		return { outcome: "terminal_failure", failureNote: errorMessage };
+	}
 	return {
 		outcome: "retryable_failure",
 		failureNote: `The agent session did not accept the queued prompt${errorMessage ? `: ${errorMessage}` : "."}`,

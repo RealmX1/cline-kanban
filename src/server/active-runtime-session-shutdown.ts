@@ -1,11 +1,10 @@
 import type { AcpTaskSessionService } from "../acp-client-session/acp-task-session-service";
-import type { ClineTaskSessionService } from "../cline-sdk/cline-task-session-service";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import type { HostedAgentSessionDispositionForRuntimeShutdown } from "../core/runtime-shutdown-trigger";
 import { resolveSessionFacets } from "../core/session-activity";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 
-export interface ActiveTerminalClineAndAcpRuntimeSessionShutdownDependencies {
+export interface ActiveTerminalAndAcpRuntimeSessionShutdownDependencies {
 	terminalManager:
 		| (Pick<
 				TerminalSessionManager,
@@ -13,7 +12,6 @@ export interface ActiveTerminalClineAndAcpRuntimeSessionShutdownDependencies {
 		  > &
 				Partial<Pick<TerminalSessionManager, "flushAutomaticFailureContinuationPersistence">>)
 		| null;
-	clineTaskSessionService: Pick<ClineTaskSessionService, "listSummaries" | "stopTaskSessionForSafeShutdown"> | null;
 	// ACP agent（omp 等）是持有 stdio 的真子进程：漏掉它，永久删项目会在 worktree 已被删掉之后
 	// 才拆连接，正常关服也会留下还能继续改仓库、并阻塞 Kanban 退出的 agent 进程。
 	acpTaskSessionService: Pick<AcpTaskSessionService, "listSummaries" | "stopTaskSession"> | null;
@@ -46,19 +44,23 @@ function isRuntimeSessionBackedByAnActiveProcess(summary: RuntimeTaskSessionSumm
 	return liveness === "starting" || liveness === "live" || liveness === "retrying";
 }
 
+export function countAcpTaskSessionsInterruptedByRuntimeExit(
+	acpTaskSessionServices: Iterable<Pick<AcpTaskSessionService, "listSummaries">>,
+): number {
+	let interruptedAcpTaskSessionCount = 0;
+	for (const acpTaskSessionService of acpTaskSessionServices) {
+		interruptedAcpTaskSessionCount += acpTaskSessionService
+			.listSummaries()
+			.filter(isRuntimeSessionBackedByAnActiveProcess).length;
+	}
+	return interruptedAcpTaskSessionCount;
+}
+
 function collectConversationRuntimeSessionShutdownSources(
-	dependencies: ActiveTerminalClineAndAcpRuntimeSessionShutdownDependencies,
+	dependencies: ActiveTerminalAndAcpRuntimeSessionShutdownDependencies,
 ): ConversationRuntimeSessionShutdownSource[] {
 	const sources: ConversationRuntimeSessionShutdownSource[] = [];
-	const { clineTaskSessionService, acpTaskSessionService } = dependencies;
-	if (clineTaskSessionService) {
-		sources.push({
-			harnessLabel: "Cline",
-			listSummaries: () => clineTaskSessionService.listSummaries(),
-			stopTaskSessionForSafeShutdown: async (taskId) =>
-				await clineTaskSessionService.stopTaskSessionForSafeShutdown(taskId),
-		});
-	}
+	const { acpTaskSessionService } = dependencies;
 	if (acpTaskSessionService) {
 		sources.push({
 			harnessLabel: "ACP",
@@ -69,8 +71,8 @@ function collectConversationRuntimeSessionShutdownSources(
 	return sources;
 }
 
-export async function stopActiveTerminalClineAndAcpRuntimeSessionsForWorkspace(
-	dependencies: ActiveTerminalClineAndAcpRuntimeSessionShutdownDependencies,
+export async function stopActiveTerminalAndAcpRuntimeSessionsForWorkspace(
+	dependencies: ActiveTerminalAndAcpRuntimeSessionShutdownDependencies,
 ): Promise<ActiveRuntimeSessionShutdownResult> {
 	const stoppedRuntimeSessionSummariesByTaskId = new Map<string, RuntimeTaskSessionSummary>();
 	const runtimeSessionSummariesForSafePersistenceByTaskId = new Map<string, RuntimeTaskSessionSummary>();

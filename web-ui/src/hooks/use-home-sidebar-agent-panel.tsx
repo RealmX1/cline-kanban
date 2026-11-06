@@ -3,13 +3,12 @@
 // chat or a terminal panel and wires that surface to shared runtime actions.
 import type { ReactElement } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-
+import { AgentConversationChatPanel } from "@/components/detail-panels/agent-conversation-chat-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
-import { ClineAgentChatPanel } from "@/components/detail-panels/cline-agent-chat-panel";
 import { Spinner } from "@/components/ui/spinner";
 import { createIdleTaskSession } from "@/hooks/app-utils";
 import { selectNewestTaskSessionSummary } from "@/hooks/home-sidebar-agent-panel-session-summary";
-import { useClineChatRuntimeActions } from "@/hooks/use-cline-chat-runtime-actions";
+import { useAgentConversationChatRuntimeActions } from "@/hooks/use-agent-conversation-chat-runtime-actions";
 import { useHomeAgentSession } from "@/hooks/use-home-agent-session";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { selectLatestTaskChatMessageForTask } from "@/runtime/native-agent";
@@ -27,7 +26,6 @@ interface UseHomeSidebarAgentPanelInput {
 	currentProjectId: string | null;
 	hasNoProjects: boolean;
 	runtimeProjectConfig: RuntimeConfigResponse | null;
-	clineSessionContextVersion: number;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	workspaceGit: RuntimeGitRepositoryInfo | null;
 	latestTaskChatMessage: RuntimeStateStreamTaskChatMessage | null;
@@ -50,7 +48,6 @@ export function useHomeSidebarAgentPanel({
 	currentProjectId,
 	hasNoProjects,
 	runtimeProjectConfig,
-	clineSessionContextVersion,
 	taskSessions,
 	workspaceGit,
 	latestTaskChatMessage,
@@ -87,7 +84,6 @@ export function useHomeSidebarAgentPanel({
 		currentProjectId,
 		runtimeProjectConfig,
 		workspaceGit,
-		clineSessionContextVersion,
 		sessionSummaries: effectiveSessionSummaries,
 		setSessionSummaries,
 		upsertSessionSummary,
@@ -98,7 +94,7 @@ export function useHomeSidebarAgentPanel({
 	useEffect(() => {
 		currentTaskIdRef.current = taskId;
 	}, [taskId]);
-	const { sendTaskChatMessage, loadTaskChatMessages, cancelTaskChatTurn } = useClineChatRuntimeActions({
+	const { sendTaskChatMessage, loadTaskChatMessages, cancelTaskChatTurn } = useAgentConversationChatRuntimeActions({
 		currentProjectId,
 		onSessionSummary: upsertSessionSummary,
 	});
@@ -117,7 +113,7 @@ export function useHomeSidebarAgentPanel({
 	const homeTaskChatMessages = taskId ? (taskChatMessagesByTaskId[taskId] ?? null) : null;
 	const latestHomeTaskChatMessage = selectLatestTaskChatMessageForTask(taskId, latestTaskChatMessage);
 
-	const handleSendHomeClineChatMessage = useCallback(
+	const handleSendHomeAgentConversationChatMessage = useCallback(
 		async (messageTaskId: string, text: string, options?: { mode?: "act" | "plan" }) => {
 			const result = await sendTaskChatMessage(messageTaskId, text, options);
 			if (!result.ok) {
@@ -133,12 +129,12 @@ export function useHomeSidebarAgentPanel({
 		[currentProjectId, sendTaskChatMessage],
 	);
 
-	const handleLoadHomeClineChatMessages = useCallback(
+	const handleLoadHomeAgentConversationChatMessages = useCallback(
 		async (messageTaskId: string) => await loadTaskChatMessages(messageTaskId),
 		[loadTaskChatMessages],
 	);
 
-	const handleCancelHomeClineChatTurn = useCallback(
+	const handleCancelHomeAgentConversationChatTurn = useCallback(
 		async (messageTaskId: string) => await cancelTaskChatTurn(messageTaskId),
 		[cancelTaskChatTurn],
 	);
@@ -157,20 +153,19 @@ export function useHomeSidebarAgentPanel({
 
 	if (panelMode === "chat" && taskId) {
 		return (
-			<ClineAgentChatPanel
+			<AgentConversationChatPanel
 				key={taskId}
 				taskId={taskId}
 				summary={homeAgentPanelSummary ?? createIdleTaskSession(taskId)}
 				defaultMode="act"
 				showComposerModeToggle={false}
 				workspaceId={currentProjectId}
-				runtimeConfig={runtimeProjectConfig}
-				onSendMessage={handleSendHomeClineChatMessage}
-				onCancelTurn={handleCancelHomeClineChatTurn}
-				onLoadMessages={handleLoadHomeClineChatMessages}
+				onSendMessage={handleSendHomeAgentConversationChatMessage}
+				onCancelTurn={handleCancelHomeAgentConversationChatTurn}
+				onLoadMessages={handleLoadHomeAgentConversationChatMessages}
 				incomingMessage={latestHomeTaskChatMessage}
 				incomingMessages={homeTaskChatMessages}
-				composerPlaceholder="Ask Cline to add, edit, start, or link tasks"
+				composerPlaceholder="向 Agent 发送消息，管理任务"
 			/>
 		);
 	}
@@ -192,17 +187,9 @@ export function useHomeSidebarAgentPanel({
 		);
 	}
 
-	if (runtimeProjectConfig.selectedAgentId !== "cline") {
-		return (
-			<div className="flex w-full items-center justify-center rounded-md border border-border bg-surface-2 px-3 text-center text-sm text-text-secondary">
-				No runnable {selectedAgentLabel} command is configured. Open Settings, install the CLI, and select it.
-			</div>
-		);
-	}
-
 	return (
 		<div className="flex w-full items-center justify-center rounded-md border border-border bg-surface-2 px-3 text-center text-sm text-text-secondary">
-			Select a Cline provider in Settings to start a home chat session.
+			尚未配置可运行的 {selectedAgentLabel} 命令，请在设置中安装并选择 CLI。
 		</div>
 	);
 }

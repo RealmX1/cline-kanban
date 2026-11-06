@@ -1,6 +1,6 @@
 // 唯一允许 import `@agentclientprotocol/sdk` 的模块。其余 ACP 代码只从这里取类型与工厂，
 // 好让协议 SDK 的版本升级、方法重命名、废弃 API 迁移都收敛在一个文件里
-//（与 src/cline-sdk/sdk-runtime-boundary.ts 对 @clinebot/core 的做法一致）。
+//由本模块集中隔离外部协议契约。
 
 import type { ChildProcessByStdio } from "node:child_process";
 import { Readable, Writable } from "node:stream";

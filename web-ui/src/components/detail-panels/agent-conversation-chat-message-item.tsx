@@ -1,0 +1,282 @@
+import * as Collapsible from "@radix-ui/react-collapsible";
+import { Brain, ChevronDown, ChevronRight, XCircle } from "lucide-react";
+import React, { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
+import {
+	ConversationAnchorChip,
+	type ResolveConversationAnchor,
+} from "@/components/conversation-anchor/conversation-anchor-chip";
+import { extractConversationAnchorMarkers } from "@/components/conversation-anchor/conversation-anchor-markers";
+import {
+	isAgentChatReasoningMessageStillStreaming,
+	isAgentChatToolMessageStillRunning,
+} from "@/components/detail-panels/agent-chat-message-activity-state";
+import {
+	formatToolInputForDisplay,
+	getToolDisplay,
+	parseToolMessageContent,
+	parseToolOutput,
+} from "@/components/detail-panels/agent-conversation-chat-message-utils";
+import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
+import { TaskAgentUserDecisionBlock } from "@/components/detail-panels/task-agent-user-decision-block";
+import { TaskImageStrip } from "@/components/task-image-strip";
+import { cn } from "@/components/ui/cn";
+import { Spinner } from "@/components/ui/spinner";
+import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
+
+function ToolMessageBlock({ message }: { message: AgentConversationChatMessage }): ReactElement {
+	const parsed = useMemo(() => parseToolMessageContent(message.content), [message.content]);
+	const isRunning = isAgentChatToolMessageStillRunning(message);
+	const hasError = Boolean(parsed.error);
+	const [expanded, setExpanded] = useState(false);
+
+	const toolDisplay = useMemo(() => getToolDisplay(parsed.toolName, parsed.input), [parsed.toolName, parsed.input]);
+	const toolOutput = useMemo(() => (parsed.output ? parseToolOutput(parsed.output) : null), [parsed.output]);
+	const fullInput = useMemo(
+		() => formatToolInputForDisplay(parsed.toolName, parsed.input),
+		[parsed.toolName, parsed.input],
+	);
+	const hasExpandableContent = Boolean(parsed.output || parsed.error || fullInput);
+
+	return (
+		<div className="w-full">
+			<button
+				type="button"
+				onClick={hasExpandableContent ? () => setExpanded((e) => !e) : undefined}
+				className={cn(
+					"group flex w-full items-center gap-1.5 rounded px-1.5 py-0 text-left text-sm",
+					hasExpandableContent && "cursor-pointer",
+				)}
+			>
+				{isRunning ? (
+					<Spinner size={14} className="shrink-0" />
+				) : hasError ? (
+					<XCircle size={14} className="shrink-0 text-status-red" />
+				) : null}
+				<span
+					className={cn(
+						"shrink-0 font-semibold group-hover:text-text-primary",
+						expanded ? "text-text-primary" : "text-text-secondary",
+					)}
+				>
+					{toolDisplay.toolName}
+				</span>
+				{toolDisplay.inputSummary ? (
+					<span
+						className={cn(
+							"min-w-0 truncate group-hover:text-text-secondary",
+							expanded ? "text-text-secondary" : "text-text-tertiary",
+						)}
+					>
+						{toolDisplay.inputSummary}
+					</span>
+				) : null}
+				{hasExpandableContent ? (
+					<span
+						className={cn(
+							"shrink-0 group-hover:text-text-secondary",
+							expanded ? "text-text-secondary" : "text-text-tertiary",
+						)}
+					>
+						{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+					</span>
+				) : null}
+			</button>
+
+			{expanded ? (
+				<div className="mt-1 space-y-1.5 pr-1.5 pl-[24px] pb-1">
+					{/* Full tool input (e.g. complete run_commands commands) */}
+					{fullInput ? (
+						<div>
+							<div className="mb-0.5 text-xs text-text-tertiary">Command</div>
+							<pre className="max-h-60 overflow-auto rounded bg-surface-0 px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-all text-text-primary">
+								{fullInput}
+							</pre>
+						</div>
+					) : null}
+
+					{/* Parsed ToolOperationResult output */}
+					{toolOutput ? (
+						toolOutput.results.map((result, i) => (
+							<div key={i}>
+								{toolOutput.results.length > 1 ? (
+									<div className="mb-0.5 truncate text-xs text-text-tertiary">{result.query}</div>
+								) : null}
+								{result.error ? (
+									<pre className="max-h-60 overflow-auto rounded bg-status-red/5 px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-all text-status-red">
+										{result.error}
+									</pre>
+								) : null}
+								{result.content ? (
+									<pre className="max-h-60 overflow-auto rounded bg-surface-0 px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-all text-text-primary">
+										{result.content}
+									</pre>
+								) : null}
+							</div>
+						))
+					) : parsed.output ? (
+						/* Fallback for non-ToolOperationResult output (skills, ask_question, MCP tools) */
+						<div>
+							<div className="mb-0.5 text-xs text-text-tertiary">Output</div>
+							<pre className="max-h-60 overflow-auto rounded bg-surface-0 px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-all text-text-primary">
+								{parsed.output}
+							</pre>
+						</div>
+					) : null}
+
+					{/* Tool-level error (SDK crash/timeout, separate from per-result errors) */}
+					{parsed.error ? (
+						<div>
+							<div className="mb-0.5 text-xs text-status-red">Error</div>
+							<pre className="max-h-60 overflow-auto rounded bg-status-red/5 px-2 py-1.5 text-xs leading-relaxed whitespace-pre-wrap break-all text-status-red">
+								{parsed.error}
+							</pre>
+						</div>
+					) : null}
+				</div>
+			) : null}
+		</div>
+	);
+}
+
+function ReasoningMessageBlock({ message }: { message: AgentConversationChatMessage }): ReactElement {
+	const isStreaming = isAgentChatReasoningMessageStillStreaming(message);
+	const [expanded, setExpanded] = useState(isStreaming);
+	const wasStreamingRef = useRef(isStreaming);
+
+	useEffect(() => {
+		if (wasStreamingRef.current && !isStreaming) {
+			setExpanded(false);
+		}
+		wasStreamingRef.current = isStreaming;
+	}, [isStreaming]);
+
+	return (
+		<Collapsible.Root open={expanded} onOpenChange={setExpanded} className="w-full">
+			<Collapsible.Trigger asChild>
+				<button
+					type="button"
+					className="group flex w-full cursor-pointer items-center gap-1.5 rounded px-1.5 py-0 text-left text-sm"
+				>
+					<Brain size={14} className="shrink-0 text-text-tertiary" />
+					<span
+						className={cn(
+							"shrink-0 font-semibold group-hover:text-text-secondary",
+							expanded ? "text-text-secondary" : "text-text-tertiary",
+						)}
+					>
+						Reasoning
+					</span>
+					<span
+						className={cn(
+							"shrink-0 group-hover:text-text-tertiary",
+							expanded ? "text-text-tertiary" : "text-text-tertiary/60",
+						)}
+					>
+						{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+					</span>
+				</button>
+			</Collapsible.Trigger>
+			<Collapsible.Content className="overflow-hidden data-[state=closed]:animate-[kb-collapsible-up_200ms_ease-out] data-[state=open]:animate-[kb-collapsible-down_200ms_ease-out]">
+				<div className="mt-1 w-full px-1.5 text-sm italic whitespace-pre-wrap break-words text-text-tertiary">
+					{message.content}
+				</div>
+			</Collapsible.Content>
+		</Collapsible.Root>
+	);
+}
+
+/**
+ * `React.memo` 的命中依据：`use-agent-conversation-chat-session.ts` 的 `upsertMessage` 只替换被更新
+ * 的那一条消息、其余元素引用原样保留，所以 agent 流式输出时这里只会重渲最后一条。
+ * 没有这层 memo，每个 chunk 都要把整条会话（含全部代码块高亮）重跑一遍。
+ */
+export const AgentConversationChatMessageItem = React.memo(function AgentConversationChatMessageItem({
+	message,
+	taskId,
+	onResolveUserDecision,
+	resolveConversationAnchor,
+	onConversationAnchorClick,
+}: {
+	message: AgentConversationChatMessage;
+	taskId?: string | null;
+	onResolveUserDecision?: (
+		taskId: string,
+		decisionId: string,
+		optionId: string | null,
+	) => Promise<{ ok: boolean; message?: string }>;
+	// Session Map 聊天内锚（蓝图 §C.2）：按 id 查服务端 map 集合的解析器与点击回调。
+	// 缺省（无集合上下文，如 home 侧栏）时 marker 段不渲染 chip——整条 marker 按不可见处理。
+	resolveConversationAnchor?: ResolveConversationAnchor | null;
+	onConversationAnchorClick?: (anchorId: string) => void;
+}): ReactElement {
+	// 「等你拍板」的消息优先于 role 分派：它虽然以 status 消息承载，但要渲染成可操作卡片。
+	const userDecision = message.meta?.userDecision;
+	if (userDecision && taskId && onResolveUserDecision) {
+		return (
+			<TaskAgentUserDecisionBlock
+				taskId={taskId}
+				decision={userDecision}
+				promptMarkdown={message.content}
+				onResolveDecision={onResolveUserDecision}
+			/>
+		);
+	}
+	if (message.role === "tool") {
+		return <ToolMessageBlock message={message} />;
+	}
+	if (message.role === "reasoning") {
+		return <ReasoningMessageBlock message={message} />;
+	}
+	if (message.role === "user") {
+		const hasText = message.content.trim().length > 0;
+		const hasImages = Boolean(message.images && message.images.length > 0);
+		const source = message.meta?.source?.trim();
+		return (
+			<div className="ml-auto max-w-[85%] rounded-md bg-accent/10 border border-accent/20 px-3 py-2 text-sm text-text-primary">
+				{source ? <div className="mb-1 text-right text-xs font-medium text-text-tertiary">{source}</div> : null}
+				{hasText ? <div className="whitespace-pre-wrap break-words">{message.content}</div> : null}
+				{hasImages ? (
+					<TaskImageStrip images={message.images ?? []} className={hasText ? "mt-2" : undefined} />
+				) : null}
+			</div>
+		);
+	}
+	if (message.role === "assistant") {
+		const normalizedAssistantContent = message.content.replace(/^\n+/, "");
+		// Session Map 锚 marker（蓝图 §C.1/§C.2）：摘除 HTML 注释 marker 后分段渲染——
+		// text 段照常 markdown，marker 段原位渲 chip（id 在 map 集合不可解析则不渲）。
+		// 无 marker 时与接入前完全同构的单块渲染（绝大多数消息走这条快路径）。
+		const anchorExtraction = extractConversationAnchorMarkers(normalizedAssistantContent);
+		const hasAnchorMarkerSegment = anchorExtraction.segments.some((segment) => segment.kind === "marker");
+		if (!hasAnchorMarkerSegment) {
+			return (
+				<div className="min-w-0 w-full px-1.5 text-sm text-text-primary">
+					<AgentConversationMarkdownContent content={normalizedAssistantContent} />
+				</div>
+			);
+		}
+		return (
+			<div className="min-w-0 w-full px-1.5 text-sm text-text-primary">
+				{anchorExtraction.segments.map((segment, index) =>
+					segment.kind === "text" ? (
+						<AgentConversationMarkdownContent key={index} content={segment.text} />
+					) : resolveConversationAnchor ? (
+						<ConversationAnchorChip
+							key={index}
+							anchorId={segment.anchorId}
+							resolve={resolveConversationAnchor}
+							onClick={onConversationAnchorClick}
+						/>
+					) : null,
+				)}
+			</div>
+		);
+	}
+	const label = message.role === "status" ? "Status" : "System";
+	return (
+		<div className="max-w-[85%] rounded-md border border-border bg-surface-3/70 px-3 py-2 text-sm whitespace-pre-wrap break-all text-text-secondary">
+			<div className="mb-1 text-xs uppercase tracking-wide text-text-tertiary">{label}</div>
+			{message.content}
+		</div>
+	);
+});

@@ -1793,94 +1793,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 		},
 	);
 
-	it("writes Cline hook scripts and injects --hooks-dir", async () => {
-		setupTempHome();
-		const launch = await prepareAgentLaunch({
-			taskId: "task-1",
-			agentId: "cline",
-			binary: "cline",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			workspaceId: "workspace-1",
-		});
-
-		const hooksDir = join(homedir(), ".cline", "kanban", "hooks", "cline");
-		const notificationHookPath =
-			process.platform === "win32" ? join(hooksDir, "Notification.ps1") : join(hooksDir, "Notification");
-		const taskCompleteHookPath =
-			process.platform === "win32" ? join(hooksDir, "TaskComplete.ps1") : join(hooksDir, "TaskComplete");
-		const userPromptSubmitHookPath =
-			process.platform === "win32" ? join(hooksDir, "UserPromptSubmit.ps1") : join(hooksDir, "UserPromptSubmit");
-		const preToolUseHookPath =
-			process.platform === "win32" ? join(hooksDir, "PreToolUse.ps1") : join(hooksDir, "PreToolUse");
-		const postToolUseHookPath =
-			process.platform === "win32" ? join(hooksDir, "PostToolUse.ps1") : join(hooksDir, "PostToolUse");
-
-		expect(launch.env.KANBAN_HOOK_TASK_ID).toBe("task-1");
-		expect(launch.env.KANBAN_HOOK_WORKSPACE_ID).toBe("workspace-1");
-
-		const hooksDirArgIndex = launch.args.indexOf("--hooks-dir");
-		expect(hooksDirArgIndex).toBeGreaterThanOrEqual(0);
-		expect(launch.args[hooksDirArgIndex + 1]).toBe(hooksDir);
-
-		expect(existsSync(notificationHookPath)).toBe(true);
-		expect(existsSync(taskCompleteHookPath)).toBe(true);
-		expect(existsSync(userPromptSubmitHookPath)).toBe(true);
-		expect(existsSync(preToolUseHookPath)).toBe(true);
-		expect(existsSync(postToolUseHookPath)).toBe(true);
-
-		const notificationScript = readFileSync(notificationHookPath, "utf8");
-		expect(notificationScript).toContain("hooks");
-		expect(notificationScript).toContain("to_review");
-		expect(notificationScript).toContain("user_attention");
-		expect(notificationScript).toContain("completion_result");
-		expect(notificationScript).toContain('{"cancel":false}');
-
-		const taskCompleteScript = readFileSync(taskCompleteHookPath, "utf8");
-		expect(taskCompleteScript).toContain("hooks");
-		expect(taskCompleteScript).toContain("to_review");
-		expect(taskCompleteScript).toContain('{"cancel":false}');
-
-		const userPromptSubmitScript = readFileSync(userPromptSubmitHookPath, "utf8");
-		expect(userPromptSubmitScript).toContain("hooks");
-		expect(userPromptSubmitScript).toContain("to_in_progress");
-		expect(userPromptSubmitScript).toContain('{"cancel":false}');
-
-		const preToolUseScript = readFileSync(preToolUseHookPath, "utf8");
-		expect(preToolUseScript).toContain("hooks");
-		expect(preToolUseScript).toContain("activity");
-		expect(preToolUseScript).toContain("to_in_progress");
-		expect(preToolUseScript).toContain("to_review");
-		expect(preToolUseScript).toContain("ask_followup_question");
-		expect(preToolUseScript).toContain("plan_mode_respond");
-
-		const postToolUseScript = readFileSync(postToolUseHookPath, "utf8");
-		expect(postToolUseScript).toContain("hooks");
-		expect(postToolUseScript).toContain("activity");
-		expect(postToolUseScript).toContain("to_in_progress");
-		expect(postToolUseScript).toContain("ask_followup_question");
-		expect(postToolUseScript).toContain("plan_mode_respond");
-	});
-
-	it("prepends task workspace guard instructions for Cline CLI task prompts", async () => {
-		setupTempHome();
-		const launch = await prepareAgentLaunch({
-			taskId: "task-cline-worktree-guard",
-			agentId: "cline",
-			binary: "cline",
-			args: [],
-			cwd: "/tmp/worktrees/task-1/repo",
-			prompt: "Implement the task",
-		});
-
-		const prompt = launch.args.at(-1) ?? "";
-		expect(prompt).toContain("你负责在分配的工作区完成本任务");
-		expect(prompt).toContain("`/tmp/worktrees/task-1/repo`");
-		expect(prompt).toContain("先确认其编辑归属");
-		expect(prompt).toContain("# Task\nImplement the task");
-	});
-
 	it("adds resume flags for each agent", async () => {
 		setupTempHome();
 
@@ -1949,17 +1861,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 			resumeFromTrash: true,
 		});
 		expect(kiroLaunch.args).toContain("--resume");
-
-		const clineLaunch = await prepareAgentLaunch({
-			taskId: "task-cline",
-			agentId: "cline",
-			binary: "cline",
-			args: [],
-			cwd: "/tmp",
-			prompt: "",
-			resumeFromTrash: true,
-		});
-		expect(clineLaunch.args).toContain("--continue");
 	});
 
 	it("places Codex hook config before the resume subcommand", async () => {
@@ -2006,7 +1907,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 			{ agentId: "codex", binary: "codex", args: [], flag: "--dangerously-bypass-approvals-and-sandbox" },
 			{ agentId: "gemini", binary: "gemini", args: [], flag: "--yolo" },
 			{ agentId: "kiro", binary: "kiro-cli", args: ["chat"], flag: "--trust-all-tools" },
-			{ agentId: "cline", binary: "cline", args: [], flag: "--auto-approve-all" },
 			{ agentId: "kimi", binary: "kimi", args: [], flag: "--auto" },
 			{ agentId: "cursor", binary: "cursor-agent", args: [], flag: "--force" },
 		];
@@ -2047,7 +1947,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 				flag: "--dangerously-bypass-approvals-and-sandbox",
 			},
 			{ agentId: "gemini", binary: "gemini", args: ["--yolo"], flag: "--yolo" },
-			{ agentId: "cline", binary: "cline", args: ["--auto-approve-all"], flag: "--auto-approve-all" },
 			{ agentId: "kiro", binary: "kiro-cli", args: ["chat", "--trust-all-tools"], flag: "--trust-all-tools" },
 		];
 
@@ -2143,21 +2042,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 			});
 			expect(launch.args, `${agentId} must not silently widen to full bypass`).not.toContain(forbiddenFlag);
 		}
-
-		// cline 是个刻意的例外：agentId "cline" 在 Kanban 里路由到进程内 Cline SDK，而那条路径的
-		// requestToolApproval 目前恒批准，所以它只能表达「全放行」一档。这个「无法收紧」的事实由
-		// resolveTaskAgentPermissionModeForAgent 如实报告 degraded，并在任务创建界面明示，
-		// 而不是让用户以为选了更严的档位就真的更严。
-		const clineLaunch = await prepareAgentLaunch({
-			taskId: "task-cline-accept-edits",
-			agentId: "cline",
-			binary: "cline",
-			args: [],
-			taskAgentPermissionMode: "auto_approve_file_edits_only",
-			cwd: "/tmp",
-			prompt: "",
-		});
-		expect(clineLaunch.args).toContain("--auto-approve-all");
 	});
 
 	// 用户拍板的正交约束：plan 起步只决定「开局先只读规划」，不得剥夺所选放权档。
@@ -3765,4 +3649,17 @@ it("Droid 实际启动参数中角色流程与需求各出现一次", async () =
 	const sent = [...launch.args, launch.deferredStartupPromptText ?? ""].join("\n");
 	expect(sent.split("需求唯一哨兵")).toHaveLength(2);
 	expect(sent.split("# Kanban Task Workspace")).toHaveLength(2);
+});
+
+it("Cline CLI adapter 在任何文件写入前明确拒绝退役身份", async () => {
+	await expect(
+		prepareAgentLaunch({
+			taskId: "retired-cline",
+			agentId: "cline",
+			binary: "cline",
+			args: [],
+			cwd: "/must-not-be-created",
+			prompt: "不会执行",
+		}),
+	).rejects.toThrow("Cline agent 已退役");
 });

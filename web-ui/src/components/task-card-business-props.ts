@@ -48,7 +48,6 @@ export interface BuildTaskCardBusinessPropsInput {
 	/** 非 backlog 卡的单击行为（打开详情）。backlog 卡的单击固定走 `onEditTask`。 */
 	onActivateCard?: (card: BoardCard) => void;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
 
@@ -62,7 +61,6 @@ export function buildTaskCardBusinessProps({
 	handlers,
 	onActivateCard,
 	workspacePath,
-	defaultClineModelId = null,
 	defaultAgentId = null,
 }: BuildTaskCardBusinessPropsInput): TaskCardBusinessProps {
 	const isShelved = card.taskShelvingState?.isShelved === true;
@@ -106,7 +104,6 @@ export function buildTaskCardBusinessProps({
 		isMoveToReviewLoading: isInProgress ? (handlers.moveToReviewLoadingById?.[card.id] ?? false) : false,
 		workspacePath,
 		resolveTaskWorkspaceAbsoluteDirectoryPath: handlers.resolveTaskWorkspaceAbsoluteDirectoryPath,
-		defaultClineModelId,
 		defaultAgentId,
 		onClick: isBacklog ? handlers.onEditTask : onActivateCard,
 	};

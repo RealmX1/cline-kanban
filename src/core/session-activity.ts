@@ -285,7 +285,7 @@ export function projectLegacyState(facets: SessionFacets): RuntimeTaskSessionSta
 }
 
 // 单一构造：给「已合并好的 summary」打上与其 legacy state 自洽的三 facet + schemaVersion。
-// 所有 dual-write 经两处 updateSummary 漏斗（src/cline-sdk/cline-session-state.ts、
+// 所有 dual-write 经两处 updateSummary 漏斗（src/acp-client-session/acp-session-state.ts、
 // src/terminal/session-manager.ts）统一走此函数，故 facet 恒由当刻 state/reviewReason/pid/
 // connectionRetry 派生、与 state 投影可逆——无需在每个写点手填 facet，也杜绝漂移。
 export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeTaskSessionSummary {
@@ -309,6 +309,7 @@ export function applySessionFacets(summary: RuntimeTaskSessionSummary): RuntimeT
 // 缺省时两者相同。只影响「本轮何时开始 / 停止生成」两个边沿章，updatedAt 仍是写入墙钟。
 export interface SummaryWriteDomainEventTiming {
 	domainEventObservedAtEpochMs?: number;
+	hookEventDeliveryIdempotencyKey?: string;
 }
 
 // 原生接受核验可能落后于无工具回合的完成 hook。完成信号证明发生过工作，提交状态仍保持待确认。

@@ -17,6 +17,7 @@ import { resolveLastAgentConversationUserHandoffObservation } from "./agent-conv
 import type {
 	QueuedTaskPromptDeliveryEntry,
 	QueuedTaskPromptDispatchBlockReason,
+	RuntimeAgentId,
 	RuntimeTaskSessionSummary,
 } from "./api-contract";
 import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "./managed-task-prompt-delivery";
@@ -56,6 +57,8 @@ export interface QueuedTaskPromptDispatchEligibilityInput {
 	headEntry: QueuedTaskPromptDeliveryEntry;
 	// 该 task 此刻的会话摘要。null = 运行时压根没有这个会话的条目。
 	sessionSummary: RuntimeTaskSessionSummary | null | undefined;
+	// 内存摘要缺失时的持久会话或卡片身份；当前摘要优先。
+	persistedAgentId?: RuntimeAgentId | null;
 	// 仅 PTY 有意义：单飞槽此刻是否被另一条程序化投递（例：RVF followup）占着。
 	// 非 PTY transport 由调用方恒传 false——它们没有输入框可抢。
 	hasPendingProgrammaticTaskChatInputDelivery: boolean;
@@ -73,6 +76,7 @@ export function resolveQueuedPromptDispatchBlockReason(
 	input: QueuedTaskPromptDispatchEligibilityInput,
 ): QueuedTaskPromptDispatchBlockReason | null {
 	const { headEntry, sessionSummary, hasPendingProgrammaticTaskChatInputDelivery } = input;
+	if ((sessionSummary?.agentId ?? input.persistedAgentId) === "cline") return "agent_retired";
 
 	// -1. 由另一个此刻活着的实例托管。同机多实例共享 workspaces 根，只有托管者该发它——否则两个实例会各自
 	// 在自己的会话边沿上认领同一条队列。托管者死了之后，调用方（dispatcher）会先盖章并接管托管权，这条
