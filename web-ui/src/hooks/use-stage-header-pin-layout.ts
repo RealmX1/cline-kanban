@@ -2,6 +2,8 @@ import type { RefObject } from "react";
 import { useEffect, useState } from "react";
 
 import {
+	computeFocusedCardRailContentMaximumHeight,
+	isFocusedCardOccludedByTopRail,
 	STAGE_HEADER_HEIGHT_PX,
 	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
 	STAGE_RAIL_GAP_PX,
@@ -28,14 +30,16 @@ import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-
  * 钉在同侧时额外挂「焦点卡克隆」，克隆外还有 `padding: 8`（上下共 16px），整条比普通卡头（40px 槽高 +
  * 2px 外框）高。堆叠偏移阈值必须把**边框**与**焦点卡（padding + 卡高）**一并计入，否则「首个未钉卡头」会被
  * 焦点条目吞在 rail 之后（与旧 `--kb-selected-pin-top` 变量要解决的是同一类遮挡 bug）。焦点卡高取**真实卡**
- * （`[data-task-id]`，折叠时由 peek 支路保活）的实测高度——它不依赖分类结果、**无反馈环**；绝不测
- * rail 克隆（那才循环）。渲染侧仍用 flexbox 自然堆叠、不手算逐条偏移。
+ * （`[data-task-id]`，折叠时由 peek 支路保活）的实测高度。跨项目的紧凑源行与完整副本不同形时，
+ * 宿主提供完整副本的缓存高度；隐藏副本不清空缓存，测量本身不决定焦点卡是否越界。
  *
  * 条目几何常量（卡头槽高 / 外框 / 间距 / 焦点卡 padding）是本 hook 与渲染方、跳转/折叠滚动计算共用的契约，
  * 单一真源在 `@/components/detail-panels/stage-header-rail-geometry`。
  */
 
 export interface StageHeaderPinLayout {
+	/** 焦点卡实际所属 rail，渲染方与分组分类共用这一结果。 */
+	focusedCardRailEdge: SelectedCardPinState;
 	/** 已滚过、卡头钉在视口顶沿的 stage columnId（文档序，顶→下堆叠）。 */
 	topPinnedColumnIds: string[];
 	/** 未到达、卡头钉在视口底沿的 stage columnId（文档序，上→下堆叠）。 */
@@ -46,7 +50,7 @@ export interface UseStageHeaderPinLayoutOptions {
 	/** 滚动容器（`.kb-detail-task-list-scroll`）的 ref，作为几何判定的视口基准。 */
 	scrollRootRef: RefObject<HTMLElement | null>;
 	/** 全部 stage 的 columnId，按列表文档序。 */
-	columnIds: string[];
+	columnIds: readonly string[];
 	/** 焦点卡所在 stage 的 columnId。 */
 	focusedColumnId: string;
 	/** 焦点卡 taskId：其真实卡高用于把焦点条目（卡头+卡）计入堆叠偏移。 */
@@ -55,9 +59,17 @@ export interface UseStageHeaderPinLayoutOptions {
 	focusedCardPinState: SelectedCardPinState;
 	/** 为 `false`（如拖拽期，真实卡被 portal 到 body 致几何失真）时暂停并返回空布局。 */
 	enabled?: boolean;
+	sectionElementAttributeName?: string;
+	focusedCardElementSelector?: string;
+	/** 未受视口限高的完整副本自然高度，不包含 rail 外层 padding。 */
+	focusedCardCloneHeightPx?: number;
 }
 
-const EMPTY_LAYOUT: StageHeaderPinLayout = { topPinnedColumnIds: [], bottomPinnedColumnIds: [] };
+const EMPTY_LAYOUT: StageHeaderPinLayout = {
+	topPinnedColumnIds: [],
+	bottomPinnedColumnIds: [],
+	focusedCardRailEdge: "hidden",
+};
 
 function sameIds(a: readonly string[], b: readonly string[]): boolean {
 	if (a.length !== b.length) {
@@ -78,6 +90,9 @@ export function useStageHeaderPinLayout({
 	focusedTaskId,
 	focusedCardPinState,
 	enabled = true,
+	sectionElementAttributeName = "data-stage-section-id",
+	focusedCardElementSelector,
+	focusedCardCloneHeightPx,
 }: UseStageHeaderPinLayoutOptions): StageHeaderPinLayout {
 	const [layout, setLayout] = useState<StageHeaderPinLayout>(EMPTY_LAYOUT);
 	// 数组入参每渲染换新引用；用稳定字符串 key 作为 effect 依赖，并在 effect 内还原（columnId 不含此分隔符）。
@@ -87,7 +102,8 @@ export function useStageHeaderPinLayout({
 		const commit = (next: StageHeaderPinLayout): void => {
 			setLayout((prev) =>
 				sameIds(prev.topPinnedColumnIds, next.topPinnedColumnIds) &&
-				sameIds(prev.bottomPinnedColumnIds, next.bottomPinnedColumnIds)
+				sameIds(prev.bottomPinnedColumnIds, next.bottomPinnedColumnIds) &&
+				prev.focusedCardRailEdge === next.focusedCardRailEdge
 					? prev
 					: next,
 			);
@@ -119,12 +135,20 @@ export function useStageHeaderPinLayout({
 			const focusedIndex = orderedColumnIds.indexOf(focusedColumnId);
 
 			let focusedCardHeight = 0;
+			let focusedCardRect: DOMRect | null = null;
 			if (focusedIndex >= 0) {
 				const focusedCard = root.querySelector(
-					`[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`,
+					focusedCardElementSelector ?? `[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`,
 				);
 				if (focusedCard) {
-					focusedCardHeight = focusedCard.getBoundingClientRect().height;
+					focusedCardRect = focusedCard.getBoundingClientRect();
+					focusedCardHeight = focusedCardCloneHeightPx || focusedCardRect.height;
+					if (focusedCardCloneHeightPx !== undefined) {
+						focusedCardHeight = Math.min(
+							focusedCardHeight,
+							computeFocusedCardRailContentMaximumHeight(rootRect.height, orderedColumnIds.length),
+						);
+					}
 				}
 			}
 
@@ -132,7 +156,7 @@ export function useStageHeaderPinLayout({
 			const sectionBottoms: number[] = [];
 			for (const columnId of orderedColumnIds) {
 				const section = root.querySelector(
-					`[data-stage-section-id="${escapeCssAttributeSelectorValue(columnId)}"]`,
+					`[${sectionElementAttributeName}="${escapeCssAttributeSelectorValue(columnId)}"]`,
 				);
 				if (!section) {
 					sectionTops.push(Number.NaN);
@@ -144,67 +168,107 @@ export function useStageHeaderPinLayout({
 				sectionBottoms.push(rect.bottom);
 			}
 
-			const total = orderedColumnIds.length;
-			const entryHeight = (index: number, edge: SelectedCardPinState): number =>
-				index === focusedIndex && focusedCardPinState === edge
-					? STAGE_HEADER_HEIGHT_PX +
-						STAGE_SECTION_BORDER_PX +
-						STAGE_RAIL_FOCUSED_CARD_PADDING_PX +
-						focusedCardHeight
-					: STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX;
+			const computePinnedLayoutForFocusedCardEdge = (
+				focusedCardEdge: SelectedCardPinState,
+			): StageHeaderPinLayout => {
+				const total = orderedColumnIds.length;
+				const entryHeight = (index: number): number =>
+					index === focusedIndex && focusedCardEdge !== "hidden"
+						? STAGE_HEADER_HEIGHT_PX +
+							STAGE_SECTION_BORDER_PX +
+							STAGE_RAIL_FOCUSED_CARD_PADDING_PX +
+							focusedCardHeight
+						: STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX;
 
-			// 前向 pass：卡头自然上沿滚到 rail 增长下沿（`<=`，含等号，sticky 语义）即钉顶。
-			// topOffset 从 rootTop 起（scrollport 8px 顶 padding 天然形成静止不误钉的死区）；每条计入
-			// gap 略作高估，保证「首个未钉卡头」严格落在 rail 下沿之下（偏安全侧，至多提前 8px 钉）。
-			let topOffset = rootTop;
-			const topPinnedColumnIds: string[] = [];
-			let lastTopIndex = -1;
-			for (let index = 0; index < total; index += 1) {
-				const sectionTop = sectionTops[index];
-				const columnId = orderedColumnIds[index];
-				if (sectionTop === undefined || columnId === undefined || Number.isNaN(sectionTop)) {
-					break;
+				// 前向 pass：卡头自然上沿滚到 rail 增长下沿（`<=`，含等号，sticky 语义）即钉顶。
+				// topOffset 从 rootTop 起（scrollport 8px 顶 padding 天然形成静止不误钉的死区）；每条计入
+				// gap 略作高估，保证「首个未钉卡头」严格落在 rail 下沿之下（偏安全侧，至多提前 8px 钉）。
+				let topOffset = rootTop;
+				const topPinnedColumnIds: string[] = [];
+				let lastTopIndex = -1;
+				for (let index = 0; index < total; index += 1) {
+					const sectionTop = sectionTops[index];
+					const columnId = orderedColumnIds[index];
+					// 焦点卡仍在视口下方时，把所属标题留给底 rail，避免完整副本遮住刚跳到的分组首行。
+					if (index === focusedIndex && focusedCardEdge === "pinBottom") break;
+					if (sectionTop === undefined || columnId === undefined || Number.isNaN(sectionTop)) {
+						break;
+					}
+					if (sectionTop <= topOffset) {
+						topPinnedColumnIds.push(columnId);
+						lastTopIndex = index;
+						topOffset += entryHeight(index) + STAGE_RAIL_GAP_PX;
+					} else {
+						break;
+					}
 				}
-				if (sectionTop <= topOffset) {
-					topPinnedColumnIds.push(columnId);
-					lastTopIndex = index;
-					topOffset += entryHeight(index, "pinTop") + STAGE_RAIL_GAP_PX;
-				} else {
-					break;
+
+				// 后向 pass：镜像前向。卡头自然上沿在 rail 槽上沿之下（`>=`）即钉底；`i <= lastTopIndex → break`
+				// 定优先级为「顶胜」，杜绝上下双认领（含单个高 section 撑满视口的退化）。第二守卫防「静止时最后
+				// 一节短卡头落在底 40px 内」的伪钉：section 须真溢出底沿（`sBottom > rootBottom`），除非其下已有钉底
+				// 条目（此时不透明 rail 会遮住它的真实卡头，必须一并进 rail 以免「被遮却不显」）。
+				let bottomOffset = rootBottom;
+				const bottomPinnedReversed: string[] = [];
+				for (let index = total - 1; index > lastTopIndex; index -= 1) {
+					const sectionTop = sectionTops[index];
+					const sectionBottom = sectionBottoms[index];
+					const columnId = orderedColumnIds[index];
+					if (
+						sectionTop === undefined ||
+						sectionBottom === undefined ||
+						columnId === undefined ||
+						Number.isNaN(sectionTop) ||
+						Number.isNaN(sectionBottom)
+					) {
+						break;
+					}
+					const slotTopEdge = bottomOffset - entryHeight(index);
+					const overflowsBelow = sectionBottom > rootBottom;
+					const containsFocusedCardBelowViewport =
+						focusedCardEdge === "pinBottom" && focusedIndex > lastTopIndex && index >= focusedIndex;
+					if (
+						containsFocusedCardBelowViewport ||
+						(sectionTop >= slotTopEdge && (overflowsBelow || bottomPinnedReversed.length > 0))
+					) {
+						bottomPinnedReversed.push(columnId);
+						bottomOffset -= entryHeight(index) + STAGE_RAIL_GAP_PX;
+					} else {
+						break;
+					}
 				}
+				bottomPinnedReversed.reverse();
+
+				return {
+					topPinnedColumnIds,
+					bottomPinnedColumnIds: bottomPinnedReversed,
+					focusedCardRailEdge:
+						focusedCardEdge === "hidden"
+							? "hidden"
+							: topPinnedColumnIds.includes(focusedColumnId)
+								? "pinTop"
+								: bottomPinnedReversed.includes(focusedColumnId)
+									? "pinBottom"
+									: "hidden",
+				};
+			};
+			let nextLayout = computePinnedLayoutForFocusedCardEdge(focusedCardPinState);
+			if (focusedCardPinState === "hidden" && focusedCardRect && focusedCardRect.height > 0) {
+				const plainEntryStride = STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX + STAGE_RAIL_GAP_PX;
+				const topRailHeight = Math.max(
+					0,
+					nextLayout.topPinnedColumnIds.length * plainEntryStride - STAGE_RAIL_GAP_PX,
+				);
+				const bottomRailHeight = Math.max(
+					0,
+					nextLayout.bottomPinnedColumnIds.length * plainEntryStride - STAGE_RAIL_GAP_PX,
+				);
+				// 标题 rail 覆盖的区域也不可见；只补算一次，避免用完整副本高度制造循环。
+				if (isFocusedCardOccludedByTopRail(focusedCardRect.top - rootTop, topRailHeight))
+					nextLayout = computePinnedLayoutForFocusedCardEdge("pinTop");
+				else if (bottomRailHeight > 0 && focusedCardRect.bottom >= rootBottom - bottomRailHeight)
+					nextLayout = computePinnedLayoutForFocusedCardEdge("pinBottom");
 			}
-
-			// 后向 pass：镜像前向。卡头自然上沿在 rail 槽上沿之下（`>=`）即钉底；`i <= lastTopIndex → break`
-			// 定优先级为「顶胜」，杜绝上下双认领（含单个高 section 撑满视口的退化）。第二守卫防「静止时最后
-			// 一节短卡头落在底 40px 内」的伪钉：section 须真溢出底沿（`sBottom > rootBottom`），除非其下已有钉底
-			// 条目（此时不透明 rail 会遮住它的真实卡头，必须一并进 rail 以免「被遮却不显」）。
-			let bottomOffset = rootBottom;
-			const bottomPinnedReversed: string[] = [];
-			for (let index = total - 1; index > lastTopIndex; index -= 1) {
-				const sectionTop = sectionTops[index];
-				const sectionBottom = sectionBottoms[index];
-				const columnId = orderedColumnIds[index];
-				if (
-					sectionTop === undefined ||
-					sectionBottom === undefined ||
-					columnId === undefined ||
-					Number.isNaN(sectionTop) ||
-					Number.isNaN(sectionBottom)
-				) {
-					break;
-				}
-				const slotTopEdge = bottomOffset - entryHeight(index, "pinBottom");
-				const overflowsBelow = sectionBottom > rootBottom;
-				if (sectionTop >= slotTopEdge && (overflowsBelow || bottomPinnedReversed.length > 0)) {
-					bottomPinnedReversed.push(columnId);
-					bottomOffset -= entryHeight(index, "pinBottom") + STAGE_RAIL_GAP_PX;
-				} else {
-					break;
-				}
-			}
-			bottomPinnedReversed.reverse();
-
-			commit({ topPinnedColumnIds, bottomPinnedColumnIds: bottomPinnedReversed });
+			commit(nextLayout);
 		};
 
 		const scheduleCompute = (): void => {
@@ -240,7 +304,17 @@ export function useStageHeaderPinLayout({
 			resizeObserver?.disconnect();
 			mutationObserver.disconnect();
 		};
-	}, [columnIdsKey, focusedColumnId, focusedTaskId, focusedCardPinState, enabled, scrollRootRef]);
+	}, [
+		columnIdsKey,
+		focusedColumnId,
+		focusedTaskId,
+		focusedCardPinState,
+		enabled,
+		scrollRootRef,
+		sectionElementAttributeName,
+		focusedCardElementSelector,
+		focusedCardCloneHeightPx,
+	]);
 
 	return layout;
 }

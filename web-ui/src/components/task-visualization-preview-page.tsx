@@ -32,6 +32,7 @@ export function TaskVisualizationPreviewPage() {
 				<span>任务可视化</span>
 			</header>
 			<TaskVisualizationArtifactsPanel
+				detachedForeground
 				workspaceId={workspaceId}
 				taskId={taskId}
 				controller={controller}

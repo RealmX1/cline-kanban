@@ -134,6 +134,11 @@ export const PROJECT_VISUAL_COLOR_CHINESE_NAMES = {
 };
 
 const ProjectVisualIdentityContext = createContext<ReadonlyMap<string, RuntimeProjectSummary>>(new Map());
+
+export function useProjectNameFromVisualIdentityContext(workspaceId: string | null | undefined): string | undefined {
+	return useContext(ProjectVisualIdentityContext).get(workspaceId ?? "")?.name;
+}
+
 export function ProjectVisualIdentityProvider({
 	projects,
 	children,

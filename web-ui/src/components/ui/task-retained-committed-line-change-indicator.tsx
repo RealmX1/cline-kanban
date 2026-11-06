@@ -73,7 +73,7 @@ export function TaskRetainedCommittedLineChangeIndicator({
 				type="button"
 				className={cn(
 					"inline-flex cursor-pointer items-baseline gap-1 rounded-sm text-inherit focus-visible:outline-2 focus-visible:outline-accent",
-					allowLineWrapping && "max-w-full flex-wrap [&>span]:whitespace-nowrap",
+					allowLineWrapping && "min-w-0 max-w-full flex-wrap [&>span]:min-w-0 [&>span]:[overflow-wrap:anywhere]",
 					showCommittedChangeBackground &&
 						"bg-status-blue/30 px-0.5 text-text-primary ring-1 ring-inset ring-status-blue/70",
 				)}

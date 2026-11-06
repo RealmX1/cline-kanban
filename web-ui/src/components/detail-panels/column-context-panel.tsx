@@ -1,6 +1,5 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-import { Trash2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
@@ -17,6 +16,8 @@ import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { DeletedTaskHistoryIcon } from "@/components/ui/deleted-task-history-icon";
+import { Tooltip } from "@/components/ui/tooltip";
 import { useFocusViewStageSectionExpansion } from "@/hooks/use-focus-view-stage-section-expansion";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
@@ -42,6 +43,7 @@ function ColumnSection({
 	selectedCardId,
 	open,
 	onToggleOpen,
+	onJumpToSection,
 	taskIdRequestedToReveal,
 	onCardClick,
 	taskSessions,
@@ -75,6 +77,7 @@ function ColumnSection({
 	 */
 	open: boolean;
 	onToggleOpen: () => void;
+	onJumpToSection: () => void;
 	/** 置顶板请求跳转的任务 id；命中本列时并入 `ensureVisibleIndex`，保证本体卡已挂载。 */
 	taskIdRequestedToReveal?: string | null;
 	onCardClick: (card: BoardCardModel) => void;
@@ -166,6 +169,7 @@ function ColumnSection({
 				icon={<ColumnIndicator columnId={column.id} />}
 				isExpanded={open}
 				onToggleExpanded={onToggleOpen}
+				onJumpToSection={onJumpToSection}
 				actions={
 					<FocusViewStageGroupHeaderActions
 						column={column}
@@ -434,6 +438,7 @@ export function ColumnContextPanel({
 						host={crossProjectRecentlyActiveTaskSwitcherHost}
 						currentProjectTaskCards={currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion}
 						defaultAgentId={defaultAgentId ?? null}
+						onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
 					/>
 				) : null}
 				<div
@@ -441,21 +446,31 @@ export function ColumnContextPanel({
 					data-testid="focus-view-current-project-stage-list"
 				>
 					{/* 创建入口与置顶板同属固定区，不随下方 stage 列表滚走。 */}
-					{onCreateTask ? (
-						<div className="shrink-0 px-2 pt-2">
-							<Button
-								icon={<span style={{ fontSize: 16, lineHeight: 1 }}>+</span>}
-								aria-label="Create task"
-								fill
-								onClick={onCreateTask}
-							>
-								<span className="inline-flex items-center gap-1.5">
-									<span>Create task</span>
+					{onCreateTask || onOpenPermanentlyDeletedTaskHistory ? (
+						<div className="flex shrink-0 items-center gap-1 px-2 pt-2">
+							{onCreateTask ? (
+								<Button
+									icon={<span className="text-base leading-none">+</span>}
+									aria-label="Create task"
+									className="min-w-0 flex-1"
+									onClick={onCreateTask}
+								>
+									Create task{" "}
 									<span aria-hidden className="text-text-secondary">
 										(c)
 									</span>
-								</span>
-							</Button>
+								</Button>
+							) : null}
+							{onOpenPermanentlyDeletedTaskHistory ? (
+								<Tooltip content="已删除 Task" side="top">
+									<Button
+										icon={<DeletedTaskHistoryIcon />}
+										aria-label="已删除 Task"
+										onClick={onOpenPermanentlyDeletedTaskHistory}
+										data-verification-anchor="permanently-deleted-task-history-focus-view-entry"
+									/>
+								</Tooltip>
+							) : null}
 						</div>
 					) : null}
 					{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
@@ -480,7 +495,9 @@ export function ColumnContextPanel({
 							<div
 								ref={scrollContainerRef}
 								className="kb-detail-task-list-scroll flex flex-col gap-1 p-2"
-								data-selected-pinned={selectedCardPinState !== "hidden" ? "true" : undefined}
+								data-selected-pinned={
+									stageHeaderPinLayout.focusedCardRailEdge !== "hidden" ? "true" : undefined
+								}
 								style={{
 									flex: "1 1 0",
 									minHeight: 0,
@@ -496,6 +513,7 @@ export function ColumnContextPanel({
 										selectedCardId={selection.card.id}
 										open={isStageSectionExpanded(column.id)}
 										onToggleOpen={() => toggleStageSectionExpandedFromInFlowHeader(column.id)}
+										onJumpToSection={() => jumpToStageSectionBelowTopRail(column.id)}
 										taskIdRequestedToReveal={taskIdRequestedToReveal}
 										onCardClick={activateCard}
 										taskSessions={taskSessions}
@@ -543,7 +561,7 @@ export function ColumnContextPanel({
 							focusedDisplayGroupId={focusedDisplayGroupId}
 							topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}
 							bottomPinnedColumnIds={stageHeaderPinLayout.bottomPinnedColumnIds}
-							focusedCardPinState={selectedCardPinState}
+							focusedCardPinState={stageHeaderPinLayout.focusedCardRailEdge}
 							isStageSectionExpanded={isStageSectionExpanded}
 							onToggleStageSectionExpandedFromStageHeaderRail={toggleStageSectionExpandedFromStageHeaderRail}
 							onJumpToStageSectionBelowTopRail={jumpToStageSectionBelowTopRail}
@@ -556,18 +574,6 @@ export function ColumnContextPanel({
 						/>
 					</div>
 				</div>
-				{onOpenPermanentlyDeletedTaskHistory ? (
-					<div className="shrink-0 border-t border-border p-2">
-						<Button
-							fill
-							icon={<Trash2 size={14} />}
-							onClick={onOpenPermanentlyDeletedTaskHistory}
-							data-verification-anchor="permanently-deleted-task-history-focus-view-entry"
-						>
-							已删除 Task
-						</Button>
-					</div>
-				) : null}
 			</div>
 		</TaskCardBodyVisualDensityProvider>
 	);

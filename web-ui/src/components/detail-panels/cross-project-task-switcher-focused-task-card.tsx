@@ -6,6 +6,7 @@ import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-v
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { Tooltip } from "@/components/ui/tooltip";
 import { resolveBoardColumnTitle } from "@/data/board-data";
 import type { RuntimeAgentId } from "@/runtime/types";
 import type { CardSelection } from "@/types";
@@ -46,13 +47,15 @@ export function CrossProjectTaskSwitcherFocusedTaskCard({
 					</span>
 				) : null}
 				{onRevealFocusedTask ? (
-					<Button
-						size="xs"
-						variant="ghost"
-						icon={<CornerUpLeft size={13} />}
-						aria-label="返回当前任务所在位置"
-						onClick={onRevealFocusedTask}
-					/>
+					<Tooltip content="返回当前任务所在位置" side="top">
+						<Button
+							size="xs"
+							variant="ghost"
+							icon={<CornerUpLeft size={13} />}
+							aria-label="返回当前任务所在位置"
+							onClick={onRevealFocusedTask}
+						/>
+					</Tooltip>
 				) : null}
 			</div>
 			<div className="min-w-0 px-1 pb-1.5" onClick={onRevealFocusedTask ? revealFromCardBody : undefined}>

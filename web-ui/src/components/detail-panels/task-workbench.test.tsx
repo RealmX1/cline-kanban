@@ -1,11 +1,20 @@
-import { act, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { act, type ReactNode, useState } from "react";
+import { createRoot as createReactRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import type {
 	FocusViewDesktopPanelArrangementPreference,
 	TaskWorkbenchModule,
 } from "@/resize/focus-view-desktop-panel-arrangement";
 import { TaskWorkbench } from "./task-workbench";
+
+function createRoot(container: HTMLElement) {
+	const root = createReactRoot(container);
+	return {
+		render: (children: ReactNode) => root.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => root.unmount(),
+	};
+}
 
 it("模块换格、隐藏再显示和布局切换保留同一输入节点及草稿", async () => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -35,8 +44,17 @@ it("模块换格、隐藏再显示和布局切换保留同一输入节点及草�
 		await act(async () => root.render(<Harness />));
 		const input = container.querySelector("input")!;
 		const select = async (label: string, value: string) => {
-			if (label === "任务专注视图布局")
-				await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="工作台布局"]')!.click());
+			if (label === "任务专注视图布局") {
+				await act(async () =>
+					container
+						.querySelector<HTMLButtonElement>('[aria-label="工作台布局"]')!
+						.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0 })),
+				);
+				const options = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+				expect(options.map((option) => option.textContent)).toEqual(["自动", "左右", "上下"]);
+				await act(async () => options[1]!.click());
+				return;
+			}
 			return act(async () => {
 				const element = document.querySelector<HTMLSelectElement>(`[aria-label="${label}"]`)!;
 				element.value = value;

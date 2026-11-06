@@ -52,8 +52,8 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 		).toBe(76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
 	});
 
-	it("omits the clone when the focused card would land below the viewport top even at the smaller rail height", () => {
-		// 偏移 −50：−50 + 76 = 26 > 0 → 跳转后焦点卡落在视口上沿之下（被 rail 遮住但判为 hidden）→ 无克隆。
+	it("焦点卡跳转后仍在视口内但被标题 rail 遮住时，也预留完整副本", () => {
+		// 偏移 −50：无副本时落在 26px，位于普通标题 rail 内，分类器仍会补出焦点副本。
 		expect(
 			computeTopRailHeightAboveStageJumpTarget({
 				...baseInput,
@@ -61,7 +61,7 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 				focusedCardViewportTop: -50,
 				focusedCardHeight: 92,
 			}),
-		).toBe(76);
+		).toBe(76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
 	});
 
 	it("takes the safe (larger) side at the exact boundary", () => {

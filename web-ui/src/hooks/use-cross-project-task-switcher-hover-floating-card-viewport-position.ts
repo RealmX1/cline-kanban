@@ -34,14 +34,24 @@ export function useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
 		const fullTaskCardContentElement = fullTaskCardContentElementRef.current;
 		const hostingScrollContainer = hostingScrollContainerRef?.current;
 		if (!rowElement || !fullTaskCardContentElement || !hostingScrollContainer) return;
+		const headerRailHost = hostingScrollContainer.parentElement;
+		const findHeaderRails = () =>
+			headerRailHost?.querySelectorAll<HTMLElement>(":scope > .kb-stage-header-rail") ?? [];
 
 		const updateFloatingCardViewportPosition = () => {
 			const scrollContainerRect = hostingScrollContainer.getBoundingClientRect();
-			const viewportTopPx = Math.max(0, scrollContainerRect.top + hostingScrollContainer.clientTop);
-			const viewportBottomPx = Math.min(
+			let viewportTopPx = Math.max(0, scrollContainerRect.top + hostingScrollContainer.clientTop);
+			let viewportBottomPx = Math.min(
 				window.innerHeight,
 				scrollContainerRect.top + hostingScrollContainer.clientTop + hostingScrollContainer.clientHeight,
 			);
+			// 直接复用已渲染标题 rail 的边界，完整副本和展开卡也不能盖住导航。
+			for (const headerRail of findHeaderRails()) {
+				const headerRailRect = headerRail.getBoundingClientRect();
+				if (headerRail.dataset.edge === "top") viewportTopPx = Math.max(viewportTopPx, headerRailRect.bottom);
+				else if (headerRail.dataset.edge === "bottom")
+					viewportBottomPx = Math.min(viewportBottomPx, headerRailRect.top);
+			}
 			const maximumHeightPx = Math.max(0, viewportBottomPx - viewportTopPx);
 			const rowTopPx = rowElement.getBoundingClientRect().top;
 			const naturalFloatingCardHeightPx =
@@ -85,11 +95,19 @@ export function useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
 		resizeObserver?.observe(rowElement);
 		resizeObserver?.observe(fullTaskCardContentElement);
 		resizeObserver?.observe(hostingScrollContainer);
+		const observeHeaderRails = () => {
+			for (const headerRail of findHeaderRails()) resizeObserver?.observe(headerRail);
+			updateFloatingCardViewportPosition();
+		};
+		observeHeaderRails();
+		const headerRailMutationObserver = new MutationObserver(observeHeaderRails);
+		if (headerRailHost) headerRailMutationObserver.observe(headerRailHost, { childList: true });
 		window.addEventListener("scroll", updateFloatingCardViewportPosition, true);
 		window.addEventListener("resize", updateFloatingCardViewportPosition);
 		return () => {
 			stopObservingRowLayoutShift();
 			resizeObserver?.disconnect();
+			headerRailMutationObserver.disconnect();
 			window.removeEventListener("scroll", updateFloatingCardViewportPosition, true);
 			window.removeEventListener("resize", updateFloatingCardViewportPosition);
 		};

@@ -1,11 +1,20 @@
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { createRoot as createReactRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import type { BoardColumn, CardSelection } from "@/types";
+
+function createRoot(container: HTMLElement) {
+	const root = createReactRoot(container);
+	return {
+		render: (children: ReactNode) => root.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => root.unmount(),
+	};
+}
 
 // BoardCard = 列表内的可拖卡（包 <Draggable>）。mock 暴露 data-card-variant="draggable" 与它收到的
 // Draggable index（data-draggable-index），供断言「展开态焦点卡以真实、连续的 index 拖拽」。
@@ -965,6 +974,8 @@ describe("ColumnContextPanel left column task list scope", () => {
 				onCardSelect={() => {}}
 				taskSessions={{}}
 				onTaskDragEnd={() => {}}
+				onCreateTask={() => {}}
+				onOpenPermanentlyDeletedTaskHistory={() => {}}
 			/>
 		);
 		return withHost ? (
@@ -977,6 +988,7 @@ describe("ColumnContextPanel left column task list scope", () => {
 					isBoardScopeAllProjectsSelected,
 					focusedTaskInProject: { workspaceId: "project-a", taskId: "task-1" },
 					onOpenTaskInProject: vi.fn(),
+					onRequestCreateTaskInBoardScope: vi.fn(),
 					onRequestPinCurrentProjectTaskToTaskPinboard: vi.fn(),
 					onUnpinCurrentProjectTaskFromTaskPinboard: vi.fn(),
 					onEditCurrentProjectTaskPinboardPinReason: vi.fn(),
@@ -1017,5 +1029,19 @@ describe("ColumnContextPanel left column task list scope", () => {
 		const stageList = container.querySelector<HTMLElement>('[data-testid="focus-view-current-project-stage-list"]');
 		expect(stageList?.className).toContain("hidden");
 		expect(stageList?.querySelector('[data-task-id="task-1"]')).not.toBeNull();
+	});
+	it.each([false, true])("已删除 Task 与创建入口同行且位于右侧，All Projects=%s", (allProjects) => {
+		renderPanel(true, allProjects);
+		const visibleHost = container.querySelector(
+			allProjects
+				? "[data-cross-project-focused-task-visibility-panel]"
+				: '[data-testid="focus-view-current-project-stage-list"]',
+		)!;
+		const createButton = visibleHost.querySelector('[aria-label="Create task"]')!;
+		const historyButton = visibleHost.querySelector('[aria-label="已删除 Task"]')!;
+		expect(createButton).not.toBeNull();
+		expect(historyButton).not.toBeNull();
+		expect(createButton.parentElement?.contains(historyButton)).toBe(true);
+		expect(createButton.compareDocumentPosition(historyButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 	});
 });

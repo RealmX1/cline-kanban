@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "../src/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "../src/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "../src/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { PrimaryActionButtonWithAdditionalActionMenu } from "../src/components/primary-action-button-with-additional-action-menu";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { createInitialBoardData } from "../src/data/board-data";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "../src/hooks/use-cross-project-recently-active-task-switcher-sections";
@@ -40,6 +41,7 @@ const projects: RuntimeProjectSummary[] = [{
 function Harness() {
 	const [fullCardTitleSuffix, setFullCardTitleSuffix] = useState("");
 	const [actionResult, setActionResult] = useState("");
+	const [disabledMenuOpen, setDisabledMenuOpen] = useState(false);
 	const sectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({ projects, notificationLogByWorkspaceId: {}, currentProjectId: "project-a" });
 	const board = useMemo(() => {
 		const nextBoard = createInitialBoardData();
@@ -70,6 +72,7 @@ function Harness() {
 			<div className="flex shrink-0 gap-4">
 				<button type="button" onClick={() => setFullCardTitleSuffix(" 需要完整展示并可滚动的长任务标题".repeat(200))}>模拟卡片内容增长</button>
 				<button type="button" onClick={() => setFullCardTitleSuffix("")}>恢复卡片内容</button>
+				<PrimaryActionButtonWithAdditionalActionMenu open={disabledMenuOpen} onOpenChange={setDisabledMenuOpen} icon={null} primaryLabel="禁用快捷操作" primaryAccessibleLabel="禁用快捷操作" onPrimaryAction={() => {}} additionalAction={{ label: "禁用附加操作", onSelect: () => {} }} disabled />
 				<output aria-label="动作结果">{actionResult}</output>
 			</div>
 			<div data-isolated-hover-host="" className={`flex min-h-0 flex-1 flex-col ${showsHomeColumns ? "w-full" : "w-[360px]"}`}>
