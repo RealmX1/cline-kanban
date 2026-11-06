@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { compress } from "zstd-stream";
 import {
 	configureAvailableAgentSessionIndexLimitsForTests,
 	getAvailableAgentSessionIndexCacheSizeForTests,
@@ -53,6 +54,79 @@ afterEach(() => {
 });
 
 describe("listAvailableAgentSessions", () => {
+	it("普通、压缩与压缩父段/普通子段的索引预览一致，缓存仍按解压字节标记覆盖不足", async () => {
+		const root = createTemporaryRoot();
+		const gitFixture = createIsolatedGitTestWorkspaceFixture();
+		const workspacePath = gitFixture.createNonBareRepository({
+			repositoryDirectoryName: "compressed-codex-session-index",
+		}).repositoryPath;
+		const sessionId = "21111111-2222-7333-8444-555555555555";
+		const segmentId = "21111111-2222-7333-8444-555555555556";
+		const sessions = join(root, ".codex", "sessions");
+		mkdirSync(sessions, { recursive: true });
+		const path = join(sessions, `rollout-old-${sessionId}.jsonl`);
+		const metadata = { type: "session_meta", payload: { id: sessionId, source: "cli", cwd: workspacePath } };
+		const records = [
+			metadata,
+			{ type: "response_item", payload: { type: "function_call_output", output: "说明".repeat(10000) } },
+			{
+				type: "event_msg",
+				timestamp: "2026-10-25T10:00:00Z",
+				payload: { type: "user_message", message: "压缩索引的真实问题" },
+			},
+			{ type: "turn_context", payload: { model: "synthetic-model" } },
+			{
+				type: "event_msg",
+				timestamp: "2026-10-25T10:00:01Z",
+				payload: { type: "agent_message", message: "压缩索引的真实回答" },
+			},
+		];
+		const content = `${records.map((record) => JSON.stringify(record)).join("\n")}\n`;
+		writeFileSync(path, content);
+		configureAvailableAgentSessionIndexLimitsForTests({
+			maximumTranscriptBytesPerFile: 1024,
+			sessionScanDeadlineMilliseconds: 10_000,
+		});
+		const request = {
+			agentId: "codex" as const,
+			searchScope: "all_local_sessions" as const,
+			query: "",
+			pageCursor: 0,
+			pageSize: 50,
+			forceRefresh: true,
+		};
+		const ordinary = await listAvailableAgentSessions(workspacePath, request);
+		expect(ordinary.sessions).toHaveLength(1);
+		writeFileSync(`${path}.zst`, await compress(Buffer.from(content)));
+		rmSync(path);
+		const compressed = await listAvailableAgentSessions(workspacePath, request);
+		expect(compressed).toEqual(ordinary);
+		const repeated = await listAvailableAgentSessions(workspacePath, { ...request, forceRefresh: false });
+		expect(repeated).toEqual(compressed);
+		const parent = `${records
+			.slice(0, 2)
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`;
+		writeFileSync(`${path}.zst`, await compress(Buffer.from(parent)));
+		writeJsonLines(join(sessions, `rollout-new-${sessionId}_${segmentId}.jsonl`), [
+			{
+				...metadata,
+				payload: {
+					...metadata.payload,
+					history_mode: "paginated",
+					history_base: {
+						thread_id: sessionId,
+						end_byte_offset: Buffer.byteLength(parent),
+						end_ordinal_exclusive: 2,
+					},
+				},
+			},
+			...records.slice(2),
+		]);
+		const mixed = await listAvailableAgentSessions(workspacePath, request);
+		expect(mixed.sessions).toEqual(ordinary.sessions);
+		expect(mixed.scanWarnings.join("\n")).toContain("bounded");
+	});
 	it("复制未提交时只列原副本，绑定提交后只列专用目录，回退后恢复原副本", async () => {
 		const root = createTemporaryRoot();
 		const sourceHome = join(root, ".codex");

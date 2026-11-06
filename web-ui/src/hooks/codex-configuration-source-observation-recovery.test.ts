@@ -6,7 +6,7 @@ import {
 import type { CodexConfigurationBatchActionResult, CodexConfigurationSyncState } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
-const queries = vi.hoisted(() => ({ fetch: vi.fn(), batch: vi.fn() }));
+const queries = vi.hoisted(() => ({ fetch: vi.fn(), batch: vi.fn(), source: vi.fn(), receipt: vi.fn() }));
 
 function createDeferredResponse<T>() {
 	let resolve: (value: T) => void = () => {};
@@ -18,7 +18,9 @@ function createDeferredResponse<T>() {
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			getCodexConfigurationSyncState: { query: queries.fetch },
+			getCodexConfigurationSyncActiveState: { query: queries.fetch },
+			getCodexConfigurationSourceObservation: { query: queries.source },
+			getCodexConfigurationMutationReceipt: { query: queries.receipt },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 		},
 	}),
@@ -67,6 +69,8 @@ beforeEach(() => {
 	};
 	queries.fetch.mockReset().mockImplementation(async () => state);
 	queries.batch.mockReset();
+	queries.source.mockReset().mockResolvedValue(null);
+	queries.receipt.mockReset().mockResolvedValue(null);
 	startController().acceptState(state);
 });
 afterEach(() => {
@@ -205,7 +209,11 @@ describe("来源回执的有界核验与持久恢复", () => {
 		startController();
 		await vi.runAllTimersAsync();
 		expect(callOrder[0]).toBe("read");
-		expect(queries.batch.mock.calls[1]![0]).toEqual({ action: frozen.action, items: [frozen.item] });
+		expect(queries.batch.mock.calls[1]![0]).toEqual({
+			action: frozen.action,
+			items: [frozen.item],
+			stateResponseScope: "active",
+		});
 		expect(controller.getSnapshot().sourceOperations).toEqual({});
 	});
 	it("不同 workspace 和未指定 workspace 的持久身份互不混用", async () => {
@@ -226,4 +234,51 @@ describe("来源回执的有界核验与持久恢复", () => {
 		expect(queries.batch).not.toHaveBeenCalled();
 		expect(controller.getSnapshot().sourceActionMessages.source).toContain("尚未发送");
 	});
+});
+
+it("活跃列表缺项和回执未知时保留持久操作，不当作已被替代", async () => {
+	queries.batch.mockRejectedValue(new Error("隔离丢失响应"));
+	queries.fetch.mockResolvedValue({ ...state, stateResponseScope: "active", sourceObservations: [] });
+	const pending = controller.batch("confirm_source", [item]);
+	await vi.runAllTimersAsync();
+	await pending;
+	expect(controller.getSnapshot().sourceOperations.source?.phase).toBe("unknown");
+	expect(JSON.parse(localStorage.getItem(persistedKey)!)).toHaveLength(1);
+	expect(queries.receipt).toHaveBeenCalled();
+	expect(queries.source).toHaveBeenCalled();
+	expect(queries.batch).toHaveBeenCalledTimes(1);
+});
+it("历史稍后条目不在活跃列表时仍携带原版本提交", async () => {
+	const observation = handledState("deferred").sourceObservations[0]!;
+	controller.acceptState({ ...state, stateResponseScope: "active", sourceObservations: [] });
+	queries.batch.mockResolvedValue({
+		state: { ...state, revision: 3, stateResponseScope: "active", sourceObservations: [] },
+		results: [{ changeId: "source", status: "applied", message: "已标记已读" }],
+	});
+	await controller.batch("confirm_source", [{ ...item, expectedVersion: observation.version, observation }]);
+	expect(queries.batch).toHaveBeenCalledTimes(1);
+	expect(queries.batch.mock.calls[0]?.[0].items[0]).toMatchObject({ changeId: "source", expectedVersion: 2 });
+	expect(controller.getSnapshot().sourceOperations).toEqual({});
+});
+it("同一存储按提交代数淘汰迟到响应，数据库外同代数展示仍可更新", () => {
+	controller.acceptState({ ...state, storageIdentity: "same", storageGeneration: 10, revision: 2 });
+	controller.acceptState({ ...state, storageIdentity: "same", storageGeneration: 9, revision: 100 });
+	expect(controller.getSnapshot().state?.revision).toBe(2);
+	controller.acceptState({
+		...state,
+		storageIdentity: "same",
+		storageGeneration: 10,
+		revision: 2,
+		observationProblem: "展示上下文已更新",
+	});
+	expect(controller.getSnapshot().state?.observationProblem).toBe("展示上下文已更新");
+});
+
+it("换库先建立新的请求代际，旧存储迟到响应不能覆盖已绑定的新存储", () => {
+	controller.acceptState({ ...state, storageIdentity: "original", storageGeneration: 100 });
+	expect(controller.acceptState({ ...state, storageIdentity: "replacement", storageGeneration: 1 })).toBeNull();
+	controller.resetForRuntimeReconnect();
+	controller.acceptState({ ...state, storageIdentity: "replacement", storageGeneration: 1 });
+	expect(controller.acceptState({ ...state, storageIdentity: "original", storageGeneration: 101 })).toBeNull();
+	expect(controller.getSnapshot().state?.storageIdentity).toBe("replacement");
 });

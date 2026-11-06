@@ -16,6 +16,7 @@ import {
 } from "@/hooks/codex-configuration-feedback-suggestion-groups";
 import { useCodexConfigurationChangeDetails } from "@/hooks/use-codex-configuration-change-details";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
+import { useCodexConfigurationSyncHistory } from "@/hooks/use-codex-configuration-sync-history";
 import type { CodexConfigurationSyncNoticePresentation } from "@/hooks/use-codex-configuration-sync-notice";
 import type {
 	CodexConfigurationChange,
@@ -278,7 +279,7 @@ function CodexConfigurationChangeActions({
 				)}
 			{change.targets.length > 0 && (
 				<ul className="mt-3 mb-0 pl-4 space-y-1 text-xs text-text-secondary" aria-label="会话同步进度">
-					{change.targets.map((target) => (
+					{(details.propagationTargets ?? change.targets).map((target) => (
 						<li key={target.writerId} className="break-words">
 							<span className="text-text-primary">
 								{target.conversationSessionId}：{targetStatusLabels[target.status]}
@@ -431,6 +432,7 @@ function CodexConfigurationSourceObservationEntry({
 										entryKind: "source_observation",
 										changeId: observation.observationId,
 										expectedVersion: observation.version,
+										observation,
 									},
 								]);
 							}}
@@ -502,6 +504,26 @@ function CodexConfigurationReviewList({
 	const [filter, setFilter] = useState<ReviewFilter>("all");
 	const [search, setSearch] = useState("");
 	const [selected, setSelected] = useState(new Set<string>());
+	const [historyCategory, setHistoryCategory] = useState<"all" | "settings" | "sources">("all");
+	const usesActiveResponse = controller.state?.stateResponseScope === "active";
+	const pagedHistory = useCodexConfigurationSyncHistory(
+		controller.workspaceId,
+		!remindersOnly && usesActiveResponse && filter === "history",
+		search,
+		historyCategory,
+		controller.state,
+	);
+	const historyController = {
+		...controller,
+		state: controller.state
+			? {
+					...controller.state,
+					changes: [...controller.state.changes, ...pagedHistory.changes],
+					sourceObservations: [...controller.state.sourceObservations, ...pagedHistory.sourceObservations],
+				}
+			: null,
+	};
+
 	const matching = (text: string) => text.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase());
 	const changes = (controller.state?.changes ?? []).filter(
 		(change) =>
@@ -517,7 +539,18 @@ function CodexConfigurationReviewList({
 			(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
 	);
 	const proposalGroups = groupCodexConfigurationFeedbackSuggestions(proposals);
-	const history = changes.filter(
+	const propagationChanges = usesActiveResponse
+		? changes.filter(
+				(change) =>
+					change.approvalStatus !== "pending" &&
+					change.targets.some((target) =>
+						["accepted", "pending_reload", "pending_next_start", "conflict"].includes(target.status),
+					),
+			)
+		: [];
+	const history = (
+		usesActiveResponse ? pagedHistory.changes.filter((change) => change.recordKind !== "source_observation") : changes
+	).filter(
 		(change) =>
 			change.approvalStatus !== "pending" ||
 			(change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now()),
@@ -538,8 +571,10 @@ function CodexConfigurationReviewList({
 	);
 	const processedObservations = remindersOnly
 		? []
-		: (controller.state?.sourceObservations ?? []).filter(
-				(observation) => observation.acknowledgedAt !== null && matching(observationSearchText(observation)),
+		: (usesActiveResponse ? pagedHistory.sourceObservations : (controller.state?.sourceObservations ?? [])).filter(
+				(observation) =>
+					observation.acknowledgedAt !== null &&
+					(usesActiveResponse || matching(observationSearchText(observation))),
 			);
 	const selectable = filter === "all" || filter === "settings" ? proposalGroups : [];
 	const selectedProposalGroups = selectable.filter((group) => selected.has(selectionIdentity(group)));
@@ -707,6 +742,18 @@ function CodexConfigurationReviewList({
 					</div>
 				</div>
 			)}
+			{filter === "all" && propagationChanges.length > 0 && (
+				<div role="group" aria-label="会话采用进度">
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
+						会话采用进度 · {propagationChanges.length}
+					</h3>
+					<div className="divide-y divide-border">
+						{propagationChanges.map((change) => (
+							<CodexConfigurationChangeActions key={change.changeId} change={change} controller={controller} />
+						))}
+					</div>
+				</div>
+			)}
 			{(filter === "all" || filter === "sources") && (
 				<div role="group" aria-label="来源更新">
 					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">来源更新 · {observations.length}</h3>
@@ -722,25 +769,89 @@ function CodexConfigurationReviewList({
 					</div>
 				</div>
 			)}
-			{(filter === "all" || filter === "history") && history.length + processedObservations.length > 0 && (
-				<div role="group" aria-label="历史记录">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
-						历史记录 · {history.length + processedObservations.length}
-					</h3>
-					<div className="divide-y divide-border">
-						{history.map((change) => (
-							<CodexConfigurationChangeActions key={change.changeId} change={change} controller={controller} />
-						))}
-						{processedObservations.map((observation) => (
-							<CodexConfigurationSourceObservationEntry
-								key={observation.observationId}
-								observation={observation}
-								controller={controller}
-							/>
-						))}
+			{(filter === "history" || (!usesActiveResponse && filter === "all")) &&
+				(usesActiveResponse || history.length + processedObservations.length > 0) && (
+					<div role="group" aria-label="历史记录">
+						<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
+							历史记录 ·{" "}
+							{usesActiveResponse ? pagedHistory.totalCount : history.length + processedObservations.length}
+						</h3>
+						{usesActiveResponse && (
+							<div className="flex flex-wrap items-center gap-2 py-2">
+								<select
+									aria-label="历史记录类别"
+									value={historyCategory}
+									onChange={(event) =>
+										setHistoryCategory(event.target.value as "all" | "settings" | "sources")
+									}
+									className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary"
+								>
+									<option value="all">全部历史</option>
+									<option value="settings">设置历史</option>
+									<option value="sources">来源历史</option>
+								</select>
+								{pagedHistory.hasNewHistory && (
+									<span role="status" className="text-xs text-text-secondary">
+										有新的历史记录
+									</span>
+								)}
+								<Button
+									size="sm"
+									variant="ghost"
+									disabled={pagedHistory.loading}
+									onClick={() => void pagedHistory.refresh()}
+								>
+									刷新历史
+								</Button>
+							</div>
+						)}
+						<div className="divide-y divide-border">
+							{history.map((change) => (
+								<CodexConfigurationChangeActions
+									key={change.changeId}
+									change={change}
+									controller={historyController}
+								/>
+							))}
+							{processedObservations.map((observation) => (
+								<CodexConfigurationSourceObservationEntry
+									key={observation.observationId}
+									observation={observation}
+									controller={historyController}
+								/>
+							))}
+						</div>
+						{usesActiveResponse && (
+							<div className="py-2">
+								{pagedHistory.loading && (
+									<p role="status" className="text-xs text-text-secondary">
+										正在读取历史记录…
+									</p>
+								)}
+								{pagedHistory.error && (
+									<p role="alert" className="text-xs text-status-red">
+										{pagedHistory.error}
+									</p>
+								)}
+								{!pagedHistory.loading &&
+									!pagedHistory.error &&
+									history.length + processedObservations.length === 0 && (
+										<p className="text-xs text-text-secondary">没有匹配的历史记录。</p>
+									)}
+								{pagedHistory.hasMore && (
+									<Button
+										size="sm"
+										variant="ghost"
+										disabled={pagedHistory.loading}
+										onClick={() => void pagedHistory.loadMore()}
+									>
+										加载更多历史
+									</Button>
+								)}
+							</div>
+						)}
 					</div>
-				</div>
-			)}
+				)}
 			{controller.batchResults
 				.filter((result) => result.status !== "applied" && result.status !== "replayed")
 				.map((result) => (

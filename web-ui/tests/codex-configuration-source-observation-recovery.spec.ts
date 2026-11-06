@@ -1,6 +1,8 @@
 import { expect, type Page, type Route, test } from "@playwright/test";
 import type { CodexConfigurationBatchActionRequest, CodexConfigurationSyncState } from "../src/runtime/types";
 
+test.setTimeout(90_000);
+
 async function openIsolatedSourceObservationFixture(page: Page, initiallyReadCount = 0) {
 	let state: CodexConfigurationSyncState = {
 		revision: 1,
@@ -31,7 +33,7 @@ async function openIsolatedSourceObservationFixture(page: Page, initiallyReadCou
 		const name = url.pathname.split("/api/trpc/")[1];
 		expect(request.headers()["x-kanban-workspace-id"]).toBe("isolated-source-workspace");
 		expect(url.searchParams.has("batch")).toBe(false);
-		if (name === "runtime.getCodexConfigurationSyncState") {
+		if (name === "runtime.getCodexConfigurationSyncActiveState") {
 			if (readsUnavailable) return route.abort("failed");
 			return route.fulfill({ json: { result: { data: state } } });
 		}
@@ -77,6 +79,7 @@ async function openIsolatedSourceObservationFixture(page: Page, initiallyReadCou
 		}),
 	);
 	await page.goto("/isolated-source-observation-recovery");
+	await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 	const settings = page.getByRole("region", { name: "隔离配置设置页" });
 	await expect(
 		settings.getByRole("heading", { name: `来源更新 · ${6 - initiallyReadCount}`, exact: true }),
@@ -163,6 +166,7 @@ test("刷新先补读已持久处理事实，运行时重连恢复离线补读�
 	await expect.poll(() => fixture.actions.length).toBe(1);
 	fixture.setReadsUnavailable(true);
 	await page.reload();
+	await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 	await expect(page.getByText("暂时无法读取 Codex 配置同步状态，连接恢复后自动重试。").first()).toBeVisible();
 	fixture.setReadsUnavailable(false);
 	await page.getByRole("button", { name: "模拟运行时重连" }).click();

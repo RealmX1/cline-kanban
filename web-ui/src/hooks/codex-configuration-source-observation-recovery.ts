@@ -1,6 +1,9 @@
 import {
 	batchCodexConfigurationAction,
+	fetchCodexConfigurationMutationReceipt,
+	fetchCodexConfigurationSourceObservation,
 	fetchCodexConfigurationSyncState,
+	notifyCodexConfigurationSyncUpdated,
 } from "@/runtime/codex-configuration-sync-query";
 import type {
 	CodexConfigurationBatchActionRequest,
@@ -38,9 +41,10 @@ export interface CodexConfigurationSourceObservationRecoveryController {
 	): CodexConfigurationSyncState | null;
 	batch(
 		action: SourceAction,
-		items: Array<Omit<SourceActionItem, "idempotencyKey">>,
+		items: Array<Omit<SourceActionItem, "idempotencyKey"> & { observation?: CodexConfigurationSourceObservation }>,
 	): Promise<CodexConfigurationBatchActionResult["results"]>;
 	resumeUnconfirmedActions(observationId?: string): void;
+	resetForRuntimeReconnect(): void;
 }
 
 // 取消底层 HTTP 之外也结束逻辑等待，避免 transport 忽略取消时 Promise 一直挂起。
@@ -164,12 +168,21 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 			sourceActionMessages: { ...snapshot.sourceActionMessages, [operation.item.changeId]: message },
 		});
 	};
+	const individuallyReadObservations = new Map<string, CodexConfigurationSourceObservation>();
 	const classify = (operation: PersistedSourceAction) => {
 		if (!snapshot.state) return "unknown";
 		const observation = snapshot.state.sourceObservations.find(
 			(entry) => entry.observationId === operation.item.changeId,
 		);
-		if (!observation || observationFingerprint(observation) !== operation.observationFingerprint) return "superseded";
+		if (!observation) {
+			const individuallyRead = individuallyReadObservations.get(operation.item.changeId);
+			if (!individuallyRead) return snapshot.state.stateResponseScope === "active" ? "unknown" : "superseded";
+			return classifyObservation(individuallyRead, operation);
+		}
+		return classifyObservation(observation, operation);
+	};
+	const classifyObservation = (observation: CodexConfigurationSourceObservation, operation: PersistedSourceAction) => {
+		if (observationFingerprint(observation) !== operation.observationFingerprint) return "superseded";
 		if (observation.version < operation.item.expectedVersion) return "unknown";
 		if (observation.version === operation.item.expectedVersion) return "unchanged";
 		return observation.acknowledgedAt !== null &&
@@ -178,7 +191,22 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 			: "superseded";
 	};
 	const acceptState = (state: CodexConfigurationSyncState, receivedSourceActionIdempotencyKey?: string) => {
-		if (lifecycle.signal.aborted || (snapshot.state && state.revision < snapshot.state.revision))
+		if (
+			snapshot.state?.storageIdentity &&
+			state.storageIdentity &&
+			state.storageIdentity !== snapshot.state.storageIdentity
+		) {
+			notifyCodexConfigurationSyncUpdated("runtime_reconnected");
+			return null;
+		}
+		if (
+			lifecycle.signal.aborted ||
+			(snapshot.state &&
+				state.storageIdentity === snapshot.state.storageIdentity &&
+				(state.storageGeneration !== undefined && snapshot.state.storageGeneration !== undefined
+					? state.storageGeneration < snapshot.state.storageGeneration
+					: state.revision < snapshot.state.revision))
+		)
 			return snapshot.state;
 		emit({ state });
 		for (const operation of Object.values(snapshot.sourceOperations)) {
@@ -215,7 +243,7 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 		);
 		if (signal.aborted) return [];
 		const receipt = result.results.find((entry) => entry.changeId === operation.item.changeId);
-		acceptState(result.state, receipt ? operation.item.idempotencyKey : undefined);
+		if (!acceptState(result.state, receipt ? operation.item.idempotencyKey : undefined)) return [];
 		if (!receipt) throw new Error("来源处理回执缺失。");
 		finish(operation, receipt.message, signal);
 		return result.results;
@@ -255,8 +283,50 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 						signal,
 					);
 					if (signal.aborted) return [];
-					acceptState(latest);
+					individuallyReadObservations.delete(operation.item.changeId);
+					if (!acceptState(latest)) return [];
 					if (!isCurrent(operation, signal)) return [];
+					if (
+						latest.stateResponseScope === "active" &&
+						!latest.sourceObservations.some((entry) => entry.observationId === operation.item.changeId)
+					) {
+						const receipt = await runCodexConfigurationSyncRequestWithinBudget(
+							(requestSignal) =>
+								fetchCodexConfigurationMutationReceipt(
+									workspaceId,
+									{
+										idempotencyKey: operation.item.idempotencyKey,
+										expectedAction: operation.action,
+										expectedEntry: operation.item,
+									},
+									requestSignal,
+								),
+							signal,
+						);
+						if (receipt?.changeId === operation.item.changeId) {
+							finish(operation, "已通过幂等回执核验处理状态。", signal);
+							return [];
+						}
+						const observation = await runCodexConfigurationSyncRequestWithinBudget(
+							(requestSignal) =>
+								fetchCodexConfigurationSourceObservation(workspaceId, operation.item.changeId, requestSignal),
+							signal,
+						);
+						if (observation) {
+							individuallyReadObservations.set(observation.observationId, observation);
+							const status = classify(operation);
+							if (status === "observed" || status === "superseded") {
+								finish(
+									operation,
+									status === "observed"
+										? "已通过补读核验处理状态。"
+										: "来源或处理状态已有更新，已保留最新事实。",
+									signal,
+								);
+								return [];
+							}
+						}
+					}
 					if (classify(operation) === "unchanged" && operation.automaticResendCount === 0) {
 						operation = { ...operation, automaticResendCount: 1 };
 						if (!persist(operation)) break;
@@ -310,13 +380,18 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 			document.removeEventListener("visibilitychange", onVisible);
 		};
 	};
-	const batch = async (action: SourceAction, items: Array<Omit<SourceActionItem, "idempotencyKey">>) => {
+	const batch = async (
+		action: SourceAction,
+		items: Array<Omit<SourceActionItem, "idempotencyKey"> & { observation?: CodexConfigurationSourceObservation }>,
+	) => {
 		const results = await Promise.all(
-			items.map((item) => {
+			items.map(({ observation: suppliedObservation, ...item }) => {
 				if (snapshot.sourceOperations[item.changeId]) return [];
-				const observation = snapshot.state?.sourceObservations.find(
-					(entry) => entry.observationId === item.changeId && entry.version === item.expectedVersion,
-				);
+				const observation =
+					suppliedObservation ??
+					snapshot.state?.sourceObservations.find(
+						(entry) => entry.observationId === item.changeId && entry.version === item.expectedVersion,
+					);
 				if (!observation) return [];
 				const operation: SourceObservationPendingAction = {
 					workspaceId,
@@ -344,5 +419,26 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 		);
 		return results.flat();
 	};
-	return { subscribe, getSnapshot: () => snapshot, acceptState, batch, resumeUnconfirmedActions };
+	return {
+		subscribe,
+		getSnapshot: () => snapshot,
+		acceptState,
+		batch,
+		resumeUnconfirmedActions,
+		resetForRuntimeReconnect: () => {
+			lifecycle.abort(new Error("连接代际已变化，原操作身份保留待补证。"));
+			lifecycle = new AbortController();
+			runningOperations.clear();
+			individuallyReadObservations.clear();
+			emit({
+				state: null,
+				sourceOperations: Object.fromEntries(
+					Object.entries(snapshot.sourceOperations).map(([key, operation]) => [
+						key,
+						{ ...operation, phase: "unknown" as const },
+					]),
+				),
+			});
+		},
+	};
 }

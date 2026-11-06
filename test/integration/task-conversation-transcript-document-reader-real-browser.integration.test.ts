@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { compress, decompress } from "zstd-stream";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType } from "../../web-ui/node_modules/playwright-core";
@@ -29,7 +30,7 @@ const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1")(
-	"桌面和手机经隔离 runtime 读取真实 JSONL，全屏与断开的终端均不影响主会话和侧会话阅读",
+	"桌面和手机经隔离 runtime 读取普通与压缩历史，格式转换保留分页、阅读位置且不启动 Agent",
 	async (context) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const checkout = resolve(import.meta.dirname, "../..");
@@ -163,6 +164,10 @@ it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1
 						.map((record) => JSON.stringify(record))
 						.join("\n")}\n`,
 				);
+				if (sessionId !== taskId) {
+					writeFileSync(`${transcriptPath}.zst`, await compress(readFileSync(transcriptPath)));
+					unlinkSync(transcriptPath);
+				}
 				const summary: RuntimeTaskSessionSummary = {
 					taskId: sessionId,
 					agentId: "codex",
@@ -278,10 +283,23 @@ it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1
 				).toBe("false");
 				await reader.getByRole("button", { name: "exec_command", exact: true }).click();
 				expect(await reader.textContent()).toContain("工具完整正文");
-				appendFileSync(
-					summary.agentNativeConversationSessionIdentity.transcriptPath,
-					`${JSON.stringify(message("追加后刷新才出现"))}\n`,
-				);
+				const nativePath = summary.agentNativeConversationSessionIdentity.transcriptPath;
+				if (index === 0) {
+					writeFileSync(`${nativePath}.zst`, await compress(readFileSync(nativePath)));
+					unlinkSync(nativePath);
+				}
+				const beforeConversionScrollTop = await reader
+					.locator("[data-transcript-document-scroll-container]")
+					.evaluate((element) => element.scrollTop);
+				writeFileSync(`${nativePath}.replacement`, await decompress(readFileSync(`${nativePath}.zst`)));
+				renameSync(`${nativePath}.replacement`, nativePath);
+				unlinkSync(`${nativePath}.zst`);
+				expect(
+					await reader
+						.locator("[data-transcript-document-scroll-container]")
+						.evaluate((element) => element.scrollTop),
+				).toBe(beforeConversionScrollTop);
+				appendFileSync(nativePath, `${JSON.stringify(message("追加后刷新才出现"))}\n`);
 				const scroller = reader.locator("[data-transcript-document-scroll-container]");
 				await scroller.evaluate((element) => {
 					element.scrollTop = 200;

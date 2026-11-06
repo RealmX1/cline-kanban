@@ -12,7 +12,7 @@ vi.mock("../../../src/state/workspace-state", () => ({
 	listWorkspaceIndexEntries: async () => [],
 }));
 vi.mock("../../../src/codex-configuration-sync/codex-configuration-sync-store", () => ({
-	readCodexConfigurationSyncStore: lookups.store,
+	readCodexConfigurationSyncActiveStore: lookups.store,
 }));
 vi.mock(
 	"../../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation",
