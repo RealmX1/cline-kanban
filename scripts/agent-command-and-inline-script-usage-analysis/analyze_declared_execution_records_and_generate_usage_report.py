@@ -11,10 +11,12 @@ import shlex
 import shutil
 import sys
 import tempfile
+import traceback
 
-from shell_command_and_inline_script_parsing import UnresolvedShellExpansion, describe_inline_script_exclusion_reason, extract_inline_scripts, identify_cli
-from goal_evidence_and_safe_usage_summary import render_safe_usage_html, safe_goal_usage_summary
-from controlled_goal_recipe_comparisons import compare_fixed_goal_recipes, controlled_comparison_environment
+from execution_record_parsing.extract_cli_routes_and_inline_script_bodies import UnresolvedShellExpansion, describe_inline_script_exclusion_reason, extract_inline_scripts, identify_cli
+from candidate_goal_usage_reporting.classify_candidate_goals_and_render_privacy_safe_usage_report import agent_readable_usage_summary, render_safe_usage_html, safe_goal_usage_summary
+from synthetic_recipe_validation.compare_fixed_recipe_results_and_preparation_costs import compare_fixed_goal_recipes, controlled_comparison_environment
+from reviewed_execution_result_correlation.correlate_native_executions_with_reviewed_analysis_materials import summarize_reviewed_execution_results
 
 
 INPUT_SCHEMA_VERSION = 'agent-command-usage-analysis-input/v1'
@@ -62,7 +64,7 @@ def require_object(value, allowed_keys, required_keys=()):
 
 def validate_manifest(manifest):
     require_object(manifest, ['schemaVersion', 'analysisWindow', 'sourceInputs', 'excludedExecutionSelectors',
-                              'baselineReference', 'goalSampleSelection'], ['schemaVersion', 'analysisWindow', 'sourceInputs'])
+                              'baselineReference', 'goalSampleSelection', 'executionResultReviews'], ['schemaVersion', 'analysisWindow', 'sourceInputs'])
     if manifest['schemaVersion'] != INPUT_SCHEMA_VERSION:
         raise InvalidAnalysisInput('unsupported_input_version')
     window = manifest['analysisWindow']
@@ -102,6 +104,11 @@ def validate_manifest(manifest):
                 require_object(reference, ['path', 'sha256'], ['path', 'sha256'])
                 if not isinstance(reference['path'], str) or not isinstance(reference['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', reference['sha256']):
                     raise InvalidAnalysisInput('invalid_baseline_reference')
+    if 'executionResultReviews' in manifest:
+        reference = manifest['executionResultReviews']
+        require_object(reference, ['path', 'sha256'], ['path', 'sha256'])
+        if not isinstance(reference['path'], str) or not reference['path'] or not isinstance(reference['sha256'], str) or not re.fullmatch('[0-9a-f]{64}', reference['sha256']):
+            raise InvalidAnalysisInput('invalid_execution_result_review_reference')
 
 
 def completed_artifact_manifest(directory):
@@ -124,6 +131,9 @@ def completed_artifact_manifest(directory):
             path = directory / name
             if Path(name).name != name or path.is_symlink() or material_digest(path.read_bytes()) != digest:
                 return None
+        if 'executionResultReviews' in read_json(directory / 'private-frozen-analysis-input-manifest.json') and not {
+                'private-frozen-execution-result-reviews.json', 'private-reviewed-execution-result-bindings.json'} <= set(manifest['artifactSha256']):
+            return None
         # 仅在归属及全部内容摘要通过后修复权限；缓存与冻结恢复共用此入口。
         if directory.stat().st_mode & 0o7777 != 0o700:
             directory.chmod(0o700)
@@ -168,9 +178,47 @@ def normalize_execution(row, source_location):
         source_location = {**source_location, 'declaredPriorSourceLocator': prior_locator}
     if isinstance(row.get('inlineCode'), str):
         source_location = {**source_location, 'priorInlineScriptCodeCharacterCount': len(row['inlineCode'])}
-    return {'executionId': identity, 'at': row['at'], 'cwd': row.get('cwd', ''), 'command': row['command'],
-            'exitCode': row.get('exitCode'), 'output': row.get('output') if isinstance(row.get('output'), str) else None,
-            'sources': [source_location]}
+    normalized_execution = {'executionId': identity, 'at': row['at'], 'cwd': row.get('cwd', ''), 'command': row['command'],
+                            'exitCode': row.get('exitCode'), 'output': row.get('output') if isinstance(row.get('output'), str) else None,
+                            'sources': [source_location]}
+    # 在逐记录错误边界拒绝不可编码字符串，避免后续摘要或冻结中断整份分析。
+    canonical_json(normalized_execution).encode('utf-8')
+    return normalized_execution
+
+
+def read_execution_result_review_source(reference, manifest_directory, output_directory):
+    if reference is None:
+        return None
+    result = {'specification': reference, 'materialSha256': None, 'contentText': None,
+              'unavailableReason': None, 'primarySourceFailure': None, 'primaryObservedSha256': None,
+              'recoveredFromObservationId': None}
+    try:
+        content = (manifest_directory / reference['path']).read_bytes()
+        result['primaryObservedSha256'] = material_digest(content)
+        if result['primaryObservedSha256'] != reference['sha256']:
+            result['unavailableReason'] = 'declared_review_material_digest_mismatch'
+        else:
+            return {**result, 'materialSha256': reference['sha256'], 'contentText': content.decode('utf-8')}
+    except FileNotFoundError:
+        result['unavailableReason'] = 'declared_review_source_missing'
+    except (OSError, UnicodeError):
+        result['unavailableReason'] = 'declared_review_source_unreadable'
+    for directory in sorted(output_directory.glob('observation-*')):
+        completed = completed_artifact_manifest(directory)
+        name = 'private-frozen-execution-result-reviews.json'
+        if completed is None or name not in completed['artifactSha256']:
+            continue
+        try:
+            frozen = read_json(directory / name)
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(frozen, dict):
+            continue
+        text = frozen.get('contentText')
+        if isinstance(text, str) and frozen.get('materialSha256') == reference['sha256'] and material_digest(text.encode('utf-8')) == reference['sha256']:
+            return {**result, 'materialSha256': reference['sha256'], 'contentText': text, 'unavailableReason': None,
+                    'primarySourceFailure': result['unavailableReason'], 'recoveredFromObservationId': completed['observationId']}
+    return result
 
 
 def native_execution(event):
@@ -314,6 +362,7 @@ def analyze_records(records):
             'correctiveAttemptCount': None, 'firstAttemptSuccessful': None,
             'knownAuthoredCharacterSubtotal': len(row['command']), 'completeAuthoredCharacterCount': None,
             'tokenCount': None, 'goalElapsedTimeMs': None, 'usageOpportunityCount': None,
+            'observedToolOutputCharacterCount': len(row['output']) if row['output'] is not None else None,
         }
         row['operationGoalObservationId'] = None
 
@@ -422,6 +471,9 @@ def frozen_input_manifest(manifest, manifest_directory, sources):
         reference = frozen.get('baselineReference', {}).get(key)
         if reference:
             reference['path'] = str((manifest_directory / reference['path']).resolve())
+    if 'executionResultReviews' in frozen:
+        reference = frozen['executionResultReviews']
+        reference['path'] = str((manifest_directory / reference['path']).resolve())
     return frozen
 
 
@@ -448,12 +500,18 @@ def run_analysis(manifest_path, output_directory):
         if source_path.is_dir() and output_directory.is_relative_to(source_path):
             raise InvalidAnalysisInput('artifacts_inside_source_directory')
     sources = [read_declared_source(specification, manifest_path.parent, output_directory) for specification in manifest['sourceInputs']]
-    analyzer_digest = json_digest({path.name: material_digest(path.read_bytes()) for path in sorted(Path(__file__).parent.glob('*.py'))})
+    review_source = read_execution_result_review_source(manifest.get('executionResultReviews'), manifest_path.parent, output_directory)
+    analyzer_directory = Path(__file__).parent
+    analyzer_digest = json_digest({path.relative_to(analyzer_directory).as_posix(): material_digest(path.read_bytes())
+                                   for path in sorted(analyzer_directory.rglob('*.py'))})
     records, duplicates, excluded = deduplicate_executions(sources, manifest)
     analyze_records(records)
     summary = aggregate_usage(sources, records, duplicates, excluded, manifest)
     catalog, goal_summary = safe_goal_usage_summary(records, manifest.get('goalSampleSelection', {}))
     summary.update(goal_summary)
+    reviewed_results, review_feedback = summarize_reviewed_execution_results(records, review_source)
+    summary['executionResultFeedback'] = review_feedback
+    summary['coverage']['unavailableRequiredExecutionResultReviewCount'] = int(review_feedback['status'] == 'partial')
     baseline_summary, unavailable_baselines, baseline_bindings = historical_baseline_bridge(manifest, manifest_path.parent, summary, records)
     summary.update(baseline_summary)
     summary['coverage']['unavailableRequiredBaselineCount'] = unavailable_baselines
@@ -462,13 +520,16 @@ def run_analysis(manifest_path, output_directory):
                                   'analyzerSha256': analyzer_digest, 'baseline': baseline_summary,
                                   'baselineMaterialBindings': baseline_bindings,
                                   'controlledComparisonEnvironment': comparison_environment,
+                                  'executionResultReviewSource': {key: review_source[key] for key in [
+                                      'materialSha256', 'unavailableReason', 'primarySourceFailure', 'primaryObservedSha256']}
+                                      if review_source is not None else None,
                                   'sources': [{**{key: source[key] for key in ['materialSha256', 'recoveryKind', 'unavailableReason', 'primarySourceFailure', 'primaryObservedSha256', 'files']},
                                                'resolvedDeclaredPath': str((manifest_path.parent / specification['path']).resolve()),
                                                'normalizedRecordsSha256': json_digest(source['records'])}
                                               for specification, source in zip(manifest['sourceInputs'], sources)]})
     directory = output_directory / f'observation-{observation_id}'
     completed = completed_artifact_manifest(directory)
-    if completed and completed['observationId'] == observation_id:
+    if completed and completed['observationId'] == observation_id and 'agent-readable-analysis-summary.json' in completed['artifactSha256']:
         return completed, directory, True
     owner = {'analyzerVersion': ANALYZER_VERSION, 'observationId': observation_id}
     require_existing_observation_directory_ownership(directory, owner)
@@ -486,6 +547,9 @@ def run_analysis(manifest_path, output_directory):
             bindings[-1]['frozenSourceArtifact'] = frozen_name
         artifact_digests['private-normalized-executions.json'] = write_artifact(staging, 'private-normalized-executions.json', {'schemaVersion': 1, 'records': records})
         artifact_digests['private-goal-evidence-catalog.json'] = write_artifact(staging, 'private-goal-evidence-catalog.json', catalog)
+        if review_source is not None:
+            artifact_digests['private-frozen-execution-result-reviews.json'] = write_artifact(staging, 'private-frozen-execution-result-reviews.json', review_source)
+            artifact_digests['private-reviewed-execution-result-bindings.json'] = write_artifact(staging, 'private-reviewed-execution-result-bindings.json', reviewed_results)
         comparisons = compare_fixed_goal_recipes(staging)
         artifact_digests['goal-recipe-comparison-results.json'] = write_artifact(staging, 'goal-recipe-comparison-results.json', comparisons)
         summary['controlledGoalComparisons'] = {'status': comparisons['status'], 'measurementScope': comparisons['measurementScope'],
@@ -493,10 +557,11 @@ def run_analysis(manifest_path, output_directory):
                               'recipes': [{key: recipe[key] for key in ['id', 'costs', 'equivalentUnderContract', 'status', 'unavailableToolKinds']} for recipe in contract['recipes']]}
                              for contract in comparisons['goalContracts']]}
         artifact_digests['aggregate-usage-summary.json'] = write_artifact(staging, 'aggregate-usage-summary.json', summary)
+        artifact_digests['agent-readable-analysis-summary.json'] = write_artifact(staging, 'agent-readable-analysis-summary.json', agent_readable_usage_summary(summary))
         artifact_digests['agent-command-usage-analysis.html'] = write_text_artifact(staging, 'agent-command-usage-analysis.html', render_safe_usage_html(summary))
         completed = {'analyzerVersion': ANALYZER_VERSION, 'analyzerSha256': analyzer_digest, 'observationId': observation_id,
                      'inputManifestSha256': material_digest(manifest_path.read_bytes()),
-                     'status': 'partial' if summary['coverage']['unavailableRequiredSourceCount'] or unavailable_baselines else 'completed',
+                     'status': 'partial' if summary['coverage']['unavailableRequiredSourceCount'] or unavailable_baselines or review_feedback['status'] == 'partial' else 'completed',
                      'baselineBindings': baseline_bindings,
                      'sourceBindings': bindings, 'artifactSha256': artifact_digests,
                      'recoveryPolicy': {'automaticAttemptsPerMaterialFingerprint': 1, 'retryWhen': '来源或分析器指纹变化；中断可整体只读重放。'}}
@@ -504,7 +569,7 @@ def run_analysis(manifest_path, output_directory):
         if directory.exists():
             require_existing_observation_directory_ownership(directory, owner)
             concurrent_completion = completed_artifact_manifest(directory)
-            if concurrent_completion:
+            if concurrent_completion and 'agent-readable-analysis-summary.json' in concurrent_completion['artifactSha256']:
                 return concurrent_completion, directory, True
             preserved = output_directory / f'interrupted-{observation_id}-{os.urandom(6).hex()}'
             directory.rename(preserved)
@@ -515,24 +580,57 @@ def run_analysis(manifest_path, output_directory):
     return completed, directory, False
 
 
-def main():
-    parser = argparse.ArgumentParser(description='按显式清单离线分析命令与内联脚本；不执行被分析命令。')
-    parser.add_argument('--input-manifest', required=True, type=Path, help='含窗口、来源与覆盖范围的JSON清单')
-    parser.add_argument('--analysis-artifacts-directory', required=True, type=Path, help='保存私有证据与聚合报告的持久目录')
-    arguments = parser.parse_args()
+def analyze_one_declared_manifest(manifest_path, output_directory):
     try:
         if sys.version_info < (3, 11):
             raise InvalidAnalysisInput('python_3_11_required')
-        completed, directory, reused = run_analysis(arguments.input_manifest.resolve(), arguments.analysis_artifacts_directory.resolve())
-        print(json.dumps({'status': completed['status'], 'observationId': completed['observationId'],
-                          'observationDirectory': str(directory), 'reusedCompletedObservation': reused}, ensure_ascii=False))
-        return 3 if completed['status'] == 'partial' else 0
-    except (InvalidAnalysisInput, json.JSONDecodeError, FileNotFoundError):
-        print(json.dumps({'errorCategory': 'invalid_analysis_input'}, ensure_ascii=False), file=sys.stderr)
-        return 2
-    except Exception:
-        print(json.dumps({'errorCategory': 'internal_analysis_failure'}, ensure_ascii=False), file=sys.stderr)
-        return 1
+        try:
+            manifest_path = manifest_path.resolve()
+        except (OSError, RuntimeError) as error:
+            raise InvalidAnalysisInput('manifest_path_unresolvable') from error
+        completed, directory, reused = run_analysis(manifest_path, output_directory.resolve())
+        # EXPERIMENT_NODE: 用真实使用记录比较默认摘要与仅路径回执的总读取成本，再调整默认返回。
+        return {'status': completed['status'], 'observationId': completed['observationId'],
+                'observationDirectory': str(directory), 'reusedCompletedObservation': reused,
+                'agentSummary': read_json(directory / 'agent-readable-analysis-summary.json'),
+                'detailFiles': ['aggregate-usage-summary.json', 'agent-command-usage-analysis.html',
+                                'private-analysis-run-manifest.json', 'private-goal-evidence-catalog.json']}, 3 if completed['status'] == 'partial' else 0
+    except InvalidAnalysisInput as error:
+        failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': str(error)}
+        code = 2
+    except json.JSONDecodeError as error:
+        failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': 'invalid_json',
+                   'jsonLine': error.lineno, 'jsonColumn': error.colno}
+        code = 2
+    except FileNotFoundError:
+        failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': 'declared_file_missing'}
+        code = 2
+    except Exception as error:
+        failure = {'errorCategory': 'internal_analysis_failure', 'exceptionType': type(error).__name__}
+        failure['diagnosticFrames'] = [{'file': Path(frame.filename).name, 'line': frame.lineno, 'function': frame.name}
+                                       for frame in traceback.extract_tb(error.__traceback__)[-5:]]
+        code = 1
+    return {'status': 'failed', 'inputManifestPath': str(manifest_path), **failure}, code
+
+
+def main():
+    parser = argparse.ArgumentParser(description='按显式清单离线分析命令与内联脚本；不执行被分析命令。')
+    parser.add_argument('--input-manifest', required=True, type=Path, action='append', help='含窗口、来源与覆盖范围的JSON清单；可重复以批量分析')
+    parser.add_argument('--analysis-artifacts-directory', required=True, type=Path, help='保存私有证据与聚合报告的持久目录')
+    arguments = parser.parse_args()
+    results = [analyze_one_declared_manifest(path, arguments.analysis_artifacts_directory)
+               for path in arguments.input_manifest]
+    if len(results) == 1:
+        receipt, code = results[0]
+        print(json.dumps(receipt, ensure_ascii=False), file=sys.stderr if code in (1, 2) else sys.stdout)
+        return code
+    analyses = [receipt for receipt, _ in results]
+    codes = [code for _, code in results]
+    completed_any = any('observationId' in receipt for receipt in analyses)
+    status = 'completed' if all(code == 0 for code in codes) else 'partial' if completed_any else 'failed'
+    print(json.dumps({'status': status, 'analyses': analyses,
+                      'distinctAnalysisObservationCount': len({receipt['observationId'] for receipt in analyses if 'observationId' in receipt})}, ensure_ascii=False))
+    return 0 if status == 'completed' else 3 if status == 'partial' else 1 if 1 in codes else 2
 
 
 if __name__ == '__main__':

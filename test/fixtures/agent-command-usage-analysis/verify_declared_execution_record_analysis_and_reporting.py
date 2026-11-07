@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 
 REPOSITORY = Path(__file__).resolve().parents[3]
-ANALYZER = REPOSITORY / 'scripts/agent-command-and-inline-script-usage-analysis/analyze_agent_command_and_inline_script_usage.py'
+ANALYZER = REPOSITORY / 'scripts/agent-command-and-inline-script-usage-analysis/analyze_declared_execution_records_and_generate_usage_report.py'
 
 
 def write_json(path, value):
@@ -68,6 +68,40 @@ class AnalysisFixture(unittest.TestCase):
 
 
 class ManifestAndReplayTests(AnalysisFixture):
+    def test_unencodable_execution_strings_do_not_discard_valid_records(self):
+        for source_format in ['phase-one-normalized-executions-json', 'codex-command-execution-jsonl']:
+            with self.subTest(source_format=source_format):
+                records = [execution('valid-unicode', output='有效记录🌟'),
+                           execution('invalid-high-surrogate-output', output='\ud800'),
+                           execution('invalid-low-surrogate-output', output='\udfff'),
+                           execution('invalid-command', command='\ud800'),
+                           execution('invalid-cwd', cwd='\ud800'), execution('\ud800')]
+                if source_format == 'phase-one-normalized-executions-json':
+                    records.append(execution('invalid-prior-source', source={'file': '\ud800', 'line': 1}))
+                    content = json.dumps(records, ensure_ascii=True)
+                else:
+                    content = '\n'.join(json.dumps({
+                        'timestamp': row['at'], 'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {
+                            'type': 'CommandExecution', 'id': row['executionId'], 'cwd': row['cwd'],
+                            'command': ['/bin/sh', '-c', row['command']], 'exit_code': row['exitCode'],
+                            'aggregated_output': row.get('output')}}}, ensure_ascii=True) for row in records)
+                self.source.write_text(content, encoding='utf-8')
+                source_digest = self.digest(self.source)
+                self.manifest['sourceInputs'] = [{'path': self.source.name, 'format': source_format,
+                                                 'coverage': 'completed-shell-executions', 'sha256': source_digest}]
+                receipt, summary = self.run_analysis()
+                self.assertEqual(summary['counts']['knownDistinctCompletedExecutions'], 1)
+                self.assertEqual(summary['counts']['malformedRecordCount'], len(records) - 1)
+                self.assertIsNone(summary['coverage']['allShellExecutionCount'])
+                self.assertEqual(summary['coverage']['unavailableRequiredSourceCount'], 0)
+                self.assertEqual(receipt['agentSummary']['attention']['malformedRecordCount'], len(records) - 1)
+                self.assertEqual(receipt['agentSummary']['observedToolOutputCharacterCount'], len('有效记录🌟'))
+                self.assertEqual([row['executionId'] for row in self.private_records()], ['valid-unicode'])
+                replay, repeated_summary = self.run_analysis()
+                self.assertTrue(replay['reusedCompletedObservation'])
+                self.assertEqual(summary, repeated_summary)
+                self.assertEqual(source_digest, self.digest(self.source))
+
     def test_cache_binds_resolved_source_paths_used_by_exclusions(self):
         observations = []
         counts = []
@@ -227,7 +261,7 @@ class ParserAndGoalEvidenceTests(AnalysisFixture):
 
     def test_literal_shell_metacharacters_remain_known_and_option_terminators_stop_evaluation(self):
         sys.path.insert(0, str(ANALYZER.parent))
-        from shell_command_and_inline_script_parsing import extract_inline_scripts
+        from execution_record_parsing.extract_cli_routes_and_inline_script_bodies import extract_inline_scripts
         for command in ["python3 -- -c 'script filename argument'", "node -- -e 'script filename argument'",
                         "node -- --eval='script filename argument'"]:
             self.assertEqual(extract_inline_scripts(command), [], command)
@@ -259,7 +293,7 @@ class ParserAndGoalEvidenceTests(AnalysisFixture):
 
     def test_original_parser_checks_and_interpreter_position_boundaries(self):
         sys.path.insert(0, str(ANALYZER.parent))
-        from shell_command_and_inline_script_parsing import extract_inline_scripts, verify_extraction, verify_parser
+        from execution_record_parsing.extract_cli_routes_and_inline_script_bodies import extract_inline_scripts, verify_extraction, verify_parser
         verify_parser()
         verify_extraction()
         for command in ["printf '%s' 'python3 -c example'", "python3 existing.py -c 'argument, not code'",
@@ -410,9 +444,65 @@ class ParserAndGoalEvidenceTests(AnalysisFixture):
 
 
 class ControlledGoalRecipeTests(AnalysisFixture):
+    def test_required_json_field_preserves_false_null_empty_values_and_rejects_invalid_input(self):
+        self.run_analysis()
+        comparisons = json.loads((self.observation / 'goal-recipe-comparison-results.json').read_text())
+        contract = next(item for item in comparisons['goalContracts'] if item['id'] == 'read-required-json-field')
+        recipes = {recipe['id']: recipe for recipe in contract['recipes']}
+        for name in ['python-required-json-field', 'python-short-required-json-field', 'jq-required-json-field']:
+            recipe = recipes[name]
+            if recipe['status'] == 'tools_unavailable':
+                self.assertIsNone(recipe['equivalentUnderContract'])
+                continue
+            self.assertTrue(recipe['equivalentUnderContract'], recipe)
+            self.assertEqual({case['id'] for case in recipe['scenarios']}, {
+                'array_value', 'null_value', 'false_value', 'zero_value', 'empty_string', 'empty_array',
+                'empty_object', 'literal_shell_code', 'missing_field', 'invalid_json', 'empty_input',
+                'multiple_documents', 'array_root', 'missing_file',
+            })
+            self.assertTrue(all(case['sourceFilesUnchanged'] and case['inputWasNotExecuted']
+                                for case in recipe['scenarios']))
+        rejected = recipes['jq-exit-status-as-value-validation']
+        if rejected['status'] == 'completed':
+            self.assertFalse(rejected['equivalentUnderContract'])
+        else:
+            self.assertIsNone(rejected['equivalentUnderContract'])
+
+    def test_bound_current_task_snapshot_checks_identity_atomic_replacement_and_unsafe_targets(self):
+        self.run_analysis()
+        comparisons = json.loads((self.observation / 'goal-recipe-comparison-results.json').read_text())
+        contract = next(item for item in comparisons['goalContracts'] if item['id'] == 'save-bound-current-task-snapshot')
+        self.assertEqual(len(contract['recipes']), 2)
+        for recipe in contract['recipes']:
+            if recipe['status'] == 'tools_unavailable':
+                self.assertIsNone(recipe['equivalentUnderContract'])
+                continue
+            self.assertTrue(recipe['equivalentUnderContract'], recipe)
+            self.assertEqual({case['id'] for case in recipe['scenarios']}, {
+                'success', 'new_snapshot', 'query_failure', 'invalid_json', 'missing_fields',
+                'wrong_task', 'wrong_project', 'missing_session', 'wrong_session', 'multiple_documents',
+                'target_symlink', 'dangling_target_symlink', 'target_directory', 'temporary_creation_failure',
+                'atomic_replace_failure', 'query_terminated',
+            })
+            success = next(case for case in recipe['scenarios'] if case['id'] == 'success')
+            self.assertTrue(success['replacedFileIdentity'])
+            self.assertEqual(success['snapshotMode'], '600')
+            self.assertTrue(all(not case['temporaryFileLeftBehind'] for case in recipe['scenarios']))
+        inline, persisted = [recipe['costs'] for recipe in contract['recipes']]
+        self.assertGreater(persisted['completeAuthoredCharacterCount'], inline['completeAuthoredCharacterCount'])
+        self.assertLess(persisted['reusedPreparedInputAuthoredCharacterCount'], inline['authoredCommandCharacterCount'])
+
+    def test_documented_recipes_are_the_same_fixed_commands_that_are_executed(self):
+        sys.path.insert(0, str(ANALYZER.parent))
+        from synthetic_recipe_validation import compare_fixed_recipe_results_and_preparation_costs as comparisons_module
+        documentation = (REPOSITORY / 'docs/agent-command-json-and-task-snapshot-recipes.md').read_text(encoding='utf-8')
+        for recipe in [comparisons_module.JSON_FIELD_JQ_RECIPE, comparisons_module.JSON_FIELD_SHORT_PYTHON_RECIPE,
+                       comparisons_module.BOUND_TASK_SNAPSHOT_SHELL_RECIPE]:
+            self.assertIn('```sh\n' + recipe + '\n```', documentation)
+
     def test_missing_jq_only_pauses_dependent_recipes(self):
         sys.path.insert(0, str(ANALYZER.parent))
-        import controlled_goal_recipe_comparisons as comparisons_module
+        from synthetic_recipe_validation import compare_fixed_recipe_results_and_preparation_costs as comparisons_module
         descriptor, tools = comparisons_module.controlled_comparison_environment()
         descriptor['toolAvailability']['jq'] = False
         descriptor['toolImplementationDigests'].pop('jq', None)
@@ -422,11 +512,13 @@ class ControlledGoalRecipeTests(AnalysisFixture):
             comparisons = comparisons_module.compare_fixed_goal_recipes(self.output)
         self.assertIn('jq', comparisons['unavailableToolKinds'])
         recipes = {recipe['id']: recipe for contract in comparisons['goalContracts'] for recipe in contract['recipes']}
-        for name in ['shell-validated-atomic-save', 'shell-direct-redirection']:
+        for name in ['shell-validated-atomic-save', 'shell-direct-redirection', 'jq-required-json-field',
+                     'shell-bound-current-task-atomic-save', 'shell-persisted-current-task-atomic-save']:
             self.assertEqual(recipes[name]['scenarios'], [])
-            self.assertFalse(recipes[name]['equivalentUnderContract'])
+            self.assertIsNone(recipes[name]['equivalentUnderContract'])
         self.assertEqual(len(recipes['python-checked-save']['scenarios']), 4)
         self.assertTrue(recipes['python-checked-save']['equivalentUnderContract'])
+        self.assertTrue(recipes['python-short-required-json-field']['equivalentUnderContract'])
         for name in ['python-exact-character-slice', 'python-short-exact-character-slice']:
             self.assertEqual(len(recipes[name]['scenarios']), 2)
             self.assertTrue(recipes[name]['equivalentUnderContract'])
@@ -463,7 +555,7 @@ class ControlledGoalRecipeTests(AnalysisFixture):
     def test_unicode_units_and_exact_binding_reject_shorter_recipes(self):
         self.run_analysis()
         comparisons = json.loads((self.observation / 'goal-recipe-comparison-results.json').read_text())
-        self.assertEqual(len(comparisons['goalContracts']), 2)
+        self.assertEqual(len(comparisons['goalContracts']), 4)
         evidence = next(item for item in comparisons['goalContracts'] if item['id'] == 'read-bound-unicode-log-fragment')
         recipes = {recipe['id']: recipe for recipe in evidence['recipes']}
         self.assertTrue(recipes['python-exact-character-slice']['equivalentUnderContract'])
@@ -475,11 +567,314 @@ class ControlledGoalRecipeTests(AnalysisFixture):
         self.assertEqual(comparisons['measurementScope'], 'controlled_synthetic_fixtures')
 
 
+class ExecutionResultReviewTests(AnalysisFixture):
+    def setUp(self):
+        super().setUp()
+        self.review_path = self.root / 'private-execution-result-reviews.json'
+        self.review_document = {'schemaVersion': 'agent-command-execution-result-reviews/v1',
+                                'observationContext': 'development_validation',
+                                'materialTextsBySha256': {}, 'reviews': []}
+        self.records = []
+
+    def add_material(self, value):
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        digest = hashlib.sha256(text.encode('utf-8')).hexdigest()
+        self.review_document['materialTextsBySha256'][digest] = text
+        return digest
+
+    def add_review(self, identity, observation='a', version='b', result_status='completed', equivalence_result=False):
+        command = 'npm run analyze:agent-command-and-inline-script-usage -- --fixture ' + identity
+        self.records.append(execution(identity, command=command))
+        comparison = {'schemaVersion': 'controlled-goal-recipe-comparisons/v1', 'status': result_status,
+                      'goalContracts': [{'recipes': [{'status': result_status,
+                                                      'equivalentUnderContract': equivalence_result}]}]}
+        comparison_digest = self.add_material(comparison)
+        manifest_digest = self.add_material({'observationId': observation * 64, 'status': 'completed',
+                                             'analyzerSha256': version * 64,
+                                             'artifactSha256': {'goal-recipe-comparison-results.json': comparison_digest}})
+        receipt_digest = self.add_material({'observationId': observation * 64, 'status': 'completed',
+                                            'observationDirectory': '/PRIVATE_REVIEW_SOURCE_PATH_SENTINEL/' + identity})
+        self.review_document['reviews'].append({
+            'executionId': identity, 'commandSha256': hashlib.sha256(command.encode('utf-8')).hexdigest(),
+            'analysisReceiptMaterialSha256': receipt_digest, 'analysisManifestMaterialSha256': manifest_digest,
+            'comparisonResultsMaterialSha256': comparison_digest,
+        })
+
+    def save_reviews(self):
+        self.replace_source(self.records)
+        write_json(self.review_path, self.review_document)
+        self.manifest['executionResultReviews'] = {'path': self.review_path.name, 'sha256': self.digest(self.review_path)}
+
+    def test_native_calls_result_observations_versions_and_business_outcomes_are_separate(self):
+        self.add_review('PRIVATE_REVIEW_EXECUTION_SENTINEL-1', result_status='execution_failed')
+        self.add_review('PRIVATE_REVIEW_EXECUTION_SENTINEL-2', observation='c', version='d')
+        self.add_review('PRIVATE_REVIEW_EXECUTION_SENTINEL-3', observation='c', version='d')
+        self.review_document['reviews'].append(dict(self.review_document['reviews'][0]))
+        self.save_reviews()
+        receipt, summary = self.run_analysis()
+        feedback = summary['executionResultFeedback']
+        self.assertEqual(feedback['verifiedExecutionBindingCount'], 3)
+        self.assertEqual(feedback['distinctResultObservationCount'], 2)
+        self.assertEqual(feedback['distinctAnalyzerVersionCount'], 2)
+        self.assertEqual(feedback['duplicateReviewCopyCount'], 1)
+        self.assertEqual(feedback['cliZeroExitWithIncompleteComparisonCount'], 1)
+        self.assertEqual(receipt['agentSummary']['attention']['cliZeroExitWithIncompleteComparisonCount'], 1)
+        self.assertEqual(feedback['comparisonOutcomeCounts']['comparison_execution_complete'], 2)
+        self.assertEqual(feedback['comparisonOutcomeCounts']['comparison_execution_failed'], 1)
+        self.assertEqual(len(feedback['analyzerVersionCohorts']), 2)
+        frozen_manifest = json.loads((self.observation / 'private-frozen-analysis-input-manifest.json').read_text())
+        self.assertEqual(Path(frozen_manifest['executionResultReviews']['path']), self.review_path.resolve())
+        self.assertIsNone(summary['costs']['firstAttemptSuccessRate'])
+        self.assertTrue(all(row['operationGoalObservationId'] is None for row in self.private_records()))
+        public = (self.observation / 'aggregate-usage-summary.json').read_text() + (self.observation / 'agent-command-usage-analysis.html').read_text()
+        self.assertNotIn('PRIVATE_REVIEW_', public)
+        self.assertIn('原生调用与结果反馈', public)
+
+    def test_changed_command_and_missing_native_execution_do_not_prove_association(self):
+        self.add_review('actual')
+        self.add_review('not-in-source', observation='c')
+        self.review_document['reviews'][0]['commandSha256'] = 'f' * 64
+        self.records.pop()
+        self.save_reviews()
+        _, summary = self.run_analysis(expected_status=3)
+        self.assertEqual(summary['counts']['knownDistinctCompletedExecutions'], 1)
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 0)
+        self.assertEqual(summary['executionResultFeedback']['unavailableReviewCount'], 2)
+
+    def test_missing_tools_and_nonzero_process_exit_keep_distinct_facts(self):
+        self.add_review('waiting-for-tools', result_status='tools_unavailable')
+        self.add_review('nonzero-cli', observation='c')
+        self.records[-1]['exitCode'] = 7
+        self.add_review('unknown-comparison-result', observation='e', equivalence_result=None)
+        self.save_reviews()
+        _, summary = self.run_analysis()
+        feedback = summary['executionResultFeedback']
+        self.assertEqual(feedback['verifiedExecutionBindingCount'], 3)
+        self.assertEqual(feedback['comparisonOutcomeCounts'], {
+            'comparison_execution_complete': 1, 'comparison_evidence_pending': 2})
+        self.assertEqual(feedback['cliZeroExitWithIncompleteComparisonCount'], 2)
+        bindings = json.loads((self.observation / 'private-reviewed-execution-result-bindings.json').read_text())
+        nonzero = next(binding for binding in bindings if binding['executionId'] == 'nonzero-cli')
+        self.assertEqual(nonzero['nativeExitCode'], 7)
+
+    def test_conflicting_execution_reviews_and_result_identities_remain_unresolved(self):
+        self.add_review('same-execution')
+        self.add_review('same-execution', observation='c')
+        self.save_reviews()
+        _, summary = self.run_analysis(expected_status=3)
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 0)
+        self.review_document['reviews'] = []
+        self.records = []
+        self.add_review('first')
+        self.add_review('second', version='d')
+        self.save_reviews()
+        _, summary = self.run_analysis(expected_status=3)
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 0)
+
+    def test_material_digest_and_manifest_result_binding_are_required(self):
+        self.add_review('actual')
+        self.review_document['reviews'][0]['comparisonResultsMaterialSha256'] = self.add_material({
+            'schemaVersion': 'controlled-goal-recipe-comparisons/v1', 'status': 'completed', 'goalContracts': []})
+        self.save_reviews()
+        _, summary = self.run_analysis(expected_status=3)
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 0)
+        self.review_document['materialTextsBySha256']['f' * 64] = '$(touch review-input-was-executed)'
+        self.save_reviews()
+        self.run_analysis(expected_status=3)
+        self.assertFalse((self.root / 'review-input-was-executed').exists())
+
+    def test_frozen_review_recovers_missing_source_but_not_corrupt_cached_material(self):
+        self.add_review('actual')
+        self.save_reviews()
+        self.run_analysis()
+        self.review_path.unlink()
+        _, summary = self.run_analysis()
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 1)
+        frozen = json.loads((self.observation / 'private-frozen-execution-result-reviews.json').read_text())
+        self.assertEqual(frozen['primarySourceFailure'], 'declared_review_source_missing')
+        recovered_observation = self.observation
+        for _ in range(3):
+            receipt, _ = self.run_analysis()
+            self.assertTrue(receipt['reusedCompletedObservation'])
+            self.assertEqual(self.observation, recovered_observation)
+        for path in self.output.glob('observation-*/private-frozen-execution-result-reviews.json'):
+            path.write_text('{corrupt')
+        _, summary = self.run_analysis(expected_status=3)
+        self.assertEqual(summary['executionResultFeedback']['verifiedExecutionBindingCount'], 0)
+        self.assertIsNone(summary['executionResultFeedback']['submittedReviewCount'])
+
+    def test_review_reference_contract_and_document_bounds_are_enforced(self):
+        self.manifest['executionResultReviews'] = {'path': 'missing', 'sha256': 'bad'}
+        self.run_analysis(expected_status=2)
+        self.add_review('actual')
+        self.review_document['reviews'] *= 61
+        self.save_reviews()
+        self.run_analysis(expected_status=3)
+        self.review_document['reviews'] = [dict(self.review_document['reviews'][0])]
+        self.review_document['reviews'][0]['executionId'] = '\ud800'
+        self.review_path.write_text(json.dumps(self.review_document, ensure_ascii=True), encoding='utf-8')
+        self.manifest['executionResultReviews']['sha256'] = self.digest(self.review_path)
+        self.run_analysis(expected_status=3)
+
+
+class AgentInteractionSummaryAndBatchTests(AnalysisFixture):
+    def test_output_observation_distinguishes_empty_unknown_and_excludes_conflicting_identity(self):
+        private_output = 'PRIVATE_TOOL_OUTPUT_SENTINEL' * 2000
+        self.replace_source([execution('long', output=private_output), execution('empty', output=''),
+                             execution('unknown'), execution('conflict', output='不得混算'),
+                             execution('conflict', command='different-command', output='也不得混算')])
+        receipt, summary = self.run_analysis()
+        burden = summary['agentInteractionBurden']
+        self.assertEqual(burden['agentIntervention']['knownToolExecutionCount'], 3)
+        self.assertIsNone(burden['agentIntervention']['agentTurnCount'])
+        self.assertEqual(burden['agentInput']['observedToolOutputCharacterCount'], len(private_output))
+        self.assertEqual(burden['agentInput']['executionsWithObservedOutputCount'], 2)
+        self.assertEqual(burden['agentInput']['executionsWithoutObservedOutputCount'], 1)
+        self.assertIsNone(burden['actualCost'])
+        self.assertIsNone(burden['contextEffectivenessChange'])
+        self.assertIsNone(burden['capabilityChange'])
+        self.assertEqual(receipt['agentSummary']['observedToolOutputCharacterCount'], len(private_output))
+        self.assertLess(len(json.dumps(receipt)), len(private_output) // 10)
+        self.assertNotIn('PRIVATE_TOOL_OUTPUT_SENTINEL', json.dumps(receipt))
+        self.assertNotIn('PRIVATE_TOOL_OUTPUT_SENTINEL', (self.observation / 'agent-command-usage-analysis.html').read_text())
+        self.assertIn('低效轮次、无效写与无效读', (self.observation / 'agent-command-usage-analysis.html').read_text())
+
+    def test_partial_summary_surfaces_missing_source_and_preserves_detail_entry(self):
+        self.source.unlink()
+        receipt, summary = self.run_analysis(3)
+        self.assertEqual(receipt['agentSummary']['attention']['unavailableRequiredSourceCount'], 1)
+        self.assertEqual(receipt['agentSummary']['attention']['comparisonStatus'], summary['controlledGoalComparisons']['status'])
+        self.assertIn('private-analysis-run-manifest.json', receipt['detailFiles'])
+        self.assertEqual(json.loads((self.observation / 'agent-readable-analysis-summary.json').read_text()), receipt['agentSummary'])
+
+    def test_summary_surfaces_unavailable_required_baseline(self):
+        self.manifest['baselineReference'] = {'algorithmVersion': 'phase-one-prototype/v1',
+                                              'cliSummary': {'path': 'absent-baseline.json', 'sha256': 'a' * 64}}
+        receipt, summary = self.run_analysis(3)
+        self.assertEqual(receipt['status'], 'partial')
+        self.assertEqual(summary['coverage']['unavailableRequiredBaselineCount'], 1)
+        self.assertEqual(receipt['agentSummary']['attention']['unavailableRequiredBaselineCount'], 1)
+        self.assertEqual(receipt['agentSummary']['knownExecutionCount'], 1)
+
+    def test_summary_distinguishes_missing_execution_identity_from_no_executions(self):
+        self.replace_source([execution(None, output='PRIVATE_UNATTRIBUTABLE_OUTPUT')])
+        self.manifest['sourceInputs'][0]['coverage'] = 'completed-shell-executions'
+        receipt, summary = self.run_analysis()
+        self.assertEqual(receipt['status'], 'completed')
+        self.assertEqual(receipt['agentSummary']['knownExecutionCount'], 0)
+        self.assertEqual(summary['counts']['missingIdentityRecordCount'], 1)
+        self.assertEqual(receipt['agentSummary']['attention']['missingIdentityRecordCount'], 1)
+        self.assertIsNone(summary['coverage']['allShellExecutionCount'])
+        self.assertNotIn('PRIVATE_UNATTRIBUTABLE_OUTPUT', json.dumps(receipt))
+
+    def run_batch(self, paths, expected_status):
+        command = [sys.executable, '-B', str(ANALYZER), '--analysis-artifacts-directory', str(self.output)]
+        for path in paths:
+            command.extend(['--input-manifest', str(path)])
+        result = subprocess.run(command, capture_output=True, text=True, encoding='utf-8', timeout=30)
+        self.assertEqual(result.returncode, expected_status, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_batch_continues_after_bad_input_and_counts_reused_observation_once(self):
+        write_json(self.manifest_path, self.manifest)
+        broken = self.root / 'broken-analysis-manifest.json'
+        broken.write_text('\n{PRIVATE_INVALID_JSON', encoding='utf-8')
+        result = self.run_batch([broken, self.manifest_path, self.manifest_path], 3)
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['distinctAnalysisObservationCount'], 1)
+        self.assertEqual(len(result['analyses']), 3)
+        failure, first, reused = result['analyses']
+        self.assertEqual(failure['reasonCode'], 'invalid_json')
+        self.assertEqual(failure['jsonLine'], 2)
+        self.assertEqual(first['status'], 'completed')
+        self.assertTrue(reused['reusedCompletedObservation'])
+        self.assertEqual(first['observationId'], reused['observationId'])
+        self.assertNotIn('PRIVATE_INVALID_JSON', json.dumps(result))
+
+    def test_batch_all_invalid_has_nonzero_status_and_specific_reason_without_raw_input(self):
+        invalid = write_json(self.root / 'invalid-analysis-manifest.json', {})
+        missing = self.root / 'missing-analysis-manifest.json'
+        result = self.run_batch([invalid, missing], 2)
+        self.assertEqual(result['status'], 'failed')
+        self.assertEqual(result['distinctAnalysisObservationCount'], 0)
+        self.assertEqual([item['reasonCode'] for item in result['analyses']], ['invalid_object_fields', 'manifest_unreadable'])
+
+    def test_unresolvable_manifest_preserves_prior_and_following_batch_receipts(self):
+        write_json(self.manifest_path, self.manifest)
+        unresolvable_manifest = self.root / 'self-referential-analysis-manifest.json'
+        unresolvable_manifest.symlink_to(unresolvable_manifest.name)
+        result = self.run_batch([self.manifest_path, unresolvable_manifest, self.manifest_path], 3)
+        self.assertEqual(result['status'], 'partial')
+        self.assertEqual(result['distinctAnalysisObservationCount'], 1)
+        first, failure, replay = result['analyses']
+        self.assertEqual(first['status'], 'completed')
+        self.assertEqual(failure['status'], 'failed')
+        self.assertEqual(failure['reasonCode'], 'manifest_path_unresolvable')
+        self.assertEqual(failure['inputManifestPath'], str(unresolvable_manifest))
+        self.assertEqual(first['observationId'], replay['observationId'])
+        self.assertTrue(replay['reusedCompletedObservation'])
+        all_failed = self.run_batch([unresolvable_manifest, unresolvable_manifest], 2)
+        self.assertEqual(all_failed['status'], 'failed')
+        self.assertEqual(all_failed['distinctAnalysisObservationCount'], 0)
+        single = subprocess.run([sys.executable, '-B', str(ANALYZER), '--input-manifest', str(unresolvable_manifest),
+                                 '--analysis-artifacts-directory', str(self.output)],
+                                capture_output=True, text=True, encoding='utf-8', timeout=20)
+        self.assertEqual(single.returncode, 2)
+        self.assertEqual(single.stdout, '')
+        self.assertEqual(json.loads(single.stderr)['reasonCode'], 'manifest_path_unresolvable')
+
+    def test_batch_preserves_partial_and_complete_observations_independently(self):
+        partial = {**self.manifest, 'sourceInputs': [{**self.manifest['sourceInputs'][0], 'path': 'absent.json'}]}
+        partial_path = write_json(self.root / 'partial-analysis-manifest.json', partial)
+        write_json(self.manifest_path, self.manifest)
+        result = self.run_batch([partial_path, self.manifest_path], 3)
+        self.assertEqual([item['status'] for item in result['analyses']], ['partial', 'completed'])
+        self.assertEqual(result['distinctAnalysisObservationCount'], 2)
+        self.assertEqual(result['analyses'][0]['agentSummary']['attention']['unavailableRequiredSourceCount'], 1)
+
+    def test_tampered_agent_summary_is_rebuilt_before_returning_cached_receipt(self):
+        receipt, _ = self.run_analysis()
+        summary_path = self.observation / 'agent-readable-analysis-summary.json'
+        summary_path.write_text('{"fabricatedSuccess":true}', encoding='utf-8')
+        replay, _ = self.run_analysis()
+        self.assertFalse(replay['reusedCompletedObservation'])
+        self.assertEqual(receipt['agentSummary'], replay['agentSummary'])
+        self.assertNotIn('fabricatedSuccess', summary_path.read_text())
+
+    def test_legacy_frozen_material_without_agent_summary_still_recovers_source(self):
+        self.run_analysis()
+        legacy_manifest_path = self.observation / 'private-analysis-run-manifest.json'
+        legacy_manifest = json.loads(legacy_manifest_path.read_text())
+        legacy_manifest['artifactSha256'].pop('agent-readable-analysis-summary.json')
+        write_json(legacy_manifest_path, legacy_manifest)
+        (self.observation / 'agent-readable-analysis-summary.json').unlink()
+        self.source.unlink()
+        receipt, summary = self.run_analysis()
+        self.assertEqual(summary['coverage']['recoveredSourceCount'], 1)
+        self.assertEqual(receipt['agentSummary']['knownExecutionCount'], 1)
+
+
 class DiscoveryAndBoundaryTests(AnalysisFixture):
+    def test_nested_module_changes_invalidate_cached_observation(self):
+        copied_source_directory = self.root / 'isolated-analyzer-source-copy'
+        shutil.copytree(ANALYZER.parent, copied_source_directory, ignore=shutil.ignore_patterns('__pycache__'))
+        copied_entry = copied_source_directory / ANALYZER.name
+        nested_module = copied_source_directory / 'execution_record_parsing/extract_cli_routes_and_inline_script_bodies.py'
+        with patch(f'{__name__}.ANALYZER', copied_entry):
+            first, _ = self.run_analysis()
+            nested_module.write_bytes(nested_module.read_bytes() + '\n# 验证子目录源码更新不会复用旧观察。\n'.encode('utf-8'))
+            changed, summary = self.run_analysis()
+            self.assertNotEqual(first['observationId'], changed['observationId'])
+            self.assertFalse(changed['reusedCompletedObservation'])
+            self.assertEqual(summary['counts']['knownDistinctCompletedExecutions'], 1)
+            repeated, _ = self.run_analysis()
+            self.assertEqual(changed['observationId'], repeated['observationId'])
+            self.assertTrue(repeated['reusedCompletedObservation'])
+
     def test_npm_entry_and_python_ci_prerequisite_are_connected(self):
         package = json.loads((REPOSITORY / 'package.json').read_text())
         self.assertEqual(package['scripts']['analyze:agent-command-and-inline-script-usage'],
-                         'python3 -B scripts/agent-command-and-inline-script-usage-analysis/analyze_agent_command_and_inline_script_usage.py')
+                         'python3 -B scripts/agent-command-and-inline-script-usage-analysis/analyze_declared_execution_records_and_generate_usage_report.py')
         workflow = (REPOSITORY / '.github/workflows/test.yml').read_text()
         python_step = workflow.split('uses: actions/setup-python@v5')[0].rsplit('- name:', 1)[1]
         self.assertNotIn('if: matrix.os', python_step)

@@ -1,4 +1,4 @@
-"""将静态线索保留为候选目标；公开输出只使用固定类别和聚合数值。"""
+"""分类候选操作目标、汇总交互负担并生成摘要和HTML；公开输出只含固定类别与聚合数值。"""
 from collections import Counter, defaultdict
 import ast
 import hashlib
@@ -7,7 +7,7 @@ import json
 import math
 import re
 
-from shell_command_and_inline_script_parsing import classify_nonzero_output, classify_script, observable_kanban_cli_subprocess_routes
+from execution_record_parsing.extract_cli_routes_and_inline_script_bodies import classify_nonzero_output, classify_script, observable_kanban_cli_subprocess_routes
 
 
 GOAL_FAMILIES = {
@@ -174,6 +174,48 @@ def sample_goal_evidence(records, selection):
     return catalog, coverage
 
 
+def summarize_agent_interaction_burden(known):
+    observed_outputs = [row['output'] for row in known if row['output'] is not None]
+    return {
+        'measurementScope': 'declared-completed-shell-executions-only',
+        'agentIntervention': {'knownToolExecutionCount': len(known), 'agentTurnCount': None},
+        'agentOutput': {'observedCommandCharacterCount': sum(len(row['command']) for row in known),
+                        'completeOutputTokenCount': None},
+        'agentInput': {'observedToolOutputCharacterCount': sum(len(output) for output in observed_outputs),
+                       'executionsWithObservedOutputCount': len(observed_outputs),
+                       'executionsWithoutObservedOutputCount': len(known) - len(observed_outputs),
+                       'completeInputTokenCount': None},
+        'actualCost': None, 'contextEffectivenessChange': None, 'capabilityChange': None,
+        'limitation': '工具调用数不等于Agent轮次；仅计记录中可见返回，不是完整模型输入，字符不等于token或费用。',
+    }
+
+
+def agent_readable_usage_summary(summary):
+    burden = summary['agentInteractionBurden']
+    comparisons = summary['controlledGoalComparisons']
+    return {
+        'knownExecutionCount': burden['agentIntervention']['knownToolExecutionCount'],
+        'observedCommandCharacterCount': burden['agentOutput']['observedCommandCharacterCount'],
+        'observedToolOutputCharacterCount': burden['agentInput']['observedToolOutputCharacterCount'],
+        'executionsWithoutObservedOutputCount': burden['agentInput']['executionsWithoutObservedOutputCount'],
+        'attention': {
+            'unavailableRequiredSourceCount': summary['coverage']['unavailableRequiredSourceCount'],
+            'unavailableOptionalSourceCount': summary['coverage']['unavailableOptionalSourceCount'],
+            'unavailableRequiredBaselineCount': summary['coverage']['unavailableRequiredBaselineCount'],
+            'malformedRecordCount': summary['counts']['malformedRecordCount'],
+            'missingIdentityRecordCount': summary['counts']['missingIdentityRecordCount'],
+            'conflictedExecutionVariantCount': summary['counts']['conflictedExecutionVariantCount'],
+            'comparisonStatus': comparisons['status'],
+            'incompleteRecipeIds': [recipe['id'] for contract in comparisons['goalContracts']
+                                    for recipe in contract['recipes'] if recipe['status'] != 'completed'],
+            'executionResultReviewStatus': summary['executionResultFeedback']['status'],
+            'unavailableReviewCount': summary['executionResultFeedback']['unavailableReviewCount'],
+            'cliZeroExitWithIncompleteComparisonCount': summary['executionResultFeedback']['cliZeroExitWithIncompleteComparisonCount'],
+        },
+        'unmeasured': ['agent_turns', 'complete_model_input_and_output_tokens', 'actual_cost', 'context_effectiveness_change', 'capability_change'],
+    }
+
+
 def safe_goal_usage_summary(records, selection):
     for row in records:
         enrich_goal_family_evidence(row)
@@ -213,12 +255,19 @@ def safe_goal_usage_summary(records, selection):
                    'limitation': '词元跨度表示观察到的组成，不自动证明全部都是可删除的固定样板。'}
     return catalog, {'goalEvidence': coverage, 'operationGoalFamilyCandidateCounts': dict(sorted(family_counts.items())),
                      'shellOutcomeClassifications': dict(sorted(Counter(row['shellOutcomeCategory'] for row in known).items())),
-                     'costs': costs, 'commandComposition': composition, 'priorInlineClassificationBridge': inline_bridge,
+                     'costs': costs, 'agentInteractionBurden': summarize_agent_interaction_burden(known),
+                     'commandComposition': composition, 'priorInlineClassificationBridge': inline_bridge,
                      'thirdPhaseCandidates': candidates[:5]}
 
 
 def render_safe_usage_html(summary):
     counts = summary['counts']
+    burden = summary['agentInteractionBurden']
+    burden_html = '<h2>低效轮次、无效写与无效读</h2><table><caption>三项观察维度；仅代表声明记录中的可见部分</caption><thead><tr><th>维度</th><td>可观察量</td><td>仍未知</td></tr></thead><tbody>' + (
+        f'<tr><th scope="row">Agent介入</th><td>{burden["agentIntervention"]["knownToolExecutionCount"]:,}次工具执行</td><td>模型介入轮次</td></tr>'
+        f'<tr><th scope="row">Agent输出</th><td>{burden["agentOutput"]["observedCommandCharacterCount"]:,}命令字符</td><td>完整输出与token</td></tr>'
+        f'<tr><th scope="row">Agent输入</th><td>{burden["agentInput"]["observedToolOutputCharacterCount"]:,}已观测返回字符</td><td>{burden["agentInput"]["executionsWithoutObservedOutputCount"]:,}条缺返回；完整输入与token</td></tr>'
+    ) + '</tbody></table><p>减少Cost、减轻Context Rot影响及维持/提升能力分别观察。允许阶段性或单项成功，保留代价与复查/回撤依据。字符和调用数不直接证明费用或能力变化。</p>'
     families = summary['operationGoalFamilyCandidateCounts']
     maximum = max(families.values(), default=1)
     rows = ''.join(f'<tr data-family="{family}"><th scope="row">{escape(GOAL_FAMILIES[family][0])}</th>'
@@ -228,12 +277,27 @@ def render_safe_usage_html(summary):
     candidates = ''.join(f'<li><strong>{escape(candidate["label"])}</strong><p>{escape(candidate["existingAlternative"])}</p>'
                          '<p>原生能力进入条件尚未证实；先核对结果契约与真实归属。</p></li>' for candidate in summary['thirdPhaseCandidates'])
     comparisons = summary['controlledGoalComparisons']
-    comparison_rows = ''.join(f'<tr><th scope="row">{escape(recipe["id"])}</th><td>{recipe["costs"]["completeAuthoredCharacterCount"]}</td>'
+    comparison_rows = ''.join(f'<tr><th scope="row">{escape(recipe["id"])}</th><td>{recipe["costs"]["completeAuthoredCharacterCount"]} / {recipe["costs"]["reusedPreparedInputAuthoredCharacterCount"]}</td>'
                               f'<td>{"待验证" if recipe["status"] != "completed" else "通过" if recipe["equivalentUnderContract"] else "拒绝"}</td></tr>'
                               for contract in comparisons['goalContracts'] for recipe in contract['recipes'])
+    feedback = summary['executionResultFeedback']
+    feedback_html = ''
+    if feedback['status'] != 'not_supplied':
+        feedback_rows = ''.join(f'<tr><th scope="row">版本组 {cohort["versionGroup"]}</th>'
+            f'<td>{cohort["verifiedExecutionCount"]} / {cohort["distinctObservationCount"]}</td>'
+            f'<td>{sum(count for outcome, count in cohort["comparisonOutcomeCounts"].items() if outcome != "comparison_execution_complete")}</td></tr>'
+            for cohort in feedback['analyzerVersionCohorts'])
+        feedback_html = ('<h2>原生调用与结果反馈</h2><p>开发验证工作流；显式审阅关联不证明原生业务目标或生产收益。</p>'
+            + ('<p class="notice">结果关联证据不完整，独立命令分析继续保留。</p>' if feedback['status'] == 'partial' else '')
+            + f'<p>已关联 {feedback["verifiedExecutionBindingCount"]} 次调用、{feedback["distinctResultObservationCount"]} 份独立观察、'
+            f'{feedback["distinctAnalyzerVersionCount"]} 个分析器版本。CLI退出0但对照未完成：{feedback["cliZeroExitWithIncompleteComparisonCount"]} 次。</p>'
+            + '<p>复用同一观察不会增加独立证据；各版本分组，不据此比较跨版本收益。正确拒绝反例也属于对照执行完成。</p>'
+            + '<p>字符小计仅覆盖声明的shell完成记录，外层工具payload与文件修改成本仍可能未知。</p>'
+            + '<table><caption>版本分组只呈现已验证关联，不含原始ID或摘要</caption><thead><tr><th>分析器版本组</th><td>调用 / 观察</td><td>未完成对照调用</td></tr></thead><tbody>'
+            + feedback_rows + '</tbody></table>')
     composition = summary['commandComposition']
-    missing_required = summary['coverage']['unavailableRequiredSourceCount'] + summary['coverage']['unavailableRequiredBaselineCount']
-    coverage_notice = '<p class="notice">部分结果：必要来源或历史基线缺失，不能视为完整分析。</p>' if missing_required else ''
+    missing_required = summary['coverage']['unavailableRequiredSourceCount'] + summary['coverage']['unavailableRequiredBaselineCount'] + summary['coverage']['unavailableRequiredExecutionResultReviewCount']
+    coverage_notice = '<p class="notice">部分结果：声明来源、历史基线或结果关联证据不完整，不能视为完整分析。</p>' if missing_required else ''
     safe_payload = {key: summary[key] for key in ['counts', 'coverage', 'costs', 'commandComposition', 'goalEvidence', 'operationGoalFamilyCandidateCounts']}
     payload = json.dumps(safe_payload, ensure_ascii=False).replace('<', '\\u003c')
     return '''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -242,12 +306,12 @@ def render_safe_usage_html(summary):
 <main><p>离线分析 · 声明来源 · 聚合导出</p><h1>命令变短，目标也要完整</h1>
 <p class="notice">目标族来自静态线索，尚非同目标完成率。输入子集不能代表全部使用；准备文件、token和生产耗时缺证时保持未知。</p>''' + coverage_notice + '''
 <div class="metrics">''' + f'<div class="metric"><strong>{counts["knownDistinctCompletedExecutions"]:,}</strong>可计独立执行</div><div class="metric"><strong>{counts["inlineScriptExecutions"]:,}</strong>含内联脚本的执行</div><div class="metric"><strong>{summary["goalEvidence"]["sampledStructuralClusterCount"]}</strong>已抽样结构簇</div></div>' + '''
-<h2>哪些目标值得进一步核对</h2><label for="goal-filter">筛选目标族</label> <select id="goal-filter"><option value="all">全部候选目标</option>''' + options + '''</select>
+''' + burden_html + '''<h2>哪些目标值得进一步核对</h2><label for="goal-filter">筛选目标族</label> <select id="goal-filter"><option value="all">全部候选目标</option>''' + options + '''</select>
 <table><caption>候选标签分布，不外推为总体目标比例</caption><thead><tr><th>候选目标族</th><td>执行次数</td><td>相对分布</td></tr></thead><tbody>''' + rows + '''</tbody></table>
 <h2>命令组成与完整成本</h2><p>''' + f'在{composition["independentNonHelpDirectCliCount"]}条独立非帮助CLI中，观察到的启动前缀中位{composition["observedLaunchPrefixCharacters"]["medianCharacters"]}字符，显式任务和项目身份中位{composition["explicitTaskAndProjectIdentityCharacters"]["medianCharacters"]}字符。' + '''这些是词元组成，不自动证明全部可以删除。</p><p>可观察command字符小计：''' + f'{summary["costs"]["knownAuthoredCharacterSubtotal"]:,}' + '''。内联代码已包含在command中，不重复相加。准备文件、完整目标调用链、首次成功率及生产收益仍为未知。</p>
-<h2>同目标受控对照</h2><p>完整快照保存与精确Unicode证据读取。表中字符包含配方所需的新输入文件；共用的既有fixture建设单列于对照JSON，不能外推生产收益。</p>
-<table><caption>相同结果契约，检查成功、失败与副作用</caption><thead><tr><th>合成配方</th><td>完整配方字符</td><td>语义检查</td></tr></thead><tbody>''' + comparison_rows + '''</tbody></table>
-<h2>下一批候选与门槛</h2><ol>''' + candidates + '''</ol><p>先比较结果、身份、错误传播与旧产物保护，再比较字符数。低调用量不能直接推断能力无用。</p>
+<h2>同目标受控对照</h2><p>JSON必需字段、会话绑定完整快照及精确Unicode证据读取。表中为首次使用的完整字符，包含新输入文件；持久脚本的后续调用成本与共用fixture建设另列于对照JSON，不能外推生产收益。</p>
+<table><caption>相同结果契约，检查成功、失败与副作用</caption><thead><tr><th>合成配方</th><td>首次 / 复用字符</td><td>语义检查</td></tr></thead><tbody>''' + comparison_rows + '''</tbody></table>
+''' + feedback_html + '''<h2>下一批候选与门槛</h2><ol>''' + candidates + '''</ol><p>先比较结果、身份、错误传播与旧产物保护，再比较字符数。低调用量不能直接推断能力无用。</p>
 <small>本页不含原始命令、执行ID、会话ID、原始路径或stderr参数值；私有证据保留在独立产物中。</small></main>
 <script type="application/json" id="aggregate-usage">''' + payload + '''</script><script>
 document.getElementById('goal-filter').addEventListener('change',event=>{for(const row of document.querySelectorAll('tr[data-family]'))row.hidden=event.target.value!=='all'&&row.dataset.family!==event.target.value});

@@ -1,4 +1,4 @@
-"""复用首轮的静态 shell、内联脚本和 AST 分析；不求值或执行输入。"""
+"""从shell命令静态提取CLI路由、内联脚本正文及AST分类；不求值或执行输入。"""
 import ast
 import hashlib
 import json
