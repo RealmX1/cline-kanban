@@ -32,6 +32,44 @@ function validate(draft: AddReferenceRelationDialogDraft) {
 }
 
 describe("validateAddReferenceRelationDialogDraftIntoAssertionRequest", () => {
+	it("快捷添加的反向选项交换请求端点，界面本 Task 仍固定在左侧", () => {
+		const outcome = validate(
+			buildDraft({
+				selectedReferenceRelationKind: "reference_reuses_produced_outputs_of",
+				currentTaskIsStatementSubject: false,
+			}),
+		);
+		expect(outcome).toMatchObject({
+			isDraftReadyForSubmission: true,
+			referenceRelationAssertionRequestWithoutClientCharacteristics: {
+				subjectWorkUnit: { bareTaskId: "def34", workspaceId: "workspace-other-project" },
+				counterpartWorkUnit: { bareTaskId: SUBJECT_TASK_ID, workspaceId: SUBJECT_WORKSPACE_ID },
+			},
+		});
+	});
+	it("跨 project 对应在同 project 或归属未确定时阻止提交，切换对端后重新校验", () => {
+		const crossProjectDraft = buildDraft({
+			selectedReferenceRelationKind: "reference_is_cross_repository_counterpart_with",
+		});
+		const counterpart = crossProjectDraft.selectedCounterpartKanbanBoardCard;
+		if (!counterpart) throw new Error("缺少对端");
+		expect(
+			validate({
+				...crossProjectDraft,
+				selectedCounterpartKanbanBoardCard: {
+					...counterpart,
+					counterpartKanbanBoardCardWorkspaceId: SUBJECT_WORKSPACE_ID,
+				},
+			}),
+		).toMatchObject({
+			isDraftReadyForSubmission: false,
+			draftValidationProblemMessages: [expect.stringContaining("仅限不同 project")],
+		});
+		expect(
+			validate({ ...crossProjectDraft, selectedCounterpartKanbanBoardCard: null }).isDraftReadyForSubmission,
+		).toBe(false);
+		expect(validate(crossProjectDraft).isDraftReadyForSubmission).toBe(true);
+	});
 	it("空草稿只要求选择对端", () => {
 		expect(
 			validateAddReferenceRelationDialogDraftIntoAssertionRequest({

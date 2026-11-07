@@ -559,6 +559,11 @@ export function WorkUnitRelationNeighborhoodPanel({
 					onAddReferenceRelationDialogOpenChange={setIsAddReferenceRelationDialogOpen}
 					subjectKanbanBoardCardWorkspaceId={workspaceId}
 					subjectKanbanBoardCardTaskId={kanbanBoardCardTaskId}
+					subjectTaskTitle={
+						readState.relationNeighborhoodReadPhase === "relation_neighborhood_loaded"
+							? readState.relationNeighborhoodPanelPresentation.panelSubjectTaskTitle
+							: kanbanBoardCardTaskId
+					}
 					subjectTaskIncarnationCreatedAtEpochMs={taskIncarnationCreatedAtEpochMs}
 					onReferenceRelationAssertionWriteSucceeded={handleReferenceRelationAssertionWriteSucceeded}
 				/>

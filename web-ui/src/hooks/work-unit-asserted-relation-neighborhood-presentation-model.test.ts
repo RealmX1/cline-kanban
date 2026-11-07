@@ -128,8 +128,8 @@ describe("buildWorkUnitAssertedRelationNeighborhoodPresentation", () => {
 				}).assertedByPanelSubjectOrConfirmedRelationRows[0]?.readingPhraseFromPanelSubjectPerspective,
 		);
 		expect(symmetricRelationReadFromBothEnds).toEqual([
-			"is the cross-repository counterpart of",
-			"is the cross-repository counterpart of",
+			"─ 跨 project 对应（无方向） ─",
+			"─ 跨 project 对应（无方向） ─",
 		]);
 	});
 

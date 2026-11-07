@@ -7,11 +7,13 @@ import {
 import { postDeployVerificationFollowUpSourceEntryReferenceSchema } from "./post-deploy-verification-entry-navigation-contract";
 
 // dd2db 阶段 2：断言型关系（义务 / 门 / 参照三轴，d-vocab §1.3：品种由轴前缀唯一决定）的 kind 注册表与读侧信封。
-// 2.1 只注册参照轴 6 个 kind（d-vocab §3.5，写入动词 `kanban work-unit assert-reference-relation`，R3.4）；
+// 参照轴保留历史 kind，新增交付物修复与 Agent 执行 Trajectory 诊断；写入动词为 assert-reference-relation。
 // 义务轴、门轴随 2.4、阶段 3 注册。方向的规范来源是注册表里的读法短语（d-vocab §1.1），由单测锁定。
 // 本文件同时被 web-ui 引用（Relations 面板的「添加关系」对话框列 kind），只放 schema、纯数据与纯判定函数，不放 node 依赖。
 
 export const ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS = [
+	"reference_fixes_defects_in_produced_outputs_of",
+	"reference_diagnoses_agent_execution_trajectory_of",
 	"reference_concerns_behavior_or_state_of",
 	"reference_verifies_claims_of",
 	"reference_reuses_produced_outputs_of",
@@ -76,7 +78,7 @@ export interface AssertedInterWorkUnitRelationKindRegistryEntry {
 	assertReferenceRelationCounterpartRoleCommandLineFlagName: string;
 	allowedSubjectWorkUnitTypes: readonly InterWorkUnitRelationWorkUnitType[];
 	allowedAnchorWorkUnitTypes: readonly InterWorkUnitRelationWorkUnitType[];
-	// 同仓写入直接拒绝（d-vocab §3.5 跨仓配对），提示改用泛相关，不在事后改写 kind。
+	// 按端点当前 project 判断写入资格；canonical identity 只负责身份与去重，不改写失效选择。
 	rejectsEndpointsInSameKanbanWorkspace: boolean;
 	// 至少要填其中一组：外层数组是「或」，内层数组是「与」。空数组 = 没有专有必填属性。
 	requiredKindSpecificAttributeKeyAlternatives: readonly (readonly (keyof AssertedReferenceRelationKindSpecificAttributes)[])[];
@@ -100,6 +102,39 @@ export const ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY: Record<
 	AssertedInterWorkUnitReferenceRelationKind,
 	AssertedInterWorkUnitRelationKindRegistryEntry
 > = {
+	reference_fixes_defects_in_produced_outputs_of: {
+		relationAxis: "reference",
+		relationEndpointSymmetry: "directed_subject_points_back_at_anchor",
+		// 只声明修复工作的对象，不证明修复已经完成。
+		forwardReadingPhraseFromSubject: "fixes defects in produced outputs of",
+		inverseReadingPhraseFromAnchor: "has defects in its produced outputs fixed by",
+		assertReferenceRelationCounterpartRoleCommandLineFlagName: "--fixes-defects-in-produced-outputs-of",
+		allowedSubjectWorkUnitTypes: KANBAN_BOARD_CARD_AND_STANDALONE_SESSION_WORK_UNIT_TYPES,
+		allowedAnchorWorkUnitTypes: KANBAN_BOARD_CARD_AND_STANDALONE_SESSION_WORK_UNIT_TYPES,
+		rejectsEndpointsInSameKanbanWorkspace: false,
+		requiredKindSpecificAttributeKeyAlternatives: [],
+		allowedKindSpecificAttributeKeys: [],
+		riskRelevantAttributeKeys: [],
+		neighborhoodSummarySectionPriority: 8,
+		defaultVisibleInNeighborhoodSummary: true,
+		webUiAddRelationOptionLabel: "修复其交付物",
+	},
+	reference_diagnoses_agent_execution_trajectory_of: {
+		relationAxis: "reference",
+		relationEndpointSymmetry: "directed_subject_points_back_at_anchor",
+		forwardReadingPhraseFromSubject: "diagnoses the agent execution trajectory of",
+		inverseReadingPhraseFromAnchor: "has its agent execution trajectory diagnosed by",
+		assertReferenceRelationCounterpartRoleCommandLineFlagName: "--diagnoses-agent-execution-trajectory-of",
+		allowedSubjectWorkUnitTypes: KANBAN_BOARD_CARD_AND_STANDALONE_SESSION_WORK_UNIT_TYPES,
+		allowedAnchorWorkUnitTypes: KANBAN_BOARD_CARD_AND_STANDALONE_SESSION_WORK_UNIT_TYPES,
+		rejectsEndpointsInSameKanbanWorkspace: false,
+		requiredKindSpecificAttributeKeyAlternatives: [],
+		allowedKindSpecificAttributeKeys: [],
+		riskRelevantAttributeKeys: [],
+		neighborhoodSummarySectionPriority: 8,
+		defaultVisibleInNeighborhoodSummary: true,
+		webUiAddRelationOptionLabel: "诊断其 Trajectory",
+	},
 	reference_concerns_behavior_or_state_of: {
 		relationAxis: "reference",
 		relationEndpointSymmetry: "directed_subject_points_back_at_anchor",
@@ -182,7 +217,7 @@ export const ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY: Record<
 		riskRelevantAttributeKeys: [],
 		neighborhoodSummarySectionPriority: 8,
 		defaultVisibleInNeighborhoodSummary: true,
-		webUiAddRelationOptionLabel: "Is the cross-repository counterpart of (shared contract)",
+		webUiAddRelationOptionLabel: "跨 project 对应（无方向）",
 	},
 	reference_is_generally_related_with: {
 		relationAxis: "reference",

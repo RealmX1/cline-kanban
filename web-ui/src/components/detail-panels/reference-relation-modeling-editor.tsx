@@ -2,10 +2,7 @@ import type {
 	AssertedInterWorkUnitRelation,
 	AssertedReferenceRelationKindSpecificAttributes,
 } from "@runtime-inter-work-unit-asserted-relation-kind-registry-contract";
-import {
-	ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS,
-	ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY,
-} from "@runtime-inter-work-unit-asserted-relation-kind-registry-contract";
+import { ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY } from "@runtime-inter-work-unit-asserted-relation-kind-registry-contract";
 import type { KanbanBoardCardWorkUnitQualifiedReference } from "@runtime-inter-work-unit-relation-ledger-event-contract";
 import type {
 	ReferenceRelationModelingDraft,
@@ -15,10 +12,10 @@ import isDeepEqual from "fast-deep-equal";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
 	REFERENCE_RELATION_LABELS,
-	RELATION_GRAPH_LABELS,
 	RELATION_PREVIEW_STATE_LABELS,
 	ReferenceRelationModelingGraph,
 } from "@/components/detail-panels/reference-relation-modeling-graph";
+import { ReferenceRelationStatement } from "@/components/detail-panels/reference-relation-statement";
 import { RelationTaskCardPreviewLayout } from "@/components/detail-panels/relation-task-card-preview-layout";
 import { KindSpecificAttributeInput } from "@/components/detail-panels/work-unit-relation-add-reference-relation-dialog";
 import { WorkUnitRelationCounterpartKanbanBoardCardPicker } from "@/components/detail-panels/work-unit-relation-counterpart-kanban-board-card-picker";
@@ -37,9 +34,11 @@ import type { TaskEditorClipboardTaskSelectionRequest } from "@/hooks/use-task-e
 import {
 	type AddReferenceRelationDialogDraft,
 	EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
+	getCrossProjectCounterpartSelectionProblem,
 	listKindSpecificAttributeKeysShownAsAddReferenceRelationDialogInputs,
 	validateAddReferenceRelationDialogDraftIntoAssertionRequest,
 } from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
+import { getReferenceRelationDisplayLabel } from "@/hooks/work-unit-relation-kind-display-labels";
 import {
 	collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent,
 	type TriggeringExplicitUserGestureEvent,
@@ -111,6 +110,7 @@ function buildPendingRelationDetailsForm(
 export function ReferenceRelationModelingEditor({
 	controller,
 	workspaceId,
+	targetWorkspaceId,
 	taskId,
 	rootTitle = "待创建任务",
 	onDraftInteraction,
@@ -123,6 +123,7 @@ export function ReferenceRelationModelingEditor({
 }: {
 	controller: ReferenceRelationModelingEditorController;
 	workspaceId: string;
+	targetWorkspaceId?: string | null;
 	taskId: string | null;
 	rootTitle?: string;
 	onDraftInteraction?: () => void;
@@ -149,17 +150,56 @@ export function ReferenceRelationModelingEditor({
 	);
 	const [taskEditorRelationGraphOpen, setTaskEditorRelationGraphOpen] = useState(false);
 	const taskCardPreview = useRelationTaskCardPreview();
+	const effectiveTargetWorkspaceId = targetWorkspaceId === undefined ? workspaceId : targetWorkspaceId;
+	const preview = controller.preview;
+	function counterpartPresentation(ref: ReferenceRelationModelingDraft["counterpartWorkUnit"]) {
+		const entry = preview?.workUnits.find(
+			(entry) =>
+				isDeepEqual(entry.workUnit, ref) || isDeepEqual(entry.kanbanBoardCardIdentity?.kanbanBoardCard, ref),
+		);
+		const identity = entry?.kanbanBoardCardIdentity;
+		return {
+			currentWorkspaceId:
+				identity?.permanentlyRemovedFromBoardAt === null ? identity.kanbanBoardCard.workspaceId : null,
+			label:
+				ref.workUnitType === "kanban_board_card"
+					? `${identity?.kanbanBoardCard.workspaceId ?? ref.workspaceId} / ${ref.taskId} / ${identity?.currentTitle ?? entry?.workUnitDisplayLabel ?? ref.taskId}`
+					: ref.nativeConversationSessionId,
+		};
+	}
+	const pendingProjectProblems = controller.draft.referenceRelationDrafts.flatMap((draft) => {
+		const problem = getCrossProjectCounterpartSelectionProblem(
+			draft.relationKind,
+			effectiveTargetWorkspaceId,
+			counterpartPresentation(draft.counterpartWorkUnit).currentWorkspaceId,
+		);
+		return problem ? [problem] : [];
+	});
+	const formCounterpartCurrentWorkspaceId = editingDraft
+		? counterpartPresentation(editingDraft.counterpartWorkUnit).currentWorkspaceId
+		: form.selectedCounterpartKanbanBoardCard?.counterpartKanbanBoardCardWorkspaceId;
+	const formProjectProblem = getCrossProjectCounterpartSelectionProblem(
+		form.selectedReferenceRelationKind,
+		effectiveTargetWorkspaceId,
+		formCounterpartCurrentWorkspaceId,
+	);
 	const invalidDetailsForms = controller.draft.invalidReferenceRelationDetailsFormsByDraftId ?? {};
 	const hasInvalidDetailsForms = Object.keys(invalidDetailsForms).length > 0;
 	const hasUnstagedCounterpartSelection =
 		resolving || Boolean(formOpen && !editingDraft && (editing || form.selectedCounterpartKanbanBoardCard));
 	const hasUnstagedRelationForm =
-		hasUnstagedCounterpartSelection || Boolean(editingDraft && formError) || hasInvalidDetailsForms;
+		hasUnstagedCounterpartSelection ||
+		Boolean(editingDraft && formError) ||
+		hasInvalidDetailsForms ||
+		pendingProjectProblems.length > 0 ||
+		Boolean(formOpen && formProjectProblem);
 	const invalidDetailsProblemMessages = controller.draft.referenceRelationDrafts.flatMap((draft) => {
 		const invalidDetailsForm = invalidDetailsForms[draft.draftId];
 		if (!invalidDetailsForm) return [];
 		const validation = validateAddReferenceRelationDialogDraftIntoAssertionRequest({
 			draft: buildPendingRelationDetailsForm(draft, invalidDetailsForm),
+			currentTaskTargetWorkspaceId: effectiveTargetWorkspaceId,
+			counterpartCurrentWorkspaceId: counterpartPresentation(draft.counterpartWorkUnit).currentWorkspaceId,
 			subjectKanbanBoardCardWorkspaceId: workspaceId,
 			subjectKanbanBoardCardTaskId: taskId ?? "task-being-created",
 		});
@@ -169,7 +209,6 @@ export function ReferenceRelationModelingEditor({
 		onUnstagedFormChange?.(hasUnstagedRelationForm);
 		return () => onUnstagedFormChange?.(false);
 	}, [hasUnstagedRelationForm, onUnstagedFormChange]);
-	const preview = controller.preview;
 	const labels = new Map(
 		preview?.workUnits.map((entry) => [
 			entry.workUnitKey,
@@ -251,7 +290,8 @@ export function ReferenceRelationModelingEditor({
 		setForm({
 			...buildRelationDetailsForm(relation),
 			selectedCounterpartKanbanBoardCard: {
-				counterpartKanbanBoardCardWorkspaceId: counterpart.workspaceId,
+				counterpartKanbanBoardCardWorkspaceId:
+					counterpartPresentation(counterpart).currentWorkspaceId ?? counterpart.workspaceId,
 				counterpartKanbanBoardCardTaskId: counterpart.taskId,
 				counterpartKanbanBoardCardTitle:
 					preview?.workUnits.find(
@@ -292,6 +332,8 @@ export function ReferenceRelationModelingEditor({
 		}
 		const validation = validateAddReferenceRelationDialogDraftIntoAssertionRequest({
 			draft: form,
+			currentTaskTargetWorkspaceId: effectiveTargetWorkspaceId,
+			counterpartCurrentWorkspaceId: formCounterpartCurrentWorkspaceId,
 			subjectKanbanBoardCardWorkspaceId: workspaceId,
 			subjectKanbanBoardCardTaskId: taskId ?? "task-being-created",
 		});
@@ -346,7 +388,17 @@ export function ReferenceRelationModelingEditor({
 					Object.entries(invalidDetailsForms ?? {}).filter(([draftId]) => draftId !== editingDraft.draftId),
 				),
 			});
-	}, [form, direction, editingDraft, workspaceId, taskId, controller, resetForm]);
+	}, [
+		form,
+		direction,
+		editingDraft,
+		workspaceId,
+		taskId,
+		controller,
+		resetForm,
+		effectiveTargetWorkspaceId,
+		formCounterpartCurrentWorkspaceId,
+	]);
 
 	async function addFormToDraft(
 		selectedForm = form,
@@ -357,6 +409,7 @@ export function ReferenceRelationModelingEditor({
 		setFormError(null);
 		const result = validateAddReferenceRelationDialogDraftIntoAssertionRequest({
 			draft: selectedForm,
+			currentTaskTargetWorkspaceId: effectiveTargetWorkspaceId,
 			subjectKanbanBoardCardWorkspaceId: workspaceId,
 			subjectKanbanBoardCardTaskId: taskId ?? "task-being-created",
 		});
@@ -488,6 +541,7 @@ export function ReferenceRelationModelingEditor({
 		creationInFlight ||
 		readOnly ||
 		Boolean(editingDraft) ||
+		Boolean(formProjectProblem) ||
 		!(editing || form.selectedCounterpartKanbanBoardCard);
 	const handleRelationDetailsKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
 		onSubmit: () => addFormToDraft(),
@@ -586,62 +640,35 @@ export function ReferenceRelationModelingEditor({
 						) : null}
 						{editing || editingDraft || form.selectedCounterpartKanbanBoardCard ? (
 							<>
-								<label className="flex flex-col gap-1" htmlFor={`${id}-kind`}>
-									关系类型
-									<NativeSelect
-										id={`${id}-kind`}
-										aria-label="关系类型"
-										size="sm"
-										fill
-										value={selectedKind}
-										onChange={(event) =>
-											setForm((previous) => ({
-												...EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
-												selectedCounterpartKanbanBoardCard: previous.selectedCounterpartKanbanBoardCard,
-												relationAssertionRationaleOneSentenceText:
-													previous.relationAssertionRationaleOneSentenceText,
-												relationAssertionEvidencePointersOnePerLineText:
-													previous.relationAssertionEvidencePointersOnePerLineText,
-												selectedReferenceRelationKind: event.target
-													.value as AddReferenceRelationDialogDraft["selectedReferenceRelationKind"],
-											}))
-										}
-									>
-										<option value="">普通关联（默认）</option>
-										{ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS.map((kind) => (
-											<option key={kind} value={kind}>
-												{REFERENCE_RELATION_LABELS[kind]}
-											</option>
-										))}
-									</NativeSelect>
-								</label>
-								{selectedKind &&
-								ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[selectedKind].relationEndpointSymmetry !==
-									"symmetric_unordered_endpoint_pair" ? (
-									<label className="flex flex-col gap-1" htmlFor={`${id}-direction`}>
-										陈述方向
-										<NativeSelect
-											id={`${id}-direction`}
-											aria-label="陈述方向"
-											size="sm"
-											fill
-											value={direction ? "current" : "other"}
-											onChange={(event) => setDirection(event.target.value === "current")}
-										>
-											<option value="current">当前任务 → 关联任务</option>
-											<option value="other">关联任务 → 当前任务</option>
-										</NativeSelect>
-									</label>
-								) : null}
-								{selectedKind && form.selectedCounterpartKanbanBoardCard ? (
-									<p className="rounded-md bg-surface-2 p-2" role="note" aria-label="关系陈述预览">
-										{direction
-											? rootTitle
-											: form.selectedCounterpartKanbanBoardCard.counterpartKanbanBoardCardTitle}{" "}
-										· {REFERENCE_RELATION_LABELS[selectedKind]} ·{" "}
-										{direction
-											? form.selectedCounterpartKanbanBoardCard.counterpartKanbanBoardCardTitle
-											: rootTitle}
+								<ReferenceRelationStatement
+									relationKind={selectedKind || "reference_is_generally_related_with"}
+									currentTaskIsStatementSubject={direction}
+									rootTitle={rootTitle}
+									counterpartLabel={
+										editingDraft
+											? counterpartPresentation(editingDraft.counterpartWorkUnit).label
+											: form.selectedCounterpartKanbanBoardCard
+												? `${form.selectedCounterpartKanbanBoardCard.counterpartKanbanProjectDisplayName} / ${form.selectedCounterpartKanbanBoardCard.counterpartKanbanBoardCardTaskId} / ${form.selectedCounterpartKanbanBoardCard.counterpartKanbanBoardCardTitle}`
+												: "尚未选择"
+									}
+									currentTaskTargetWorkspaceId={effectiveTargetWorkspaceId}
+									counterpartCurrentWorkspaceId={formCounterpartCurrentWorkspaceId}
+									assertedRelationKindSpecificAttributes={
+										editingDraft?.assertedRelationKindSpecificAttributes ??
+										editing?.assertedRelationKindSpecificAttributes
+									}
+									onReferenceRelationKindAndDirectionChange={(relationKind, subject) => {
+										setDirection(subject);
+										setForm((previous) => ({
+											...previous,
+											selectedReferenceRelationKind: relationKind,
+											currentTaskIsStatementSubject: subject,
+										}));
+									}}
+								/>
+								{formProjectProblem ? (
+									<p role="alert" className="text-status-orange">
+										{formProjectProblem}
 									</p>
 								) : null}
 								<details className="space-y-3">
@@ -724,67 +751,89 @@ export function ReferenceRelationModelingEditor({
 					</div>
 				) : null}
 				<ul aria-label="待保存关联任务" className="divide-y divide-border">
-					{controller.draft.referenceRelationDrafts.map((draft) => (
-						<li key={draft.draftId} className="flex min-w-0 flex-wrap items-center gap-2 py-2">
-							<span className="min-w-0 flex-1 break-words">
-								{draft.counterpartWorkUnit.workUnitType === "kanban_board_card"
-									? `${draft.counterpartWorkUnit.workspaceId} / ${preview?.workUnits.find((entry) => isDeepEqual(entry.workUnit, draft.counterpartWorkUnit))?.kanbanBoardCardIdentity?.currentTitle ?? draft.counterpartWorkUnit.taskId}`
-									: draft.counterpartWorkUnit.nativeConversationSessionId}
-							</span>
-							{invalidDetailsForms[draft.draftId] ? <span className="text-status-orange">详情有误</span> : null}
-							<NativeSelect
-								aria-label="待保存关系类型"
-								size="sm"
-								value={draft.relationKind}
-								onChange={(event) => {
-									if (editingDraft?.draftId === draft.draftId) resetForm();
-									controller.addDraft({
-										...draft,
-										relationKind: event.target.value as ReferenceRelationModelingDraft["relationKind"],
-										assertedRelationKindSpecificAttributes: {},
-									});
-								}}
-								disabled={
-									readOnly ||
-									Boolean(invalidDetailsForms[draft.draftId]) ||
-									(formOpen && editingDraft?.draftId === draft.draftId)
-								}
-							>
-								{ASSERTED_INTER_WORK_UNIT_REFERENCE_RELATION_KINDS.map((kind) => (
-									<option key={kind} value={kind}>
-										{REFERENCE_RELATION_LABELS[kind]}
-									</option>
-								))}
-							</NativeSelect>
-							<Button
-								size="xs"
-								variant="ghost"
-								disabled={readOnly || hasUnstagedCounterpartSelection}
-								onClick={() =>
-									editingDraft?.draftId === draft.draftId
-										? setFormOpen((open) => !open)
-										: editPendingDraft(draft)
-								}
-							>
-								{editingDraft?.draftId === draft.draftId && formOpen ? "收起详情" : "详情"}
-							</Button>
-							<Button
-								size="xs"
-								variant="ghost"
-								disabled={readOnly}
-								onClick={() => {
-									if (editingDraft?.draftId === draft.draftId) resetForm();
-									controller.updateDraft({
-										referenceRelationDrafts: controller
-											.readLatestDraft()
-											.referenceRelationDrafts.filter((entry) => entry.draftId !== draft.draftId),
-									});
-								}}
-							>
-								移除关系
-							</Button>
-						</li>
-					))}
+					{controller.draft.referenceRelationDrafts.map((draft) => {
+						const counterpart = counterpartPresentation(draft.counterpartWorkUnit);
+						const projectProblem = getCrossProjectCounterpartSelectionProblem(
+							draft.relationKind,
+							effectiveTargetWorkspaceId,
+							counterpart.currentWorkspaceId,
+						);
+						return (
+							<li key={draft.draftId} className="min-w-0 space-y-2 py-2">
+								<ReferenceRelationStatement
+									relationKind={draft.relationKind}
+									currentTaskIsStatementSubject={draft.currentTaskIsStatementSubject}
+									rootTitle={rootTitle}
+									counterpartLabel={counterpart.label}
+									currentTaskTargetWorkspaceId={effectiveTargetWorkspaceId}
+									counterpartCurrentWorkspaceId={counterpart.currentWorkspaceId}
+									assertedRelationKindSpecificAttributes={draft.assertedRelationKindSpecificAttributes}
+									selectAriaLabel="待保存关系及方向"
+									onReferenceRelationKindAndDirectionChange={(relationKind, currentTaskIsStatementSubject) => {
+										if (editingDraft?.draftId === draft.draftId) resetForm();
+										const attributes =
+											relationKind === draft.relationKind
+												? { ...draft.assertedRelationKindSpecificAttributes }
+												: {};
+										if (currentTaskIsStatementSubject !== draft.currentTaskIsStatementSubject) {
+											// 结论与来源条目属于原有序端点，反向后不能沿用。
+											delete attributes.originatingPostDeployVerificationEntry;
+											if (attributes.claimsUnderVerification)
+												attributes.claimsUnderVerification = attributes.claimsUnderVerification.map(
+													(claim) => ({ ...claim, verificationVerdict: "pending" }),
+												);
+										}
+										controller.addDraft({
+											...draft,
+											relationKind,
+											currentTaskIsStatementSubject,
+											assertedRelationKindSpecificAttributes: attributes,
+										});
+									}}
+									disabled={
+										readOnly ||
+										Boolean(invalidDetailsForms[draft.draftId]) ||
+										(formOpen && editingDraft?.draftId === draft.draftId)
+									}
+								/>
+								{projectProblem ? (
+									<p role="alert" className="text-status-orange">
+										{projectProblem}
+									</p>
+								) : null}
+								{invalidDetailsForms[draft.draftId] ? <p className="text-status-orange">详情有误</p> : null}
+								<div className="flex flex-wrap gap-2">
+									<Button
+										size="xs"
+										variant="ghost"
+										disabled={readOnly || hasUnstagedCounterpartSelection}
+										onClick={() =>
+											editingDraft?.draftId === draft.draftId
+												? setFormOpen((open) => !open)
+												: editPendingDraft(draft)
+										}
+									>
+										{editingDraft?.draftId === draft.draftId && formOpen ? "收起详情" : "详情"}
+									</Button>
+									<Button
+										size="xs"
+										variant="ghost"
+										disabled={readOnly}
+										onClick={() => {
+											if (editingDraft?.draftId === draft.draftId) resetForm();
+											controller.updateDraft({
+												referenceRelationDrafts: controller
+													.readLatestDraft()
+													.referenceRelationDrafts.filter((entry) => entry.draftId !== draft.draftId),
+											});
+										}}
+									>
+										移除关系
+									</Button>
+								</div>
+							</li>
+						);
+					})}
 				</ul>
 
 				<div className="flex flex-wrap items-center gap-2">
@@ -859,19 +908,25 @@ export function ReferenceRelationModelingEditor({
 									)
 									.map((relation) => (
 										<li key={relation.relationId} className="py-2">
-											<p className="break-words">
-												{labels.get(relation.subjectKey) ?? relation.subjectKey}{" "}
-												<span className="text-text-secondary">
-													{RELATION_GRAPH_LABELS[relation.relationKind] ?? relation.relationKind}
-												</span>{" "}
-												{[
-													"reference_is_generally_related_with",
-													"reference_is_cross_repository_counterpart_with",
-												].includes(relation.relationKind)
-													? "↔"
-													: "→"}{" "}
-												{labels.get(relation.anchorKey) ?? relation.anchorKey}
-											</p>
+											<ReferenceRelationStatement
+												relationKind={relation.relationKind}
+												currentTaskIsStatementSubject={relation.subjectKey === preview.rootWorkUnitKey}
+												rootTitle={rootTitle}
+												assertedRelationKindSpecificAttributes={
+													relation.assertedRelation?.assertedRelationKindSpecificAttributes
+												}
+												counterpartLabel={(() => {
+													const key =
+														relation.subjectKey === preview.rootWorkUnitKey
+															? relation.anchorKey
+															: relation.subjectKey;
+													const entry = preview.workUnits.find((entry) => entry.workUnitKey === key);
+													return entry
+														? counterpartPresentation(entry.workUnit).label
+														: (labels.get(key) ?? key);
+												})()}
+											/>
+
 											<p className="mt-1 text-text-secondary">
 												{RELATION_PREVIEW_STATE_LABELS[relation.relationPresentationState]}
 												{relation.assertedRelation
@@ -1047,7 +1102,11 @@ export function ReferenceRelationModelingEditor({
 							<div key={candidate.candidateId} className="rounded-md border border-border bg-surface-2 p-3">
 								<div className="flex flex-wrap items-center justify-between gap-2">
 									<span className="font-medium">
-										{label} · {REFERENCE_RELATION_LABELS[candidate.relationDraft.relationKind]}
+										{label} ·{" "}
+										{getReferenceRelationDisplayLabel(
+											candidate.relationDraft.relationKind,
+											candidate.relationDraft.assertedRelationKindSpecificAttributes,
+										)}
 									</span>
 									<Button
 										size="xs"

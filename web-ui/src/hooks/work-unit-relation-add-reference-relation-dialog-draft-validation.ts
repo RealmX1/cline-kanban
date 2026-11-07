@@ -25,14 +25,14 @@ export interface SelectedCounterpartKanbanBoardCardForAddReferenceRelation {
 	counterpartKanbanProjectDisplayName: string;
 }
 
-export interface AddReferenceRelationDialogDraft
-	extends Omit<ReferenceRelationModelingInvalidDetailsForm, "currentTaskIsStatementSubject"> {
+export interface AddReferenceRelationDialogDraft extends ReferenceRelationModelingInvalidDetailsForm {
 	selectedCounterpartKanbanBoardCard: SelectedCounterpartKanbanBoardCardForAddReferenceRelation | null;
 }
 
 export const EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT: AddReferenceRelationDialogDraft = {
 	selectedCounterpartKanbanBoardCard: null,
 	selectedReferenceRelationKind: "",
+	currentTaskIsStatementSubject: true,
 	relationAssertionRationaleOneSentenceText: "",
 	relationAssertionEvidencePointersOnePerLineText: "",
 	concernedAspectSummaryText: "",
@@ -130,11 +130,26 @@ export type AddReferenceRelationDialogDraftValidationOutcome =
 	  }
 	| { isDraftReadyForSubmission: false; draftValidationProblemMessages: string[] };
 
+export function getCrossProjectCounterpartSelectionProblem(
+	relationKind: string,
+	currentTaskTargetWorkspaceId: string | null | undefined,
+	counterpartCurrentWorkspaceId: string | null | undefined,
+): string | null {
+	if (relationKind !== "reference_is_cross_repository_counterpart_with") return null;
+	if (!currentTaskTargetWorkspaceId || !counterpartCurrentWorkspaceId)
+		return "跨 project 对应仅限不同 project；请先确认两端任务的当前 project。";
+	return currentTaskTargetWorkspaceId === counterpartCurrentWorkspaceId
+		? "跨 project 对应仅限不同 project；当前两端任务属于同一 project。"
+		: null;
+}
+
 export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(input: {
 	draft: AddReferenceRelationDialogDraft;
 	subjectKanbanBoardCardWorkspaceId: string;
 	subjectKanbanBoardCardTaskId: string;
 	subjectTaskIncarnationCreatedAtEpochMs?: number;
+	currentTaskTargetWorkspaceId?: string | null;
+	counterpartCurrentWorkspaceId?: string | null;
 }): AddReferenceRelationDialogDraftValidationOutcome {
 	const { draft } = input;
 	const draftValidationProblemMessages: string[] = [];
@@ -150,6 +165,16 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 	}
 
 	const relationKind = draft.selectedReferenceRelationKind || "reference_is_generally_related_with";
+	const crossProjectProblem = getCrossProjectCounterpartSelectionProblem(
+		relationKind,
+		input.currentTaskTargetWorkspaceId === undefined
+			? input.subjectKanbanBoardCardWorkspaceId
+			: input.currentTaskTargetWorkspaceId,
+		input.counterpartCurrentWorkspaceId === undefined
+			? counterpart?.counterpartKanbanBoardCardWorkspaceId
+			: input.counterpartCurrentWorkspaceId,
+	);
+	if (crossProjectProblem) draftValidationProblemMessages.push(crossProjectProblem);
 
 	const relationAssertionRationaleOneSentence = draft.relationAssertionRationaleOneSentenceText.trim();
 	if (relationAssertionRationaleOneSentence.length > RELATION_ASSERTION_RATIONALE_MAXIMUM_LENGTH) {
@@ -191,45 +216,53 @@ export function validateAddReferenceRelationDialogDraftIntoAssertionRequest(inpu
 	if (draftValidationProblemMessages.length > 0 || !counterpart || !relationKind) {
 		return { isDraftReadyForSubmission: false, draftValidationProblemMessages };
 	}
+	const request: ReferenceRelationAssertionRequestWithoutClientCharacteristics = {
+		subjectWorkUnit:
+			input.subjectTaskIncarnationCreatedAtEpochMs !== undefined
+				? {
+						workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+						kanbanBoardCard: {
+							workUnitType: "kanban_board_card",
+							workspaceId: input.subjectKanbanBoardCardWorkspaceId,
+							taskId: input.subjectKanbanBoardCardTaskId,
+							taskIncarnationCreatedAtEpochMs: input.subjectTaskIncarnationCreatedAtEpochMs,
+						},
+					}
+				: {
+						workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+						bareTaskId: input.subjectKanbanBoardCardTaskId,
+						workspaceId: input.subjectKanbanBoardCardWorkspaceId,
+					},
+		relationKind,
+		counterpartWorkUnit:
+			counterpart.counterpartTaskIncarnationCreatedAtEpochMs !== undefined
+				? {
+						workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+						kanbanBoardCard: {
+							workUnitType: "kanban_board_card",
+							workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
+							taskId: counterpart.counterpartKanbanBoardCardTaskId,
+							taskIncarnationCreatedAtEpochMs: counterpart.counterpartTaskIncarnationCreatedAtEpochMs,
+						},
+					}
+				: {
+						workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
+						bareTaskId: counterpart.counterpartKanbanBoardCardTaskId,
+						workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
+					},
+		relationAssertionRationaleOneSentence,
+		relationAssertionEvidencePointers,
+		assertedRelationKindSpecificAttributes,
+	};
+	if (
+		draft.currentTaskIsStatementSubject === false &&
+		ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[relationKind].relationEndpointSymmetry !==
+			"symmetric_unordered_endpoint_pair"
+	) {
+		[request.subjectWorkUnit, request.counterpartWorkUnit] = [request.counterpartWorkUnit, request.subjectWorkUnit];
+	}
 	return {
 		isDraftReadyForSubmission: true,
-		referenceRelationAssertionRequestWithoutClientCharacteristics: {
-			subjectWorkUnit:
-				input.subjectTaskIncarnationCreatedAtEpochMs !== undefined
-					? {
-							workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
-							kanbanBoardCard: {
-								workUnitType: "kanban_board_card",
-								workspaceId: input.subjectKanbanBoardCardWorkspaceId,
-								taskId: input.subjectKanbanBoardCardTaskId,
-								taskIncarnationCreatedAtEpochMs: input.subjectTaskIncarnationCreatedAtEpochMs,
-							},
-						}
-					: {
-							workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-							bareTaskId: input.subjectKanbanBoardCardTaskId,
-							workspaceId: input.subjectKanbanBoardCardWorkspaceId,
-						},
-			relationKind,
-			counterpartWorkUnit:
-				counterpart.counterpartTaskIncarnationCreatedAtEpochMs !== undefined
-					? {
-							workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
-							kanbanBoardCard: {
-								workUnitType: "kanban_board_card",
-								workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
-								taskId: counterpart.counterpartKanbanBoardCardTaskId,
-								taskIncarnationCreatedAtEpochMs: counterpart.counterpartTaskIncarnationCreatedAtEpochMs,
-							},
-						}
-					: {
-							workUnitSelectorKind: "kanban_board_card_by_bare_task_id",
-							bareTaskId: counterpart.counterpartKanbanBoardCardTaskId,
-							workspaceId: counterpart.counterpartKanbanBoardCardWorkspaceId,
-						},
-			relationAssertionRationaleOneSentence,
-			relationAssertionEvidencePointers,
-			assertedRelationKindSpecificAttributes,
-		},
+		referenceRelationAssertionRequestWithoutClientCharacteristics: request,
 	};
 }

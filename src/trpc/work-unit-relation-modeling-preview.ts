@@ -72,6 +72,7 @@ export async function buildRelationModelingPreview(
 			relationKind: draft.relationKind,
 			relationPresentationState: draft.replacesRelationId ? "pending_revision" : "pending_addition",
 			assertedRelation: null,
+			assertedRelationKindSpecificAttributes: draft.assertedRelationKindSpecificAttributes,
 		});
 	}
 	// EXPERIMENT_NODE: 根据真实项目关系密度评估 150 节点与 300 条关系的预览上限。
@@ -81,7 +82,12 @@ export async function buildRelationModelingPreview(
 		input.relationNeighborhoodDepth,
 	);
 	const selectedIds = new Set(neighborhood.relationIds);
-	const selectedRefs = neighborhood.workUnitKeys.flatMap((key) => {
+	// 草稿资格使用完整对端身份；图仍仅按已裁剪的 relations 绘制，展示预算不能阻止保存。
+	const displayWorkUnitKeys = new Set([
+		...neighborhood.workUnitKeys,
+		...input.referenceRelationDrafts.map((draft) => buildInterWorkUnitRelationWorkUnitKey(draft.counterpartWorkUnit)),
+	]);
+	const selectedRefs = [...displayWorkUnitKeys].flatMap((key) => {
 		const ref = refsByKey.get(key);
 		return ref ? [ref] : [];
 	});

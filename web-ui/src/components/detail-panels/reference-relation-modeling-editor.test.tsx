@@ -55,11 +55,13 @@ const onUnstagedFormChange = vi.fn();
 function Harness({
 	workspaceId = "project-a",
 	taskId = "task-a",
+	targetWorkspaceId,
 	showEditor = true,
 	presentation,
 }: {
 	workspaceId?: string;
 	taskId?: string | null;
+	targetWorkspaceId?: string;
 	showEditor?: boolean;
 	presentation?: "embedded" | "foreground" | "task_editor";
 }) {
@@ -73,6 +75,7 @@ function Harness({
 		<ReferenceRelationModelingEditor
 			controller={controller}
 			workspaceId={workspaceId}
+			targetWorkspaceId={targetWorkspaceId}
 			taskId={taskId}
 			onDraftInteraction={onDraftInteraction}
 			onUnstagedFormChange={onUnstagedFormChange}
@@ -300,12 +303,70 @@ describe("关系表单迟到的身份解析", () => {
 		expect(controller.draft.invalidReferenceRelationDetailsFormsByDraftId).toEqual({});
 		expect(onUnstagedFormChange).toHaveBeenLastCalledWith(false);
 	});
+	it("预览截断时仍按对端身份校验跨 project，切换目标与迁移后保留选择并阻止失效提交", async () => {
+		const identity = {
+			kanbanBoardCard: counterpartWorkUnit,
+			canonicalKanbanBoardCard: counterpartWorkUnit,
+			permanentlyRemovedFromBoardAt: null,
+			currentTitle: "对端任务",
+		};
+		const preview = {
+			rootWorkUnitKey: "root",
+			workUnits: [
+				{
+					workUnitKey: "counterpart",
+					workUnit: counterpartWorkUnit,
+					workUnitDisplayLabel: "对端任务",
+					kanbanBoardCardIdentity: identity,
+				},
+			],
+			relations: [],
+			truncated: true,
+			projectedThroughGlobalCommittedEventSequence: 1,
+		};
+		queries.readRelationModelingPreview.mockResolvedValue(preview);
+		await openAndFillRelationForm();
+		await act(async () => vi.advanceTimersByTimeAsync(300));
+		await changeControlValue(
+			'select[aria-label="待保存关系及方向"]',
+			"reference_is_cross_repository_counterpart_with",
+		);
+		const saveButton = () =>
+			[...container.querySelectorAll<HTMLButtonElement>("button")].find(
+				(button) => button.textContent === "保存关系变更",
+			);
+		expect(saveButton()?.disabled).toBe(false);
+		await act(async () => root.render(<Harness targetWorkspaceId="counterpart-project" />));
+		expect(controller.draft.referenceRelationDrafts[0]?.relationKind).toBe(
+			"reference_is_cross_repository_counterpart_with",
+		);
+		expect(saveButton()?.disabled).toBe(true);
+		expect(container.querySelector('[role="alert"]')?.textContent).toContain("仅限不同 project");
+		await act(async () => root.render(<Harness targetWorkspaceId="project-a" />));
+		expect(saveButton()?.disabled).toBe(false);
+		queries.readRelationModelingPreview.mockResolvedValue({
+			...preview,
+			workUnits: [
+				{
+					...preview.workUnits[0],
+					kanbanBoardCardIdentity: {
+						...identity,
+						kanbanBoardCard: { ...counterpartWorkUnit, workspaceId: "project-a" },
+					},
+				},
+			],
+		});
+		await clickButton("刷新关系");
+		await act(async () => vi.advanceTimersByTimeAsync(300));
+		expect(saveButton()?.disabled).toBe(true);
+		expect(controller.draft.referenceRelationDrafts[0]?.counterpartWorkUnit).toEqual(counterpartWorkUnit);
+	});
 	it("重复选择同一任务可为新增条目改选另一类型，同时保留原普通关联", async () => {
 		await openAndFillRelationForm();
 		const originalDraft = controller.draft.referenceRelationDrafts[0];
 		await openAndFillRelationForm();
 		expect(controller.draft.referenceRelationDrafts).toEqual([originalDraft]);
-		await changeControlValue('select[aria-label="关系类型"]', "reference_reuses_produced_outputs_of");
+		await changeControlValue('select[aria-label="关系及方向"]', "reference_reuses_produced_outputs_of");
 		await clickButton("添加关系到草稿");
 		expect(controller.draft.referenceRelationDrafts).toEqual([
 			originalDraft,
@@ -358,13 +419,15 @@ describe("关系表单迟到的身份解析", () => {
 	it("详情和方向立即进入草稿，收起、重新打开与刷新恢复均保留", async () => {
 		await openAndFillRelationForm();
 		await clickButton("详情");
-		await changeControlValue('select[aria-label="关系类型"]', "reference_concerns_behavior_or_state_of");
-		await changeControlValue('select[aria-label="陈述方向"]', "other");
+		await changeControlValue(
+			'select[aria-label="关系及方向"]',
+			"reference_diagnoses_agent_execution_trajectory_of:inverse",
+		);
 		await changeControlValue('input[id$="-reason"]', "可选的说明");
 		await clickButton("收起详情");
 		expect(controller.draft.referenceRelationDrafts).toEqual([
 			expect.objectContaining({
-				relationKind: "reference_concerns_behavior_or_state_of",
+				relationKind: "reference_diagnoses_agent_execution_trajectory_of",
 				currentTaskIsStatementSubject: false,
 				relationAssertionRationaleOneSentence: "可选的说明",
 				assertedRelationKindSpecificAttributes: {},

@@ -7,6 +7,10 @@ import {
 	referenceRelationModelingEditorDraftSchema,
 	relationModelingEditorDraftSaveRequestSchema,
 } from "../../../src/core/work-unit-relation-modeling-api-contract";
+import {
+	buildInterWorkUnitRelationWorkUnitKey,
+	createEmptyKanbanBoardCardIdentityProjectionState,
+} from "../../../src/inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 import { planReferenceRelationModelingChanges } from "../../../src/inter-work-unit-relation-ledger/reference-relation-modeling-change-planning";
 
 const root: KanbanBoardCardWorkUnitQualifiedReference = {
@@ -28,6 +32,71 @@ const draft: ReferenceRelationModelingDraft = {
 };
 
 describe("用户参照关系修改规划", () => {
+	it.each(["reference_fixes_defects_in_produced_outputs_of", "reference_diagnoses_agent_execution_trajectory_of"])(
+		"新关系 %s 保留正反向与空专有属性，不产生完成证明",
+		(relationKind) => {
+			for (const currentTaskIsStatementSubject of [true, false]) {
+				const parsed = referenceRelationModelingDraftSchema.parse({
+					...draft,
+					relationKind,
+					currentTaskIsStatementSubject,
+				});
+				const relation = planReferenceRelationModelingChanges(root, [parsed], [], [], 10).relationsAfterChange[0];
+				expect(relation.relationKind).toBe(relationKind);
+				expect(relation.relationStatementSubjectWorkUnitRef).toEqual(
+					currentTaskIsStatementSubject ? root : draft.counterpartWorkUnit,
+				);
+				expect(relation.relationStatementAnchorWorkUnitRef).toEqual(
+					currentTaskIsStatementSubject ? draft.counterpartWorkUnit : root,
+				);
+				expect(relation.assertedRelationKindSpecificAttributes).toEqual({});
+			}
+		},
+	);
+	it("跨 project 资格使用当前位置，关系身份与去重仍使用 canonical identity", () => {
+		const identities = createEmptyKanbanBoardCardIdentityProjectionState();
+		const counterpart = { ...root, taskId: "other" };
+		for (const ref of [root, counterpart]) {
+			identities.projectionsByKanbanBoardCardWorkUnitKey.set(buildInterWorkUnitRelationWorkUnitKey(ref), {
+				kanbanBoardCard: ref,
+				currentWorkspaceId: ref === root ? "project" : "transferred-project",
+				kanbanBoardCardFirstObservationRoute: "board_state_baseline_at_live_capture_activation",
+				firstObservedAt: 1,
+				creationActor: null,
+				creationOnBehalfOfInitiatingWorkUnit: null,
+				currentFieldValueSha256ByFieldName: {},
+				lastKnownBoardColumnId: "backlog",
+				movedToTrashColumnAt: null,
+				permanentlyRemovedFromBoardAt: null,
+			});
+		}
+		const crossProjectDraft = {
+			...draft,
+			counterpartWorkUnit: counterpart,
+			relationKind: "reference_is_cross_repository_counterpart_with" as const,
+		};
+		const first = planReferenceRelationModelingChanges(root, [crossProjectDraft], [], [], 10, identities)
+			.relationsAfterChange[0];
+		expect(first.relationStatementAnchorWorkUnitRef).toEqual(counterpart);
+		expect(() =>
+			planReferenceRelationModelingChanges(
+				root,
+				[{ ...crossProjectDraft, currentTaskIsStatementSubject: false }],
+				[],
+				[first],
+				11,
+				identities,
+			),
+		).toThrow(/相同类型/);
+		const counterpartIdentity = identities.projectionsByKanbanBoardCardWorkUnitKey.get(
+			buildInterWorkUnitRelationWorkUnitKey(counterpart),
+		);
+		if (!counterpartIdentity) throw new Error("缺少隔离身份");
+		counterpartIdentity.currentWorkspaceId = "project";
+		expect(() => planReferenceRelationModelingChanges(root, [crossProjectDraft], [], [], 12, identities)).toThrow(
+			/仅限不同 project/,
+		);
+	});
 	it("草稿保存与恢复保留无效详情原文，账本写入的证据长度校验保持严格", () => {
 		const invalidEvidence = "x".repeat(1001);
 		const saved = relationModelingEditorDraftSaveRequestSchema.parse({
@@ -122,7 +191,7 @@ describe("用户参照关系修改规划", () => {
 				[],
 				10,
 			),
-		).toThrow(/same project/);
+		).toThrow(/仅限不同 project/);
 	});
 	it("替代旧断言保留历史，移除证据而不是取并集", () => {
 		const first = planReferenceRelationModelingChanges(root, [draft], [], [], 10).relationsAfterChange[0];

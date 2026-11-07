@@ -243,6 +243,7 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 			const editedTargetCard: RuntimeBoardCard = {
 				...originalCard,
 				title: "目标项目中合法更新的标题",
+				taskNameVersion: 1,
 				prompt: "目标项目中合法更新的正文",
 				baseRef: request.targetBaseRef,
 				updatedAt: 3456,

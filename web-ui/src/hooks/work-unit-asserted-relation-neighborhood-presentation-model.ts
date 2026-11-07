@@ -21,6 +21,7 @@ import type {
 	GetRelationNeighborhoodSummaryResponse,
 	WorkUnitDisplayEntry,
 } from "@runtime-work-unit-relation-read-api-contract";
+import { getReferenceRelationDirectionLabel } from "@/hooks/work-unit-relation-kind-display-labels";
 import {
 	areInterWorkUnitRelationWorkUnitReferencesSameWorkUnit,
 	buildWorkUnitRelationNeighborPresentation,
@@ -268,14 +269,17 @@ export function buildWorkUnitAssertedRelationNeighborhoodPresentation(input: {
 		const relationKindRegistryEntry = isAssertedInterWorkUnitReferenceRelationKind(relation.relationKind)
 			? ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[relation.relationKind]
 			: null;
-		const readingPhraseFromPanelSubjectPerspective = relationKindRegistryEntry
-			? isPanelSubjectTheRelationStatementSubject
-				? relationKindRegistryEntry.forwardReadingPhraseFromSubject
-				: relationKindRegistryEntry.inverseReadingPhraseFromAnchor
-			: buildGenericReadingPhraseForUnrecognizedAssertedRelationKind(
-					relation.relationKind,
-					isPanelSubjectTheRelationStatementSubject,
-				);
+		const readingPhraseFromPanelSubjectPerspective =
+			relation.relationKind === "reference_is_cross_repository_counterpart_with"
+				? `─ ${getReferenceRelationDirectionLabel(relation.relationKind, true)} ─`
+				: relationKindRegistryEntry
+					? isPanelSubjectTheRelationStatementSubject
+						? relationKindRegistryEntry.forwardReadingPhraseFromSubject
+						: relationKindRegistryEntry.inverseReadingPhraseFromAnchor
+					: buildGenericReadingPhraseForUnrecognizedAssertedRelationKind(
+							relation.relationKind,
+							isPanelSubjectTheRelationStatementSubject,
+						);
 
 		const relationAsserterWorkUnit = relation.relationAsserterWorkUnitRef;
 		let relationAsserter: AssertedRelationAsserterPresentation;
