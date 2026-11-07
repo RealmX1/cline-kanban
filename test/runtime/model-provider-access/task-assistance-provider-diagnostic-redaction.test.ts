@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
+import type { TaskIndexingMaterial } from "../../../src/core/task-indexing-support-contract";
 import {
 	DIAGNOSTIC_EVENT_JOURNAL_ROOT_DIR_ENV_VAR,
 	getDiagnosticEventJournalActiveFilePath,
@@ -80,10 +81,28 @@ it("真实 HTTP 非 JSON 响应不把正文或凭据写入 attempts、journal、
 		for (const [name, value] of Object.entries(environmentVariables)) vi.stubEnv(name, value);
 		await saveTaskAssistanceModelProviderRoutingSettings(routingSettings);
 		const conversationDirectoryPath = join(directory.path, "task-lookup-conversations");
+		// 空索引会直接返回零候选；此用例需要实际触发召回 HTTP 才能验证诊断脱敏。
+		const diagnosticRedactionLookupMaterial: TaskIndexingMaterial = {
+			taskReference: {
+				workUnitType: "kanban_board_card",
+				workspaceId: "diagnostic-redaction-project",
+				taskId: "abc12",
+				taskIncarnationCreatedAtEpochMs: 1,
+			},
+			projectName: "诊断脱敏测试项目",
+			title: "查卡诊断脱敏测试",
+			prompt: "查卡诊断脱敏测试",
+			taskDescription: "触发召回以验证非 JSON 响应不会泄漏正文或凭据",
+			columnId: "backlog",
+			latestNotificationSummaryText: null,
+			latestHookFinalMessage: null,
+			claudeAwaySummary: null,
+			missingContextParts: [],
+		};
 		const dependencies = {
 			storageDirectoryPath: conversationDirectoryPath,
 			runtimeProcessInstanceId: "diagnostic-redaction-runtime",
-			collectMaterials: async () => ({ materials: [], missingContextParts: [] }),
+			collectMaterials: async () => ({ materials: [diagnosticRedactionLookupMaterial], missingContextParts: [] }),
 			getExecutorSettings: async () => ({ agentId: "codex" as const, modelId: null }),
 			getContext: async () => ({
 				schemaVersion: 1 as const,

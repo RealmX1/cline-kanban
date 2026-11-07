@@ -34,6 +34,7 @@ export {
 };
 
 export interface RuntimeCreateTaskInput {
+	taskDescription?: string;
 	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
@@ -68,6 +69,7 @@ export interface RuntimeCreateTaskInput {
 }
 
 export interface RuntimeUpdateTaskInput {
+	taskDescription?: string | null;
 	codexConfigurationProfileId?: string | null;
 	codexReasoningEffortOverride?: string | null;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local" | null;
@@ -250,6 +252,7 @@ export function addTaskToColumn(
 			: {}),
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
+		...(input.taskDescription?.trim() ? { taskDescription: input.taskDescription.trim() } : {}),
 		prompt,
 		startInPlanMode: input.startInPlanMode ?? true,
 		taskAgentPermissionMode: input.taskAgentPermissionMode ?? DEFAULT_TASK_AGENT_PERMISSION_MODE,
@@ -620,6 +623,8 @@ export function updateTask(
 				taskNameVersion:
 					(card.taskNameVersion ?? 0) + (resolveTaskTitle(input.title, prompt) !== card.title ? 1 : 0),
 				prompt,
+				taskDescription:
+					input.taskDescription === undefined ? card.taskDescription : input.taskDescription?.trim() || undefined,
 				startInPlanMode: Boolean(input.startInPlanMode),
 				// 三态：undefined 原样保留卡片现值（**包括「字段缺失」本身**）、null 复位到默认档、其余按传入值。
 				// 「缺失」在本设计里不是「等同默认档」：它触发 runtime-api 的 legacy 兼容推导，按当时的全局

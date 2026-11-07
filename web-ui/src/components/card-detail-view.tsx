@@ -24,7 +24,7 @@ import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "re
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useHotkeys } from "react-hotkeys-hook";
-import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
+import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { showAppToast } from "@/components/app-toaster";
 import {
 	AgentConversationChatPanel,
@@ -1947,10 +1947,7 @@ export function CardDetailView({
 									showAgentConversationChatPanel || isDoneTaskReadOnly ? sessionInformationActions : undefined
 								}
 								currentWorkPhaseGoalContent={
-									<AgentCurrentWorkPhaseGoal
-										summary={activeTaskConversationSessionSummary}
-										isFullGoalTextVisible
-									/>
+									<AgentWorkProgress summary={activeTaskConversationSessionSummary} isProgressHistoryVisible />
 								}
 								onBackToBoard={onBackToBoard}
 								navigationAndToolsControls={mobileControls}

@@ -42,6 +42,7 @@ import {
 } from "../../../src/core/api-contract";
 
 export interface TaskDraft {
+	taskDescription?: string;
 	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
@@ -262,6 +263,7 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	independentTaskCreationProvenance: true,
 	title: true,
 	taskNameVersion: true,
+	taskDescription: true,
 	prompt: true,
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
@@ -410,6 +412,7 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			? { taskMainSessionHandover: taskMainSessionHandoverRecordSchema.parse(card.taskMainSessionHandover) }
 			: {}),
 		title,
+		...(typeof card.taskDescription === "string" ? { taskDescription: card.taskDescription } : {}),
 		...(typeof card.taskNameVersion === "number" &&
 		Number.isInteger(card.taskNameVersion) &&
 		card.taskNameVersion >= 0
@@ -571,6 +574,7 @@ export function addTaskToColumnWithResult(
 		{
 			taskId: trimmedRuntimeAllocatedTaskId,
 			title: draft.title,
+			taskDescription: draft.taskDescription,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
 			taskAgentPermissionMode: draft.taskAgentPermissionMode,
@@ -846,6 +850,8 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 			return {
 				...card,
 				title: title || card.title,
+				taskDescription:
+					draft.taskDescription === undefined ? card.taskDescription : draft.taskDescription.trim() || undefined,
 				prompt,
 				startInPlanMode: Boolean(draft.startInPlanMode),
 				taskAgentPermissionMode: shouldUpdateTaskAgentPermissionMode

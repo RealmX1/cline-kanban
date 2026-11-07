@@ -46,7 +46,7 @@ const service = createTaskLookupConversationService({
 		return {
 			value:
 				JSON.parse(request.queryText).phase === "recall"
-					? { candidateTaskReferences: [] }
+					? { candidateTaskReferenceKeys: [] }
 					: { answerText: "隔离查询完成", candidates: [] },
 			usage: { resolvedModelId: null },
 			stablePromptPrefixSha256: "isolated",

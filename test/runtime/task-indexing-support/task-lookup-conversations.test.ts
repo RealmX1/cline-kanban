@@ -19,11 +19,19 @@ const createSynchronizationBarrier = () => {
 	});
 	return { promise, release };
 };
+const sessionIntent = (taskId: string, text: string) => ({
+	taskConversationSessionId: taskId,
+	nativeSessionId: "native-session",
+	messages: [
+		{ kind: "user_prompt" as const, sourceMessageId: `${taskId}-user`, turnUserMessageId: `${taskId}-user`, text },
+	],
+});
 const material = (taskId: string, workspaceId = "project-a"): TaskIndexingMaterial => ({
 	taskReference: { workUnitType: "kanban_board_card", workspaceId, taskId, taskIncarnationCreatedAtEpochMs: 1 },
 	projectName: workspaceId,
 	title: `任务 ${taskId}`,
 	prompt: "实现任务查卡和持久历史",
+	sessionIntent: sessionIntent(taskId, "用户希望实现任务查卡和持久历史"),
 	columnId: "backlog",
 	latestNotificationSummaryText: null,
 	latestHookFinalMessage: null,
@@ -56,7 +64,7 @@ async function setup() {
 			return {
 				value: request.outputSchema.parse(
 					query.phase === "recall"
-						? { candidateTaskReferences: materials.map((entry) => entry.taskReference) }
+						? { candidateTaskReferenceKeys: materials.map((_entry, index) => `task-${index + 1}`) }
 						: {
 								answerText: "找到两个可能相关任务",
 								candidates: materials.map((entry) => ({
@@ -81,6 +89,677 @@ async function waitForTurn(service: ReturnType<typeof createTaskLookupConversati
 	return await service.getConversation(conversationId);
 }
 describe("持久多轮查卡服务", () => {
+	it("首轮允许零候选，不补足数量，也不读取任何 Session Intent", async () => {
+		const { dependencies } = await setup();
+		const reads: unknown[] = [];
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async (_workspaceId, options) => {
+				reads.push(options);
+				return await dependencies.collectMaterials();
+			},
+			executeAgent: async (request) => {
+				expect(JSON.parse(request.queryText).phase).toBe("recall");
+				return {
+					value: request.outputSchema.parse({ candidateTaskReferenceKeys: [] }),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "zero",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "zero-intent",
+				questionText: "查找无关意图",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(saved.turns[0]?.result?.candidates).toEqual([]);
+			expect(reads.every((options) => !JSON.stringify(options).includes("sessionIntentTaskReferences"))).toBe(true);
+		} finally {
+			await service.close();
+		}
+	});
+	it("候选只读取 Session Intent，不发送完整要求、recap 或过程工具正文", async () => {
+		const { dependencies } = await setup();
+		const candidate = {
+			...material("abc12"),
+			taskDescription: "会话意图检索",
+			prompt: "禁止发送的完整任务原文",
+			latestNotificationSummaryText: "禁止发送的 recap",
+			latestHookFinalMessage: "禁止发送的 hook 全文",
+			sessionIntent: {
+				taskConversationSessionId: "abc12",
+				nativeSessionId: "native-session",
+				messages: [
+					{
+						kind: "user_prompt" as const,
+						sourceMessageId: "user-1",
+						turnUserMessageId: "user-1",
+						text: "允许读取的用户意图",
+					},
+				],
+			},
+		};
+		const reads: unknown[] = [];
+		const requests: string[] = [];
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async (_workspaceId, options) => {
+				reads.push(options);
+				return { materials: [candidate], missingContextParts: [] };
+			},
+			executeAgent: async (request) => {
+				requests.push(request.queryText + request.stableContextText);
+				return {
+					value: request.outputSchema.parse(
+						JSON.parse(request.queryText).phase === "recall"
+							? { candidateTaskReferenceKeys: ["task-1"] }
+							: { answerText: "意图匹配", candidates: [] },
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "intent-only",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "intent-only",
+				questionText: "查找意图",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(reads).toContainEqual(
+				expect.objectContaining({
+					includeRecapSources: false,
+					sessionIntentTaskReferences: [candidate.taskReference],
+				}),
+			);
+			expect(requests.join("\n")).toContain("允许读取的用户意图");
+			for (const forbidden of [
+				candidate.prompt,
+				candidate.latestNotificationSummaryText,
+				candidate.latestHookFinalMessage,
+				"completeCandidateRequirements",
+			])
+				expect(requests.join("\n")).not.toContain(forbidden);
+		} finally {
+			await service.close();
+		}
+	});
+	it("长卡后文撤回的匹配不会残留在其他候选的说明中", async () => {
+		const { dependencies } = await setup();
+		const shortCandidate = { ...material("abc12"), sessionIntent: sessionIntent("abc12", "短卡支持自动部署。") };
+		const longCandidate = {
+			...material("def34"),
+			sessionIntent: sessionIntent(
+				"def34",
+				`长卡原先设想支持自动部署。${"补充说明。".repeat(22000)}最终明确禁止自动部署。`,
+			),
+		};
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async () => ({ materials: [shortCandidate, longCandidate], missingContextParts: [] }),
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				const references: TaskIndexingMaterial["taskReference"][] = query.eligibleTaskReferences ?? [];
+				const excluded = JSON.stringify([
+					query.candidateSessionIntentSegments,
+					query.previousCandidateSessionIntentAssessments,
+				]).includes("明确禁止自动部署");
+				const candidates = references
+					.filter((reference) => reference.taskId !== longCandidate.taskReference.taskId || !excluded)
+					.map((taskReference) => ({
+						taskReference,
+						matchingReason: "支持自动部署",
+						evidence: ["当前可读要求"],
+						limitations: [],
+					}));
+				const answerText = references
+					.map((reference) =>
+						reference.taskId === shortCandidate.taskReference.taskId
+							? "短卡支持自动部署。"
+							: excluded
+								? "长卡明确禁止自动部署。"
+								: "长卡仍支持自动部署。",
+					)
+					.join("\n");
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: ["task-1", "task-2"] }
+							: { answerText, candidates },
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "isolated-candidate-assessments",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "candidate-narrative-isolation",
+				questionText: "查找支持自动部署的任务",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(saved.turns[0]?.result?.candidates.map((candidate) => candidate.taskReference.taskId)).toEqual([
+				"abc12",
+			]);
+			expect(saved.turns[0]?.result?.answerText).toContain("长卡明确禁止自动部署");
+			expect(saved.turns[0]?.result?.answerText).not.toContain("长卡仍支持自动部署");
+		} finally {
+			await service.close();
+		}
+	});
+
+	it("单项会话意图被上下文拒绝后保留完整子分片路径，缩批不静默裁掉材料", async () => {
+		const { dependencies } = await setup();
+		const candidate = { ...material("abc12"), sessionIntent: sessionIntent("abc12", "详细意图".repeat(4000)) };
+		const acceptedSegments: Array<{ serializedSessionIntentText: string; sessionIntentSubsegmentPath: unknown[] }> =
+			[];
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async () => ({ materials: [candidate], missingContextParts: [] }),
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				if (query.phase === "answer") {
+					const segment = query.candidateSessionIntentSegments[0];
+					if (Buffer.byteLength(segment.serializedSessionIntentText) > 20000)
+						throw new StatelessTaskIndexingAgentExecutionError(
+							"input_budget_exceeded",
+							"context length limit exceeded",
+						);
+					acceptedSegments.push(segment);
+				}
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: ["task-1"] }
+							: {
+									answerText: "只解释当前分片证据",
+									candidates: [
+										{
+											taskReference: candidate.taskReference,
+											matchingReason: "原文匹配",
+											evidence: ["本分片"],
+											limitations: [],
+										},
+									],
+								},
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "split",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "single-large-requirement",
+				questionText: "查找原文",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(acceptedSegments.map((segment) => segment.serializedSessionIntentText).join("")).toBe(
+				JSON.stringify(candidate.sessionIntent),
+			);
+			expect(acceptedSegments.length).toBeGreaterThan(1);
+			expect(acceptedSegments.every((segment) => segment.sessionIntentSubsegmentPath.length > 0)).toBe(true);
+			expect(saved.turns[0]?.contextBatchCoverage?.failedCandidateSessionIntentSegmentCount).toBe(0);
+		} finally {
+			await service.close();
+		}
+	});
+	it.each([false, true])("全局候选按预算归并排序，排序失败=%s 时保留部分覆盖说明", async (rankingUnavailable) => {
+		const { dependencies } = await setup();
+		const materials = Array.from({ length: 800 }, (_, index) => ({
+			...material(`task${index}`),
+			taskDescription: "任务要求".repeat(100),
+		}));
+		let rankingCalls = 0;
+		const selectedIntentReads: number[] = [];
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async (_workspaceId, options) => {
+				if (options?.sessionIntentTaskReferences)
+					selectedIntentReads.push(options.sessionIntentTaskReferences.length);
+				return { materials, missingContextParts: [] };
+			},
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				const rows = JSON.parse(request.stableContextText ?? "[]") as Array<{ taskReferenceKey: string }>;
+				expect(Buffer.byteLength((request.stableContextText ?? "") + request.queryText)).toBeLessThan(300000);
+				if (query.purpose === "rank_candidates") {
+					rankingCalls++;
+					if (rankingUnavailable) throw new Error("排序暂不可用");
+				}
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: rows.slice(0, 10).map((row) => row.taskReferenceKey) }
+							: {
+									answerText: "已核对候选原文",
+									candidates: query.eligibleTaskReferences.map((taskReference: unknown) => ({
+										taskReference,
+										matchingReason: "要求匹配",
+										evidence: ["原文"],
+										limitations: [],
+									})),
+								},
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "ranked",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "ranked",
+				questionText: "查找相关任务",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(saved.turns[0]?.result?.candidates).toHaveLength(10);
+			expect(selectedIntentReads).toEqual([10]);
+			expect(rankingCalls).toBeGreaterThan(0);
+			expect(saved.turns[0]?.contextBatchCoverage?.recalledTaskCount).toBe(800);
+			expect(saved.turns[0]?.result?.answerText.includes("部分结果")).toBe(rankingUnavailable);
+		} finally {
+			await service.close();
+		}
+	});
+	it("长历史按绑定轮次压缩并持久保存摘要，原始问题不被改写", async () => {
+		const { service, dependencies } = await setup();
+		const conversation = await service.createConversation({
+			contextWorkspaceId: "project-a",
+			scope: { projectIds: [], columnIds: [] },
+		});
+		await service.submitTurn({
+			conversationId: conversation.conversationId,
+			requestId: "seed",
+			questionText: "排除自动部署",
+		});
+		const saved = await waitForTurn(service, conversation.conversationId);
+		await service.close();
+		const seed = saved.turns[0];
+		if (!seed) throw new Error("缺少历史模板。");
+		saved.turns = Array.from({ length: 24 }, (_, index) => ({
+			...seed,
+			turnId: `history-${index}`,
+			requestId: `history-${index}`,
+			questionText: `第 ${index + 1} 轮：${index === 0 ? "排除自动部署，原始精确限制仅在这一轮。" : "继续讨论检索范围。"}${"需要保留用户修正和具体范围。".repeat(300)}`,
+		}));
+		await writeFile(
+			join(dependencies.storageDirectoryPath, `${conversation.conversationId}.json`),
+			JSON.stringify(saved),
+		);
+		const queries: Array<Record<string, unknown>> = [];
+		const resumed = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText) as Record<string, unknown>;
+				queries.push(query);
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "history_summary"
+							? { historySummaryText: "用户讨论了检索范围；具体条件需回读历史原文。" }
+							: query.phase === "recall"
+								? {
+										candidateTaskReferenceKeys: ["task-1"],
+										requestedHistoricalTurnIds: saved.turns.slice(0, 6).map((turn) => turn.turnId),
+									}
+								: { answerText: "当前材料未找到", candidates: [] },
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "summary",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			await resumed.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "next",
+				questionText: "继续查找",
+			});
+			const result = await waitForTurn(resumed, conversation.conversationId);
+			expect(result.turns.at(-1)?.status).toBe("completed");
+			expect(result.turns.at(-1)?.queryHistorySummary?.historySummaryText).toContain("具体条件需回读");
+			expect(result.turns[0].questionText).toBe(saved.turns[0].questionText);
+			expect(queries.filter((query) => query.phase === "history_summary").length).toBeGreaterThan(0);
+			expect(queries.find((query) => query.phase === "recall")?.earlierHistorySummaryText).toContain(
+				"具体条件需回读",
+			);
+			const answerQueries = queries.filter((query) => query.phase === "answer");
+			const historicalSegments = answerQueries.map(
+				(query) =>
+					query.requestedHistoricalTurnMaterialSegment as {
+						serializedHistoricalTurnMaterialText: string;
+						segmentIndex: number;
+						segmentCount: number;
+					},
+			);
+			expect(historicalSegments.length).toBeGreaterThan(1);
+			expect(historicalSegments.every((segment) => segment.segmentCount === historicalSegments.length)).toBe(true);
+			expect(
+				JSON.parse(historicalSegments.map((segment) => segment.serializedHistoricalTurnMaterialText).join("")),
+			).toMatchObject(
+				saved.turns.slice(0, 6).map((turn) => ({ turnId: turn.turnId, questionText: turn.questionText })),
+			);
+			expect(JSON.stringify(answerQueries)).toContain("原始精确限制仅在这一轮");
+			for (const query of answerQueries) expect(Buffer.byteLength(JSON.stringify(query))).toBeLessThan(300000);
+			expect(answerQueries.at(-1)?.previousCandidateSessionIntentAssessments).toMatchObject([
+				{ answer: { answerText: "当前材料未找到", candidates: [] } },
+			]);
+		} finally {
+			await resumed.close();
+		}
+	});
+	it.each([false, true])("候选跨批核验保留否定证据并覆盖前文设想，否定证据在前=%s", async (exclusionFirst) => {
+		const { dependencies } = await setup();
+		const candidate = {
+			...material("abc12"),
+			sessionIntent: sessionIntent(
+				"abc12",
+				[
+					exclusionFirst ? "明确限制：禁止自动部署。" : "前文设想：自动部署。",
+					"中间任务说明。".repeat(22000),
+					exclusionFirst ? "尚未批准的设想：自动部署。" : "最终修正：禁止自动部署。",
+				].join("\n"),
+			),
+		};
+		let answerBatchCount = 0;
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async () => ({ materials: [candidate], missingContextParts: [] }),
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				let answer = {
+					answerText: "前文设想支持自动部署",
+					candidates: [
+						{
+							taskReference: candidate.taskReference,
+							matchingReason: "前文设想支持自动部署",
+							evidence: ["前文设想"],
+							limitations: [],
+						},
+					],
+				};
+				if (query.phase === "answer") {
+					answerBatchCount++;
+					if (answerBatchCount > 1) expect(query.previousCandidateSessionIntentAssessments).toHaveLength(1);
+					const hasExclusion = JSON.stringify([
+						query.candidateSessionIntentSegments,
+						query.previousCandidateSessionIntentAssessments,
+					]).includes("禁止自动部署");
+					if (hasExclusion) answer = { answerText: "禁止自动部署，已排除该候选", candidates: [] };
+				}
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall" ? { candidateTaskReferenceKeys: ["task-1"] } : answer,
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "cumulative-evidence",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "cumulative-evidence",
+				questionText: "查找允许自动部署的任务",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(answerBatchCount).toBeGreaterThan(1);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(saved.turns[0]?.result?.candidates).toEqual([]);
+			expect(saved.turns[0]?.result?.answerText).toBe("禁止自动部署，已排除该候选");
+			expect(saved.turns[0]?.contextBatchCoverage?.failedCandidateSessionIntentSegmentCount).toBe(0);
+		} finally {
+			await service.close();
+		}
+	});
+	it.each([false, true])("候选补读缺口传入模型并保存，返回候选=%s", async (returnCandidate) => {
+		const { dependencies } = await setup();
+		const candidate = material("abc12");
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async (_workspaceId, options) => ({
+				materials: [
+					{
+						...candidate,
+						missingContextParts: options?.sessionIntentTaskReferences
+							? ["session_intent_source_unavailable"]
+							: [],
+					},
+				],
+				missingContextParts: options?.sessionIntentTaskReferences
+					? ["project-a:session_intent_sources_unreadable", "project-b:outside_scope_unreadable"]
+					: [],
+			}),
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				if (query.phase === "answer") {
+					expect(query.candidateSessionIntentSegments[0].missingContextParts).toContain(
+						"session_intent_source_unavailable",
+					);
+					expect(query.contextCompleteness).toContain("project-a/abc12:session_intent_source_unavailable");
+					expect(query.contextCompleteness).not.toContain("project-b:outside_scope_unreadable");
+				}
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: ["task-1"] }
+							: {
+									answerText: "按当前可读材料核验",
+									candidates: returnCandidate
+										? [
+												{
+													taskReference: candidate.taskReference,
+													matchingReason: "当前要求匹配",
+													evidence: ["原始要求"],
+													limitations: [],
+												},
+											]
+										: [],
+								},
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "material-gap",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: ["project-a"], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "material-gap",
+				questionText: "查找已有汇报",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(saved.turns[0]?.result?.contextCompleteness).toEqual([
+				"project-a:session_intent_sources_unreadable",
+				"project-a/abc12:session_intent_source_unavailable",
+			]);
+			expect(saved.turns[0]?.result?.answerText).toContain("未覆盖材料");
+			if (returnCandidate)
+				expect(saved.turns[0]?.result?.candidates[0]?.limitations.join(" ")).toContain("未覆盖材料");
+		} finally {
+			await service.close();
+		}
+	});
+	it("已知上下文拒绝自动拆批，失败批次保留未知覆盖，候选只核对会话意图", async () => {
+		const { dependencies, materials } = await setup();
+		let contextRejections = 0;
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			executeAgent: async (request) => {
+				const query = JSON.parse(request.queryText);
+				const rows = JSON.parse(request.stableContextText ?? "[]") as Array<{ taskReferenceKey: string }>;
+				if (query.phase === "recall" && rows.length > 1) {
+					contextRejections++;
+					throw new StatelessTaskIndexingAgentExecutionError(
+						"input_budget_exceeded",
+						"context length limit exceeded",
+					);
+				}
+				if (query.phase === "recall" && rows[0]?.taskReferenceKey === "task-2")
+					throw new Error("该批模型暂时不可用");
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: rows.map((row) => row.taskReferenceKey) }
+							: {
+									answerText: "找到当前材料可确认的候选",
+									candidates: [
+										{
+											taskReference: materials[0].taskReference,
+											matchingReason: "原文匹配",
+											evidence: ["原始要求"],
+											limitations: [],
+										},
+									],
+								},
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "prefix",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "context-rejection",
+				questionText: "查找任务",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(contextRejections).toBe(1);
+			expect(saved.turns[0]?.contextBatchCoverage).toMatchObject({
+				recalledTaskCount: 1,
+				failedRecallBatchCount: 1,
+			});
+			expect(saved.turns[0]?.result?.answerText).toContain("未覆盖");
+			expect(saved.turns[0]?.result?.candidates[0].limitations.join(" ")).toContain("未覆盖");
+		} finally {
+			await service.close();
+		}
+	});
+	it("超限规模的全局材料分批召回，候选回答不重复全局 Context，覆盖范围持久保存", async () => {
+		const { dependencies } = await setup();
+		const materials = Array.from({ length: 1500 }, (_, index) => ({
+			...material(`task${index}`),
+			prompt: "原始要求".repeat(8000),
+			taskDescription: `任务简介 ${index} ${"说明".repeat(100)}`,
+		}));
+		const seenKeys = new Set<string>();
+		const requests: Array<{ stableContextText?: string; queryText: string; context?: unknown }> = [];
+		const service = createTaskLookupConversationService({
+			...dependencies,
+			collectMaterials: async () => ({ materials, missingContextParts: [] }),
+			getContext: async () => ({
+				...(await dependencies.getContext()),
+				levelTwoProjectTaskRecapsText: "全局旧 recap".repeat(100000),
+			}),
+			executeAgent: async (request) => {
+				requests.push(request);
+				const query = JSON.parse(request.queryText);
+				const rows = JSON.parse(request.stableContextText ?? "[]") as Array<{ taskReferenceKey: string }>;
+				for (const row of rows) seenKeys.add(row.taskReferenceKey);
+				return {
+					value: request.outputSchema.parse(
+						query.phase === "recall"
+							? { candidateTaskReferenceKeys: rows.slice(0, 1).map((row) => row.taskReferenceKey) }
+							: {
+									answerText: "核对候选当前要求",
+									candidates: query.eligibleTaskReferences.map((taskReference: unknown) => ({
+										taskReference,
+										matchingReason: "要求匹配",
+										evidence: ["当前原文"],
+										limitations: [],
+									})),
+								},
+					),
+					usage: { resolvedModelId: null },
+					stablePromptPrefixSha256: "small-prefix",
+					elapsedMs: 1,
+				};
+			},
+		});
+		try {
+			const conversation = await service.createConversation({
+				contextWorkspaceId: "project-a",
+				scope: { projectIds: [], columnIds: [] },
+			});
+			await service.submitTurn({
+				conversationId: conversation.conversationId,
+				requestId: "large-overview",
+				questionText: "查找相关任务",
+			});
+			const saved = await waitForTurn(service, conversation.conversationId);
+			expect(saved.turns[0]?.status).toBe("completed");
+			expect(seenKeys.size).toBe(1500);
+			expect(requests.filter((request) => JSON.parse(request.queryText).phase === "recall").length).toBeGreaterThan(
+				1,
+			);
+			for (const request of requests) {
+				expect(request.context).toBeUndefined();
+				expect(Buffer.byteLength((request.stableContextText ?? "") + request.queryText)).toBeLessThan(300000);
+				if (JSON.parse(request.queryText).phase === "answer") expect(request.stableContextText).toBe("[]");
+			}
+			expect(saved.turns[0]?.contextBatchCoverage?.recalledTaskCount).toBe(1500);
+			const verifiedSegments = requests.flatMap(
+				(request) => JSON.parse(request.queryText).candidateSessionIntentSegments ?? [],
+			);
+			expect(verifiedSegments.length).toBeGreaterThan(0);
+			expect(JSON.stringify(requests)).not.toContain("原始要求原始要求");
+		} finally {
+			await service.close();
+		}
+	});
 	it.each(["completed", "running"] as const)("空闲恢复扫描不重复解析 %s 大图片历史", async (status) => {
 		const { service, dependencies } = await setup();
 		const conversation = await service.createConversation({
@@ -421,7 +1100,7 @@ describe("持久多轮查卡服务", () => {
 			executeAgent: async (request) => ({
 				value:
 					JSON.parse(request.queryText).phase === "recall"
-						? { candidateTaskReferences: [] }
+						? { candidateTaskReferenceKeys: [] }
 						: { answerText: "当前材料下未找到", candidates: [] },
 				usage: { resolvedModelId: null },
 				stablePromptPrefixSha256: "prefix",

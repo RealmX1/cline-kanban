@@ -149,6 +149,7 @@ async function scenario() {
 			id,
 			title: `任务 ${id}`,
 			prompt: `原始正文 ${id}`,
+			taskDescription: `独立简介 ${id}`,
 			baseRef: "main",
 			startInPlanMode: true,
 			createdAt: Date.now(),
@@ -279,6 +280,8 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 		expect(card).toMatchObject({
 			codexReasoningEffortOverride: "ultra",
 			codexConfigurationProfileId: "selected-profile",
+			taskDescription: request.newTaskCard.taskDescription,
+			prompt: request.newTaskCard.prompt,
 		});
 	});
 	it("默认模型与启动设置先持久冻结，建卡失败及新实例恢复不重新套用默认值", async () => {

@@ -8,8 +8,8 @@ export const TASK_LOOKUP_EXECUTION_PHASE_LABELS: Record<TaskLookupTurn["phase"],
 	collecting_materials: "读取任务材料",
 	preparing_context: "准备检索 Context",
 	recalling_candidates: "召回候选任务",
-	explaining_candidates: "解释候选任务",
-	validating_candidates: "核验候选要求",
+	explaining_candidates: "阅读候选会话意图",
+	validating_candidates: "核对任务身份与范围",
 	saving_result: "保存查询结果",
 	finished: "已结束",
 };
@@ -56,6 +56,8 @@ export function TaskLookupTurnExecutionDetails({
 			providerRoutingSettings: turn.providerRoutingSettings,
 			providerAttempts: turn.providerAttempts,
 			inputByteCount: turn.inputByteCount,
+			maximumInputByteCount: turn.maximumInputByteCount,
+			contextBatchCoverage: turn.contextBatchCoverage,
 			modelExecutionTimeoutMs: turn.modelExecutionTimeoutMs,
 			executionOwnershipWarning: turn.executionOwnershipWarning,
 			executionFailureDiagnostic: failure,
@@ -100,6 +102,26 @@ export function TaskLookupTurnExecutionDetails({
 			<details className="text-xs text-text-secondary">
 				<summary className="cursor-pointer">检索记录与诊断</summary>
 				<div className="mt-2 space-y-2 break-words">
+					{turn.contextBatchCoverage ? (
+						<p>
+							索引已覆盖 {turn.contextBatchCoverage.recalledTaskCount}/{turn.contextBatchCoverage.totalTaskCount}{" "}
+							个任务 · 未完成 {turn.contextBatchCoverage.failedRecallBatchCount} 批；{" "}
+							{turn.contextBatchCoverage.assessedCandidateSessionIntentSegmentCount !== undefined
+								? "会话意图已阅读"
+								: "历史原文已核验"}{" "}
+							{turn.contextBatchCoverage.assessedCandidateSessionIntentSegmentCount ??
+								turn.contextBatchCoverage.validatedCandidateRequirementSegmentCount ??
+								0}{" "}
+							段 · 未完成{" "}
+							{turn.contextBatchCoverage.failedCandidateSessionIntentSegmentCount ??
+								turn.contextBatchCoverage.failedCandidateRequirementSegmentCount ??
+								0}{" "}
+							段
+						</p>
+					) : null}
+					{turn.maximumInputByteCount !== undefined ? (
+						<p>本轮最大模型输入：{turn.maximumInputByteCount.toLocaleString()} 字节</p>
+					) : null}
 					<p>
 						{turn.providerRoutingSettings
 							? `API 首选：${turn.providerRoutingSettings.preferredModelProviderId} · 备用：${turn.providerRoutingSettings.fallbackModelProviderId ?? "无"}`
@@ -111,8 +133,8 @@ export function TaskLookupTurnExecutionDetails({
 						单次模型时限：
 						{turn.modelExecutionTimeoutMs === undefined ? "未知" : `${turn.modelExecutionTimeoutMs / 1000} 秒`}
 					</p>
-					{turn.executions.map((execution) => (
-						<p key={execution.phase}>
+					{turn.executions.map((execution, index) => (
+						<p key={`${execution.phase}-${index}`}>
 							{execution.phase === "recall" ? "候选召回" : "候选解释"} · {execution.elapsedMs}ms · 实际模型{" "}
 							{execution.resolvedModelId ?? "未返回"} · 输入 {execution.inputTokens ?? "未知"} / 输出{" "}
 							{execution.outputTokens ?? "未知"} tokens · 缓存读取 {execution.cacheReadTokens ?? "未知"}

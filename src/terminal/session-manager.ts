@@ -1,4 +1,8 @@
 import type { RuntimePtySessionProcessOwnership } from "../core/agent-session-pty-host-diagnostics-contract";
+import {
+	preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot,
+	projectLegacyWorkPhaseGoalIntoExistingProgress,
+} from "../core/agent-work-progress";
 import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
 import { measureTaskSessionStartupPhase } from "../diagnostics/task-session-start-diagnostics-logger";
 import {
@@ -103,6 +107,7 @@ import type {
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
 	RuntimeAgentSessionTransport,
+	RuntimeAgentWorkProgressEntry,
 	RuntimeLastAgentConversationPromptCacheReferenceObservation,
 	RuntimeLastConversationProgressObservation,
 	RuntimeLastEffectiveAgentConversationActivityObservation,
@@ -8893,6 +8898,31 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	applyCurrentWorkProgress(
+		taskId: string,
+		entries: RuntimeAgentWorkProgressEntry[],
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		const latest = entries.at(-1);
+		if (
+			!entry ||
+			!latest ||
+			latest.owningKanbanTaskConversationSessionId !== taskId ||
+			latest.owningNativeConversationSessionId !==
+				(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null) ||
+			latest.owningRuntimeSessionIncarnationId !== (entry.summary.runtimeSessionIncarnationId ?? null)
+		)
+			return null;
+		const summary = updateSummary(entry, {
+			agentWorkProgressEntries: preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot(
+				entry.summary.agentWorkProgressEntries,
+				entries,
+			),
+		});
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	applyCurrentWorkPhaseGoal(
 		taskId: string,
 		goal: RuntimeAgentCurrentWorkPhaseGoal | null,
@@ -8912,7 +8942,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return null;
 		const summary = updateSummary(
 			entry,
-			nativeProjection ? { agentNativeCurrentWorkPhaseGoal: goal } : { agentCurrentWorkPhaseGoal: goal },
+			nativeProjection
+				? { agentNativeCurrentWorkPhaseGoal: goal }
+				: {
+						agentCurrentWorkPhaseGoal: goal,
+						agentWorkProgressEntries:
+							projectLegacyWorkPhaseGoalIntoExistingProgress(entry.summary, goal, now()) ??
+							entry.summary.agentWorkProgressEntries,
+					},
 		);
 		this.emitSummary(summary);
 		return cloneSummary(summary);

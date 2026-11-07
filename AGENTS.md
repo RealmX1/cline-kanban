@@ -49,6 +49,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
+- **任务概况与进展分开**：独立 `taskDescription` 不覆盖 Initial Prompt；实施开始核对名称与简介，更新概况带读取时版本。Progress 增量记录阶段结果，查卡只取当前主会话投影；旧阶段目标不能推断成功。见 `docs/task-description-and-work-progress.md`。
 - **独立填写窗由页面级宿主持有**：入口只登记窗口，导航不卸载表单；任务键带 workspace/task/incarnation，保存绑定打开时归属。任务编辑器入口不得与窗口 controller 竞争持久草稿。见 `docs/non-modal-floating-form-windows-and-retained-sessions.md`。
 - **lint 强制的边界**（biome + `grit/*.grit`，各条 includes 作用域外仍只是约定）：禁止重新引入已退役的 `@clinebot/*` 依赖；`createWorkspaceTrpcClient` 仅限 `web-ui/src/runtime/*-query.ts`；`src/`（除 `cli.ts`）禁 `console.*` 与 `process.exit`；禁解构 `process.env`；`src/commands/**` 禁直写 board/sessions（`mutateWorkspaceState` 等）、禁 import 关系账本模块、禁写 PDV `verifiedAt`——CLI 写动词一律走 runtime procedure，否则关系账本记不到行动者（dd2db 1a）。格式：tab 缩进、indentWidth 3、lineWidth 120。
 

@@ -22,6 +22,7 @@ export interface TaskEditDraft {
 	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskTitleOverride?: string;
+	taskDescription?: string;
 	taskId: string;
 	prompt: string;
 	images: TaskImage[];
@@ -101,6 +102,7 @@ export function areTaskEditDraftFormValuesEqual(
 ): boolean {
 	return (
 		left.taskTitleOverride === right.taskTitleOverride &&
+		(left.taskDescription ?? "") === (right.taskDescription ?? "") &&
 		left.prompt === right.prompt &&
 		areTaskImagesEqual(left.images, right.images) &&
 		left.startInPlanMode === right.startInPlanMode &&
@@ -150,6 +152,7 @@ export function clearTaskEditDraft(projectId: string | null, taskId: string): vo
 export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">, task: BoardCard): boolean {
 	return (
 		(draft.taskTitleOverride === undefined || draft.taskTitleOverride.trim() === task.title) &&
+		(draft.taskDescription ?? "") === (task.taskDescription ?? "") &&
 		draft.prompt === task.prompt.trim() &&
 		areTaskImagesEqual(draft.images, task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&

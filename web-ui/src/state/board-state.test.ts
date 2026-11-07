@@ -67,6 +67,26 @@ afterEach(() => {
 });
 
 describe("board state", () => {
+	it("浏览器创建与编辑保留独立简介，省略字段不覆盖，清空不改正文", () => {
+		const created = addTaskToColumnWithResult(
+			createInitialBoardData(),
+			"backlog",
+			{ prompt: "原始需求", taskDescription: "任务简介", baseRef: "main" },
+			"abc12",
+		);
+		expect(created.task.taskDescription).toBe("任务简介");
+		const retained = updateTask(created.board, "abc12", { prompt: "原始需求", baseRef: "main" }).board;
+		expect(retained.columns[0]?.cards[0]?.taskDescription).toBe("任务简介");
+		const updated = updateTask(retained, "abc12", {
+			prompt: "原始需求",
+			taskDescription: "修正后的方案",
+			baseRef: "main",
+		}).board;
+		expect(updated.columns[0]?.cards[0]?.taskDescription).toBe("修正后的方案");
+		const cleared = updateTask(updated, "abc12", { prompt: "原始需求", taskDescription: "", baseRef: "main" }).board;
+		expect(cleared.columns[0]?.cards[0]?.taskDescription).toBeUndefined();
+		expect(cleared.columns[0]?.cards[0]?.prompt).toBe("原始需求");
+	});
 	it("applies worktree and agent session initialization changes when updating a task", () => {
 		const fixture = createBacklogBoard(["Task A"]);
 		const taskId = requireTaskId(fixture.taskIdByPrompt["Task A"], "Task A");
@@ -1129,6 +1149,7 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 		createdAt: 1_600_000_000_000,
 		updatedAt: 1_650_000_000_000,
 		taskDescriptionLastUpdatedAt: 1_640_000_000_000,
+		taskDescription: "独立简介",
 	};
 
 	it("服务端卡片的每个字段都原样带过归一化", () => {

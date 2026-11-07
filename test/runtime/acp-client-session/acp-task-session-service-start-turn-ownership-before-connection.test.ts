@@ -19,10 +19,15 @@ vi.mock("../../../src/acp-client-session/acp-client-connection-runtime", () => (
 	},
 }));
 
+import { createDefaultAcpSummary } from "../../../src/acp-client-session/acp-session-state";
 import {
 	AcpTaskSessionService,
 	type StartAcpTaskSessionRequest,
 } from "../../../src/acp-client-session/acp-task-session-service";
+import {
+	advanceAgentWorkProgress,
+	resolveAgentWorkProgressEntriesForDisplay,
+} from "../../../src/core/agent-work-progress";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
 
@@ -68,6 +73,57 @@ function startServiceWithSummaryRecorder(
 }
 
 describe("AcpTaskSessionService.startTaskSession 开局回合归属", () => {
+	it("冷恢复不导入其他逻辑会话的进展", async () => {
+		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
+		const persisted = createDefaultAcpSummary("another-task", "omp");
+		persisted.agentWorkProgressEntries = advanceAgentWorkProgress(
+			persisted,
+			{ progressEntryId: "foreign-progress", progressText: "其他会话的进展" },
+			"foreign-progress",
+			100,
+		);
+		const { settleAsEstablished } = createPendingTaskConnection();
+		const started = service.startTaskSession(
+			buildStartRequest({ persistedTaskSessionSummaryForProgressRestoration: persisted, prompt: "" }),
+		);
+		expect(emittedSummaries[0]?.agentWorkProgressEntries).toBeUndefined();
+		settleAsEstablished(createIdentityTestConnection("native-current"));
+		await started;
+		expect(service.getSummary(TASK_ID)?.agentWorkProgressEntries).toBeUndefined();
+	});
+
+	it("冷恢复保留旧阶段目标，未记录的失效水位仍保持缺失", async () => {
+		const { service, emittedSummaries } = startServiceWithSummaryRecorder();
+		const persisted = createDefaultAcpSummary(TASK_ID, "omp");
+		persisted.agentNativeConversationSessionIdentity = {
+			sourceAgentId: "omp",
+			nativeSessionId: "native-original",
+			transcriptPath: null,
+			observedAt: 1,
+		};
+		persisted.agentCurrentWorkPhaseGoal = {
+			goalText: "旧阶段目标",
+			source: "agent_explicit_declaration",
+			updatedAt: 100,
+			owningKanbanTaskConversationSessionId: TASK_ID,
+			owningNativeConversationSessionId: "native-original",
+			owningRuntimeSessionIncarnationId: "prior-runtime",
+		};
+		const { settleAsEstablished } = createPendingTaskConnection();
+		const started = service.startTaskSession(
+			buildStartRequest({
+				persistedTaskSessionSummaryForProgressRestoration: persisted,
+				observedAgentNativeConversationSessionIdentity: persisted.agentNativeConversationSessionIdentity,
+				resumePriorAgentConversationWithoutResendingPrompt: true,
+			}),
+		);
+		expect(emittedSummaries[0]?.agentCurrentWorkPhaseGoal).toEqual(persisted.agentCurrentWorkPhaseGoal);
+		expect(emittedSummaries[0]?.agentCurrentWorkPhaseGoalInvalidatedAt).toBeUndefined();
+		settleAsEstablished(createIdentityTestConnection("native-original"));
+		await started;
+		expect(service.getSummary(TASK_ID)?.agentWorkProgressEntries).toBeUndefined();
+	});
+
 	it.each(["task-1", "__home_agent__:workspace-1:omp"])("%s 的 ACP 初始请求包含共享起草指导", async (taskId) => {
 		const { service } = startServiceWithSummaryRecorder();
 		const { settleAsEstablished } = createPendingTaskConnection();
@@ -236,6 +292,52 @@ function createIdentityTestConnection(sessionId: string) {
 	};
 }
 describe("ACP 原生身份恢复", () => {
+	it.each(["native-original", "native-replaced"])(
+		"重建 ACP 服务后在首次广播前恢复进展，续跑原生身份=%s",
+		async (nativeSessionId) => {
+			const first = startServiceWithSummaryRecorder().service;
+			acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(
+				createIdentityTestConnection("native-original"),
+			);
+			const initial = await first.startTaskSession(buildStartRequest({ prompt: "" }));
+			const entries = advanceAgentWorkProgress(
+				initial,
+				{ progressEntryId: "implemented", progressText: "核心实现已完成", progressEntryOutcome: "completed" },
+				"implemented",
+				100,
+			);
+			first.applyCurrentWorkProgress(TASK_ID, entries);
+			const current = first.getSummary(TASK_ID);
+			if (!current) throw new Error("缺少持久进展模板。");
+			const nextEntries = advanceAgentWorkProgress(
+				current,
+				{ progressEntryId: "verifying", progressText: "验证进行中" },
+				"verifying",
+				200,
+			);
+			first.applyCurrentWorkProgress(TASK_ID, nextEntries);
+			const persisted = JSON.parse(JSON.stringify(first.getSummary(TASK_ID))) as RuntimeTaskSessionSummary;
+			const { service, emittedSummaries } = startServiceWithSummaryRecorder();
+			acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(
+				createIdentityTestConnection(nativeSessionId),
+			);
+			const resumed = await service.startTaskSession(
+				buildStartRequest({
+					resumePriorAgentConversationWithoutResendingPrompt: true,
+					observedAgentNativeConversationSessionIdentity: persisted.agentNativeConversationSessionIdentity,
+					persistedTaskSessionSummaryForProgressRestoration: persisted,
+				}),
+			);
+			expect(emittedSummaries[0]?.agentWorkProgressEntries).toEqual(persisted.agentWorkProgressEntries);
+			expect(resumed.agentWorkProgressEntries).toEqual(persisted.agentWorkProgressEntries);
+			expect(resolveAgentWorkProgressEntriesForDisplay(resumed).at(-1)?.isHistorical).toBe(
+				nativeSessionId !== "native-original",
+			);
+			expect(resolveAgentWorkProgressEntriesForDisplay(resumed)[0]?.outcome).toBe("completed");
+			await first.stopTaskSession(TASK_ID);
+			await service.stopTaskSession(TASK_ID);
+		},
+	);
 	it("新提交报告原始用户正文，续跑重播不会触发提交监听", async () => {
 		const { service } = startServiceWithSummaryRecorder();
 		const listener = vi.fn();
