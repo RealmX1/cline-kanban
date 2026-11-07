@@ -57,7 +57,7 @@ export function TaskCardSummaryMetadata({
 					.join("")}…`
 			: projectName;
 	const statisticCellClassName =
-		"pointer-events-auto flex min-w-0 flex-wrap items-center gap-1 font-mono text-[11px] leading-[1.4] [overflow-wrap:anywhere]";
+		"pointer-events-auto flex min-w-0 flex-wrap content-center items-center gap-1 font-mono text-[11px] leading-[1.4] [overflow-wrap:anywhere]";
 	return (
 		<div
 			role="group"
@@ -65,7 +65,7 @@ export function TaskCardSummaryMetadata({
 			data-task-card-compact-metadata-row=""
 			data-task-directory={showGitMetadata ? "" : undefined}
 			aria-label={description ?? undefined}
-			className="relative mb-1 grid min-w-0 grid-cols-3 items-start gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary"
+			className="relative mb-1 grid min-w-0 grid-cols-[minmax(0,1fr)_fit-content(30%)_fit-content(40%)] items-stretch gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary"
 		>
 			<span
 				role="group"
@@ -143,7 +143,7 @@ export function TaskCardSummaryMetadata({
 			<span
 				data-task-card-summary-cell="time"
 				data-task-card-time-metadata-group=""
-				className="pointer-events-auto flex min-w-0 flex-wrap items-center gap-1 [overflow-wrap:anywhere] [&_span]:min-w-0 [&_span]:max-w-full [&_span]:shrink [&_span]:flex-wrap [&_span]:whitespace-normal"
+				className="pointer-events-auto flex min-w-0 flex-wrap content-center items-center gap-1 [overflow-wrap:anywhere] [&_span]:min-w-0 [&_span]:max-w-full [&_span]:shrink [&_span]:flex-wrap [&_span]:whitespace-normal"
 			>
 				{timePills}
 			</span>

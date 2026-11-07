@@ -94,3 +94,74 @@ it.each([undefined, 5])("焦点副本扣除标题预算并随视口缩小更新�
 		vi.unstubAllGlobals();
 	}
 });
+
+it("吸顶区滚轮优先内部滚动，到边界后交给同列，保留缩放和横向手势并清理监听", () => {
+	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+	const container = document.body.appendChild(document.createElement("div"));
+	container.setAttribute("data-focus-view-column-scroll-boundary", "");
+	const scrollRoot = container.appendChild(document.createElement("div"));
+	scrollRoot.style.lineHeight = "20px";
+	Object.defineProperties(scrollRoot, {
+		offsetWidth: { value: 320 },
+		clientWidth: { value: 306 },
+		clientHeight: { value: 300 },
+		scrollHeight: { value: 1000 },
+	});
+	const root = createRoot(container.appendChild(document.createElement("div")));
+	const dispatchWheel = (element: HTMLElement, options: WheelEventInit = {}) => {
+		const event = new WheelEvent("wheel", { bubbles: true, cancelable: true, deltaY: 40, ...options });
+		element.dispatchEvent(event);
+		return event;
+	};
+	try {
+		act(() =>
+			root.render(
+				<FocusViewGroupHeaderRails
+					scrollRootRef={{ current: scrollRoot }}
+					topPinnedGroupIds={["review"]}
+					bottomPinnedGroupIds={[]}
+					renderEntry={(id) => (
+						<div key={id}>
+							<span>标题</span>
+							<div style={{ overflowY: "auto" }}>焦点副本</div>
+						</div>
+					)}
+				/>,
+			),
+		);
+		expect(container.style.getPropertyValue("--kb-focus-view-column-scrollbar-width")).toBe("14px");
+		const header = container.querySelector("span")!;
+		const focusedCard = header.nextElementSibling as HTMLElement;
+		const rail = container.querySelector<HTMLElement>('[data-testid="stage-header-rail"]')!;
+		rail.style.overflowY = "auto";
+		Object.defineProperties(rail, { clientHeight: { value: 160 }, scrollHeight: { value: 162 } });
+		Object.defineProperties(focusedCard, { clientHeight: { value: 50 }, scrollHeight: { value: 200 } });
+		scrollRoot.scrollTop = 100;
+		expect(dispatchWheel(header).defaultPrevented).toBe(true);
+		expect(scrollRoot.scrollTop).toBe(140);
+		expect(dispatchWheel(scrollRoot).defaultPrevented).toBe(false);
+		expect(dispatchWheel(focusedCard).defaultPrevented).toBe(false);
+		expect(scrollRoot.scrollTop).toBe(140);
+		focusedCard.scrollTop = 150;
+		expect(dispatchWheel(focusedCard).defaultPrevented).toBe(true);
+		expect(scrollRoot.scrollTop).toBe(180);
+		for (const gesture of [{ ctrlKey: true }, { metaKey: true }, { shiftKey: true }, { deltaX: 80 }]) {
+			expect(dispatchWheel(header, gesture).defaultPrevented).toBe(false);
+			expect(scrollRoot.scrollTop).toBe(180);
+		}
+		dispatchWheel(header, { deltaMode: WheelEvent.DOM_DELTA_LINE, deltaY: 2 });
+		expect(scrollRoot.scrollTop).toBe(220);
+		dispatchWheel(header, { deltaMode: WheelEvent.DOM_DELTA_PAGE, deltaY: 1 });
+		expect(scrollRoot.scrollTop).toBe(520);
+		scrollRoot.scrollTop = 700;
+		expect(dispatchWheel(header).defaultPrevented).toBe(false);
+		expect(scrollRoot.scrollTop).toBe(700);
+		act(() => root.unmount());
+		expect(dispatchWheel(container).defaultPrevented).toBe(false);
+		expect(container.style.getPropertyValue("--kb-focus-view-column-scrollbar-width")).toBe("");
+	} finally {
+		if (container.querySelector("span")) act(() => root.unmount());
+		container.remove();
+		vi.unstubAllGlobals();
+	}
+});
