@@ -1,5 +1,5 @@
 // ACP 会话的纯状态原语：内存 entry / 消息形状 + 唯一的 summary 写漏斗。
-// 对位 src/cline-sdk/cline-session-state.ts，但消息分组模型不同——ACP 用协议自带的
+// 消息分组使用 ACP 协议自带的
 // `messageId` 给流式 chunk 分组（omp 全程在发），而不是 Cline 那套 activeAssistantMessageId。
 import type {
 	RuntimeAgentId,

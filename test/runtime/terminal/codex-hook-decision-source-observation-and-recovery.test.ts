@@ -312,11 +312,17 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 			];
 			for (const decision of decisions) {
 				await decideHook(origin, selection, decision);
-				await instance.scan();
-				expect((await instance.getState()).observationProblem).toBeNull();
-				const stored = await readCodexConfigurationSyncStore();
-				expect(stored.sources[origin.sourceIdentity].fields[fieldKey(selection)]?.value).toEqual(decision);
-				expect(stored.changes.at(-1)?.fieldKey).toBe(fieldKey(selection));
+				// 文件监听扫描可能与审批交错而丢弃旧观察；核对补扫后的完整决定，不能要求单次扫描立即收敛。
+				await vi.waitFor(
+					async () => {
+						await instance.scan();
+						expect((await instance.getState()).observationProblem).toBeNull();
+						const stored = await readCodexConfigurationSyncStore();
+						expect(stored.sources[origin.sourceIdentity].fields[fieldKey(selection)]?.value).toEqual(decision);
+						expect(stored.changes.at(-1)?.fieldKey).toBe(fieldKey(selection));
+					},
+					{ timeout: 5_000 },
+				);
 				const future = await writer();
 				const configuration = parse(
 					await readFile(join(future.configurationHomeDirectoryPath, selection.fileName), "utf8"),
@@ -329,6 +335,7 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 				expect(value).toEqual(decision);
 			}
 		},
+		30_000,
 	);
 	it("会话 JSON 损坏时保留 hook 决定并继续吸收独立字段，恢复后清除问题", async () => {
 		const selection = await configureHookSource("user_file");

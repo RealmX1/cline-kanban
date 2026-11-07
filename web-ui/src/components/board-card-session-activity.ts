@@ -8,7 +8,7 @@ import { describeAutomaticAgentFailureContinuation } from "@runtime-session-acti
 // / needs_input=待你输入(金) / error=运行出错(红)。Stage 4 采集增强后另产出 question / plan_review
 // （Cline SDK）/ permission（Claude）三类「阻塞等你」（均金 CTA），见 resolveAwaitingUserTurnPresentation。
 
-import { formatClineToolCallLabel } from "@runtime-cline-tool-call-display";
+import { formatAgentConversationToolCallLabel } from "@runtime-agent-conversation-tool-call-display";
 import { isAwaitingUserReviewTurn, resolveSessionFacets } from "@runtime-session-activity";
 import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "@/runtime/types";
 
@@ -84,7 +84,7 @@ function resolveToolCallLabel(
 		if (!toolInputSummary && !parsedSummary) {
 			return null;
 		}
-		return formatClineToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
+		return formatAgentConversationToolCallLabel(toolName, toolInputSummary ?? parsedSummary);
 	}
 	if (!activityText) {
 		return null;
@@ -93,7 +93,7 @@ function resolveToolCallLabel(
 	if (!parsed) {
 		return null;
 	}
-	return formatClineToolCallLabel(parsed.toolName, parsed.toolInputSummary);
+	return formatAgentConversationToolCallLabel(parsed.toolName, parsed.toolInputSummary);
 }
 
 // Channel C（人轴文案）：把「等人审查回合」的 userTurnKind 映射为状态点颜色 + 无内容时的占位 CTA。

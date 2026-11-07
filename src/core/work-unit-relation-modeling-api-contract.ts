@@ -52,6 +52,7 @@ export const relationModelingPreviewEdgeSchema = z.object({
 	relationKind: z.string(),
 	relationPresentationState: z.enum(["saved", "pending_addition", "pending_revision", "pending_revocation"]),
 	assertedRelation: assertedInterWorkUnitRelationSchema.nullable(),
+	assertedRelationKindSpecificAttributes: assertedReferenceRelationKindSpecificAttributesSchema.optional(),
 });
 export const relationModelingPreviewResponseSchema = z.object({
 	rootWorkUnitKey: z.string(),

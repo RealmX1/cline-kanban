@@ -1,0 +1,50 @@
+[
+  {
+    "kind": "guided_manual",
+    "script": null,
+    "cleanup": {
+      "mode": "automatic",
+      "assetsDir": null,
+      "manualSteps": []
+    },
+    "verificationId": "f08a51af-8300-4ab0-a4b7-aec6d79c2e11",
+    "label": "真实会话换格、改变布局与断点后，终端输出、输入草稿和可视化继续保留",
+    "guidance": {
+      "steps": [
+        "打开本任务 Focus View，选择一个已经存在的真实会话和可视化预览。",
+        "保留一段未发送输入，交换工作台格位、切换左右与上下布局，再跨过手机断点后返回。",
+        "观察终端继续输出、草稿和 iframe 内阅读位置保留；查看 Sessions 和工具区域仅各有一条标题工具栏。"
+      ],
+      "expectedObservation": "既有会话持续显示后续输出，同一终端和可视化未重新初始化，草稿与阅读位置保留；标题没有重复常驻行。",
+      "failureSignature": "输出中断、终端或 iframe 重新载入、草稿清空、阅读位置重置，或一个区域出现两条标题栏。",
+      "anchor": {
+        "view": "task_detail",
+        "anchorKey": "task-detail:91ade"
+      }
+    }
+  },
+  {
+    "kind": "guided_manual",
+    "script": null,
+    "cleanup": {
+      "mode": "automatic",
+      "assetsDir": null,
+      "manualSteps": []
+    },
+    "verificationId": "a3acf278-cb7a-4446-a245-53536e45cbd1",
+    "label": "真实手机软键盘弹出时，信息浮层和右下控制保持可达且不遮挡最新输出入口",
+    "guidance": {
+      "steps": [
+        "在真实手机上打开本任务 Focus View 的已有会话，记录任务标题、停止和问答入口。",
+        "弹出系统软键盘，分别展开问答与资源详情、任务操作菜单和下方按键栏。",
+        "确认浮层在可视视口内滚动，关闭后焦点回到入口；按键栏与任务信息、上方导航独立展开。"
+      ],
+      "expectedObservation": "任务标题与停止按钮可见，问答和资源各可访问；320–359px 的资源位于更多菜单，360px 起有独立资源入口；浮层、滚轮、Latest 与任务菜单不互相遮挡。",
+      "failureSignature": "控制被软键盘或安全区盖住，浮层挤小终端或超出视口，菜单挡住滚轮或 Latest，或展开一区意外展开其他区域。",
+      "anchor": {
+        "view": "task_detail",
+        "anchorKey": "task-detail:91ade"
+      }
+    }
+  }
+]

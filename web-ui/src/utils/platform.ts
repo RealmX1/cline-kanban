@@ -16,6 +16,12 @@ export function isSafariUserAgent(userAgent: string): boolean {
 
 export const isSafari = typeof navigator !== "undefined" && isSafariUserAgent(navigator.userAgent);
 
+export function isFirefoxUserAgent(userAgent: string): boolean {
+	return /firefox\/|fxios\//i.test(userAgent);
+}
+
+export const isFirefox = typeof navigator !== "undefined" && isFirefoxUserAgent(navigator.userAgent);
+
 export const modifierKeyLabel = isMacPlatform ? "Cmd" : "Ctrl";
 export const optionKeyLabel = isMacPlatform ? "⌥" : "Alt";
 export const pasteShortcutLabel = `${modifierKeyLabel}+V`;

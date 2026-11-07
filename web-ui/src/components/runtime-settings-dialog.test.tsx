@@ -265,18 +265,6 @@ const savedClineOauthConfig = {
 			installed: true,
 		},
 	],
-	clineProviderSettings: {
-		providerId: null,
-		modelId: "cline-sonnet",
-		baseUrl: null,
-		reasoningEffort: null,
-		apiKeyConfigured: false,
-		oauthProvider: "cline",
-		oauthAccessTokenConfigured: true,
-		oauthRefreshTokenConfigured: true,
-		oauthAccountId: "acc-1",
-		oauthExpiresAt: 1_800_000_000_000,
-	},
 } as unknown as RuntimeConfigResponse;
 
 describe("RuntimeSettingsDialog", () => {
@@ -951,28 +939,5 @@ describe("RuntimeSettingsDialog", () => {
 		expect(handleOpenChange).toHaveBeenCalledWith(false);
 		expect(window.localStorage.getItem("kanban.theme")).toBe("graphite");
 		expect(document.documentElement.getAttribute("data-theme")).toBe("graphite");
-	});
-
-	it("forwards cline setup saves to the dialog onSaved callback", async () => {
-		const handleSaved = vi.fn();
-		await act(async () => {
-			root.render(
-				<RuntimeSettingsDialog
-					open={true}
-					workspaceId={"workspace-1"}
-					initialConfig={savedClineOauthConfig}
-					onOpenChange={() => {}}
-					onSaved={handleSaved}
-				/>,
-			);
-		});
-
-		expect(clineSetupSectionOnSavedRef.onSaved).toBeTypeOf("function");
-
-		await act(async () => {
-			clineSetupSectionOnSavedRef.onSaved?.();
-		});
-
-		expect(handleSaved).toHaveBeenCalledTimes(1);
 	});
 });

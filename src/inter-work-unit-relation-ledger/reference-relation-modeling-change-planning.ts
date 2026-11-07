@@ -15,7 +15,10 @@ import {
 	validateAndCompleteAssertedReferenceRelationKindSpecificAttributes,
 	validateAssertedReferenceRelationEndpoints,
 } from "./inter-work-unit-relation-assertion-write-planning";
-import { buildInterWorkUnitRelationWorkUnitKey } from "./kanban-board-card-identity-projection-from-ledger-events";
+import {
+	buildInterWorkUnitRelationWorkUnitKey,
+	type KanbanBoardCardIdentityProjectionState,
+} from "./kanban-board-card-identity-projection-from-ledger-events";
 
 export function planReferenceRelationModelingChanges(
 	root: InterWorkUnitRelationWorkUnitReference,
@@ -23,6 +26,7 @@ export function planReferenceRelationModelingChanges(
 	revocations: ApplyReferenceRelationModelingChangesRequest["relationRevocations"],
 	existingRelations: AssertedInterWorkUnitRelation[],
 	occurredAt: number,
+	kanbanBoardCardIdentityProjectionState?: KanbanBoardCardIdentityProjectionState,
 ) {
 	const rootKey = buildInterWorkUnitRelationWorkUnitKey(root);
 	const byId = new Map(existingRelations.map((relation) => [relation.relationId, relation]));
@@ -84,7 +88,10 @@ export function planReferenceRelationModelingChanges(
 			relationStatementSubjectWorkUnitRef: draft.currentTaskIsStatementSubject ? root : draft.counterpartWorkUnit,
 			relationStatementAnchorWorkUnitRef: draft.currentTaskIsStatementSubject ? draft.counterpartWorkUnit : root,
 		};
-		const endpointValidation = validateAssertedReferenceRelationEndpoints(endpoints);
+		const endpointValidation = validateAssertedReferenceRelationEndpoints({
+			...endpoints,
+			kanbanBoardCardIdentityProjectionState,
+		});
 		const attributeValidation = validateAndCompleteAssertedReferenceRelationKindSpecificAttributes(
 			draft,
 			"web_ui_user_with_verified_page_load_nonce",

@@ -1,5 +1,4 @@
-import { open, stat } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
 	inferCodexHomeDirectoryPathFromTranscriptPath,
 	resolveMigratedCodexConversationHome,
@@ -15,12 +14,14 @@ import type {
 	RuntimeAgentRaisedUserQuestionPayload,
 	RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 } from "../core/api-contract";
-import {
-	parseTranscriptJsonRecord,
-	readBoundedJsonLines,
-	readTranscriptRecord,
-} from "./bounded-agent-transcript-reader";
+import { parseTranscriptJsonRecord, readTranscriptRecord } from "./bounded-agent-transcript-reader";
 import { listKnownCodexTranscriptSegmentPaths } from "./codex-native-conversation-transcript-location-for-resume";
+import {
+	codexTranscriptJsonlPath,
+	openCodexTranscriptReadSource,
+	readCodexTranscriptSessionMetadata,
+} from "./codex-transcript-read-source";
+import { transcriptMetadataMatchesNativeConversationIdentity } from "./persisted-agent-transcript-last-conversation-progress-probe";
 
 export interface CodexUserQuestionTranscriptExchange {
 	callId: string;
@@ -213,20 +214,47 @@ export async function recoverCodexUserQuestionsFromKnownConversation(
 ): Promise<RecoveredCodexUserQuestions> {
 	const storageBinding = await resolveCodexUserQuestionTranscriptRecoveryStorageBinding(input);
 	input = storageBinding;
-	const root = join(storageBinding.homeDirectoryPath, "sessions");
-	const paths = new Set(
-		(await listKnownCodexTranscriptSegmentPaths(root, input.sessionId)).map((path) => resolve(path)),
-	);
-	if (input.transcriptPath) paths.add(resolve(input.transcriptPath));
-	const segments: CodexTranscriptSegment[] = [];
-	for (const filePath of paths) {
+	let root = join(storageBinding.homeDirectoryPath, "sessions");
+	if (input.transcriptPath) {
 		try {
-			const byteLength = (await stat(filePath)).size;
-			const prefix = await readBoundedJsonLines(filePath, Math.min(byteLength, 256 * 1024), 256 * 1024);
-			const first = prefix.lines[0] ? parseTranscriptJsonRecord(prefix.lines[0]) : null;
+			const source = await openCodexTranscriptReadSource(input.transcriptPath, input.sessionId);
+			input = { ...input, transcriptPath: source.nativePath };
+			await source.close();
+		} catch {
+			return { exchanges: [], coverage: "unavailable" };
+		}
+		const selectedStorageRoot = [root, join(storageBinding.homeDirectoryPath, "archived_sessions")].find(
+			(candidateRoot) => {
+				const location = relative(candidateRoot, resolve(input.transcriptPath as string));
+				return !isAbsolute(location) && location !== ".." && !location.startsWith(`..${sep}`);
+			},
+		);
+		if (!selectedStorageRoot) return { exchanges: [], coverage: "unavailable" };
+		root = selectedStorageRoot;
+	}
+	const paths = new Map(
+		(await listKnownCodexTranscriptSegmentPaths(root, input.sessionId, { includeCompressedTranscripts: true })).map(
+			(path) => [codexTranscriptJsonlPath(resolve(path)), path],
+		),
+	);
+	if (input.transcriptPath) {
+		const key = codexTranscriptJsonlPath(resolve(input.transcriptPath));
+		paths.set(key, resolve(input.transcriptPath));
+	}
+	const segments: CodexTranscriptSegment[] = [];
+	for (const filePath of paths.values()) {
+		let source: Awaited<ReturnType<typeof openCodexTranscriptReadSource>> | null = null;
+		try {
+			source = await openCodexTranscriptReadSource(filePath);
+			const byteLength = (await source.stat()).size;
+			const first = (await readCodexTranscriptSessionMetadata(source)).record;
 			const metadata = readTranscriptRecord(first?.payload);
 			if (
 				first?.type !== "session_meta" ||
+				!transcriptMetadataMatchesNativeConversationIdentity(
+					{ sourceAgentId: "codex", nativeSessionId: input.sessionId },
+					first,
+				) ||
 				!metadata ||
 				metadata.id !== input.sessionId ||
 				(metadata.session_id !== undefined && metadata.session_id !== input.sessionId)
@@ -235,7 +263,7 @@ export async function recoverCodexUserQuestionsFromKnownConversation(
 			const startedAt = Date.parse(
 				typeof metadata.timestamp === "string" ? metadata.timestamp : String(first.timestamp),
 			);
-			const fileName = basename(filePath);
+			const fileName = basename(codexTranscriptJsonlPath(filePath));
 			const resumedRolloutMarker = `-${input.sessionId}_`;
 			const resumedRolloutMarkerIndex = fileName.lastIndexOf(resumedRolloutMarker);
 			const resumedRolloutThreadId =
@@ -248,9 +276,12 @@ export async function recoverCodexUserQuestionsFromKnownConversation(
 				: resumedRolloutThreadId && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(resumedRolloutThreadId)
 					? resumedRolloutThreadId
 					: null;
-			if (Number.isFinite(startedAt)) segments.push({ filePath, rolloutThreadId, byteLength, startedAt, metadata });
+			if (Number.isFinite(startedAt))
+				segments.push({ filePath: source.nativePath, rolloutThreadId, byteLength, startedAt, metadata });
 		} catch {
 			/* 身份或文件不可验证时不猜测归属。 */
+		} finally {
+			await source?.close();
 		}
 	}
 	segments.sort(
@@ -258,7 +289,11 @@ export async function recoverCodexUserQuestionsFromKnownConversation(
 			left.startedAt - right.startedAt || basename(left.filePath).localeCompare(basename(right.filePath)),
 	);
 	const current = input.transcriptPath
-		? segments.find((segment) => resolve(segment.filePath) === resolve(input.transcriptPath as string))
+		? segments.find(
+				(segment) =>
+					codexTranscriptJsonlPath(resolve(segment.filePath)) ===
+					codexTranscriptJsonlPath(resolve(input.transcriptPath as string)),
+			)
 		: segments.at(-1);
 	if (!current) return { exchanges: [], coverage: "unavailable" };
 	// EXPERIMENT_NODE: 32 MiB 按需恢复预算需结合真实长会话体量和查询耗时校准；超预算必须如实返回覆盖不足。
@@ -277,7 +312,7 @@ export async function recoverCodexUserQuestionsFromKnownConversation(
 			return { lines: [], complete: false };
 		visited.add(segment.filePath);
 		remainingBytes -= endByteOffset;
-		const transcriptFileHandle = await open(segment.filePath, "r");
+		const transcriptFileHandle = await openCodexTranscriptReadSource(segment.filePath);
 		let transcriptPrefixBuffer: Buffer;
 		try {
 			transcriptPrefixBuffer = Buffer.allocUnsafe(endByteOffset);

@@ -1,12 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
-
+import { useRecoverableForegroundRead } from "@/expanded-foreground-view/use-recoverable-foreground-read";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type {
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceChangesResponse,
 } from "@/runtime/types";
-import { useTrpcQuery } from "@/runtime/use-trpc-query";
 
 export type RuntimeWorkspaceChangesQueryPhase =
 	| "disabled"
@@ -25,7 +24,7 @@ export interface UseRuntimeWorkspaceChangesResult {
 	refresh: () => Promise<void>;
 }
 
-// 只比较驱动渲染的 files 内容（忽略每次轮询都变的 generatedAt），内容相同则让 useTrpcQuery 保留旧引用。
+// 只比较驱动渲染的 files 内容（忽略每次轮询都变的 generatedAt），内容相同则保留旧引用。
 // files 由后端按 path 排序，顺序稳定，可按下标逐项比对。
 // ponytail: oldText/newText 用 === 全串比较，最坏 O(payload 字节)/轮询——但仅在长度相等时才逐字节，
 // 且远比它省下的整面板 re-render + Prism 重算便宜；瓶颈化再考虑后端下发内容指纹。
@@ -71,84 +70,39 @@ export function useRuntimeWorkspaceChanges(
 	const hasWorkspaceScope = taskId !== null && workspaceId !== null && baseRef !== null;
 	const normalizedViewKey = viewKey ?? "__default__";
 	const requestKey = `${workspaceId ?? "__none__"}:${taskId ?? "__none__"}:${baseRef ?? "__none__"}:${worktreeMode ?? "branch"}:${mode}:${normalizedViewKey}`;
-	const previousRequestKeyRef = useRef(requestKey);
-	const isRequestTransitioning = hasWorkspaceScope && previousRequestKeyRef.current !== requestKey;
-	const queryFn = useCallback(async () => {
-		if (!taskId || !workspaceId || !baseRef) {
-			throw new Error("Missing workspace scope.");
-		}
-		void normalizedViewKey;
-		const trpcClient = getRuntimeTrpcClient(workspaceId);
-		return await trpcClient.workspace.getChanges.query({
-			taskId,
-			baseRef,
-			...(worktreeMode ? { worktreeMode } : {}),
-			mode,
-		});
-	}, [baseRef, mode, normalizedViewKey, taskId, workspaceId, worktreeMode]);
-	const changesQuery = useTrpcQuery<RuntimeWorkspaceChangesResponse>({
+	const queryFn = useCallback(
+		async (signal: AbortSignal) => {
+			if (!taskId || !workspaceId || !baseRef) {
+				throw new Error("Missing workspace scope.");
+			}
+			void normalizedViewKey;
+			const trpcClient = getRuntimeTrpcClient(workspaceId);
+			return await trpcClient.workspace.getChanges.query(
+				{ taskId, baseRef, ...(worktreeMode ? { worktreeMode } : {}), mode },
+				{ signal, context: { sendAsIndependentHttpRequest: true } },
+			);
+		},
+		[baseRef, mode, normalizedViewKey, taskId, workspaceId, worktreeMode],
+	);
+	const changesQuery = useRecoverableForegroundRead<RuntimeWorkspaceChangesResponse>({
+		identity: requestKey,
 		enabled: hasWorkspaceScope,
-		queryFn,
-		retainDataOnError: true,
+		read: queryFn,
 		retainErrorDuringRefetch: true,
 		isDataEqual: areWorkspaceChangesEqual,
+		retainedValueScopeIdentity: clearOnViewTransition
+			? undefined
+			: JSON.stringify([workspaceId, taskId, baseRef, worktreeMode, mode]),
+		refreshIntervalMs: pollIntervalMs ?? undefined,
+		workspaceId: workspaceId ?? undefined,
 	});
-
-	const refresh = useCallback(async () => {
-		if (!hasWorkspaceScope) {
-			return;
-		}
-		await changesQuery.refetch();
-	}, [changesQuery.refetch, hasWorkspaceScope]);
+	const refresh = changesQuery.refresh;
 	const previousStateVersionRef = useRef(stateVersion);
-
 	useEffect(() => {
-		if (!isRequestTransitioning) {
-			return;
-		}
-		previousRequestKeyRef.current = requestKey;
-		if (clearOnViewTransition) {
-			changesQuery.setData(null);
-			changesQuery.clearQueryError();
-		}
-	}, [changesQuery.clearQueryError, changesQuery.setData, clearOnViewTransition, isRequestTransitioning, requestKey]);
-
-	useEffect(() => {
-		if (!hasWorkspaceScope) {
-			previousRequestKeyRef.current = requestKey;
-			previousStateVersionRef.current = stateVersion;
-			return;
-		}
-		if (previousStateVersionRef.current === stateVersion) {
-			return;
-		}
+		const changed = previousStateVersionRef.current !== stateVersion;
 		previousStateVersionRef.current = stateVersion;
-		void changesQuery.refetch();
-	}, [changesQuery.refetch, hasWorkspaceScope, requestKey, stateVersion]);
-
-	useEffect(() => {
-		if (!hasWorkspaceScope || pollIntervalMs == null) {
-			return;
-		}
-		let cancelled = false;
-		let nextPollTimer: number | null = null;
-		const scheduleNextPoll = () => {
-			nextPollTimer = window.setTimeout(() => {
-				void changesQuery.refetch().finally(() => {
-					if (!cancelled) {
-						scheduleNextPoll();
-					}
-				});
-			}, pollIntervalMs);
-		};
-		scheduleNextPoll();
-		return () => {
-			cancelled = true;
-			if (nextPollTimer !== null) {
-				window.clearTimeout(nextPollTimer);
-			}
-		};
-	}, [changesQuery.refetch, hasWorkspaceScope, pollIntervalMs]);
+		if (hasWorkspaceScope && changed && !changesQuery.retryBudgetExhausted) void refresh();
+	}, [hasWorkspaceScope, refresh, stateVersion, changesQuery.retryBudgetExhausted]);
 
 	if (!taskId) {
 		return {
@@ -170,10 +124,9 @@ export function useRuntimeWorkspaceChanges(
 		};
 	}
 
-	const shouldHideDuringTransition = clearOnViewTransition && isRequestTransitioning;
-	const visibleChanges = shouldHideDuringTransition ? null : changesQuery.data;
-	const visibleError = shouldHideDuringTransition ? null : changesQuery.error;
-	const isRequestInFlight = shouldHideDuringTransition || changesQuery.isLoading;
+	const visibleChanges = changesQuery.value;
+	const visibleError = changesQuery.failure;
+	const isRequestInFlight = changesQuery.loading;
 	const queryPhase: RuntimeWorkspaceChangesQueryPhase =
 		visibleChanges !== null
 			? visibleError

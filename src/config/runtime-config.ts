@@ -104,8 +104,16 @@ const CONFIG_FILENAME = "config.json";
 const PROJECT_CONFIG_PARENT_DIR = ".cline";
 const PROJECT_CONFIG_DIR = "kanban";
 const PROJECT_CONFIG_FILENAME = "config.json";
-const DEFAULT_AGENT_ID: RuntimeAgentId = "cline";
-const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = ["claude", "codex", "cursor", "droid", "kiro"];
+const DEFAULT_AGENT_ID: RuntimeAgentId = "codex";
+const AUTO_SELECT_AGENT_PRIORITY: readonly RuntimeAgentId[] = [
+	"claude",
+	"codex",
+	"cursor",
+	"droid",
+	"kiro",
+	"kimi",
+	"omp",
+];
 const DEFAULT_AGENT_AUTONOMOUS_MODE_ENABLED = true;
 const DEFAULT_NEW_TASK_START_IN_PLAN_MODE_BY_DEFAULT = true;
 // omp 新任务默认走 TUI（PTY）而不是 ACP：ACP 通道尚有一批未收口的缺口（历史纯内存、无 stall 兜底、
@@ -189,7 +197,7 @@ function normalizeAgentId(agentId: RuntimeAgentId | string | null | undefined): 
 	if (parsed.success && isRuntimeAgentLaunchSupported(parsed.data)) {
 		return parsed.data;
 	}
-	return DEFAULT_AGENT_ID;
+	return pickBestInstalledAgentId() ?? DEFAULT_AGENT_ID;
 }
 
 // 以 runtimeAgentSessionTransportSchema 为唯一真源做校验，与 normalizeAgentId 同理：
@@ -524,9 +532,7 @@ async function writeRuntimeGlobalConfigFile(
 		);
 	}
 	if (selectedAgentId !== undefined) {
-		if (hasOwnKey(existing, "selectedAgentId") || selectedAgentId !== DEFAULT_AGENT_ID) {
-			payload.selectedAgentId = selectedAgentId;
-		}
+		payload.selectedAgentId = selectedAgentId;
 	} else if (existingSelectedAgentId !== undefined) {
 		payload.selectedAgentId = existingSelectedAgentId;
 	}

@@ -472,7 +472,6 @@ export function useTaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskS
 						onActivateTaskCardOpeningTaskInItsProject: (card) =>
 							onOpenTaskInProject?.(pendingVerificationReview.workspaceId, card.id),
 						defaultAgentId: null,
-						defaultClineModelId: null,
 					}}
 					isSubmittingClosure={isVerificationClosureSubmitting}
 					onCancel={() => {

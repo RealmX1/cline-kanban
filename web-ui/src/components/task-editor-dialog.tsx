@@ -63,10 +63,8 @@ import type {
 	RuntimeAgentDefinition,
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
-	RuntimeClineReasoningEffort,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
-	RuntimeTaskClineSettings,
 	RuntimeTaskConversationMode,
 	RuntimeTaskTerminalAgentModelOverrideSettings,
 	RuntimeTaskWorktreeMode,
@@ -135,17 +133,9 @@ export interface TaskCreateFormSnapshot {
 	branchRef: string;
 	worktreeMode: RuntimeTaskWorktreeMode;
 	agentId: RuntimeAgentId | undefined;
-	clineSettings: RuntimeTaskClineSettings | undefined;
 	terminalAgentModelOverrideSettings: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	projectWorkspaceId?: string | null;
-}
-
-function isSameClineSettings(
-	left: RuntimeTaskClineSettings | undefined,
-	right: RuntimeTaskClineSettings | undefined,
-): boolean {
-	return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 function isSameTerminalAgentModelOverrideSettings(
@@ -175,7 +165,6 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		JSON.stringify(current.taskAgentSessionInitialization) !==
 			JSON.stringify(baseline.taskAgentSessionInitialization) ||
 		current.agentId !== baseline.agentId ||
-		!isSameClineSettings(current.clineSettings, baseline.clineSettings) ||
 		!isSameTerminalAgentModelOverrideSettings(
 			current.terminalAgentModelOverrideSettings,
 			baseline.terminalAgentModelOverrideSettings,
@@ -283,15 +272,10 @@ export function TaskEditorDialogForm({
 	onWorktreeModeChange,
 	agentId,
 	onAgentIdChange,
-	clineSettings,
-	onClineSettingsChange,
 	terminalAgentModelOverrideSettings,
 	onTerminalAgentModelOverrideSettingsChange,
 	agents,
 	defaultAgentId,
-	defaultProviderId,
-	defaultModelId,
-	defaultReasoningEffort,
 	taskEditorMode = "create",
 	creatingTaskName,
 	onCreatingTaskNameChange,
@@ -365,8 +349,6 @@ export function TaskEditorDialogForm({
 	onWorktreeModeChange: (value: RuntimeTaskWorktreeMode) => void;
 	agentId?: RuntimeAgentId | undefined;
 	onAgentIdChange?: (value: RuntimeAgentId | undefined) => void;
-	clineSettings?: RuntimeTaskClineSettings | undefined;
-	onClineSettingsChange?: (value: RuntimeTaskClineSettings | undefined) => void;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | undefined;
 	onTerminalAgentModelOverrideSettingsChange?: (
 		value: RuntimeTaskTerminalAgentModelOverrideSettings | undefined,
@@ -376,12 +358,6 @@ export function TaskEditorDialogForm({
 	agents?: RuntimeAgentDefinition[];
 	/** Default agent ID from runtimeConfig.selectedAgentId, used to show "Default (AgentName)" in picker */
 	defaultAgentId?: RuntimeAgentId | null;
-	/** Default Cline provider ID from runtimeConfig.clineProviderSettings.providerId */
-	defaultProviderId?: string | null;
-	/** Default Cline model ID from runtimeConfig.clineProviderSettings.modelId */
-	defaultModelId?: string | null;
-	/** Default Cline reasoning effort from runtimeConfig.clineProviderSettings.reasoningEffort */
-	defaultReasoningEffort?: RuntimeClineReasoningEffort | null;
 	taskEditorMode?: "create" | "edit";
 	creatingTaskName?: string;
 	onCreatingTaskNameChange?: (value: string) => void;
@@ -683,7 +659,6 @@ export function TaskEditorDialogForm({
 		autoReviewMode,
 		worktreeMode,
 		agentId,
-		clineSettings,
 		terminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization,
 		mode,
@@ -833,9 +808,22 @@ export function TaskEditorDialogForm({
 		if (!submittingPrompt.trim()) return false;
 		const inputSnapshot = latestSubmissionInputRef.current;
 		let acceptedAssignmentInputSnapshot = inputSnapshot;
-		const isSubmittedInputStillCurrent = () =>
-			latestSubmissionInputRef.current === inputSnapshot ||
-			latestSubmissionInputRef.current === acceptedAssignmentInputSnapshot;
+		let acceptedRelationSavedInputSnapshot: string | null = null;
+		const isSubmittedInputStillCurrent = () => {
+			const currentRelationDraft = relationModeling.readLatestDraft();
+			if (
+				acceptedRelationSavedInputSnapshot &&
+				(currentRelationDraft.referenceRelationDrafts.length ||
+					currentRelationDraft.relationRevocations.length ||
+					Object.keys(currentRelationDraft.invalidReferenceRelationDetailsFormsByDraftId ?? {}).length)
+			)
+				return false;
+			return (
+				latestSubmissionInputRef.current === inputSnapshot ||
+				latestSubmissionInputRef.current === acceptedAssignmentInputSnapshot ||
+				latestSubmissionInputRef.current === acceptedRelationSavedInputSnapshot
+			);
+		};
 		const relationSnapshot = JSON.stringify({
 			drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
 			revocations: relationModeling.readLatestDraft().relationRevocations,
@@ -985,8 +973,16 @@ export function TaskEditorDialogForm({
 			if (persistence && !(await persistence)) throw new Error("任务更改尚未保存，草稿已保留。");
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("提交期间输入又有更改，新的草稿已保留，请核对后再次保存。");
-			if (relationModeling.hasChanges && characteristics)
+			if (relationModeling.hasChanges && characteristics) {
 				await relationModeling.applyToTask(taskId, characteristics, assignment.workspaceId);
+				// 保存只消费本次关系草稿；随后出现的真实输入仍按原快照保护。
+				acceptedRelationSavedInputSnapshot = JSON.stringify({
+					...(JSON.parse(acceptedAssignmentInputSnapshot) as Record<string, unknown>),
+					referenceRelationDrafts: [],
+					relationRevocations: [],
+					invalidReferenceRelationDetailsFormsByDraftId: undefined,
+				});
+			}
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("保存关系期间输入又有更改，新的草稿已保留，尚未启动任务。");
 			if (automaticProjectAssignmentAnalysisEnabledForThisSubmission)
@@ -1387,7 +1383,6 @@ export function TaskEditorDialogForm({
 		branchRef,
 		worktreeMode,
 		agentId,
-		clineSettings,
 		terminalAgentModelOverrideSettings,
 		taskAgentSessionInitialization,
 		projectWorkspaceId: targetWorkspaceId,
@@ -1794,7 +1789,6 @@ export function TaskEditorDialogForm({
 														branchRef,
 														worktreeMode,
 														agentId,
-														clineSettings,
 														terminalAgentModelOverrideSettings,
 														taskAgentSessionInitialization,
 													} satisfies TaskEditDraftComparableValues
@@ -1922,16 +1916,11 @@ export function TaskEditorDialogForm({
 											workspaceId={targetWorkspaceId}
 											agentId={agentId}
 											onAgentIdChange={onAgentIdChange ?? (() => undefined)}
-											allowAgentSelection={Boolean(onAgentIdChange && onClineSettingsChange)}
-											clineSettings={clineSettings}
-											onClineSettingsChange={onClineSettingsChange}
+											allowAgentSelection={Boolean(onAgentIdChange)}
 											terminalAgentModelOverrideSettings={terminalAgentModelOverrideSettings}
 											onTerminalAgentModelOverrideSettingsChange={onTerminalAgentModelOverrideSettingsChange}
 											agents={agents}
 											defaultAgentId={defaultAgentId}
-											defaultProviderId={defaultProviderId}
-											defaultModelId={defaultModelId}
-											defaultReasoningEffort={defaultReasoningEffort}
 											startInPlanMode={startInPlanMode}
 											onStartInPlanModeChange={onStartInPlanModeChange}
 											startInPlanModeDisabled={startInPlanModeDisabled}
@@ -1974,6 +1963,7 @@ export function TaskEditorDialogForm({
 														presentation="task_editor"
 														clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
 														workspaceId={workspaceId}
+														targetWorkspaceId={targetWorkspaceId}
 														taskId={taskEditorMode === "edit" ? editingTaskId : null}
 														rootTitle={taskName || "待创建任务"}
 														onUnstagedFormChange={setHasUnstagedRelationForm}

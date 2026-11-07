@@ -6,7 +6,7 @@
 
 历史转录中的 writer home 先按物理路径识别，再核验持久绑定清单、历史目录身份及历史与写锁桥接；HOME 的软链或等价路径不会改变历史归属。summary 缺少历史目录字段时可从已核验的清单恢复；普通旧 home 仍以原生转录归属为准。仅有目录形状、清单身份不符或桥接被替换都不能取得历史桥接资格。
 
-共享默认保存于看板内部的 `configuration-sync-state.json`，权限为 `0600`。外部配置只在首次初始化时一次性导入，此后由 Kanban 独立维护。独立历史 helper 与无状态 Codex 执行器也使用自己的配置副本，不能通过辅助进程刷新活会话。
+共享默认保存于看板内部的 `codex-configuration-sync.sqlite`，权限为 `0600`；旧 `configuration-sync-state.json` 在迁移后作为阻止旧版继续写入的哨兵。外部配置只在首次初始化时一次性导入，此后由 Kanban 独立维护。独立历史 helper 与无状态 Codex 执行器也使用自己的配置副本，不能通过辅助进程刷新活会话。
 
 ## 一次性初始化与外部设置边界
 
@@ -191,3 +191,7 @@ npm run test:guarded -- --project runtime-integration test/integration/codex-con
 ```
 
 构建前分别核验并隔离 `dist`、`web-ui/dist`，显式设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`。构建 Node 必须与所用原生依赖的 ABI 相符，不重编共享依赖来修复单个任务的环境漂移。
+
+## 存储性能与切换说明
+
+SQLite 活跃集合、历史分页、迁移屏障、未知提交恢复与最新状态回退见 [配置同步 SQLite 存储与恢复](codex-configuration-sync-sqlite-storage-and-recovery.md)。

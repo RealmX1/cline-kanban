@@ -5,8 +5,12 @@ import { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 // stream-json 的 CommonJS 导出挂在函数对象上，原生 ESM 不能静态识别其 parser 命名导出。
 import streamJson from "stream-json";
-import { decompressStream } from "zstd-stream";
 import { countDailyWorkProgressCollectionCost } from "../diagnostics/daily-work-progress-collection-cost-recorder";
+import {
+	assertCodexTranscriptNativeStoragePathOwnership,
+	codexTranscriptJsonlPath,
+	readCodexDecodedTranscriptChunks,
+} from "./codex-transcript-read-source";
 
 // 只枚举文件名；正文读取严格限定到已知原生 ID，不按 cwd 或更新时间猜对话。
 export async function listKnownCodexTranscriptSegmentPaths(
@@ -23,7 +27,7 @@ export async function listKnownCodexTranscriptSegmentPaths(
 			countDailyWorkProgressCollectionCost("codex_directory_enumerations");
 			for (const entry of await readdir(directory, { withFileTypes: true })) {
 				const path = join(directory, entry.name);
-				// 正文读取者默认只接收 JSONL；只有能够解压的预检显式启用压缩文件。
+				// 写入/迁移消费者保留 JSONL 默认；共享只读消费者显式包含压缩格式。
 				const transcriptName =
 					options.includeCompressedTranscripts && entry.name.endsWith(".jsonl.zst")
 						? entry.name.slice(0, -4)
@@ -40,7 +44,12 @@ export async function listKnownCodexTranscriptSegmentPaths(
 			/* 无法读取的目录不构成任何会话存在的证据。 */
 		}
 	}
-	return paths;
+	const selected = new Map<string, string>();
+	for (const path of paths.sort()) {
+		const ordinaryPath = codexTranscriptJsonlPath(path);
+		if (!selected.has(ordinaryPath)) selected.set(ordinaryPath, path);
+	}
+	return [...selected.values()];
 }
 
 // 身份比对只保存有限长度的键和值；其余字符串（尤其 base_instructions）直接消费并丢弃。
@@ -58,6 +67,7 @@ function createCodexMetadataIdentityTokenInspector(nativeSessionId: string) {
 	let metadataIdMatches = false;
 	let optionalSessionIdMatches = true;
 	let sourceIsPersistentMainConversation = true;
+	let threadSourceIsUser = true;
 	const maximumCapturedTextLength = Math.max(nativeSessionId.length, "memory_consolidation".length) + 1;
 
 	return {
@@ -78,11 +88,13 @@ function createCodexMetadataIdentityTokenInspector(nativeSessionId: string) {
 						metadataIdMatches = false;
 						optionalSessionIdMatches = true;
 						sourceIsPersistentMainConversation = true;
+						threadSourceIsUser = true;
 					}
 				} else if (depth === 2 && readingPayloadObject) {
 					payloadKey = capturedText;
 					if (payloadKey === "id") metadataIdMatches = false;
 					if (payloadKey === "session_id") optionalSessionIdMatches = false;
+					if (payloadKey === "thread_source") threadSourceIsUser = false;
 					if (payloadKey === "source") sourceIsPersistentMainConversation = true;
 				} else if (
 					depth === 3 &&
@@ -96,13 +108,16 @@ function createCodexMetadataIdentityTokenInspector(nativeSessionId: string) {
 				capturedStringField =
 					depth === 1 && rootKey === "type"
 						? "type"
-						: depth === 2 && readingPayloadObject && ["id", "session_id", "source"].includes(payloadKey)
+						: depth === 2 &&
+								readingPayloadObject &&
+								["id", "session_id", "source", "thread_source"].includes(payloadKey)
 							? payloadKey
 							: "";
 			} else if (token.name === "endString") {
 				if (capturedStringField === "type") recordTypeMatches = capturedText === "session_meta";
 				if (capturedStringField === "id") metadataIdMatches = capturedText === nativeSessionId;
 				if (capturedStringField === "session_id") optionalSessionIdMatches = capturedText === nativeSessionId;
+				if (capturedStringField === "thread_source") threadSourceIsUser = capturedText === "user";
 				if (capturedStringField === "source") {
 					sourceIsPersistentMainConversation = !["memory_consolidation", "guardian_review"].includes(capturedText);
 				}
@@ -121,7 +136,11 @@ function createCodexMetadataIdentityTokenInspector(nativeSessionId: string) {
 			}
 		},
 		matches: () =>
-			recordTypeMatches && metadataIdMatches && optionalSessionIdMatches && sourceIsPersistentMainConversation,
+			recordTypeMatches &&
+			metadataIdMatches &&
+			optionalSessionIdMatches &&
+			sourceIsPersistentMainConversation &&
+			threadSourceIsUser,
 	};
 }
 
@@ -131,11 +150,12 @@ async function transcriptEstablishesRequestedCodexConversation(
 ): Promise<boolean> {
 	try {
 		const handle = await open(path, "r");
-		let transcriptFileChunks: AsyncGenerator<Buffer, void, unknown> | null = null;
+		let transcriptFileChunks: AsyncGenerator<Uint8Array, void, unknown> | null = null;
 		try {
 			const file = await handle.stat();
 			if (!file.isFile()) return false;
 			const transcriptInspectionDeadline = performance.now() + 3_000;
+			const transcriptInspectionAbortSignal = AbortSignal.timeout(3_000);
 			let foundMetadataLineTerminator = false;
 			const metadataLineComplete = new Error("Codex 元数据首行读取完成");
 			const transcriptIsZstandardCompressed = path.endsWith(".jsonl.zst");
@@ -162,64 +182,20 @@ async function transcriptEstablishesRequestedCodexConversation(
 					}
 				},
 			});
-			async function* readTranscriptFileChunksWithinInspectionBudget() {
-				// 以打开时的文件大小封顶，避免不断追加、缺少换行的文件拖住预检。
-				for (let position = 0; position < file.size; ) {
-					assertWithinInspectionDeadline();
-					const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, file.size - position));
-					const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
-					if (bytesRead === 0) return;
-					position += bytesRead;
-					yield buffer.subarray(0, bytesRead);
-					if (foundMetadataLineTerminator && !transcriptIsZstandardCompressed) return;
-				}
-			}
 			const identityInspector = createCodexMetadataIdentityTokenInspector(nativeSessionId);
-			const fileChunks = readTranscriptFileChunksWithinInspectionBudget();
-			transcriptFileChunks = fileChunks;
-			let compressedInputCancelled = false;
-			// Node 22.0 的 Readable.toWeb 在取消时可能重复关闭 controller；直接交接迭代器。
-			const compressedInput = transcriptIsZstandardCompressed
-				? new ReadableStream<Uint8Array>(
-						{
-							async pull(controller) {
-								try {
-									const { done, value } = await fileChunks.next();
-									if (compressedInputCancelled) return;
-									if (done) controller.close();
-									else controller.enqueue(value);
-								} catch (error) {
-									if (!compressedInputCancelled) controller.error(error);
-								}
-							},
-							async cancel() {
-								compressedInputCancelled = true;
-								await fileChunks.return();
-							},
-						},
-						{ highWaterMark: 0 },
-					)
-				: null;
-			// JSON 只消费首行；压缩流继续流式核验完整性，损坏的正文不能放行销毁旧 PTY。
+			const decodedChunks = readCodexDecodedTranscriptChunks(
+				handle,
+				path,
+				file.size,
+				assertWithinInspectionDeadline,
+				transcriptInspectionAbortSignal,
+			);
+			transcriptFileChunks = decodedChunks;
 			async function* readDecodedTranscriptChunks() {
-				if (!compressedInput) {
-					yield* fileChunks;
-					return;
-				}
-				const decodedStream = await decompressStream(compressedInput, { highWaterMark: 64 * 1024 });
-				const reader = decodedStream.getReader();
-				try {
-					while (true) {
-						const { done, value } = await reader.read();
-						if (done) return;
-						yield value;
-					}
-				} finally {
-					try {
-						await reader.cancel();
-					} finally {
-						reader.releaseLock();
-					}
+				for await (const chunk of decodedChunks) {
+					yield chunk;
+					// 压缩首行之后仍读到正常 EOF，保持原完整性与 3 秒预检门禁。
+					if (foundMetadataLineTerminator && !transcriptIsZstandardCompressed) return;
 				}
 			}
 			await pipeline(
@@ -273,6 +249,7 @@ export async function inspectCodexNativeConversationTranscriptBeforeResume(input
 	const inspectCandidate = async (path: string): Promise<boolean> => {
 		if (!isWithinEffectiveCodexStore(path)) return false;
 		try {
+			await assertCodexTranscriptNativeStoragePathOwnership(path);
 			const before = await stat(path);
 			const version = `${path}:${before.dev}:${before.ino}:${before.size}:${before.mtimeMs}:${before.ctimeMs}`;
 			if (inspectedFileVersions.has(version)) return false;

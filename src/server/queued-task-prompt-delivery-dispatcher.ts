@@ -64,6 +64,7 @@ import type {
 	QueuedTaskPromptDeliveryEntry,
 	QueuedTaskPromptDispatchBlockReason,
 	QueuedTaskPromptInFlightDeliveryCancelResult,
+	RuntimeAgentId,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
@@ -98,6 +99,7 @@ import {
 	stampQueuedTaskPromptDeliveriesThatSurvivedRuntimeRestart,
 } from "../state/queued-task-prompt-delivery-store";
 import { updateQueuedTaskPromptNativeIndependentUserTurnQueryRecovery } from "../state/queued-task-prompt-native-independent-user-turn-query-recovery";
+import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
 import {
 	TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS,
 	type TaskChatInputDeliveryOutcome,
@@ -419,10 +421,12 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		workspaceId: string,
 		entry: QueuedTaskPromptDeliveryEntry,
 		summary: RuntimeTaskSessionSummary | null,
+		persistedAgentId?: RuntimeAgentId,
 	): QueuedTaskPromptDispatchBlockReason | null =>
 		resolveQueuedPromptDispatchBlockReason({
 			headEntry: entry,
 			sessionSummary: summary,
+			persistedAgentId,
 			hasPendingProgrammaticTaskChatInputDelivery: deps.hasPendingProgrammaticTaskChatInputDelivery(
 				workspaceId,
 				entry.taskId,
@@ -435,8 +439,9 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		workspaceId: string,
 		entry: QueuedTaskPromptDeliveryEntry,
 		summary: RuntimeTaskSessionSummary | null,
+		persistedAgentId?: RuntimeAgentId,
 	): QueuedTaskPromptDispatchBlockReason | null =>
-		resolveSessionBlockReasonForEntry(workspaceId, entry, summary) ??
+		resolveSessionBlockReasonForEntry(workspaceId, entry, summary, persistedAgentId) ??
 		(entry.taskConversationSessionReportOrigin &&
 		reportExecutionQualificationByWorkspaceAndEntryId.get(workspaceId)?.get(entry.queueEntryId) !== true
 			? "session_report_execution_qualification_pending"
@@ -447,6 +452,11 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		snapshotOverride?: WorkspaceQueuedTaskPromptDeliverySnapshot,
 	): Promise<RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId> => {
 		const snapshot = snapshotOverride ?? (await loadSnapshot(workspaceId));
+		const persistedState = Object.keys(snapshot.entriesByTaskId).some(
+			(taskId) => deps.getTaskSessionSummary(workspaceId, taskId) === null,
+		)
+			? await loadPersistedWorkspaceStateById(workspaceId)
+			: null;
 		let promptLibraryShaByEntryId: ReadonlyMap<string, string> | null = null;
 		try {
 			promptLibraryShaByEntryId = await deps.readPromptLibraryEntryTextSha256ByEntryId(workspaceId);
@@ -456,7 +466,15 @@ export function createQueuedTaskPromptDeliveryDispatcher(
 		return buildRuntimeQueuedTaskPromptDeliveryProjectionsByTaskId({
 			snapshot,
 			resolveDispatchBlockReasonForQueuedEntry: (entry) =>
-				resolveBlockReasonForEntry(workspaceId, entry, deps.getTaskSessionSummary(workspaceId, entry.taskId)),
+				resolveBlockReasonForEntry(
+					workspaceId,
+					entry,
+					deps.getTaskSessionSummary(workspaceId, entry.taskId),
+					persistedState?.sessions[entry.taskId]?.agentId ??
+						persistedState?.board.columns
+							.flatMap((column) => column.cards)
+							.find((card) => card.id === (entry.workspaceTaskId ?? entry.taskId))?.agentId,
+				),
 			currentPromptLibraryEntryTextSha256ByEntryId: promptLibraryShaByEntryId,
 			nowEpochMs: now(),
 		});

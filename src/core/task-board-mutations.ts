@@ -8,7 +8,6 @@ import type {
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
-	RuntimeTaskClineSettings,
 	RuntimeTaskCommentEntry,
 	RuntimeTaskConversationMode,
 	RuntimeTaskImage,
@@ -60,7 +59,6 @@ export interface RuntimeCreateTaskInput {
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	// 卡片声明的会话模式（探索/操作，蓝图 §A.1）；不传 = operational（缺省不落盘，字段缺失即默认档）。
 	taskConversationMode?: RuntimeTaskConversationMode;
-	clineSettings?: RuntimeTaskClineSettings;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization;
 	baseRef: string;
@@ -88,7 +86,6 @@ export interface RuntimeUpdateTaskInput {
 	// 三态同上：undefined = 保留卡片原值，null = 清除声明（回落 operational 缺省），具体值 = 改声明。
 	// 改模式只影响下一次启动——活会话读的是 summary.taskConversationMode 快照（v1 不热切换）。
 	taskConversationMode?: RuntimeTaskConversationMode | null;
-	clineSettings?: RuntimeTaskClineSettings | null;
 	terminalAgentModelOverrideSettings?: RuntimeTaskTerminalAgentModelOverrideSettings | null;
 	taskAgentSessionInitialization?: RuntimeTaskAgentSessionInitialization | null;
 	baseRef: string;
@@ -129,19 +126,6 @@ function cloneTaskCommentEntries(entries?: RuntimeTaskCommentEntry[] | null): Ru
 		})
 		.filter((entry): entry is RuntimeTaskCommentEntry => entry !== null);
 	return clonedEntries.length > 0 ? clonedEntries : undefined;
-}
-
-function cloneTaskClineSettings(settings?: RuntimeTaskClineSettings | null): RuntimeTaskClineSettings | undefined {
-	if (settings === undefined || settings === null) {
-		return undefined;
-	}
-	const providerId = settings.providerId?.trim();
-	const modelId = settings.modelId?.trim();
-	return {
-		...(providerId ? { providerId } : {}),
-		...(modelId ? { modelId } : {}),
-		...(settings.reasoningEffort ? { reasoningEffort: settings.reasoningEffort } : {}),
-	};
 }
 
 function cloneTaskTerminalAgentModelOverrideSettings(
@@ -277,7 +261,6 @@ export function addTaskToColumn(
 		...(ompAgentSessionTransport !== undefined ? { ompAgentSessionTransport } : {}),
 		// 缺省不落盘：字段缺失即 operational（蓝图 §A.1「legacy 卡片零迁移」）。
 		...(input.taskConversationMode !== undefined ? { taskConversationMode: input.taskConversationMode } : {}),
-		...(input.clineSettings !== undefined ? { clineSettings: cloneTaskClineSettings(input.clineSettings) } : {}),
 		...(input.terminalAgentModelOverrideSettings !== undefined
 			? {
 					terminalAgentModelOverrideSettings: cloneTaskTerminalAgentModelOverrideSettings(
@@ -670,12 +653,6 @@ export function updateTask(
 					input.taskConversationMode === undefined
 						? card.taskConversationMode
 						: (input.taskConversationMode ?? undefined),
-				clineSettings:
-					input.clineSettings === undefined
-						? cloneTaskClineSettings(card.clineSettings)
-						: input.clineSettings === null
-							? undefined
-							: cloneTaskClineSettings(input.clineSettings),
 				terminalAgentModelOverrideSettings:
 					input.terminalAgentModelOverrideSettings === undefined
 						? cloneTaskTerminalAgentModelOverrideSettings(card.terminalAgentModelOverrideSettings)

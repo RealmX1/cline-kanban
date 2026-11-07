@@ -144,7 +144,8 @@ async function changeFormValue(label: string, value: string) {
 	const labelElement = [...container.querySelectorAll("label")].find(
 		(candidate) => candidate.firstChild?.textContent?.trim() === label,
 	);
-	const field = labelElement?.querySelector("input, textarea, select");
+	const field =
+		labelElement?.querySelector("input, textarea, select") ?? container.querySelector(`[aria-label="${label}"]`);
 	if (
 		!(field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement || field instanceof HTMLSelectElement)
 	) {
@@ -197,7 +198,10 @@ describe("核验结论与有序端点身份绑定", () => {
 		"原当前任务为主语：%s，反转陈述方向后同名主张回到 pending",
 		async (currentTaskIsStatementSubject) => {
 			await renderExistingClaimRelation({ verdict: "confirmed", currentTaskIsStatementSubject });
-			await changeFormValue("陈述方向", currentTaskIsStatementSubject ? "other" : "current");
+			await changeFormValue(
+				"关系及方向",
+				currentTaskIsStatementSubject ? "reference_verifies_claims_of:inverse" : "reference_verifies_claims_of",
+			);
 			await clickButton("保存详情到草稿");
 			expectSavedClaims([{ claimSummary: "缓存已失效", verificationVerdict: "pending" }]);
 		},

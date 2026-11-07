@@ -3,6 +3,38 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 const expansionStateAttribute = "data-cross-project-task-switcher-row-in-place-expansion-state";
 const floatingCardSelector = "[data-cross-project-task-switcher-hover-floating-card]";
 
+test("共享快捷操作首次悬停同时显示上方名称与下方菜单，键盘和禁用提示可用", async ({ page }) => {
+	const { rows, pageErrors } = await mountHoverExpansionHarness(page, "focus");
+	await hoverRow(page, rows.first());
+	const prompt = rows.first().getByRole("button", { name: "View original prompt", exact: true });
+	await prompt.hover();
+	const tooltip = page.getByRole("tooltip").filter({ hasText: "查看原始 Prompt" });
+	const menu = page.getByRole("menu", { name: "查看原始 Prompt附加操作" });
+	await expect(tooltip).toBeVisible();
+	await expect(menu).toBeVisible();
+	const triggerBounds = (await prompt.boundingBox())!;
+	const tooltipBounds = (await tooltip.boundingBox())!;
+	const menuBounds = (await menu.boundingBox())!;
+	expect(tooltipBounds.y + tooltipBounds.height).toBeLessThanOrEqual(triggerBounds.y);
+	expect(menuBounds.y).toBeGreaterThanOrEqual(triggerBounds.y + triggerBounds.height);
+	await page.getByRole("menuitem", { name: "复制原始 Prompt" }).focus();
+	await page.keyboard.press("Escape");
+	await expect(menu).toHaveCount(0);
+	await expect(prompt).toBeFocused();
+	await expect(tooltip).toBeVisible();
+	await page.keyboard.press("Escape");
+	await expect(tooltip).toHaveCount(0);
+	const disabled = page.getByRole("button", { name: "禁用快捷操作", exact: true });
+	await disabled.locator("..").hover();
+	await expect(page.getByRole("tooltip").filter({ hasText: "禁用快捷操作" })).toBeVisible();
+	await expect(disabled).toBeDisabled();
+	await page.mouse.move(1200, 10);
+	await disabled.locator("..").focus();
+	await expect(page.getByRole("tooltip").filter({ hasText: "禁用快捷操作" })).toBeVisible();
+	await expect(page.getByRole("menu")).toHaveCount(0);
+	expect(pageErrors).toEqual([]);
+});
+
 async function mountHoverExpansionHarness(page: Page, host: "home" | "focus") {
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -210,14 +242,25 @@ for (const host of ["home", "focus"] as const) {
 		await expect(floatingCard).not.toHaveCSS("overflow-y", "auto");
 		await floatingCard.locator("[data-task-card-title]").focus();
 		const naturalCardHeight = (await floatingCard.boundingBox())!.height;
-		// 可视区只比当前卡片高 5px；三行标题到达后卡片才会超过整个可视区。
-		await scrollContainer.evaluate((root, height) => {
-			const element = root as HTMLElement;
-			element.style.flex = "none";
-			element.style.height = `${height}px`;
+		await scrollContainer.evaluate((root) => {
 			const row = root.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="hover-0"]')!;
 			root.scrollTop += row.getBoundingClientRect().top - root.getBoundingClientRect().top - 16;
-		}, naturalCardHeight + 5);
+		});
+		if (host === "focus") {
+			await expect(page.locator('.kb-stage-header-rail[data-edge="top"]')).toBeVisible();
+		}
+		// 卡片可用区比自然高度多 5px；Focus View 同时缩放 rail 宿主，保留标题占用的高度。
+		await scrollContainer.evaluate(
+			(root, { height, host }) => {
+				const element = (host === "focus" ? root.parentElement : root) as HTMLElement;
+				const railHeight = [
+					...(root.parentElement?.querySelectorAll(":scope > .kb-stage-header-rail") ?? []),
+				].reduce((total, rail) => total + rail.getBoundingClientRect().height, 0);
+				element.style.flex = "none";
+				element.style.height = `${height + railHeight}px`;
+			},
+			{ height: naturalCardHeight + 5, host },
+		);
 		await expectFloatingCardWithinViewport(scrollContainer, rows.first());
 		const before = await measureList(scrollContainer);
 		// 模拟推流更新卡片正文，不触发面板外 pointerdown。
@@ -281,7 +324,7 @@ for (const host of ["home", "focus"] as const) {
 		const row = rows.first();
 		await expect(row.locator("[data-task-card-side-attachments]:visible")).toHaveCount(0);
 		await hoverRow(page, row);
-		const rail = row.locator("[data-task-card-side-attachments]");
+		const rail = page.locator(`[id="${await row.locator(".kb-board-card-shell").getAttribute("aria-owns")}"]`);
 		await expect(rail).toHaveCSS("opacity", "1");
 		const surfaceBounds = await row.locator(".kb-board-card-surface").boundingBox();
 		const railBounds = await rail.boundingBox();
@@ -292,7 +335,7 @@ for (const host of ["home", "focus"] as const) {
 		await expect(rail).toContainText("125");
 		const attachmentBounds = (await rail.boundingBox())!;
 		const cardBounds = (await row.locator(".kb-board-card-shell").boundingBox())!;
-		expect(attachmentBounds.x + attachmentBounds.width).toBeLessThanOrEqual(cardBounds.x + cardBounds.width + 1);
+		expect(attachmentBounds.x).toBeGreaterThanOrEqual(cardBounds.x + cardBounds.width - 1);
 		expect(attachmentBounds.y + attachmentBounds.height).toBeLessThanOrEqual(cardBounds.y + cardBounds.height + 1);
 		await page.getByRole("dialog", { name: "关联任务预览" }).hover();
 		await page.waitForTimeout(350);
@@ -301,7 +344,7 @@ for (const host of ["home", "focus"] as const) {
 		await row.getByRole("button", { name: "Keep expanded in list", exact: true }).click();
 		await page.mouse.move(1200, 10);
 		await expect(row).toHaveAttribute(expansionStateAttribute, "kept_expanded_in_list");
-		await expect(rail).toHaveCSS("opacity", "1");
+		await expect(rail).toHaveCSS("opacity", "0");
 		expect(pageErrors).toEqual([]);
 	});
 }
@@ -321,7 +364,9 @@ test.describe("触屏长按", () => {
 		await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 		await expect(page.getByLabel("动作结果")).toBeEmpty();
 		const prompt = rows.first().getByRole("button", { name: "View original prompt", exact: true });
-		const rail = rows.first().locator("[data-task-card-side-attachments]");
+		const rail = page.locator(
+			`[id="${await rows.first().locator(".kb-board-card-shell").getAttribute("aria-owns")}"]`,
+		);
 		await expect(rail).toHaveCSS("opacity", "1");
 		const promptBounds = await prompt.boundingBox();
 		expect(promptBounds!.width).toBeGreaterThanOrEqual(44);

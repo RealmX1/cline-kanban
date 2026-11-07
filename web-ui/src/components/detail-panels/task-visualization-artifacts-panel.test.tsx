@@ -1,10 +1,19 @@
-import { act, useState } from "react";
-import { createRoot, type Root } from "react-dom/client";
+import { act, type ReactNode, useState } from "react";
+import { createRoot as createReactRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { ExpandedForegroundViewProvider } from "@/expanded-foreground-view/expanded-foreground-view-provider";
 import type { useTaskVisualizationArtifacts } from "@/hooks/use-task-visualization-artifacts";
 import type { TaskVisualizationArtifact } from "@/runtime/types";
+
+function createRoot(container: HTMLElement) {
+	const root = createReactRoot(container);
+	return {
+		render: (children: ReactNode) => root.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => root.unmount(),
+	};
+}
 
 const queries = vi.hoisted(() => ({ prepare: vi.fn() }));
 vi.mock("@/runtime/task-visualization-query", () => ({ prepareTaskVisualizationPreview: queries.prepare }));
@@ -95,10 +104,21 @@ it("清单读取失败显示错误与重试入口，只有成功空清单显示�
 	);
 	expect(container.textContent).toContain("此任务还没有已发布的可视化");
 });
-it("任务署名在 iframe 外显示，任务名和图表标题独立且全屏保留", async () => {
+it("工作台省略重复任务名，独立页面仍显示完整归属", async () => {
 	await act(async () =>
 		root.render(
 			<TaskVisualizationArtifactsPanel workspaceId="workspace-a" taskId="task-a" controller={controller} />,
+		),
+	);
+	expect(container.querySelector('[aria-label="可视化任务署名"]')).toBeNull();
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel
+				workspaceId="workspace-a"
+				taskId="task-a"
+				controller={controller}
+				detachedForeground
+			/>,
 		),
 	);
 	const attribution = container.querySelector('[aria-label="可视化任务署名"]');
@@ -117,7 +137,12 @@ it("来自另一个 workspace 的同号任务署名不会串入当前预览", as
 	};
 	await act(async () =>
 		root.render(
-			<TaskVisualizationArtifactsPanel workspaceId="workspace-a" taskId="task-a" controller={mismatched} />,
+			<TaskVisualizationArtifactsPanel
+				workspaceId="workspace-a"
+				taskId="task-a"
+				controller={mismatched}
+				detachedForeground
+			/>,
 		),
 	);
 	const attribution = container.querySelector('[aria-label="可视化任务署名"]');

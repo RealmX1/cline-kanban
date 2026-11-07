@@ -23,32 +23,6 @@ import type {
 	RuntimeArchiveExploratoryFindingResponse,
 	RuntimeAvailableAgentSessionsRequest,
 	RuntimeAvailableAgentSessionsResponse,
-	RuntimeClineAccountBalanceResponse,
-	RuntimeClineAccountOrganizationsResponse,
-	RuntimeClineAccountProfileResponse,
-	RuntimeClineAccountSwitchRequest,
-	RuntimeClineAccountSwitchResponse,
-	RuntimeClineAddProviderRequest,
-	RuntimeClineAddProviderResponse,
-	RuntimeClineDeviceAuthCompleteRequest,
-	RuntimeClineDeviceAuthCompleteResponse,
-	RuntimeClineDeviceAuthStartResponse,
-	RuntimeClineKanbanAccessResponse,
-	RuntimeClineMcpAuthStatusResponse,
-	RuntimeClineMcpOAuthRequest,
-	RuntimeClineMcpOAuthResponse,
-	RuntimeClineMcpSettingsResponse,
-	RuntimeClineMcpSettingsSaveRequest,
-	RuntimeClineMcpSettingsSaveResponse,
-	RuntimeClineOauthLoginRequest,
-	RuntimeClineOauthLoginResponse,
-	RuntimeClineProviderCatalogResponse,
-	RuntimeClineProviderModelsRequest,
-	RuntimeClineProviderModelsResponse,
-	RuntimeClineProviderSettingsSaveRequest,
-	RuntimeClineProviderSettingsSaveResponse,
-	RuntimeClineUpdateProviderRequest,
-	RuntimeClineUpdateProviderResponse,
 	RuntimeCommandRunRequest,
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
@@ -72,7 +46,6 @@ import type {
 	RuntimeDismissAgentRaisedPendingUserDecisionResponse,
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
-	RuntimeFeaturebaseTokenResponse,
 	RuntimeGetExplorationThreadGraphRequest,
 	RuntimeGetExplorationThreadGraphResponse,
 	RuntimeGetExploratoryFindingsRequest,
@@ -149,7 +122,6 @@ import type {
 	RuntimeSetCurrentWorkPhaseGoalRequest,
 	RuntimeShellSessionStartRequest,
 	RuntimeShellSessionStartResponse,
-	RuntimeSlashCommandsResponse,
 	RuntimeStopTerminatingHostedAgentSessionsResponse,
 	RuntimeTaskAgentUserDecisionResolveRequest,
 	RuntimeTaskAgentUserDecisionResolveResponse,
@@ -179,8 +151,6 @@ import type {
 	RuntimeTaskChatDeliveryCancelResponse,
 	RuntimeTaskChatMessagesRequest,
 	RuntimeTaskChatMessagesResponse,
-	RuntimeTaskChatReloadRequest,
-	RuntimeTaskChatReloadResponse,
 	RuntimeTaskChatSendRequest,
 	RuntimeTaskChatSendResponse,
 	RuntimeTaskConversationHistoryPageRequest,
@@ -265,32 +235,6 @@ import {
 	runtimeAvailableAgentSessionsResponseSchema,
 	runtimeClaimDailyWorkProgressCelebrationsRequestSchema,
 	runtimeClaimDailyWorkProgressCelebrationsResponseSchema,
-	runtimeClineAccountBalanceResponseSchema,
-	runtimeClineAccountOrganizationsResponseSchema,
-	runtimeClineAccountProfileResponseSchema,
-	runtimeClineAccountSwitchRequestSchema,
-	runtimeClineAccountSwitchResponseSchema,
-	runtimeClineAddProviderRequestSchema,
-	runtimeClineAddProviderResponseSchema,
-	runtimeClineDeviceAuthCompleteRequestSchema,
-	runtimeClineDeviceAuthCompleteResponseSchema,
-	runtimeClineDeviceAuthStartResponseSchema,
-	runtimeClineKanbanAccessResponseSchema,
-	runtimeClineMcpAuthStatusResponseSchema,
-	runtimeClineMcpOAuthRequestSchema,
-	runtimeClineMcpOAuthResponseSchema,
-	runtimeClineMcpSettingsResponseSchema,
-	runtimeClineMcpSettingsSaveRequestSchema,
-	runtimeClineMcpSettingsSaveResponseSchema,
-	runtimeClineOauthLoginRequestSchema,
-	runtimeClineOauthLoginResponseSchema,
-	runtimeClineProviderCatalogResponseSchema,
-	runtimeClineProviderModelsRequestSchema,
-	runtimeClineProviderModelsResponseSchema,
-	runtimeClineProviderSettingsSaveRequestSchema,
-	runtimeClineProviderSettingsSaveResponseSchema,
-	runtimeClineUpdateProviderRequestSchema,
-	runtimeClineUpdateProviderResponseSchema,
 	runtimeCommandRunRequestSchema,
 	runtimeCommandRunResponseSchema,
 	runtimeConfigResponseSchema,
@@ -316,7 +260,6 @@ import {
 	runtimeDismissAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
-	runtimeFeaturebaseTokenResponseSchema,
 	runtimeGetExplorationThreadGraphRequestSchema,
 	runtimeGetExplorationThreadGraphResponseSchema,
 	runtimeGetExploratoryFindingsRequestSchema,
@@ -395,7 +338,6 @@ import {
 	runtimeSetCurrentWorkPhaseGoalRequestSchema,
 	runtimeShellSessionStartRequestSchema,
 	runtimeShellSessionStartResponseSchema,
-	runtimeSlashCommandsResponseSchema,
 	runtimeStopTerminatingHostedAgentSessionsResponseSchema,
 	runtimeTaskAgentUserDecisionResolveRequestSchema,
 	runtimeTaskAgentUserDecisionResolveResponseSchema,
@@ -431,8 +373,6 @@ import {
 	runtimeTaskChatDeliveryCancelResponseSchema,
 	runtimeTaskChatMessagesRequestSchema,
 	runtimeTaskChatMessagesResponseSchema,
-	runtimeTaskChatReloadRequestSchema,
-	runtimeTaskChatReloadResponseSchema,
 	runtimeTaskChatSendRequestSchema,
 	runtimeTaskChatSendResponseSchema,
 	runtimeTaskConversationHistoryPageRequestSchema,
@@ -504,9 +444,16 @@ import {
 	codexConfigurationChangeDetailsRequestSchema,
 	codexConfigurationChangeDetailsSchema,
 	codexConfigurationChangeMutationRequestSchema,
+	codexConfigurationMutationReceiptRequestSchema,
+	codexConfigurationMutationReceiptSchema,
 	codexConfigurationProfileMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
 	codexConfigurationResolveTargetConflictRequestSchema,
+	codexConfigurationSourceObservationRequestSchema,
+	codexConfigurationSourceObservationSchema,
+	codexConfigurationSyncActiveStateSchema,
+	codexConfigurationSyncHistoryPageSchema,
+	codexConfigurationSyncHistoryRequestSchema,
 	codexConfigurationSynchronizeRequestSchema,
 	codexConfigurationSyncStateSchema,
 } from "../core/codex-configuration-sync-contract";
@@ -772,18 +719,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeConfigSaveRequest,
 		) => Promise<RuntimeConfigResponse>;
-		saveClineProviderSettings: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineProviderSettingsSaveRequest,
-		) => Promise<RuntimeClineProviderSettingsSaveResponse>;
-		addClineProvider: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineAddProviderRequest,
-		) => Promise<RuntimeClineAddProviderResponse>;
-		updateClineProvider: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineUpdateProviderRequest,
-		) => Promise<RuntimeClineUpdateProviderResponse>;
 		setCurrentWorkPhaseGoal: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeSetCurrentWorkPhaseGoalRequest,
@@ -919,7 +854,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationHistoryPageRequest,
 		) => Promise<RuntimeTaskConversationHistoryPageResponse>;
-		getClineSlashCommands: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeSlashCommandsResponse>;
 		sendTaskChatMessage: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatSendRequest,
@@ -979,10 +913,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: { taskId: string; operationId: string },
 		) => Promise<RuntimeTerminalInputBoxStashResponse>;
-		reloadTaskChatSession: (
-			scope: RuntimeTrpcWorkspaceScope,
-			input: RuntimeTaskChatReloadRequest,
-		) => Promise<RuntimeTaskChatReloadResponse>;
 		abortTaskChatTurn: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatAbortRequest,
@@ -995,24 +925,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskAgentUserDecisionResolveRequest,
 		) => Promise<RuntimeTaskAgentUserDecisionResolveResponse>;
-		getClineProviderCatalog: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-		) => Promise<RuntimeClineProviderCatalogResponse>;
-		getClineAccountProfile: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineAccountProfileResponse>;
-		getClineKanbanAccess: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineKanbanAccessResponse>;
-		getFeaturebaseToken: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeFeaturebaseTokenResponse>;
-		getClineAccountBalance: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineAccountBalanceResponse>;
-		getClineAccountOrganizations: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-		) => Promise<RuntimeClineAccountOrganizationsResponse>;
-		switchClineAccount: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineAccountSwitchRequest,
-		) => Promise<RuntimeClineAccountSwitchResponse>;
-		getClineProviderModels: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineProviderModelsRequest,
-		) => Promise<RuntimeClineProviderModelsResponse>;
 		getTerminalAgentModelSelectionOptions: (
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeTerminalAgentModelSelectionOptionsRequest,
@@ -1021,25 +933,6 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope | null,
 			input: RuntimeAvailableAgentSessionsRequest,
 		) => Promise<RuntimeAvailableAgentSessionsResponse>;
-		runClineProviderOAuthLogin: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineOauthLoginRequest,
-		) => Promise<RuntimeClineOauthLoginResponse>;
-		startClineDeviceAuth: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineDeviceAuthStartResponse>;
-		completeClineDeviceAuth: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineDeviceAuthCompleteRequest,
-		) => Promise<RuntimeClineDeviceAuthCompleteResponse>;
-		getClineMcpAuthStatuses: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineMcpAuthStatusResponse>;
-		runClineMcpServerOAuth: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineMcpOAuthRequest,
-		) => Promise<RuntimeClineMcpOAuthResponse>;
-		getClineMcpSettings: (scope: RuntimeTrpcWorkspaceScope | null) => Promise<RuntimeClineMcpSettingsResponse>;
-		saveClineMcpSettings: (
-			scope: RuntimeTrpcWorkspaceScope | null,
-			input: RuntimeClineMcpSettingsSaveRequest,
-		) => Promise<RuntimeClineMcpSettingsSaveResponse>;
 		startShellSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeShellSessionStartRequest,
@@ -1964,6 +1857,33 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.query(async ({ ctx }) => {
 			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
 		}),
+	getCodexConfigurationSyncActiveState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(codexConfigurationSyncActiveStateSchema)
+		.query(({ ctx }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getActiveState();
+		}),
+	listCodexConfigurationSyncHistory: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationSyncHistoryRequestSchema)
+		.output(codexConfigurationSyncHistoryPageSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.listHistory(input);
+		}),
+	getCodexConfigurationSourceObservation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationSourceObservationRequestSchema)
+		.output(codexConfigurationSourceObservationSchema.nullable())
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getSourceObservation(input);
+		}),
+	getCodexConfigurationMutationReceipt: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationMutationReceiptRequestSchema)
+		.output(codexConfigurationMutationReceiptSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getMutationReceipt(input);
+		}),
 	getCodexConfigurationSyncState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.output(codexConfigurationSyncStateSchema)
 		.query(({ ctx }) => {
@@ -2019,24 +1939,6 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.output(runtimeConfigResponseSchema)
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.saveConfig(ctx.workspaceScope, input);
-		}),
-	saveClineProviderSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineProviderSettingsSaveRequestSchema)
-		.output(runtimeClineProviderSettingsSaveResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.saveClineProviderSettings(ctx.workspaceScope, input);
-		}),
-	addClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineAddProviderRequestSchema)
-		.output(runtimeClineAddProviderResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.addClineProvider(ctx.workspaceScope, input);
-		}),
-	updateClineProvider: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineUpdateProviderRequestSchema)
-		.output(runtimeClineUpdateProviderResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.updateClineProvider(ctx.workspaceScope, input);
 		}),
 	// mutation 而非 query：每次点「起名」都要真发一次外部请求拿一组**新**候选，被查询缓存去重掉
 	// 就实现不了「再按一次再给三个」。
@@ -2227,17 +2129,6 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.query(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 		}),
-	getClineSlashCommands: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeSlashCommandsResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineSlashCommands(ctx.workspaceScope);
-		}),
-	reloadTaskChatSession: workspaceProcedure
-		.input(runtimeTaskChatReloadRequestSchema)
-		.output(runtimeTaskChatReloadResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.reloadTaskChatSession(ctx.workspaceScope, input);
-		}),
 	sendTaskChatMessage: workspaceProcedure
 		.input(runtimeTaskChatSendRequestSchema)
 		.output(runtimeTaskChatSendResponseSchema)
@@ -2355,48 +2246,6 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.resolveTaskAgentUserDecision(ctx.workspaceScope, input);
 		}),
-	getClineProviderCatalog: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineProviderCatalogResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineProviderCatalog(ctx.workspaceScope);
-		}),
-	getClineAccountProfile: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineAccountProfileResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineAccountProfile(ctx.workspaceScope);
-		}),
-	getClineKanbanAccess: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineKanbanAccessResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineKanbanAccess(ctx.workspaceScope);
-		}),
-	getFeaturebaseToken: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeFeaturebaseTokenResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getFeaturebaseToken(ctx.workspaceScope);
-		}),
-	getClineAccountBalance: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineAccountBalanceResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineAccountBalance(ctx.workspaceScope);
-		}),
-	getClineAccountOrganizations: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineAccountOrganizationsResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineAccountOrganizations(ctx.workspaceScope);
-		}),
-	switchClineAccount: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineAccountSwitchRequestSchema)
-		.output(runtimeClineAccountSwitchResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.switchClineAccount(ctx.workspaceScope, input);
-		}),
-	getClineProviderModels: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineProviderModelsRequestSchema)
-		.output(runtimeClineProviderModelsResponseSchema)
-		.query(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.getClineProviderModels(ctx.workspaceScope, input);
-		}),
 	getTerminalAgentModelSelectionOptions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeTerminalAgentModelSelectionOptionsRequestSchema)
 		.output(runtimeTerminalAgentModelSelectionOptionsResponseSchema)
@@ -2415,45 +2264,6 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			if (!ctx.workspaceScope) throw new TRPCError({ code: "BAD_REQUEST", message: "请先选择工作区。" });
 			return ctx.runtimeApi.operateCodexConversationStorage(ctx.workspaceScope, input);
-		}),
-	getClineMcpAuthStatuses: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineMcpAuthStatusResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineMcpAuthStatuses(ctx.workspaceScope);
-		}),
-	runClineMcpServerOAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineMcpOAuthRequestSchema)
-		.output(runtimeClineMcpOAuthResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.runClineMcpServerOAuth(ctx.workspaceScope, input);
-		}),
-	getClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineMcpSettingsResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.runtimeApi.getClineMcpSettings(ctx.workspaceScope);
-		}),
-	saveClineMcpSettings: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineMcpSettingsSaveRequestSchema)
-		.output(runtimeClineMcpSettingsSaveResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.saveClineMcpSettings(ctx.workspaceScope, input);
-		}),
-	runClineProviderOAuthLogin: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineOauthLoginRequestSchema)
-		.output(runtimeClineOauthLoginResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.runClineProviderOAuthLogin(ctx.workspaceScope, input);
-		}),
-	startClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(runtimeClineDeviceAuthStartResponseSchema)
-		.mutation(async ({ ctx }) => {
-			return await ctx.runtimeApi.startClineDeviceAuth(ctx.workspaceScope);
-		}),
-	completeClineDeviceAuth: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(runtimeClineDeviceAuthCompleteRequestSchema)
-		.output(runtimeClineDeviceAuthCompleteResponseSchema)
-		.mutation(async ({ ctx, input }) => {
-			return await ctx.runtimeApi.completeClineDeviceAuth(ctx.workspaceScope, input);
 		}),
 	startShellSession: workspaceProcedure
 		.input(runtimeShellSessionStartRequestSchema)

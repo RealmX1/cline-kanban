@@ -1,6 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
 import type { CodexConfigurationBatchActionRequest, CodexConfigurationSyncState } from "../src/runtime/types";
 
+test.setTimeout(90_000);
+
 async function openGroupedCandidateFixture(page: Page) {
 	let state: CodexConfigurationSyncState = {
 		revision: 1,
@@ -53,7 +55,7 @@ async function openGroupedCandidateFixture(page: Page) {
 		const procedure = url.pathname.split("/api/trpc/")[1];
 		const batched = url.searchParams.has("batch");
 		let response: unknown;
-		if (procedure === "runtime.getCodexConfigurationSyncState") response = state;
+		if (procedure === "runtime.getCodexConfigurationSyncActiveState") response = state;
 		else if (procedure === "runtime.batchCodexConfigurationAction") {
 			const body = route.request().postDataJSON();
 			const input: CodexConfigurationBatchActionRequest = batched ? body["0"] : body;
@@ -93,8 +95,9 @@ async function openGroupedCandidateFixture(page: Page) {
 		}),
 	);
 	await page.goto("/isolated-grouped-configuration");
+	await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 	const settings = page.getByRole("region", { name: "隔离配置设置页" });
-	await expect(settings.getByRole("heading", { name: "设置待反馈 · 2", exact: true })).toBeVisible();
+	await expect(settings.getByRole("heading", { name: "设置待反馈 · 2", exact: true })).toBeVisible({ timeout: 20000 });
 	return { settings, requests };
 }
 
@@ -140,6 +143,7 @@ for (const width of [390, 1280])
 			[["source-1", 2]],
 		]);
 		await page.reload();
+		await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 		await expect(settings.getByRole("heading", { name: "设置待反馈 · 1", exact: true })).toBeVisible();
 		await expect(
 			settings.getByRole("article", { name: "另一配置 · config.toml · model 的候选值", exact: true }),

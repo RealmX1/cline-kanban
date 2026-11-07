@@ -40,7 +40,7 @@ import { serializeHostedSessionTerminalModes } from "../agent-session-pty-host/w
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
-import { readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
 import {
 	buildCodexConfigurationWriterEnvironment,
 	prepareCodexConfigurationWriterBinding,
@@ -76,6 +76,7 @@ import {
 } from "../codex-native-session-protocol/native-independent-user-turn-delivery-gate";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import {
+	assertRuntimeAgentIsNotRetired,
 	canAgentResumeByRecordedNativeConversationSessionId,
 	isAgentNativeConversationHoldableByHarnessBackgroundSessionDaemon,
 	isAgentNativeConversationSessionIdAssignedByKanbanBeforeLaunch,
@@ -5432,6 +5433,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		request: StartTaskSessionRequest,
 		taskSessionStartOrigin: TaskSessionStartOrigin = "external_entry_point",
 	): Promise<RuntimeTaskSessionSummary> {
+		assertRuntimeAgentIsNotRetired(request.agentId);
 		if (!["durable_record_rebuilt_resume", "auto_restart_after_pty_exit"].includes(taskSessionStartOrigin)) {
 			this.automaticFailureContinuationCoordinators.get(request.taskId)?.cancel("session_replaced");
 			const entry = this.entries.get(request.taskId);
@@ -6418,6 +6420,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					environment: { ...process.env, ...request.env, ...launch.env },
 					nativeLaunchArguments: launch.args,
 					workingDirectory: request.cwd,
+					deferRemotePluginUpdatesUntilAfterConversationResume: Boolean(
+						request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
+					),
 				};
 				const preparedPluginInstallation = await measureTaskSessionStartupPhase(
 					{
@@ -8819,6 +8824,55 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
+	recordRecoveredHistoricalHookReviewLifecycleEvent(
+		taskId: string,
+		evidence: {
+			runtimeSessionIncarnationId: string;
+			agentTurnSequence: number;
+			capturedAtEpochMs: number;
+			deliveryIdempotencyKey: string;
+		},
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry ||
+			entry.active ||
+			entry.summary.runtimeSessionIncarnationId !== evidence.runtimeSessionIncarnationId ||
+			(entry.summary.agentResponseGenerationTurnSequence ?? 0) !== evidence.agentTurnSequence ||
+			evidence.agentTurnSequence <= 0 ||
+			resolveSessionFacets(entry.summary).turnOwner !== null ||
+			!["none", "exited"].includes(resolveSessionFacets(entry.summary).liveness) ||
+			(entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0) > evidence.capturedAtEpochMs ||
+			(entry.summary.agentResponseGenerationTurnStarted?.startedAt ?? 0) > evidence.capturedAtEpochMs
+		)
+			return null;
+		// 只补历史交棒；已退出的旧进程不获得新的待命锚点，也不启动或续跑 agent。
+		const summary = updateSummary(
+			entry,
+			{
+				turnOwner: "user",
+				liveness: "exited",
+				userTurnKind: "review",
+				reviewReason: "hook",
+				currentAgentProcessUserTurnIdleRetentionStarted: null,
+				lastAgentConversationUserHandoffObservation: {
+					observedAtMs: evidence.capturedAtEpochMs,
+					signalConfidence: "harness_turn_complete",
+					turnSequence: evidence.agentTurnSequence,
+				},
+				lastAppliedHookReviewLifecycleEventDelivery: {
+					deliveryIdempotencyKey: evidence.deliveryIdempotencyKey,
+					capturedAtEpochMs: evidence.capturedAtEpochMs,
+					runtimeSessionIncarnationId: evidence.runtimeSessionIncarnationId,
+				},
+			},
+			now(),
+			{ domainEventObservedAtEpochMs: evidence.capturedAtEpochMs },
+		);
+		this.emitSummary(summary);
+		return cloneSummary(summary);
+	}
+
 	// 切换前先保存协作会话的目标通道。启动失败仍保留新意图，后续明确发送不得复活旧 ACP。
 	applyTaskConversationSessionTargetTransport(
 		taskId: string,
@@ -10747,7 +10801,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		) {
 			this.stopAutomaticSubmissionAndSettleInterruptedDelivery(entry, true);
 		}
-		return updateSummary(entry, transition.patch, now(), domainEventTiming);
+		return updateSummary(
+			entry,
+			{
+				...transition.patch,
+				...(event.type === "hook.to_review" &&
+				domainEventTiming?.hookEventDeliveryIdempotencyKey &&
+				entry.summary.runtimeSessionIncarnationId
+					? {
+							lastAppliedHookReviewLifecycleEventDelivery: {
+								deliveryIdempotencyKey: domainEventTiming.hookEventDeliveryIdempotencyKey,
+								capturedAtEpochMs: Math.min(domainEventTiming.domainEventObservedAtEpochMs ?? now(), now()),
+								runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
+							},
+						}
+					: {}),
+			},
+			now(),
+			domainEventTiming,
+		);
 	}
 
 	private ensureStallScanRunning(): void {

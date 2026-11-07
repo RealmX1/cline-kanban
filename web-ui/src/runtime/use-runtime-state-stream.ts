@@ -15,16 +15,13 @@ import {
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
 import type {
-	RuntimeClineMcpServerAuthStatus,
 	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
 	RuntimeProjectSummary,
 	RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId,
 	RuntimeStateStreamClientMessage,
-	RuntimeStateStreamClineSessionContextUpdatedMessage,
 	RuntimeStateStreamExplorationThreadGraphUpdatedMessage,
 	RuntimeStateStreamExploratoryFindingsUpdatedMessage,
-	RuntimeStateStreamMcpAuthUpdatedMessage,
 	RuntimeStateStreamMessage,
 	RuntimeStateStreamNotificationLogUpdatedMessage,
 	RuntimeStateStreamProjectsMessage,
@@ -173,7 +170,6 @@ export interface UseRuntimeStateStreamResult {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
-	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	// 流（重）连握手代数：每次快照递增（每次快照 = 一次（重）连握手完成）。推送只覆盖「在场期间」
 	// 的变更；断连窗口的变更不补发，消费者以它为重连信号重查对齐。
 	streamSnapshotGeneration: number;
@@ -191,7 +187,6 @@ export interface UseRuntimeStateStreamResult {
 	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	// 跨 repo 聚合的通知 feed，按 workspaceId 分桶（切项目不清空——铃铛看整台服务器）。
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
-	clineSessionContextVersion: number;
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
 	hasReceivedSnapshot: boolean;
@@ -207,13 +202,11 @@ interface RuntimeStateStreamStore {
 	taskChatMessagesByTaskId: Record<string, RuntimeTaskChatMessage[]>;
 	latestTaskReadyForReview: RuntimeStateStreamTaskReadyForReviewMessage | null;
 	taskReadyForReviewEvents: RuntimeStateStreamTaskReadyForReviewMessage[];
-	latestMcpAuthStatuses: RuntimeClineMcpServerAuthStatus[] | null;
 	streamSnapshotGeneration: number;
 	exploratoryFindings: RuntimeExploratoryFindingEntry[] | null;
 	latestExplorationThreadGraphUpdate: RuntimeStateStreamExplorationThreadGraphUpdatedMessage | null;
 	queuedTaskPromptDeliveryProjectionsByTaskId: RuntimeQueuedTaskPromptDeliveryProjectionsByTaskId | null;
 	notificationLogByWorkspaceId: Record<string, RuntimeNotificationFeedEntry[]>;
-	clineSessionContextVersion: number;
 	streamError: string | null;
 	isRuntimeDisconnected: boolean;
 	hasReceivedSnapshot: boolean;
@@ -242,8 +235,6 @@ type RuntimeStateStreamAction =
 			type: "exploration_thread_graph_updated";
 			payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage;
 	  }
-	| { type: "mcp_auth_updated"; payload: RuntimeStateStreamMcpAuthUpdatedMessage }
-	| { type: "cline_session_context_updated"; payload: RuntimeStateStreamClineSessionContextUpdatedMessage }
 	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
 	| { type: "stream_error"; message: string }
 	| { type: "stream_disconnected"; message: string };
@@ -258,13 +249,11 @@ function createInitialRuntimeStateStreamStore(requestedWorkspaceId: string | nul
 		taskChatMessagesByTaskId: {},
 		latestTaskReadyForReview: null,
 		taskReadyForReviewEvents: [],
-		latestMcpAuthStatuses: null,
 		streamSnapshotGeneration: 0,
 		exploratoryFindings: null,
 		latestExplorationThreadGraphUpdate: null,
 		queuedTaskPromptDeliveryProjectionsByTaskId: null,
 		notificationLogByWorkspaceId: {},
-		clineSessionContextVersion: 0,
 		streamError: null,
 		isRuntimeDisconnected: false,
 		hasReceivedSnapshot: false,
@@ -323,8 +312,6 @@ function runtimeStateStreamReducer(
 			streamError: null,
 			isRuntimeDisconnected: false,
 			hasReceivedSnapshot: false,
-			latestMcpAuthStatuses: state.latestMcpAuthStatuses,
-			clineSessionContextVersion: state.clineSessionContextVersion,
 		};
 	}
 	if (action.type === "stream_connected") {
@@ -353,11 +340,9 @@ function runtimeStateStreamReducer(
 			taskChatMessagesByTaskId: {},
 			latestTaskReadyForReview: state.latestTaskReadyForReview,
 			taskReadyForReviewEvents: state.taskReadyForReviewEvents,
-			latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 			// 快照是聚合日志的权威源：整体替换分桶（含重连后从后端恢复已访问态）。
 			// ?? [] 兜底旧服务端/异常 payload——缺字段时不因 for-of undefined 抛错而丢掉整个 snapshot。
 			notificationLogByWorkspaceId: bucketNotificationFeedByWorkspaceId(action.payload.notificationLog ?? []),
-			clineSessionContextVersion: action.payload.clineSessionContextVersion,
 			// 每次快照 = 一次（重）连握手完成：递增代数给消费者做「重连后重查对齐」的触发
 			// （断连窗口的变更不补发）。findings 保留作 last-known（重连后由 use-exploratory-findings
 			// 经快照代数重拉对齐），查询落定前不出现空窗。
@@ -449,12 +434,6 @@ function runtimeStateStreamReducer(
 			},
 		};
 	}
-	if (action.type === "mcp_auth_updated") {
-		return {
-			...state,
-			latestMcpAuthStatuses: action.payload.statuses,
-		};
-	}
 	if (action.type === "exploration_thread_graph_updated") {
 		// 单张图的全量替换。按 exploration 分发，消费侧负责过滤出当前卡片那张。
 		return {
@@ -475,12 +454,6 @@ function runtimeStateStreamReducer(
 		return {
 			...state,
 			exploratoryFindings: action.payload.findings,
-		};
-	}
-	if (action.type === "cline_session_context_updated") {
-		return {
-			...state,
-			clineSessionContextVersion: action.payload.version,
 		};
 	}
 	if (action.type === "workspace_state_updated") {
@@ -823,20 +796,6 @@ export function useRuntimeStateStream(
 						});
 						return;
 					}
-					if (payload.type === "mcp_auth_updated") {
-						dispatch({
-							type: "mcp_auth_updated",
-							payload,
-						});
-						return;
-					}
-					if (payload.type === "cline_session_context_updated") {
-						dispatch({
-							type: "cline_session_context_updated",
-							payload,
-						});
-						return;
-					}
 					if (payload.type === "error") {
 						dispatch({
 							type: "stream_error",
@@ -901,13 +860,11 @@ export function useRuntimeStateStream(
 		taskChatMessagesByTaskId: state.taskChatMessagesByTaskId,
 		latestTaskReadyForReview: state.latestTaskReadyForReview,
 		taskReadyForReviewEvents: state.taskReadyForReviewEvents,
-		latestMcpAuthStatuses: state.latestMcpAuthStatuses,
 		streamSnapshotGeneration: state.streamSnapshotGeneration,
 		exploratoryFindings: state.exploratoryFindings,
 		latestExplorationThreadGraphUpdate: state.latestExplorationThreadGraphUpdate,
 		queuedTaskPromptDeliveryProjectionsByTaskId: state.queuedTaskPromptDeliveryProjectionsByTaskId,
 		notificationLogByWorkspaceId: state.notificationLogByWorkspaceId,
-		clineSessionContextVersion: state.clineSessionContextVersion,
 		streamError: state.streamError,
 		isRuntimeDisconnected: state.isRuntimeDisconnected,
 		hasReceivedSnapshot: state.hasReceivedSnapshot,

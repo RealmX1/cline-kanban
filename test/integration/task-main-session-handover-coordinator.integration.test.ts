@@ -1726,7 +1726,6 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				loadScopedRuntimeConfig: unexpectedTransportAccess,
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: unexpectedTransportAccess,
-				getScopedClineTaskSessionService: unexpectedTransportAccess,
 				getScopedAcpTaskSessionService: unexpectedTransportAccess,
 				resolveInteractiveShellCommand: () => {
 					throw new Error("发送前门禁拒绝后不应启动 shell");
@@ -2334,7 +2333,6 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 		fixture(async (f) => {
 			const api = createWorkspaceApi({
 				ensureTerminalManagerForWorkspace: async () => f.manager,
-				getScopedClineTaskSessionService: async () => ({ getSummary: () => null }) as never,
 				loadScopedRuntimeConfig: vi.fn(),
 				broadcastRuntimeWorkspaceStateUpdated: vi.fn(),
 				broadcastRuntimeProjectsUpdated: vi.fn(),
@@ -2740,7 +2738,6 @@ describe.sequential("主会话交接的持久控制与会话身份", () => {
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: async () =>
 					({ ...f.manager, startTaskSession: terminalStart }) as unknown as TerminalSessionManager,
-				getScopedClineTaskSessionService: unexpectedServiceAccess,
 				getScopedAcpTaskSessionService: async () =>
 					({ ...f.acp, startTaskSession: acpStart }) as unknown as AcpTaskSessionService,
 				resolveInteractiveShellCommand: () => {

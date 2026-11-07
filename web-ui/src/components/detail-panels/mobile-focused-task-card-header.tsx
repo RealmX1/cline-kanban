@@ -1,5 +1,5 @@
 import { ArrowLeft, ChevronDown, ChevronUp, PanelTopClose, PanelTopOpen } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, type Ref, useEffect, useId, useRef, useState } from "react";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card-body";
 import { cn } from "@/components/ui/cn";
@@ -14,7 +14,13 @@ export function MobileFocusedTaskCardHeader({
 	idleCollapseController,
 	onBackToBoard,
 	navigationAndToolsControls,
+	terminalToolbarHostRef,
+	sessionInformationContent,
+	currentWorkPhaseGoalContent,
 }: {
+	terminalToolbarHostRef?: Ref<HTMLDivElement>;
+	sessionInformationContent?: ReactNode;
+	currentWorkPhaseGoalContent?: ReactNode;
 	cardBusinessProps: TaskCardBusinessProps;
 	stageDisplayName: string;
 	idleCollapseController: MobileFocusViewIdleCollapseController;
@@ -55,7 +61,7 @@ export function MobileFocusedTaskCardHeader({
 					aria-controls={isExpanded ? contentId : undefined}
 					className={cn(
 						MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME,
-						"flex min-w-0 flex-1 items-center gap-2 px-3 text-left text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
+						"flex min-w-0 flex-1 items-center gap-1 px-1 text-left text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
 					)}
 					onClick={() => {
 						idleCollapseController.recordUserInteraction();
@@ -65,7 +71,7 @@ export function MobileFocusedTaskCardHeader({
 					<span className="min-w-0 flex-1 truncate text-text-primary">
 						{isExpanded ? "任务信息" : cardBusinessProps.card.title}
 					</span>
-					<span className="inline-flex shrink-0 items-center gap-1">
+					<span className="hidden min-[480px]:inline-flex shrink-0 items-center gap-1">
 						<ColumnIndicator columnId={cardBusinessProps.columnId} size={12} />
 						{stageDisplayName}
 					</span>
@@ -75,6 +81,14 @@ export function MobileFocusedTaskCardHeader({
 						<ChevronDown size={16} className="shrink-0" />
 					)}
 				</button>
+				{sessionInformationContent}
+				{terminalToolbarHostRef ? (
+					<div
+						ref={terminalToolbarHostRef}
+						className="flex shrink-0 items-center"
+						data-mobile-focused-task-session-toolbar-host=""
+					/>
+				) : null}
 				{navigationAndToolsControls ? (
 					<button
 						type="button"
@@ -97,6 +111,13 @@ export function MobileFocusedTaskCardHeader({
 			</div>
 			{isExpanded ? (
 				<div id={contentId} className="min-h-0 overflow-y-auto overscroll-contain px-3 pt-2 pb-3">
+					<p className="pb-2 text-xs text-text-secondary">
+						任务创建于{" "}
+						<time dateTime={new Date(cardBusinessProps.card.createdAt).toISOString()}>
+							{new Date(cardBusinessProps.card.createdAt).toLocaleString()}
+						</time>
+					</p>
+					{currentWorkPhaseGoalContent}
 					<TaskCardBody {...cardBusinessProps} renderRole="focused_task_card_copy_in_mobile_detail_header" />
 				</div>
 			) : null}

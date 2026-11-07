@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { UserRejectionSuppressionTombstone } from "../../../src/core/inter-work-unit-relation-assertion-lifecycle-event-contract";
 import type {
 	CommittedInterWorkUnitRelationLedgerEvent,
+	InterWorkUnitRelationWorkUnitReference,
 	KanbanBoardCardWorkUnitQualifiedReference,
 } from "../../../src/core/inter-work-unit-relation-ledger-event-contract";
 import {
@@ -18,6 +19,7 @@ import {
 	validateAndCompleteAssertedReferenceRelationKindSpecificAttributes,
 	validateAssertedReferenceRelationEndpoints,
 } from "../../../src/inter-work-unit-relation-ledger/inter-work-unit-relation-assertion-write-planning";
+import { createEmptyKanbanBoardCardIdentityProjectionState } from "../../../src/inter-work-unit-relation-ledger/kanban-board-card-identity-projection-from-ledger-events";
 
 const cardA: KanbanBoardCardWorkUnitQualifiedReference = {
 	workUnitType: "kanban_board_card",
@@ -72,6 +74,44 @@ function committedLifecycleEvent(
 }
 
 describe("asserted inter-work-unit relation projection from family-4 lifecycle events", () => {
+	it("跨 project 对应保留独立会话的三种端点组合，仍拒绝自指与受限的需求来源端点", () => {
+		const session: InterWorkUnitRelationWorkUnitReference = {
+			workUnitType: "kanban_unmanaged_standalone_agent_conversation_session",
+			conversationSessionHostKanbanAgentId: "claude",
+			nativeConversationSessionId: "standalone-a",
+		};
+		const otherSession = { ...session, nativeConversationSessionId: "standalone-b" };
+		for (const identities of [undefined, createEmptyKanbanBoardCardIdentityProjectionState()]) {
+			for (const [subject, anchor] of [
+				[session, cardA],
+				[cardA, session],
+				[session, otherSession],
+			]) {
+				expect(
+					validateAssertedReferenceRelationEndpoints({
+						relationKind: "reference_is_cross_repository_counterpart_with",
+						relationStatementSubjectWorkUnitRef: subject,
+						relationStatementAnchorWorkUnitRef: anchor,
+						kanbanBoardCardIdentityProjectionState: identities,
+					}),
+				).toMatchObject({ validationPassed: true });
+			}
+		}
+		expect(
+			validateAssertedReferenceRelationEndpoints({
+				relationKind: "reference_is_cross_repository_counterpart_with",
+				relationStatementSubjectWorkUnitRef: session,
+				relationStatementAnchorWorkUnitRef: session,
+			}),
+		).toMatchObject({ validationPassed: false });
+		expect(
+			validateAssertedReferenceRelationEndpoints({
+				relationKind: "reference_requirement_originates_from",
+				relationStatementSubjectWorkUnitRef: session,
+				relationStatementAnchorWorkUnitRef: cardA,
+			}),
+		).toMatchObject({ validationPassed: false });
+	});
 	it("applies a created change, merges a reassertion, records injection receipts and drops a revoked relation from the neighborhood", () => {
 		const state = createEmptyAssertedInterWorkUnitRelationProjectionState();
 		const naturalKey = buildRelationAssertionNaturalKey({

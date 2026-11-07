@@ -119,7 +119,6 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 							workspacePathOwningRuntimeBoardSnapshot: null,
 							onActivateTaskCardOpeningTaskInItsProject: vi.fn(),
 							defaultAgentId: null,
-							defaultClineModelId: null,
 						}}
 					/>
 				</TooltipProvider>,

@@ -11,6 +11,7 @@ import {
 	getCodexConfigurationSyncDirectory,
 	mutateCodexConfigurationSyncStore,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
+import * as sharedPluginInstallationCoordinator from "../../../src/codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
 import {
 	getCodexConversationMigrationRecordPath,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -131,6 +132,10 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		});
 	});
 	it("新会话在专用目录启动，持久摘要记录实际目录且不继承 App 来源", async () => {
+		const preparePlugins = vi.spyOn(
+			sharedPluginInstallationCoordinator,
+			"prepareCodexSharedPluginInstallationForNativeLaunch",
+		);
 		vi.stubEnv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "codex_work_desktop");
 		const manager = createManager();
 		await manager.startTaskSession(request());
@@ -140,8 +145,15 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 		);
 		expect(spawned.mock.calls[0]?.[0].env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE).toBeUndefined();
 		expect(manager.getSummary(request().taskId)?.codexConversationStorageHomeDirectoryPath).toBe(home);
+		expect(preparePlugins).toHaveBeenCalledWith(
+			expect.objectContaining({ deferRemotePluginUpdatesUntilAfterConversationResume: false }),
+		);
 	});
 	it("配置锁超过旧预算后并发 resume 只启动一次，保持原生身份、目录且不重发 prompt", async () => {
+		const preparePlugins = vi.spyOn(
+			sharedPluginInstallationCoordinator,
+			"prepareCodexSharedPluginInstallationForNativeLaunch",
+		);
 		const manager = createManager();
 		const home = join(fixture.path, ".codex");
 		const transcriptPath = join(home, "sessions", `${nativeSessionId}.jsonl`);
@@ -212,6 +224,9 @@ describe("真实运行时启用 Codex 存储隔离的启动边界", () => {
 			expect(outcome).not.toHaveProperty("error");
 			expect(spawned).toHaveBeenCalledOnce();
 			expect(prepared).toHaveBeenCalledOnce();
+			expect(preparePlugins).toHaveBeenCalledExactlyOnceWith(
+				expect.objectContaining({ deferRemotePluginUpdatesUntilAfterConversationResume: true }),
+			);
 			expect(prepared.mock.calls[0]?.[0].observedAgentNativeConversationSessionResumeAddressing).toMatchObject({
 				sourceSessionId: nativeSessionId,
 				sourceSessionReuseMode: "resume_existing_session",

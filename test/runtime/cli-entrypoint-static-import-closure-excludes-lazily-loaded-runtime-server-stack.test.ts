@@ -23,7 +23,6 @@ const LAZILY_LOADED_RUNTIME_SERVER_STACK_MODULE_RELATIVE_PATHS = [
 	"src/server/directory-picker.ts",
 	"src/server/shell.ts",
 	"src/trpc/app-router.ts",
-	"src/cline-sdk/sdk-runtime-boundary.ts",
 	"src/terminal/session-manager.ts",
 ];
 

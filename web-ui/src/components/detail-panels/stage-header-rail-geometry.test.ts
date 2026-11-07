@@ -11,15 +11,15 @@ import {
 } from "@/components/detail-panels/stage-header-rail-geometry";
 
 /** 一个普通 rail 条目占的纵向空间；测试内独立重算，避免与实现共用同一处笔误。 */
-const PLAIN_ENTRY_STRIDE = 40 + 2 + 8;
+const PLAIN_ENTRY_STRIDE = 32 + 2 + 4;
 
 describe("stage header rail geometry constants", () => {
 	// 守卫断言：这些数值同时被渲染方、分类方、滚动落点计算消费，漂移必须是一次**有意的**测试改动。
 	it("pins the shared rail entry box constants", () => {
-		expect(STAGE_HEADER_HEIGHT_PX).toBe(40);
+		expect(STAGE_HEADER_HEIGHT_PX).toBe(32);
 		expect(STAGE_SECTION_BORDER_PX).toBe(2);
-		expect(STAGE_RAIL_GAP_PX).toBe(8);
-		expect(STAGE_RAIL_FOCUSED_CARD_PADDING_PX).toBe(16);
+		expect(STAGE_RAIL_GAP_PX).toBe(4);
+		expect(STAGE_RAIL_FOCUSED_CARD_PADDING_PX).toBe(20);
 	});
 });
 
@@ -41,7 +41,7 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 	});
 
 	it("reserves the focused card clone when the focused card would pin to the top after the jump", () => {
-		// 焦点卡远在目标 section 之上（−400）：即使加上 R=100 也仍在视口上沿之上 → 钉顶 → 有克隆。
+		// 焦点卡远在目标 section 之上（−400）：即使加上 R=76 也仍在视口上沿之上 → 钉顶 → 有克隆。
 		expect(
 			computeTopRailHeightAboveStageJumpTarget({
 				...baseInput,
@@ -49,11 +49,11 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 				focusedCardViewportTop: -400,
 				focusedCardHeight: 92,
 			}),
-		).toBe(100 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
+		).toBe(76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
 	});
 
-	it("omits the clone when the focused card would land below the viewport top even at the smaller rail height", () => {
-		// 偏移 −50：−50 + 100 = 50 > 0 → 跳转后焦点卡落在视口上沿之下（被 rail 遮住但判为 hidden）→ 无克隆。
+	it("焦点卡跳转后仍在视口内但被标题 rail 遮住时，也预留完整副本", () => {
+		// 偏移 −50：无副本时落在 26px，位于普通标题 rail 内，分类器仍会补出焦点副本。
 		expect(
 			computeTopRailHeightAboveStageJumpTarget({
 				...baseInput,
@@ -61,19 +61,19 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 				focusedCardViewportTop: -50,
 				focusedCardHeight: 92,
 			}),
-		).toBe(100);
+		).toBe(76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
 	});
 
 	it("takes the safe (larger) side at the exact boundary", () => {
-		// −100 + 100 = 0，判据取闭区间 → 按有克隆预留：宁可 rail 下方多留空隙，也不把目标塞回 rail 之后。
+		// −76 + 76 = 0，判据取闭区间 → 按有克隆预留：宁可 rail 下方多留空隙，也不把目标塞回 rail 之后。
 		expect(
 			computeTopRailHeightAboveStageJumpTarget({
 				...baseInput,
 				focusedStageIndex: 0,
-				focusedCardViewportTop: -100,
+				focusedCardViewportTop: -76,
 				focusedCardHeight: 92,
 			}),
-		).toBe(100 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
+		).toBe(76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92);
 	});
 
 	it("ignores the focused stage when it sits at or below the target, or is missing", () => {
@@ -85,7 +85,7 @@ describe("computeTopRailHeightAboveStageJumpTarget", () => {
 					focusedCardViewportTop: -400,
 					focusedCardHeight: 92,
 				}),
-			).toBe(100);
+			).toBe(76);
 		}
 	});
 });
@@ -102,9 +102,9 @@ describe("computeScrollTopForJumpingToStageBelowTopRail", () => {
 	};
 
 	it("parks the target section top at the bottom edge of the top rail, not at the scrollport top edge", () => {
-		// 目标 section 在视口内 600px 处；要把它挪到 rootTop + 100 → 需再向下滚 500。
-		// 旧的 scrollIntoView({block:"start"}) 等价于滚 600，多出的 100 正是被 rail 盖住的那截。
-		expect(computeScrollTopForJumpingToStageBelowTopRail(baseInput)).toBe(300 + 600 - 100);
+		// 目标 section 在视口内 600px 处；要把它挪到 rootTop + 76 → 需再向下滚 524。
+		// 旧的 scrollIntoView({block:"start"}) 等价于滚 600，多出的 76 正是被 rail 盖住的那截。
+		expect(computeScrollTopForJumpingToStageBelowTopRail(baseInput)).toBe(300 + 600 - 76);
 	});
 
 	it("clamps to zero instead of producing a negative scrollTop", () => {
@@ -118,14 +118,14 @@ describe("computeScrollTopForJumpingToStageBelowTopRail", () => {
 	});
 
 	it("scrolls upward when the target sits above the current viewport", () => {
-		// 目标 section 在视口上沿之上 300px；要把它挪到 rootTop + 100 → 需向上滚 400。
+		// 目标 section 在视口上沿之上 300px；要把它挪到 rootTop + 76 → 需向上滚 376。
 		expect(
 			computeScrollTopForJumpingToStageBelowTopRail({
 				...baseInput,
 				currentScrollTop: 1000,
 				targetSectionViewportTop: -200,
 			}),
-		).toBe(1000 - 400);
+		).toBe(1000 - 376);
 	});
 
 	it("shifts the landing point down by the focused card clone when one is reserved", () => {
@@ -136,7 +136,7 @@ describe("computeScrollTopForJumpingToStageBelowTopRail", () => {
 				focusedCardViewportTop: -400,
 				focusedCardHeight: 92,
 			}),
-		).toBe(300 + 600 - (100 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92));
+		).toBe(300 + 600 - (76 + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + 92));
 	});
 });
 

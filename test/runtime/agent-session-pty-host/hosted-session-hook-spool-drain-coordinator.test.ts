@@ -112,6 +112,44 @@ function createDeferred<T>() {
 }
 
 describe("HostedSessionHookSpoolDrainCoordinator", () => {
+	it("现代完成事件未能持久受理时保留 host 原条目，恢复后才确认", async () => {
+		const { coordinator, droppedSpooledHookEvents } = createCoordinatorRecordingSideEffects();
+		const target = createInMemoryHookSpoolDrainTarget("hosted-session-1", "task-1");
+		target.spoolWithoutPendingNotification({
+			workspaceId: "workspace-1",
+			taskId: "task-1",
+			event: "to_review",
+			metadata: { source: "claude", hookEventName: "Stop", finalMessage: "私有正文" },
+			hookRuntimeSessionIncarnationId: "00000000-0000-4000-8000-000000000001",
+			hookEventCapturedAtEpochMs: 100,
+			hookEventDeliveryIdempotencyKey: "durable-stop-1",
+		});
+		const apply = vi.fn(async (_request: unknown) => ({
+			ok: false,
+			failureKind: "runtime_dependency_unavailable" as const,
+		}));
+		coordinator.bindSpooledHookIngestRequestApplier(apply);
+		coordinator.registerHookSpoolDrainTargetHostedSession(target.target);
+		await coordinator.drainPendingHookSpoolEntriesBeforeDirectHookIngest("workspace-1", "task-1");
+		expect(apply).toHaveBeenCalledTimes(3);
+		expect(target.acknowledgedThroughSequenceNumbers).toEqual([]);
+		expect(droppedSpooledHookEvents).toEqual([]);
+		expect(target.remainingEntryCount()).toBe(1);
+		expect(apply.mock.calls[0]?.[0]).toMatchObject({ hookEventDeliveryHostedSessionKey: "hosted-session-1" });
+		expect(apply.mock.calls[0]?.[0]).toHaveProperty("metadata.finalMessage", "私有正文");
+		await coordinator.drainHookSpoolAfterExitAcknowledgedUntilHostForgetsHostedSessionThenForgetTarget(
+			"hosted-session-1",
+		);
+		expect(apply).toHaveBeenCalledTimes(3);
+		await coordinator.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges("workspace-1", "storage-unavailable");
+		expect(apply).toHaveBeenCalledTimes(6);
+		await coordinator.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges("workspace-1", "storage-unavailable");
+		expect(apply).toHaveBeenCalledTimes(6);
+		apply.mockResolvedValue({ ok: true, failureKind: "runtime_dependency_unavailable" });
+		await coordinator.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges("workspace-1", "storage-ready");
+		expect(target.acknowledgedThroughSequenceNumbers).toEqual([1]);
+		expect(target.remainingEntryCount()).toBe(0);
+	});
 	it("waits for the ingest applier, then applies spooled events in order and acknowledges each only after applying it", async () => {
 		const { coordinator } = createCoordinatorRecordingSideEffects();
 		const inMemoryTarget = createInMemoryHookSpoolDrainTarget("hosted-session-1", "task-1");

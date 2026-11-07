@@ -7,6 +7,7 @@ import {
 	type RuntimeWorkspaceChangesQueryPhase,
 	useRuntimeWorkspaceChanges,
 } from "@/runtime/use-runtime-workspace-changes";
+import { notifyTaskVisualizationStreamReconnected } from "@/stores/task-visualization-browser-bridge";
 
 const getChangesQueryMock = vi.hoisted(() => vi.fn());
 
@@ -127,6 +128,7 @@ describe("useRuntimeWorkspaceChanges", () => {
 			root.unmount();
 		});
 		container.remove();
+		vi.useRealTimers();
 		if (previousActEnvironment === undefined) {
 			delete (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
 		} else {
@@ -151,12 +153,10 @@ describe("useRuntimeWorkspaceChanges", () => {
 			await Promise.resolve();
 		});
 
-		expect(getChangesQueryMock).toHaveBeenCalledWith({
-			taskId: "task-inplace",
-			baseRef: "main",
-			worktreeMode: "inplace",
-			mode: "working_copy",
-		});
+		expect(getChangesQueryMock).toHaveBeenCalledWith(
+			{ taskId: "task-inplace", baseRef: "main", worktreeMode: "inplace", mode: "working_copy" },
+			{ signal: expect.any(AbortSignal), context: { sendAsIndependentHttpRequest: true } },
+		);
 	});
 
 	it("omits worktreeMode from the getChanges request by default", async () => {
@@ -398,6 +398,22 @@ describe("useRuntimeWorkspaceChanges", () => {
 			isRequestInFlight: false,
 		});
 	});
+	it("同任务视图允许保留内容时，切换任务仍立即清空旧归属", async () => {
+		const next = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockResolvedValueOnce(createWorkspaceChangesResponse("old-task.ts"));
+		getChangesQueryMock.mockImplementationOnce(() => next.promise);
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => snapshots.push(snapshot);
+		await act(async () =>
+			root.render(<HookHarness taskId="task-a" clearOnViewTransition={false} onSnapshot={onSnapshot} />),
+		);
+		await act(async () =>
+			root.render(<HookHarness taskId="task-b" clearOnViewTransition={false} onSnapshot={onSnapshot} />),
+		);
+		expect(snapshots.at(-1)).toMatchObject({ paths: [], queryPhase: "initial_loading", errorMessage: null });
+		await act(async () => next.resolve(createWorkspaceChangesResponse("new-task.ts")));
+		expect(snapshots.at(-1)?.paths).toEqual(["new-task.ts"]);
+	});
 
 	it("keeps an initial error stable while the automatic retry is in flight", async () => {
 		vi.useFakeTimers();
@@ -597,5 +613,67 @@ describe("useRuntimeWorkspaceChanges", () => {
 		});
 		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
 		vi.useRealTimers();
+	});
+	it("挂起查询被实际取消，预算耗尽停止轮询，重连后恢复", async () => {
+		vi.useFakeTimers();
+		const signals: AbortSignal[] = [];
+		getChangesQueryMock.mockImplementation((_input, options: { signal: AbortSignal }) => {
+			signals.push(options.signal);
+			return new Promise(() => undefined);
+		});
+		const snapshots: HookSnapshot[] = [];
+		await act(async () =>
+			root.render(
+				<HookHarness taskId="task-a" pollIntervalMs={1_000} onSnapshot={(snapshot) => snapshots.push(snapshot)} />,
+			),
+		);
+		await act(async () => vi.advanceTimersByTimeAsync(60_000));
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
+		expect(signals.every((signal) => signal.aborted)).toBe(true);
+		expect(snapshots.at(-1)).toMatchObject({ queryPhase: "initial_error", isRequestInFlight: false });
+		for (const stateVersion of [1, 2, 3]) {
+			await act(async () =>
+				root.render(
+					<HookHarness
+						taskId="task-a"
+						pollIntervalMs={1_000}
+						stateVersion={stateVersion}
+						onSnapshot={(snapshot) => snapshots.push(snapshot)}
+					/>,
+				),
+			);
+		}
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
+		getChangesQueryMock.mockResolvedValue(createWorkspaceChangesResponse("recovered.ts"));
+		await act(async () => notifyTaskVisualizationStreamReconnected("another-project"));
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(3);
+		await act(async () => notifyTaskVisualizationStreamReconnected("project-1"));
+		expect(snapshots.at(-1)).toMatchObject({ paths: ["recovered.ts"], queryPhase: "ready" });
+	});
+	it("版本失效连续到达时合并补读，切换任务取消旧归属", async () => {
+		const initial = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockImplementationOnce(() => initial.promise);
+		getChangesQueryMock.mockResolvedValue(createWorkspaceChangesResponse("fresh.ts"));
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => snapshots.push(snapshot);
+		await act(async () => root.render(<HookHarness taskId="task-a" onSnapshot={onSnapshot} />));
+		const signal = getChangesQueryMock.mock.calls[0]?.[1]?.signal as AbortSignal;
+		for (const stateVersion of [1, 2, 3]) {
+			await act(async () =>
+				root.render(<HookHarness taskId="task-a" stateVersion={stateVersion} onSnapshot={onSnapshot} />),
+			);
+		}
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
+		expect(signal.aborted).toBe(false);
+		await act(async () => initial.resolve(createWorkspaceChangesResponse("initial.ts")));
+		expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+		const old = createDeferred<RuntimeWorkspaceChangesResponse>();
+		getChangesQueryMock.mockImplementationOnce(() => old.promise);
+		await act(async () => root.render(<HookHarness taskId="task-a" stateVersion={4} onSnapshot={onSnapshot} />));
+		const oldSignal = getChangesQueryMock.mock.calls[2]?.[1]?.signal as AbortSignal;
+		await act(async () => root.render(<HookHarness taskId="task-b" stateVersion={4} onSnapshot={onSnapshot} />));
+		expect(oldSignal.aborted).toBe(true);
+		await act(async () => old.resolve(createWorkspaceChangesResponse("wrong-task.ts")));
+		expect(snapshots.at(-1)?.paths).toEqual(["fresh.ts"]);
 	});
 });

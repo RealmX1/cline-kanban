@@ -15,7 +15,12 @@
 // spool 为空时退出照常交付，不被「runtime server 还没建好」卡住。
 
 import { setTimeout as waitMillisecondsWithTimer } from "node:timers/promises";
-import { runtimeHookEventSchema } from "../../core/api-contract";
+import {
+	type RuntimeHookIngestResponse,
+	runtimeHookEventSchema,
+	runtimeHookIngestRequestSchema,
+} from "../../core/api-contract";
+import { projectRecoverableHookReviewLifecycleEvent } from "../../core/recoverable-hook-review-lifecycle-event";
 import { recordHookDeliveryFailure } from "../../diagnostics/hook-ingest-delivery-failure-logger";
 import type { HostedSessionHookSpoolEntry } from "../wire-protocol/agent-session-pty-host-wire-protocol-messages";
 
@@ -28,9 +33,7 @@ export interface HookSpoolDrainTargetHostedSession {
 	acknowledgeHookSpoolEntriesThrough(throughHookSpoolEntrySequenceNumber: number): void;
 }
 
-export type SpooledHookIngestRequestApplier = (
-	spooledHookIngestRequest: unknown,
-) => Promise<{ ok: boolean; error?: string }>;
+export type SpooledHookIngestRequestApplier = (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>;
 
 export interface SpooledHookEventDroppedAfterApplyRetriesExhausted {
 	workspaceId: string;
@@ -94,11 +97,15 @@ interface HookSpoolDrainTargetRegistration {
 	latestRequestedFreshHookSpoolReadGeneration: number;
 	freshHookSpoolReadWaiters: FreshHookSpoolReadWaiter[];
 	drainLoopRunning: boolean;
+	lifecycleAdmissionAwaitingRecoveryEvidence: boolean;
+	lastLifecycleAdmissionRecoveryEvidenceFingerprint: string | null;
+	exitAcknowledged: boolean;
 }
 
 type SpooledHookEventApplyOutcome =
 	| "applied"
 	| "dropped_after_apply_retries_exhausted"
+	| "retained_until_lifecycle_recovery_can_be_confirmed"
 	| "drain_target_registration_forgotten";
 
 export class HostedSessionHookSpoolDrainCoordinator {
@@ -124,6 +131,9 @@ export class HostedSessionHookSpoolDrainCoordinator {
 			latestRequestedFreshHookSpoolReadGeneration: 0,
 			freshHookSpoolReadWaiters: [],
 			drainLoopRunning: false,
+			lifecycleAdmissionAwaitingRecoveryEvidence: false,
+			lastLifecycleAdmissionRecoveryEvidenceFingerprint: null,
+			exitAcknowledged: false,
 		};
 		this.registrationsByHostedSessionKey.set(target.hostedSessionKey, registration);
 		void this.requestDrainIncludingFreshHookSpoolRead(registration);
@@ -193,9 +203,30 @@ export class HostedSessionHookSpoolDrainCoordinator {
 		if (registration === undefined) {
 			return;
 		}
+		registration.exitAcknowledged = true;
 		await this.requestDrainIncludingFreshHookSpoolRead(registration);
-		if (this.registrationsByHostedSessionKey.get(hostedSessionKey) === registration) {
+		if (
+			!registration.lifecycleAdmissionAwaitingRecoveryEvidence &&
+			this.registrationsByHostedSessionKey.get(hostedSessionKey) === registration
+		) {
 			this.forgetHookSpoolDrainTargetHostedSession(hostedSessionKey);
+		}
+	}
+
+	async retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges(
+		workspaceId: string,
+		evidenceFingerprint: string,
+	): Promise<void> {
+		for (const registration of this.registrationsByHostedSessionKey.values()) {
+			if (registration.target.workspaceId !== workspaceId || registration.registrationForgotten) continue;
+			const changed = registration.lastLifecycleAdmissionRecoveryEvidenceFingerprint !== evidenceFingerprint;
+			registration.lastLifecycleAdmissionRecoveryEvidenceFingerprint = evidenceFingerprint;
+			if (!changed || !registration.lifecycleAdmissionAwaitingRecoveryEvidence) continue;
+			registration.lifecycleAdmissionAwaitingRecoveryEvidence = false;
+			await this.requestDrainIncludingFreshHookSpoolRead(registration);
+			if (registration.exitAcknowledged && !registration.lifecycleAdmissionAwaitingRecoveryEvidence) {
+				this.forgetHookSpoolDrainTargetHostedSession(registration.target.hostedSessionKey);
+			}
 		}
 	}
 
@@ -256,6 +287,7 @@ export class HostedSessionHookSpoolDrainCoordinator {
 					return;
 				}
 				if (hookSpoolEntries.length > 0) {
+					if (registration.lifecycleAdmissionAwaitingRecoveryEvidence) return;
 					// 读到条目才需要应用函数：spool 为空时，退出交付与直投不依赖 runtime server 是否已建好。
 					const spooledHookIngestRequestApplier = await this.waitUntilSpooledHookIngestRequestApplierIsBound();
 					for (const hookSpoolEntry of hookSpoolEntries) {
@@ -268,6 +300,10 @@ export class HostedSessionHookSpoolDrainCoordinator {
 							hookSpoolEntry,
 						);
 						if (applyOutcome === "drain_target_registration_forgotten" || registration.registrationForgotten) {
+							return;
+						}
+						if (applyOutcome === "retained_until_lifecycle_recovery_can_be_confirmed") {
+							registration.lifecycleAdmissionAwaitingRecoveryEvidence = true;
 							return;
 						}
 						// 逐条确认：中途被注销时，已应用的前缀不会被下一个接管者重放。
@@ -301,6 +337,7 @@ export class HostedSessionHookSpoolDrainCoordinator {
 	): Promise<SpooledHookEventApplyOutcome> {
 		const { target } = registration;
 		let lastApplyFailureMessage = "unknown error";
+		let lastFailureKind: RuntimeHookIngestResponse["failureKind"];
 		for (let applyAttempt = 1; applyAttempt <= MAXIMUM_APPLY_ATTEMPTS_PER_SPOOLED_HOOK_EVENT; applyAttempt += 1) {
 			if (applyAttempt > 1) {
 				await this.waitBeforeRetryingSpooledHookEventApply(
@@ -314,12 +351,24 @@ export class HostedSessionHookSpoolDrainCoordinator {
 			}
 			let applied = false;
 			try {
-				const response = await spooledHookIngestRequestApplier(hookSpoolEntry.spooledHookIngestRequest);
+				const projectedLifecycleEvent = projectRecoverableHookReviewLifecycleEvent(
+					hookSpoolEntry.spooledHookIngestRequest,
+				);
+				const response = await spooledHookIngestRequestApplier(
+					projectedLifecycleEvent
+						? {
+								...runtimeHookIngestRequestSchema.parse(hookSpoolEntry.spooledHookIngestRequest),
+								hookEventDeliveryHostedSessionKey: target.hostedSessionKey,
+							}
+						: hookSpoolEntry.spooledHookIngestRequest,
+				);
 				applied = response.ok;
+				lastFailureKind = response.failureKind;
 				if (!response.ok) {
 					lastApplyFailureMessage = `rejected: ${response.error ?? "unknown error"}`;
 				}
 			} catch (error) {
+				lastFailureKind = "runtime_dependency_unavailable";
 				lastApplyFailureMessage = `failed: ${error instanceof Error ? error.message : String(error)}`;
 			}
 			if (registration.registrationForgotten) {
@@ -328,6 +377,15 @@ export class HostedSessionHookSpoolDrainCoordinator {
 			if (applied) {
 				return "applied";
 			}
+		}
+		if (
+			projectRecoverableHookReviewLifecycleEvent(hookSpoolEntry.spooledHookIngestRequest) &&
+			lastFailureKind !== "permanent_business_rejection"
+		) {
+			this.options.warn(
+				`生命周期事件尚未确认持久受理，保留 host 原条目：${target.workspaceId}/${target.taskId} #${hookSpoolEntry.hookSpoolEntrySequenceNumber}`,
+			);
+			return "retained_until_lifecycle_recovery_can_be_confirmed";
 		}
 		this.options.warn(
 			`spooled hook event of ${target.workspaceId}/${target.taskId} (agent session pty host spool entry #${hookSpoolEntry.hookSpoolEntrySequenceNumber}) could not be applied after ${MAXIMUM_APPLY_ATTEMPTS_PER_SPOOLED_HOOK_EVENT} attempts and is dropped from the spool: ${lastApplyFailureMessage}`,

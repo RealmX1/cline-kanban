@@ -1,9 +1,12 @@
+import * as Popover from "@radix-ui/react-popover";
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
-import { PanelBottomOpen } from "lucide-react";
+import { Ellipsis, PanelBottomOpen, Square } from "lucide-react";
+import { createPortal } from "react-dom";
 import { AgentConversationHeldByHarnessBackgroundSessionNotice } from "@/components/detail-panels/agent-conversation-held-by-harness-background-session-notice";
 import { AgentNativeConversationPersistenceRecoveryNotice } from "@/components/detail-panels/agent-native-conversation-persistence-recovery-notice";
 import { AgentSessionRestartWithAdditionalStartupArgumentsDialog } from "@/components/detail-panels/agent-session-restart-with-additional-startup-arguments-dialog";
 import { AgentSessionTransportSwitchButton } from "@/components/detail-panels/agent-session-transport-switch-button";
+import { TaskTerminalActionsMenu } from "@/components/detail-panels/task-terminal-actions-menu";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 import "@xterm/xterm/css/xterm.css";
 
@@ -30,7 +33,7 @@ import {
 	Unplug,
 	X,
 } from "lucide-react";
-import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement, Ref } from "react";
+import type { ChangeEvent, KeyboardEvent, MutableRefObject, ReactElement, ReactNode, Ref } from "react";
 import { useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { TaskConversationTranscriptDocumentReaderPanel } from "@/components/detail-panels/task-conversation-transcript-document-reader-panel";
@@ -59,7 +62,6 @@ import {
 	type TaskAgentSessionStartRequestInFlightPhase,
 	useTaskAgentSessionStartRequestInFlightPhase,
 } from "@/stores/task-agent-session-start-request-in-flight-store";
-import { useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
 import type { TerminalSearchResultState } from "@/terminal/persistent-terminal-manager";
 import { wasCurrentRuntimeSessionIncarnationEndedByKanbanInactivityReclamation } from "@/terminal/stale-agent-terminal-session-automatic-resume-eligibility";
 import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
@@ -117,6 +119,9 @@ export interface AgentTerminalPanelProps {
 	showMoveToTrash?: boolean;
 	showMoveToValidation?: boolean;
 	showSessionToolbar?: boolean;
+	headerInformationContent?: ReactNode;
+	narrowMobileInformationContent?: ReactNode;
+	mobileHeaderToolbarElement?: HTMLElement | null;
 	onClose?: () => void;
 	autoFocus?: boolean;
 	// 由详情视图递增的「把键盘焦点接过去」请求信号，透传给终端会话；key 不变就不重复抢焦。
@@ -777,52 +782,6 @@ function TerminalSearchBar({
 	);
 }
 
-function AgentTerminalReviewActions({
-	taskId,
-	taskColumnId,
-	onCommit,
-	onOpenPr,
-	isCommitLoading,
-	isOpenPrLoading,
-}: {
-	taskId: string;
-	taskColumnId: string;
-	onCommit?: () => void;
-	onOpenPr?: () => void;
-	isCommitLoading: boolean;
-	isOpenPrLoading: boolean;
-}): ReactElement | null {
-	const reviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(taskId);
-	const showReviewGitActions = taskColumnId === "review" && (reviewWorkspaceSnapshot?.changedFiles ?? 0) > 0;
-
-	if (!showReviewGitActions) {
-		return null;
-	}
-
-	return (
-		<div style={{ display: "flex", gap: 6 }}>
-			<Button
-				variant="primary"
-				size="sm"
-				style={{ flex: "1 1 0" }}
-				disabled={isCommitLoading || isOpenPrLoading}
-				onClick={onCommit}
-			>
-				{isCommitLoading ? "..." : "Commit"}
-			</Button>
-			<Button
-				variant="primary"
-				size="sm"
-				style={{ flex: "1 1 0" }}
-				disabled={isCommitLoading || isOpenPrLoading}
-				onClick={onOpenPr}
-			>
-				{isOpenPrLoading ? "..." : "Open PR"}
-			</Button>
-		</div>
-	);
-}
-
 function AgentTerminalPanelLayout({
 	taskId,
 	workspaceId,
@@ -842,6 +801,9 @@ function AgentTerminalPanelLayout({
 	showMoveToTrash,
 	showMoveToValidation,
 	showSessionToolbar = true,
+	headerInformationContent,
+	narrowMobileInformationContent,
+	mobileHeaderToolbarElement,
 	onClose,
 	autoFocus: _autoFocus = false,
 	agentEntryKeyboardFocusRequestKey: _agentEntryKeyboardFocusRequestKey,
@@ -999,6 +961,156 @@ function AgentTerminalPanelLayout({
 		return normalizedCommand.split(/\s+/)[0] ?? null;
 	}, [agentCommand]);
 
+	const compactTerminalToolsContent = (
+		<div className="flex flex-wrap items-center gap-1 p-1">
+			<TerminalTranscriptReaderToggleButton
+				isOpen={isTranscriptReaderOpen}
+				onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
+				iconSize={12}
+				variant="ghost"
+			/>
+			<Tooltip side="top" content="Find in terminal">
+				<Button
+					icon={<Search size={12} />}
+					variant="ghost"
+					size="sm"
+					onClick={openTerminalSearch}
+					aria-label="Find in terminal"
+				/>
+			</Tooltip>
+			<TerminalViewResyncAndAgentSessionRestartButtons
+				workspaceId={workspaceId}
+				taskId={taskId}
+				runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
+				captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
+				supportsAdditionalStartupArgumentsForRestart={
+					(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) === "codex"
+				}
+				showAgentSessionRestartButton={showRefreshButton}
+				canRestartAgentSession={canRefresh}
+				isRestartingAgentSession={isRefreshing}
+				isResyncingTerminalView={isResyncingTerminalView}
+				isAgentSessionInActiveTurn={canStop}
+				onResyncTerminalView={resyncTerminalView}
+				onRestartAgentSession={refreshTerminal}
+				iconSize={12}
+				variant="ghost"
+			/>
+			{agentLabel && onSendAgentCommand ? (
+				<Tooltip side="top" content={`Run ${agentLabel}`}>
+					<Button
+						icon={<MessageSquare size={12} />}
+						variant="ghost"
+						size="sm"
+						onClick={onSendAgentCommand}
+						aria-label={`Run ${agentLabel}`}
+					/>
+				</Tooltip>
+			) : null}
+			{onToggleExpand ? (
+				<Tooltip
+					side="top"
+					content={
+						<span style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}>
+							<span>{isExpanded ? "Collapse" : "Expand"}</span>
+							<span
+								style={{
+									display: "inline-flex",
+									alignItems: "center",
+									gap: 2,
+									whiteSpace: "nowrap",
+								}}
+							>
+								<span>(</span>
+								{isMacPlatform ? <Command size={11} /> : <span style={{ fontSize: 11 }}>Ctrl</span>}
+								<span>+ M)</span>
+							</span>
+						</span>
+					}
+				>
+					<Button
+						icon={isExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
+						variant="ghost"
+						size="sm"
+						onClick={onToggleExpand}
+						aria-label={isExpanded ? "Collapse terminal" : "Expand terminal"}
+					/>
+				</Tooltip>
+			) : null}
+			{onClose ? (
+				<Button icon={<X size={14} />} variant="ghost" size="sm" onClick={onClose} aria-label="Close terminal" />
+			) : null}
+		</div>
+	);
+	const compactFocusViewToolbar = (
+		<div
+			data-focus-view-session-information-toolbar=""
+			className="flex h-8 min-w-0 shrink-0 items-center gap-1 border-b border-border px-2 max-[769px]:h-11 max-[769px]:border-0 max-[769px]:px-0"
+		>
+			{headerInformationContent}
+			<Popover.Root key={JSON.stringify([workspaceId, taskId])}>
+				<Popover.Trigger asChild>
+					<button
+						type="button"
+						aria-label="终端工具与更多信息"
+						className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:h-11 max-[769px]:w-11"
+					>
+						<Ellipsis size={16} />
+					</button>
+				</Popover.Trigger>
+				<Popover.Portal>
+					<Popover.Content
+						aria-label="终端工具与更多信息"
+						align="end"
+						sideOffset={4}
+						data-mobile-focus-view-idle-collapse-suspension=""
+						className="z-50 max-h-[var(--radix-popover-content-available-height)] max-w-[calc(100vw-1rem)] overflow-y-auto rounded-md border border-border-bright bg-surface-1 text-text-primary max-[769px]:[&_button]:min-h-11 max-[769px]:[&_button]:min-w-11"
+					>
+						<div className="hidden max-[359px]:block">{narrowMobileInformationContent}</div>
+						{compactTerminalToolsContent}
+					</Popover.Content>
+				</Popover.Portal>
+			</Popover.Root>
+			<button
+				type="button"
+				aria-label="停止当前会话"
+				disabled={!canStop || isStopping}
+				onClick={() => {
+					void stopTerminal();
+				}}
+				className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm text-status-red hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50 max-[769px]:h-11 max-[769px]:w-11"
+			>
+				{isStopping ? <Spinner size={14} /> : <Square size={14} />}
+			</button>
+			{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+				<button
+					type="button"
+					aria-label={cancelAutomaticActionLabel}
+					title={cancelAutomaticActionLabel}
+					onClick={onCancelAutomaticAction}
+					className="inline-flex h-7 max-w-32 shrink-0 items-center justify-center gap-1 rounded-sm px-1 text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:hidden"
+				>
+					<X size={14} className="shrink-0" />
+					<span className="truncate max-[769px]:hidden">{cancelAutomaticActionLabel}</span>
+				</button>
+			) : null}
+		</div>
+	);
+	const taskActionsMenu = (
+		<TaskTerminalActionsMenu
+			key={JSON.stringify([workspaceId, taskId, taskColumnId, summary?.runtimeSessionIncarnationId])}
+			taskId={taskId}
+			taskColumnId={taskColumnId}
+			onCommit={onCommit}
+			onOpenPr={onOpenPr}
+			isCommitLoading={isCommitLoading}
+			isOpenPrLoading={isOpenPrLoading}
+			onMoveToTrash={showMoveToTrash ? onMoveToTrash : undefined}
+			onMoveToValidation={showMoveToValidation ? onMoveToValidation : undefined}
+			isMoveToTrashLoading={isMoveToTrashLoading}
+			isMoveToValidationLoading={isMoveToValidationLoading}
+		/>
+	);
 	return (
 		<div
 			style={{
@@ -1010,13 +1122,20 @@ function AgentTerminalPanelLayout({
 				background: panelBackgroundColor,
 			}}
 		>
+			{headerInformationContent
+				? isMobile && mobileHeaderToolbarElement
+					? createPortal(compactFocusViewToolbar, mobileHeaderToolbarElement)
+					: !isMobile
+						? compactFocusViewToolbar
+						: null
+				: null}
 			<div
 				hidden={!upperToolsExpanded}
 				className="shrink-0"
 				data-mobile-focus-view-terminal-toolbar=""
 				data-mobile-focus-view-collapsible-region=""
 			>
-				{showSessionToolbar ? (
+				{headerInformationContent ? null : showSessionToolbar ? (
 					<>
 						<div
 							style={{
@@ -1129,104 +1248,19 @@ function AgentTerminalPanelLayout({
 							) : null}
 						</div>
 						<div style={{ display: "flex", alignItems: "center", gap: 2, marginRight: "-6px" }}>
-							<TerminalTranscriptReaderToggleButton
-								isOpen={isTranscriptReaderOpen}
-								onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
-								iconSize={12}
-								variant="ghost"
-							/>
-							<Tooltip side="top" content="Find in terminal">
-								<Button
-									icon={<Search size={12} />}
-									variant="ghost"
-									size="sm"
-									onClick={openTerminalSearch}
-									aria-label="Find in terminal"
-								/>
-							</Tooltip>
-							<TerminalViewResyncAndAgentSessionRestartButtons
-								workspaceId={workspaceId}
-								taskId={taskId}
-								runtimeSessionIncarnationId={summary?.runtimeSessionIncarnationId}
-								captureAgentSessionRestartForFloatingForm={captureAgentSessionRestartForFloatingForm}
-								supportsAdditionalStartupArgumentsForRestart={
-									(summary?.agentId ?? summary?.agentNativeConversationSessionIdentity?.sourceAgentId) ===
-									"codex"
-								}
-								showAgentSessionRestartButton={showRefreshButton}
-								canRestartAgentSession={canRefresh}
-								isRestartingAgentSession={isRefreshing}
-								isResyncingTerminalView={isResyncingTerminalView}
-								isAgentSessionInActiveTurn={canStop}
-								onResyncTerminalView={resyncTerminalView}
-								onRestartAgentSession={refreshTerminal}
-								iconSize={12}
-								variant="ghost"
-							/>
-							{agentLabel && onSendAgentCommand ? (
-								<Tooltip side="top" content={`Run ${agentLabel}`}>
-									<Button
-										icon={<MessageSquare size={12} />}
-										variant="ghost"
-										size="sm"
-										onClick={onSendAgentCommand}
-										aria-label={`Run ${agentLabel}`}
-									/>
-								</Tooltip>
-							) : null}
-							{onToggleExpand ? (
-								<Tooltip
-									side="top"
-									content={
-										<span
-											style={{ display: "inline-flex", alignItems: "center", gap: 6, whiteSpace: "nowrap" }}
-										>
-											<span>{isExpanded ? "Collapse" : "Expand"}</span>
-											<span
-												style={{
-													display: "inline-flex",
-													alignItems: "center",
-													gap: 2,
-													whiteSpace: "nowrap",
-												}}
-											>
-												<span>(</span>
-												{isMacPlatform ? <Command size={11} /> : <span style={{ fontSize: 11 }}>Ctrl</span>}
-												<span>+ M)</span>
-											</span>
-										</span>
-									}
-								>
-									<Button
-										icon={isExpanded ? <Minimize2 size={12} /> : <Maximize2 size={12} />}
-										variant="ghost"
-										size="sm"
-										onClick={onToggleExpand}
-										aria-label={isExpanded ? "Collapse terminal" : "Expand terminal"}
-									/>
-								</Tooltip>
-							) : null}
-							{onClose ? (
-								<Button
-									icon={<X size={14} />}
-									variant="ghost"
-									size="sm"
-									onClick={onClose}
-									aria-label="Close terminal"
-								/>
-							) : null}
+							{compactTerminalToolsContent}
 						</div>
 					</div>
 				) : null}
-				<TerminalSearchBar
-					isOpen={isSearchOpen}
-					openRequestKey={searchOpenRequestKey}
-					results={searchResults}
-					onClose={closeTerminalSearch}
-					onNext={findNextInTerminal}
-					onPrevious={findPreviousInTerminal}
-				/>
 			</div>
+			<TerminalSearchBar
+				isOpen={isSearchOpen}
+				openRequestKey={searchOpenRequestKey}
+				results={searchResults}
+				onClose={closeTerminalSearch}
+				onNext={findNextInTerminal}
+				onPrevious={findPreviousInTerminal}
+			/>
 			{isAutomaticStaleSessionResumeInProgress ? (
 				<div className="flex items-center gap-1.5 border-t border-border bg-surface-2 px-3 py-1.5 text-xs text-text-tertiary">
 					<Spinner size={12} />
@@ -1330,26 +1364,42 @@ function AgentTerminalPanelLayout({
 						/>
 					</div>
 				) : null}
-				{showVirtualKeyInputBar && !lowerKeysExpanded ? (
-					<div
-						className="absolute bottom-[max(0.5rem,env(safe-area-inset-bottom))] right-[max(0.5rem,env(safe-area-inset-right))] z-20 flex flex-col gap-1"
-						data-mobile-terminal-floating-scroll-controls=""
-					>
-						<TerminalMouseWheelScrollButtons
-							interactionIdentity={scrollInteractionIdentity}
-							onScrollByMouseWheelLines={scrollByMouseWheelLines}
-							isFloating
-						/>
+				<div
+					className="absolute bottom-[max(0.5rem,env(safe-area-inset-bottom))] right-[max(0.5rem,env(safe-area-inset-right))] z-20 flex flex-col items-end gap-1"
+					data-mobile-terminal-floating-scroll-controls={
+						showVirtualKeyInputBar && !lowerKeysExpanded ? "" : undefined
+					}
+				>
+					{headerInformationContent && cancelAutomaticActionLabel && onCancelAutomaticAction ? (
 						<button
 							type="button"
-							aria-label="展开下方按键栏"
-							onClick={mobileControls?.expandLowerVirtualKeyBar}
-							className="mt-1 inline-flex h-11 w-11 items-center justify-center rounded-md border border-border-bright bg-surface-2 text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+							aria-label={cancelAutomaticActionLabel}
+							title={cancelAutomaticActionLabel}
+							onClick={onCancelAutomaticAction}
+							className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-md border border-border-bright bg-surface-2/80 text-text-primary hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent max-[769px]:inline-flex"
 						>
-							<PanelBottomOpen size={16} />
+							<X size={16} />
 						</button>
-					</div>
-				) : null}
+					) : null}
+					{showVirtualKeyInputBar && !lowerKeysExpanded ? (
+						<>
+							<TerminalMouseWheelScrollButtons
+								interactionIdentity={scrollInteractionIdentity}
+								onScrollByMouseWheelLines={scrollByMouseWheelLines}
+								isFloating
+							/>
+							<button
+								type="button"
+								aria-label="展开下方按键栏"
+								onClick={mobileControls?.expandLowerVirtualKeyBar}
+								className="inline-flex h-11 w-11 items-center justify-center rounded-md border border-border-bright bg-surface-2/80 text-text-primary hover:bg-surface-2 focus-visible:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent"
+							>
+								<PanelBottomOpen size={16} />
+							</button>
+						</>
+					) : null}
+					{taskActionsMenu}
+				</div>
 			</div>
 			{showVirtualKeyInputBar && lowerKeysExpanded ? (
 				<TerminalVirtualKeyInputBar
@@ -1365,6 +1415,11 @@ function AgentTerminalPanelLayout({
 					scrollInteractionIdentity={scrollInteractionIdentity}
 				/>
 			) : null}
+			{!headerInformationContent && cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+				<Button variant="default" onClick={onCancelAutomaticAction}>
+					{cancelAutomaticActionLabel}
+				</Button>
+			) : null}
 			{lastError ? (
 				<div
 					role="alert"
@@ -1373,35 +1428,6 @@ function AgentTerminalPanelLayout({
 					{lastError}
 				</div>
 			) : null}
-			<div hidden={!lowerKeysExpanded} className="shrink-0">
-				{(showMoveToTrash && onMoveToTrash) || (showMoveToValidation && onMoveToValidation) ? (
-					<div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "8px 12px" }}>
-						<AgentTerminalReviewActions
-							taskId={taskId}
-							taskColumnId={taskColumnId}
-							onCommit={onCommit}
-							onOpenPr={onOpenPr}
-							isCommitLoading={isCommitLoading}
-							isOpenPrLoading={isOpenPrLoading}
-						/>
-						{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-							<Button variant="default" fill onClick={onCancelAutomaticAction}>
-								{cancelAutomaticActionLabel}
-							</Button>
-						) : null}
-						{showMoveToValidation && onMoveToValidation ? (
-							<Button variant="primary" fill disabled={isMoveToValidationLoading} onClick={onMoveToValidation}>
-								{isMoveToValidationLoading ? <Spinner size={14} /> : "Move Card To Validation"}
-							</Button>
-						) : null}
-						{showMoveToTrash && onMoveToTrash ? (
-							<Button variant="danger" fill disabled={isMoveToTrashLoading} onClick={onMoveToTrash}>
-								{isMoveToTrashLoading ? <Spinner size={14} /> : "结案任务"}
-							</Button>
-						) : null}
-					</div>
-				) : null}
-			</div>
 		</div>
 	);
 }

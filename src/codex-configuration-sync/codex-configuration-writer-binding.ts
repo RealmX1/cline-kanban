@@ -46,8 +46,10 @@ import { isCodexConfigurationChangeExcludedFromSettingsSynchronization } from ".
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
-	mutateCodexConfigurationSyncStore,
-	readCodexConfigurationSyncStore,
+	mutateCodexConfigurationSyncActiveStore as mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncLookupStore,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
+	runWithCodexConfigurationSyncStoreSelection,
 } from "./codex-configuration-sync-store";
 import {
 	assertCodexSourceSharedPluginInstallationDirectoriesBinding,
@@ -102,41 +104,54 @@ export async function resolveVerifiedCodexConfigurationSourceIdentity(
 		.map(([identity]) => identity);
 	if (!registeredSourceIdentities.length && !expectedSourceIdentity) return codexDirectoryIdentity(sourceHome);
 	// 来源归属只依赖原清单和来源指纹；退休、辅助 writer 或无关的旧历史桥接均不改变来源资格。
-	const candidates = Object.values(store.writers)
-		.map((writer) => writer.binding)
-		.filter((binding) => registeredSourceIdentities.includes(binding.sourceIdentity))
-		.sort((left, right) => left.createdAt - right.createdAt);
-	for (const binding of candidates) {
-		try {
-			if ((await realpath(binding.sourceHomeDirectoryPath)) !== canonicalSourceHome) continue;
-			if (store.sources[binding.sourceIdentity]?.home !== canonicalSourceHome) continue;
-			const { manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
-			return await codexDirectoryIdentity(sourceHome, {
-				expectedIdentity: binding.sourceIdentity,
-				boundAtMs: binding.createdAt,
-				legacyBindingManifestPath: manifestPath,
-			});
-		} catch {
-			// 一份旧 writer 损坏不否定其他可独立核验的同来源绑定。
+	const verifyBindings = async (bindings: CodexConfigurationWriterBinding[]) => {
+		const candidates = bindings
+			.filter((binding) => registeredSourceIdentities.includes(binding.sourceIdentity))
+			.sort((left, right) => left.createdAt - right.createdAt);
+		for (const binding of candidates) {
+			try {
+				if ((await realpath(binding.sourceHomeDirectoryPath)) !== canonicalSourceHome) continue;
+				if (store.sources[binding.sourceIdentity]?.home !== canonicalSourceHome) continue;
+				const { manifestPath } = await assertCodexConfigurationWriterBindingManifest(binding);
+				return await codexDirectoryIdentity(sourceHome, {
+					expectedIdentity: binding.sourceIdentity,
+					boundAtMs: binding.createdAt,
+					legacyBindingManifestPath: manifestPath,
+				});
+			} catch {
+				// 一份旧 writer 损坏不否定其他可独立核验的同来源绑定。
+			}
 		}
-	}
+		return null;
+	};
+	const currentIdentity = await verifyBindings(Object.values(store.writers).map((writer) => writer.binding));
+	if (currentIdentity) return currentIdentity;
 	for (const sourceIdentity of registeredSourceIdentities) {
 		const source = store.sources[sourceIdentity];
-		if (source?.configurationInitialization && source.home === canonicalSourceHome) {
-			await readVerifiedCodexConfigurationInitializationSnapshot(
-				sourceIdentity,
-				canonicalSourceHome,
-				source.configurationInitialization,
-			);
-			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
-		}
-		if (
-			Object.values(store.legacySessionProfileAdoptions ?? {}).some(
-				(adoption) => adoption.sourceIdentity === sourceIdentity,
+		try {
+			if (source?.configurationInitialization && source.home === canonicalSourceHome) {
+				await readVerifiedCodexConfigurationInitializationSnapshot(
+					sourceIdentity,
+					canonicalSourceHome,
+					source.configurationInitialization,
+				);
+				return await codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+			}
+			if (
+				Object.values(store.legacySessionProfileAdoptions ?? {}).some(
+					(adoption) => adoption.sourceIdentity === sourceIdentity,
+				)
 			)
-		)
-			return codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+				return await codexDirectoryIdentity(sourceHome, { expectedIdentity: sourceIdentity });
+		} catch {
+			// 已持久身份不能核验时，仅为本来源补读旧绑定；稳定观察不加载退休历史。
+		}
 	}
+	const historical = await readCodexConfigurationSyncLookupStore({
+		sourceIdentityBindingEvidenceSourceIdentities: registeredSourceIdentities,
+	});
+	const recoveredIdentity = await verifyBindings(Object.values(historical.writers).map((writer) => writer.binding));
+	if (recoveredIdentity) return recoveredIdentity;
 	throw new Error("Codex 配置来源缺少可核验的原绑定证据，恢复原清单或目录后自动重试。");
 }
 
@@ -227,7 +242,7 @@ function readCodexLaunchExceptionSelections(arguments_: string[], fields: CodexC
 	};
 }
 
-export async function prepareCodexConfigurationWriterBinding(input: {
+async function prepareCodexConfigurationWriterBindingInternal(input: {
 	purpose: CodexConfigurationWriterBinding["purpose"];
 	storageHome: string;
 	sqliteHome?: string;
@@ -815,48 +830,62 @@ export async function recordCodexConfigurationWriterLaunchArguments(
 	binding: CodexConfigurationWriterBinding,
 	arguments_: string[],
 ) {
-	await mutateCodexConfigurationSyncStore((store) => {
-		const writer = store.writers[binding.writerId];
-		if (!writer) throw new Error("Codex 配置启动绑定不存在。");
-		const overrides: string[] = [];
-		for (let index = 0; index < arguments_.length; index++) {
-			const argument = arguments_[index];
-			if (!argument) continue;
-			if (argument === "--") break;
-			if (["--enable", "--disable"].includes(argument)) {
-				const feature = arguments_[++index];
-				if (feature) overrides.push(`features.${feature}`);
-				continue;
+	await runWithCodexConfigurationSyncStoreSelection({ writerIds: [binding.writerId] }, () =>
+		mutateCodexConfigurationSyncStore((store) => {
+			const writer = store.writers[binding.writerId];
+			if (!writer) throw new Error("Codex 配置启动绑定不存在。");
+			const overrides: string[] = [];
+			for (let index = 0; index < arguments_.length; index++) {
+				const argument = arguments_[index];
+				if (!argument) continue;
+				if (argument === "--") break;
+				if (["--enable", "--disable"].includes(argument)) {
+					const feature = arguments_[++index];
+					if (feature) overrides.push(`features.${feature}`);
+					continue;
+				}
+				if (argument.startsWith("--enable=") || argument.startsWith("--disable=")) {
+					overrides.push(`features.${argument.slice(argument.indexOf("=") + 1)}`);
+					continue;
+				}
+				if (["--model", "-m"].includes(argument)) {
+					overrides.push("model");
+					index++;
+					continue;
+				}
+				const value =
+					argument === "-c" || argument === "--config"
+						? arguments_[++index]
+						: argument.startsWith("--config=")
+							? argument.slice(9)
+							: argument.startsWith("-c")
+								? argument.slice(2)
+								: undefined;
+				if (value?.includes("=")) {
+					// 运行时的 session-flags 信任只作用于注入的 hook，不是用户 hooks.state 的永久覆盖。
+					if (value.startsWith("hooks.state=") && value.includes("<session-flags>")) continue;
+					overrides.push(value.slice(0, value.indexOf("=")));
+				}
 			}
-			if (argument.startsWith("--enable=") || argument.startsWith("--disable=")) {
-				overrides.push(`features.${argument.slice(argument.indexOf("=") + 1)}`);
-				continue;
-			}
-			if (["--model", "-m"].includes(argument)) {
-				overrides.push("model");
-				index++;
-				continue;
-			}
-			const value =
-				argument === "-c" || argument === "--config"
-					? arguments_[++index]
-					: argument.startsWith("--config=")
-						? argument.slice(9)
-						: argument.startsWith("-c")
-							? argument.slice(2)
-							: undefined;
-			if (value?.includes("=")) {
-				// 运行时的 session-flags 信任只作用于注入的 hook，不是用户 hooks.state 的永久覆盖。
-				if (value.startsWith("hooks.state=") && value.includes("<session-flags>")) continue;
-				overrides.push(value.slice(0, value.indexOf("=")));
-			}
-		}
-		writer.overrideKeyPaths = overrides;
-	});
+			writer.overrideKeyPaths = overrides;
+		}),
+	);
 }
 
 export async function findCodexConfigurationWriterByHome(home: string) {
-	return Object.values((await readCodexConfigurationSyncStore()).writers).find(
-		(writer) => resolve(writer.binding.configurationHomeDirectoryPath) === resolve(home),
+	return Object.values(
+		(await readCodexConfigurationSyncLookupStore({ writerHomePaths: [resolve(home)] })).writers,
+	).find((writer) => resolve(writer.binding.configurationHomeDirectoryPath) === resolve(home));
+}
+
+export async function prepareCodexConfigurationWriterBinding(
+	input: Parameters<typeof prepareCodexConfigurationWriterBindingInternal>[0],
+) {
+	return await runWithCodexConfigurationSyncStoreSelection(
+		{
+			writerIds: input.previousBinding ? [input.previousBinding.writerId] : [],
+			writerHomePaths: [resolve(input.storageHome)],
+		},
+		() => prepareCodexConfigurationWriterBindingInternal(input),
 	);
 }

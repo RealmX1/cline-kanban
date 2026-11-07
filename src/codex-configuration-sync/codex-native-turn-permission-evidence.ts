@@ -1,15 +1,19 @@
-import { open, stat } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import {
 	parseTranscriptJsonRecord,
 	readTranscriptRecord,
 	splitCompleteJsonLines,
 } from "../agent-session-history/bounded-agent-transcript-reader";
+import {
+	openCodexTranscriptReadSource,
+	statCodexTranscriptReadSource,
+} from "../agent-session-history/codex-transcript-read-source";
 import { transcriptMetadataMatchesNativeConversationIdentity } from "../agent-session-history/persisted-agent-transcript-last-conversation-progress-probe";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { type CodexConfigurationFields, configurationFieldAddress } from "./codex-configuration-field-projection";
 
 export interface CodexNativeTurnPermissionTranscriptFingerprint {
+	nativeSessionId: string;
 	dev: number;
 	ino: number;
 	size: number;
@@ -32,7 +36,7 @@ export async function codexNativeTurnPermissionTranscriptFingerprintStillCurrent
 	fingerprint: CodexNativeTurnPermissionTranscriptFingerprint,
 ): Promise<boolean> {
 	try {
-		const current = await stat(transcriptPath);
+		const current = await statCodexTranscriptReadSource(transcriptPath, fingerprint.nativeSessionId);
 		return (
 			current.isFile() &&
 			current.dev === fingerprint.dev &&
@@ -55,9 +59,9 @@ export async function readCodexNativeTurnPermissionEvidence(input: {
 	const path = identity?.transcriptPath;
 	if (input.summary.agentId !== "codex" || identity?.sourceAgentId !== "codex" || !path) return null;
 	try {
-		const before = await stat(path);
+		const before = await statCodexTranscriptReadSource(path, identity.nativeSessionId);
 		if (!before.isFile() || !before.size) return null;
-		const handle = await open(path, "r");
+		const handle = await openCodexTranscriptReadSource(path, identity.nativeSessionId);
 		let headLines: string[], contextLines: string[];
 		try {
 			const maximumReadBytes = 2 * 1024 * 1024;
@@ -105,7 +109,7 @@ export async function readCodexNativeTurnPermissionEvidence(input: {
 				contextAtMs = typeof record.timestamp === "string" ? Date.parse(record.timestamp) : 0;
 			}
 		}
-		const after = await stat(path);
+		const after = await statCodexTranscriptReadSource(path, identity.nativeSessionId);
 		if (
 			!context ||
 			!Number.isFinite(contextAtMs) ||
@@ -145,6 +149,7 @@ export async function readCodexNativeTurnPermissionEvidence(input: {
 		};
 		// 发布时用这次读取结束的文件身份判断转录是否又追加了更新的回合，避免旧证据覆盖新权限。
 		transcriptFingerprintByEvidence.set(evidence, {
+			nativeSessionId: identity.nativeSessionId,
 			dev: after.dev,
 			ino: after.ino,
 			size: after.size,

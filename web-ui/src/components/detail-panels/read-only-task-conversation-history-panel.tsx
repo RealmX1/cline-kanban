@@ -1,5 +1,5 @@
 import { useLayoutEffect, useRef } from "react";
-import { ClineChatMessageItem } from "@/components/detail-panels/cline-chat-message-item";
+import { AgentConversationChatMessageItem } from "@/components/detail-panels/agent-conversation-chat-message-item";
 import { Button } from "@/components/ui/button";
 import { useTaskConversationHistory } from "@/hooks/use-task-conversation-history";
 
@@ -99,7 +99,7 @@ export function ReadOnlyTaskConversationHistoryPanel({
 								</pre>
 							</details>
 						) : (
-							<ClineChatMessageItem message={message} />
+							<AgentConversationChatMessageItem message={message} />
 						)}
 					</div>
 				))}

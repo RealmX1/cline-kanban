@@ -247,4 +247,24 @@ describe("late-delivered hook events (hook ingest × real TerminalSessionManager
 		expect(manager.hasAppliedHookEventDeliveryIdempotencyKey(TASK_ID, "delivery-8")).toBe(true);
 		expect(manager.hasAppliedHookEventDeliveryIdempotencyKey(TASK_ID, "delivery-7")).toBe(false);
 	});
+	it("机器重启后的旧代完成事件只补历史，不启动 agent 或重置历史时间", () => {
+		const running = manager.getSummary(TASK_ID);
+		if (!running?.runtimeSessionIncarnationId || typeof running.agentResponseGenerationTurnSequence !== "number")
+			throw new Error("缺少原代与回合的运行会话夹具。");
+		const restarted = new TerminalSessionManager();
+		restarted.hydrateFromRecord({ [TASK_ID]: running });
+		const spawnCount = ptySessionSpawnMock.mock.calls.length;
+		const stoppedAt = RUNTIME_ABSENT_STARTED_AT_EPOCH_MS + 1_000;
+		vi.setSystemTime(RUNTIME_ABSENT_STARTED_AT_EPOCH_MS + TWO_HOURS_MS);
+		const recovered = restarted.recordRecoveredHistoricalHookReviewLifecycleEvent(TASK_ID, {
+			runtimeSessionIncarnationId: running.runtimeSessionIncarnationId,
+			agentTurnSequence: running.agentResponseGenerationTurnSequence,
+			capturedAtEpochMs: stoppedAt,
+			deliveryIdempotencyKey: "durable-stop-before-machine-restart",
+		});
+		expect(recovered).toMatchObject({ turnOwner: "user", liveness: "exited", userTurnKind: "review", pid: null });
+		expect(recovered?.lastAgentConversationUserHandoffObservation?.observedAtMs).toBe(stoppedAt);
+		expect(recovered?.currentAgentProcessUserTurnIdleRetentionStarted).toBeNull();
+		expect(ptySessionSpawnMock).toHaveBeenCalledTimes(spawnCount);
+	});
 });

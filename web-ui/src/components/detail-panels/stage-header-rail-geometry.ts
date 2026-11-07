@@ -10,9 +10,9 @@
  */
 
 /** stage 卡头槽高（与 `ColumnSection` / rail 条目卡头内联 `height` 一致）。 */
-export const STAGE_HEADER_HEIGHT_PX = 40;
-/** rail 条目间距（复刻 scrollport 的 `gap-2` = 8px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
-export const STAGE_RAIL_GAP_PX = 8;
+export const STAGE_HEADER_HEIGHT_PX = 32;
+/** rail 条目间距（复刻 scrollport 的 `gap-1` = 4px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
+export const STAGE_RAIL_GAP_PX = 4;
 /**
  * 每个 rail 条目外框 `border border-border` 的上下边框之和（1px 上 + 1px 下）。渲染侧 `StageHeaderRailEntry`
  * 的外层 `<div className="bg-surface-1 rounded-lg border border-border">` 使条目真实高度比卡头槽高多这 2px；
@@ -20,15 +20,36 @@ export const STAGE_RAIL_GAP_PX = 8;
  */
 export const STAGE_SECTION_BORDER_PX = 2;
 /**
- * 焦点条目在焦点卡克隆外层 `<div style={{ padding: 8 }}>` 的上下 padding 之和（8px 上 + 8px 下）。仅焦点条目
+ * 焦点卡克隆外层 `pt-3 pb-2` 的上下 padding 之和（12px 上 + 8px 下），顶部避让悬停操作组。仅焦点条目
  * （`withCard`）挂此包裹层；`focusedCardHeight` 取真实卡 border box（`getBoundingClientRect().height` 不含其
  * `marginBottom: 6`，与 rail 内 sticky 卡头副本的 `marginBottom: 0` 一致），故焦点条目真实高
- * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 16px 会使焦点条目严重低估、吞掉相邻随流卡头。
+ * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 20px 会使焦点条目严重低估、吞掉相邻随流卡头。
  */
-export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 16;
+export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 20;
 
 /** 一个不含焦点卡克隆的普通 rail 条目所占的纵向空间（条目自身高 + 其下的堆叠间距）。 */
 const PLAIN_STAGE_RAIL_ENTRY_STRIDE_PX = STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX + STAGE_RAIL_GAP_PX;
+
+/** 完整副本的内容限高；预留全部可导航标题，避免分类结果反过来改变测量预算。 */
+export function computeFocusedCardRailContentMaximumHeight(
+	scrollViewportHeight: number,
+	navigableGroupCount: number,
+): number {
+	return Math.max(
+		0,
+		scrollViewportHeight -
+			navigableGroupCount * PLAIN_STAGE_RAIL_ENTRY_STRIDE_PX -
+			STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
+	);
+}
+
+/** 焦点卡仍在视口内但已进入不透明标题 rail 时，同样需要副本。 */
+export function isFocusedCardOccludedByTopRail(
+	focusedCardTopRelativeToScrollRoot: number,
+	topRailHeight: number,
+): boolean {
+	return topRailHeight > 0 && focusedCardTopRelativeToScrollRoot <= topRailHeight;
+}
 
 export interface StageJumpTargetRailGeometryInput {
 	/** 目标 stage 在文档序中的下标。 */
@@ -49,17 +70,9 @@ export interface StageJumpTargetRailGeometryInput {
  * 与 `use-stage-header-pin-layout.ts` 前向 pass 的 `topOffset` 累加同构：目标之前的每个 stage 都会因
  * 「section 上沿已滚到 rail 增长下沿之上」而钉顶，各占一个条目高 + 一段间距。
  *
- * **焦点卡克隆项不是确定的**，这是本函数唯一需要推理的部分：跳转落点上，目标之前那些 section 的下沿
- * 落在 `rootTop + R − gap`，即**仍在视口内、只是被不透明 rail 遮住**；而 `useSelectedCardPinState` 按
- * `cardRect.top <= rootRect.top` 判定，被 rail 遮住的焦点卡返回 `"hidden"` 而非 `"pinTop"` → 焦点条目
- * **不挂克隆**。若一律按「焦点 stage 在目标之上就必有克隆」预留，会多算约 90–110px。
- *
- * 解法（单次求值、可证安全）：先以「无克隆」的较小 `R` 试算焦点卡跳转后的位置。跳转后整页位移
- * `delta = (rootTop + R) − targetSectionTop`，故 `predictedCardTop = focusedCardTop + delta`，钉顶判据
- * `predictedCardTop <= rootTop` 化简为 `(focusedCardTop − targetSectionTop) + R <= 0`。
- * 因 `R` 增大只会把焦点卡推得更低、更不可能钉顶，所以试算判定「不钉顶」⇒ 任何更大的 `R` 也不钉顶
- * ⇒ 确定无克隆；否则（含临界）一律按有克隆的较大值预留——宁可在 rail 下方多留一段空隙，
- * 也绝不把目标塞回不透明 rail 之后。
+ * 先按无副本的落点预测焦点卡位置，再复用分类器的标题遮挡判据（包括目标标题本身）。
+ * 焦点卡进入普通标题 rail 时就预留完整副本；只试算一次，避免副本把源卡推低后的反馈循环。
+ * 即使最终无需副本，也只会多留空隙，不会把目标首行塞回不透明 rail 之后。
  */
 export function computeTopRailHeightAboveStageJumpTarget({
 	targetStageIndex,
@@ -76,9 +89,14 @@ export function computeTopRailHeightAboveStageJumpTarget({
 	if (focusedStageIndex < 0 || focusedStageIndex >= targetStageIndex) {
 		return plainTopRailHeightAboveTarget;
 	}
-	const focusedCardWouldStayBelowViewportTopAfterJump =
-		focusedCardViewportTop - targetSectionViewportTop + plainTopRailHeightAboveTarget > 0;
-	if (focusedCardWouldStayBelowViewportTopAfterJump) {
+	const predictedFocusedCardTopRelativeToScrollRoot =
+		focusedCardViewportTop - targetSectionViewportTop + plainTopRailHeightAboveTarget;
+	if (
+		!isFocusedCardOccludedByTopRail(
+			predictedFocusedCardTopRelativeToScrollRoot,
+			plainTopRailHeightAboveTarget + STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX,
+		)
+	) {
 		return plainTopRailHeightAboveTarget;
 	}
 	return plainTopRailHeightAboveTarget + STAGE_RAIL_FOCUSED_CARD_PADDING_PX + focusedCardHeight;

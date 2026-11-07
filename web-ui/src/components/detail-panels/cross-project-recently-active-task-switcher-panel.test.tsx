@@ -221,6 +221,14 @@ function section(name: string): HTMLElement {
 	return element;
 }
 
+function recentFilterPanel(): HTMLElement {
+	if (!document.querySelector('[role="dialog"][aria-label="Recent 筛选与排序"]'))
+		act(() =>
+			section("remaining").querySelector<HTMLButtonElement>('button[aria-label^="Recent 筛选与排序"]')!.click(),
+		);
+	return document.querySelector<HTMLElement>('[role="dialog"][aria-label="Recent 筛选与排序"]')!;
+}
+
 function rowInPlaceExpansionState(row: HTMLElement | null | undefined): string | undefined {
 	return row?.dataset.crossProjectTaskSwitcherRowInPlaceExpansionState;
 }
@@ -340,6 +348,22 @@ function rowTaskIds(sectionElement: HTMLElement): string[] {
 }
 
 describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
+	it("缩略项目名和整行按钮各打开一次，工具按钮不误触打开", () => {
+		readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
+		const host = makeHost();
+		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const row = section("remaining").querySelector('[data-cross-project-task-switcher-task-id="recent"]')!;
+		const projectName = row.querySelector<HTMLElement>("[data-task-card-project-metadata-group] span[tabindex]")!;
+		act(() => projectName.click());
+		expect(host.onOpenTaskInProject).toHaveBeenCalledExactlyOnceWith("project-b", "recent");
+		act(() =>
+			row.querySelector<HTMLButtonElement>("[data-cross-project-task-switcher-compact-row-open-task]")!.click(),
+		);
+		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
+		act(() => row.querySelector<HTMLButtonElement>('[aria-label="Keep expanded in list"]')!.click());
+		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
+	});
+
 	it.each(["加载中", "已加载"])(
 		"启动准备在标题下显示，三态保留等待状态且真实会话接管后去重：%s",
 		async (snapshotState) => {
@@ -391,7 +415,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			};
 			renderEntries("starting_agent");
 			const running = section("running");
-			expect(running?.textContent).toContain("1 运行中 · 1 正在启动");
+			expect(running?.textContent).toContain("2 · 启动 1");
 			expect(
 				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]')
 					?.textContent,
@@ -429,7 +453,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			renderEntries("waiting_for_dependency");
 			expect(running?.textContent).toContain("启动等待恢复");
 			renderEntries("starting_agent", true);
-			expect(running?.textContent).toContain("2 运行中");
+			expect(running?.textContent).toContain("Running2");
 			expect(
 				running?.querySelector('[data-verification-anchor="task-editor-creation-agent-startup:start"]'),
 			).toBeNull();
@@ -508,7 +532,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
 		expect(container.querySelector('[data-testid="cross-project-task-switcher-section-backlog"]')).toBeNull();
-		const filters = section("remaining").querySelector('[aria-label="Filter recent tasks by stage"]');
+		const filters = recentFilterPanel().querySelector('[aria-label="Filter recent tasks by stage"]');
 		const filterButton = (label: string) =>
 			[...(filters?.querySelectorAll("button") ?? [])].find((button) => button.textContent === label);
 		expect(filterButton("In progress / Review")?.getAttribute("aria-pressed")).toBe("true");
@@ -548,7 +572,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		act(() =>
 			root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost({ focusedTaskInProject: null })} />),
 		);
-		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="Collapse ${title}"]`);
+		const toggle = section(sectionName).querySelector<HTMLButtonElement>(`button[aria-label="收起 ${title}"]`);
 		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
 		act(() => toggle?.click());
 		expect(rowTaskIds(section(sectionName))).toEqual([]);
@@ -607,16 +631,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			focusedTaskInProject: { workspaceId: "project-a", taskId: "focused-backlog" },
 		});
 		renderFocusedTask("focused-backlog", "backlog", host);
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
-		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="Collapse Recent"]')?.click());
+		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="收起 Recent"]')?.click());
 		expect(section("remaining").querySelector('button[aria-expanded="false"]')).not.toBeNull();
 		expect(rowTaskIds(section("remaining"))).toEqual(["focused-backlog"]);
 		expect(
@@ -1017,16 +1038,16 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		const gitMetadataOf = (taskId: string) =>
 			container.querySelector<HTMLElement>(
-				`[data-cross-project-task-switcher-section="remaining"][data-cross-project-task-switcher-task-id="${taskId}"] [data-cross-project-task-switcher-row-worktree-git-metadata]`,
+				`[data-cross-project-task-switcher-section="remaining"][data-cross-project-task-switcher-task-id="${taskId}"] [data-task-directory]`,
 			) ??
 			container.querySelector<HTMLElement>(
-				`[data-cross-project-task-switcher-section="prompt_cache_warm"][data-cross-project-task-switcher-task-id="${taskId}"] [data-cross-project-task-switcher-row-worktree-git-metadata]`,
+				`[data-cross-project-task-switcher-section="prompt_cache_warm"][data-cross-project-task-switcher-task-id="${taskId}"] [data-task-directory]`,
 			);
 		const otherProjectGitMetadata = gitMetadataOf("recent");
 		expect(otherProjectGitMetadata?.textContent).toContain("(3 files +5 -2)");
-		expect(otherProjectGitMetadata?.getAttribute("title")).toContain("2 commits ahead of develop");
+		expect(otherProjectGitMetadata?.getAttribute("aria-label")).toContain("2 commits ahead of develop");
 		const currentProjectGitMetadata = gitMetadataOf("warm");
-		expect(currentProjectGitMetadata?.getAttribute("title")).toContain("4 commits ahead of base branch");
+		expect(currentProjectGitMetadata?.getAttribute("aria-label")).toContain("4 commits ahead of base branch");
 		expect(currentProjectGitMetadata?.textContent).not.toContain("files");
 		expect(gitMetadataOf("backlog-task")).toBeNull();
 	});
@@ -1296,12 +1317,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			onOpenBacklogTaskEditorInProject: vi.fn(),
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
@@ -1899,12 +1917,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(host.onOpenTaskInProject).toHaveBeenLastCalledWith("project-b", "done-pinned");
 
 		// Backlog：原地打开编辑框（与点精简行同一条路径，不是卡体自己的编辑回调）。
+		const recentFilters = recentFilterPanel();
 		act(() =>
-			[
-				...section("remaining").querySelectorAll<HTMLButtonElement>(
-					'[aria-label="Filter recent tasks by stage"] button',
-				),
-			]
+			[...recentFilters.querySelectorAll<HTMLButtonElement>('[aria-label="Filter recent tasks by stage"] button')]
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);

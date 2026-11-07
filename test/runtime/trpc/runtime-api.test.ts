@@ -40,42 +40,6 @@ const turnCheckpointMocks = vi.hoisted(() => ({
 	captureTaskTurnCheckpoint: vi.fn(),
 }));
 
-const oauthMocks = vi.hoisted(() => ({
-	addLocalProvider: vi.fn(),
-	ensureCustomProvidersLoaded: vi.fn(),
-	getValidClineCredentials: vi.fn(),
-	getValidOcaCredentials: vi.fn(),
-	getValidOpenAICodexCredentials: vi.fn(),
-	loginClineOAuth: vi.fn(),
-	loginOcaOAuth: vi.fn(),
-	loginOpenAICodex: vi.fn(),
-	resolveDefaultMcpSettingsPath: vi.fn(),
-	resolveClineDataDir: vi.fn(() => "/tmp/cline"),
-	loadMcpSettingsFile: vi.fn(),
-	saveProviderSettings: vi.fn(),
-	getProviderSettings: vi.fn(),
-	getLastUsedProviderSettings: vi.fn(),
-}));
-
-const llmsModelMocks = vi.hoisted(() => ({
-	getAllProviders: vi.fn(),
-	getModelsForProvider: vi.fn(),
-	resolveProviderConfig: vi.fn(),
-	resolveProviderModelCatalogKeys: vi.fn(),
-}));
-
-const localProviderMocks = vi.hoisted(() => ({
-	getLocalProviderModels: vi.fn(),
-}));
-
-const clineAccountMocks = vi.hoisted(() => ({
-	fetchMe: vi.fn(),
-	fetchRemoteConfig: vi.fn(),
-	fetchOrganization: vi.fn(),
-	fetchFeaturebaseToken: vi.fn(),
-	constructedOptions: [] as Array<{ apiBaseUrl: string; getAuthToken: () => Promise<string | undefined | null> }>,
-}));
-
 const browserMocks = vi.hoisted(() => ({
 	openInBrowser: vi.fn(),
 }));
@@ -107,58 +71,6 @@ vi.mock("../../../src/workspace/task-worktree.js", () => ({
 
 vi.mock("../../../src/workspace/turn-checkpoints.js", () => ({
 	captureTaskTurnCheckpoint: turnCheckpointMocks.captureTaskTurnCheckpoint,
-}));
-
-vi.mock("@clinebot/core", () => ({
-	addLocalProvider: oauthMocks.addLocalProvider,
-	ensureCustomProvidersLoaded: oauthMocks.ensureCustomProvidersLoaded,
-	getLocalProviderModels: localProviderMocks.getLocalProviderModels,
-	getValidClineCredentials: oauthMocks.getValidClineCredentials,
-	getValidOcaCredentials: oauthMocks.getValidOcaCredentials,
-	getValidOpenAICodexCredentials: oauthMocks.getValidOpenAICodexCredentials,
-	loginClineOAuth: oauthMocks.loginClineOAuth,
-	loginOcaOAuth: oauthMocks.loginOcaOAuth,
-	loginOpenAICodex: oauthMocks.loginOpenAICodex,
-	resolveDefaultMcpSettingsPath: oauthMocks.resolveDefaultMcpSettingsPath,
-	resolveClineDataDir: oauthMocks.resolveClineDataDir,
-	loadMcpSettingsFile: oauthMocks.loadMcpSettingsFile,
-	resolveProviderConfig: llmsModelMocks.resolveProviderConfig,
-	ClineAccountService: class {
-		constructor(options: { apiBaseUrl: string; getAuthToken: () => Promise<string | undefined | null> }) {
-			clineAccountMocks.constructedOptions.push(options);
-		}
-		fetchMe = clineAccountMocks.fetchMe;
-		fetchRemoteConfig = clineAccountMocks.fetchRemoteConfig;
-		fetchOrganization = clineAccountMocks.fetchOrganization;
-		fetchFeaturebaseToken = clineAccountMocks.fetchFeaturebaseToken;
-	},
-	ProviderSettingsManager: class {
-		saveProviderSettings = oauthMocks.saveProviderSettings;
-		getProviderSettings = oauthMocks.getProviderSettings;
-		getLastUsedProviderSettings = oauthMocks.getLastUsedProviderSettings;
-		getProviderConfig = vi.fn((providerId: string) => {
-			const settings = oauthMocks.getProviderSettings(providerId);
-			if (!settings) {
-				return undefined;
-			}
-			return {
-				providerId: settings.provider,
-				apiKey: settings.apiKey,
-				modelId: settings.model,
-				baseUrl: settings.baseUrl,
-			};
-		});
-	},
-	Llms: {
-		getAllProviders: llmsModelMocks.getAllProviders,
-		getModelsForProvider: llmsModelMocks.getModelsForProvider,
-		resolveProviderModelCatalogKeys: llmsModelMocks.resolveProviderModelCatalogKeys,
-	},
-	LlmsModels: {
-		CLINE_DEFAULT_MODEL: "anthropic/claude-sonnet-4.6",
-		getAllProviders: llmsModelMocks.getAllProviders,
-		getModelsForProvider: llmsModelMocks.getModelsForProvider,
-	},
 }));
 
 vi.mock("../../../src/server/browser.js", () => ({
@@ -339,62 +251,56 @@ function createCollaborationSummary(overrides: Partial<RuntimeTaskSessionSummary
 	});
 }
 
-function setSelectedProviderSettings(
-	settings: {
-		provider: string;
-		model?: string;
-		baseUrl?: string;
-		apiKey?: string;
-		reasoning?: {
-			effort?: "low" | "medium" | "high" | "xhigh";
-		};
-		auth?: {
-			accessToken?: string;
-			refreshToken?: string;
-			accountId?: string;
-			expiresAt?: number;
-		};
-	} | null,
-): void {
-	oauthMocks.getLastUsedProviderSettings.mockReturnValue(settings ?? undefined);
-	oauthMocks.getProviderSettings.mockImplementation((providerId: string) =>
-		settings && settings.provider === providerId ? settings : undefined,
-	);
-}
-
-function restoreEnvVar(name: "CLINE_API_KEY" | "OCA_API_KEY" | "CODEX_HOME", value: string | undefined): void {
-	if (value === undefined) {
-		delete process.env[name];
-		return;
-	}
-	process.env[name] = value;
-}
-
-function createClineTaskSessionServiceMock() {
-	return {
-		startTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary>>(async () =>
-			createSummary({ agentId: "cline", pid: null }),
-		),
-		onMessage: vi.fn<(...args: unknown[]) => () => void>(() => () => {}),
-		stopTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		abortTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		cancelTaskTurn: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		sendTaskSessionInput: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		clearTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		reloadTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(async () => null),
-		rebindPersistedTaskSession: vi.fn<(...args: unknown[]) => Promise<RuntimeTaskSessionSummary | null>>(
-			async () => null,
-		),
-		getSummary: vi.fn<(...args: unknown[]) => RuntimeTaskSessionSummary | null>(() => null),
-		listSummaries: vi.fn<(...args: unknown[]) => RuntimeTaskSessionSummary[]>(() => []),
-		listMessages: vi.fn<(...args: unknown[]) => unknown[]>(() => []),
-		loadTaskSessionMessages: vi.fn<(...args: unknown[]) => Promise<unknown[]>>(async () => []),
-		applyTurnCheckpoint: vi.fn<(...args: unknown[]) => RuntimeTaskSessionSummary | null>(() => null),
-		dispose: vi.fn<(...args: unknown[]) => Promise<void>>(async () => {}),
-	};
-}
-
-describe("createRuntimeApi startTaskSession", () => {
+// 从退役前基线迁回仍适用于 PTY/ACP 的安全与恢复回归，移除 SDK 专属夹具。
+describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
+	beforeEach(() => {
+		agentRegistryMocks.resolveAgentCommand.mockReset();
+		persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory.mockClear();
+		persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId.mockClear();
+		taskWorktreeMocks.resolveTaskCwd.mockReset();
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
+		taskClosureLockMocks.withTaskClosureLifecycleLocks.mockReset();
+		taskClosureLockMocks.withTaskClosureLifecycleLocks.mockImplementation(
+			async (_workspaceId, _ids, action) => await action(),
+		);
+		workspaceStateMocks.loadPersistedConversationSessions.mockReset();
+		workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue({});
+		workspaceStateMocks.mutateWorkspaceState.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [
+				{
+					id: "review",
+					cards: [
+						{
+							id: "task-1",
+							title: "Task 1",
+							prompt: "Implement task",
+							startInPlanMode: false,
+							autoReviewEnabled: false,
+							autoReviewMode: "commit",
+							baseRef: "main",
+							createdAt: 1,
+							updatedAt: 1,
+						},
+					],
+				},
+			],
+		});
+		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
+			agentId: "claude",
+			label: "Claude Code",
+			command: "claude",
+			binary: "claude",
+			args: [],
+		});
+		turnCheckpointMocks.captureTaskTurnCheckpoint.mockResolvedValue({
+			turn: 1,
+			ref: "refs/kanban/checkpoints/task-1/turn/1",
+			commit: "1111111",
+			createdAt: Date.now(),
+		});
+	});
 	it("自动恢复动作按 workspace、会话与当前 episode 投递，不把过期动作冒充成功", async () => {
 		const actOnAutomaticFailureContinuation = vi.fn(
 			async (_taskId: string, episodeId: string) => episodeId === "current",
@@ -405,7 +311,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager,
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -427,213 +332,19 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(getScopedTerminalManager).toHaveBeenCalledWith(scope);
 		expect(actOnAutomaticFailureContinuation).toHaveBeenLastCalledWith("conversation", "current", "retry_now");
 	});
-	const originalClineApiKey = process.env.CLINE_API_KEY;
-	const originalOcaApiKey = process.env.OCA_API_KEY;
-	const originalClineMcpSettingsPath = process.env.CLINE_MCP_SETTINGS_PATH;
-	const originalClineMcpOauthSettingsPath = process.env.CLINE_MCP_OAUTH_SETTINGS_PATH;
-	let mcpSettingsPath = "";
-	let mcpOauthSettingsPath = "";
 
-	beforeEach(() => {
-		mcpSettingsPath = `/tmp/kanban-mcp-settings-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
-		mcpOauthSettingsPath = `/tmp/kanban-mcp-oauth-settings-${Date.now()}-${Math.random().toString(16).slice(2)}.json`;
-		process.env.CLINE_MCP_SETTINGS_PATH = mcpSettingsPath;
-		process.env.CLINE_MCP_OAUTH_SETTINGS_PATH = mcpOauthSettingsPath;
-		agentRegistryMocks.resolveAgentCommand.mockReset();
-		agentRegistryMocks.buildRuntimeConfigResponse.mockReset();
-		taskWorktreeMocks.resolveTaskCwd.mockReset();
-		turnCheckpointMocks.captureTaskTurnCheckpoint.mockReset();
-		taskClosureLockMocks.withTaskClosureLifecycleLocks.mockClear();
-		oauthMocks.addLocalProvider.mockReset();
-		oauthMocks.ensureCustomProvidersLoaded.mockReset();
-		oauthMocks.loginClineOAuth.mockReset();
-		oauthMocks.loginOcaOAuth.mockReset();
-		oauthMocks.loginOpenAICodex.mockReset();
-		oauthMocks.getValidClineCredentials.mockReset();
-		oauthMocks.getValidOcaCredentials.mockReset();
-		oauthMocks.getValidOpenAICodexCredentials.mockReset();
-		oauthMocks.resolveDefaultMcpSettingsPath.mockReset();
-		oauthMocks.loadMcpSettingsFile.mockReset();
-		oauthMocks.saveProviderSettings.mockReset();
-		oauthMocks.getProviderSettings.mockReset();
-		oauthMocks.getLastUsedProviderSettings.mockReset();
-		clineAccountMocks.fetchMe.mockReset();
-		clineAccountMocks.fetchRemoteConfig.mockReset();
-		clineAccountMocks.constructedOptions.length = 0;
-		localProviderMocks.getLocalProviderModels.mockReset();
-		llmsModelMocks.getAllProviders.mockReset();
-		llmsModelMocks.getModelsForProvider.mockReset();
-		llmsModelMocks.resolveProviderConfig.mockReset();
-		llmsModelMocks.resolveProviderModelCatalogKeys.mockReset();
-		browserMocks.openInBrowser.mockReset();
-		persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory.mockClear();
-		persistedAgentTranscriptModelProbeMocks.probeByAgentNativeConversationSessionId.mockClear();
-		workspaceStateMocks.loadWorkspaceBoardById.mockReset();
-		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
-			columns: [
-				{ id: "backlog", title: "Backlog", cards: [] },
-				{ id: "in_progress", title: "In Progress", cards: [] },
-				{
-					id: "review",
-					title: "Review",
-					cards: [
-						{
-							id: "task-1",
-							title: "Task 1",
-							prompt: "Implement task",
-							startInPlanMode: false,
-							autoReviewEnabled: false,
-							autoReviewMode: "commit",
-							baseRef: "main",
-							createdAt: 1,
-							updatedAt: 1,
-						},
-					],
-				},
-				{ id: "trash", title: "Done", cards: [] },
-			],
-		});
-
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
-			agentId: "claude",
-			label: "Claude Code",
-			command: "claude",
-			binary: "claude",
-			args: [],
-		});
-		turnCheckpointMocks.captureTaskTurnCheckpoint.mockResolvedValue({
-			turn: 1,
-			ref: "refs/kanban/checkpoints/task-1/turn/1",
-			commit: "1111111",
-			createdAt: Date.now(),
-		});
-		oauthMocks.loginClineOAuth.mockResolvedValue({
-			access: "oauth-access",
-			refresh: "oauth-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "acct-1",
-		});
-		oauthMocks.loginOcaOAuth.mockResolvedValue({
-			access: "oca-access",
-			refresh: "oca-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "oca-acct",
-		});
-		oauthMocks.loginOpenAICodex.mockResolvedValue({
-			access: "codex-access",
-			refresh: "codex-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "codex-acct",
-		});
-		oauthMocks.getValidClineCredentials.mockResolvedValue({
-			access: "oauth-access",
-			refresh: "oauth-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "acct-1",
-		});
-		oauthMocks.getValidOcaCredentials.mockResolvedValue({
-			access: "oca-access",
-			refresh: "oca-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "oca-acct",
-		});
-		oauthMocks.getValidOpenAICodexCredentials.mockResolvedValue({
-			access: "codex-access",
-			refresh: "codex-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "codex-acct",
-		});
-		oauthMocks.addLocalProvider.mockResolvedValue({
-			providerId: "custom-provider",
-			settingsPath: "/tmp/providers.json",
-			modelsPath: "/tmp/models.json",
-			modelsCount: 1,
-		});
-		oauthMocks.ensureCustomProvidersLoaded.mockResolvedValue(undefined);
-		llmsModelMocks.getAllProviders.mockResolvedValue([]);
-		llmsModelMocks.getModelsForProvider.mockResolvedValue({});
-		llmsModelMocks.resolveProviderConfig.mockResolvedValue(undefined);
-		llmsModelMocks.resolveProviderModelCatalogKeys.mockImplementation((providerId: string) =>
-			providerId === "cline" ? ["openrouter", "cline"] : [providerId],
-		);
-		oauthMocks.resolveDefaultMcpSettingsPath.mockReturnValue(mcpSettingsPath);
-		oauthMocks.loadMcpSettingsFile.mockReturnValue({
-			mcpServers: {},
-		});
-		clineAccountMocks.fetchMe.mockResolvedValue({
-			id: "acct-1",
-			email: "saoud@example.com",
-			displayName: "Saoud",
-		});
-		clineAccountMocks.fetchRemoteConfig.mockResolvedValue({
-			organizationId: "org-1",
-			enabled: true,
-			value: JSON.stringify({
-				kanbanEnabled: true,
-			}),
-		});
-		setSelectedProviderSettings(null);
-		llmsModelMocks.getAllProviders.mockResolvedValue([
-			{
-				id: "cline",
-				name: "Cline",
-				defaultModelId: "claude-sonnet-4-6",
-				capabilities: ["oauth"],
-			},
-			{
-				id: "anthropic",
-				name: "Anthropic",
-				defaultModelId: "claude-sonnet-4-6",
-				capabilities: ["tools"],
-			},
-		]);
-		llmsModelMocks.getModelsForProvider.mockImplementation(async (providerId: string) => {
-			if (providerId !== "cline") {
-				return {};
-			}
-			return {
-				"claude-sonnet-4-6": {
-					id: "claude-sonnet-4-6",
-					name: "Claude Sonnet 4.6",
-					capabilities: ["images", "files"],
-				},
-			};
-		});
-	});
-
-	afterEach(() => {
-		restoreEnvVar("CLINE_API_KEY", originalClineApiKey);
-		restoreEnvVar("OCA_API_KEY", originalOcaApiKey);
-		if (originalClineMcpSettingsPath === undefined) {
-			delete process.env.CLINE_MCP_SETTINGS_PATH;
-		} else {
-			process.env.CLINE_MCP_SETTINGS_PATH = originalClineMcpSettingsPath;
-		}
-		if (originalClineMcpOauthSettingsPath === undefined) {
-			delete process.env.CLINE_MCP_OAUTH_SETTINGS_PATH;
-		} else {
-			process.env.CLINE_MCP_OAUTH_SETTINGS_PATH = originalClineMcpOauthSettingsPath;
-		}
-		rmSync(mcpSettingsPath, { force: true });
-		rmSync(`${mcpSettingsPath}.lock`, { force: true });
-		rmSync(mcpOauthSettingsPath, { force: true });
-		rmSync(`${mcpOauthSettingsPath}.lock`, { force: true });
-	});
-
-	it("reuses an existing worktree path before falling back to ensure", async () => {
+	it("优先复用既有工作树路径，再尝试创建", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 
 		const terminalManager = {
 			startTaskSession: vi.fn(async () => createSummary()),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -679,7 +390,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -720,7 +430,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -756,7 +465,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -786,13 +494,11 @@ describe("createRuntimeApi startTaskSession", () => {
 				startTaskSession: vi.fn(async () => createSummary()),
 				applyTurnCheckpoint: vi.fn(),
 			};
-			const clineTaskSessionService = createClineTaskSessionServiceMock();
 			const api = createTestRuntimeApi({
 				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -817,56 +523,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			);
 		});
 
-		it("Cline 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
-			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-			agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-			setSelectedProviderSettings({
-				provider: "anthropic",
-				model: "claude-sonnet-4-6",
-				apiKey: "anthropic-api-key",
-			});
-
-			const terminalManager = {
-				startTaskSession: vi.fn(async () => createSummary()),
-				applyTurnCheckpoint: vi.fn(),
-			};
-			const clineTaskSessionService = createClineTaskSessionServiceMock();
-			clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-			const api = createTestRuntimeApi({
-				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-				loadScopedRuntimeConfig: vi.fn(async () => {
-					const runtimeConfigState = createRuntimeConfigState();
-					runtimeConfigState.selectedAgentId = "cline";
-					return runtimeConfigState;
-				}),
-				setActiveRuntimeConfig: vi.fn(),
-				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-				resolveInteractiveShellCommand: vi.fn(),
-				runCommand: vi.fn(),
-			});
-
-			const response = await api.startTaskSession(
-				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-				{
-					taskId: "task-1",
-					baseRef: "main",
-					prompt: "Map the exploration space",
-					taskConversationMode: "exploratory",
-				},
-			);
-
-			expect(response.ok).toBe(true);
-			expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-				expect.objectContaining({
-					taskId: "task-1",
-					taskConversationMode: "exploratory",
-				}),
-			);
-			expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
-		});
-
 		it("ACP 分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {
 			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 			const acpSummary = createSummary({
@@ -889,14 +545,12 @@ describe("createRuntimeApi startTaskSession", () => {
 				startTaskSession: vi.fn(async () => createSummary()),
 				applyTurnCheckpoint: vi.fn(),
 			};
-			const clineTaskSessionService = createClineTaskSessionServiceMock();
 
 			const api = createTestRuntimeApi({
 				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 				getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
@@ -955,7 +609,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -1042,7 +695,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -1141,7 +793,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
 				getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -1188,6 +839,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		"探针期间原生身份变化",
 		"交接后的当前主会话",
 	] as const;
+
 	it.each(taskCollaboratorMainContextForkMainSessionBindingAndNativeIdentityValidationScenarioNames)(
 		"协作 fork：%s",
 		async (scenario) => {
@@ -1257,7 +909,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					return createRuntimeConfigState();
 				}),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -1395,7 +1046,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager),
 				getScopedAcpTaskSessionService: vi.fn(async () => acpService),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -1836,7 +1486,8 @@ describe("createRuntimeApi startTaskSession", () => {
 						expect.objectContaining({ cwd: "/tmp/repo", taskId: "task-1" }),
 					);
 				} finally {
-					restoreEnvVar("CODEX_HOME", originalCodexHome);
+					if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
+					else process.env.CODEX_HOME = originalCodexHome;
 					if (isolatedCodexHome) rmSync(isolatedCodexHome, { recursive: true, force: true });
 					terminalManager.markInterruptedAndStopAll();
 					startAcp.mockRestore();
@@ -1880,14 +1531,12 @@ describe("createRuntimeApi startTaskSession", () => {
 			listMessages: vi.fn(() => []),
 		};
 		const terminalManager = { getSummary: vi.fn(() => persisted), listSummaries: vi.fn(() => [persisted]) };
-		const clineService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -1919,7 +1568,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			undefined,
 			expect.any(Function),
 		);
-		expect(clineService.startTaskSession).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
@@ -1943,7 +1591,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
 				getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -1970,20 +1617,18 @@ describe("createRuntimeApi startTaskSession", () => {
 		},
 	);
 
-	it("starts a By the way runtime session in the main task workspace without creating a turn checkpoint", async () => {
+	it("旁问会话使用主任务目录且不创建回合检查点", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {
 			getSummary: vi.fn(() => null),
 			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-1" })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -2024,7 +1669,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
-	// cf427：浏览器乐观建卡后立刻启动，卡片却可能永远落不了盘，agent 就成了没有卡片的孤儿会话。
 	describe("宿主卡未落盘时拒绝启动卡片会话", () => {
 		function createRuntimeApiWithTerminalManagerSpy() {
 			const terminalManager = {
@@ -2038,7 +1682,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -2129,7 +1772,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 					setActiveRuntimeConfig: vi.fn(),
 					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 					resolveInteractiveShellCommand: vi.fn(),
 					runCommand: vi.fn(),
 				});
@@ -2151,54 +1793,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 			});
 
-			it("Cline 会话：经 Cline 会话服务停掉刚启动的会话，返回同一拒绝原因", async () => {
-				taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/task-1-worktree");
-				agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-				setSelectedProviderSettings({
-					provider: "anthropic",
-					model: "claude-sonnet-4-6",
-					apiKey: "anthropic-api-key",
-				});
-				const terminalManager = {
-					getSummary: vi.fn(() => null),
-					listSummaries: vi.fn(() => []),
-					startTaskSession: vi.fn(async () => createSummary()),
-					stopTaskSession: vi.fn(() => null),
-					applyTurnCheckpoint: vi.fn(),
-				};
-				const clineTaskSessionService = createClineTaskSessionServiceMock();
-				clineTaskSessionService.startTaskSession.mockImplementation(async () => {
-					simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
-					return createSummary({ agentId: "cline", pid: null });
-				});
-				const api = createTestRuntimeApi({
-					getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-					loadScopedRuntimeConfig: vi.fn(async () => {
-						const runtimeConfigState = createRuntimeConfigState();
-						runtimeConfigState.selectedAgentId = "cline";
-						return runtimeConfigState;
-					}),
-					setActiveRuntimeConfig: vi.fn(),
-					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-					getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-					resolveInteractiveShellCommand: vi.fn(),
-					runCommand: vi.fn(),
-				});
-
-				const response = await api.startTaskSession(
-					{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-					{ taskId: "task-1", baseRef: "main", prompt: "Implement task" },
-				);
-
-				expect(response).toMatchObject({
-					ok: false,
-					summary: null,
-					taskSessionStartRejectionReason: "task_card_not_yet_persisted_on_workspace_board",
-				});
-				expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledExactlyOnceWith("task-1");
-				expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
-			});
-
 			it("侧边栏 home agent 会话不属于任何卡片：盘上 board 怎么变都照常启动、不被停", async () => {
 				const homeTaskId = "__home_agent__:workspace-1:codex";
 				simulateHostTaskCardDeletedFromWorkspaceBoardByAnotherClient();
@@ -2214,7 +1808,6 @@ describe("createRuntimeApi startTaskSession", () => {
 					loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 					setActiveRuntimeConfig: vi.fn(),
 					getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-					getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 					resolveInteractiveShellCommand: vi.fn(),
 					runCommand: vi.fn(),
 				});
@@ -2231,7 +1824,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	it("rejects By the way runtime sessions for unsupported agents", async () => {
+	it("拒绝不支持旁问会话的 agent", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {
 			getSummary: vi.fn(() => null),
@@ -2239,13 +1832,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-unsupported" })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -2295,13 +1886,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-later" })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -2382,7 +1971,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -2424,7 +2012,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		},
 	);
 
-	it("rejects a forged full-authority fork context", async () => {
+	it("拒绝伪造的完整权限 fork 上下文", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/main-task-worktree");
 		const terminalManager = {
 			getSummary: vi.fn(() => null),
@@ -2432,13 +2020,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			startTaskSession: vi.fn(async () => createSummary({ taskId: "side-session-forged" })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -2467,7 +2053,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
 
-	it("ensures the worktree when no existing task cwd is available", async () => {
+	it("没有既有任务目录时创建工作树", async () => {
 		taskWorktreeMocks.resolveTaskCwd
 			.mockRejectedValueOnce(new Error("missing"))
 			.mockResolvedValueOnce("/tmp/new-worktree");
@@ -2476,13 +2062,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			startTaskSession: vi.fn(async () => createSummary()),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -2514,255 +2098,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	it("routes cline start sessions to cline task session service", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			model: "claude-sonnet-4-6",
-			apiKey: "anthropic-api-key",
-		});
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-				images: [
-					{
-						id: "img-1",
-						data: "abc123",
-						mimeType: "image/png",
-					},
-				],
-				startInPlanMode: true,
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				taskId: "task-1",
-				cwd: "/tmp/existing-worktree",
-				prompt: "Continue task",
-				images: [
-					{
-						id: "img-1",
-						data: "abc123",
-						mimeType: "image/png",
-					},
-				],
-				providerId: "anthropic",
-				apiKey: "anthropic-api-key",
-				mode: "act",
-				startInPlanMode: true,
-				resumeFromTrash: undefined,
-			}),
-		);
-		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("applies task-level reasoning overrides even without task model/provider overrides", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			model: "claude-sonnet-4-6",
-			apiKey: "anthropic-api-key",
-		});
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Reasoning-only override task",
-				clineSettings: {
-					reasoningEffort: "medium",
-				},
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "anthropic",
-				modelId: "claude-sonnet-4-6",
-				reasoningEffort: "medium",
-			}),
-		);
-		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("uses model-default reasoning when a task overrides the model but leaves reasoning on default", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			model: "claude-sonnet-4-6",
-			apiKey: "anthropic-api-key",
-			reasoning: {
-				effort: "high",
-			},
-		});
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Task with model override",
-				clineSettings: {
-					modelId: "anthropic/claude-opus-4.6",
-				},
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "anthropic",
-				modelId: "anthropic/claude-opus-4.6",
-				reasoningEffort: null,
-			}),
-		);
-		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("skips cline persisted-session probing when resumeFromTrash already has a non-cline terminal summary", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
-			agentId: "codex",
-			label: "OpenAI Codex",
-			command: "codex",
-			binary: "codex",
-			args: [],
-		});
-
-		const terminalManager = {
-			getSummary: vi.fn(() => createSummary({ agentId: "codex", state: "idle", pid: null })),
-			startTaskSession: vi.fn(async () => createSummary({ agentId: "codex" })),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		const getScopedClineTaskSessionService = vi.fn(async () => clineTaskSessionService as never);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService,
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Resume task",
-				resumeFromTrash: true,
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(terminalManager.getSummary).toHaveBeenCalledWith("task-1");
-		expect(getScopedClineTaskSessionService).not.toHaveBeenCalled();
-		expect(clineTaskSessionService.rebindPersistedTaskSession).not.toHaveBeenCalled();
-		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				taskId: "task-1",
-				agentId: "codex",
-				resumeFromTrash: true,
-			}),
-			expect.any(String),
-		);
-		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
-	});
-
-	it("clears task chat cache before resumeFromTrash starts", async () => {
+	it("从已观测的 Codex 身份恢复，不受旧全局 Cline 默认值影响", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "codex",
@@ -2783,12 +2119,11 @@ describe("createRuntimeApi startTaskSession", () => {
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => {
 				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "codex";
+				runtimeConfigState.selectedAgentId = "cline";
 				return runtimeConfigState;
 			}),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			broadcastTaskChatCleared,
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -2809,243 +2144,29 @@ describe("createRuntimeApi startTaskSession", () => {
 
 		expect(response.ok).toBe(true);
 		expect(broadcastTaskChatCleared).toHaveBeenCalledWith("workspace-1", "task-1");
-	});
-
-	it("probes cline persisted sessions on resumeFromTrash when no terminal agent summary exists", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
-			agentId: "codex",
-			label: "OpenAI Codex",
-			command: "codex",
-			binary: "codex",
-			args: [],
-		});
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			model: "claude-sonnet-4-6",
-			apiKey: "anthropic-api-key",
-		});
-
-		const terminalManager = {
-			getSummary: vi.fn(() => null),
-			startTaskSession: vi.fn(async () => createSummary({ agentId: "codex" })),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(
-			createSummary({ agentId: "cline", pid: null }),
-		);
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "codex";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Resume task",
-				resumeFromTrash: true,
-			},
-		);
-
-		expect(response.ok).toBe(true);
 		expect(terminalManager.getSummary).toHaveBeenCalledWith("task-1");
-		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
+		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
 			expect.objectContaining({
 				taskId: "task-1",
+				agentId: "codex",
 				resumeFromTrash: true,
-				providerId: "anthropic",
-				apiKey: "anthropic-api-key",
 			}),
+			expect.any(String),
 		);
-		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
-	it("uses saved cline settings even when no last-used provider is recorded", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		oauthMocks.getLastUsedProviderSettings.mockReturnValue(undefined);
-		oauthMocks.getProviderSettings.mockImplementation((providerId: string) =>
-			providerId === "cline"
-				? {
-						provider: "cline",
-						model: "anthropic/claude-opus-4.6",
-						apiKey: "saved-cline-api-key",
-					}
-				: undefined,
-		);
-
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(
-				async () => ({ startTaskSession: vi.fn(), applyTurnCheckpoint: vi.fn() }) as never,
-			),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "cline",
-				modelId: "anthropic/claude-opus-4.6",
-				apiKey: "saved-cline-api-key",
-			}),
-		);
-	});
-
-	it("fails early when the cline provider is selected without cline credentials", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		delete process.env.CLINE_API_KEY;
-		setSelectedProviderSettings({
-			provider: "cline",
-			model: "anthropic/claude-opus-4.6",
-		});
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(false);
-		expect(response.summary).toBeNull();
-		expect(response.error).toContain("no Cline credentials are configured");
-		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
-		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("allows the cline provider to launch when CLINE_API_KEY is present in the environment", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-		process.env.CLINE_API_KEY = "env-cline-api-key";
-		setSelectedProviderSettings({
-			provider: "cline",
-			model: "anthropic/claude-opus-4.6",
-		});
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "cline",
-				apiKey: "env-cline-api-key",
-			}),
-		);
-	});
-
-	it("starts home agent sessions in the workspace root without resolving a task worktree", async () => {
+	it("主页 agent 使用工作区根目录且不创建任务工作树", async () => {
 		const homeTaskId = "__home_agent__:workspace-1:codex";
 		const terminalManager = {
 			startTaskSession: vi.fn(async () => createSummary({ taskId: homeTaskId })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3074,7 +2195,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
 
-	it("forwards task images to CLI task sessions", async () => {
+	it("向 CLI 任务会话转发图片", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "codex",
@@ -3088,7 +2209,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			startTaskSession: vi.fn(async () => createSummary({ agentId: "codex" })),
 			applyTurnCheckpoint: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => {
@@ -3098,7 +2218,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3133,7 +2252,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 			expect.any(String),
 		);
-		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
 	});
 
 	it.each([undefined, [], ["--cd", "/explicit restart"]])(
@@ -3159,7 +2277,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				),
 				refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "codex" })),
 			};
-			const clineTaskSessionService = createClineTaskSessionServiceMock();
 			const api = createTestRuntimeApi({
 				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 				loadScopedRuntimeConfig: vi.fn(async () => {
@@ -3169,7 +2286,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				}),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-				getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
 			});
@@ -3197,12 +2313,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		},
 	);
 
-	// ── 「首轮未结束被硬中断 → 重启后 TUI 全白且重启按钮不可用」的回归护栏 ────────────────────
-	// 中断后 agentId 是最容易丢的字段。以前 refreshTaskTerminal 在解析卡片**之前**就以「没有活体
-	// summary」「summary.agentId 为 null」两条 gate 拒绝，于是那句 `?? card.agentId ?? selectedAgentId`
-	// 兜底永远够不着——用户只剩一个既全白、又点不动的面板。
-
-	it("rebuilds the session when the summary is gone entirely（硬中断后没有任何活体条目）", async () => {
+	it("摘要完全丢失后重新构建会话", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "claude",
@@ -3220,7 +2331,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3237,7 +2347,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	it("rebuilds the session from the card's most recently launched agent when the summary lost its agentId", async () => {
+	it("摘要缺少 agentId 时使用卡片最近实际启动的 agent 恢复", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		// 卡片没有 agentId（用户从未显式选过 agent，走项目默认档）——正是 2026-07 那次修复漏掉的那类卡片。
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
@@ -3277,7 +2387,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3294,12 +2403,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	// ── 归因护栏：客户端声明的启动来源必须原样落到 manager ────────────────────────────────
-	// 「用户手点 Restart」与「前端发现会话已陈旧、自动续跑」打到的是同一个 refreshTaskTerminal，服务端
-	// 收到的请求形状完全相同。而 refresh_task_terminal 实测占 pty 创建量的 68%——这 68% 里究竟有多少
-	// 是程序自己点的，只有靠客户端声明才分得开。省略时必须维持旧行为，否则老客户端的记账会被改写。
-
-	it("records a client-declared stale auto-resume refresh under its own origin instead of a human refresh", async () => {
+	it("客户端声明的过期自动恢复使用独立来源记录", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
@@ -3313,7 +2417,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3334,7 +2437,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	// 已结案任务须先经重开恢复；自动续跑和用户重启均不得绕过成果恢复。
 	it.each([
 		{ declaredOrigin: "stale_session_client_auto_resume" as const, expectsRestart: false },
 		{ declaredOrigin: undefined, expectsRestart: false },
@@ -3352,7 +2454,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3371,9 +2472,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledTimes(expectsRestart ? 1 : 0);
 	});
 
-	// 「停止后台会话并在这里续跑」：终端面板确认接管后，字段必须一路传到 terminalManager——漏在这一环就是
-	// 按钮能点、确认框能弹，服务端却照旧拒绝（runbook「runtime-api 传参最易漏」同一类）。
-	it("forwards the user-confirmed takeover of a Claude background session to the terminal manager", async () => {
+	it("向终端管理器转发用户确认的 Claude 后台接管", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
@@ -3387,7 +2486,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3407,7 +2505,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	it("keeps recording an undeclared refresh as a human refresh so older clients read the same", async () => {
+	it("未声明来源的刷新继续记录为人工刷新", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
@@ -3421,7 +2519,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3434,11 +2531,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(expect.anything(), "refresh_task_terminal");
 	});
 
-	// ── 兜底优先级排序护栏：观测事实 > 卡片意图 ──────────────────────────────────────────────
-	// `refreshTaskTerminal` 下游是 `resumeFromTrash: true` → `--continue`，解析的是「这条**既存**会话由谁跑起来」，
-	// 与 `backfillMissingSessionAgentIdsFromDurableSources` 同问题、必须同序。
-
-	it("prefers the observed launched agent over the card's agentId when the two disagree", async () => {
+	it("卡片选择与实际启动身份冲突时使用观测身份", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		// 卡片意图是 claude（「下次想用 claude 启动」），但上一次真正跑起来的是 codex。
 		// 续的是那条既存会话，故必须取观测值 codex。
@@ -3479,7 +2572,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3496,7 +2588,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	it("rejects refresh when the observed launched agent is a conversation-panel agent even if the card names a PTY agent", async () => {
+	it("实际摘要为已退役 Cline 时拒绝刷新，即使卡片选择 PTY agent", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		// `startTaskSession` 的 `shouldProbePersistedClineSession` 分支会在 `card.agentId` 仍是 PTY agent 时
 		// 探测到持久化的 Cline 会话并改走 Cline——真正跑起来的与卡片意图天然不一致。若让 card.agentId 胜出，
@@ -3531,7 +2623,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3542,15 +2633,12 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 
 		expect(response.ok).toBe(false);
-		expect(response.error).toBe("Refresh is only available for active TUI terminal agents.");
+		expect(response.error).toContain("已退役");
 		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
 	});
 
-	// ── By the way 侧问会话的重启（**会话 ≠ 卡片**）────────────────────────────────────
-	// 侧问会话的 taskId 是 `task-conversation-session-<uuid>`，看板上没有这张卡。此前这里拿会话 id 去
-	// 找卡片，于是它的重启按钮恒定返回 "Card not found in the workspace board." —— 点了等于没点。
-
 	const BY_THE_WAY_TASK_CONVERSATION_SESSION_ID = "task-conversation-session-1111";
+
 	const BY_THE_WAY_CONVERSATION_SESSION_METADATA = {
 		workspaceTaskId: "task-1",
 		taskConversationSessionRole: "by_the_way" as const,
@@ -3590,7 +2678,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3623,7 +2710,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 	});
 
-	it("does not write the By the way session's agent identity back onto the host card", async () => {
+	it("不将旁问会话身份回写到宿主卡片", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		const mutationResults: unknown[] = [];
 		workspaceStateMocks.mutateWorkspaceState.mockImplementation(
@@ -3657,7 +2744,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3672,9 +2758,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(mutationResults.every((value) => value === false)).toBe(true);
 	});
 
-	// 回归：从垃圾桶恢复走的也是「按 id 续跑」，模型就必须按同一个 id 取。少了这一步，主会话恢复时会读到
-	// 「工作目录里最近那段对话」——共用 worktree 下那多半是侧问会话——并经回写把侧问的模型固化进主卡。
-	it("probes the resumed model by the session's own native id when restoring a task from trash", async () => {
+	it("恢复任务时按会话自身原生 ID 探测模型", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		const nativeSessionId = "aaaaaaaa-1111-4111-8111-111111111111";
 		const terminalManager = {
@@ -3697,7 +2781,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3714,7 +2797,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(persistedAgentTranscriptModelProbeMocks.probeByWorkingDirectory).not.toHaveBeenCalled();
 	});
 
-	it("explains that the host card is gone instead of blaming the conversation session id", async () => {
+	it("宿主卡片丢失时明确说明宿主不存在", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", title: "In Progress", cards: [] }],
@@ -3734,7 +2817,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3748,7 +2830,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(response.error).toBe("The board card hosting this conversation session no longer exists.");
 	});
 
-	it("still rejects refresh for agents that are not PTY terminals（按能力谓词，不按 agentId 字面量）", async () => {
+	it("缺少摘要身份时按持久 Cline 卡片明确拒绝刷新", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [
@@ -3779,7 +2861,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3790,11 +2871,11 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 
 		expect(response.ok).toBe(false);
-		expect(response.error).toBe("Refresh is only available for active TUI terminal agents.");
+		expect(response.error).toContain("已退役");
 		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
 	});
 
-	it("records the launched agent onto the card so a hard interruption can be recovered from", async () => {
+	it("将实际启动身份记录到卡片以便硬中断后恢复", async () => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 			agentId: "codex",
@@ -3854,7 +2935,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			}),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -3874,243 +2954,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(launchedCard?.updatedAt).toBe(1);
 	});
 
-	it("does not resolve cline OAuth when starting a non-cline task session", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue({
-			agentId: "codex",
-			label: "OpenAI Codex",
-			command: "codex",
-			binary: "codex",
-			args: [],
-		});
-		oauthMocks.getValidClineCredentials.mockRejectedValue(
-			new Error('OAuth credentials for provider "cline" are invalid. Re-run OAuth login.'),
-		);
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary({ agentId: "codex" })),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "codex";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(oauthMocks.getValidClineCredentials).not.toHaveBeenCalled();
-		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				agentId: "codex",
-				cwd: "/tmp/existing-worktree",
-			}),
-			expect.any(String),
-		);
-		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("prefers OAuth api key when cline OAuth credentials are configured", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-		oauthMocks.getValidClineCredentials.mockResolvedValue({
-			access: "oauth-access",
-			refresh: "oauth-refresh",
-			expires: 1_700_000_000_000,
-			accountId: "acct-1",
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			model: "claude-sonnet-4-6",
-			auth: {
-				accessToken: "oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(oauthMocks.getValidClineCredentials).toHaveBeenCalledTimes(1);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				apiKey: "workos:oauth-access",
-			}),
-		);
-		expect(clineAccountMocks.fetchMe).not.toHaveBeenCalled();
-		expect(oauthMocks.saveProviderSettings).toHaveBeenCalledWith(
-			expect.objectContaining({
-				provider: "cline",
-				auth: expect.objectContaining({
-					accessToken: "workos:oauth-access",
-					refreshToken: "oauth-refresh",
-					accountId: "acct-1",
-				}),
-			}),
-			expect.objectContaining({
-				tokenSource: "oauth",
-				setLastUsed: true,
-			}),
-		);
-	});
-
-	it("does not use OAuth credentials for non-OAuth providers", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		agentRegistryMocks.resolveAgentCommand.mockReturnValue(null);
-
-		const terminalManager = {
-			startTaskSession: vi.fn(async () => createSummary()),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.startTaskSession.mockResolvedValue(createSummary({ agentId: "cline", pid: null }));
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			apiKey: "anthropic-api-key",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				const runtimeConfigState = createRuntimeConfigState();
-				runtimeConfigState.selectedAgentId = "cline";
-				return runtimeConfigState;
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.startTaskSession(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				taskId: "task-1",
-				baseRef: "main",
-				prompt: "Continue task",
-			},
-		);
-
-		expect(response.ok).toBe(true);
-		expect(oauthMocks.getValidClineCredentials).not.toHaveBeenCalled();
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "anthropic",
-				apiKey: "anthropic-api-key",
-			}),
-		);
-		expect(oauthMocks.saveProviderSettings).not.toHaveBeenCalled();
-	});
-
-	it("routes cline task input and stop to cline task session service", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const terminalManager = {
-			writeInput: vi.fn(),
-			stopTaskSession: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(summary);
-		clineTaskSessionService.stopTaskSession.mockResolvedValue(summary);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const sendResponse = await api.sendTaskSessionInput(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1", text: "hello", appendNewline: true },
-		);
-		expect(sendResponse.ok).toBe(true);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith("task-1", "hello\n");
-		expect(terminalManager.writeInput).not.toHaveBeenCalled();
-
-		const stopResponse = await api.stopTaskSession(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1" },
-		);
-		expect(stopResponse.ok).toBe(true);
-		expect(clineTaskSessionService.stopTaskSession).toHaveBeenCalledWith("task-1");
-		expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
-	});
-
 	it("ACP 取消当前回合声明回合范围，明确停止会话继续使用整任务范围", async () => {
 		const summary = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
 		const onTaskSessionStopRequested = vi.fn<NonNullable<CreateRuntimeApiDependencies["onTaskSessionStopRequested"]>>(
@@ -4127,7 +2970,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: async () => ({ listSummaries: () => [] }) as never,
 			getScopedAcpTaskSessionService: async () => acpService as never,
-			getScopedClineTaskSessionService: async () => createClineTaskSessionServiceMock() as never,
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			onTaskSessionStopRequested,
@@ -4137,147 +2979,6 @@ describe("createRuntimeApi startTaskSession", () => {
 		expect(onTaskSessionStopRequested).toHaveBeenCalledWith("workspace-1", summary.taskId, "current_agent_turn");
 		expect((await api.stopTaskSession(scope, { taskId: summary.taskId })).ok).toBe(true);
 		expect(onTaskSessionStopRequested).toHaveBeenLastCalledWith("workspace-1", summary.taskId);
-	});
-
-	it("returns cline chat messages and sends chat message through cline service", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const latestMessage = {
-			id: "message-1",
-			role: "user" as const,
-			content: "hello",
-			createdAt: Date.now(),
-		};
-		const terminalManager = {
-			writeInput: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
-		clineTaskSessionService.loadTaskSessionMessages.mockResolvedValue([latestMessage]);
-		clineTaskSessionService.getSummary.mockReturnValue(summary);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const sendResponse = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1", text: "hello" },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-		expect(sendResponse.ok).toBe(true);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
-			"task-1",
-			"hello",
-			undefined,
-			undefined,
-		);
-		expect(sendResponse.message).toEqual(latestMessage);
-
-		const messagesResponse = await api.getTaskChatMessages(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1" },
-		);
-		expect(messagesResponse.ok).toBe(true);
-		expect(messagesResponse.messages).toEqual([latestMessage]);
-
-		clineTaskSessionService.abortTaskSession.mockResolvedValue(summary);
-		const abortResponse = await api.abortTaskChatTurn(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1" },
-		);
-		expect(abortResponse.ok).toBe(true);
-		expect(clineTaskSessionService.abortTaskSession).toHaveBeenCalledWith("task-1");
-
-		clineTaskSessionService.cancelTaskTurn.mockResolvedValue(summary);
-		const cancelResponse = await api.cancelTaskChatTurn(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1" },
-		);
-		expect(cancelResponse.ok).toBe(true);
-		expect(clineTaskSessionService.cancelTaskTurn).toHaveBeenCalledWith("task-1");
-	});
-
-	it("handles clear slash commands without sending them to the model", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null, state: "idle" });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.clearTaskSession.mockResolvedValue(summary);
-		const broadcastTaskChatCleared = vi.fn();
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-			broadcastTaskChatCleared,
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1", text: "  /clear  " },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response).toEqual({
-			ok: true,
-			summary,
-			message: null,
-		});
-		expect(clineTaskSessionService.clearTaskSession).toHaveBeenCalledWith("__home_agent__:workspace-1");
-		expect(broadcastTaskChatCleared).toHaveBeenCalledWith("workspace-1", "__home_agent__:workspace-1");
-		expect(clineTaskSessionService.sendTaskSessionInput).not.toHaveBeenCalled();
-		expect(clineTaskSessionService.startTaskSession).not.toHaveBeenCalled();
-	});
-
-	it("forwards chat images through the cline service send path", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([]);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{
-				taskId: "task-1",
-				text: "hello",
-				images: [
-					{
-						id: "img-1",
-						data: "abc123",
-						mimeType: "image/png",
-					},
-				],
-			},
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith("task-1", "hello", undefined, [
-			{
-				id: "img-1",
-				data: "abc123",
-				mimeType: "image/png",
-			},
-		]);
 	});
 
 	it.each([
@@ -4363,7 +3064,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				],
 			});
 			const getScopedTerminalManager = vi.fn();
-			const getScopedClineTaskSessionService = vi.fn();
 			const listRetainedMessages = vi.fn(() => [
 				{ id: "retained", role: "assistant" as const, content: "已完成的回答", createdAt: 1 },
 			]);
@@ -4373,7 +3073,6 @@ describe("createRuntimeApi startTaskSession", () => {
 				loadScopedRuntimeConfig: vi.fn(),
 				setActiveRuntimeConfig: vi.fn(),
 				getScopedTerminalManager,
-				getScopedClineTaskSessionService,
 				getScopedAcpTaskSessionService,
 				resolveInteractiveShellCommand: vi.fn(),
 				runCommand: vi.fn(),
@@ -4393,7 +3092,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			expect(response.availability).toBe(expectedHistoryAvailability);
 			expect(response.messages.map((message) => message.content)).toEqual(shouldReadHistory ? ["已完成的回答"] : []);
 			expect(getScopedTerminalManager).not.toHaveBeenCalled();
-			expect(getScopedClineTaskSessionService).not.toHaveBeenCalled();
 			const expectedRetainedMessageReads = sessionTransport === "acp_stdio_subprocess" && shouldReadHistory ? 1 : 0;
 			expect(getScopedAcpTaskSessionService).toHaveBeenCalledTimes(expectedRetainedMessageReads);
 			expect(listRetainedMessages).toHaveBeenCalledTimes(expectedRetainedMessageReads);
@@ -4407,226 +3105,18 @@ describe("createRuntimeApi startTaskSession", () => {
 		}
 	});
 
-	it("hydrates persisted cline chat messages when no live in-memory session is loaded", async () => {
-		const persistedMessage = {
-			id: "message-persisted-1",
-			role: "assistant" as const,
-			content: "Recovered from SDK artifacts",
-			createdAt: Date.now(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.getSummary.mockReturnValue(null);
-		clineTaskSessionService.loadTaskSessionMessages.mockResolvedValue([persistedMessage]);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.getTaskChatMessages(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1" },
-		);
-
-		expect(response.ok).toBe(true);
-		expect(response.messages).toEqual([persistedMessage]);
-		expect(clineTaskSessionService.loadTaskSessionMessages).toHaveBeenCalledWith("task-1");
-	});
-
-	it("reloads a chat session through the Cline task session service", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.reloadTaskSession.mockResolvedValue(summary);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.reloadTaskChatSession(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1:cline" },
-		);
-
-		expect(response).toEqual({
-			ok: true,
-			summary,
-		});
-		expect(clineTaskSessionService.reloadTaskSession).toHaveBeenCalledWith("__home_agent__:workspace-1:cline");
-	});
-
-	it("restarts the home chat session from the saved launch config when reload cannot reuse cached config", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.reloadTaskSession.mockResolvedValue(null);
-		clineTaskSessionService.startTaskSession.mockResolvedValue(summary);
-		setSelectedProviderSettings({
-			provider: "openrouter",
-			model: "openrouter/auto",
-			apiKey: "sk-or-test",
-			baseUrl: "https://openrouter.ai/api/v1",
-			reasoning: {},
-		});
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.reloadTaskChatSession(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1:cline" },
-		);
-
-		expect(response).toEqual({
-			ok: true,
-			summary,
-		});
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith({
-			taskId: "__home_agent__:workspace-1:cline",
-			cwd: "/tmp/repo",
-			prompt: "",
-			resumeFromPersistence: true,
-			providerId: "openrouter",
-			modelId: "openrouter/auto",
-			apiKey: "sk-or-test",
-			baseUrl: "https://openrouter.ai/api/v1",
-			reasoningEffort: undefined,
-		});
-	});
-
-	it("rebinds persisted non-home chat sessions before retrying the first send after restart", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const latestMessage = {
-			id: "message-rebound-1",
-			role: "user" as const,
-			content: "continue",
-			createdAt: Date.now(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValueOnce(null).mockResolvedValueOnce(summary);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1", text: "continue" },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenNthCalledWith(
-			1,
-			"task-1",
-			"continue",
-			undefined,
-			undefined,
-		);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenNthCalledWith(
-			2,
-			"task-1",
-			"continue",
-			undefined,
-			undefined,
-		);
-		expect(response.message).toEqual(latestMessage);
-	});
-
-	it("forwards task chat source metadata to the Cline message", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const latestMessage = {
-			id: "message-rvf-1",
-			role: "user" as const,
-			content: "$review-validate-fix",
-			createdAt: Date.now(),
-			meta: {
-				source: "review-validate-fix",
-				idempotencyKey: "rvf-run-1",
-				promptSha256: "abc123",
-			},
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{
-				taskId: "task-1",
-				text: "$review-validate-fix",
-				source: " review-validate-fix ",
-				idempotencyKey: " rvf-run-1 ",
-				promptSha256: " abc123 ",
-			},
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
-			"task-1",
-			"$review-validate-fix",
-			undefined,
-			undefined,
-			{
-				source: "review-validate-fix",
-				idempotencyKey: "rvf-run-1",
-				promptSha256: "abc123",
-			},
-		);
-		expect(response.message).toEqual(latestMessage);
-	});
-
-	it("falls back to terminal input for running non-Cline task chat messages", async () => {
+	it("当前 PTY 会话通过就绪门禁接收程序化消息", async () => {
 		const summary = createSummary({ agentId: "codex", state: "awaiting_review" });
 		const terminalManager = {
+			getSummary: () => summary,
 			submitTaskChatInputWhenReady: vi.fn(() => summary),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
 
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -4636,7 +3126,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			{
 				taskId: "task-1",
 				text: "please continue",
-				source: "review-validate-fix",
+				source: "runtime-api-regression-test",
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
@@ -4644,19 +3134,7 @@ describe("createRuntimeApi startTaskSession", () => {
 		);
 
 		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledWith(
-			"task-1",
-			"please continue",
-			undefined,
-			undefined,
-			{
-				source: "review-validate-fix",
-				idempotencyKey: "rvf-run-1",
-				promptSha256: "abc123",
-			},
-		);
-		expect(clineTaskSessionService.rebindPersistedTaskSession).toHaveBeenCalledWith("task-1");
-		// RVF followup 终端回退：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
+		// 后台程序化消息：经就绪门控投递，以原始文本调用（bracketed-paste 编码与就绪判定下沉到
 		// TerminalSessionManager.submitTaskChatInputWhenReady，由 session-manager 单测覆盖）。带 source（后台自动
 		// 注入）→ deferWhileUserTurn=true：遇 agent 正等用户拍板的模态时让位挂起、不打断（Fix B）。
 		// 带 idempotencyKey → 同时登记诚实回执：runtime 在投递落定后经 onDeliveryOutcome 回写注入账本，
@@ -4684,14 +3162,13 @@ describe("createRuntimeApi startTaskSession", () => {
 			createdAt: expect.any(Number),
 			meta: {
 				messageKind: "terminal-input",
-				source: "review-validate-fix",
+				source: "runtime-api-regression-test",
 				idempotencyKey: "rvf-run-1",
 				promptSha256: "abc123",
 			},
 		});
 	});
 
-	// ACP 发出请求只代表受理；真实接受通过已登记回调在有界时间内结算。
 	it("ACP 程序化投递保留待确认回执并登记可靠接受回调", async () => {
 		// ACP 会话的 summary 恒由 createDefaultAcpSummary 盖上通道章。这里必须显式带上：
 		// 不带章的 omp summary 现在意味着一条 **TUI** 会话（omp 的 catalog 默认已是 pty_terminal），
@@ -4719,14 +3196,12 @@ describe("createRuntimeApi startTaskSession", () => {
 			listMessages: vi.fn(() => [latestMessage]),
 			clearTaskSession: vi.fn(),
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
 
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -4737,7 +3212,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			{
 				taskId: "task-acp-1",
 				text: "please continue",
-				source: "review-validate-fix",
+				source: "runtime-api-regression-test",
 				idempotencyKey: "rvf-acp-1",
 				promptSha256: "abc123",
 			},
@@ -4758,11 +3233,9 @@ describe("createRuntimeApi startTaskSession", () => {
 			reason: null,
 		});
 		expect(response.message).toEqual(latestMessage);
-		expect(clineTaskSessionService.sendTaskSessionInput).not.toHaveBeenCalled();
 	});
 
-	// 有 ACP 会话账本但连接已经没了：同样不能留 pending，如实判失败。
-	it("reports ACP delivery failure when the agent connection is already gone", async () => {
+	it("ACP 连接已退出时如实报告投递失败", async () => {
 		const summary = createSummary({
 			agentId: "omp",
 			state: "idle",
@@ -4780,7 +3253,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -4791,7 +3263,7 @@ describe("createRuntimeApi startTaskSession", () => {
 			{
 				taskId: "task-acp-1",
 				text: "please continue",
-				source: "review-validate-fix",
+				source: "runtime-api-regression-test",
 				idempotencyKey: "rvf-acp-2",
 				promptSha256: "abc123",
 			},
@@ -4805,20 +3277,21 @@ describe("createRuntimeApi startTaskSession", () => {
 		});
 	});
 
-	it("does not fall back to terminal input for chat messages with images", async () => {
-		const terminalManager = {
-			submitTaskChatInputWhenReady: vi.fn(),
+	it("ACP 图片发送失败时不回退到终端输入", async () => {
+		const summary = createSummary({ agentId: "omp", sessionTransport: "acp_stdio_subprocess" });
+		const terminalManager = { getSummary: () => null, submitTaskChatInputWhenReady: vi.fn() };
+		const acpService = {
+			getSummary: () => summary,
+			sendTaskSessionInput: vi.fn(async () => null),
+			listMessages: () => [],
 		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
 
 		const api = createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
+			getScopedAcpTaskSessionService: async () => acpService as never,
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -4839,1009 +3312,27 @@ describe("createRuntimeApi startTaskSession", () => {
 			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
 		);
 
-		expect(response).toEqual({
-			ok: false,
-			summary: null,
-			error: "Task chat images require an active Cline chat session.",
-		});
+		expect(response.ok).toBe(false);
+		expect(acpService.sendTaskSessionInput).toHaveBeenCalledWith(
+			"task-1",
+			"look at this",
+			expect.arrayContaining([expect.objectContaining({ id: "img-1" })]),
+			undefined,
+			undefined,
+			expect.any(Function),
+		);
 		expect(terminalManager.submitTaskChatInputWhenReady).not.toHaveBeenCalled();
 	});
 
-	it("auto-starts home chat sessions when the first message is sent", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const latestMessage = {
-			id: "message-home-1",
-			role: "user" as const,
-			content: "hello home",
-			createdAt: Date.now(),
-		};
-		const terminalManager = {
-			writeInput: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		const runtimeConfigState = createRuntimeConfigState();
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "seed-token",
-				refreshToken: "seed-refresh",
-				expiresAt: Date.now() + 3_600_000,
-			},
-		});
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.startTaskSession.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => runtimeConfigState),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				taskId: "__home_agent__:workspace-1",
-				cwd: "/tmp/repo",
-				prompt: "hello home",
-				providerId: "cline",
-				apiKey: "workos:oauth-access",
-			}),
-		);
-		expect(oauthMocks.getValidClineCredentials).toHaveBeenCalledWith(
-			expect.objectContaining({
-				access: "seed-token",
-				refresh: "seed-refresh",
-			}),
-			expect.any(Object),
-		);
-		expect(response.message).toEqual(latestMessage);
-	});
-
-	it("starts home chat sessions from persisted history with current launch config", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const latestMessage = {
-			id: "message-home-rebound-1",
-			role: "user" as const,
-			content: "continue home",
-			createdAt: Date.now(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValueOnce(null);
-		clineTaskSessionService.startTaskSession.mockResolvedValue(summary);
-		clineTaskSessionService.listMessages.mockReturnValue([latestMessage]);
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "seed-token",
-				refreshToken: "seed-refresh",
-				expiresAt: Date.now() + 3_600_000,
-			},
-		});
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1", text: "continue home" },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				taskId: "__home_agent__:workspace-1",
-				cwd: "/tmp/repo",
-				prompt: "continue home",
-				resumeFromPersistence: true,
-				providerId: "cline",
-				apiKey: "workos:oauth-access",
-			}),
-		);
-		expect(clineTaskSessionService.sendTaskSessionInput).toHaveBeenCalledTimes(1);
-		expect(response.message).toEqual(latestMessage);
-	});
-
-	it("home chat auto-start keeps manual API key for non-OAuth providers", async () => {
-		const summary = createSummary({ agentId: "cline", pid: null });
-		const terminalManager = {
-			writeInput: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		const runtimeConfigState = createRuntimeConfigState();
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			apiKey: "anthropic-api-key",
-			auth: {
-				accessToken: "workos:seed-token",
-				refreshToken: "seed-refresh",
-				expiresAt: Date.now() + 3_600_000,
-			},
-		});
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.startTaskSession.mockResolvedValue(summary);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => runtimeConfigState),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.sendTaskChatMessage(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "__home_agent__:workspace-1", text: "hello home" },
-			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
-		);
-
-		expect(response.ok).toBe(true);
-		expect(oauthMocks.getValidClineCredentials).not.toHaveBeenCalled();
-		expect(clineTaskSessionService.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({
-				providerId: "anthropic",
-				apiKey: "anthropic-api-key",
-			}),
-		);
-	});
-
-	it("returns cline provider catalog and provider models", async () => {
-		const terminalManager = {
-			writeInput: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => {
-				return createRuntimeConfigState();
-			}),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			model: "claude-sonnet-4-6",
-		});
-
-		const catalogResponse = await api.getClineProviderCatalog({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-		expect(catalogResponse.providers.some((provider) => provider.id === "cline")).toBe(true);
-		expect(catalogResponse.providers.find((provider) => provider.id === "cline")?.enabled).toBe(true);
-
-		const modelsResponse = await api.getClineProviderModels(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ providerId: "cline" },
-		);
-		expect(modelsResponse.providerId).toBe("cline");
-		expect(modelsResponse.models.some((model) => model.id === "claude-sonnet-4-6")).toBe(true);
-	});
-
-	it("loads provider models through the SDK local-provider resolver with saved config", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "openrouter",
-			model: "openrouter/auto",
-			apiKey: "openrouter-key",
-			baseUrl: "https://openrouter.ai/api/v1",
-		});
-		localProviderMocks.getLocalProviderModels.mockResolvedValue({
-			providerId: "openrouter",
-			models: [
-				{
-					id: "openrouter/free",
-					name: "OpenRouter Free",
-					supportsReasoning: true,
-				},
-			],
-		});
-
-		const response = await api.getClineProviderModels(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ providerId: "openrouter" },
-		);
-
-		expect(localProviderMocks.getLocalProviderModels).toHaveBeenCalledWith(
-			"openrouter",
-			expect.objectContaining({
-				providerId: "openrouter",
-				modelId: "openrouter/auto",
-				apiKey: "openrouter-key",
-				baseUrl: "https://openrouter.ai/api/v1",
-			}),
-		);
-		expect(response).toEqual({
-			providerId: "openrouter",
-			models: [
-				{
-					id: "openrouter/free",
-					name: "OpenRouter Free",
-					supportsReasoningEffort: true,
-				},
-			],
-		});
-	});
-
-	it("adds refreshed live catalog models to provider model responses", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "deepseek",
-			model: "deepseek-chat",
-			apiKey: "deepseek-key",
-			baseUrl: "https://api.deepseek.com/v1",
-		});
-		localProviderMocks.getLocalProviderModels.mockResolvedValue({
-			providerId: "deepseek",
-			models: [
-				{
-					id: "deepseek-chat",
-					name: "DeepSeek Chat",
-				},
-			],
-		});
-		llmsModelMocks.resolveProviderConfig.mockResolvedValue({
-			knownModels: {
-				"deepseek-v4-pro": {
-					id: "deepseek-v4-pro",
-					name: "DeepSeek V4 Pro",
-					capabilities: ["tools", "reasoning"],
-				},
-			},
-		});
-
-		const response = await api.getClineProviderModels(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ providerId: "deepseek" },
-		);
-
-		expect(llmsModelMocks.resolveProviderModelCatalogKeys).toHaveBeenCalledWith("deepseek");
-		expect(llmsModelMocks.resolveProviderConfig).toHaveBeenCalledWith(
-			"deepseek",
-			expect.objectContaining({
-				loadLatestOnInit: true,
-				loadPrivateOnAuth: true,
-				failOnError: false,
-			}),
-			expect.objectContaining({
-				providerId: "deepseek",
-				modelId: "deepseek-chat",
-				apiKey: "deepseek-key",
-			}),
-		);
-		expect(response.models).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					id: "deepseek-v4-pro",
-					name: "DeepSeek V4 Pro",
-					supportsReasoningEffort: true,
-				}),
-				expect.objectContaining({
-					id: "deepseek-chat",
-					name: "DeepSeek Chat",
-				}),
-			]),
-		);
-	});
-
-	it("loads Cline provider models from the SDK catalog key mapping", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			model: "anthropic/claude-sonnet-4.6",
-		});
-		localProviderMocks.getLocalProviderModels.mockResolvedValue({
-			providerId: "cline",
-			models: [
-				{
-					id: "anthropic/claude-sonnet-4.6",
-					name: "Claude Sonnet 4.6",
-				},
-			],
-		});
-		llmsModelMocks.resolveProviderConfig.mockImplementation((providerId: string) =>
-			providerId === "openrouter"
-				? Promise.resolve({
-						knownModels: {
-							"deepseek/deepseek-v4-flash": {
-								id: "deepseek/deepseek-v4-flash",
-								name: "DeepSeek V4 Flash",
-								capabilities: ["tools", "reasoning"],
-							},
-						},
-					})
-				: Promise.resolve(undefined),
-		);
-
-		const response = await api.getClineProviderModels(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ providerId: "cline" },
-		);
-
-		expect(llmsModelMocks.resolveProviderModelCatalogKeys).toHaveBeenCalledWith("cline");
-		expect(llmsModelMocks.resolveProviderConfig).toHaveBeenCalledWith(
-			"openrouter",
-			expect.objectContaining({
-				loadLatestOnInit: true,
-			}),
-			undefined,
-		);
-		expect(response.models.some((model) => model.id === "deepseek/deepseek-v4-flash")).toBe(true);
-	});
-
-	it("falls back to the queried provider's saved model when provider model loading fails", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		oauthMocks.getLastUsedProviderSettings.mockReturnValue({
-			provider: "anthropic",
-			model: "claude-sonnet-4-6",
-			apiKey: "anthropic-key",
-		});
-		oauthMocks.getProviderSettings.mockImplementation((providerId: string) => {
-			if (providerId === "anthropic") {
-				return {
-					provider: "anthropic",
-					model: "claude-sonnet-4-6",
-					apiKey: "anthropic-key",
-				};
-			}
-			if (providerId === "openrouter") {
-				return {
-					provider: "openrouter",
-					model: "openrouter/free",
-					apiKey: "openrouter-key",
-					baseUrl: "https://openrouter.ai/api/v1",
-				};
-			}
-			return undefined;
-		});
-		localProviderMocks.getLocalProviderModels.mockRejectedValue(new Error("catalog unavailable"));
-
-		const response = await api.getClineProviderModels(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ providerId: "openrouter" },
-		);
-
-		expect(response).toEqual({
-			providerId: "openrouter",
-			models: [
-				{
-					id: "openrouter/free",
-					name: "openrouter/free",
-				},
-			],
-		});
-	});
-
-	it("adds a custom OpenAI-compatible provider through the SDK-backed flow", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		llmsModelMocks.getAllProviders.mockResolvedValue([
-			{
-				id: "cline",
-				name: "Cline",
-				defaultModelId: "claude-sonnet-4-6",
-				capabilities: ["oauth"],
-			},
-		]);
-		oauthMocks.addLocalProvider.mockImplementation(async (_manager: unknown, request: Record<string, unknown>) => {
-			oauthMocks.getProviderSettings.mockImplementation((providerId: string) =>
-				providerId === request.providerId
-					? {
-							provider: request.providerId,
-							model: request.defaultModelId,
-							apiKey: request.apiKey,
-							baseUrl: request.baseUrl,
-						}
-					: undefined,
-			);
-			return {
-				providerId: request.providerId,
-				settingsPath: "/tmp/providers.json",
-				modelsPath: "/tmp/models.json",
-				modelsCount: 1,
-			};
-		});
-
-		const response = await api.addClineProvider(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{
-				providerId: "my-provider",
-				name: "My Provider",
-				baseUrl: "http://localhost:8000/v1",
-				apiKey: "secret-key",
-				models: ["qwen2.5-coder:32b"],
-				defaultModelId: "qwen2.5-coder:32b",
-				capabilities: ["tools", "streaming"],
-			},
-		);
-
-		expect(response).toEqual(
-			expect.objectContaining({
-				providerId: "my-provider",
-				modelId: "qwen2.5-coder:32b",
-				baseUrl: "http://localhost:8000/v1",
-				apiKeyConfigured: true,
-			}),
-		);
-		expect(oauthMocks.addLocalProvider).toHaveBeenCalledWith(
-			expect.any(Object),
-			expect.objectContaining({
-				providerId: "my-provider",
-				name: "My Provider",
-				baseUrl: "http://localhost:8000/v1",
-				apiKey: "secret-key",
-				models: ["qwen2.5-coder:32b"],
-				defaultModelId: "qwen2.5-coder:32b",
-				capabilities: ["tools", "streaming"],
-			}),
-		);
-		expect(oauthMocks.ensureCustomProvidersLoaded).toHaveBeenCalled();
-		expect(oauthMocks.saveProviderSettings).toHaveBeenCalledWith(
-			expect.objectContaining({
-				provider: "my-provider",
-				model: "qwen2.5-coder:32b",
-				apiKey: "secret-key",
-				baseUrl: "http://localhost:8000/v1",
-			}),
-			expect.objectContaining({
-				tokenSource: "manual",
-				setLastUsed: true,
-			}),
-		);
-	});
-
-	it("returns cline account profile for cline OAuth users", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		const response = await api.getClineAccountProfile({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.profile).toEqual({
-			accountId: "acct-1",
-			email: "saoud@example.com",
-			displayName: "Saoud",
-		});
-		expect(clineAccountMocks.constructedOptions[0]?.apiBaseUrl).toBe("https://api.cline.bot");
-		expect(clineAccountMocks.fetchMe).toHaveBeenCalledTimes(1);
-		expect(oauthMocks.getValidClineCredentials).not.toHaveBeenCalled();
-		const getAuthToken = clineAccountMocks.constructedOptions[0]?.getAuthToken;
-		await expect(getAuthToken?.()).resolves.toBe("workos:oauth-access");
-	});
-
-	it("refreshes cline OAuth credentials and retries profile lookup when direct profile fetch fails", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		clineAccountMocks.fetchMe
-			.mockRejectedValueOnce(new Error("Cline account request failed with status 401"))
-			.mockResolvedValueOnce({
-				id: "acct-1",
-				email: "saoud@example.com",
-				displayName: "Saoud",
-			});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:expired-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		const response = await api.getClineAccountProfile({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.profile).toEqual({
-			accountId: "acct-1",
-			email: "saoud@example.com",
-			displayName: "Saoud",
-		});
-		expect(clineAccountMocks.fetchMe).toHaveBeenCalledTimes(2);
-		expect(oauthMocks.getValidClineCredentials).toHaveBeenCalledTimes(1);
-		const refreshedGetAuthToken = clineAccountMocks.constructedOptions[1]?.getAuthToken;
-		await expect(refreshedGetAuthToken?.()).resolves.toBe("workos:oauth-access");
-	});
-
-	it("blocks kanban when remote config explicitly disables it", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-		clineAccountMocks.fetchRemoteConfig.mockResolvedValueOnce({
-			organizationId: "org-1",
-			enabled: true,
-			value: JSON.stringify({
-				kanbanEnabled: false,
-			}),
-		});
-
-		clineAccountMocks.fetchOrganization.mockResolvedValueOnce({
-			externalOrganizationId: "test",
-		});
-
-		const response = await api.getClineKanbanAccess({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.enabled).toBe(false);
-		expect(clineAccountMocks.fetchRemoteConfig).toHaveBeenCalledTimes(1);
-	});
-
-	it("allows kanban when remote config fetch fails", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-		clineAccountMocks.fetchRemoteConfig
-			.mockResolvedValueOnce({
-				organizationId: "org-1",
-				enabled: true,
-				value: JSON.stringify({
-					kanbanEnabled: false,
-				}),
-			})
-			.mockRejectedValueOnce(new Error("remote config request failed"));
-
-		clineAccountMocks.fetchOrganization.mockResolvedValueOnce({
-			externalOrganizationId: "test",
-		});
-
-		const initialResponse = await api.getClineKanbanAccess({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-		const failedFetchResponse = await api.getClineKanbanAccess({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(initialResponse.enabled).toBe(false);
-		expect(failedFetchResponse.enabled).toBe(true);
-		expect(clineAccountMocks.fetchRemoteConfig).toHaveBeenCalledTimes(2);
-	});
-
-	it("allows kanban by default for non-cline providers", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "anthropic",
-			apiKey: "anthropic-api-key",
-		});
-
-		const response = await api.getClineKanbanAccess({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.enabled).toBe(true);
-		expect(clineAccountMocks.fetchRemoteConfig).not.toHaveBeenCalled();
-	});
-
-	it("runs oauth login for selected provider and persists provider settings", async () => {
-		const terminalManager = {
-			writeInput: vi.fn(),
-		};
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		const bumpClineSessionContextVersion = vi.fn();
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-			bumpClineSessionContextVersion,
-		});
-
-		const response = await api.runClineProviderOAuthLogin(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ provider: "cline" },
-		);
-		expect(response.ok).toBe(true);
-		expect(response.provider).toBe("cline");
-		expect(response.settings).toEqual(
-			expect.objectContaining({
-				providerId: "cline",
-				oauthProvider: "cline",
-				oauthAccessTokenConfigured: true,
-				oauthRefreshTokenConfigured: true,
-				oauthAccountId: "acct-1",
-			}),
-		);
-		expect(oauthMocks.saveProviderSettings).toHaveBeenCalledWith(
-			expect.objectContaining({
-				provider: "cline",
-				auth: expect.objectContaining({
-					accessToken: "workos:oauth-access",
-					refreshToken: "oauth-refresh",
-					accountId: "acct-1",
-				}),
-			}),
-			expect.objectContaining({
-				tokenSource: "oauth",
-				setLastUsed: true,
-			}),
-		);
-		expect(oauthMocks.loginClineOAuth).toHaveBeenCalledTimes(1);
-		expect(bumpClineSessionContextVersion).toHaveBeenCalledTimes(1);
-		const loginInput = oauthMocks.loginClineOAuth.mock.calls[0]?.[0] as
-			| {
-					callbacks?: { onManualCodeInput?: unknown };
-			  }
-			| undefined;
-		expect(loginInput?.callbacks?.onManualCodeInput).toBeUndefined();
-	});
-
-	it("bumps cline session context when provider settings are saved", async () => {
-		const bumpClineSessionContextVersion = vi.fn();
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-			bumpClineSessionContextVersion,
-		});
-		setSelectedProviderSettings({
-			provider: "openrouter",
-			model: "openrouter/auto",
-			apiKey: "openrouter-key",
-			baseUrl: "https://openrouter.ai/api/v1",
-		});
-
-		const response = await api.saveClineProviderSettings(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{
-				providerId: "openrouter",
-				modelId: "openrouter/free",
-			},
-		);
-
-		expect(response.providerId).toBe("openrouter");
-		expect(bumpClineSessionContextVersion).toHaveBeenCalledTimes(1);
-	});
-
-	it("returns Cline MCP settings", async () => {
-		writeFileSync(
-			mcpSettingsPath,
-			JSON.stringify(
-				{
-					mcpServers: {
-						linear: {
-							type: "streamableHttp",
-							url: "https://mcp.linear.app/mcp",
-							disabled: false,
-						},
-					},
-				},
-				null,
-				2,
-			),
-		);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.getClineMcpSettings({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.path).toBe(mcpSettingsPath);
-		expect(response.servers).toEqual([
-			{
-				name: "linear",
-				disabled: false,
-				type: "streamableHttp",
-				url: "https://mcp.linear.app/mcp",
-			},
-		]);
-	});
-
-	it("saves Cline MCP settings", async () => {
-		const bumpClineSessionContextVersion = vi.fn();
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-			bumpClineSessionContextVersion,
-		});
-
-		const response = await api.saveClineMcpSettings(
-			{
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			},
-			{
-				servers: [
-					{
-						name: "linear",
-						disabled: false,
-						type: "streamableHttp",
-						url: "https://mcp.linear.app/mcp",
-					},
-				],
-			},
-		);
-
-		expect(response.path).toBe(mcpSettingsPath);
-		expect(response.servers).toEqual([
-			{
-				name: "linear",
-				disabled: false,
-				type: "streamableHttp",
-				url: "https://mcp.linear.app/mcp",
-			},
-		]);
-		expect(bumpClineSessionContextVersion).toHaveBeenCalledTimes(1);
-	});
-
-	it("returns MCP auth statuses from persisted OAuth settings", async () => {
-		writeFileSync(
-			mcpSettingsPath,
-			JSON.stringify(
-				{
-					mcpServers: {
-						linear: {
-							type: "streamableHttp",
-							url: "https://mcp.linear.app/mcp",
-						},
-						filesystem: {
-							type: "stdio",
-							command: "npx",
-							args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-						},
-					},
-				},
-				null,
-				2,
-			),
-		);
-		writeFileSync(
-			mcpOauthSettingsPath,
-			JSON.stringify(
-				{
-					servers: {
-						linear: {
-							tokens: {
-								access_token: "token-1",
-								token_type: "Bearer",
-							},
-							lastAuthenticatedAt: 1_700_000_000_000,
-						},
-					},
-				},
-				null,
-				2,
-			),
-		);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		const response = await api.getClineMcpAuthStatuses({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response.statuses).toEqual([
-			{
-				serverName: "filesystem",
-				oauthSupported: false,
-				oauthConfigured: false,
-				lastError: null,
-				lastAuthenticatedAt: null,
-			},
-			{
-				serverName: "linear",
-				oauthSupported: true,
-				oauthConfigured: true,
-				lastError: null,
-				lastAuthenticatedAt: 1_700_000_000_000,
-			},
-		]);
-	});
-
-	it("rejects MCP OAuth flow for stdio servers", async () => {
-		writeFileSync(
-			mcpSettingsPath,
-			JSON.stringify(
-				{
-					mcpServers: {
-						filesystem: {
-							type: "stdio",
-							command: "npx",
-							args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-						},
-					},
-				},
-				null,
-				2,
-			),
-		);
-
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-
-		await expect(
-			api.runClineMcpServerOAuth(
-				{
-					workspaceId: "workspace-1",
-					workspacePath: "/tmp/repo",
-				},
-				{
-					serverName: "filesystem",
-				},
-			),
-		).rejects.toThrow("does not support OAuth browser flow");
-	});
-
-	it("runs reset teardown before deleting debug state paths", async () => {
+	it("删除调试状态目录前先完成会话拆除", async () => {
 		const originalHome = process.env.HOME;
 		const tempHome = `/tmp/kanban-reset-home-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 		process.env.HOME = tempHome;
 		mkdirSync(tempHome, { recursive: true });
-		const debugPaths = [
-			join(tempHome, ".cline", "data"),
-			join(tempHome, ".cline", "kanban"),
-			join(tempHome, ".cline", "worktrees"),
-		];
+		const debugPaths = [join(tempHome, ".cline", "kanban"), join(tempHome, ".cline", "worktrees")];
+		const retainedLegacySdkMarkerPath = join(tempHome, ".cline", "data", "marker.txt");
+		mkdirSync(join(tempHome, ".cline", "data"), { recursive: true });
+		writeFileSync(retainedLegacySdkMarkerPath, "preserved");
 		for (const path of debugPaths) {
 			mkdirSync(path, { recursive: true });
 			writeFileSync(join(path, "marker.txt"), "present");
@@ -5856,7 +3347,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			prepareForStateReset,
@@ -5867,6 +3357,7 @@ describe("createRuntimeApi startTaskSession", () => {
 
 			expect(response.ok).toBe(true);
 			expect(prepareForStateReset).toHaveBeenCalledTimes(1);
+			expect(existsSync(retainedLegacySdkMarkerPath)).toBe(true);
 			for (const path of debugPaths) {
 				expect(existsSync(path)).toBe(false);
 			}
@@ -5880,16 +3371,12 @@ describe("createRuntimeApi startTaskSession", () => {
 		}
 	});
 
-	it("aborts reset path deletion when teardown fails", async () => {
+	it("会话拆除失败时保留全部状态目录", async () => {
 		const originalHome = process.env.HOME;
 		const tempHome = `/tmp/kanban-reset-home-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 		process.env.HOME = tempHome;
 		mkdirSync(tempHome, { recursive: true });
-		const debugPaths = [
-			join(tempHome, ".cline", "data"),
-			join(tempHome, ".cline", "kanban"),
-			join(tempHome, ".cline", "worktrees"),
-		];
+		const debugPaths = [join(tempHome, ".cline", "kanban"), join(tempHome, ".cline", "worktrees")];
 		for (const path of debugPaths) {
 			mkdirSync(path, { recursive: true });
 			writeFileSync(join(path, "marker.txt"), "present");
@@ -5899,7 +3386,6 @@ describe("createRuntimeApi startTaskSession", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			prepareForStateReset: vi.fn(async () => {
@@ -5923,140 +3409,6 @@ describe("createRuntimeApi startTaskSession", () => {
 	});
 });
 
-describe("createRuntimeApi getFeaturebaseToken", () => {
-	beforeEach(() => {
-		oauthMocks.getProviderSettings.mockReset();
-		oauthMocks.getLastUsedProviderSettings.mockReset();
-		oauthMocks.getValidClineCredentials.mockReset();
-		oauthMocks.saveProviderSettings.mockReset();
-		clineAccountMocks.fetchFeaturebaseToken.mockReset();
-		clineAccountMocks.constructedOptions.length = 0;
-	});
-
-	it("returns JWT from SDK method", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:oauth-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-		clineAccountMocks.fetchFeaturebaseToken.mockResolvedValueOnce({
-			featurebaseJwt: "jwt-token-123",
-		});
-
-		const response = await api.getFeaturebaseToken({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response).toEqual({ featurebaseJwt: "jwt-token-123" });
-	});
-
-	it("throws when no provider settings configured", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings(null);
-
-		await expect(
-			api.getFeaturebaseToken({
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			}),
-		).rejects.toThrow("Failed to fetch Featurebase token.");
-	});
-
-	it("throws when provider is not cline", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "oca",
-			auth: {
-				accessToken: "some-token",
-				refreshToken: "some-refresh",
-			},
-		});
-
-		await expect(
-			api.getFeaturebaseToken({
-				workspaceId: "workspace-1",
-				workspacePath: "/tmp/repo",
-			}),
-		).rejects.toThrow("Featurebase token requires a Cline provider.");
-	});
-
-	it("retries after OAuth refresh when first attempt fails", async () => {
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		setSelectedProviderSettings({
-			provider: "cline",
-			auth: {
-				accessToken: "workos:stale-access",
-				refreshToken: "oauth-refresh",
-				accountId: "acct-1",
-				expiresAt: 1_700_000_000_000,
-			},
-		});
-
-		// First attempt fails (e.g. expired token)
-		clineAccountMocks.fetchFeaturebaseToken.mockRejectedValueOnce(new Error("Unauthorized"));
-
-		// OAuth refresh returns fresh credentials
-		oauthMocks.getValidClineCredentials.mockResolvedValueOnce({
-			access: "fresh-access",
-			refresh: "fresh-refresh",
-			expires: 1_800_000_000_000,
-			accountId: "acct-1",
-		});
-
-		// Second attempt succeeds with refreshed token
-		clineAccountMocks.fetchFeaturebaseToken.mockResolvedValueOnce({
-			featurebaseJwt: "refreshed-jwt-456",
-		});
-
-		const response = await api.getFeaturebaseToken({
-			workspaceId: "workspace-1",
-			workspacePath: "/tmp/repo",
-		});
-
-		expect(response).toEqual({ featurebaseJwt: "refreshed-jwt-456" });
-		expect(clineAccountMocks.fetchFeaturebaseToken).toHaveBeenCalledTimes(2);
-		expect(oauthMocks.getValidClineCredentials).toHaveBeenCalledTimes(1);
-	});
-});
-
 describe("createRuntimeApi update handlers", () => {
 	it("delegates update status to the required dependency", async () => {
 		const getUpdateStatus = vi.fn(() => ({
@@ -6071,7 +3423,6 @@ describe("createRuntimeApi update handlers", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			getUpdateStatus,
@@ -6099,7 +3450,6 @@ describe("createRuntimeApi update handlers", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => ({}) as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			runUpdateNow,
@@ -6112,6 +3462,61 @@ describe("createRuntimeApi update handlers", () => {
 			message: "Updated Kanban to 0.2.0.",
 		});
 		expect(runUpdateNow).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("createRuntimeApi 直接输入的退役身份兜底", () => {
+	beforeEach(() => {
+		workspaceStateMocks.loadPersistedConversationSessions.mockReset();
+		workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue({});
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ cards: [{ id: "task-1", agentId: "cline" }] }],
+		});
+	});
+
+	it.each(["card", "session"] as const)("无内存摘要时从持久 %s 身份拒绝 Cline，且不写入终端", async (source) => {
+		if (source === "session") {
+			workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({ columns: [] });
+			workspaceStateMocks.loadPersistedConversationSessions.mockReturnValue({
+				"task-1": createSummary({ agentId: "cline" }),
+			});
+		}
+		const terminalManager = { getSummary: vi.fn(() => null), writeInput: vi.fn() };
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: () => "workspace-1",
+			loadScopedRuntimeConfig: async () => createRuntimeConfigState(),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: async () => terminalManager as never,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		expect(
+			await api.sendTaskSessionInput(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", text: "继续" },
+			),
+		).toMatchObject({ ok: false, summary: null, error: expect.stringContaining("已退役") });
+		expect(terminalManager.writeInput).not.toHaveBeenCalled();
+	});
+
+	it("当前 Codex 摘要优先于旧 Cline 卡片，不丢弃正常输入", async () => {
+		const summary = createSummary({ agentId: "codex" });
+		const terminalManager = { getSummary: () => summary, writeInput: vi.fn(() => summary) };
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: () => "workspace-1",
+			loadScopedRuntimeConfig: async () => createRuntimeConfigState(),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager: async () => terminalManager as never,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		expect(
+			await api.sendTaskSessionInput(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", text: "继续", appendNewline: true },
+			),
+		).toMatchObject({ ok: true, summary });
+		expect(terminalManager.writeInput).toHaveBeenCalledWith("task-1", Buffer.from("继续\n"));
 	});
 });
 
@@ -6242,11 +3647,45 @@ describe("createRuntimeApi resumed claude session model", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
 	}
+
+	it("旧 Cline 会话的启动、恢复和聊天统一拒绝，保留原身份", async () => {
+		const terminalManager = createTerminalManagerStub();
+		const historicalSummary = createSummary({
+			agentId: "cline",
+			sessionTransport: "in_process_cline_sdk",
+			pid: null,
+		});
+		terminalManager.getSummary.mockReturnValue(historicalSummary);
+		const api = createApiWithTerminalManager(terminalManager);
+		const scope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue(
+			createBoardWithResumedTaskCard(createResumedTaskCard({ agentId: "claude", modelId: "historical-model" })),
+		);
+		for (const response of [
+			await api.startTaskSession(scope, {
+				taskId: RESUMED_TASK_ID,
+				agentId: "cline",
+				prompt: "不会投递",
+				baseRef: "main",
+			}),
+			await api.refreshTaskTerminal(scope, { taskId: RESUMED_TASK_ID, cols: 120, rows: 40 }),
+			await api.sendTaskChatMessage(
+				scope,
+				{ taskId: RESUMED_TASK_ID, text: "不会投递" },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		]) {
+			expect(response.ok).toBe(false);
+			expect(response.error).toContain("Cline agent 已退役");
+		}
+		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
+		expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
+		expect(historicalSummary.agentId).toBe("cline");
+	});
 
 	beforeEach(() => {
 		originalHomeDirectoryPath = process.env.HOME;
@@ -6518,7 +3957,6 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 				async () =>
 					({ getSummary: () => createSummary({ agentId: "claude" }), stopTaskSession: () => null }) as never,
 			),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => ({ getSummary: () => null }) as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -6555,7 +3993,6 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -6606,7 +4043,6 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpService as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -6657,7 +4093,6 @@ describe("createRuntimeApi switchAgentSessionTransport", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			getScopedAcpTaskSessionService: vi.fn(async () => acpTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
@@ -6746,6 +4181,7 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		forward: (taskId: string, expectedTerminalSessionIncarnationToken: string) => boolean;
 	}) {
 		return {
+			getSummary: vi.fn(() => createSummary()),
 			captureTaskTerminalInputBoxContentForPromptLibraryStash: vi.fn(args.capture),
 			forwardStashKeyToClearTaskTerminalInputBox: vi.fn(args.forward),
 			runTaskTerminalInputBoxStashAttemptExclusivelyPerTask: createPerTaskStashExclusivityDouble(),
@@ -6764,7 +4200,6 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -6821,9 +4256,6 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 	it("争用抢占：走同一条暂存链路，条目标成被抢占，且只有「入库且框已清」才算放行", async () => {
 		const scope = createStashWorkspaceScope();
 		const summary = createSummary({ agentId: "claude", state: "awaiting_review" });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
 		let inputBoxWasCleared = true;
 		const terminalManager = {
 			...createStashTerminalManagerDouble({
@@ -6848,7 +4280,6 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -6992,9 +4423,6 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 		terminalManager: ReturnType<typeof createStashTerminalManagerDouble>,
 	): Promise<(taskId: string) => Promise<TerminalInputBoxStashOutcome>> {
 		const summary = createSummary({ agentId: "claude", state: "awaiting_review" });
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
 		// spread 复制的是 vi.fn 的引用，于是调用方仍可以对原 terminalManager 上那个 forward 替身做断言。
 		const terminalManagerWithDelivery = {
 			...terminalManager,
@@ -7014,7 +4442,6 @@ describe("createRuntimeApi stashTerminalInputBoxToPromptLibrary", () => {
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManagerWithDelivery as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -7146,11 +4573,13 @@ describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTas
 
 	// 终端通道「先受理、后落定」：把投递终态交给测试决定，就能覆盖「受理了但最终没送达」这个真实形态。
 	function createReleaseTerminalManagerDouble(settledOutcome: { status: string; reason: string | null }): {
+		getSummary: ReturnType<typeof vi.fn>;
 		submitTaskChatInputWhenReady: ReturnType<typeof vi.fn>;
 		disarmRestorationContinuationGuard: ReturnType<typeof vi.fn>;
 		completeRestorationHarnessGeneratedTaskNotificationInterceptionAfterExplicitUserTurn: ReturnType<typeof vi.fn>;
 	} {
 		return {
+			getSummary: vi.fn(() => createSummary()),
 			submitTaskChatInputWhenReady: vi.fn(
 				(_taskId: string, _text: string, options?: { onDeliveryOutcome?: (outcome: unknown) => void }) => {
 					options?.onDeliveryOutcome?.(settledOutcome);
@@ -7163,15 +4592,11 @@ describe("createRuntimeApi releaseDeferredRestorationHarnessNotificationsIntoTas
 	}
 
 	function createReleaseApi(terminalManager: unknown): ReturnType<typeof createTestRuntimeApi> {
-		const clineTaskSessionService = createClineTaskSessionServiceMock();
-		clineTaskSessionService.sendTaskSessionInput.mockResolvedValue(null);
-		clineTaskSessionService.rebindPersistedTaskSession.mockResolvedValue(null);
 		return createTestRuntimeApi({
 			getActiveWorkspaceId: vi.fn(() => releaseWorkspaceId),
 			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
 			setActiveRuntimeConfig: vi.fn(),
 			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			getScopedClineTaskSessionService: vi.fn(async () => clineTaskSessionService as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 		});
@@ -7279,7 +4704,6 @@ describe("createRuntimeApi task prompt delivery queue", () => {
 			getScopedTerminalManager: vi.fn(
 				async () => ({ getSummary: (taskId: string) => currentSessionSummaries[taskId] ?? null }) as never,
 			),
-			getScopedClineTaskSessionService: vi.fn(async () => createClineTaskSessionServiceMock() as never),
 			resolveInteractiveShellCommand: vi.fn(),
 			runCommand: vi.fn(),
 			queuedTaskPromptDeliveryDispatcher: dispatcher,

@@ -12,11 +12,14 @@ import {
 	type CodexConfigurationBatchActionRequest,
 	type CodexConfigurationBatchActionResult,
 	type CodexConfigurationChangeDetailsRequest,
+	type CodexConfigurationMutationReceiptRequest,
 	type CodexConfigurationProfileMutationRequest,
 	type CodexConfigurationResolveConflictRequest,
 	type CodexConfigurationResolveTargetConflictRequest,
+	type CodexConfigurationSyncHistoryRequest,
 	type CodexConfigurationSynchronizeRequest,
 	type CodexConfigurationSyncState,
+	codexConfigurationSyncActiveStateSchema,
 	codexConfigurationSyncStateSchema,
 } from "../core/codex-configuration-sync-contract";
 import { resolveSessionFacets } from "../core/session-activity";
@@ -71,8 +74,14 @@ import {
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
-	mutateCodexConfigurationSyncStore,
-	readCodexConfigurationSyncStore,
+	listCodexConfigurationSyncStoredHistory,
+	mutateCodexConfigurationSyncActiveStore as mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncStore as readCodexConfigurationSyncCompleteStore,
+	readCodexConfigurationSyncLookupStore,
+	readCodexConfigurationSyncStorageMetadata,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
+	runOutsideCodexConfigurationSyncStoreSelection,
+	runWithCodexConfigurationSyncStoreSelection,
 	type StoredCodexConfigurationChange,
 } from "./codex-configuration-sync-store";
 import {
@@ -125,18 +134,7 @@ function codexConfigurationSourceObservationDecisionFingerprint(
 	store: CodexConfigurationSyncStore,
 	sourceIdentity: string,
 ) {
-	return configurationDigest({
-		source: store.sources[sourceIdentity],
-		profiles: Object.values(store.profiles).filter((profile) => profile.sourceIdentity === sourceIdentity),
-		hookTrustDecisions: Object.values(store.hookTrustDecisions).filter(
-			(decision) => decision.sourceIdentity === sourceIdentity,
-		),
-		writers: Object.values(store.writers).filter((writer) => writer.binding.sourceIdentity === sourceIdentity),
-		changes: store.changes.filter((change) => change.sourceIdentity === sourceIdentity),
-		legacySessionProfileAdoptions: Object.values(store.legacySessionProfileAdoptions).filter(
-			(adoption) => adoption.sourceIdentity === sourceIdentity,
-		),
-	});
+	return String(store.sourceDecisionGenerations?.[sourceIdentity] ?? 0);
 }
 
 function publicState(
@@ -144,9 +142,16 @@ function publicState(
 	sessions: SessionTarget[],
 	diagnosticCoverage?: CodexConfigurationSyncState["diagnosticCoverage"],
 	taskSourceContext?: CodexConfigurationTaskSourceContext,
+	stateResponseScope: "full" | "active" = "full",
 ): CodexConfigurationSyncState {
 	return codexConfigurationSyncStateSchema.parse({
 		revision: store.revision,
+		stateResponseScope,
+		storageIdentity: store.storageIdentity,
+		storageGeneration: store.storageGeneration,
+		historyTotalCount: store.historyTotalCount,
+		historyMaximumSequence: store.historyMaximumSequence,
+		historyProjectionGeneration: store.historyProjectionGeneration,
 		observationProblem: store.observationProblem,
 		defaultCodexConfigurationProfileId: store.defaultCodexConfigurationProfileId,
 		profiles: Object.values(store.profiles).map((profile) => ({
@@ -188,84 +193,158 @@ function publicState(
 					: [];
 		}),
 		diagnosticCoverage,
-		sourceObservations: [...store.sourceObservations].reverse().map((observation) => ({
-			...observation,
-			changeIds: observation.rawChangeIds,
-			detectedLocations: observation.detectedWriterIds.map((writerId) => ({
-				workspaceId: store.writers[writerId]?.binding.workspaceId ?? "",
-				conversationSessionId: store.writers[writerId]?.binding.conversationSessionId ?? "用户全局配置",
+		sourceObservations: [...store.sourceObservations]
+			.filter((observation) => stateResponseScope === "full" || observation.acknowledgedAt === null)
+			.reverse()
+			.map((observation) => ({
+				...observation,
+				changeIds: observation.rawChangeIds,
+				detectedLocations: observation.detectedWriterIds.map((writerId) => ({
+					workspaceId: store.writers[writerId]?.binding.workspaceId ?? "",
+					conversationSessionId: store.writers[writerId]?.binding.conversationSessionId ?? "用户全局配置",
+				})),
 			})),
-		})),
-		changes: [...store.changes].reverse().map((change) => {
-			const writer = store.writers[change.sourceWriterId];
-			const presentation = describeCodexConfigurationChange(store, change, false, undefined, taskSourceContext);
-			return {
-				candidateFieldGroupKey: JSON.stringify([
-					change.codexConfigurationProfileId ?? change.sourceIdentity,
-					change.exceptionGroup ?? change.fieldKey,
-				]),
-				completeCandidateValueDigest: completeCodexConfigurationCandidateValueDigest(change),
-				settingsIsolationArchivedAtMs: change.settingsIsolationArchivedAtMs,
-				fieldKey: change.fieldKey,
-				sourceEvidence: presentation.sourceEvidence,
-				comparison: presentation,
-				targetComparisons: Object.fromEntries(
-					change.targets
-						.filter((target) => target.status === "conflict")
-						.map((target) => [
-							target.writerId,
-							describeCodexConfigurationChange(store, change, false, target.writerId, taskSourceContext),
-						]),
-				),
-				hookExplanation: presentation.hookExplanation,
-				codexConfigurationProfileId: change.codexConfigurationProfileId,
-				profileName: store.profiles[change.codexConfigurationProfileId ?? ""]?.name,
-				feedbackExpiresAtMs: change.feedbackExpiresAtMs,
-				exceptionGroup: change.exceptionGroup,
-				sharingScope: change.sharingScope,
-				changeId: change.changeId,
-				version: change.version,
-				sourceWriterId: change.sourceWriterId,
-				sourceConversationSessionId:
-					writer?.binding.conversationSessionId ??
-					(change.codexConfigurationProfileId
-						? (store.profiles[change.codexConfigurationProfileId]?.name ?? "profile 设置")
-						: "用户全局配置"),
-				sourceWorkspaceId: writer?.binding.workspaceId ?? "",
-				fieldLabel: presentation.fieldLabel,
-				previousValueSummary: summarizeConfigurationField(change.fieldKey, change.previous),
-				valueSummary: summarizeConfigurationField(change.fieldKey, change.value),
-				observedAt: change.observedAt,
-				recordKind: change.recordKind ?? "historical_record",
-				approvalStatus: change.approvalStatus ?? "historical",
-				decidedAt: change.decidedAt ?? null,
-				settingDifferences: describeCodexConfigurationSettingDifferences(
-					change.previous,
-					change.value,
-					change.fieldKey,
-				),
-				mergeStatus:
-					change.mergeStatus === "shared_default_updated" &&
-					!isCodexConfigurationSourceObservationStillCurrent(store, change)
-						? "superseded"
-						: change.mergeStatus,
-				acknowledgedAt: change.acknowledgedAt,
-				eligibleTargetCount: sessions.filter(
-					({ summary }) =>
-						summary.agentId === "codex" &&
+		changes: [...store.changes]
+			.filter(
+				(change) =>
+					stateResponseScope === "full" ||
+					change.approvalStatus === "pending" ||
+					change.mergeStatus === "conflict" ||
+					(change.recordKind === "source_observation" &&
+						store.sourceObservations.some(
+							(observation) =>
+								observation.acknowledgedAt === null && observation.rawChangeIds.includes(change.changeId),
+						)) ||
+					change.targets.some((target) =>
+						["accepted", "pending_reload", "pending_next_start", "conflict"].includes(target.status),
+					),
+			)
+			.reverse()
+			.map((change) => {
+				const writer = store.writers[change.sourceWriterId];
+				const presentation = describeCodexConfigurationChange(store, change, false, undefined, taskSourceContext);
+				return {
+					candidateFieldGroupKey: JSON.stringify([
+						change.codexConfigurationProfileId ?? change.sourceIdentity,
+						change.exceptionGroup ?? change.fieldKey,
+					]),
+					completeCandidateValueDigest: completeCodexConfigurationCandidateValueDigest(change),
+					settingsIsolationArchivedAtMs: change.settingsIsolationArchivedAtMs,
+					fieldKey: change.fieldKey,
+					sourceEvidence: presentation.sourceEvidence,
+					comparison: presentation,
+					targetComparisons: Object.fromEntries(
+						change.targets
+							.filter((target) => target.status === "conflict")
+							.map((target) => [
+								target.writerId,
+								describeCodexConfigurationChange(store, change, false, target.writerId, taskSourceContext),
+							]),
+					),
+					hookExplanation: presentation.hookExplanation,
+					codexConfigurationProfileId: change.codexConfigurationProfileId,
+					profileName: store.profiles[change.codexConfigurationProfileId ?? ""]?.name,
+					feedbackExpiresAtMs: change.feedbackExpiresAtMs,
+					exceptionGroup: change.exceptionGroup,
+					sharingScope: change.sharingScope,
+					changeId: change.changeId,
+					version: change.version,
+					sourceWriterId: change.sourceWriterId,
+					sourceConversationSessionId:
+						writer?.binding.conversationSessionId ??
 						(change.codexConfigurationProfileId
-							? store.writers[summary.codexConfigurationWriterBinding?.writerId ?? ""]
-									?.codexConfigurationProfileId === change.codexConfigurationProfileId
-							: summary.codexConfigurationWriterBinding?.sourceIdentity === change.sourceIdentity) &&
-						summary.codexConfigurationWriterBinding?.writerId !== change.sourceWriterId,
-				).length,
-				targets: change.targets,
-			};
-		}),
+							? (store.profiles[change.codexConfigurationProfileId]?.name ?? "profile 设置")
+							: "用户全局配置"),
+					sourceWorkspaceId: writer?.binding.workspaceId ?? "",
+					fieldLabel: presentation.fieldLabel,
+					previousValueSummary: summarizeConfigurationField(change.fieldKey, change.previous),
+					valueSummary: summarizeConfigurationField(change.fieldKey, change.value),
+					observedAt: change.observedAt,
+					recordKind: change.recordKind ?? "historical_record",
+					approvalStatus: change.approvalStatus ?? "historical",
+					decidedAt: change.decidedAt ?? null,
+					settingDifferences: describeCodexConfigurationSettingDifferences(
+						change.previous,
+						change.value,
+						change.fieldKey,
+					),
+					mergeStatus:
+						change.mergeStatus === "shared_default_updated" &&
+						!isCodexConfigurationSourceObservationStillCurrent(store, change)
+							? "superseded"
+							: change.mergeStatus,
+					acknowledgedAt: change.acknowledgedAt,
+					eligibleTargetCount: sessions.filter(
+						({ summary }) =>
+							summary.agentId === "codex" &&
+							(change.codexConfigurationProfileId
+								? store.writers[summary.codexConfigurationWriterBinding?.writerId ?? ""]
+										?.codexConfigurationProfileId === change.codexConfigurationProfileId
+								: summary.codexConfigurationWriterBinding?.sourceIdentity === change.sourceIdentity) &&
+							summary.codexConfigurationWriterBinding?.writerId !== change.sourceWriterId,
+					).length,
+					targets: change.targets,
+					propagationTargetTotalCount: change.propagationTargetTotalCount,
+				};
+			}),
 	});
 }
 
+function withoutConfigurationStateResponseScope<T extends object>(input: T) {
+	const { stateResponseScope: _excludedStateResponseScope, ...businessInput } = input as T & {
+		stateResponseScope?: "full" | "active";
+	};
+	return businessInput;
+}
+
 export function createCodexConfigurationSyncService(deps: CodexConfigurationSyncServiceDependencies) {
+	const withRequestSelection = <T>(
+		input: {
+			changeId?: string;
+			workspaceId?: string;
+			conversationSessionId?: string;
+			targetWriterId?: string;
+			idempotencyKey?: string;
+			items?: Array<{ changeId: string; idempotencyKey: string }>;
+		},
+		operation: () => T,
+	): T =>
+		runWithCodexConfigurationSyncStoreSelection(
+			{
+				changeIds: [input.changeId, ...(input.items?.map((item) => item.changeId) ?? [])].filter(
+					(id): id is string => Boolean(id),
+				),
+				observationIds: [input.changeId, ...(input.items?.map((item) => item.changeId) ?? [])].filter(
+					(id): id is string => Boolean(id),
+				),
+				writerIds: [
+					...(input.targetWriterId ? [input.targetWriterId] : []),
+					...deps
+						.listSessions()
+						.filter(
+							({ workspaceId, summary }) =>
+								workspaceId === input.workspaceId && summary.taskId === input.conversationSessionId,
+						)
+						.flatMap(({ summary }) =>
+							summary.codexConfigurationWriterBinding ? [summary.codexConfigurationWriterBinding.writerId] : [],
+						),
+				],
+				targetWriterIds: deps
+					.listSessions()
+					.map(
+						({ workspaceId, summary }) =>
+							summary.codexConfigurationWriterBinding?.writerId ?? `legacy:${workspaceId}:${summary.taskId}`,
+					),
+				receiptKeys: [input.idempotencyKey, ...(input.items?.map((item) => item.idempotencyKey) ?? [])].filter(
+					(id): id is string => Boolean(id),
+				),
+			},
+			operation,
+		);
+	const responseStore = (input: { stateResponseScope?: "full" | "active" }) =>
+		input.stateResponseScope === "active"
+			? readCodexConfigurationSyncStore()
+			: readCodexConfigurationSyncCompleteStore();
 	let taskSourceContext: CodexConfigurationTaskSourceContext | undefined;
 	let taskSourceContextReadInFlight: Promise<void> | null = null;
 	const refreshTaskSourceContext = async () => {
@@ -305,16 +384,25 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 	let scanning: Promise<void> | null = null;
 	let recovering: Promise<void> | null = null;
 	let lastPublishedRevision = -1;
+	let lastPublishedStorageGeneration = -1;
+	let lastPublishedStorageIdentity: string | undefined;
 	let lastPublishedTaskSourceContextDigest: string | undefined;
 	const watchers = new Map<string, FSWatcher>();
 	const traceMonitor = createCodexConfigurationTargetObservationMonitor({
 		listTargetPaths: listRuntimeCodexConfigurationTraceTargets,
 	});
 	const publish = async () => {
-		const revision = (await readCodexConfigurationSyncStore()).revision;
+		const { revision, storageGeneration, storageIdentity } = await readCodexConfigurationSyncStorageMetadata();
 		const taskSourceContextDigest = configurationDigest(taskSourceContext ?? null);
-		if (lastPublishedRevision !== revision || lastPublishedTaskSourceContextDigest !== taskSourceContextDigest) {
+		if (
+			lastPublishedRevision !== revision ||
+			lastPublishedStorageGeneration !== storageGeneration ||
+			lastPublishedStorageIdentity !== storageIdentity ||
+			lastPublishedTaskSourceContextDigest !== taskSourceContextDigest
+		) {
 			lastPublishedRevision = revision;
+			lastPublishedStorageGeneration = storageGeneration;
+			lastPublishedStorageIdentity = storageIdentity;
 			lastPublishedTaskSourceContextDigest = taskSourceContextDigest;
 			deps.onUpdated(revision);
 		}
@@ -589,7 +677,21 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		taskProfileObservationProblem ||= (taskProfileObservations?.unavailableWorkspaceCount ?? 0) > 0;
 		const requestedTaskProfileBindings = taskProfileObservations?.bindings ?? [];
-		const observationPersistenceOptions = { skipUnchangedObservationPersistence: true };
+		const observationPersistenceOptions = {
+			skipUnchangedObservationPersistence: true,
+			selection: {
+				scope: "active" as const,
+				hookTrustDecisionIds: [...writerFieldObservations].flatMap(([writerId, observation]) => {
+					const sourceIdentity = preflightStoreSnapshot.writers[writerId]?.binding.sourceIdentity;
+					return Object.entries(observation.observed).flatMap(([fieldKey, field]) => {
+						const { keyPath } = configurationFieldAddress(fieldKey);
+						return sourceIdentity && field.definitionDigest && keyPath.includes("state")
+							? [configurationDigest([sourceIdentity, keyPath.at(-1) ?? "", field.definitionDigest])]
+							: [];
+					});
+				}),
+			},
+		};
 		await mutateCodexConfigurationSyncStore(async (store) => {
 			// 取锁等待期间卡片可能改选 profile，且该变化不写配置存储，来源指纹不会失效。
 			// 锁内重读当前绑定后再合并；重读失败则丢弃锁外快照，交给既有五秒补扫，避免把旧 profile 写回。
@@ -1643,7 +1745,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						if (path === getCodexConfigurationSyncDirectory()) return;
 						clearTimeout(debounce);
 						debounce = setTimeout(() => {
-							void scan().catch(() => {});
+							runOutsideCodexConfigurationSyncStoreSelection(() => {
+								void scan().catch(() => {});
+							});
 						}, 250);
 						debounce.unref();
 					});
@@ -1764,10 +1868,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		return {
 			results,
 			state: publicState(
-				await readCodexConfigurationSyncStore(),
+				await responseStore(input),
 				deps.listSessions(),
 				traceMonitor.getCoverage(),
 				taskSourceContext,
+				input.stateResponseScope ?? "full",
 			),
 		};
 	};
@@ -1775,14 +1880,19 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		input:
 			| CodexConfigurationSynchronizeRequest
 			| CodexConfigurationResolveConflictRequest
-			| { changeId: string; expectedVersion: number; idempotencyKey: string },
+			| {
+					changeId: string;
+					expectedVersion: number;
+					idempotencyKey: string;
+					stateResponseScope?: "full" | "active";
+			  },
 		kind: "synchronize" | "resolve_conflict" | "acknowledge",
 	) => {
 		await observe();
 		if (kind === "resolve_conflict" && "resolution" in input && input.resolution === "use_session_value")
 			await prepareCodexConfigurationProposalIdentityVolumeObservations([input.changeId]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
-			const requestDigest = configurationDigest([kind, input]);
+			const requestDigest = configurationDigest([kind, withoutConfigurationStateResponseScope(input)]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
 			if (receipt) {
 				if (receipt.requestDigest !== requestDigest) throw new Error("幂等键已用于另一配置操作。");
@@ -1856,10 +1966,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await recover();
 		await publish();
 		return publicState(
-			await readCodexConfigurationSyncStore(),
+			await responseStore(input),
 			deps.listSessions(),
 			traceMonitor.getCoverage(),
 			taskSourceContext,
+			input.stateResponseScope ?? "full",
 		);
 	};
 	const resolveTargetConflict = async (input: CodexConfigurationResolveTargetConflictRequest) => {
@@ -1873,7 +1984,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				...codexSourceSharedPluginInstallationIdentityDirectoryPaths(preflightWriterBinding),
 			]);
 		await mutateCodexConfigurationSyncStore(async (store) => {
-			const requestDigest = configurationDigest(["resolve_target_conflict", input]);
+			const requestDigest = configurationDigest([
+				"resolve_target_conflict",
+				withoutConfigurationStateResponseScope(input),
+			]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
 			if (receipt) {
 				if (receipt.requestDigest !== requestDigest) throw new Error("幂等键已用于另一操作。");
@@ -1942,16 +2056,17 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await recover();
 		await publish();
 		return publicState(
-			await readCodexConfigurationSyncStore(),
+			await responseStore(input),
 			deps.listSessions(),
 			traceMonitor.getCoverage(),
 			taskSourceContext,
+			input.stateResponseScope ?? "full",
 		);
 	};
 	const mutateProfile = async (input: CodexConfigurationProfileMutationRequest) => {
 		await observe();
 		await mutateCodexConfigurationSyncStore((store) => {
-			const requestDigest = configurationDigest(["profile", input]);
+			const requestDigest = configurationDigest(["profile", withoutConfigurationStateResponseScope(input)]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
 			if (receipt) {
 				if (receipt.requestDigest !== requestDigest) throw new Error("幂等身份已用于其他 profile 操作。");
@@ -2037,46 +2152,134 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await recover();
 		await publish();
 		return publicState(
-			await readCodexConfigurationSyncStore(),
+			await responseStore(input),
 			deps.listSessions(),
 			traceMonitor.getCoverage(),
 			taskSourceContext,
+			input.stateResponseScope ?? "full",
 		);
 	};
 	return {
-		mutateProfile,
+		mutateProfile: (input: CodexConfigurationProfileMutationRequest) =>
+			withRequestSelection(input, () => mutateProfile(input)),
 		getChangeDetails: async (input: CodexConfigurationChangeDetailsRequest) => {
 			await refreshTaskSourceContext();
-			const store = await readCodexConfigurationSyncStore();
+			const store = await readCodexConfigurationSyncLookupStore({
+				changeIds: [input.changeId],
+				writerIds: input.targetWriterId ? [input.targetWriterId] : [],
+				targetWriterIds: input.targetWriterId ? [input.targetWriterId] : [],
+				includeTerminalTargets: input.includePropagationHistory,
+			});
 			const change = store.changes.find((entry) => entry.changeId === input.changeId);
 			if (!change || change.version !== input.expectedVersion) throw new Error("配置记录版本已变化，请刷新比较。");
 			if (input.targetWriterId && !change.targets.some((target) => target.writerId === input.targetWriterId))
 				throw new Error("目标不属于此配置记录。");
-			return describeCodexConfigurationChange(store, change, true, input.targetWriterId, taskSourceContext);
+			return {
+				...describeCodexConfigurationChange(store, change, true, input.targetWriterId, taskSourceContext),
+				...(input.includePropagationHistory ? { propagationTargets: change.targets } : {}),
+			};
 		},
 		getState: async () => {
 			await refreshTaskSourceContext();
 			return publicState(
-				await readCodexConfigurationSyncStore(),
+				await readCodexConfigurationSyncCompleteStore(),
 				deps.listSessions(),
 				traceMonitor.getCoverage(),
 				taskSourceContext,
 			);
 		},
-		batchAction,
+		getActiveState: async () => {
+			await refreshTaskSourceContext();
+			return codexConfigurationSyncActiveStateSchema.parse(
+				publicState(
+					await readCodexConfigurationSyncStore(),
+					deps.listSessions(),
+					traceMonitor.getCoverage(),
+					taskSourceContext,
+					"active",
+				),
+			);
+		},
+		listHistory: async (input: CodexConfigurationSyncHistoryRequest) => {
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const page = await listCodexConfigurationSyncStoredHistory(input);
+				const store = await readCodexConfigurationSyncLookupStore({
+					includeActiveTargets: false,
+					changeIds: page.entries
+						.filter((entry) => entry.entry_kind === "settings")
+						.map((entry) => entry.entry_id),
+					observationIds: page.entries
+						.filter((entry) => entry.entry_kind === "sources")
+						.map((entry) => entry.entry_id),
+				});
+				if (store.storageGeneration !== page.storageGeneration) continue;
+				const state = publicState(store, deps.listSessions(), traceMonitor.getCoverage(), taskSourceContext);
+				const ids = new Set(page.entries.map((entry) => entry.entry_id));
+				return {
+					...page,
+					changes: state.changes.filter(
+						(entry) =>
+							ids.has(entry.changeId) ||
+							(entry.recordKind === "source_observation" &&
+								store.sourceObservations.some(
+									(observation) =>
+										ids.has(observation.observationId) && observation.rawChangeIds.includes(entry.changeId),
+								)),
+					),
+					sourceObservations: state.sourceObservations.filter((entry) => ids.has(entry.observationId)),
+				};
+			}
+			throw new Error("历史查询期间配置持续变化，连接稳定后自动重验。");
+		},
+		getSourceObservation: async (input: { observationId: string }) => {
+			const store = await readCodexConfigurationSyncLookupStore({ observationIds: [input.observationId] });
+			return (
+				publicState(
+					store,
+					deps.listSessions(),
+					traceMonitor.getCoverage(),
+					taskSourceContext,
+				).sourceObservations.find((entry) => entry.observationId === input.observationId) ?? null
+			);
+		},
+		getMutationReceipt: async (input: CodexConfigurationMutationReceiptRequest) => {
+			const store = await readCodexConfigurationSyncLookupStore({ receiptKeys: [input.idempotencyKey] });
+			const receipt = store.mutationReceipts[input.idempotencyKey] ?? null;
+			if (
+				receipt &&
+				input.expectedAction &&
+				input.expectedEntry &&
+				receipt.requestDigest !== configurationDigest(["batch_action", input.expectedAction, input.expectedEntry])
+			)
+				throw new Error("幂等凭证与原操作请求不符，未确认其他操作的结果。");
+			return receipt;
+		},
+		batchAction: (input: CodexConfigurationBatchActionRequest) =>
+			withRequestSelection(input, () => batchAction(input)),
 		scan,
-		synchronize: (input: CodexConfigurationSynchronizeRequest) => mutateChange(input, "synchronize"),
-		resolveConflict: (input: CodexConfigurationResolveConflictRequest) => mutateChange(input, "resolve_conflict"),
-		resolveTargetConflict,
-		acknowledge: (input: { changeId: string; expectedVersion: number; idempotencyKey: string }) =>
-			mutateChange(input, "acknowledge"),
+		synchronize: (input: CodexConfigurationSynchronizeRequest) =>
+			withRequestSelection(input, () => mutateChange(input, "synchronize")),
+		resolveConflict: (input: CodexConfigurationResolveConflictRequest) =>
+			withRequestSelection(input, () => mutateChange(input, "resolve_conflict")),
+		resolveTargetConflict: (input: CodexConfigurationResolveTargetConflictRequest) =>
+			withRequestSelection(input, () => resolveTargetConflict(input)),
+		acknowledge: (input: {
+			changeId: string;
+			expectedVersion: number;
+			idempotencyKey: string;
+			stateResponseScope?: "full" | "active";
+		}) => withRequestSelection(input, () => mutateChange(input, "acknowledge")),
 		start: () => {
 			void traceMonitor.start();
 			timer = setInterval(() => {
-				void scan().catch(() => {});
+				runOutsideCodexConfigurationSyncStoreSelection(() => {
+					void scan().catch(() => {});
+				});
 			}, 5_000);
 			timer.unref();
-			void scan().catch(() => {});
+			runOutsideCodexConfigurationSyncStoreSelection(() => {
+				void scan().catch(() => {});
+			});
 		},
 		close: async () => {
 			stopped = true;

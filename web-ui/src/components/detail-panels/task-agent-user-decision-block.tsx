@@ -4,7 +4,7 @@ import { Check, ShieldQuestion, X } from "lucide-react";
 import { type ReactElement, useState } from "react";
 
 import { notifyError } from "@/components/app-toaster";
-import { ClineMarkdownContent } from "@/components/detail-panels/cline-markdown-content";
+import { AgentConversationMarkdownContent } from "@/components/detail-panels/agent-conversation-markdown-content";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeTaskAgentUserDecision, RuntimeTaskAgentUserDecisionOption } from "@/runtime/types";
@@ -58,7 +58,7 @@ export function TaskAgentUserDecisionBlock({
 				<ShieldQuestion size={12} />
 				{decision.kind === "tool_permission" ? "Permission requested" : "Approval requested"}
 			</div>
-			<ClineMarkdownContent content={promptMarkdown} />
+			<AgentConversationMarkdownContent content={promptMarkdown} />
 			{isResolved ? (
 				<div className="mt-2 flex items-center gap-1.5 text-xs text-text-secondary">
 					{decision.resolvedOutcome === "selected" ? <Check size={12} /> : <X size={12} />}

@@ -26,10 +26,12 @@ import { flushSync } from "react-dom";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
 import { showAppToast } from "@/components/app-toaster";
+import {
+	AgentConversationChatPanel,
+	type AgentConversationChatPanelHandle,
+} from "@/components/detail-panels/agent-conversation-chat-panel";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
-import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
-import { ClineAgentChatPanel, type ClineAgentChatPanelHandle } from "@/components/detail-panels/cline-agent-chat-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { DeferredRestorationHarnessNotificationReleaseBanner } from "@/components/detail-panels/deferred-restoration-harness-notification-release-banner";
@@ -42,6 +44,7 @@ import { ReadOnlyTaskConversationHistoryPanel } from "@/components/detail-panels
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskEditorCreationProgressNotice } from "@/components/detail-panels/task-editor-creation-progress-notice";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
+import { TaskSessionInformationActions } from "@/components/detail-panels/task-session-information-actions";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
 import { TaskWorkbench } from "@/components/detail-panels/task-workbench";
 import { WorkUnitRelationNeighborhoodPanel } from "@/components/detail-panels/work-unit-relation-neighborhood-panel";
@@ -58,9 +61,9 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import type { ExpandedForegroundViewTarget } from "@/expanded-foreground-view/expanded-foreground-view-navigation";
+import type { AgentConversationChatActionResult } from "@/hooks/use-agent-conversation-chat-runtime-actions";
+import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
 import { useAgentRaisedPendingUserDecision } from "@/hooks/use-agent-raised-pending-user-decision";
-import type { ClineChatActionResult } from "@/hooks/use-cline-chat-runtime-actions";
-import type { ClineChatMessage } from "@/hooks/use-cline-chat-session";
 import { useConversationSessionTurnProjection } from "@/hooks/use-conversation-session-turn-projection";
 import type { ExplorationThreadGraphData } from "@/hooks/use-exploration-thread-graph";
 import { useFocusViewDesktopPanelArrangement } from "@/hooks/use-focus-view-desktop-panel-arrangement";
@@ -93,7 +96,6 @@ import {
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
-	RuntimeClineReasoningEffort,
 	RuntimeConfigResponse,
 	RuntimeExploratoryFindingEntry,
 	RuntimeTaskChatMessage,
@@ -574,6 +576,7 @@ function DetailUtilityTabList({
 	queuedPromptTaskId,
 	queuedPromptCountIndicator,
 	emitsQueueTabAnchor,
+	compact = false,
 }: {
 	activeTab: DetailUtilityTab;
 	onTabChange: (tab: DetailUtilityTab) => void;
@@ -582,7 +585,29 @@ function DetailUtilityTabList({
 	// 窄屏下顶部 MobileDetailTabBar 才是常驻可见的那份页签，锚点挂在那边；这里再挂一份会让 spotlight
 	// 命中到一个可能被 display:none 藏起来的元素上。
 	emitsQueueTabAnchor: boolean;
+	compact?: boolean;
 }): React.ReactElement {
+	if (compact)
+		return (
+			<select
+				aria-label="工具内部导航"
+				value={activeTab}
+				onChange={(event) => onTabChange(event.target.value as DetailUtilityTab)}
+				className="h-7 min-w-0 flex-1 rounded-sm bg-surface-2 px-1 text-xs text-text-primary"
+				{...(emitsQueueTabAnchor
+					? { [VERIFICATION_ANCHOR_ATTR]: queuedTaskPromptDeliveryQueueTabAnchorKey(queuedPromptTaskId) }
+					: {})}
+			>
+				{DETAIL_UTILITY_TABS.map((tab) => (
+					<option key={tab.id} value={tab.id}>
+						{tab.label}
+						{tab.id === "queue" && queuedPromptCountIndicator.pendingCount > 0
+							? ` (${queuedPromptCountIndicator.pendingCount})`
+							: ""}
+					</option>
+				))}
+			</select>
+		);
 	return (
 		<div
 			role="tablist"
@@ -736,12 +761,12 @@ export function CardDetailView({
 	moveToReviewLoadingById,
 	onAddReviewComments,
 	onSendReviewComments,
-	onSendClineChatMessage,
-	onCancelClineChatTurn,
+	onSendAgentConversationChatMessage,
+	onCancelAgentConversationChatTurn,
 	onResolveTaskAgentUserDecision,
-	onLoadClineChatMessages,
-	latestClineChatMessage,
-	streamedClineChatMessages,
+	onLoadAgentConversationChatMessages,
+	latestAgentConversationChatMessage,
+	streamedAgentConversationChatMessages,
 	onMoveToTrash,
 	isMoveToTrashLoading,
 	onMoveToValidation,
@@ -762,8 +787,6 @@ export function CardDetailView({
 	isBottomTerminalExpanded,
 	onBottomTerminalToggleExpand,
 	isDocumentVisible = true,
-	onClineSettingsSaved,
-	onTaskClineSettingsChanged,
 	isTaskChangesSidebarOpen = false,
 	isFocusViewTaskListSidebarHidden = false,
 	isFocusViewWorkbenchSidebarHidden = false,
@@ -826,20 +849,20 @@ export function CardDetailView({
 	moveToReviewLoadingById?: Record<string, boolean>;
 	onAddReviewComments?: (taskId: string, text: string) => void;
 	onSendReviewComments?: (taskId: string, text: string) => void;
-	onSendClineChatMessage?: (
+	onSendAgentConversationChatMessage?: (
 		taskId: string,
 		text: string,
 		options?: { mode?: RuntimeTaskSessionMode },
-	) => Promise<ClineChatActionResult>;
-	onCancelClineChatTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
+	) => Promise<AgentConversationChatActionResult>;
+	onCancelAgentConversationChatTurn?: (taskId: string) => Promise<{ ok: boolean; message?: string }>;
 	onResolveTaskAgentUserDecision?: (
 		taskId: string,
 		decisionId: string,
 		optionId: string | null,
 	) => Promise<{ ok: boolean; message?: string }>;
-	onLoadClineChatMessages?: (taskId: string) => Promise<ClineChatMessage[] | null>;
-	latestClineChatMessage?: ClineChatMessage | null;
-	streamedClineChatMessages?: ClineChatMessage[] | null;
+	onLoadAgentConversationChatMessages?: (taskId: string) => Promise<AgentConversationChatMessage[] | null>;
+	latestAgentConversationChatMessage?: AgentConversationChatMessage | null;
+	streamedAgentConversationChatMessages?: AgentConversationChatMessage[] | null;
 	onMoveToTrash: () => void;
 	isMoveToTrashLoading?: boolean;
 	onMoveToValidation?: () => void;
@@ -860,12 +883,6 @@ export function CardDetailView({
 	isBottomTerminalExpanded?: boolean;
 	onBottomTerminalToggleExpand?: () => void;
 	isDocumentVisible?: boolean;
-	onClineSettingsSaved?: () => void;
-	onTaskClineSettingsChanged?: (settings: {
-		providerId: string;
-		modelId: string;
-		reasoningEffort: RuntimeClineReasoningEffort | "";
-	}) => void;
 	isTaskChangesSidebarOpen?: boolean;
 	onCreateTaskConversationSession?: (input: {
 		codexConfigurationProfileId?: string;
@@ -909,6 +926,7 @@ export function CardDetailView({
 	const mobileControls = mobileFocusViewControls ?? localMobileFocusViewControls;
 	const mobileFocusViewIdleCollapseController = mobileControls.idleCollapseController;
 	const mobileFocusViewRootRef = mobileFocusViewControls ? undefined : mobileControls.focusViewRootRef;
+	const [mobileHeaderToolbarElement, setMobileHeaderToolbarElement] = useState<HTMLDivElement | null>(null);
 	const [mobileTab, setMobileTab] = useState<MobileTab>("chat");
 	const [detailUtilityTab, setDetailUtilityTab] = useState<DetailUtilityTab>("prompts");
 	const [workbenchModuleSelectionRequest, setWorkbenchModuleSelectionRequest] = useState<{
@@ -974,8 +992,9 @@ export function CardDetailView({
 			(foregroundBelongsToThisTask && foregroundView.target.viewKind === "task_visualization"),
 		onAutomaticPreview: showAutomaticVisualizationPreview,
 	});
-	const taskVisualizationPanel = (
+	const taskVisualizationPanel = (headerNavigationContent?: ReactNode) => (
 		<TaskVisualizationArtifactsPanel
+			headerNavigationContent={headerNavigationContent}
 			workspaceId={currentProjectId}
 			taskId={selection.card.id}
 			taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
@@ -1043,11 +1062,9 @@ export function CardDetailView({
 	const { startDrag: startRightPromptResize } = useResizeDrag();
 	const detailLayoutRef = useRef<HTMLDivElement | null>(null);
 
-	const hasExplicitTaskClineSettings =
-		selection.card.agentId === "cline" || selection.card.clineSettings !== undefined;
 	const mainRowRef = useRef<HTMLDivElement | null>(null);
 	const detailDiffRowRef = useRef<HTMLDivElement | null>(null);
-	const clineAgentChatPanelRef = useRef<ClineAgentChatPanelHandle | null>(null);
+	const agentConversationChatPanelRef = useRef<AgentConversationChatPanelHandle | null>(null);
 	const terminalShortcutInputFocusHandleRef = useRef<AgentInputShortcutInsertionFocusHandle>(null);
 
 	const handleSeparatorMouseDown = useResizeHandler(
@@ -1186,7 +1203,7 @@ export function CardDetailView({
 	// 分流依据是「会话传输形态」而不是「是不是 Cline」：Cline SDK 与 ACP（omp）都由 Kanban
 	// 直接持有结构化消息，渲染成会话面板；只有 PTY 终端 agent 才渲染 xterm。
 	// 有活会话时读会话自己盖的通道章（omp 可在 TUI ⇄ ACP 之间切换，agentId 判不出来）。
-	const showClineAgentChatPanel = activeTaskConversationSessionSummary
+	const showAgentConversationChatPanel = activeTaskConversationSessionSummary
 		? isRuntimeAgentSessionSummaryRenderedAsConversationPanel(activeTaskConversationSessionSummary)
 		: nextLaunchAgentSessionTransport !== null && nextLaunchAgentSessionTransport !== "pty_terminal";
 	// ── 会话 turn 投影（姊妹蓝图 §2.2）──────────────────────────────────
@@ -1204,7 +1221,7 @@ export function CardDetailView({
 	// 重算与 git 子进程轮询（本仓 AGENTS.md 记载过同类事件循环停摆事故）。上述三类
 	// 边沿与 updatedAt 在同一个广播批次里到达，去掉它不引入任何可感知延迟。
 	const turnProjectionConversationSessionTaskId =
-		showClineAgentChatPanel && !isDoneTaskReadOnly ? selectedTaskConversationSessionId : null;
+		showAgentConversationChatPanel && !isDoneTaskReadOnly ? selectedTaskConversationSessionId : null;
 	const turnProjectionRefreshFacets = activeTaskConversationSessionSummary
 		? resolveSessionFacets(activeTaskConversationSessionSummary)
 		: null;
@@ -1231,7 +1248,7 @@ export function CardDetailView({
 					width: "100%",
 					flex: `0 0 ${stackedAgentPanelHeightRatio * 100}%`,
 				}
-			: showClineAgentChatPanel
+			: showAgentConversationChatPanel
 				? { display: isDiffExpanded ? "none" : "flex", width: agentPanelPercent }
 				: {
 						display: isDiffExpanded ? "none" : "flex",
@@ -1243,7 +1260,7 @@ export function CardDetailView({
 		? { display: "none" }
 		: isWorkbenchBelowAgent
 			? { flex: "1 1 0", width: "100%", minHeight: 0 }
-			: showClineAgentChatPanel
+			: showAgentConversationChatPanel
 				? { width: isDiffExpanded ? "100%" : diffPanelPercent }
 				: { flex: "1 1 0", minWidth: MIN_DETAIL_DIFF_PANEL_WIDTH_PX };
 	const availablePaths = useMemo(() => {
@@ -1382,14 +1399,14 @@ export function CardDetailView({
 	const injectTextIntoActiveInput = useCallback(
 		(formatted: string) => {
 			if (isDoneTaskReadOnly) return;
-			if (showClineAgentChatPanel) {
-				clineAgentChatPanelRef.current?.appendToDraft(formatted);
+			if (showAgentConversationChatPanel) {
+				agentConversationChatPanelRef.current?.appendToDraft(formatted);
 				setIsDiffExpanded(false);
 				return;
 			}
 			onAddReviewComments?.(selectedTaskConversationSessionId, formatted);
 		},
-		[onAddReviewComments, selectedTaskConversationSessionId, showClineAgentChatPanel, isDoneTaskReadOnly],
+		[onAddReviewComments, selectedTaskConversationSessionId, showAgentConversationChatPanel, isDoneTaskReadOnly],
 	);
 	const handleFillPromptIntoActiveInput = useCallback(
 		(text: string) => {
@@ -1398,33 +1415,35 @@ export function CardDetailView({
 			flushSync(() => {
 				setIsDiffExpanded(false);
 				if (isMobile) setMobileTab("chat");
-				if (showClineAgentChatPanel) {
-					clineAgentChatPanelRef.current?.appendToDraft(text, { preserveInsertedTextBoundaryWhitespace: true });
+				if (showAgentConversationChatPanel) {
+					agentConversationChatPanelRef.current?.appendToDraft(text, {
+						preserveInsertedTextBoundaryWhitespace: true,
+					});
 				} else {
 					injectTextIntoActiveInput(text);
 				}
 			});
-			if (showClineAgentChatPanel) {
-				clineAgentChatPanelRef.current?.focusAgentInputAfterShortcutInsertion();
+			if (showAgentConversationChatPanel) {
+				agentConversationChatPanelRef.current?.focusAgentInputAfterShortcutInsertion();
 			} else {
 				terminalShortcutInputFocusHandleRef.current?.focusAgentInputAfterShortcutInsertion();
 			}
 		},
-		[injectTextIntoActiveInput, showClineAgentChatPanel, isDoneTaskReadOnly, isMobile],
+		[injectTextIntoActiveInput, showAgentConversationChatPanel, isDoneTaskReadOnly, isMobile],
 	);
 
 	const handleSendDiffComments = useCallback(
 		(formatted: string) => {
 			if (isDoneTaskReadOnly) return;
-			if (showClineAgentChatPanel) {
-				void clineAgentChatPanelRef.current?.sendText(formatted);
+			if (showAgentConversationChatPanel) {
+				void agentConversationChatPanelRef.current?.sendText(formatted);
 				setIsDiffExpanded(false);
 				return;
 			}
 			onSendReviewComments?.(selection.card.id, formatted);
 			setIsDiffExpanded(false);
 		},
-		[onSendReviewComments, selection.card.id, showClineAgentChatPanel, isDoneTaskReadOnly],
+		[onSendReviewComments, selection.card.id, showAgentConversationChatPanel, isDoneTaskReadOnly],
 	);
 
 	const promptLibraryProjectId = currentProjectId ?? "__unknown_project__";
@@ -1487,10 +1506,11 @@ export function CardDetailView({
 		},
 		[enqueuePromptForDeliveryAfterCurrentTurn],
 	);
-	const detailUtilityTabs = (
+	const detailUtilityTabs = (compact = false) => (
 		<>
 			<PostDeployVerificationEntryNavigationButton taskId={selection.card.id} />
 			<DetailUtilityTabList
+				compact={compact}
 				activeTab={detailUtilityTab}
 				onTabChange={handleDetailUtilityTabChange}
 				queuedPromptTaskId={selectedTaskConversationSessionId}
@@ -1503,9 +1523,10 @@ export function CardDetailView({
 			</span>
 		</>
 	);
-	const detailUtilityPanel =
+	const detailUtilityPanel = (headerNavigationContent?: ReactNode) =>
 		detailUtilityTab === "prompts" || detailUtilityTab === "commands" ? (
 			<PromptLibraryPanel
+				headerNavigationContent={headerNavigationContent}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				entryKind={detailUtilityTab === "commands" ? "reusable_command" : "draft_prompt"}
 				taskId={selectedTaskConversationSessionId}
@@ -1514,14 +1535,15 @@ export function CardDetailView({
 				onQueuePromptForAfterCurrentTurn={
 					currentProjectId && !isDoneTaskReadOnly ? handleQueuePromptForAfterCurrentTurn : undefined
 				}
-				headerContent={detailUtilityTabs}
+				headerContent={detailUtilityTabs(Boolean(headerNavigationContent))}
 				taskIdsOnBoard={promptLibraryIdentifiersStillOwnedByBoardTasks}
 			/>
 		) : (
 			<QueuedTaskPromptDeliveryQueuePanel
+				headerNavigationContent={headerNavigationContent}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				controller={queuedPromptQueueController}
-				headerContent={detailUtilityTabs}
+				headerContent={detailUtilityTabs(Boolean(headerNavigationContent))}
 			/>
 		);
 
@@ -1549,56 +1571,58 @@ export function CardDetailView({
 					userTurnKind: null,
 				}
 			: null);
-	const taskConversationSessionsPanel = mainSessionSummaryForSessionsPanel ? (
-		<TaskConversationSessionsPanel
-			isTaskAgentExecutionDisabled={isDoneTaskReadOnly || !onCreateTaskConversationSession}
-			key={JSON.stringify([currentProjectId, selection.card.id])}
-			workspaceId={currentProjectId}
-			taskCard={selection.card}
-			workspaceTaskId={selection.card.id}
-			mainSessionSummary={mainSessionSummaryForSessionsPanel}
-			mainSessionUserMessagePreview={selection.card.prompt}
-			mainSessionOriginalPromptCard={selection.card}
-			effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId ?? "codex"}
-			agents={runtimeConfig?.agents}
-			taskSessions={taskSessions}
-			selectedTaskConversationSessionId={selectedTaskConversationSessionId}
-			onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
-			onCreateTaskConversationSession={async ({
-				agentId,
-				sessionRole,
-				initialUserQuestion,
-				contextSource,
-				codexConfigurationProfileId,
-				expectedTaskIncarnationCreatedAtEpochMs,
-				contextSourceTaskConversationSessionId,
-			}) => {
-				if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
-					return { ok: false, message: "请先恢复任务，再创建会话。" };
-				const result = await onCreateTaskConversationSession({
-					...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
+	const taskConversationSessionsPanel = (headerNavigationContent?: ReactNode) =>
+		mainSessionSummaryForSessionsPanel ? (
+			<TaskConversationSessionsPanel
+				headerNavigationContent={headerNavigationContent}
+				isTaskAgentExecutionDisabled={isDoneTaskReadOnly || !onCreateTaskConversationSession}
+				key={JSON.stringify([currentProjectId, selection.card.id])}
+				workspaceId={currentProjectId}
+				taskCard={selection.card}
+				workspaceTaskId={selection.card.id}
+				mainSessionSummary={mainSessionSummaryForSessionsPanel}
+				mainSessionUserMessagePreview={selection.card.prompt}
+				mainSessionOriginalPromptCard={selection.card}
+				effectiveAgentId={effectiveTaskAgentId ?? effectiveTaskConversationSessionAgentId ?? "codex"}
+				agents={runtimeConfig?.agents}
+				taskSessions={taskSessions}
+				selectedTaskConversationSessionId={selectedTaskConversationSessionId}
+				onSelectTaskConversationSession={setSelectedTaskConversationSessionId}
+				onCreateTaskConversationSession={async ({
 					agentId,
 					sessionRole,
 					initialUserQuestion,
 					contextSource,
-					...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
-						? { expectedTaskIncarnationCreatedAtEpochMs }
-						: {}),
-					...(contextSourceTaskConversationSessionId ? { contextSourceTaskConversationSessionId } : {}),
-					mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
-					mainSessionOriginUserMessagePreview: selection.card.prompt,
-				});
-				if (
-					result.ok &&
-					result.taskConversationSessionId &&
-					latestFocusedTaskIdentityForSessionCreation.current === focusedTaskIdentityForSessionCreation
-				) {
-					setSelectedTaskConversationSessionId(result.taskConversationSessionId);
-				}
-				return result;
-			}}
-		/>
-	) : null;
+					codexConfigurationProfileId,
+					expectedTaskIncarnationCreatedAtEpochMs,
+					contextSourceTaskConversationSessionId,
+				}) => {
+					if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
+						return { ok: false, message: "请先恢复任务，再创建会话。" };
+					const result = await onCreateTaskConversationSession({
+						...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
+						agentId,
+						sessionRole,
+						initialUserQuestion,
+						contextSource,
+						...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
+							? { expectedTaskIncarnationCreatedAtEpochMs }
+							: {}),
+						...(contextSourceTaskConversationSessionId ? { contextSourceTaskConversationSessionId } : {}),
+						mainSessionOriginTurnNumber: mainSessionSummaryForSessionsPanel.latestTurnCheckpoint?.turn ?? 1,
+						mainSessionOriginUserMessagePreview: selection.card.prompt,
+					});
+					if (
+						result.ok &&
+						result.taskConversationSessionId &&
+						latestFocusedTaskIdentityForSessionCreation.current === focusedTaskIdentityForSessionCreation
+					) {
+						setSelectedTaskConversationSessionId(result.taskConversationSessionId);
+					}
+					return result;
+				}}
+			/>
+		) : null;
 	const isMainTaskConversationSessionSelected =
 		selectedTaskConversationSessionId === resolveMainTaskConversationSessionId(selection.card);
 	// 探索地图与本会话 Findings 使用现有工作台模块；Done 也展示持久资产，不依赖实时聊天投影。
@@ -1608,9 +1632,10 @@ export function CardDetailView({
 	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
 	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
 	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
-	const explorationThreadGraphPanel =
+	const explorationThreadGraphPanel = (headerNavigationContent?: ReactNode) =>
 		explorationThreadGraph !== undefined && currentProjectId ? (
 			<ExplorationThreadGraphPanel
+				headerNavigationContent={headerNavigationContent}
 				initiallyExpanded={!isMobile}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				workspaceId={currentProjectId}
@@ -1632,8 +1657,9 @@ export function CardDetailView({
 		) : null;
 	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
 	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
-	const workUnitRelationNeighborhoodPanel = (
+	const workUnitRelationNeighborhoodPanel = (headerNavigationContent?: ReactNode) => (
 		<WorkUnitRelationNeighborhoodPanel
+			headerNavigationContent={headerNavigationContent}
 			initiallyExpanded={!isMobile}
 			workspaceId={currentProjectId}
 			kanbanBoardCardTaskId={selection.card.id}
@@ -1642,8 +1668,29 @@ export function CardDetailView({
 	);
 	const activeTaskConversationSessionMessages =
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
-		(isMainTaskConversationSessionSelected ? streamedClineChatMessages : null);
+		(isMainTaskConversationSessionSelected ? streamedAgentConversationChatMessages : null);
 
+	const sessionInformationActions = (
+		<TaskSessionInformationActions
+			key={JSON.stringify([
+				currentProjectId,
+				selection.card.id,
+				selection.card.createdAt,
+				selectedTaskConversationSessionId,
+			])}
+			workspaceId={currentProjectId}
+			taskId={selection.card.id}
+			taskConversationSessionId={selectedTaskConversationSessionId}
+			taskCreatedAtEpochMs={selection.card.createdAt}
+			summary={activeTaskConversationSessionSummary}
+			hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showAgentConversationChatPanel}
+			pendingUserDecisionIdentityForRefresh={
+				pendingUserDecision.decision
+					? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+					: null
+			}
+		/>
+	);
 	const agentSessionContent = isDoneTaskReadOnly ? (
 		<ReadOnlyTaskConversationHistoryPanel
 			key={JSON.stringify([currentProjectId, selection.card.id, selectedTaskConversationSessionId])}
@@ -1652,9 +1699,13 @@ export function CardDetailView({
 			taskConversationSessionId={selectedTaskConversationSessionId}
 			onRestoreTask={onRestoreTaskFromTrash ? () => onRestoreTaskFromTrash(selection.card.id) : undefined}
 		/>
-	) : showClineAgentChatPanel ? (
-		<ClineAgentChatPanel
-			ref={clineAgentChatPanelRef}
+	) : effectiveTaskConversationSessionAgentId === "cline" ? (
+		<div role="status" className="p-4 text-sm text-text-secondary">
+			Cline agent 已退役。旧卡片和会话数据仍保留；请选择其他 Agent 开始新会话。
+		</div>
+	) : showAgentConversationChatPanel ? (
+		<AgentConversationChatPanel
+			ref={agentConversationChatPanelRef}
 			taskId={selectedTaskConversationSessionId}
 			agentEntryKeyboardFocusRequestKey={agentEntryKeyboardFocusRequestKey}
 			summary={activeTaskConversationSessionSummary}
@@ -1669,17 +1720,12 @@ export function CardDetailView({
 			}
 			showComposerModeToggle={false}
 			workspaceId={currentProjectId}
-			runtimeConfig={runtimeConfig}
-			taskClineSettings={selection.card.clineSettings}
-			taskHasExplicitClineSettings={hasExplicitTaskClineSettings}
-			onClineSettingsSaved={onClineSettingsSaved}
-			onTaskClineSettingsChanged={onTaskClineSettingsChanged}
-			onSendMessage={onSendClineChatMessage}
-			onCancelTurn={onCancelClineChatTurn}
+			onSendMessage={onSendAgentConversationChatMessage}
+			onCancelTurn={onCancelAgentConversationChatTurn}
 			onResolveUserDecision={onResolveTaskAgentUserDecision}
-			onLoadMessages={onLoadClineChatMessages}
+			onLoadMessages={onLoadAgentConversationChatMessages}
 			incomingMessages={activeTaskConversationSessionMessages}
-			incomingMessage={isMainTaskConversationSessionSelected ? latestClineChatMessage : null}
+			incomingMessage={isMainTaskConversationSessionSelected ? latestAgentConversationChatMessage : null}
 			onCommit={
 				isMainTaskConversationSessionSelected && onAgentCommitTask
 					? () => onAgentCommitTask(selection.card.id)
@@ -1750,6 +1796,15 @@ export function CardDetailView({
 			isCommitLoading={agentCommitTaskLoadingById?.[selection.card.id] ?? false}
 			isOpenPrLoading={agentOpenPrTaskLoadingById?.[selection.card.id] ?? false}
 			showSessionToolbar={false}
+			mobileHeaderToolbarElement={mobileHeaderToolbarElement}
+			headerInformationContent={sessionInformationActions}
+			narrowMobileInformationContent={
+				<TaskResourceUsageDetailPanel
+					key={JSON.stringify([currentProjectId, selection.card.id, selectedTaskConversationSessionId])}
+					taskCardId={selection.card.id}
+					presentation="toolbar_popover"
+				/>
+			}
 			autoFocus={!taskLookupWorkbenchContent}
 			showMoveToTrash={isMainTaskConversationSessionSelected && showMoveToTrashActions}
 			onMoveToTrash={onMoveToTrash}
@@ -1805,15 +1860,11 @@ export function CardDetailView({
 				(activeTaskConversationSessionSummary?.runtimeSessionIncarnationId ?? null));
 	const agentChatPanel = (
 		<div className="flex min-h-0 min-w-0 flex-1 flex-col">
-			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
-				<div data-task-created-at-details="" className="px-3 py-1 text-xs text-text-secondary">
-					任务创建于{" "}
-					<time dateTime={new Date(selection.card.createdAt).toISOString()}>
-						{new Date(selection.card.createdAt).toLocaleString()}
-					</time>
+			{(isDoneTaskReadOnly || showAgentConversationChatPanel) && !isMobile ? (
+				<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
+					{sessionInformationActions}
 				</div>
-				<AgentCurrentWorkPhaseGoal summary={activeTaskConversationSessionSummary} />
-			</div>
+			) : null}
 			{pendingUserDecision.transcriptRecoveryNotice ? (
 				<p role="status" className="px-3 py-2 text-xs text-text-secondary">
 					{pendingUserDecision.transcriptRecoveryNotice}
@@ -1843,18 +1894,6 @@ export function CardDetailView({
 					}
 				/>
 			) : null}
-			<div hidden={isMobile && !mobileControls.upperNavigationAndToolsExpanded} className="shrink-0">
-				<AgentRaisedUserDecisionHistoryPanel
-					workspaceId={currentProjectId}
-					taskId={selectedTaskConversationSessionId}
-					pendingUserDecisionIdentityForRefresh={
-						pendingUserDecision.decision
-							? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
-							: null
-					}
-				/>
-				<TaskResourceUsageDetailPanel taskCardId={selection.card.id} />
-			</div>
 			{agentSessionContent}
 		</div>
 	);
@@ -1899,6 +1938,20 @@ export function CardDetailView({
 					{isMobile && !taskLookupWorkbenchContent ? (
 						<>
 							<MobileFocusedTaskCardHeader
+								terminalToolbarHostRef={
+									showAgentConversationChatPanel || isDoneTaskReadOnly
+										? undefined
+										: setMobileHeaderToolbarElement
+								}
+								sessionInformationContent={
+									showAgentConversationChatPanel || isDoneTaskReadOnly ? sessionInformationActions : undefined
+								}
+								currentWorkPhaseGoalContent={
+									<AgentCurrentWorkPhaseGoal
+										summary={activeTaskConversationSessionSummary}
+										isFullGoalTextVisible
+									/>
+								}
 								onBackToBoard={onBackToBoard}
 								navigationAndToolsControls={mobileControls}
 								key={mobileFocusedTaskIdentity}
@@ -1915,7 +1968,6 @@ export function CardDetailView({
 									selected: true,
 									workspacePath,
 									defaultAgentId: selectedAgentId,
-									defaultClineModelId: runtimeConfig?.clineProviderSettings?.modelId ?? null,
 									handlers: {
 										onStartTask,
 										onEditTask,
@@ -1993,7 +2045,6 @@ export function CardDetailView({
 										onCancelAutomaticTaskAction={onCancelAutomaticTaskAction}
 										moveToTrashLoadingById={moveToTrashLoadingById}
 										panelWidth="100%"
-										defaultClineModelId={runtimeConfig?.clineProviderSettings?.modelId ?? null}
 										defaultAgentId={selectedAgentId}
 									/>
 								</div>
@@ -2052,7 +2103,7 @@ export function CardDetailView({
 											onMouseDown={
 												isWorkbenchBelowAgent
 													? handleStackedAgentSeparatorMouseDown
-													: showClineAgentChatPanel
+													: showAgentConversationChatPanel
 														? handleAgentDiffSeparatorMouseDown
 														: handleTerminalDiffSeparatorMouseDown
 											}
@@ -2114,13 +2165,13 @@ export function CardDetailView({
 																	viewMode="unified"
 																	onAddToTerminal={
 																		!isDoneTaskReadOnly &&
-																		(onAddReviewComments || showClineAgentChatPanel)
+																		(onAddReviewComments || showAgentConversationChatPanel)
 																			? injectTextIntoActiveInput
 																			: undefined
 																	}
 																	onSendToTerminal={
 																		!isDoneTaskReadOnly &&
-																		(onSendReviewComments || showClineAgentChatPanel)
+																		(onSendReviewComments || showAgentConversationChatPanel)
 																			? handleSendDiffComments
 																			: undefined
 																	}
@@ -2225,13 +2276,13 @@ export function CardDetailView({
 																				viewMode={isDiffExpanded ? "split" : "unified"}
 																				onAddToTerminal={
 																					!isDoneTaskReadOnly &&
-																					(onAddReviewComments || showClineAgentChatPanel)
+																					(onAddReviewComments || showAgentConversationChatPanel)
 																						? injectTextIntoActiveInput
 																						: undefined
 																				}
 																				onSendToTerminal={
 																					!isDoneTaskReadOnly &&
-																					(onSendReviewComments || showClineAgentChatPanel)
+																					(onSendReviewComments || showAgentConversationChatPanel)
 																						? handleSendDiffComments
 																						: undefined
 																				}
@@ -2324,13 +2375,18 @@ export function CardDetailView({
 												modules={{
 													task_sessions: taskConversationSessionsPanel,
 													cross_task_relations: workUnitRelationNeighborhoodPanel,
-													exploration_map:
-														explorationThreadGraphPanel || sessionFindingsSection ? (
-															<>
-																{explorationThreadGraphPanel}
-																{sessionFindingsSection}
-															</>
-														) : null,
+													exploration_map: (headerNavigationContent) => (
+														<>
+															{explorationThreadGraph !== undefined && currentProjectId ? (
+																explorationThreadGraphPanel(headerNavigationContent)
+															) : (
+																<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
+																	{headerNavigationContent ?? "探索地图"}
+																</div>
+															)}
+															{sessionFindingsSection}
+														</>
+													),
 													prompt_tools: detailUtilityPanel,
 													task_visualizations: taskVisualizationPanel,
 												}}

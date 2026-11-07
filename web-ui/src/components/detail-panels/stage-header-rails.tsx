@@ -1,12 +1,12 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-import { ChevronDown, ChevronRight } from "lucide-react";
 import type { MouseEvent, RefObject } from "react";
-import { useEffect, useMemo, useState } from "react";
-
-import { StageHeaderLabel } from "@/components/detail-panels/stage-header-label";
-import { STAGE_HEADER_HEIGHT_PX } from "@/components/detail-panels/stage-header-rail-geometry";
+import { useMemo } from "react";
+import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
+import { FocusViewGroupHeaderRails } from "@/components/detail-panels/focus-view-group-header-rails";
+import { FocusViewStageGroupHeaderActions } from "@/components/detail-panels/focus-view-stage-group-header-actions";
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { ColumnIndicator } from "@/components/ui/column-indicator";
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -22,11 +22,15 @@ interface StageRailFocusedCardProps {
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	taskCardActionHandlers: TaskCardActionHandlerBundle;
 	workspacePath?: string | null;
-	defaultClineModelId?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }
 
-interface StageHeaderRailsProps extends StageRailFocusedCardProps {
+interface StageHeaderGroupActionHandlers {
+	onRequestStartAllReadyBacklogTasks?: () => void;
+	onClearTrash?: () => void;
+}
+
+interface StageHeaderRailsProps extends StageRailFocusedCardProps, StageHeaderGroupActionHandlers {
 	selection: CardSelection;
 	displayGroups: BoardDisplayGroup[];
 	focusedDisplayGroupId: BoardDisplayGroupId;
@@ -60,87 +64,44 @@ function StageHeaderRailEntry({
 	taskSessions,
 	taskCardActionHandlers,
 	workspacePath,
-	defaultClineModelId,
 	defaultAgentId,
-}: StageRailFocusedCardProps & {
-	column: BoardDisplayGroup;
-	withCard: boolean;
-	selection: CardSelection;
-	isStageSectionExpanded: boolean;
-	onToggleStageSectionExpanded: () => void;
-	onScrollToSection: () => void;
-	onScrollToFocusedCard: (event: MouseEvent<HTMLElement>) => void;
-}): React.ReactElement {
+	onRequestStartAllReadyBacklogTasks,
+	onClearTrash,
+}: StageRailFocusedCardProps &
+	StageHeaderGroupActionHandlers & {
+		column: BoardDisplayGroup;
+		withCard: boolean;
+		selection: CardSelection;
+		isStageSectionExpanded: boolean;
+		onToggleStageSectionExpanded: () => void;
+		onScrollToSection: () => void;
+		onScrollToFocusedCard: (event: MouseEvent<HTMLElement>) => void;
+	}): React.ReactElement {
 	const columnId = column.id;
 	const { card } = selection;
 
 	return (
 		<div className="bg-surface-1 rounded-lg border border-border">
-			{/*
-			 * 卡头行拆成**两个同级按钮**（嵌套 <button> 是非法 HTML）：箭头折叠、其余跳转。钉住时这个条目在视觉上
-			 * 替代被它盖住的行内卡头，故几何与 `ColumnSection` 的行内卡头逐项对位：行内是 `margin: 0 4px` +
-			 * `padding: 0 8px` + `gap: 8` → 箭头占 x∈[12,28]、标签起于 36。这里箭头按钮 margin-left 4 + 宽 32
-			 * → [4,36] 内居中 16px 图标 → [12,28]；跳转按钮起于 36、padding-left 0 → 标签起于 36；右侧
-			 * margin 4 + padding 8 = 12，与行内一致。行高必须仍是 STAGE_HEADER_HEIGHT_PX、外层保留
-			 * `border border-border`，且不得新增纵向 padding——否则钉住分类器与跳转落点的堆叠阈值全部失准。
-			 */}
-			<div style={{ display: "flex", alignItems: "center", height: STAGE_HEADER_HEIGHT_PX }}>
-				<button
-					type="button"
-					onClick={onToggleStageSectionExpanded}
-					aria-expanded={isStageSectionExpanded}
-					aria-label={`${isStageSectionExpanded ? "Collapse" : "Expand"} ${column.title}`}
-					title={`${isStageSectionExpanded ? "Collapse" : "Expand"} ${column.title}`}
-					className="hover:bg-surface-0 rounded-md"
-					style={{
-						height: 32,
-						width: 32,
-						flexShrink: 0,
-						display: "flex",
-						alignItems: "center",
-						justifyContent: "center",
-						padding: 0,
-						margin: "0 0 0 4px",
-						background: "none",
-						border: "none",
-						cursor: "pointer",
-						color: "inherit",
-					}}
-				>
-					{isStageSectionExpanded ? (
-						<ChevronDown size={16} className="text-text-secondary" style={{ flexShrink: 0 }} />
-					) : (
-						<ChevronRight size={16} className="text-text-secondary" style={{ flexShrink: 0 }} />
-					)}
-				</button>
-				<button
-					type="button"
-					onClick={onScrollToSection}
-					className="hover:bg-surface-0 rounded-md"
-					aria-label={`Jump to ${column.title}`}
-					title={`Jump to ${column.title}`}
-					style={{
-						height: 32,
-						flex: "1 1 auto",
-						minWidth: 0,
-						display: "flex",
-						alignItems: "center",
-						padding: "0 8px 0 0",
-						margin: "0 4px 0 0",
-						background: "none",
-						border: "none",
-						cursor: "pointer",
-						color: "inherit",
-						textAlign: "left",
-					}}
-				>
-					<StageHeaderLabel columnId={columnId} title={column.title} count={column.cards.length} />
-				</button>
-			</div>
+			<FocusViewGroupHeader
+				title={column.title}
+				count={column.cards.length}
+				icon={<ColumnIndicator columnId={columnId} />}
+				isExpanded={isStageSectionExpanded}
+				onToggleExpanded={onToggleStageSectionExpanded}
+				onJumpToSection={onScrollToSection}
+				actions={
+					<FocusViewStageGroupHeaderActions
+						column={column}
+						onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+						onClearTrash={onClearTrash}
+						onRestoreFromTrashTask={taskCardActionHandlers.onRestoreFromTrashTask}
+					/>
+				}
+			/>
 			{withCard ? (
 				<div
 					data-testid="stage-header-rail-focused-card"
-					style={{ display: "flex", flexDirection: "column", padding: 8 }}
+					className="flex flex-col px-2 pb-2 pt-3"
 					onClick={onScrollToFocusedCard}
 				>
 					<TaskCardBody
@@ -153,7 +114,6 @@ function StageHeaderRailEntry({
 							selected: true,
 							handlers: taskCardActionHandlers,
 							workspacePath,
-							defaultClineModelId,
 							defaultAgentId,
 						})}
 					/>
@@ -188,29 +148,14 @@ export function StageHeaderRails({
 	onToggleStageSectionExpandedFromStageHeaderRail,
 	onJumpToStageSectionBelowTopRail,
 	scrollRootRef,
+	onRequestStartAllReadyBacklogTasks,
+	onClearTrash,
 	...focusedCardProps
 }: StageHeaderRailsProps): React.ReactElement | null {
 	const columnById = useMemo(
 		() => new Map<string, BoardDisplayGroup>(displayGroups.map((column) => [column.id, column])),
 		[displayGroups],
 	);
-
-	// 让出滚动条宽度，使纵向滚动条仍可见可点（macOS overlay 滚动条则为 0）。与旧钉住条一致。
-	const [scrollbarWidth, setScrollbarWidth] = useState(0);
-	useEffect(() => {
-		const root = scrollRootRef.current;
-		if (!root) {
-			return;
-		}
-		const measure = (): void => setScrollbarWidth(root.offsetWidth - root.clientWidth);
-		measure();
-		if (typeof ResizeObserver === "undefined") {
-			return;
-		}
-		const resizeObserver = new ResizeObserver(measure);
-		resizeObserver.observe(root);
-		return () => resizeObserver.disconnect();
-	}, [scrollRootRef]);
 
 	const scrollToFocusedCard = (event: MouseEvent<HTMLElement>): void => {
 		if (!event.currentTarget.contains(event.target as Node)) {
@@ -237,39 +182,19 @@ export function StageHeaderRails({
 				onToggleStageSectionExpanded={() => onToggleStageSectionExpandedFromStageHeaderRail(column.id, edge)}
 				onScrollToSection={() => onJumpToStageSectionBelowTopRail(column.id)}
 				onScrollToFocusedCard={scrollToFocusedCard}
+				onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
+				onClearTrash={onClearTrash}
 				{...focusedCardProps}
 			/>
 		);
 	};
 
-	const hasTop = topPinnedColumnIds.length > 0;
-	const hasBottom = bottomPinnedColumnIds.length > 0;
-	if (!hasTop && !hasBottom) {
-		return null;
-	}
-
 	return (
-		<>
-			{hasTop ? (
-				<div
-					className="kb-stage-header-rail"
-					data-testid="stage-header-rail"
-					data-edge="top"
-					style={{ right: scrollbarWidth }}
-				>
-					{topPinnedColumnIds.map((columnId) => renderEntry(columnId, "pinTop"))}
-				</div>
-			) : null}
-			{hasBottom ? (
-				<div
-					className="kb-stage-header-rail"
-					data-testid="stage-header-rail"
-					data-edge="bottom"
-					style={{ right: scrollbarWidth }}
-				>
-					{bottomPinnedColumnIds.map((columnId) => renderEntry(columnId, "pinBottom"))}
-				</div>
-			) : null}
-		</>
+		<FocusViewGroupHeaderRails
+			scrollRootRef={scrollRootRef}
+			topPinnedGroupIds={topPinnedColumnIds}
+			bottomPinnedGroupIds={bottomPinnedColumnIds}
+			renderEntry={renderEntry}
+		/>
 	);
 }

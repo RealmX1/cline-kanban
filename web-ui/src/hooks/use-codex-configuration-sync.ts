@@ -20,6 +20,7 @@ import type {
 	CodexConfigurationChange,
 	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationPropagationTarget,
+	CodexConfigurationSourceObservation,
 } from "@/runtime/types";
 
 const subscribeWhenDisabled = () => () => {};
@@ -33,6 +34,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		enabled ? recoveryController.subscribe : subscribeWhenDisabled,
 		recoveryController.getSnapshot,
 	);
+	const [runtimeConnectionGeneration, setRuntimeConnectionGeneration] = useState(0);
 	const [error, setError] = useState<string | null>(null);
 	const [pendingChangeId, setPendingChangeId] = useState<string | null>(null);
 	const [batchResults, setBatchResults] = useState<CodexConfigurationBatchActionResult["results"]>([]);
@@ -44,7 +46,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			operationIdentities: new Map<string, string>(),
 			unconfirmedProfileMutation: null as { requestIdentity: string; idempotencyKey: string } | null,
 		}),
-		[recoveryController, enabled],
+		[recoveryController, enabled, runtimeConnectionGeneration],
 	);
 	const currentScope = useRef(scope);
 	currentScope.current = scope;
@@ -80,10 +82,16 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		setError(null);
 		setBatchResults([]);
 		if (!enabled) return;
-		void refresh();
+		void refresh().then(() => recoveryController.resumeUnconfirmedActions());
 		const unsubscribe = subscribeCodexConfigurationSyncUpdated((reason) => {
+			if (reason === "runtime_reconnected") {
+				scope.active = false;
+				scope.requestAbortController.abort();
+				recoveryController.resetForRuntimeReconnect();
+				setRuntimeConnectionGeneration((generation) => generation + 1);
+				return;
+			}
 			void refresh();
-			if (reason === "runtime_reconnected") recoveryController.resumeUnconfirmedActions();
 		});
 		return () => {
 			scope.active = false;
@@ -225,6 +233,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 				changeId: string;
 				expectedVersion: number;
 				expectedSharedValueDigest?: string;
+				observation?: CodexConfigurationSourceObservation;
 			}>,
 		) => {
 			if (!entries.length) return;

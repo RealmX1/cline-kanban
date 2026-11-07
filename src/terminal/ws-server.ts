@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 import type { RawData, WebSocket } from "ws";
 import { WebSocketServer } from "ws";
 
+import { assertRuntimeAgentIsNotRetired } from "../core/agent-catalog";
 import type { RuntimeTerminalWsServerMessage } from "../core/api-contract";
 import { parseTerminalWsClientMessage } from "../core/api-validation";
 import {
@@ -13,6 +14,7 @@ import {
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { handleSocketUpgrade } from "../server/middleware";
+import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
 import type { TerminalSessionService } from "./terminal-session-service";
 
 interface TerminalWebSocketConnectionContext {
@@ -666,11 +668,21 @@ export function createTerminalWebSocketBridge({
 			previousIoSocket.close(1000, "Replaced by newer terminal stream.");
 		}
 
-		ws.on("message", (rawMessage: RawData) => {
+		ws.on("message", async (rawMessage: RawData) => {
 			try {
 				// 进程已回收时，保留画面仍可能产生鼠标或焦点报告。没有输入接收者不代表传输故障；
 				// 丢弃这些字节并保留 viewer，续跑后的新进程仍可复用同一条连接。
-				terminalManager.writeInput(taskId, rawDataToBuffer(rawMessage));
+				const summary = terminalManager.writeInput(taskId, rawDataToBuffer(rawMessage));
+				if (summary === null) {
+					const currentSummary = terminalManager.getSummary(taskId);
+					assertRuntimeAgentIsNotRetired(currentSummary?.agentId);
+					if (currentSummary) return;
+					const persistedState = await loadPersistedWorkspaceStateById(workspaceId);
+					const card = persistedState.board.columns
+						.flatMap((column) => column.cards)
+						.find((entry) => entry.id === taskId);
+					assertRuntimeAgentIsNotRetired(persistedState.sessions[taskId]?.agentId ?? card?.agentId);
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				ws.close(1011, message);

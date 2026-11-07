@@ -17,6 +17,16 @@ import type { BoardCard, BoardData } from "../src/types";
 import "../src/styles/globals.css";
 
 const nowMs = Date.now();
+const layoutParameters = new URLSearchParams(location.search);
+const cardWidth = Number(layoutParameters.get("cardWidth") ?? 280);
+const usesLargeStatistics = layoutParameters.has("largeStatistics");
+const promptCacheWarmthEstimate = layoutParameters.has("compactedContext") ? {
+ promptCacheWarmthAnchorAt: nowMs,
+ promptCacheExpectedExpiryAt: nowMs + 3_600_000,
+ promptCacheWarmthAnchorSource: "manual_compaction_replaced_main_conversation_without_follow_up_request" as const,
+ mainAgentConversationContextTokenCountAfterCompactionReportedByHarness: 200000,
+} : undefined;
+const usesZeroStatistics = layoutParameters.has("zeroStatistics");
 const hasLongMetadata = new URLSearchParams(location.search).has("longMetadata");
 const projectName = hasLongMetadata ? "很长的项目名称-project-with-a-long-name-and-repository-context" : "测试项目";
 setTaskWorkspaceSnapshot({
@@ -26,13 +36,14 @@ setTaskWorkspaceSnapshot({
 	isDetached: false,
 	headCommit: "task-head",
 	baseCommit: "base-head",
-	changedFiles: 2,
-	additions: 15,
-	deletions: 4,
-	commitsAheadOfBaseRef: 2,
-	commitsBehindBaseRef: 1,
-	taskCommitsIntegratedIntoBaseRef: 2,
+	changedFiles: usesZeroStatistics ? 0 : usesLargeStatistics ? 12345 : 2,
+	additions: usesZeroStatistics ? 0 : usesLargeStatistics ? 123456789 : 15,
+	deletions: usesZeroStatistics ? 0 : usesLargeStatistics ? 987654321 : 4,
+	commitsAheadOfBaseRef: usesZeroStatistics ? 0 : usesLargeStatistics ? 1234567 : 2,
+	commitsBehindBaseRef: usesZeroStatistics ? 0 : usesLargeStatistics ? 9876543 : 1,
+	taskCommitsIntegratedIntoBaseRef: usesZeroStatistics ? 0 : usesLargeStatistics ? 1234567 : 2,
 	taskCommitIntegrationTrackingStatus: "complete",
+	taskRetainedCommittedLineChangeSummary: { status: "complete", commitCount: 10, additions: usesZeroStatistics ? 0 : usesLargeStatistics ? 123456789 : 15, deletions: usesZeroStatistics ? 0 : usesLargeStatistics ? 987654321 : 4, historyVersion: "isolated-statistics", unavailableReason: null },
 	taskCommitCoverageInCurrentDeployment: {
 		coverageStatus: "some_known_task_commits_in_current_deployment",
 		knownTaskCommitCount: 5,
@@ -193,12 +204,13 @@ function Harness() {
 						}}>模拟部署回滚</button>
 					</div>
 					<div className="flex flex-wrap items-start gap-8">
-						<section className="w-[280px]" data-layout-host="all-projects">
+						<section style={{ width: cardWidth, maxWidth: "100%" }} data-layout-host="all-projects">
 							<h2 className="mb-6">All Projects</h2>
 							<div ref={panelRef} className="relative p-2" {...hover.panelPointerHandlers}>
 								<CrossProjectRecentlyActiveTaskSwitcherTaskRow
 									entryInProject={entryInProject}
 									section="remaining"
+ promptCacheWarmthEstimate={promptCacheWarmthEstimate}
 									isFocused={false}
 									isUnreadHandoff={hasUnread}
 									nowMs={nowMs}
@@ -227,6 +239,7 @@ function Harness() {
 											buildTaskCardActionHandlerBundleForOtherProjectTaskCard={() => ({})}
 											rowContext={{
 												projectName,
+ promptCacheWarmthEstimate,
 												nowMs,
 												inListExpansionState: isKeptExpanded
 													? "kept_expanded_in_list"
@@ -242,16 +255,17 @@ function Harness() {
 								/>
 							</div>
 						</section>
-						<section className="w-[280px]" data-layout-host="project-specific">
+						<section style={{ width: cardWidth, maxWidth: "100%" }} data-layout-host="project-specific">
 							<h2 className="mb-6">Project Specific</h2>
 							<TaskCardBodyVisualDensityProvider value="compact_row_in_focus_view_left_column">
-								<TaskCardBody card={card} columnId="in_progress" sessionSummary={summary} onClick={openTask} />
+								<TaskCardBody card={card} columnId="in_progress" sessionSummary={summary} workspacePath={`/isolated/${projectName}`} onClick={openTask} />
 							</TaskCardBodyVisualDensityProvider>
 						</section>
-						<section className="w-[280px]" data-layout-host="standard-board">
+						<section style={{ width: cardWidth, maxWidth: "100%" }} data-layout-host="standard-board">
 							<h2 className="mb-6">标准卡片</h2>
 							<TaskCardBody
 								card={card}
+								workspacePath={`/isolated/${projectName}`}
 								columnId="in_progress"
 								sessionSummary={summary}
 								renderRole="task_card_copy_in_post_deploy_verification_panel_entry"
