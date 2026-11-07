@@ -182,6 +182,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			onPointerDownCapture={rowHoverExpansionOfPanelScrollContainer.panelPointerHandlers.onPointerDownCapture}
 			className="relative flex min-h-0 flex-1 flex-col overflow-clip"
 			data-cross-project-focused-task-visibility-panel=""
+			data-focus-view-column-scroll-boundary=""
 			data-verification-anchor={crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey()}
 		>
 			{host.onRequestCreateTaskInBoardScope || onOpenPermanentlyDeletedTaskHistory ? (

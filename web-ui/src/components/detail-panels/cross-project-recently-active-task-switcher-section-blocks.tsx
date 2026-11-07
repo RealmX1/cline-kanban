@@ -163,7 +163,9 @@ function CrossProjectTaskSwitcherSectionFrame({
 		<section
 			className={cn(
 				"flex flex-col rounded-lg border border-border bg-surface-1",
-				testIdSuffix === "pinned" ? "mx-2 mt-1 min-h-0 max-h-[50%]" : "shrink-0",
+				testIdSuffix === "pinned"
+					? "ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 min-h-0 max-h-[50%]"
+					: "shrink-0",
 			)}
 			data-focus-view-group-section-id={testIdSuffix.replaceAll("-", "_")}
 			data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}

@@ -28,17 +28,58 @@ export function FocusViewGroupHeaderRails({
 		if (!root) {
 			return;
 		}
+		const scrollBoundary = root.closest<HTMLElement>("[data-focus-view-column-scroll-boundary]");
 		const measure = (): void => {
-			setScrollbarWidth(root.offsetWidth - root.clientWidth);
+			const scrollbarWidth = root.offsetWidth - root.clientWidth;
+			setScrollbarWidth(scrollbarWidth);
+			scrollBoundary?.style.setProperty("--kb-focus-view-column-scrollbar-width", `${scrollbarWidth}px`);
 			setScrollViewportHeight(root.clientHeight);
 		};
 		measure();
-		if (typeof ResizeObserver === "undefined") {
-			return;
-		}
-		const resizeObserver = new ResizeObserver(measure);
-		resizeObserver.observe(root);
-		return () => resizeObserver.disconnect();
+		const forwardWheelToColumn = (event: WheelEvent): void => {
+			if (
+				event.defaultPrevented ||
+				event.ctrlKey ||
+				event.metaKey ||
+				event.shiftKey ||
+				event.deltaY === 0 ||
+				Math.abs(event.deltaX) > Math.abs(event.deltaY) ||
+				(event.target instanceof Node && root.contains(event.target))
+			)
+				return;
+			// 吸顶栏与固定区在主滚动口之外；内部列表先滚，到边界后由同列接续。
+			const columnCanScroll =
+				event.deltaY < 0 ? root.scrollTop > 1 : root.scrollTop + root.clientHeight < root.scrollHeight - 1;
+			for (const target of event.composedPath()) {
+				if (target === scrollBoundary) break;
+				if (!(target instanceof HTMLElement)) continue;
+				// 外层 rail 的少量标题溢出不能吞掉整次滚轮；主列到边界后仍可滚出剩余标题。
+				if (target.classList.contains("kb-stage-header-rail") && columnCanScroll) continue;
+				if (
+					["auto", "scroll"].includes(getComputedStyle(target).overflowY) &&
+					(event.deltaY < 0
+						? target.scrollTop > 1
+						: target.scrollTop + target.clientHeight < target.scrollHeight - 1)
+				)
+					return;
+			}
+			const deltaUnitHeight =
+				event.deltaMode === WheelEvent.DOM_DELTA_LINE
+					? Number.parseFloat(getComputedStyle(root).lineHeight) || 16
+					: event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+						? root.clientHeight
+						: 1;
+			event.preventDefault();
+			root.scrollTop += event.deltaY * deltaUnitHeight;
+		};
+		scrollBoundary?.addEventListener("wheel", forwardWheelToColumn, { passive: false });
+		const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+		resizeObserver?.observe(root);
+		return () => {
+			resizeObserver?.disconnect();
+			scrollBoundary?.removeEventListener("wheel", forwardWheelToColumn);
+			scrollBoundary?.style.removeProperty("--kb-focus-view-column-scrollbar-width");
+		};
 	}, [scrollRootRef]);
 	const focusedCardContentMaximumHeight = computeFocusedCardRailContentMaximumHeight(
 		scrollViewportHeight,
