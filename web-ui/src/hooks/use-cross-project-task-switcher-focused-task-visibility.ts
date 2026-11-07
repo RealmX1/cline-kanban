@@ -20,11 +20,13 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 	currentProjectTaskCards,
 	sections,
 	scrollRootRef,
+	pinnedScrollRootRef,
 }: {
 	host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue;
 	currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null;
 	sections: CrossProjectTaskSwitcherSections;
 	scrollRootRef: RefObject<HTMLDivElement | null>;
+	pinnedScrollRootRef?: RefObject<HTMLDivElement | null>;
 }) {
 	const focusedTaskInProject = host.isBoardScopeAllProjectsSelected ? host.focusedTaskInProject : null;
 	const focusedTaskEntryKey = focusedTaskInProject
@@ -37,11 +39,14 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 			: null;
 	const focusedTaskSourceSection = findCrossProjectTaskSwitcherFocusedTaskSourceSection(sections, focusedTaskEntryKey);
 	const focusedTaskScrollAnchorSelector = `[data-cross-project-focused-task-scroll-anchor="${escapeCssAttributeSelectorValue(focusedTaskEntryKey ?? "")}"]`;
+	const focusedTaskSourceScrollRootRef =
+		focusedTaskSourceSection === "pinned" && pinnedScrollRootRef ? pinnedScrollRootRef : scrollRootRef;
 	const focusedTaskPinState = useSelectedCardPinState({
 		selectedTaskId: focusedTaskInProject?.taskId ?? "",
 		selectedCardElementSelector: focusedTaskScrollAnchorSelector,
 		scrollRootRef,
-		enabled: focusedTaskSelection !== null,
+		enabled:
+			focusedTaskSelection !== null && focusedTaskSourceSection !== null && focusedTaskSourceSection !== "pinned",
 	});
 
 	useLayoutEffect(() => {
@@ -53,14 +58,22 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 		if (!focusedTaskSelection || !focusedTaskEntryKey) return;
 		const continuity = readCrossProjectTaskSwitcherPanelViewContinuity();
 		if (continuity.focusedTaskEntryKeyLastRevealedInPanel === focusedTaskEntryKey) return;
-		const anchor = scrollRootRef.current?.querySelector<HTMLElement>(focusedTaskScrollAnchorSelector);
+		const anchor = focusedTaskSourceScrollRootRef.current?.querySelector<HTMLElement>(
+			focusedTaskScrollAnchorSelector,
+		);
 		if (!anchor) return;
 		anchor.scrollIntoView?.({ block: "center", inline: "nearest" });
 		writeCrossProjectTaskSwitcherPanelViewContinuity({ focusedTaskEntryKeyLastRevealedInPanel: focusedTaskEntryKey });
-	}, [focusedTaskEntryKey, focusedTaskSelection, focusedTaskScrollAnchorSelector, scrollRootRef]);
+	}, [
+		focusedTaskEntryKey,
+		focusedTaskSelection,
+		focusedTaskSourceSection,
+		focusedTaskScrollAnchorSelector,
+		focusedTaskSourceScrollRootRef,
+	]);
 
 	const revealFocusedTaskScrollAnchor = () => {
-		scrollRootRef.current
+		focusedTaskSourceScrollRootRef.current
 			?.querySelector<HTMLElement>(focusedTaskScrollAnchorSelector)
 			?.scrollIntoView?.({ block: "center", inline: "nearest" });
 	};
@@ -70,6 +83,7 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 		focusedTaskSelection,
 		focusedTaskSourceSection,
 		focusedTaskPinState,
+		focusedTaskScrollAnchorSelector,
 		revealFocusedTaskScrollAnchor,
 	};
 }

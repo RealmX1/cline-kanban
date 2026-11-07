@@ -74,6 +74,7 @@ export async function applyReferenceRelationModelingChanges(
 				input.relationRevocations,
 				[...state.assertedInterWorkUnitRelationProjectionState.assertedRelationsByRelationId.values()],
 				occurredAt,
+				state.kanbanBoardCardIdentityProjectionState,
 			);
 			const tombstones: UserRejectionSuppressionTombstone[] = plan.relationsAfterChange
 				.filter((relation) => relation.relationAssertionRevocationReason === "relation_was_incorrect")

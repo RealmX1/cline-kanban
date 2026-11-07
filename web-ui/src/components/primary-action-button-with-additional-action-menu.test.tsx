@@ -1,7 +1,16 @@
-import { act, useState } from "react";
-import { createRoot } from "react-dom/client";
+import { act, type ReactNode, useState } from "react";
+import { createRoot as createReactRoot } from "react-dom/client";
 import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
+import { TooltipProvider } from "@/components/ui/tooltip";
+
+function createRoot(container: HTMLElement) {
+	const root = createReactRoot(container);
+	return {
+		render: (children: ReactNode) => root.render(<TooltipProvider>{children}</TooltipProvider>),
+		unmount: () => root.unmount(),
+	};
+}
 
 const reactActEnvironment = globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean };
 let previousReactActEnvironment: boolean | undefined;

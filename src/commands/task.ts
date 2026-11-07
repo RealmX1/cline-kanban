@@ -599,6 +599,7 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 async function getTaskFromRuntimeWorkspace(
 	workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>>,
 	taskId: string,
+	currentTaskConversationSessionId?: string,
 ): Promise<JsonRecord | null> {
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
 	const state = await runtimeClient.workspace.getState.query();
@@ -606,6 +607,18 @@ async function getTaskFromRuntimeWorkspace(
 	const found = findTaskRecord(state, taskId);
 	if (!found) {
 		return null;
+	}
+	if (
+		currentTaskConversationSessionId &&
+		!resolveTaskChatMessageTargetConversationSessionSummary(
+			found.task,
+			state.sessions,
+			currentTaskConversationSessionId,
+		)
+	) {
+		throw new Error(
+			"当前会话身份缺失或不属于当前 Task；请用 task get --task-id <id> --project-path <主仓库路径> 显式查询。",
+		);
 	}
 
 	// worktree 路径与 HEAD 状态由运行时给出而非本地拼接：调用方通常正是为了「进到那个目录去」才来查的，
@@ -716,7 +729,7 @@ async function previewTaskCreate(input: TaskCreateCommandInput): Promise<JsonRec
 		workspaceId: registeredWorkspace?.workspaceId ?? null,
 		isProjectRegisteredInKanban: registeredWorkspace !== null,
 		wasProjectPathExplicitlyRequested: (input.projectPath ?? "").trim().length > 0,
-		repositoryGitInfo: registeredWorkspace?.git ?? detectGitRepositoryInfo(workspaceRepoPath),
+		repositoryGitInfo: registeredWorkspace?.git ?? (await detectGitRepositoryInfo(workspaceRepoPath)),
 		existingBoardColumns,
 		runtimeConfig: await loadRuntimeConfig(workspaceRepoPath),
 		requested: toTaskCreateRequestedSettings(input),
@@ -2098,6 +2111,27 @@ export function registerTaskCommand(program: Command): void {
 				});
 			});
 	}
+
+	task
+		.command("get-current-task")
+		.description("按当前会话绑定查询宿主任务；不从 cwd 推测身份，返回结构与 task get 相同。")
+		.action(async () => {
+			await runTaskCommand(async () => {
+				const taskId = process.env.KANBAN_TASK_ID?.trim();
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				const conversationSessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID?.trim();
+				if (!taskId || !projectPath || !conversationSessionId) {
+					throw new Error(
+						"当前调用环境缺少 KANBAN_TASK_ID、KANBAN_PROJECT_PATH 或 KANBAN_TASK_CONVERSATION_SESSION_ID；不会从 cwd 推测。请用 task get --task-id <id> --project-path <主仓库路径> 显式查询。",
+					);
+				}
+				const workspace = await resolveRuntimeWorkspace(projectPath, process.cwd(), { autoCreateIfMissing: false });
+				const result = await getTaskFromRuntimeWorkspace(workspace, taskId, conversationSessionId);
+				if (!result)
+					throw new Error(`当前会话绑定的 Task "${taskId}" 不在 ${workspace.repoPath}，请显式查询任务。`);
+				return result;
+			});
+		});
 
 	task
 		.command("get")

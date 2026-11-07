@@ -638,6 +638,54 @@ describe("TaskEditorDialog interactions", () => {
 		expect(startTask).not.toHaveBeenCalled();
 		expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
 	});
+	it.each(["没有后续修改", "后来修改正文", "后来新增关系"] as const)(
+		"Backlog 关系保存清空草稿后：%s",
+		async (laterChange) => {
+			const actualHook = relationModelingHooks.useReferenceRelationModelingEditor;
+			let controller!: ReturnType<typeof actualHook>;
+			vi.spyOn(relationModelingHooks, "useReferenceRelationModelingEditor").mockImplementation((input) => {
+				controller = actualHook(input);
+				return controller;
+			});
+			const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+			let completeApply!: () => void;
+			applyChanges.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						completeApply = () => resolve({ modelingSubmissionId: "restored-submission", alreadyApplied: false });
+					}),
+			);
+			let completeClearedDraftPersistence!: () => void;
+			vi.mocked(relationModelingQueries.persistRelationModelingEditorDraft).mockImplementation(
+				async (_workspace, _scope, draft) => {
+					if (draft === null)
+						await new Promise<void>((resolve) => {
+							completeClearedDraftPersistence = resolve;
+						});
+					return { saved: true };
+				},
+			);
+			const props = makeProps({
+				taskEditorMode: "edit",
+				editingTaskId: "bcdef",
+				prompt: "原始正文",
+				onCreate: vi.fn(() => "bcdef"),
+			});
+			await render(props);
+			const restored = { ...restoredCreationDraft("project-1"), createdTaskId: null };
+			await act(async () => resolveDraftRead(restored));
+			await act(async () => findButtonByText("保存更改")?.click());
+			expect(applyChanges).toHaveBeenCalledOnce();
+			await act(async () => completeApply());
+			expect(controller.readLatestDraft().referenceRelationDrafts).toEqual([]);
+			if (laterChange === "后来修改正文") await typeIntoPrompt("之后输入的正文");
+			if (laterChange === "后来新增关系")
+				await act(async () => controller.addDraft(restored.referenceRelationDrafts[0]!));
+			await act(async () => completeClearedDraftPersistence());
+			if (laterChange === "没有后续修改") expect(props.onOpenChange).toHaveBeenCalledWith(false);
+			else expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+		},
+	);
 	it.each(["create", "edit"] as const)("%s 恢复的无效关系详情阻止提交和启动", async (taskEditorMode) => {
 		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
 		const startTask = mockSuccessfulTaskStart();

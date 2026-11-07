@@ -1,8 +1,8 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import type { MouseEvent, RefObject } from "react";
-import { useEffect, useMemo, useState } from "react";
-
+import { useMemo } from "react";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
+import { FocusViewGroupHeaderRails } from "@/components/detail-panels/focus-view-group-header-rails";
 import { FocusViewStageGroupHeaderActions } from "@/components/detail-panels/focus-view-stage-group-header-actions";
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
@@ -157,23 +157,6 @@ export function StageHeaderRails({
 		[displayGroups],
 	);
 
-	// 让出滚动条宽度，使纵向滚动条仍可见可点（macOS overlay 滚动条则为 0）。与旧钉住条一致。
-	const [scrollbarWidth, setScrollbarWidth] = useState(0);
-	useEffect(() => {
-		const root = scrollRootRef.current;
-		if (!root) {
-			return;
-		}
-		const measure = (): void => setScrollbarWidth(root.offsetWidth - root.clientWidth);
-		measure();
-		if (typeof ResizeObserver === "undefined") {
-			return;
-		}
-		const resizeObserver = new ResizeObserver(measure);
-		resizeObserver.observe(root);
-		return () => resizeObserver.disconnect();
-	}, [scrollRootRef]);
-
 	const scrollToFocusedCard = (event: MouseEvent<HTMLElement>): void => {
 		if (!event.currentTarget.contains(event.target as Node)) {
 			return;
@@ -206,34 +189,12 @@ export function StageHeaderRails({
 		);
 	};
 
-	const hasTop = topPinnedColumnIds.length > 0;
-	const hasBottom = bottomPinnedColumnIds.length > 0;
-	if (!hasTop && !hasBottom) {
-		return null;
-	}
-
 	return (
-		<>
-			{hasTop ? (
-				<div
-					className="kb-stage-header-rail"
-					data-testid="stage-header-rail"
-					data-edge="top"
-					style={{ right: scrollbarWidth }}
-				>
-					{topPinnedColumnIds.map((columnId) => renderEntry(columnId, "pinTop"))}
-				</div>
-			) : null}
-			{hasBottom ? (
-				<div
-					className="kb-stage-header-rail"
-					data-testid="stage-header-rail"
-					data-edge="bottom"
-					style={{ right: scrollbarWidth }}
-				>
-					{bottomPinnedColumnIds.map((columnId) => renderEntry(columnId, "pinBottom"))}
-				</div>
-			) : null}
-		</>
+		<FocusViewGroupHeaderRails
+			scrollRootRef={scrollRootRef}
+			topPinnedGroupIds={topPinnedColumnIds}
+			bottomPinnedGroupIds={bottomPinnedColumnIds}
+			renderEntry={renderEntry}
+		/>
 	);
 }

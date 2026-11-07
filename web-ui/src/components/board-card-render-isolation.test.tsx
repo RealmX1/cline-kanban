@@ -46,7 +46,11 @@ vi.mock("@hello-pangea/dnd", () => ({
 }));
 vi.mock("@/hooks/use-selected-card-pin-state", () => ({ useSelectedCardPinState: () => "pinTop" }));
 vi.mock("@/hooks/use-stage-header-pin-layout", () => ({
-	useStageHeaderPinLayout: () => ({ topPinnedColumnIds: ["review"], bottomPinnedColumnIds: [] }),
+	useStageHeaderPinLayout: () => ({
+		topPinnedColumnIds: ["review"],
+		bottomPinnedColumnIds: [],
+		focusedCardRailEdge: "pinTop",
+	}),
 }));
 
 const card = (id: string): BoardCard => ({

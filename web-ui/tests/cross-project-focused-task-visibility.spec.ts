@@ -1,4 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
+import {
+	computeFocusedCardRailContentMaximumHeight,
+	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
+} from "../src/components/detail-panels/stage-header-rail-geometry";
 
 const scrollContainerSelector = '[data-testid="cross-project-recently-active-task-switcher-panel"]';
 const anchorSelector = "[data-cross-project-focused-task-scroll-anchor]";
@@ -81,44 +85,131 @@ async function setPanelScroll(page: Page, scrollTop: number | "end") {
 	}, scrollTop);
 }
 
-test("真实搜索打开分组外任务，Sticky 顶沿保留卡片动作和 Portal，点击卡体返回源位置", async ({ page }) => {
+test("Pinned 与普通分组随滚动条宽度变化保持等宽", async ({ page }) => {
+	await page.addStyleTag({ content: "* { scrollbar-width: auto; } *::-webkit-scrollbar { width: 14px; }" });
+	await page.getByRole("button", { name: "加入置顶", exact: true }).click();
+	const scrollRoot = page.locator(scrollContainerSelector);
+	const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
+	const group = page.getByTestId("cross-project-task-switcher-section-running");
+	for (const scrollbarWidth of ["auto", "none", "auto"]) {
+		await scrollRoot.evaluate((element, value) => {
+			element.style.scrollbarGutter = "stable";
+			element.style.scrollbarWidth = value;
+		}, scrollbarWidth);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth))
+			[scrollbarWidth === "none" ? "toBe" : "toBeGreaterThan"](0);
+		await expect
+			.poll(async () => Math.abs((await pinned.boundingBox())!.width - (await group.boundingBox())!.width))
+			.toBeLessThan(1);
+		expect((await pinned.boundingBox())!.x).toBe((await group.boundingBox())!.x);
+	}
+	await page.screenshot({ path: test.info().outputPath("all-projects-pinned-width.png") });
+});
+
+test("吸顶标题与当前任务卡上的滚轮接续整列滚动", async ({ page }) => {
+	const scrollRoot = page.locator(scrollContainerSelector);
+	for (const edge of ["top", "bottom"] as const) {
+		for (const targetSelector of ["[data-focus-view-group-header]", stickySelector]) {
+			await setPanelScroll(page, edge === "top" ? "end" : 0);
+			const rail = page.locator(`.kb-stage-header-rail[data-edge="${edge}"]`);
+			const target = rail.locator(targetSelector).first();
+			await expect(target).toBeVisible();
+			await target.evaluate((element, direction) => {
+				element.scrollTop = direction === "top" ? 0 : element.scrollHeight;
+			}, edge);
+			await target.hover();
+			const before = await scrollRoot.evaluate((element) => element.scrollTop);
+			await page.mouse.wheel(0, edge === "top" ? -100 : 100);
+			await expect
+				.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+				[edge === "top" ? "toBeLessThan" : "toBeGreaterThan"](before);
+		}
+	}
+	expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
+test("Pinned 固定在列表上方且内部限高滚动，重复任务只有真实分组定位源，空收起组没有 body", async ({ page }) => {
+	await page.getByRole("button", { name: "加入置顶", exact: true }).click();
+	const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
+	await expect(pinned).toBeVisible();
+	expect(
+		await page
+			.locator(scrollContainerSelector)
+			.evaluate((root) =>
+				root.contains(document.querySelector('[data-testid="cross-project-task-switcher-section-pinned"]')),
+			),
+	).toBe(false);
+	const before = await pinned.boundingBox();
+	await setPanelScroll(page, "end");
+	expect(await pinned.boundingBox()).toEqual(before);
+	await expect(pinned.locator(anchorSelector)).toHaveCount(0);
+	await expect(page.locator(anchorSelector)).toHaveCount(1);
+	const expandAll = pinned.getByRole("button", { name: /Show .*more/ });
+	await expandAll.click();
+	const panel = page.locator("[data-cross-project-focused-task-visibility-panel]");
+	expect((await pinned.boundingBox())!.height).toBeLessThanOrEqual((await panel.boundingBox())!.height * 0.5 + 1);
+	const content = pinned.locator(":scope > div").last();
+	await expect(content).toHaveCSS("overflow-y", "auto");
+	expect(await content.evaluate((element) => element.scrollHeight)).toBeGreaterThan(
+		await content.evaluate((element) => element.clientHeight),
+	);
+	await pinned.getByRole("button", { name: "收起 Pinned", exact: true }).click();
+	expect((await pinned.boundingBox())!.height).toBe(34);
+	await expect(pinned.locator(":scope > div")).toHaveCount(1);
+	const running = page.getByTestId("cross-project-task-switcher-section-running");
+	expect((await running.boundingBox())!.height).toBe(34);
+	await expect(running.locator(":scope > div")).toHaveCount(1);
+});
+
+test("分组标题跳到上方 rail 下沿，吸顶与行内箭头共用折叠状态", async ({ page }) => {
+	await setPanelScroll(page, 0);
+	const bottomRecent = page
+		.locator('.kb-stage-header-rail[data-edge="bottom"]')
+		.getByRole("button", { name: "跳转到 Recent", exact: true });
+	await bottomRecent.click();
+	const source = page.getByTestId("cross-project-task-switcher-section-remaining");
+	const root = (await page.locator(scrollContainerSelector).boundingBox())!;
+	const header = (await source.locator("[data-focus-view-group-header]").boundingBox())!;
+	const topRail = (await page.locator('.kb-stage-header-rail[data-edge="top"]').boundingBox())!;
+	expect(header.y).toBeGreaterThanOrEqual(root.y);
+	expect(header.y).toBeGreaterThanOrEqual(topRail.y + topRail.height - 1);
+	await setPanelScroll(page, "end");
+	const rail = page.locator(
+		'.kb-stage-header-rail[data-edge="top"] [data-focus-view-group-header-rail-entry="remaining"]',
+	);
+	const collapseButton = rail.getByRole("button", { name: "收起 Recent", exact: true });
+	await collapseButton.focus();
+	await expect(page.getByRole("tooltip")).toContainText("收起 Recent");
+	await page.keyboard.press("Escape");
+	await expect(page.getByRole("tooltip")).toHaveCount(0);
+	await collapseButton.click();
+	await expect(source.getByRole("button", { name: "展开 Recent", exact: true })).toHaveAttribute(
+		"aria-expanded",
+		"false",
+	);
+	await expect(source.locator(anchorSelector)).toHaveCount(1);
+	await expect(page.locator(anchorSelector)).toHaveCount(1);
+});
+
+test("搜索命中的分组外任务固定保留完整卡片与操作，滚动不遮挡当前归属", async ({ page }) => {
 	await searchAndOpen(page, "分组外目标任务");
 	const fallback = page.locator("[data-cross-project-focused-task-outside-sections]");
-	await expect(fallback).toBeVisible();
 	await expect(fallback).toContainText("分组外目标任务");
 	await expect(fallback).toContainText("project-a");
-	await expect(fallback).toContainText("Review");
-	await expect(fallback.locator("[data-task-id], [data-verification-anchor]")).toHaveCount(0);
+	const initialBounds = await fallback.boundingBox();
+	await setPanelScroll(page, "end");
+	await expect(fallback).toBeVisible();
+	expect(await fallback.boundingBox()).toEqual(initialBounds);
 	await expect(page.locator(stickySelector)).toHaveCount(0);
-	await setPanelScroll(page, "end");
-	const sticky = page.locator(stickySelector);
-	await expect(sticky).toHaveAttribute("data-cross-project-focused-task-sticky-edge", "top");
-	await expect(fallback).toHaveCSS("visibility", "hidden");
-	const geometry = await fallback.boundingBox();
-	const pinnedGeometry = await sticky.boundingBox();
-	const viewport = await page.locator(scrollContainerSelector).boundingBox();
-	expect(geometry!.height).toBeGreaterThan(0);
-	expect(Math.abs(pinnedGeometry!.y - viewport!.y)).toBeLessThan(2);
-	await page.screenshot({ path: test.info().outputPath("outside-task-sticky-top.png") });
-	await sticky.hover();
-	await sticky.getByRole("button", { name: "Move task to validation", exact: true }).click();
+	await fallback.hover();
+	await fallback.getByRole("button", { name: "Move task to validation", exact: true }).click();
 	await expect(page.getByLabel("动作结果")).toHaveText("validation:project-a:outside");
-	await expect(sticky).toBeVisible();
-	await sticky.getByRole("button", { name: "View original prompt", exact: true }).click();
+	await fallback.getByRole("button", { name: "View original prompt", exact: true }).click();
 	await expect(page.getByRole("dialog")).toContainText("原始任务需求：分组外目标任务");
-	await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).first().click();
-	await expect(sticky).toBeVisible();
-	await sticky.getByRole("button", { name: "返回当前任务所在位置", exact: true }).focus();
-	await page.keyboard.press("Enter");
-	await expect(sticky).toHaveCount(0);
+	await page.keyboard.press("Escape");
 	await expect(fallback).toBeVisible();
-	await expect(page.getByLabel("当前打开任务")).toContainText("project-a:outside");
-	await setPanelScroll(page, "end");
-	await expect(sticky).toBeVisible();
-	await sticky.locator("[data-task-card-title]").click();
-	await expect(sticky).toHaveCount(0);
-	await expect(fallback).toBeVisible();
-	await page.screenshot({ path: test.info().outputPath("outside-task-visible.png") });
+	await expect(page.locator(anchorSelector)).toHaveCount(1);
 });
 
 test("组内任务上下触边、大幅滚动跳转与回到视口，始终只有一个测量源和一份 Sticky", async ({ page }) => {
@@ -126,7 +217,7 @@ test("组内任务上下触边、大幅滚动跳转与回到视口，始终只�
 	await setPanelScroll(page, 0);
 	await expect(page.locator(stickySelector)).toHaveAttribute("data-cross-project-focused-task-sticky-edge", "bottom");
 	const viewport = await page.locator(scrollContainerSelector).boundingBox();
-	const bottom = await page.locator(stickySelector).boundingBox();
+	const bottom = await page.locator('.kb-stage-header-rail[data-edge="bottom"]').boundingBox();
 	expect(Math.abs(bottom!.y + bottom!.height - viewport!.y - viewport!.height)).toBeLessThan(2);
 	await page.screenshot({ path: test.info().outputPath("grouped-task-sticky-bottom.png") });
 	await setPanelScroll(page, "end");
@@ -159,7 +250,10 @@ test("动态归组移除独立区、重新挂载保留滚动与焦点副本，�
 	await expect(page.locator(stickySelector)).toHaveAttribute("data-cross-project-focused-task-sticky-edge", "top");
 	await page.getByRole("button", { name: "打开收起任务", exact: true }).click();
 	const running = page.getByTestId("cross-project-task-switcher-section-running");
-	await expect(running.getByRole("button", { name: /Running/ })).toHaveAttribute("aria-expanded", "false");
+	await expect(running.getByRole("button", { name: "展开 Running", exact: true })).toHaveAttribute(
+		"aria-expanded",
+		"false",
+	);
 	await expect(running.locator(anchorSelector)).toBeVisible();
 	await page.getByRole("button", { name: "移除焦点", exact: true }).click();
 	await expect(page.locator(stickySelector)).toHaveCount(0);
@@ -180,10 +274,10 @@ test("跨项目同号任务搜索在途只显示目标占位，取消可回原�
 	const target = page.locator("[data-cross-project-focused-task-outside-sections]");
 	await expect(target).toContainText("跨项目同号目标任务");
 	await expect(target).toContainText("project-b");
-	await expect(target).toContainText("Done");
+	await expect(target).toContainText("已结案");
 	await expect(target).not.toContainText("分组外目标任务");
 	await target.hover();
-	await target.getByRole("button", { name: "Restore task from done", exact: true }).click();
+	await target.getByRole("button", { name: "重新打开已结案任务", exact: true }).click();
 	await expect(page.getByLabel("动作结果")).toHaveText("restore:project-b:outside");
 	await expect(page.locator(anchorSelector)).toHaveCount(1);
 });
@@ -193,17 +287,24 @@ for (const interaction of ["hover_wait", "prompt_action"] as const) {
 		await page.mouse.move(1000, 700);
 		await page.locator(scrollContainerSelector).evaluate((root) => {
 			const anchor = root.querySelector<HTMLElement>("[data-cross-project-focused-task-scroll-anchor]")!;
-			root.scrollTop += anchor.getBoundingClientRect().bottom - root.getBoundingClientRect().bottom + 3;
+			const bottomRail = root.parentElement?.querySelector('[data-testid="stage-header-rail"][data-edge="bottom"]');
+			const bottomRailHeight = bottomRail?.getBoundingClientRect().height ?? 0;
+			root.scrollTop +=
+				anchor.getBoundingClientRect().bottom - root.getBoundingClientRect().bottom + bottomRailHeight + 3;
 			root.dispatchEvent(new Event("scroll"));
 		});
 		const source = page.locator(anchorSelector);
 		await expect(page.locator(stickySelector)).toHaveCount(0);
 		const sourceBeforeHover = await source.boundingBox();
 		const viewport = await page.locator(scrollContainerSelector).boundingBox();
-		expect(viewport!.y + viewport!.height - sourceBeforeHover!.y - sourceBeforeHover!.height).toBeGreaterThanOrEqual(
-			2,
-		);
-		expect(viewport!.y + viewport!.height - sourceBeforeHover!.y - sourceBeforeHover!.height).toBeLessThanOrEqual(5);
+		const bottomRailHeight =
+			(await page.locator('.kb-stage-header-rail[data-edge="bottom"]').boundingBox())?.height ?? 0;
+		expect(
+			viewport!.y + viewport!.height - bottomRailHeight - sourceBeforeHover!.y - sourceBeforeHover!.height,
+		).toBeGreaterThanOrEqual(2);
+		expect(
+			viewport!.y + viewport!.height - bottomRailHeight - sourceBeforeHover!.y - sourceBeforeHover!.height,
+		).toBeLessThanOrEqual(5);
 		await page.mouse.move(sourceBeforeHover!.x + 80, sourceBeforeHover!.y + sourceBeforeHover!.height / 2);
 		await expect(source).toHaveAttribute(
 			"data-cross-project-task-switcher-row-in-place-expansion-state",
@@ -212,7 +313,9 @@ for (const interaction of ["hover_wait", "prompt_action"] as const) {
 		await expect(page.locator(stickySelector)).toHaveCount(0);
 		const sticky = source.locator("[data-cross-project-task-switcher-hover-floating-card]");
 		const stickyGeometry = await sticky.boundingBox();
-		expect(stickyGeometry!.y + stickyGeometry!.height).toBeLessThanOrEqual(viewport!.y + viewport!.height + 1);
+		expect(stickyGeometry!.y + stickyGeometry!.height).toBeLessThanOrEqual(
+			viewport!.y + viewport!.height - bottomRailHeight + 1,
+		);
 		expect(stickyGeometry!.y + 16).toBeLessThan(sourceBeforeHover!.y);
 		expect(await source.boundingBox()).toEqual(sourceBeforeHover);
 		await sticky.hover();
@@ -234,5 +337,57 @@ for (const interaction of ["hover_wait", "prompt_action"] as const) {
 			await expect(dialog).toHaveCount(0);
 			await expect(sticky).toBeVisible();
 		}
+	});
+}
+
+for (const edge of ["top", "bottom"] as const) {
+	test(`Pinned 占据半高时，${edge} 焦点副本限高并可内部滚动`, async ({ page }) => {
+		await page.getByRole("button", { name: "加入置顶", exact: true }).click();
+		const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
+		await pinned.getByRole("button", { name: /Show .*more/ }).click();
+		await page.locator("[data-isolated-focus-view-left-panel]").evaluate((element) => {
+			element.style.height = "420px";
+		});
+		await setPanelScroll(page, edge === "top" ? "end" : 0);
+		const sticky = page.locator(`${stickySelector}[data-cross-project-focused-task-sticky-edge="${edge}"]`);
+		await expect(sticky).toBeVisible();
+		const scrollRoot = page.locator(scrollContainerSelector);
+		const expectedStickyMaximumHeight =
+			computeFocusedCardRailContentMaximumHeight(
+				await scrollRoot.evaluate((element) => element.clientHeight),
+				await scrollRoot.locator("[data-focus-view-group-section-id]").count(),
+			) + STAGE_RAIL_FOCUSED_CARD_PADDING_PX;
+		// 面板刚缩小时副本已可见，但 ResizeObserver 的新预算尚未提交。
+		await expect(sticky).toHaveCSS("max-height", `${expectedStickyMaximumHeight}px`);
+		const rootBox = await page.locator(scrollContainerSelector).boundingBox();
+		const stickyBox = await sticky.boundingBox();
+		expect(stickyBox!.y).toBeGreaterThanOrEqual(rootBox!.y);
+		expect(stickyBox!.y + stickyBox!.height).toBeLessThanOrEqual(rootBox!.y + rootBox!.height + 1);
+		expect(await sticky.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+		expect(await sticky.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
+		const naturalCard = sticky.getByRole("region", { name: "当前聚焦任务", exact: true });
+		const naturalCardHeight = (await naturalCard.boundingBox())!.height;
+		expect(naturalCardHeight).toBeGreaterThan(stickyBox!.height);
+		const columnScrollTop = await scrollRoot.evaluate((element) => element.scrollTop);
+		await sticky.hover();
+		await page.mouse.wheel(0, 60);
+		await expect.poll(() => sticky.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+		expect(await scrollRoot.evaluate((element) => element.scrollTop)).toBe(columnScrollTop);
+		await sticky.evaluate((element) => {
+			element.scrollTop = element.scrollHeight;
+		});
+		expect(await sticky.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+		// 内部滚动不改变自然高度或限高预算，避免受限盒测量驱动标题反复分类。
+		await expect.poll(async () => (await naturalCard.boundingBox())!.height).toBe(naturalCardHeight);
+		expect((await sticky.boundingBox())!.height).toBe(stickyBox!.height);
+		await expect(page.locator(anchorSelector)).toHaveCount(1);
+		await sticky.evaluate((element, direction) => {
+			element.scrollTop = direction === "top" ? 0 : element.scrollHeight;
+		}, edge);
+
+		await page.mouse.wheel(0, edge === "top" ? -100 : 100);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+			[edge === "top" ? "toBeLessThan" : "toBeGreaterThan"](columnScrollTop);
 	});
 }

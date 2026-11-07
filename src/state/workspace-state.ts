@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { channel } from "node:diagnostics_channel";
 import { readFile, realpath, stat, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -18,8 +18,12 @@ import {
 	runtimeTaskSessionSummarySchema,
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
-import { createGitProcessEnv } from "../core/git-process-env";
-import { applySessionFacets, isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
+import {
+	applySessionFacets,
+	isNeverStartedPlaceholderTaskSessionSummary,
+	mergeSummaryWithFacets,
+	resolveSessionFacets,
+} from "../core/session-activity";
 import { getTaskColumnId, moveTaskToColumn } from "../core/task-board-mutations";
 import { preserveRuntimeOwnedTaskClosureState } from "../core/task-closure-protected-board-state";
 import {
@@ -35,6 +39,8 @@ import {
 } from "../diagnostics/daily-work-progress-collection-cost-recorder";
 import { logFileLockError, logFileLockWarning } from "../fs/lock-diagnostics-logger";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
+import { workspaceMetadataGitSpawnConcurrencyLimiter } from "../workspace/git-concurrency";
+import { runGit } from "../workspace/git-utils";
 import {
 	assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot,
 	hasBoardSnapshotRemovedTaskTransferredIntoWorkspace,
@@ -438,6 +444,38 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 		const persistedSummary = persistedSessions[taskId];
 		if (!persistedSummary) continue;
 		let reconciledSummary = incomingSummary;
+		const persistedReviewReceipt = persistedSummary.lastAppliedHookReviewLifecycleEventDelivery;
+		const incomingReviewReceipt = incomingSummary.lastAppliedHookReviewLifecycleEventDelivery;
+		if (
+			persistedSummary.runtimeSessionIncarnationId === incomingSummary.runtimeSessionIncarnationId &&
+			persistedReviewReceipt &&
+			(preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot ||
+				!incomingReviewReceipt ||
+				persistedReviewReceipt.capturedAtEpochMs > incomingReviewReceipt.capturedAtEpochMs ||
+				(persistedSummary.agentResponseGenerationTurnSequence ?? 0) >
+					(incomingSummary.agentResponseGenerationTurnSequence ?? 0))
+		) {
+			reconciledSummary = {
+				...reconciledSummary,
+				lastAppliedHookReviewLifecycleEventDelivery: persistedReviewReceipt,
+			};
+			if (
+				incomingReviewReceipt?.deliveryIdempotencyKey !== persistedReviewReceipt.deliveryIdempotencyKey &&
+				(incomingSummary.agentResponseGenerationTurnSequence ?? 0) <=
+					(persistedSummary.agentResponseGenerationTurnSequence ?? 0) &&
+				(incomingSummary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0) <=
+					persistedReviewReceipt.capturedAtEpochMs
+			) {
+				reconciledSummary = mergeSummaryWithFacets(reconciledSummary, {
+					...resolveSessionFacets(persistedSummary),
+					reviewReason: persistedSummary.reviewReason,
+					lastAgentConversationUserHandoffObservation:
+						persistedSummary.lastAgentConversationUserHandoffObservation,
+					currentAgentProcessUserTurnIdleRetentionStarted:
+						persistedSummary.currentAgentProcessUserTurnIdleRetentionStarted,
+				});
+			}
+		}
 		if (
 			isNeverStartedPlaceholderTaskSessionSummary(incomingSummary) &&
 			!isNeverStartedPlaceholderTaskSessionSummary(persistedSummary)
@@ -452,7 +490,7 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 				incomingSummary.agentId === persistedSummary.agentId &&
 				(!incomingIdentity || persistedIdentity.observedAt > incomingIdentity.observedAt)
 			) {
-				reconciledSummary = { ...incomingSummary, agentNativeConversationSessionIdentity: persistedIdentity };
+				reconciledSummary = { ...reconciledSummary, agentNativeConversationSessionIdentity: persistedIdentity };
 			}
 		}
 		if (
@@ -678,32 +716,39 @@ function findWorkspaceEntry(index: WorkspaceIndexFile, repoPath: string): Worksp
 	return entry;
 }
 
-function runGitCapture(cwd: string, args: string[]): string | null {
-	const result = spawnSync("git", args, {
-		cwd,
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "ignore"],
-		env: createGitProcessEnv(),
+const workspaceContextGitProbeConcurrencyWaitObservationChannel = channel(
+	"cline-kanban.workspace-context-git-probe-concurrency-wait",
+);
+async function runGitCapture(cwd: string, args: string[]): Promise<string | null> {
+	const queuedAtMs = workspaceContextGitProbeConcurrencyWaitObservationChannel.hasSubscribers
+		? performance.now()
+		: null;
+	const result = await workspaceMetadataGitSpawnConcurrencyLimiter(() => {
+		if (queuedAtMs !== null)
+			workspaceContextGitProbeConcurrencyWaitObservationChannel.publish({
+				waitDurationMs: performance.now() - queuedAtMs,
+			});
+		return runGit(cwd, args);
 	});
-	if (result.status !== 0 || typeof result.stdout !== "string") {
+	if (!result.ok) {
 		return null;
 	}
 	const value = result.stdout.trim();
 	return value.length > 0 ? value : null;
 }
 
-function detectGitRoot(cwd: string): string | null {
-	return runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
+async function detectGitRoot(cwd: string): Promise<string | null> {
+	return await runGitCapture(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
-function detectGitCurrentBranch(repoPath: string): string | null {
-	return runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+async function detectGitCurrentBranch(repoPath: string): Promise<string | null> {
+	return await runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
 }
 
-function detectGitBranches(repoPath: string): RuntimeGitBranch[] {
+async function detectGitBranches(repoPath: string): Promise<RuntimeGitBranch[]> {
 	// TODO: support showing remote branches again once worktree creation can safely fetch/pull
 	// and resolve missing local tracking branches automatically.
-	const output = runGitCapture(repoPath, [
+	const output = await runGitCapture(repoPath, [
 		"for-each-ref",
 		"--sort=-committerdate",
 		"--format=%(refname:short)%09%(committerdate:iso-strict)",
@@ -728,8 +773,8 @@ function detectGitBranches(repoPath: string): RuntimeGitBranch[] {
 	return branches;
 }
 
-function detectGitDefaultBranch(repoPath: string, branchNames: string[]): string | null {
-	const remoteHead = runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+async function detectGitDefaultBranch(repoPath: string, branchNames: string[]): Promise<string | null> {
+	const remoteHead = await runGitCapture(repoPath, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
 	if (remoteHead) {
 		const normalized = remoteHead.startsWith("origin/") ? remoteHead.slice("origin/".length) : remoteHead;
 		if (normalized) {
@@ -747,18 +792,18 @@ function detectGitDefaultBranch(repoPath: string, branchNames: string[]): string
 
 // 导出是给 `kanban task create --preview` 用的：预览必须在**不注册项目**的前提下也能说清 base ref
 // 会怎么解析，而 loadWorkspaceContext 的 autoCreateIfMissing 路径会写工作区索引。
-export function detectGitRepositoryInfo(repoPath: string): RuntimeGitRepositoryInfo {
-	const gitRoot = detectGitRoot(repoPath);
+export async function detectGitRepositoryInfo(repoPath: string): Promise<RuntimeGitRepositoryInfo> {
+	const gitRoot = await detectGitRoot(repoPath);
 	if (!gitRoot) {
 		throw new Error(`No git repository detected at ${repoPath}`);
 	}
 
-	const currentBranch = detectGitCurrentBranch(repoPath);
-	const branches = detectGitBranches(repoPath);
+	const currentBranch = await detectGitCurrentBranch(repoPath);
+	const branches = await detectGitBranches(repoPath);
 	const branchNames = branches.map((branch) => branch.name);
 	const orderedBranches =
 		currentBranch && !branchNames.includes(currentBranch) ? [{ name: currentBranch }, ...branches] : branches;
-	const defaultBranch = detectGitDefaultBranch(
+	const defaultBranch = await detectGitDefaultBranch(
 		repoPath,
 		orderedBranches.map((branch) => branch.name),
 	);
@@ -780,7 +825,7 @@ export async function resolveWorkspacePath(cwd: string): Promise<string> {
 		canonicalCwd = resolvedCwd;
 	}
 
-	const gitRoot = detectGitRoot(canonicalCwd);
+	const gitRoot = await detectGitRoot(canonicalCwd);
 	if (!gitRoot) {
 		throw new Error(`No git repository detected at ${canonicalCwd}`);
 	}
@@ -839,7 +884,7 @@ export async function loadWorkspaceContext(
 			repoPath,
 			workspaceId: existingEntry.workspaceId,
 			statePath: getWorkspaceDirectoryPath(existingEntry.workspaceId),
-			git: detectGitRepositoryInfo(repoPath),
+			git: await detectGitRepositoryInfo(repoPath),
 		};
 	}
 
@@ -856,15 +901,15 @@ export async function loadWorkspaceContext(
 		return ensured.entry.workspaceId;
 	});
 
-	// git 探测刻意放在全局 index 锁**之外**：它是四次同步 spawnSync git，与 index 无关；放在锁里会把
-	// 高负载下被放大的 git 耗时（且期间 event loop 被同步阻塞）整段算进持锁时间，所有项目的
+	// git 探测刻意放在全局 index 锁**之外**：它与 index 无关；放在锁里会把
+	// 高负载下被放大的 git 耗时整段算进持锁时间，所有项目的
 	// ensureWorktree / startTaskSession / saveState 都在这把锁上排队，等太久就抛 ELOCKED。
 	// 抛错时机不变：index 条目照旧先写入，再因非 git 目录抛出。
 	return {
 		repoPath,
 		workspaceId: ensuredWorkspaceId,
 		statePath: getWorkspaceDirectoryPath(ensuredWorkspaceId),
-		git: detectGitRepositoryInfo(repoPath),
+		git: await detectGitRepositoryInfo(repoPath),
 	};
 }
 
@@ -1008,6 +1053,68 @@ export type AgentNativeConversationSessionIdentityPersistenceOutcome =
 	| "persisted_new_identity_and_invalidated_stale_snapshot_revision"
 	| "persisted_reconfirmed_identity_observation_time_without_revision_change"
 	| "already_persisted_without_write";
+
+export async function persistHookReviewLifecycleApplicationInWorkspaceSnapshot(input: {
+	workspaceId: string;
+	taskId: string;
+	taskIncarnationCreatedAtEpochMs: number;
+	deliveryIdempotencyKey: string;
+	runtimeSessionIncarnationId: string;
+	readCurrentSummary: () => RuntimeTaskSessionSummary | null;
+}): Promise<void> {
+	await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(input.workspaceId), async () => {
+		const { board, sessions, meta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(input.workspaceId);
+		const current = input.readCurrentSummary();
+		const card = board.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === (current?.taskConversationSessionMetadata?.workspaceTaskId ?? input.taskId));
+		if (card?.createdAt !== input.taskIncarnationCreatedAtEpochMs)
+			throw new Error("生命周期应用确认的任务代际已变化。");
+		const hasReceipt = (summary: RuntimeTaskSessionSummary | null | undefined) =>
+			summary?.lastAppliedHookReviewLifecycleEventDelivery?.deliveryIdempotencyKey ===
+				input.deliveryIdempotencyKey &&
+			summary.lastAppliedHookReviewLifecycleEventDelivery.runtimeSessionIncarnationId ===
+				input.runtimeSessionIncarnationId;
+		if (hasReceipt(sessions[input.taskId])) return;
+		if (
+			!current ||
+			current.runtimeSessionIncarnationId !== input.runtimeSessionIncarnationId ||
+			!hasReceipt(current)
+		) {
+			throw new Error("生命周期应用结果尚无同一会话的权威确认。");
+		}
+		// 与领域投影同一次快照提交；重启只恢复投影，不能因回复丢失再次执行领域事件。
+		await commitWorkspaceStateSnapshotWithinLock(
+			input.workspaceId,
+			board,
+			{
+				...sessions,
+				[input.taskId]: runtimeTaskSessionSummarySchema.parse(current),
+			},
+			{ ...meta, updatedAt: Date.now() },
+			{ boardJsonText: await readWorkspaceBoardFileRawText(input.workspaceId) },
+		);
+	});
+}
+
+export async function probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness(workspaceId: string): Promise<string> {
+	try {
+		await lockedFileSystem.withLock(
+			{ ...getWorkspaceDirectoryLockRequest(workspaceId), retries: { retries: 0 } },
+			async () => {
+				const { board, sessions, meta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId);
+				// 只核验原失败写链是否恢复；复用当前投影，不执行 hook、不推进业务 revision。
+				await commitWorkspaceStateSnapshotWithinLock(workspaceId, board, sessions, meta, {
+					boardJsonText: await readWorkspaceBoardFileRawText(workspaceId),
+				});
+			},
+		);
+		return "workspace_snapshot_commit_writable";
+	} catch (error) {
+		const code = String((error as NodeJS.ErrnoException).code ?? "UNKNOWN");
+		return `workspace_snapshot_commit_unavailable:${/^[A-Z0-9_]+$/u.test(code) ? code : "UNKNOWN"}`;
+	}
+}
 
 // 身份是重启寻址所需的会话事实，不能等待浏览器保存 board 或正常关机才落盘。
 export async function persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId(

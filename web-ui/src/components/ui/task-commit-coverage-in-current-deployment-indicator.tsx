@@ -17,8 +17,10 @@ const unavailableReasonDescriptions: Record<string, string> = {
 
 export function TaskCommitCoverageInCurrentDeploymentIndicator({
 	coverage,
+	allowLineWrapping = false,
 }: {
 	coverage?: RuntimeTaskCommitCoverageInCurrentDeployment;
+	allowLineWrapping?: boolean;
 }) {
 	const [isOpen, setIsOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
@@ -59,7 +61,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 	};
 	return (
 		<span
-			className="inline-flex align-baseline whitespace-nowrap"
+			className={cn("inline-flex align-baseline", allowLineWrapping ? "min-w-0 max-w-full" : "whitespace-nowrap")}
 			data-task-commit-coverage-in-current-deployment={coverage?.coverageStatus ?? "unknown"}
 		>
 			<button
@@ -67,6 +69,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 				type="button"
 				className={cn(
 					"inline-flex cursor-pointer items-center gap-0.5 rounded-sm font-mono focus-visible:outline-2 focus-visible:outline-accent",
+					allowLineWrapping && "min-w-0 max-w-full flex-wrap text-left [overflow-wrap:anywhere]",
 					coverage?.coverageStatus === "all_known_task_commits_in_current_deployment"
 						? "text-status-green"
 						: coverage?.coverageStatus === "some_known_task_commits_in_current_deployment"
@@ -90,7 +93,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 				}}
 			>
 				<Rocket size={10} aria-hidden="true" />
-				部署 {countText}
+				<span>部署</span> <span>{countText}</span>
 			</button>
 			{isOpen ? (
 				<Popover.Root

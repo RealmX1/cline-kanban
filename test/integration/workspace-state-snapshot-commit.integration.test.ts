@@ -24,6 +24,7 @@ import {
 	loadWorkspaceContext,
 	loadWorkspaceState,
 	mutateWorkspaceState,
+	persistHookReviewLifecycleApplicationInWorkspaceSnapshot,
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	recoverWorkspaceStateSnapshotProjectionWithinLock,
 	savePersistedWorkspaceSessionsById,
@@ -134,6 +135,127 @@ afterEach(async () => {
 });
 
 describe("workspace 持久快照提交", { timeout: 120_000 }, () => {
+	it("完成事件的领域投影与去重回执同一快照提交，投影恢复不重复应用", async () => {
+		const initial = await saveInitialSnapshot();
+		const receipt = {
+			deliveryIdempotencyKey: "persistent-review-event",
+			capturedAtEpochMs: 20,
+			runtimeSessionIncarnationId: "runtime-incarnation-1",
+		};
+		const current = applySessionFacets({
+			...session(30),
+			state: "awaiting_review",
+			pid: null,
+			runtimeSessionIncarnationId: receipt.runtimeSessionIncarnationId,
+			lastAppliedHookReviewLifecycleEventDelivery: receipt,
+		});
+		const originalWrite = lockedFileSystem.writeTextFileAtomic.bind(lockedFileSystem);
+		const projectionFailure = vi
+			.spyOn(lockedFileSystem, "writeTextFileAtomic")
+			.mockImplementation(async (path, text, options) => {
+				if (path === join(directoryPath, "sessions.json"))
+					throw Object.assign(new Error("模拟提交之后投影失败"), { code: "EIO" });
+				await originalWrite(path, text, options);
+			});
+		await persistHookReviewLifecycleApplicationInWorkspaceSnapshot({
+			workspaceId,
+			taskId: "task-1",
+			taskIncarnationCreatedAtEpochMs: 1,
+			deliveryIdempotencyKey: receipt.deliveryIdempotencyKey,
+			runtimeSessionIncarnationId: receipt.runtimeSessionIncarnationId,
+			readCurrentSummary: () => current,
+		});
+		const committed = await snapshotStorage.readWorkspaceStateSnapshotCommit(directoryPath, workspaceId);
+		if (!committed) throw new Error("缺少已提交快照。");
+		expect(JSON.parse(committed.sessionsJsonText)["task-1"]).toMatchObject({
+			turnOwner: "user",
+			lastAppliedHookReviewLifecycleEventDelivery: receipt,
+		});
+		expect(committed?.meta.revision).toBe(initial.revision);
+		projectionFailure.mockRestore();
+		await recover();
+		const persisted = await loadPersistedWorkspaceSessionsById(workspaceId, { requireCompleteRead: true });
+		expect(persisted["task-1"]?.lastAppliedHookReviewLifecycleEventDelivery).toEqual(receipt);
+		await persistHookReviewLifecycleApplicationInWorkspaceSnapshot({
+			workspaceId,
+			taskId: "task-1",
+			taskIncarnationCreatedAtEpochMs: 1,
+			deliveryIdempotencyKey: receipt.deliveryIdempotencyKey,
+			runtimeSessionIncarnationId: receipt.runtimeSessionIncarnationId,
+			readCurrentSummary: () => null,
+		});
+		expect(
+			(await loadPersistedWorkspaceSessionsById(workspaceId))["task-1"]?.lastAppliedHookReviewLifecycleEventDelivery,
+		).toEqual(receipt);
+	});
+	it.each([false, true])("延迟 UI 保存不能撤销完成回执与 facet，伪造同毫秒标识=%s", async (forgedReceipt) => {
+		const initial = await saveInitialSnapshot();
+		const receipt = {
+			deliveryIdempotencyKey: "authoritative-completion",
+			capturedAtEpochMs: 20,
+			runtimeSessionIncarnationId: "runtime-incarnation-1",
+		};
+		const completed = applySessionFacets({
+			...session(30),
+			state: "awaiting_review",
+			turnOwner: "user",
+			userTurnKind: "review",
+			liveness: "exited",
+			reviewReason: "hook",
+			runtimeSessionIncarnationId: receipt.runtimeSessionIncarnationId,
+			agentResponseGenerationTurnSequence: 1,
+			lastAppliedHookReviewLifecycleEventDelivery: receipt,
+		});
+		await savePersistedWorkspaceSessionsById(workspaceId, { "task-1": completed }, initial.revision);
+		const current = await loadWorkspaceState(repositoryPath);
+		const stale = applySessionFacets({
+			...completed,
+			state: "running",
+			turnOwner: "agent",
+			userTurnKind: null,
+			liveness: "live",
+			reviewReason: null,
+			lastAppliedHookReviewLifecycleEventDelivery: forgedReceipt
+				? { ...receipt, deliveryIdempotencyKey: "forged-completion" }
+				: undefined,
+		});
+		await saveWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+			board: current.board,
+			sessions: { "task-1": stale },
+			expectedRevision: current.revision,
+		});
+		expect((await loadWorkspaceState(repositoryPath)).sessions["task-1"]).toMatchObject({
+			turnOwner: "user",
+			userTurnKind: "review",
+			liveness: "exited",
+			lastAppliedHookReviewLifecycleEventDelivery: receipt,
+		});
+	});
+	it("带同一完成回执的合法人工审阅更新仍然保留", async () => {
+		const initial = await saveInitialSnapshot();
+		const completed = applySessionFacets({
+			...session(30),
+			state: "awaiting_review",
+			turnOwner: "user",
+			userTurnKind: "review",
+			liveness: "exited",
+			reviewReason: "hook",
+			runtimeSessionIncarnationId: "runtime-incarnation-1",
+			lastAppliedHookReviewLifecycleEventDelivery: {
+				deliveryIdempotencyKey: "authoritative-completion",
+				capturedAtEpochMs: 20,
+				runtimeSessionIncarnationId: "runtime-incarnation-1",
+			},
+		});
+		await savePersistedWorkspaceSessionsById(workspaceId, { "task-1": completed }, initial.revision);
+		const current = await loadWorkspaceState(repositoryPath);
+		await saveWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+			board: current.board,
+			sessions: { "task-1": { ...completed, reviewReason: "manual_review" } },
+			expectedRevision: current.revision,
+		});
+		expect((await loadWorkspaceState(repositoryPath)).sessions["task-1"]?.reviewReason).toBe("manual_review");
+	});
 	it.each(["sessions-only", "identity-reconfirmation", "new-identity"] as const)(
 		"%s 只更新会话时，完整提交和恢复均保留未修改看板的原始字节",
 		async (saveKind) => {

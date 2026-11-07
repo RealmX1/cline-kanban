@@ -152,7 +152,11 @@ async function openIsolatedPreview(page: Page, host = "board") {
 				: host === "mobile"
 					? page.locator('[data-task-card-render-role="focused_task_card_copy_in_mobile_detail_header"]')
 					: page.locator('[data-task-id="subject"]');
-	const trigger = source.locator("[data-related-tasks-preview-trigger]");
+	await expect(source).toBeVisible();
+	await source.hover();
+	const trigger = page.locator(
+		`[id="${await source.getAttribute("aria-owns")}"] [data-related-tasks-preview-trigger]`,
+	);
 	await expect(trigger).toBeVisible();
 
 	return { reads, taskCardSnapshotReadRequests, mutations, pageErrors, trigger, source };
@@ -184,7 +188,7 @@ for (const host of ["board", "focus", "sticky"]) {
 	});
 }
 
-test("键盘打开、独立预览、完整删除确认与 Esc 逐层返回", async ({ page }) => {
+test("键盘打开、独立预览、删除确认与 Tooltip 按 Esc 逐层返回", async ({ page }) => {
 	const fixture = await openIsolatedPreview(page);
 	await fixture.trigger.focus();
 	await page.keyboard.press("ArrowDown");
@@ -202,6 +206,11 @@ test("键盘打开、独立预览、完整删除确认与 Esc 逐层返回", asy
 	await expect(page.getByRole("alertdialog")).toHaveCount(0);
 	await expect(popover).toBeVisible();
 	await expect.poll(() => popover.evaluate((element) => element.contains(document.activeElement))).toBe(true);
+	await fullCard.getByRole("button", { name: "Delete task permanently", exact: true }).focus();
+	await expect(page.getByRole("tooltip")).toHaveText("Delete permanently");
+	await page.keyboard.press("Escape");
+	await expect(page.getByRole("tooltip")).toHaveCount(0);
+	await expect(popover).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(popover).toHaveCount(0);
 	await expect(fixture.trigger).toBeFocused();
@@ -218,7 +227,7 @@ test("Done 保留恢复与导航，永久删除与不可用项目不可操作，
 	await fixture.trigger.click();
 	const popover = page.locator("[data-related-tasks-preview-dialog]");
 	await popover.locator('[data-related-task-preview="done"]').click();
-	await expect(popover.getByRole("button", { name: "Restore task from done", exact: true })).toBeVisible();
+	await expect(popover.getByRole("button", { name: "重新打开已结案任务", exact: true })).toBeVisible();
 	await popover.locator('[data-related-task-preview="removed"]').click();
 	await expect(popover.locator('[data-related-task-open="removed"]')).toBeDisabled();
 	await expect(popover.locator("[data-related-full-task-card-preview]")).toHaveCount(0);

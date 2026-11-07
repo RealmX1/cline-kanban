@@ -11,3 +11,7 @@ import pLimit from "p-limit";
 const GIT_FILE_READ_CONCURRENCY_LIMIT = 12;
 
 export const gitFileReadConcurrencyLimiter = pLimit(GIT_FILE_READ_CONCURRENCY_LIMIT);
+
+// 元数据探针和工作区身份读取共用预算，异步化不能把同步等待变成无界子进程 burst。
+const WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT = 4;
+export const workspaceMetadataGitSpawnConcurrencyLimiter = pLimit(WORKSPACE_METADATA_GIT_SPAWN_CONCURRENCY_LIMIT);

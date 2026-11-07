@@ -34,7 +34,7 @@
 - **facet 主门控 `isAgentTurnActive`**（`output-reaction.ts:54-63`）：仅在活跃 agent 回合（`turnOwner==="agent"`）才允许起 episode。根治的场景：agent 正在向用户提问（AskUserQuestion / ExitPlanMode / 权限确认）时输出文本与真实掉线**完全同形**（静默 + 停在提示符），瞬时错误正则会命中 agent 自产的问题/选项文本；`classifyConnectionError` 无法在文本层区分，唯一兜底 `isAgentOutputQuiet` 对提问态恰好失效，所以用 facet 这个带外信号门控。配套的 `standDown`（`session-manager.ts:2350` 经 `engine.onUserTurnStart` 转发）兜「PTY 输出先于 hook 落地、episode 已起」的竞态，消除 retrying 徽标闪现。
 - **首档退避 4s 特意大于输出静默阈值 2s**（`AGENT_OUTPUT_QUIET_THRESHOLD_MS`，`src/core/session-activity.ts`；注释见 `connection-drop-auto-continue.ts:21-27`）——改其中一个数时必须连同另一个一起看。
 
-当前 `appliesTo` 只覆盖 claude/codex（`connection-drop-auto-continue.ts:173-175`）；Cursor/droid/kiro 是代码注释里登记的第一/第二序列 TODO，接入成本基本就是「appliesTo 放行 + 一组该 agent 的连接错误正则」。
+当前 `appliesTo` 只覆盖 claude/codex（`connection-drop-auto-continue.ts:173-175`）；Cursor 的连接错误适配仍是独立 TODO。Factory Droid / Kiro 按 [维护范围约定](../AGENTS.md) 保留现有接入、停止后续适配，不再列为连接错误适配待办。
 
 ### 如何新增 reaction
 

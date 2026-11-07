@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
 import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { ClaudeCodeTranscriptCompletedTurnSource } from "agent-conversation-exploration-thread-graph/harness-claude-code";
@@ -32,7 +32,10 @@ import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
+import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
+import { resolveHookReviewLifecyclePromptSubmissionOrdering } from "../core/recoverable-hook-review-lifecycle-event";
+import { ensureRuntimeBoundKanbanCliExecutable } from "../core/runtime-bound-kanban-cli-executable";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -110,6 +113,7 @@ import {
 	computeQueuedTaskPromptDeliveryTextSha256,
 	readWorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../state/queued-task-prompt-delivery-store";
+import { RecoverableHookReviewLifecycleEventDeliveries } from "../state/recoverable-hook-review-lifecycle-event-deliveries";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	readLiveRuntimeProcessInstanceIds,
@@ -120,9 +124,14 @@ import { registerWorkspaceBoardSaveStatePostDeployVerificationDoneEntryGuard } f
 import {
 	getTaskWorktreesHomePath,
 	getWorkspaceDirectoryPath,
+	getWorkspaceStateSnapshotReadFingerprintById,
+	getWorkspacesRootPath,
 	listWorkspaceIndexEntries,
+	loadPersistedWorkspaceSessionsById,
 	loadWorkspaceBoardById,
 	loadWorkspaceState,
+	persistHookReviewLifecycleApplicationInWorkspaceSnapshot,
+	probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
 import {
@@ -227,6 +236,10 @@ export interface CreateRuntimeServerDependencies {
 			spooledHookIngestRequestApplier: (spooledHookIngestRequest: unknown) => Promise<RuntimeHookIngestResponse>,
 		) => void;
 		drainPendingHookSpoolEntriesBeforeDirectHookIngest: (workspaceId: string, taskId: string) => Promise<void>;
+		retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges?: (
+			workspaceId: string,
+			evidenceFingerprint: string,
+		) => Promise<void>;
 	};
 	// runtime 退出类请求（`kanban runtime handover-restart` / `stop --terminate-hosted-agent-sessions`）的执行方：
 	// cli.ts 装好 graceful shutdown 之后才能执行，所以这里只给读取函数。缺席或尚未就绪时 procedure 报错。
@@ -324,6 +337,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 工作单元间关系账本：注册后本进程每一次 board 写入先过账本（dd2db 1a）。账本打不开时 board 只读。
 	const activatedInterWorkUnitRelationLedgerLiveCapture =
 		await activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+	if (process.platform !== "win32") {
+		try {
+			process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH = ensureRuntimeBoundKanbanCliExecutable({
+				commandParts: resolveKanbanCommandParts(),
+				executableStorageDirectoryPath: join(getRuntimeHomePath(), "runtime-bound-cli-executables"),
+			});
+		} catch (error) {
+			deps.warn(
+				`运行时绑定 CLI 入口暂不可用，保留完整启动前缀：${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
@@ -970,7 +995,156 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		loadWorkspaceBoardById,
 	});
 
+	const hookReviewSnapshotReadinessProbesByWorkspaceId = new Map<
+		string,
+		{ observedAtMs: number; evidence: Promise<string> }
+	>();
+	const recoverableHookReviewLifecycleEventDeliveries = new RecoverableHookReviewLifecycleEventDeliveries({
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		probeSnapshotCommitReadiness: async (request) => {
+			const previous = hookReviewSnapshotReadinessProbesByWorkspaceId.get(request.workspaceId);
+			if (previous && Date.now() - previous.observedAtMs < 15_000) return await previous.evidence;
+			const evidence = probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness(request.workspaceId);
+			hookReviewSnapshotReadinessProbesByWorkspaceId.set(request.workspaceId, {
+				observedAtMs: Date.now(),
+				evidence,
+			});
+			return await evidence;
+		},
+		isMainTaskConversationSession: async (request) => {
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			return board.columns.some((column) =>
+				column.cards.some((card) => (card.mainTaskConversationSessionId ?? card.id) === request.taskId),
+			);
+		},
+		getWorkspaceDeliveryFilePath: (workspaceId) => {
+			const workspaceDirectory = resolve(getWorkspaceDirectoryPath(workspaceId));
+			if (dirname(workspaceDirectory) !== resolve(getWorkspacesRootPath()))
+				throw new Error("生命周期恢复目录超出工作区范围。");
+			return join(workspaceDirectory, "recoverable-hook-lifecycle-event-deliveries.json");
+		},
+		readTarget: async (request) => {
+			const workspacePath =
+				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
+				(await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(request.workspaceId))?.repoPath;
+			if (!workspacePath) throw new Error("生命周期事件的工作区身份尚未核验。");
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			const manager = await deps.ensureTerminalManagerForWorkspace(request.workspaceId, workspacePath);
+			const summary = manager.getSummary(request.taskId);
+			const ownerTaskId = summary?.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId;
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === ownerTaskId));
+			const card = column?.cards.find((entry) => entry.id === ownerTaskId);
+			const persistedSummary = (
+				await loadPersistedWorkspaceSessionsById(request.workspaceId, { requireCompleteRead: true })
+			)[request.taskId];
+			return {
+				taskIncarnationCreatedAtEpochMs: card?.createdAt ?? null,
+				isTaskExecutionAllowed: Boolean(
+					card &&
+						column?.id !== "trash" &&
+						!isTaskCardShelved(card) &&
+						!summary?.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
+						(card.mainTaskConversationSessionId
+							? card.mainTaskConversationSessionId === request.taskId
+							: request.taskId === card.id) &&
+						summary?.liveness !== "interrupted" &&
+						summary?.liveness !== "failed",
+				),
+				summary,
+				persistedSummary,
+				recoveryEvidenceFingerprint: createHash("sha256")
+					.update(
+						JSON.stringify([
+							card?.createdAt,
+							card?.mainTaskConversationSessionId,
+							column?.id,
+							card?.taskShelvingState,
+							summary?.runtimeSessionIncarnationId,
+							summary?.pid,
+							summary ? resolveSessionFacets(summary) : null,
+							summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+							summary?.agentResponseGenerationTurnSequence,
+							summary?.agentConversationPromptSubmissionAcceptance?.attemptedAtMs,
+							summary?.automaticAgentFailureContinuation?.phase,
+						]),
+					)
+					.digest("hex"),
+			};
+		},
+		persistApplicationConfirmation: async (request, taskIncarnationCreatedAtEpochMs) => {
+			const workspacePath =
+				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
+				(await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(request.workspaceId))?.repoPath;
+			if (!workspacePath) throw new Error("生命周期确认的工作区暂不可读。");
+			const manager = await deps.ensureTerminalManagerForWorkspace(request.workspaceId, workspacePath);
+			await persistHookReviewLifecycleApplicationInWorkspaceSnapshot({
+				workspaceId: request.workspaceId,
+				taskId: request.taskId,
+				taskIncarnationCreatedAtEpochMs,
+				deliveryIdempotencyKey: request.hookEventDeliveryIdempotencyKey,
+				runtimeSessionIncarnationId: request.hookRuntimeSessionIncarnationId,
+				readCurrentSummary: () => manager.getSummary(request.taskId),
+			});
+		},
+		onApplicationConfirmed: async (
+			request,
+			notificationCandidateId,
+			unacceptedPromptSubmissionIdObservedBeforeAdmission,
+		) => {
+			const board = await loadWorkspaceBoardById(request.workspaceId, { requireCompleteRead: true });
+			if (
+				!board.columns.some(
+					(column) =>
+						column.id !== "trash" &&
+						column.cards.some(
+							(card) =>
+								!isTaskCardShelved(card) && (card.mainTaskConversationSessionId ?? card.id) === request.taskId,
+						),
+				)
+			)
+				return;
+			const summary =
+				findRuntimeSessionSummary(request.workspaceId, request.taskId) ??
+				(await loadPersistedWorkspaceSessionsById(request.workspaceId, { requireCompleteRead: true }))[
+					request.taskId
+				];
+			if (
+				!summary ||
+				summary.runtimeSessionIncarnationId !== request.hookRuntimeSessionIncarnationId ||
+				summary.lastAppliedHookReviewLifecycleEventDelivery?.deliveryIdempotencyKey !==
+					request.hookEventDeliveryIdempotencyKey ||
+				(summary.agentResponseGenerationTurnStarted?.startedAt ?? 0) > request.hookEventCapturedAtEpochMs ||
+				resolveSessionFacets(summary).userTurnKind !== "review" ||
+				summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
+			)
+				return;
+			const promptSubmissionOrdering = resolveHookReviewLifecyclePromptSubmissionOrdering(
+				summary,
+				request.hookEventCapturedAtEpochMs,
+				unacceptedPromptSubmissionIdObservedBeforeAdmission,
+			);
+			if (promptSubmissionOrdering === "unknown") throw new Error("同毫秒输入缺少受理前身份，通知对账保留待补证。");
+			if (promptSubmissionOrdering === "superseded") return;
+			await deps.runtimeStateHub.broadcastTaskReadyForReview(
+				request.workspaceId,
+				summary.taskConversationSessionMetadata?.workspaceTaskId ?? request.taskId,
+				"review",
+				{
+					candidateId: notificationCandidateId,
+					summary,
+					finalMessage: request.metadata?.finalMessage ?? undefined,
+					agentEventDeliveredLateToRuntimeByMilliseconds: Math.max(
+						0,
+						Date.now() - (request.hookEventCapturedAtEpochMs ?? Date.now()),
+					),
+				},
+				{ requireDurableRegistration: true },
+			);
+		},
+		warn: deps.warn,
+	});
 	const hooksApiDependenciesSharedByDirectAndSpooledHookIngest = {
+		recoverableHookReviewLifecycleEventDeliveries,
 		resolveCurrentTaskConversationSessionSummaryForLifecycle: async (
 			workspaceId: string,
 			summary: RuntimeTaskSessionSummary,
@@ -1005,6 +1179,61 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
+	let recoveringHookReviewLifecycleEvents = false;
+	const recoverPendingHookReviewLifecycleEvents = async () => {
+		if (recoveringHookReviewLifecycleEvents) return;
+		recoveringHookReviewLifecycleEvents = true;
+		try {
+			for (const workspace of await listWorkspaceIndexEntries()) {
+				try {
+					await recoverableHookReviewLifecycleEventDeliveries.reconcileWorkspace(
+						workspace.workspaceId,
+						(request, boundary) =>
+							hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingestRecoverableLifecycleEvent(
+								request,
+								boundary,
+							),
+					);
+					const directory = getWorkspaceDirectoryPath(workspace.workspaceId);
+					const admissionStorageEvidence = await Promise.all(
+						[directory, join(directory, "recoverable-hook-lifecycle-event-deliveries.json")].map(async (path) => {
+							try {
+								const entry = await stat(path);
+								return [entry.dev, entry.ino, entry.mode, entry.size, entry.mtimeMs, entry.ctimeMs];
+							} catch (error) {
+								return (error as NodeJS.ErrnoException).code ?? "unreadable";
+							}
+						}),
+					);
+					await deps.agentSessionPtyHostHookSpool?.retryRetainedLifecycleEventsAfterAdmissionEvidenceChanges?.(
+						workspace.workspaceId,
+						createHash("sha256")
+							.update(
+								JSON.stringify([
+									await getWorkspaceStateSnapshotReadFingerprintById(workspace.workspaceId),
+									admissionStorageEvidence,
+									await recoverableHookReviewLifecycleEventDeliveries.probeWorkspaceHookReviewLifecycleEventDeliveryAdmissionLockReadiness(
+										workspace.workspaceId,
+									),
+								]),
+							)
+							.digest("hex"),
+					);
+				} catch (error) {
+					deps.warn(
+						`工作区 ${workspace.workspaceId} 的生命周期恢复等待补证：${error instanceof Error ? error.message : String(error)}`,
+					);
+				}
+			}
+		} catch (error) {
+			deps.warn(`生命周期事件恢复保留待查状态：${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			recoveringHookReviewLifecycleEvents = false;
+		}
+	};
+	const hookReviewLifecycleRecoveryTimer = setInterval(() => void recoverPendingHookReviewLifecycleEvents(), 15_000);
+	hookReviewLifecycleRecoveryTimer.unref();
+	void recoverPendingHookReviewLifecycleEvents();
 
 	let pauseAutomaticMainSessionHandoverForStoppedTask:
 		| ((workspaceId: string, taskId: string) => Promise<void>)
@@ -2088,6 +2317,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return httpServerStoppedAcceptingConnections;
 	};
 	const stopStartingNewBackgroundWork = (preserveAlreadyStartedQueueDispatches = false) => {
+		clearInterval(hookReviewLifecycleRecoveryTimer);
 		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();
@@ -2107,6 +2337,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const beginRuntimeOwnedBackgroundServicesShutdown = (): Promise<void> => {
 		// 同时调用各关闭入口：同步部分先关准入闸，不让排空期间又起创建、交接、结案恢复或查卡作业。
 		runtimeOwnedBackgroundServicesShutdown ??= Promise.all([
+			recoverableHookReviewLifecycleEventDeliveries.close(),
 			verificationExecutionRecoveryLifecycle?.stop() ?? Promise.resolve(),
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),

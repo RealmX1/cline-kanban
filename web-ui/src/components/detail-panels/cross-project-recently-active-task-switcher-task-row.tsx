@@ -185,11 +185,15 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						isHoverFloatingCardVisible && "invisible pointer-events-none",
 					)}
 				>
-					<div className="relative flex min-w-0 flex-1 flex-col py-1.5 pl-2 pr-[calc(4rem+0.5rem)] text-left">
+					<div
+						className="relative flex min-w-0 flex-1 flex-col px-2 py-1.5 text-left"
+						onClick={(event) => {
+							if (event.currentTarget.contains(event.target as Node)) onOpen();
+						}}
+					>
 						<button
 							type="button"
 							data-cross-project-task-switcher-compact-row-open-task=""
-							onClick={onOpen}
 							aria-current={isFocused ? "true" : undefined}
 							className="absolute inset-0 cursor-pointer rounded-md focus-visible:outline-2 focus-visible:outline-accent"
 							aria-label={`打开任务：${entry.title}`}

@@ -94,6 +94,7 @@ export interface WorkUnitRelationNeighborhoodCollapsedCountGroup {
 }
 
 export interface WorkUnitRelationNeighborhoodPanelPresentation {
+	panelSubjectTaskTitle: string;
 	panelSubjectSelfReferenceInSentence: string;
 	visibleSections: WorkUnitRelationNeighborhoodVisibleSection[];
 	collapsedCountGroups: WorkUnitRelationNeighborhoodCollapsedCountGroup[];
@@ -367,6 +368,9 @@ export function buildWorkUnitRelationNeighborhoodPanelPresentation(input: {
 	}));
 
 	return {
+		panelSubjectTaskTitle:
+			relationNeighborhoodSummary.subjectWorkUnit.kanbanBoardCardIdentity?.currentTitle ??
+			relationNeighborhoodSummary.subjectWorkUnit.workUnitDisplayLabel,
 		panelSubjectSelfReferenceInSentence:
 			panelSubjectWorkUnit.workUnitType === "kanban_board_card" ? "This task" : "This standalone session",
 		visibleSections,

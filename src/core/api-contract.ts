@@ -1475,6 +1475,13 @@ export const runtimeSetCurrentWorkPhaseGoalRequestSchema = z
 export type RuntimeSetCurrentWorkPhaseGoalRequest = z.infer<typeof runtimeSetCurrentWorkPhaseGoalRequestSchema>;
 
 const runtimeTaskSessionSummaryObjectSchema = z.object({
+	lastAppliedHookReviewLifecycleEventDelivery: z
+		.object({
+			deliveryIdempotencyKey: z.string().min(1).max(128),
+			capturedAtEpochMs: z.number().int().nonnegative(),
+			runtimeSessionIncarnationId: z.string(),
+		})
+		.optional(),
 	lastEffectiveAgentConversationActivityObservation: runtimeLastEffectiveAgentConversationActivityObservationSchema
 		.nullable()
 		.optional(),
@@ -5783,6 +5790,7 @@ export const runtimeHookIngestRequestSchema = z.object({
 	// 每次 hooks CLI 调用生成一个，传输重试与 spool 重放复用同一个：同一事件只应用一次。
 	// 旧 runtime 已应用、但没来得及回响应就崩溃的事件，CLI 会把它 spool 起来，新 runtime 靠它识别出来。
 	hookEventDeliveryIdempotencyKey: z.string().min(1).max(128).optional(),
+	hookEventDeliveryHostedSessionKey: z.string().min(1).max(512).optional(),
 });
 export type RuntimeHookIngestRequest = z.infer<typeof runtimeHookIngestRequestSchema>;
 
@@ -5798,6 +5806,20 @@ export type RuntimeHarnessUserPromptProcessingDirective = z.infer<
 export const runtimeHookIngestResponseSchema = z.object({
 	ok: z.boolean(),
 	error: z.string().optional(),
+	retryableRuntimeDependencyFailureCode: z
+		.enum(["EIO", "EACCES", "ENOSPC", "EROFS", "ELOCKED", "SQLITE_BUSY", "SQLITE_LOCKED"])
+		.optional(),
+	failureKind: z
+		.enum(["runtime_dependency_unavailable", "permanent_business_rejection", "target_identity_not_verified"])
+		.optional(),
+	lifecycleEventDeliveryStatus: z
+		.enum([
+			"durably_accepted_pending_application",
+			"application_confirmed",
+			"permanently_rejected",
+			"superseded_by_newer_session_state",
+		])
+		.optional(),
 	harnessUserPromptProcessingDirective: runtimeHarnessUserPromptProcessingDirectiveSchema.optional(),
 });
 export type RuntimeHookIngestResponse = z.infer<typeof runtimeHookIngestResponseSchema>;

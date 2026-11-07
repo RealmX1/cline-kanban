@@ -12,6 +12,9 @@ export function buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment(input: {
 	workspaceRepositoryPath: string;
 }): Record<string, string> {
 	return {
+		...(process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH
+			? { KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH: process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH }
+			: {}),
 		KANBAN_VISUALIZATION_PUBLISH_COMMAND_JSON: JSON.stringify(resolveKanbanCommandParts()),
 		KANBAN_TASK_ID: input.workspaceTaskId,
 		KANBAN_ATTEMPT_ID: input.kanbanTaskConversationSessionId,
@@ -29,6 +32,7 @@ export function buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment(input: {
 // （例如在 task worktree 里跑 dev:full），这些变量会经 process.env 泄漏给进程内的 Cline 工具调用与
 // 没有显式覆盖的子进程，把它们的一切 CLI 调用错记到那张卡或那个会话名下。
 export const KANBAN_RUNTIME_INHERITED_WORK_UNIT_IDENTITY_ENVIRONMENT_VARIABLE_NAMES_TO_SCRUB_AT_START = [
+	"KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH",
 	"KANBAN_VISUALIZATION_PUBLISH_COMMAND_JSON",
 	"KANBAN_TASK_ID",
 	"KANBAN_ATTEMPT_ID",

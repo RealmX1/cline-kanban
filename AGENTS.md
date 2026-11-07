@@ -45,6 +45,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **三层职责**：浏览器是控制面；本地运行时是长驻唯一真相源；执行层才是 agent 本体。session/board 摘要状态**不靠浏览器轮询**——`src/server/runtime-state-hub.ts` 批量广播 → `use-runtime-state-stream.ts` → `App.tsx`，加 summary 字段只改契约即可搭车。但 **workspace diff 仍是定时轮询**，别假设它在推流链路上。
 - **两种可执行 session transport** 由 `src/core/agent-catalog.ts` 声明：`pty_terminal` → `src/terminal/`；`acp_stdio_subprocess`（omp 可切换，默认仍为 PTY）→ `src/acp-client-session/`。共享聊天面板与 hooks 使用 `agent-conversation-*` 命名，判断活会话时必须读取 summary 的实际通道。
 - **Cline agent 已彻底退役**：SDK、CLI adapter、专属账号/provider/MCP/telemetry/反馈界面已删除；`cline` 身份、旧 transport 和存储字段只为读取历史保留，所有执行入口必须明确拒绝。恢复依据与重新接入边界见 `docs/cline-agent-retirement.md`；不得把历史字段当成仍可启动的能力。
+- **Factory Droid 与 Kiro 保留接入、停止后续适配**：`droid` / `kiro` 的现有实现、启动入口、历史数据及回归测试保留；不再跟进其 CLI / 协议变化、补齐专属能力，也不作为新功能的适配或验收要求。共享能力改动可自然覆盖；只有用户明确要求时再恢复针对性适配。
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
@@ -64,6 +65,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **独立原生回合二次查询恢复只允许确证尚未写入的条目**：`runtime-server` 组合 validator 时须透传写入阶段；提交可能开始标记先持久化，再写正文。阶段丢失会产生“消息已发送、重启仍认为未写入”的危险状态，接线与验收见 `docs/runbooks/native-independent-user-turn-before-submission-query-recovery.md`。
 - **Post-Deploy Verification 的结案判据只在服务端**（`src/deployment/post-deploy-verification-done-entry-gate.ts`）：所有进 Done 的入口都走 `taskCardAction.moveTaskCardIntoDone…` 的门禁（整板 saveState 另有兜底改回原列），受门禁的卡未勾项必须逐项带原因；带原因结案**不是**「PDV 通过」（不写 `verifiedAt`，账本另记事件）。判据键必须带 workspaceId。全文：`docs/post-deploy-verification.md`。
 - **工作区 JSON 是已提交快照的投影**：读取和缓存必须识别快照日志与 `workspaceStateSnapshotCommitId`；后续写入先恢复投影再比较 revision，不重做业务变更。新旧写锁协议切换须核验旧写入者退出，回退先投影日志；见 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md`。
+- **普通主会话完成事件的持久受理不等于应用**：投递回执与 facet 同一次权威快照提交；恢复保留原代、原回合与原捕获时间，不重开 agent 或付费维护。通知对账不冒充送达，见 `docs/high-load-workspace-read-and-hook-lifecycle-event-recovery.md`。
 - **plan 起步与权限档位是两条正交轴**：`startInPlanMode` 不得翻译成降权；harness 表达不了中间档时**只收紧不放宽**（回落「每次询问」，绝不回落全放行）。rationale：`docs/adr/0002-plan-mode-permission-mode-orthogonal.md`。
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。

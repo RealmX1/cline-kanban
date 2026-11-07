@@ -54,11 +54,21 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 			<span {...mutedProps}>
 				{changedFiles} {changedFiles === 1 ? "file" : "files"}
 			</span>
-			<span className={cn(additionsTextColorClassName, allowLineWrapping && "whitespace-nowrap")}>
+			<span
+				className={cn(
+					additionsTextColorClassName,
+					allowLineWrapping && "whitespace-normal [overflow-wrap:anywhere]",
+				)}
+			>
 				{" "}
 				+{additions}
 			</span>
-			<span className={cn(deletionsTextColorClassName, allowLineWrapping && "whitespace-nowrap")}>
+			<span
+				className={cn(
+					deletionsTextColorClassName,
+					allowLineWrapping && "whitespace-normal [overflow-wrap:anywhere]",
+				)}
+			>
 				{" "}
 				-{deletions}
 			</span>

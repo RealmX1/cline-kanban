@@ -2,6 +2,7 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import { ChevronDown } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef } from "react";
 import { Button, type ButtonSize, type ButtonVariant } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 
 export function PrimaryActionButtonWithAdditionalActionMenu({
 	open,
@@ -81,99 +82,111 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 	};
 	return (
 		<RadixPopover.Root open={open && !disabled} onOpenChange={onOpenChange} modal={false}>
-			<RadixPopover.Anchor asChild>
-				<Button
-					ref={triggerRef}
-					icon={icon}
-					variant={variant}
-					size={size}
-					disabled={disabled}
-					className="[@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
-					aria-label={primaryAccessibleLabel}
-					aria-haspopup="menu"
-					aria-expanded={open && !disabled}
-					aria-controls={open && !disabled ? menuId : undefined}
-					onMouseDown={(event) => event.stopPropagation()}
-					onPointerDown={(event) => {
-						event.stopPropagation();
-						cancelTouchLongPress();
-						suppressReleasedLongPressClickRef.current = false;
-						if (
-							disabled ||
-							event.pointerType !== "touch" ||
-							touchAdditionalActionTrigger !== "long_press_primary_button"
-						)
-							return;
-						const { pointerId, clientX, clientY } = event;
-						const cancelForScroll = () => cancelTouchLongPress();
-						window.addEventListener("scroll", cancelForScroll, true);
-						touchLongPressRef.current = {
-							pointerId,
-							removeScrollCancellationListener: () =>
-								window.removeEventListener("scroll", cancelForScroll, true),
-							startX: clientX,
-							startY: clientY,
-							timeoutId: setTimeout(() => {
+			<Tooltip content={primaryLabel} side="top">
+				<span className="inline-flex" tabIndex={disabled ? 0 : undefined}>
+					<RadixPopover.Anchor asChild>
+						<Button
+							ref={triggerRef}
+							icon={icon}
+							variant={variant}
+							size={size}
+							disabled={disabled}
+							className="[@media(pointer:coarse)]:min-h-11 [@media(pointer:coarse)]:min-w-11"
+							aria-label={primaryAccessibleLabel}
+							aria-haspopup="menu"
+							aria-expanded={open && !disabled}
+							aria-controls={open && !disabled ? menuId : undefined}
+							onMouseDown={(event) => event.stopPropagation()}
+							onPointerDown={(event) => {
+								event.stopPropagation();
 								cancelTouchLongPress();
-								suppressReleasedLongPressClickRef.current = true;
+								suppressReleasedLongPressClickRef.current = false;
+								if (
+									disabled ||
+									event.pointerType !== "touch" ||
+									touchAdditionalActionTrigger !== "long_press_primary_button"
+								)
+									return;
+								const { pointerId, clientX, clientY } = event;
+								const cancelForScroll = () => cancelTouchLongPress();
+								window.addEventListener("scroll", cancelForScroll, true);
+								touchLongPressRef.current = {
+									pointerId,
+									removeScrollCancellationListener: () =>
+										window.removeEventListener("scroll", cancelForScroll, true),
+									startX: clientX,
+									startY: clientY,
+									timeoutId: setTimeout(() => {
+										cancelTouchLongPress();
+										suppressReleasedLongPressClickRef.current = true;
+										cancelScheduledClose();
+										openingInteractionRef.current = "touch";
+										onOpenChange(true);
+									}, 500),
+								};
+							}}
+							onPointerMove={(event) => {
+								const pendingTouchLongPress = touchLongPressRef.current;
+								if (
+									pendingTouchLongPress?.pointerId === event.pointerId &&
+									Math.hypot(
+										event.clientX - pendingTouchLongPress.startX,
+										event.clientY - pendingTouchLongPress.startY,
+									) > 8
+								)
+									cancelTouchLongPress();
+							}}
+							onPointerUp={cancelTouchLongPress}
+							onPointerCancel={() => {
+								cancelTouchLongPress();
+								suppressReleasedLongPressClickRef.current = false;
+							}}
+							onContextMenu={(event) => {
+								if (touchLongPressRef.current || suppressReleasedLongPressClickRef.current)
+									event.preventDefault();
+							}}
+							onPointerEnter={(event) => {
+								if (event.pointerType === "touch" || disabled) return;
 								cancelScheduledClose();
-								openingInteractionRef.current = "touch";
+								if (open) return;
+								openingInteractionRef.current = "hover";
 								onOpenChange(true);
-							}, 500),
-						};
-					}}
-					onPointerMove={(event) => {
-						const pendingTouchLongPress = touchLongPressRef.current;
-						if (
-							pendingTouchLongPress?.pointerId === event.pointerId &&
-							Math.hypot(
-								event.clientX - pendingTouchLongPress.startX,
-								event.clientY - pendingTouchLongPress.startY,
-							) > 8
-						)
-							cancelTouchLongPress();
-					}}
-					onPointerUp={cancelTouchLongPress}
-					onPointerCancel={() => {
-						cancelTouchLongPress();
-						suppressReleasedLongPressClickRef.current = false;
-					}}
-					onContextMenu={(event) => {
-						if (touchLongPressRef.current || suppressReleasedLongPressClickRef.current) event.preventDefault();
-					}}
-					onPointerEnter={(event) => {
-						if (event.pointerType === "touch" || disabled) return;
-						cancelScheduledClose();
-						if (open) return;
-						openingInteractionRef.current = "hover";
-						onOpenChange(true);
-					}}
-					onPointerLeave={(event) => {
-						if (event.pointerType === "touch") return;
-						cancelTouchLongPress();
-						scheduleClose();
-					}}
-					onClick={(event) => {
-						event.stopPropagation();
-						if (suppressReleasedLongPressClickRef.current && event.detail !== 0) {
-							suppressReleasedLongPressClickRef.current = false;
-							event.preventDefault();
-							return;
-						}
-						suppressReleasedLongPressClickRef.current = false;
-						activateOption(onPrimaryAction);
-					}}
-					onKeyDown={(event) => {
-						event.stopPropagation();
-						if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-							event.preventDefault();
-							openingInteractionRef.current = "keyboard";
-							if (open) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
-							onOpenChange(true);
-						}
-					}}
-				/>
-			</RadixPopover.Anchor>
+							}}
+							onPointerLeave={(event) => {
+								if (event.pointerType === "touch") return;
+								cancelTouchLongPress();
+								scheduleClose();
+							}}
+							onClick={(event) => {
+								event.stopPropagation();
+								if (suppressReleasedLongPressClickRef.current && event.detail !== 0) {
+									suppressReleasedLongPressClickRef.current = false;
+									event.preventDefault();
+									return;
+								}
+								suppressReleasedLongPressClickRef.current = false;
+								activateOption(onPrimaryAction);
+							}}
+							onKeyDown={(event) => {
+								event.stopPropagation();
+								if (event.key === "Escape" && open) {
+									event.preventDefault();
+									cancelScheduledClose();
+									restoreTriggerFocusAfterEscapeRef.current = true;
+									onOpenChange(false);
+									return;
+								}
+								if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+									event.preventDefault();
+									openingInteractionRef.current = "keyboard";
+									if (open) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+									onOpenChange(true);
+								}
+							}}
+						/>
+					</RadixPopover.Anchor>
+				</span>
+			</Tooltip>
 			{touchAdditionalActionTrigger === "separate_menu_button" ? (
 				<Button
 					icon={<ChevronDown size={12} />}
@@ -237,7 +250,7 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 					onMouseDown={(event) => event.stopPropagation()}
 					onKeyDown={(event) => {
 						event.stopPropagation();
-						if (event.key === "Escape" && !event.defaultPrevented) {
+						if (event.key === "Escape") {
 							// Radix 刚挂载时的层级判定可能尚未就绪，已聚焦的菜单项仍须响应 Escape。
 							event.preventDefault();
 							cancelScheduledClose();

@@ -309,12 +309,22 @@ export function createNotificationAssessmentService(input: {
 			pending.delete(candidate.candidateId);
 		}
 	}
-	async function enqueue(notification: NotificationAssessmentInput): Promise<void> {
+	async function enqueue(
+		notification: NotificationAssessmentInput,
+		{
+			waitForAssessmentCompletion = true,
+			requireDurableRegistration = false,
+		}: { waitForAssessmentCompletion?: boolean; requireDurableRegistration?: boolean } = {},
+	): Promise<void> {
 		const archive = getNotificationLifecycleArchive();
 		const triggeredAt = Date.now();
 		const candidateId = notification.candidateId ?? randomUUID();
-		if (closed || enqueuing.has(candidateId) || assessmentFailureReasonsAwaitingArchiveByCandidateId.has(candidateId))
+		if (closed || enqueuing.has(candidateId)) {
+			if (requireDurableRegistration)
+				throw new Error(closed ? "通知登记服务已关闭。" : "通知候选仍在登记，尚未确认持久登记。");
 			return;
+		}
+		if (assessmentFailureReasonsAwaitingArchiveByCandidateId.has(candidateId)) return;
 		enqueuing.add(candidateId);
 		try {
 			const previous = await archive.get(candidateId);
@@ -392,9 +402,13 @@ export function createNotificationAssessmentService(input: {
 				);
 				return;
 			}
-			await process(enriched);
-		} catch {
+			// 持久登记已完成；hook 响应无需等待模型或评估并发预算。
+			const assessmentCompletion = process(enriched);
+			if (waitForAssessmentCompletion) await assessmentCompletion;
+		} catch (error) {
 			reportNotificationArchiveFailure();
+			// 生命周期调用者保留待对账记录；无档案的基础提醒不能替代持久登记。
+			if (requireDurableRegistration) throw error;
 			if (
 				!closed &&
 				!(await originatingSessionHasLostLifecycleAuthority(

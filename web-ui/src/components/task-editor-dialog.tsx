@@ -816,9 +816,22 @@ export function TaskEditorDialogForm({
 		if (!submittingPrompt.trim()) return false;
 		const inputSnapshot = latestSubmissionInputRef.current;
 		let acceptedAssignmentInputSnapshot = inputSnapshot;
-		const isSubmittedInputStillCurrent = () =>
-			latestSubmissionInputRef.current === inputSnapshot ||
-			latestSubmissionInputRef.current === acceptedAssignmentInputSnapshot;
+		let acceptedRelationSavedInputSnapshot: string | null = null;
+		const isSubmittedInputStillCurrent = () => {
+			const currentRelationDraft = relationModeling.readLatestDraft();
+			if (
+				acceptedRelationSavedInputSnapshot &&
+				(currentRelationDraft.referenceRelationDrafts.length ||
+					currentRelationDraft.relationRevocations.length ||
+					Object.keys(currentRelationDraft.invalidReferenceRelationDetailsFormsByDraftId ?? {}).length)
+			)
+				return false;
+			return (
+				latestSubmissionInputRef.current === inputSnapshot ||
+				latestSubmissionInputRef.current === acceptedAssignmentInputSnapshot ||
+				latestSubmissionInputRef.current === acceptedRelationSavedInputSnapshot
+			);
+		};
 		const relationSnapshot = JSON.stringify({
 			drafts: relationModeling.readLatestDraft().referenceRelationDrafts,
 			revocations: relationModeling.readLatestDraft().relationRevocations,
@@ -970,8 +983,16 @@ export function TaskEditorDialogForm({
 			if (persistence && !(await persistence)) throw new Error("任务更改尚未保存，草稿已保留。");
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("提交期间输入又有更改，新的草稿已保留，请核对后再次保存。");
-			if (relationModeling.hasChanges && characteristics)
+			if (relationModeling.hasChanges && characteristics) {
 				await relationModeling.applyToTask(taskId, characteristics, assignment.workspaceId);
+				// 保存只消费本次关系草稿；随后出现的真实输入仍按原快照保护。
+				acceptedRelationSavedInputSnapshot = JSON.stringify({
+					...(JSON.parse(acceptedAssignmentInputSnapshot) as Record<string, unknown>),
+					referenceRelationDrafts: [],
+					relationRevocations: [],
+					invalidReferenceRelationDetailsFormsByDraftId: undefined,
+				});
+			}
 			if (!isSubmittedInputStillCurrent())
 				throw new Error("保存关系期间输入又有更改，新的草稿已保留，尚未启动任务。");
 			if (automaticProjectAssignmentAnalysisEnabledForThisSubmission)
@@ -1967,6 +1988,7 @@ export function TaskEditorDialogForm({
 														presentation="task_editor"
 														clipboardSelectionRequest={clipboardTaskReference.selectionRequest}
 														workspaceId={workspaceId}
+														targetWorkspaceId={targetWorkspaceId}
 														taskId={taskEditorMode === "edit" ? editingTaskId : null}
 														rootTitle={taskName || "待创建任务"}
 														onUnstagedFormChange={setHasUnstagedRelationForm}
