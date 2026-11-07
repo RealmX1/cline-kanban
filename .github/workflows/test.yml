@@ -36,9 +36,8 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
 
-      # macOS node-gyp/electron rebuilds can fail with Python 3.12/distutils; pin 3.11.
-      - name: Setup Python (for node-gyp on macOS)
-        if: matrix.os == 'macos-latest'
+      # 两个平台的命令分析测试均使用标准库；3.11同时保留macOS node-gyp的distutils兼容性。
+      - name: 设置 Python（分析测试与 node-gyp）
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"

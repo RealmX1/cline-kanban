@@ -6,7 +6,10 @@ import { cn } from "@/components/ui/cn";
 import { useMeasure } from "@/utils/react-use";
 import "@xyflow/react/dist/style.css";
 
-import { RELATION_GRAPH_LABELS } from "@/hooks/work-unit-relation-kind-display-labels";
+import {
+	getReferenceRelationDisplayLabel,
+	isReferenceRelationUndirected,
+} from "@/hooks/work-unit-relation-kind-display-labels";
 
 export { REFERENCE_RELATION_LABELS, RELATION_GRAPH_LABELS } from "@/hooks/work-unit-relation-kind-display-labels";
 
@@ -109,12 +112,8 @@ export function ReferenceRelationModelingGraph({
 			id: relation.relationId,
 			source: relation.subjectKey,
 			target: relation.anchorKey,
-			label: `${RELATION_GRAPH_LABELS[relation.relationKind] ?? relation.relationKind} · ${RELATION_PREVIEW_STATE_LABELS[relation.relationPresentationState]}`,
-			markerEnd: ["reference_is_generally_related_with", "reference_is_cross_repository_counterpart_with"].includes(
-				relation.relationKind,
-			)
-				? undefined
-				: { type: MarkerType.ArrowClosed },
+			label: `${getReferenceRelationDisplayLabel(relation.relationKind, relation.assertedRelation?.assertedRelationKindSpecificAttributes ?? relation.assertedRelationKindSpecificAttributes)}${isReferenceRelationUndirected(relation.relationKind) ? "（无方向）" : ""} · ${RELATION_PREVIEW_STATE_LABELS[relation.relationPresentationState]}`,
+			markerEnd: isReferenceRelationUndirected(relation.relationKind) ? undefined : { type: MarkerType.ArrowClosed },
 			style: {
 				stroke: `var(${relation.relationPresentationState === "pending_revocation" ? "--color-status-red" : relation.relationPresentationState === "saved" ? "--color-text-secondary" : "--color-accent"})`,
 				strokeDasharray: relation.relationPresentationState === "saved" ? undefined : "5 4",

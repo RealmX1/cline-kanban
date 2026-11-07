@@ -16,6 +16,7 @@ import type {
 	InterWorkUnitRelationLedgerEventDraft,
 	InterWorkUnitRelationWorkUnitReference,
 	KanbanActor,
+	KanbanBoardCardWorkUnitQualifiedReference,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
 import type { WebUiUserDecisionClientCharacteristics } from "../core/work-unit-relation-assertion-write-api-contract";
 import type { ResolvedKanbanActorWithEventEnvelopeContext } from "./kanban-actor-resolution-from-request-origin-evidence";
@@ -250,6 +251,7 @@ export function validateAssertedReferenceRelationEndpoints(input: {
 	relationKind: AssertedInterWorkUnitReferenceRelationKind;
 	relationStatementSubjectWorkUnitRef: InterWorkUnitRelationWorkUnitReference;
 	relationStatementAnchorWorkUnitRef: InterWorkUnitRelationWorkUnitReference;
+	kanbanBoardCardIdentityProjectionState?: KanbanBoardCardIdentityProjectionState;
 }): RelationAssertionWritePlanningValidationResult<null> {
 	const registryEntry = ASSERTED_INTER_WORK_UNIT_RELATION_KIND_REGISTRY[input.relationKind];
 	const subject = input.relationStatementSubjectWorkUnitRef;
@@ -272,14 +274,23 @@ export function validateAssertedReferenceRelationEndpoints(input: {
 	if (
 		registryEntry.rejectsEndpointsInSameKanbanWorkspace &&
 		subject.workUnitType === "kanban_board_card" &&
-		anchor.workUnitType === "kanban_board_card" &&
-		subject.workspaceId === anchor.workspaceId
+		anchor.workUnitType === "kanban_board_card"
 	) {
-		return {
-			validationPassed: false,
-			validationFailureMessage:
-				"Both task cards belong to the same project, so they are not cross-repository counterparts; assert reference_is_generally_related_with instead.",
+		const currentWorkspaceIdOf = (endpoint: KanbanBoardCardWorkUnitQualifiedReference) => {
+			if (!input.kanbanBoardCardIdentityProjectionState) return endpoint.workspaceId;
+			const identity = input.kanbanBoardCardIdentityProjectionState.projectionsByKanbanBoardCardWorkUnitKey.get(
+				buildInterWorkUnitRelationWorkUnitKey(endpoint),
+			);
+			return identity?.currentWorkspaceId ?? identity?.kanbanBoardCard.workspaceId ?? null;
 		};
+		const subjectWorkspaceId = currentWorkspaceIdOf(subject);
+		const anchorWorkspaceId = currentWorkspaceIdOf(anchor);
+		if (!subjectWorkspaceId || !anchorWorkspaceId || subjectWorkspaceId === anchorWorkspaceId) {
+			return {
+				validationPassed: false,
+				validationFailureMessage: "跨 project 对应仅限不同 project；请核对两端任务的当前 project。",
+			};
+		}
 	}
 	return { validationPassed: true, validatedValue: null };
 }

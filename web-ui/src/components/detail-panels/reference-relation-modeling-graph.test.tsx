@@ -1,6 +1,6 @@
 import type { RelationModelingPreviewResponse } from "@runtime-work-unit-relation-modeling-api-contract";
 import type * as ReactFlowModule from "@xyflow/react";
-import type { Node, ReactFlowProps } from "@xyflow/react";
+import type { Edge, Node, ReactFlowProps } from "@xyflow/react";
 import { act, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -12,6 +12,7 @@ const graphObservation = vi.hoisted(() => ({
 	measureContainer: vi.fn(),
 	initiallyFittedNodes: [] as Node[][],
 	unmountCount: 0,
+	latestEdges: [] as Edge[],
 }));
 
 vi.mock("@/utils/react-use", () => ({
@@ -26,7 +27,8 @@ vi.mock("@xyflow/react", async () => {
 	return {
 		...actualModule,
 		// ReactFlow 首次挂载消费 fitView；以同样的一次性边界检查宿主交付的初始布局。
-		ReactFlow: function InitialViewportProbe({ nodes = [] }: ReactFlowProps) {
+		ReactFlow: function InitialViewportProbe({ nodes = [], edges = [] }: ReactFlowProps) {
+			graphObservation.latestEdges = edges;
 			const [initialNodes] = useState(nodes);
 			const [viewport, setViewport] = useState("initial-fit");
 			useEffect(() => {
@@ -42,6 +44,45 @@ vi.mock("@xyflow/react", async () => {
 			);
 		},
 	};
+});
+
+it("图保留新关系方向、无向连接线与范围重叠语义", async () => {
+	const preview = createPreview();
+	preview.relations[0]!.relationKind = "reference_fixes_defects_in_produced_outputs_of";
+	preview.relations[1]!.relationKind = "reference_diagnoses_agent_execution_trajectory_of";
+	preview.relations.push({
+		...preview.relations[0]!,
+		relationId: "undirected",
+		relationKind: "reference_is_generally_related_with",
+	});
+	preview.relations.push({
+		...preview.relations[0]!,
+		relationId: "scope-overlap",
+		relationKind: "reference_concerns_behavior_or_state_of",
+		assertedRelationKindSpecificAttributes: { concernNature: "checks_scope_overlap_with" },
+	});
+	graphObservation.width = 900;
+	graphObservation.height = 400;
+	await act(async () =>
+		root.render(
+			<ReferenceRelationModelingGraph
+				preview={preview}
+				rootTitle="本 Task"
+				viewportResetKey="root"
+				onSelectWorkUnit={vi.fn()}
+			/>,
+		),
+	);
+	expect(graphObservation.latestEdges[0]).toMatchObject({
+		source: "root-task",
+		target: "middle-task",
+		markerEnd: { type: "arrowclosed" },
+	});
+	expect(graphObservation.latestEdges[0]?.label).toContain("修复交付物");
+	expect(graphObservation.latestEdges[1]?.label).toContain("Trajectory 诊断");
+	expect(graphObservation.latestEdges[2]?.markerEnd).toBeUndefined();
+	expect(graphObservation.latestEdges[2]?.label).toContain("无方向");
+	expect(graphObservation.latestEdges[3]?.label).toContain("工作范围重叠");
 });
 
 function createPreview(rootWorkUnitKey = "root-task"): RelationModelingPreviewResponse {

@@ -478,6 +478,7 @@ export function createWorkUnitRelationAssertionWriteApi(
 					relationKind: input.relationKind,
 					relationStatementSubjectWorkUnitRef: subject,
 					relationStatementAnchorWorkUnitRef: anchor,
+					kanbanBoardCardIdentityProjectionState: reader.projectionState.kanbanBoardCardIdentityProjectionState,
 				});
 				if (!endpointValidation.validationPassed) {
 					throwRelationAssertionWriteError(
