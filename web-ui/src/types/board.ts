@@ -61,6 +61,7 @@ export interface TaskEditorSubmitOptions {
 	keepDialogOpen?: boolean;
 	promptOverride?: string;
 	taskNameOverride?: string;
+	taskDescriptionOverride?: string;
 }
 
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
@@ -89,6 +90,7 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 }
 
 export interface BoardCard {
+	taskDescription?: string;
 	taskNameVersion?: number;
 	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { resolveAgentCurrentWorkPhaseGoalForDisplay } from "../core/agent-current-work-phase-goal";
+import { resolveAgentWorkProgressEntriesForDisplay } from "../core/agent-work-progress";
 import type { RuntimeBoardCard, RuntimeTaskChatMessage, RuntimeTaskSessionSummary } from "../core/api-contract";
 import type { TaskMainSessionHandoverMaterial } from "../core/task-main-session-handover-contract";
 import { loadTaskConversationHistoryPage } from "./task-conversation-history-page";
@@ -109,6 +110,7 @@ export async function collectNativeHistoryMainSessionHandoverMaterial(input: {
 	if (input.workspaceGitStatus == null) missing.push("无法读取任务工作目录的 git 状态。");
 	if (input.workspaceHeadCommit == null) missing.push("无法确认任务工作目录的 HEAD。");
 	const phaseGoal = resolveAgentCurrentWorkPhaseGoalForDisplay(sourceSummary);
+	const latestProgress = resolveAgentWorkProgressEntriesForDisplay(sourceSummary).at(-1);
 	return {
 		taskTitle: card.title ?? card.id,
 		taskPrompt: card.prompt,
@@ -117,7 +119,13 @@ export async function collectNativeHistoryMainSessionHandoverMaterial(input: {
 		sourceNativeConversationSessionId:
 			identity?.sourceAgentId === sourceSummary.agentId ? identity.nativeSessionId : null,
 		workspacePath,
-		currentWorkPhaseGoal: phaseGoal && !phaseGoal.isHistorical ? phaseGoal.goalText : null,
+		currentWorkPhaseGoal: latestProgress
+			? latestProgress.outcome === "in_progress" && !latestProgress.isHistorical
+				? latestProgress.progressText
+				: null
+			: phaseGoal && !phaseGoal.isHistorical
+				? phaseGoal.goalText
+				: null,
 		planReferences,
 		embeddedPlanReferences,
 		transcriptReferences: [...transcriptPaths],

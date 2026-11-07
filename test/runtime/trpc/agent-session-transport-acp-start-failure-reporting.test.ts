@@ -339,6 +339,10 @@ describe("createRuntimeApi ACP session start failure reporting", () => {
 		expect(acpTaskSessionService.startTaskSession).toHaveBeenCalledWith(
 			expect.objectContaining({
 				observedAgentNativeConversationSessionIdentity: identity,
+				persistedTaskSessionSummaryForProgressRestoration: expect.objectContaining({
+					taskId: "task-omp",
+					agentNativeConversationSessionIdentity: identity,
+				}),
 				resumePriorAgentConversationWithoutResendingPrompt: true,
 			}),
 		);

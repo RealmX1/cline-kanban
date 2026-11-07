@@ -120,6 +120,7 @@ export interface TaskCreateFormSnapshot {
 	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
+	taskDescription?: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
 	taskName: string;
 	/** 多任务模式下所有非空行 trim 后拼接；单任务模式为空串 */
@@ -148,6 +149,7 @@ function isSameTerminalAgentModelOverrideSettings(
 export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline: TaskCreateFormSnapshot): boolean {
 	return (
 		current.prompt.trim() !== baseline.prompt.trim() ||
+		(current.taskDescription ?? "").trim() !== (baseline.taskDescription ?? "").trim() ||
 		current.taskName.trim() !== baseline.taskName.trim() ||
 		current.multiPromptContent !== baseline.multiPromptContent ||
 		current.imageCount !== baseline.imageCount ||
@@ -236,6 +238,8 @@ export function TaskEditorDialogForm({
 	onOpenChange,
 	prompt,
 	onPromptChange,
+	taskDescription = "",
+	onTaskDescriptionChange,
 	images,
 	onImagesChange,
 	onCreate,
@@ -302,6 +306,8 @@ export function TaskEditorDialogForm({
 	onOpenChange: (open: boolean) => void;
 	prompt: string;
 	onPromptChange: (value: string) => void;
+	taskDescription?: string;
+	onTaskDescriptionChange?: (value: string) => void;
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
 	onTaskCreationCardPersisted?: (workspaceId: string, card: BoardCard, suggestTitle: boolean) => void;
@@ -558,6 +564,7 @@ export function TaskEditorDialogForm({
 		// TaskNameInputWithAiSuggestions 的本地 state，靠下面 setComposerResetKey 换 key 重挂来清
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
 		setNewTaskName("");
+		onTaskDescriptionChange?.("");
 		onImagesChange([]);
 		onCodexReasoningEffortOverrideChange?.(undefined);
 		setMode("single");
@@ -565,7 +572,7 @@ export function TaskEditorDialogForm({
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
+	}, [onImagesChange, onTaskDescriptionChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
 
 	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
 	const editorSurfaceRef = useRef<HTMLDivElement>(null);
@@ -646,6 +653,7 @@ export function TaskEditorDialogForm({
 		taskEditorMode,
 		workspaceId: targetWorkspaceId,
 		prompt: promptDraft,
+		taskDescription,
 		title: taskName,
 		branchRef,
 		images,
@@ -880,6 +888,7 @@ export function TaskEditorDialogForm({
 						delegateNewTaskCardPersistenceToRuntimeCreationSubmission: true,
 						promptOverride: submittingPrompt,
 						taskNameOverride: submittingTitle,
+						taskDescriptionOverride: taskDescription,
 						targetWorkspaceIdOverride: assignment.workspaceId,
 						baseRefOverride: assignment.baseRef,
 						onNewTaskCardPreparedForRuntimeCreationSubmission: (card) => {
@@ -950,6 +959,7 @@ export function TaskEditorDialogForm({
 				preserveFormUntilCreationConfirmed: true,
 				promptOverride: submittingPrompt,
 				taskNameOverride: submittingTitle,
+				taskDescriptionOverride: taskDescription,
 				targetWorkspaceIdOverride: assignment.workspaceId,
 				baseRefOverride: assignment.baseRef,
 				onTaskPersistenceRequested: (requested) => {
@@ -1345,6 +1355,7 @@ export function TaskEditorDialogForm({
 	// 每次渲染刷新「当前表单」快照，供关闭时与打开时的基线比较。
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
 		prompt: promptDraft,
+		taskDescription,
 		taskName,
 		multiPromptContent: taskPrompts
 			.map((value) => value.trim())
@@ -1756,6 +1767,7 @@ export function TaskEditorDialogForm({
 														// 用 dialog 内部的 promptDraft 而不是父层 prompt：逐字输入下沉在这里，
 														// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
 														taskTitleOverride: taskName,
+														taskDescription,
 														prompt: promptDraft,
 														images,
 														startInPlanMode,
@@ -1784,9 +1796,22 @@ export function TaskEditorDialogForm({
 													key={`task-name-input-${editingTaskId ?? composerResetKey}`}
 													taskName={taskName}
 													onTaskNameChange={setTaskName}
-													taskDescription={promptDraft}
+													taskDescription={taskDescription || promptDraft}
 													preserveNameUntilSuggestionIsPicked={taskEditorMode === "edit"}
 												/>
+
+												<label className="block space-y-1 text-xs text-text-secondary">
+													<span>任务简介</span>
+													<textarea
+														aria-label="任务简介"
+														value={taskDescription}
+														maxLength={4000}
+														rows={3}
+														placeholder="简述问题或需求、当前范围与方案…"
+														onChange={(event) => onTaskDescriptionChange?.(event.target.value)}
+														className="w-full resize-y rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+													/>
+												</label>
 
 												<TaskPromptComposer
 													key={`task-prompt-composer-${composerResetKey}`}

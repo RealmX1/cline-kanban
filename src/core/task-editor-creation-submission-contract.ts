@@ -32,6 +32,7 @@ export const taskEditorCreationSubmissionRequestSchema: z.ZodType<TaskEditorCrea
 		.pick({
 			id: true,
 			title: true,
+			taskDescription: true,
 			prompt: true,
 			startInPlanMode: true,
 			taskAgentPermissionMode: true,

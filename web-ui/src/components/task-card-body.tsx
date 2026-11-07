@@ -39,7 +39,7 @@ import {
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
+import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { AutomaticAgentFailureContinuationNotice } from "@/components/automatic-agent-failure-continuation-notice";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
@@ -1567,7 +1567,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 						) : null}
 					</div>
 				) : null}
-				<AgentCurrentWorkPhaseGoal summary={sessionSummary} />
+				{card.taskDescription ? (
+					<p className="mt-1 line-clamp-2 break-words text-xs text-text-secondary" title={card.taskDescription}>
+						{card.taskDescription}
+					</p>
+				) : null}
+				<AgentWorkProgress summary={sessionSummary} />
 				{sessionActivity ? (
 					<div
 						data-task-card-session-activity=""

@@ -102,6 +102,7 @@ import type {
 	RuntimePromptLibraryResponse,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
+	RuntimeRecordCurrentTaskProgressRequest,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeRejectExploratoryFindingRequest,
@@ -317,6 +318,7 @@ import {
 	runtimeReadAgentPromptImageAttachmentsRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
+	runtimeRecordCurrentTaskProgressRequestSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
 	runtimeRecordTaskOpenedByUserResponseSchema,
 	runtimeRejectExploratoryFindingRequestSchema,
@@ -724,6 +726,11 @@ export interface RuntimeTrpcContext {
 			input: RuntimeSetCurrentWorkPhaseGoalRequest,
 			evidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskSessionInputResponse>;
+		recordCurrentTaskProgress: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRecordCurrentTaskProgressRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskSessionInputResponse & { taskMetadataReviewReminder: string }>;
 
 		requestAutomaticTaskNameBackfill: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1954,6 +1961,12 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 				),
 		),
 
+	recordCurrentTaskProgress: workspaceProcedure
+		.input(runtimeRecordCurrentTaskProgressRequestSchema)
+		.output(runtimeTaskSessionInputResponseSchema.extend({ taskMetadataReviewReminder: z.string() }))
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.recordCurrentTaskProgress(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	requestAutomaticTaskNameBackfill: workspaceProcedure
 		.input(runtimeAutomaticTaskNameBackfillRequestSchema)
 		.output(z.object({ ok: z.boolean() }))

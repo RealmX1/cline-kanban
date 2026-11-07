@@ -16,6 +16,7 @@ export interface TaskEditorSubmittedTaskCardFieldValues {
 	codexReasoningEffortOverride?: string;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskTitleOverride?: string;
+	taskDescription?: string;
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
@@ -62,6 +63,8 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 		patch.title = submitted.taskTitleOverride.trim() || null;
 	}
 
+	if (submitted.taskDescription !== undefined && submitted.taskDescription.trim() !== (seed.taskDescription ?? ""))
+		patch.taskDescription = submitted.taskDescription.trim() || null;
 	if (submitted.prompt !== seed.prompt.trim()) {
 		patch.prompt = submitted.prompt;
 	}

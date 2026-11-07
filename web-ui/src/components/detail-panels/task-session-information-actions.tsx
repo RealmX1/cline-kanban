@@ -1,7 +1,10 @@
 import * as Popover from "@radix-ui/react-popover";
-import { resolveAgentCurrentWorkPhaseGoalForDisplay } from "@runtime-session-activity";
+import {
+	resolveAgentCurrentWorkPhaseGoalForDisplay,
+	resolveAgentWorkProgressEntriesForDisplay,
+} from "@runtime-session-activity";
 import { Ellipsis, Info } from "lucide-react";
-import { AgentCurrentWorkPhaseGoal } from "@/components/agent-current-work-phase-goal";
+import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { AgentRaisedUserDecisionHistoryPanel } from "@/components/detail-panels/agent-raised-user-decision-history-panel";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -25,6 +28,7 @@ export function TaskSessionInformationActions({
 	hasNarrowMobileResourceDetailsInTerminalTools?: boolean;
 }) {
 	const phaseGoal = resolveAgentCurrentWorkPhaseGoalForDisplay(summary);
+	const latestProgress = resolveAgentWorkProgressEntriesForDisplay(summary).at(-1);
 	return (
 		<div className="flex min-w-0 flex-1 items-center gap-1">
 			<AgentRaisedUserDecisionHistoryPanel
@@ -67,20 +71,22 @@ export function TaskSessionInformationActions({
 					<Popover.Trigger asChild>
 						<button
 							type="button"
-							aria-label="任务信息与阶段目标"
+							aria-label="任务信息与进展"
 							className="flex h-7 w-full min-w-0 items-center gap-1 rounded-sm px-1 text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent"
 						>
 							<Info size={13} className="shrink-0" />
 							<span className="truncate">
-								{phaseGoal
-									? `${phaseGoal.isHistorical ? "上次" : "当前"}目标：${phaseGoal.goalText}`
-									: "任务信息"}
+								{latestProgress
+									? `${latestProgress.isHistorical ? "上次" : "当前"}进展：${latestProgress.progressText}`
+									: phaseGoal
+										? `${phaseGoal.isHistorical ? "上次" : "当前"}目标：${phaseGoal.goalText}`
+										: "任务信息"}
 							</span>
 						</button>
 					</Popover.Trigger>
 					<Popover.Portal>
 						<Popover.Content
-							aria-label="任务信息与阶段目标"
+							aria-label="任务信息与进展"
 							align="start"
 							sideOffset={4}
 							data-mobile-focus-view-idle-collapse-suspension=""
@@ -92,7 +98,7 @@ export function TaskSessionInformationActions({
 									{new Date(taskCreatedAtEpochMs).toLocaleString()}
 								</time>
 							</p>
-							<AgentCurrentWorkPhaseGoal summary={summary} isFullGoalTextVisible />
+							<AgentWorkProgress summary={summary} isProgressHistoryVisible />
 						</Popover.Content>
 					</Popover.Portal>
 				</Popover.Root>

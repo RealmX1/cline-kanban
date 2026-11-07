@@ -749,6 +749,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						"backlog",
 						{
 							title: input.title,
+							taskDescription: input.taskDescription,
 							prompt,
 							startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
 							ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,

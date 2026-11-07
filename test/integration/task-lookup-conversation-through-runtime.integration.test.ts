@@ -6,6 +6,7 @@ import { createHTTPHandler } from "@trpc/server/adapters/standalone";
 import { expect, it, vi } from "vitest";
 import { loadWorkspaceBoardById, loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
 import { collectTaskIndexingMaterials } from "../../src/task-indexing-support/collect-task-indexing-materials";
+import { readTaskSessionIntentMaterial } from "../../src/task-indexing-support/read-task-session-intent-material";
 import { executeTaskAnalysisApi } from "../../src/task-indexing-support/task-analysis-api-executor";
 import {
 	loadAndAdvanceSharedTaskIndexingContext,
@@ -63,14 +64,22 @@ it("真实 HTTP、共享 Context 与 API 执行器支持多轮查卡、预览和
 				readTaskAssistanceHttpFixtureUserPrompt(request).split("L4 本次查询：\n").at(-1) ?? "",
 			);
 			return query.phase === "recall"
-				? { candidateTaskReferences: query.eligibleTaskReferences }
+				? {
+						candidateTaskReferenceKeys: [
+							...(typeof request.messages.find((message) => message.role === "system")?.content === "string"
+								? String(request.messages.find((message) => message.role === "system")?.content).matchAll(
+										/"taskReferenceKey":"([^"]+)"/gu,
+									)
+								: []),
+						].map((match) => match[1]),
+					}
 				: {
 						answerText: "找到符合范围的任务，尚未核验是否已经实现。",
-						candidates: query.completeCandidateRequirements.map(
-							(material: { taskReference: unknown; prompt: string }) => ({
+						candidates: query.candidateSessionIntentSegments.map(
+							(material: { taskReference: unknown; serializedSessionIntentText: string }) => ({
 								taskReference: material.taskReference,
 								matchingReason: "当前要求包含查卡与历史留档",
-								evidence: [material.prompt],
+								evidence: ["当前任务意图，持久会话来源尚未绑定"],
 								limitations: ["所在列不证明实现完成"],
 							}),
 						),
@@ -80,8 +89,22 @@ it("真实 HTTP、共享 Context 与 API 执行器支持多轮查卡、预览和
 	const storageDirectoryPath = join(fixture.isolatedHomeDirectoryPath, "task-lookup-conversations");
 	const dependencies = {
 		storageDirectoryPath,
-		collectMaterials: (workspaceId: string) =>
-			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: () => [] }),
+		collectMaterials: (
+			workspaceId: string,
+			options?: {
+				includeRecapSources?: boolean;
+				sessionIntentTaskReferences?: readonly Awaited<
+					ReturnType<typeof collectTaskIndexingMaterials>
+				>["materials"][number]["taskReference"][];
+				abortSignal?: AbortSignal;
+			},
+		) =>
+			collectTaskIndexingMaterials({
+				workspaceId,
+				listLiveSessionSummaries: () => [],
+				...options,
+				readSessionIntentMaterial: readTaskSessionIntentMaterial,
+			}),
 		getExecutorSettings: readTaskIndexingSupportExecutorSettings,
 		getContext: (
 			workspaceId: string,

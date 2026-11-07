@@ -23,8 +23,12 @@ export const TASK_NAMING_CONVENTIONS_GUIDANCE = [
 	`推荐 tag：${Object.keys(SUGGESTED_TASK_CATEGORY_TAG_VOCABULARY).join(", ")}；必要时允许具体子系统 tag。`,
 ].join("\n");
 
-export function renderTaskAgentNamingAndWorkPhaseGoalGuidance(): string {
+export function renderTaskAgentOverviewAndWorkProgressMaintenanceGuidance(): string {
 	return `${TASK_NAMING_CONVENTIONS_GUIDANCE}
 名称只在核对原始需求与批准范围后确需变化时，用 task rename-current-task --title ... --reason ... 修改；Compaction 或工具操作不意味着改名。
-真实阶段变化用 task set-current-work-phase-goal --goal ...（最多160字），结束用 task clear-current-work-phase-goal；不必每步更新。`;
+Task Name 与独立 taskDescription 都可以随已批准目标、范围及方案修正更新；Initial Prompt 保留原始来源，不用汇报覆盖。
+计划完成、已获准开始实施时，必须先 task get 读取最新概况，再用 task record-current-task-progress --implementation-started --title ... --description ... --expected-task-updated-at <task.updatedAt> --text ... 核对名称并更新简介。
+真实阶段变化用 task record-current-task-progress --progress-entry-id <稳定幂等身份> --text ...（最多160字）；有上一条当前进展时同时提供 --previous-entry-id ... --previous-outcome completed|abandoned，必要时附 --outcome-explanation ...。
+成功阶段标 completed，放弃或换路径标 abandoned；不能仅因换阶段推断成功。Progress 是实际进展，原生 To-do 是执行计划，不重复维护细粒度清单。
+每次更新 Progress 顺带检查名称与简介是否需按已批准变化同步；不必每步更新，不另注入催报回合。旧 task set-current-work-phase-goal / clear-current-work-phase-goal 继续兼容。`;
 }

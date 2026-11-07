@@ -42,11 +42,29 @@ export const taskProjectAssignmentAnalysisResponseSchema = z.object({
 	stablePromptPrefixSha256: z.string(),
 });
 
+export const taskSessionIntentMaterialSchema = z.object({
+	taskConversationSessionId: z.string(),
+	nativeSessionId: z.string().nullable(),
+	messages: z.array(
+		z.object({
+			kind: z.enum(["user_prompt", "user_question", "user_question_answer", "agent_turn_final_response"]),
+			sourceMessageId: z.string(),
+			turnUserMessageId: z.string().nullable(),
+			questionToolCallId: z.string().optional(),
+			text: z.string(),
+		}),
+	),
+});
+export type TaskSessionIntentMaterial = z.infer<typeof taskSessionIntentMaterialSchema>;
+
 export const taskIndexingMaterialSchema = z.object({
 	taskReference: kanbanBoardCardWorkUnitQualifiedReferenceSchema,
 	projectName: z.string(),
 	title: z.string(),
 	prompt: z.string(),
+	taskDescription: z.string().optional(),
+	latestTaskProgressSummaryText: z.string().nullable().optional(),
+	sessionIntent: taskSessionIntentMaterialSchema.optional(),
 	columnId: z.string(),
 	latestNotificationSummaryText: z.string().nullable(),
 	latestHookFinalMessage: z.string().nullable(),

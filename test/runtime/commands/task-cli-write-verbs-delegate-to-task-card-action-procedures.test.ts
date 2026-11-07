@@ -47,6 +47,9 @@ vi.mock("@trpc/client", () => ({
 		workspace: {
 			getState: { query: async () => harness.boardStateForColumnSelection },
 		},
+		runtime: {
+			recordCurrentTaskProgress: harness.recordTaskCardActionMutation("recordCurrentTaskProgress"),
+		},
 		taskCardAction: {
 			startTaskCardAgentSessionMovingItIntoInProgress: harness.recordTaskCardActionMutation(
 				"startTaskCardAgentSessionMovingItIntoInProgress",
@@ -139,7 +142,47 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
 		process.exitCode = undefined;
+	});
+	it("增量进展 CLI 将简介、上一项结果、幂等身份与概况版本交给运行时处理", async () => {
+		vi.stubEnv("KANBAN_PROJECT_PATH", "/fake/repo");
+		vi.stubEnv("KANBAN_TASK_ID", "task-1");
+		harness.responsesByProcedureName.recordCurrentTaskProgress = { ok: true, summary: null };
+		const result = await runKanbanTaskCommand([
+			"record-current-task-progress",
+			"--text",
+			"开始实现",
+			"--progress-entry-id",
+			"implementation",
+			"--previous-entry-id",
+			"plan",
+			"--previous-outcome",
+			"completed",
+			"--title",
+			"实现查卡压缩",
+			"--description",
+			"全范围轻索引与按候选核验",
+			"--implementation-started",
+			"--expected-task-updated-at",
+			"123",
+		]);
+		expect(result.exitCode).not.toBe(1);
+		expect(harness.taskCardActionRequests).toEqual([
+			{
+				procedureName: "recordCurrentTaskProgress",
+				input: {
+					progressEntryId: "implementation",
+					progressText: "开始实现",
+					previousProgressEntryId: "plan",
+					previousProgressEntryOutcome: "completed",
+					taskTitle: "实现查卡压缩",
+					taskDescription: "全范围轻索引与按候选核验",
+					implementationStarted: true,
+					expectedTaskCardUpdatedAt: 123,
+				},
+			},
+		]);
 	});
 
 	it("task create 缺少 Plan 显式选择时零创建，预览也不能读取 UI Plan 偏好", async () => {

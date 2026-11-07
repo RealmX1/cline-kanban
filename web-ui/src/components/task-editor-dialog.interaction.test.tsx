@@ -214,7 +214,7 @@ function hasPlanModeOverridesPermissionTierNotice(): boolean {
 }
 
 function getPromptTextarea(): HTMLTextAreaElement {
-	const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+	const textarea = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务正文"]');
 	if (!textarea) throw new Error("找不到任务 Prompt 输入框");
 	return textarea;
 }
@@ -416,7 +416,7 @@ describe("TaskEditorDialog interactions", () => {
 			}),
 		);
 		const projectField = document.querySelector('[data-testid="task-creation-target-project-field"]');
-		const taskInput = document.querySelector("textarea");
+		const taskInput = document.querySelector('textarea[aria-label="任务正文"]');
 		expect(projectField).not.toBeNull();
 		expect(taskInput).not.toBeNull();
 		expect(
@@ -999,12 +999,14 @@ describe("TaskEditorDialog interactions", () => {
 		expect(creationBrowserRecovery.readPendingTaskEditorCreationSubmission(key)).toBeNull();
 	});
 
-	it("连续创建只清空正文、名称和附件，保留设置", async () => {
+	it("连续创建清空正文、名称、简介和附件，保留设置", async () => {
 		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
 		const props = makeProps({
 			prompt: "连续创建 A",
 			creatingTaskName: "A 的名称",
 			onCreatingTaskNameChange: vi.fn(),
+			taskDescription: "A 的独立简介",
+			onTaskDescriptionChange: vi.fn(),
 			images: [{ id: "image1", name: "附件.png", data: "aW1hZ2U=", mimeType: "image/png" }],
 			startInPlanMode: true,
 			onCreate: vi.fn(() => "more1"),
@@ -1018,6 +1020,7 @@ describe("TaskEditorDialog interactions", () => {
 		await act(async () => findButtonByText("创建任务")?.click());
 		expect(props.onOpenChange).not.toHaveBeenCalled();
 		expect(props.onCreatingTaskNameChange).toHaveBeenCalledWith("");
+		expect(props.onTaskDescriptionChange).toHaveBeenCalledWith("");
 		expect(props.onImagesChange).toHaveBeenCalledWith([]);
 		expect(props.onStartInPlanModeChange).not.toHaveBeenCalled();
 		expect(props.onWorktreeModeChange).not.toHaveBeenCalled();
@@ -1459,7 +1462,7 @@ describe("TaskEditorDialog prompt draft ownership", () => {
 	});
 
 	function getPromptTextarea(): HTMLTextAreaElement {
-		const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+		const textarea = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务正文"]');
 		if (!textarea) {
 			throw new Error("Expected the prompt textarea to be rendered.");
 		}

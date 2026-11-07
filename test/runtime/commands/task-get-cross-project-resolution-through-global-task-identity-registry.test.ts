@@ -1,7 +1,8 @@
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import { createDefaultAcpSummary } from "../../../src/acp-client-session/acp-session-state";
 import { registerTaskCommand } from "../../../src/commands/task";
+import { advanceAgentWorkProgress } from "../../../src/core/agent-work-progress";
 
 // `kanban task get` 在当前 project 找不到卡时，经 runtime 的全局 task 身份登记簿跨 project 解析（dd2db 1b）。
 // 唯一活卡候选却定位 / 读取不到时必须如实报错（说清候选在哪、为何读不到），绝不能误报「匹配多张卡」；
@@ -133,6 +134,34 @@ async function runKanbanTaskGetFromCurrentDirectory(): Promise<{ exitCode: unkno
 }
 
 describe("kanban task get 的跨 project 解析", () => {
+	it("读取任务返回独立简介及主会话进展身份，Agent 可以据此增量更新", async () => {
+		const state = createBoardStateWithBacklogTaskCard(CROSS_PROJECT_TASK_ID);
+		const summary = createDefaultAcpSummary(CROSS_PROJECT_TASK_ID, "omp");
+		const entries = advanceAgentWorkProgress(
+			summary,
+			{ progressEntryId: "plan", progressText: "方案已确认" },
+			"plan",
+			100,
+		);
+		harness.boardStateByWorkspaceId.set(CURRENT_DIRECTORY_WORKSPACE.workspaceId, {
+			...state,
+			board: {
+				columns: state.board.columns.map((column) => ({
+					...column,
+					cards: column.cards.map((card) => ({ ...card, taskDescription: "独立任务简介" })),
+				})),
+			},
+			sessions: { [CROSS_PROJECT_TASK_ID]: { ...summary, agentWorkProgressEntries: entries } },
+		});
+		const result = await runKanbanTaskGetFromCurrentDirectory();
+		expect(result.exitCode).not.toBe(1);
+		expect(result.output).toMatchObject({
+			task: {
+				taskDescription: "独立任务简介",
+				session: { agentWorkProgressEntries: JSON.parse(JSON.stringify(entries)) },
+			},
+		});
+	});
 	beforeEach(() => {
 		process.exitCode = undefined;
 		harness.boardStateByWorkspaceId.clear();

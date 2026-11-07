@@ -5,8 +5,10 @@ import {
 	readBoundedJsonLines,
 } from "../agent-session-history/bounded-agent-transcript-reader";
 import { resolveClaudeTranscriptFileForAgentNativeConversationSession } from "../agent-session-history/claude-transcript-file-location-for-resume";
-import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../core/api-contract";
-import type { TaskIndexingMaterial } from "../core/task-indexing-support-contract";
+import { resolveAgentCurrentWorkPhaseGoalForDisplay } from "../core/agent-current-work-phase-goal";
+import { resolveAgentWorkProgressEntriesForDisplay } from "../core/agent-work-progress";
+import type { RuntimeBoardCard, RuntimeBoardData, RuntimeTaskSessionSummary } from "../core/api-contract";
+import type { TaskIndexingMaterial, TaskSessionIntentMaterial } from "../core/task-indexing-support-contract";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import {
@@ -66,8 +68,21 @@ export async function collectTaskIndexingMaterials(input: {
 	workspaceId: string;
 	listLiveSessionSummaries: (workspaceId: string) => readonly RuntimeTaskSessionSummary[];
 	includeRecapSources?: boolean;
+	recapTaskReferences?: readonly TaskIndexingMaterial["taskReference"][];
+	sessionIntentTaskReferences?: readonly TaskIndexingMaterial["taskReference"][];
+	abortSignal?: AbortSignal;
+	readSessionIntentMaterial?: (input: {
+		card: RuntimeBoardCard;
+		sessions: Record<string, RuntimeTaskSessionSummary>;
+		abortSignal?: AbortSignal;
+	}) => Promise<{ sessionIntent: TaskSessionIntentMaterial; missingContextParts: string[] }>;
 }): Promise<{ materials: TaskIndexingMaterial[]; missingContextParts: string[] }> {
 	const missingContextParts: string[] = [];
+	const recapTaskKeys = new Set(
+		input.recapTaskReferences?.map(
+			(reference) => `${reference.workspaceId}/${reference.taskId}/${reference.taskIncarnationCreatedAtEpochMs}`,
+		),
+	);
 	const projects = await listWorkspaceIndexEntries();
 	const groups = await Promise.all(
 		projects.map((project) =>
@@ -81,8 +96,15 @@ export async function collectTaskIndexingMaterials(input: {
 					return [];
 				}
 				const isCurrentProject = project.workspaceId === input.workspaceId && input.includeRecapSources !== false;
-				const persisted = isCurrentProject ? await loadPersistedWorkspaceSessionsById(project.workspaceId) : {};
-				const summaries = new Map(Object.entries(persisted));
+				const summaries = new Map<string, RuntimeTaskSessionSummary>();
+				let persistedSessionsUnreadable = false;
+				try {
+					const persisted = await loadPersistedWorkspaceSessionsById(project.workspaceId);
+					for (const [sessionId, summary] of Object.entries(persisted)) summaries.set(sessionId, summary);
+				} catch {
+					persistedSessionsUnreadable = true;
+					missingContextParts.push(`${project.workspaceId}:sessions_unreadable`);
+				}
 				for (const summary of input.listLiveSessionSummaries(project.workspaceId)) {
 					// 空占位摘要不覆盖已持久的真实材料。
 					if (summary.startedAt !== null || !summaries.has(summary.taskId)) summaries.set(summary.taskId, summary);
@@ -91,10 +113,31 @@ export async function collectTaskIndexingMaterials(input: {
 				for (const column of board.columns)
 					for (const card of column.cards) {
 						const summary = summaries.get(resolveMainTaskConversationSessionId(card));
-						const missing: string[] = [];
+						const shouldReadRecap = input.recapTaskReferences
+							? recapTaskKeys.has(`${project.workspaceId}/${card.id}/${card.createdAt}`)
+							: isCurrentProject;
+						const progress = resolveAgentWorkProgressEntriesForDisplay(summary).at(-1);
+						const legacy = progress ? null : resolveAgentCurrentWorkPhaseGoalForDisplay(summary);
+						const missing: string[] = persistedSessionsUnreadable ? ["persisted_sessions_unreadable"] : [];
 						let notification: string | null = null;
 						let away: string | null = null;
-						if (isCurrentProject) {
+						const shouldReadSessionIntent = input.sessionIntentTaskReferences?.some(
+							(reference) =>
+								reference.workspaceId === project.workspaceId &&
+								reference.taskId === card.id &&
+								reference.taskIncarnationCreatedAtEpochMs === card.createdAt,
+						);
+						const intent =
+							shouldReadSessionIntent && input.readSessionIntentMaterial
+								? await input.readSessionIntentMaterial({
+										card,
+										sessions: Object.fromEntries(summaries),
+										abortSignal: input.abortSignal,
+									})
+								: null;
+						if (intent) missing.push(...intent.missingContextParts);
+						else if (shouldReadSessionIntent) missing.push("session_intent_reader_unavailable");
+						if (shouldReadRecap) {
 							try {
 								notification =
 									(
@@ -125,9 +168,16 @@ export async function collectTaskIndexingMaterials(input: {
 							projectName: deriveProjectDisplayNameFromRepoPath(project.repoPath),
 							title: card.title ?? "",
 							prompt: card.prompt,
+							...(intent ? { sessionIntent: intent.sessionIntent } : {}),
+							taskDescription: card.taskDescription,
+							latestTaskProgressSummaryText: progress
+								? `${progress.isHistorical ? "上次进展：" : ""}${progress.outcome === "completed" ? "已完成" : progress.outcome === "abandoned" ? "已放弃" : progress.outcome === "outcome_unknown" ? "结果未记录" : "进行中"}：${progress.progressText}`
+								: legacy
+									? `结果未记录的${legacy.isHistorical ? "上次" : "当前"}阶段目标：${legacy.goalText}`
+									: null,
 							columnId: column.id,
 							latestNotificationSummaryText: notification,
-							latestHookFinalMessage: isCurrentProject
+							latestHookFinalMessage: shouldReadRecap
 								? (summary?.latestHookActivity?.finalMessage ?? null)
 								: null,
 							claudeAwaySummary: away,
