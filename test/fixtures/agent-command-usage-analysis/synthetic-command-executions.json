@@ -1,0 +1,17 @@
+[
+  {
+    "executionId": "synthetic-direct-query",
+    "at": "2026-10-30T01:00:00Z",
+    "cwd": "/synthetic-project",
+    "command": "kanban task get --task-id synthetic-task",
+    "exitCode": 0,
+    "output": "{\"ok\":true}"
+  },
+  {
+    "executionId": "synthetic-inline-json-read",
+    "at": "2026-10-30T01:01:00Z",
+    "cwd": "/synthetic-project",
+    "command": "python3 -c 'import json; print(json.load(open(\"existing-response.json\"))[\"task\"][\"title\"])'",
+    "exitCode": 0
+  }
+]

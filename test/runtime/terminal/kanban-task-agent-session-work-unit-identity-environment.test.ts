@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
 	collectKanbanCliInvocationEnvironmentActorClaims,
@@ -11,6 +11,23 @@ import {
 } from "../../../src/terminal/kanban-task-agent-session-work-unit-identity-environment";
 
 describe("kanban task agent session work-unit identity environment", () => {
+	afterEach(() => vi.unstubAllEnvs());
+	it("把当前运行时的 CLI 入口注入宿主与协作会话，并清除新运行时继承的旧入口", () => {
+		vi.stubEnv("KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH", "/runtime path/kanban");
+		const environment = buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
+			workspaceTaskId: "host-task",
+			kanbanTaskConversationSessionId: "collaborator-session",
+			workspaceId: "workspace",
+			workspaceRepositoryPath: "/repo",
+		});
+		expect(environment.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH).toBe("/runtime path/kanban");
+		expect(environment.KANBAN_TASK_ID).toBe("host-task");
+		expect(environment.KANBAN_TASK_CONVERSATION_SESSION_ID).toBe("collaborator-session");
+		expect(scrubInheritedWorkUnitIdentityEnvironmentVariablesFromKanbanRuntimeProcess(environment)).toContain(
+			"KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH",
+		);
+		expect(environment.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH).toBeUndefined();
+	});
 	it("injects every variable the CLI claims for card actor resolution", () => {
 		const environment = buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment({
 			workspaceTaskId: "ab12c",

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveAgentGuidanceDocumentPath } from "../../src/core/agent-guidance-document-reference";
 
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
@@ -14,6 +14,25 @@ import {
 } from "../../src/prompts/append-system-prompt";
 
 describe("resolveAppendSystemPromptCommandPrefix", () => {
+	beforeEach(() => vi.stubEnv("KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH", undefined));
+	afterEach(() => vi.unstubAllEnvs());
+	it.skipIf(process.platform === "win32")("绑定入口存在时提供带引号的环境变量调用，不重新从 PATH 选择安装", () => {
+		vi.stubEnv("KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH", "/runtime path/kanban");
+		expect(resolveAppendSystemPromptCommandPrefix()).toBe('"$KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH"');
+	});
+	it.runIf(process.platform === "win32")("Windows 忽略继承的 POSIX 绑定入口，保留完整前缀", () => {
+		vi.stubEnv("KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH", "/runtime path/kanban");
+		expect(
+			resolveAppendSystemPromptCommandPrefix({
+				execPath: "node",
+				execArgv: [],
+				argv: ["node", "cli.js"],
+				resolveRealPath: () => {
+					throw new Error("只验证回落入口");
+				},
+			}),
+		).toBe('"node" "cli.js"');
+	});
 	it("returns npx prefix for npx transient installs", () => {
 		const prefix = resolveAppendSystemPromptCommandPrefix({
 			currentVersion: "0.1.10",
@@ -81,6 +100,7 @@ describe("精简的角色提示", () => {
 		expect(prompt).toContain("用户显式调用 workflow");
 		expect(prompt).toContain("先确认其编辑归属");
 		expect(prompt).toContain("不能传 task worktree");
+		expect(prompt).toContain("task get-current-task");
 		expect(prompt).toContain("git rev-parse --git-common-dir");
 		expect(prompt).not.toContain("不直接修改项目源码");
 		expect(prompt).toContain("人工 rewind 和 checkpoint");
