@@ -6,32 +6,84 @@ async function visibleBox(locator: Locator) {
 	return box!;
 }
 
+async function measureTaskCardSummaryMetadataCellGeometry(summary: Locator) {
+	return summary.locator("[data-task-card-summary-cell]").evaluateAll((elements) =>
+		elements.map((element) => {
+			const rect = element.getBoundingClientRect();
+			const contentBounds = [...element.children]
+				.map((child) => child.getBoundingClientRect())
+				.filter((child) => child.width > 0 && child.height > 0);
+			return {
+				x: rect.x,
+				y: rect.y,
+				width: rect.width,
+				height: rect.height,
+				contentCenterY: contentBounds.length
+					? (Math.min(...contentBounds.map((child) => child.top)) +
+							Math.max(...contentBounds.map((child) => child.bottom))) /
+						2
+					: null,
+				scrollWidth: element.scrollWidth,
+				clientWidth: element.clientWidth,
+			};
+		}),
+	);
+}
+
 for (const cardWidth of [200, 240, 320, 480]) {
+	test(`${cardWidth}px 卡宽：列宽随内容分配，空统计不占一整列`, async ({ page }) => {
+		await page.setViewportSize({ width: 1600, height: 1100 });
+		const populatedProjectWidths: number[] = [];
+		for (const zeroStatistics of [false, true]) {
+			await mountCardMetadataHarness(page, `${zeroStatistics ? "zeroStatistics&" : ""}cardWidth=${cardWidth}`);
+			for (const [index, host] of ["all-projects", "project-specific", "standard-board"].entries()) {
+				const summary = page.locator(
+					`[data-layout-host="${host}"] [data-task-card-secondary-metadata-row]:visible`,
+				);
+				await expect(summary).toBeVisible();
+				const cells = await measureTaskCardSummaryMetadataCellGeometry(summary);
+				for (const cell of cells) {
+					if (cell.contentCenterY !== null)
+						expect(Math.abs(cell.contentCenterY - cell.y - cell.height / 2)).toBeLessThan(1);
+				}
+				if (zeroStatistics) {
+					expect(cells[2].width).toBeLessThan(1);
+					expect(cells[0].width).toBeGreaterThan(populatedProjectWidths[index] + 20);
+				} else {
+					populatedProjectWidths.push(cells[0].width);
+					expect(
+						Math.max(...cells.slice(0, 3).map((cell) => cell.width)) -
+							Math.min(...cells.slice(0, 3).map((cell) => cell.width)),
+					).toBeGreaterThan(10);
+				}
+			}
+			await page.screenshot({
+				path: test.info().outputPath(`summary-grid-${cardWidth}-${zeroStatistics ? "zero" : "populated"}.png`),
+			});
+		}
+	});
+
 	test(`${cardWidth}px 卡宽：大数字完整保留，摘要只在六个单元格内部换行`, async ({ page }) => {
 		await page.setViewportSize({ width: 1280, height: 1100 });
 		const errors = await mountCardMetadataHarness(page, `longMetadata&largeStatistics&cardWidth=${cardWidth}`);
 		const summary = page.locator('[data-layout-host="all-projects"] [data-task-card-secondary-metadata-row]:visible');
 		await expect(summary).toContainText("123456789");
 		await expect(summary).toContainText("987654321");
-		const cells = await summary.locator("[data-task-card-summary-cell]").evaluateAll((elements) =>
-			elements.map((element) => {
-				const rect = element.getBoundingClientRect();
-				return {
-					x: rect.x,
-					y: rect.y,
-					width: rect.width,
-					scrollWidth: element.scrollWidth,
-					clientWidth: element.clientWidth,
-				};
-			}),
-		);
+		const cells = await measureTaskCardSummaryMetadataCellGeometry(summary);
 		expect(cells).toHaveLength(6);
 		for (let index = 0; index < 3; index++) {
 			expect(Math.abs(cells[index].x - cells[index + 3].x)).toBeLessThan(1);
 			expect(Math.abs(cells[index].y - cells[0].y)).toBeLessThan(1);
 			expect(Math.abs(cells[index + 3].y - cells[3].y)).toBeLessThan(1);
+			expect(Math.abs(cells[index].height - cells[0].height)).toBeLessThan(1);
+			expect(Math.abs(cells[index + 3].height - cells[3].height)).toBeLessThan(1);
 		}
-		for (const cell of cells) expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth + 1);
+		for (const cell of cells) {
+			expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth + 1);
+			if (cell.contentCenterY !== null)
+				expect(Math.abs(cell.contentCenterY - cell.y - cell.height / 2)).toBeLessThan(1);
+		}
+		await page.screenshot({ path: test.info().outputPath(`summary-grid-large-statistics-${cardWidth}.png`) });
 		const project = summary.locator("[data-task-card-project-metadata-group]");
 		for (const host of ["all-projects", "project-specific", "standard-board"]) {
 			await expect(

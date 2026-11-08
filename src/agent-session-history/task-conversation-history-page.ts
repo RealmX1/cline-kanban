@@ -189,7 +189,18 @@ function projectNativeHistoryRecord(
 				toolCallId,
 			);
 		} else if (["tool_result", "function_call_output", "custom_tool_call_output"].includes(type)) {
-			append("tool", readNativeTranscriptContentText(block.content ?? block.output), "工具结果", toolCallId);
+			const structuredQuestionResult = agentId === "claude" ? readTranscriptRecord(record.toolUseResult) : null;
+			append(
+				"tool",
+				readTranscriptRecord(structuredQuestionResult?.answers)
+					? JSON.stringify({
+							answers: structuredQuestionResult?.answers,
+							annotations: structuredQuestionResult?.annotations,
+						})
+					: readNativeTranscriptContentText(block.content ?? block.output),
+				"工具结果",
+				toolCallId,
+			);
 		} else if (type === "reasoning" || type === "thinking") {
 			append("reasoning", readNativeTranscriptContentText(block.summary ?? block.content ?? block.thinking));
 		} else if (message.role === "assistant") {

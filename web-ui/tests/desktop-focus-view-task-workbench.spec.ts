@@ -205,6 +205,56 @@ for (const sessionScenario of ["acp&column=review", "column=trash&auto_review"])
 	}
 }
 
+test("Project Specific 的 Pinned 与普通分组随滚动条宽度变化保持等宽", async ({ page }) => {
+	await openWorkbench(page, 1280, 700, "column=review&stage_headers");
+	await page.addStyleTag({ content: "* { scrollbar-width: auto; } *::-webkit-scrollbar { width: 14px; }" });
+	const scrollRoot = page.locator(".kb-detail-task-list-scroll");
+	const pinned = page.locator('[data-task-pinboard-container="focus-view-section"]');
+	const group = page.locator('[data-stage-section-id="backlog"]');
+	for (const scrollbarWidth of ["auto", "none", "auto"]) {
+		await scrollRoot.evaluate((element, value) => {
+			element.style.scrollbarGutter = "stable";
+			element.style.scrollbarWidth = value;
+		}, scrollbarWidth);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth))
+			[scrollbarWidth === "none" ? "toBe" : "toBeGreaterThan"](0);
+		await expect
+			.poll(async () => Math.abs((await pinned.boundingBox())!.width - (await group.boundingBox())!.width))
+			.toBeLessThan(1);
+		expect((await pinned.boundingBox())!.x).toBe((await group.boundingBox())!.x);
+	}
+	await page.screenshot({ path: test.info().outputPath("project-specific-pinned-width.png") });
+});
+
+test("Project Specific 吸顶标题与当前任务卡上的滚轮接续整列滚动", async ({ page }) => {
+	await openWorkbench(page, 1280, 700, "column=review&stage_headers");
+	const scrollRoot = page.locator(".kb-detail-task-list-scroll");
+	for (const edge of ["top", "bottom"] as const) {
+		for (const targetSelector of [
+			"[data-focus-view-group-header]",
+			'[data-testid="stage-header-rail-focused-card"]',
+		]) {
+			await scrollRoot.evaluate((element, direction) => {
+				element.scrollTop = direction === "top" ? element.scrollHeight : 0;
+				element.dispatchEvent(new Event("scroll"));
+			}, edge);
+			const target = page.locator(`.kb-stage-header-rail[data-edge="${edge}"]`).locator(targetSelector).first();
+			await expect(target).toBeVisible();
+			await target.evaluate((element, direction) => {
+				element.scrollTop = direction === "top" ? 0 : element.scrollHeight;
+			}, edge);
+			await target.hover();
+			const before = await scrollRoot.evaluate((element) => element.scrollTop);
+			await page.mouse.wheel(0, edge === "top" ? -100 : 100);
+			await expect
+				.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+				[edge === "top" ? "toBeLessThan" : "toBeGreaterThan"](before);
+		}
+	}
+	expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
 test("Stage 与 sticky 标题共享 32px 几何，首卡操作避让标题", async ({ page }) => {
 	await openWorkbench(page, 1280, 900, "column=review&stage_headers");
 	await page.locator(".kb-stage-header-rail").getByRole("button", { name: "跳转到 Backlog", exact: true }).click();

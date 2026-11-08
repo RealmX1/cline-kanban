@@ -392,6 +392,7 @@ function formatTaskRecordWithSessionSummary(
 		// 卡片 schema 的 transform 已把 title 归一成「卡片上实际显示的标题」（缺省时由 prompt 派生），
 		// 这里直接透出，让 CLI 消费方看到的标题与看板一致。
 		title: task.title,
+		taskDescription: task.taskDescription,
 		prompt: task.prompt,
 		column: columnId,
 		taskShelvingState: task.taskShelvingState ?? null,
@@ -424,6 +425,8 @@ function formatTaskRecordWithSessionSummary(
 						conversationSessionId: session.taskId,
 						runtimeSessionIncarnationId: session.runtimeSessionIncarnationId,
 						agentNativeConversationSessionIdentity: session.agentNativeConversationSessionIdentity,
+						agentWorkProgressEntries: session.agentWorkProgressEntries ?? [],
+						agentCurrentWorkPhaseGoal: session.agentCurrentWorkPhaseGoal ?? null,
 						codexNativeSessionControlEndpoint: session.codexNativeSessionControlEndpoint,
 						pid: session.pid,
 						startedAt: session.startedAt,
@@ -596,6 +599,7 @@ async function getTask(input: { cwd: string; taskId: string; projectPath?: strin
 async function getTaskFromRuntimeWorkspace(
 	workspace: Awaited<ReturnType<typeof resolveRuntimeWorkspace>>,
 	taskId: string,
+	currentTaskConversationSessionId?: string,
 ): Promise<JsonRecord | null> {
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
 	const state = await runtimeClient.workspace.getState.query();
@@ -603,6 +607,18 @@ async function getTaskFromRuntimeWorkspace(
 	const found = findTaskRecord(state, taskId);
 	if (!found) {
 		return null;
+	}
+	if (
+		currentTaskConversationSessionId &&
+		!resolveTaskChatMessageTargetConversationSessionSummary(
+			found.task,
+			state.sessions,
+			currentTaskConversationSessionId,
+		)
+	) {
+		throw new Error(
+			"当前会话身份缺失或不属于当前 Task；请用 task get --task-id <id> --project-path <主仓库路径> 显式查询。",
+		);
 	}
 
 	// worktree 路径与 HEAD 状态由运行时给出而非本地拼接：调用方通常正是为了「进到那个目录去」才来查的，
@@ -644,6 +660,7 @@ interface TaskCreateCommandInput {
 	codexConfigurationProfileId?: string;
 	cwd: string;
 	title?: string;
+	taskDescription?: string;
 	prompt: string;
 	projectPath?: string;
 	baseRef?: string;
@@ -794,6 +811,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 		kanbanCliTaskBoardMutationKind: "create_backlog_task_card",
 		backlogTaskCardFieldValuesResolvedByKanbanCli: {
 			title: input.title,
+			taskDescription: input.taskDescription,
 			prompt: input.prompt,
 			startInPlanMode: effectiveSettings.resolvedSettings.startInPlanMode.value,
 			ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
@@ -867,6 +885,7 @@ async function updateTaskCommand(input: {
 	cwd: string;
 	taskId: string;
 	title?: string;
+	taskDescription?: string;
 	projectPath?: string;
 	prompt?: string;
 	baseRef?: string;
@@ -883,6 +902,7 @@ async function updateTaskCommand(input: {
 }): Promise<JsonRecord> {
 	if (
 		input.title === undefined &&
+		input.taskDescription === undefined &&
 		input.prompt === undefined &&
 		input.baseRef === undefined &&
 		input.startInPlanMode === undefined &&
@@ -910,6 +930,7 @@ async function updateTaskCommand(input: {
 			taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
 			kanbanCliTaskCardFieldUpdateRawInput: {
 				title: input.title,
+				taskDescription: input.taskDescription,
 				prompt: input.prompt,
 				baseRef: input.baseRef,
 				startInPlanMode: input.startInPlanMode,
@@ -2092,6 +2113,27 @@ export function registerTaskCommand(program: Command): void {
 	}
 
 	task
+		.command("get-current-task")
+		.description("按当前会话绑定查询宿主任务；不从 cwd 推测身份，返回结构与 task get 相同。")
+		.action(async () => {
+			await runTaskCommand(async () => {
+				const taskId = process.env.KANBAN_TASK_ID?.trim();
+				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+				const conversationSessionId = process.env.KANBAN_TASK_CONVERSATION_SESSION_ID?.trim();
+				if (!taskId || !projectPath || !conversationSessionId) {
+					throw new Error(
+						"当前调用环境缺少 KANBAN_TASK_ID、KANBAN_PROJECT_PATH 或 KANBAN_TASK_CONVERSATION_SESSION_ID；不会从 cwd 推测。请用 task get --task-id <id> --project-path <主仓库路径> 显式查询。",
+					);
+				}
+				const workspace = await resolveRuntimeWorkspace(projectPath, process.cwd(), { autoCreateIfMissing: false });
+				const result = await getTaskFromRuntimeWorkspace(workspace, taskId, conversationSessionId);
+				if (!result)
+					throw new Error(`当前会话绑定的 Task "${taskId}" 不在 ${workspace.repoPath}，请显式查询任务。`);
+				return result;
+			});
+		});
+
+	task
 		.command("get")
 		.description("Look up a single Kanban task by its task ID, including its task worktree path and state.")
 		.requiredOption("--task-id <id>", "Task ID.")
@@ -2106,6 +2148,64 @@ export function registerTaskCommand(program: Command): void {
 					}),
 			);
 		});
+
+	task
+		.command("record-current-task-progress")
+		.description("为当前会话增量记录进展，可同时核对更新任务名称与独立简介。")
+		.requiredOption("--text <text>", "当前进展（最多 160 字）。")
+		.option("--outcome <outcome>", "新条目结果：in_progress | completed | abandoned，默认 in_progress。")
+		.option("--progress-entry-id <id>", "幂等条目身份；重试必须复用。")
+		.option("--previous-entry-id <id>", "上一条当前进展身份。")
+		.option("--previous-outcome <outcome>", "上一条结果：completed | abandoned。")
+		.option("--outcome-explanation <text>", "完成或放弃原因。")
+		.option("--title <text>", "核对后的任务名称。")
+		.option("--description <text>", "独立任务简介，不改 Initial Prompt。")
+		.option("--implementation-started", "声明已获准开始实施；必须提供 title 与 description。")
+		.option(
+			"--expected-task-updated-at <epoch-ms>",
+			"更新概况时，提供最近一次 task get 返回的 task.updatedAt。",
+			Number,
+		)
+		.action(
+			async (options: {
+				text: string;
+				outcome?: "in_progress" | "completed" | "abandoned";
+				progressEntryId?: string;
+				previousEntryId?: string;
+				previousOutcome?: string;
+				outcomeExplanation?: string;
+				title?: string;
+				description?: string;
+				implementationStarted?: boolean;
+				expectedTaskUpdatedAt?: number;
+			}) => {
+				await runTaskCommand(async () => {
+					const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
+					if (!projectPath || !process.env.KANBAN_TASK_ID?.trim())
+						throw new Error("当前调用环境缺少 Task 身份；不会从 cwd 推测。");
+					const workspaceId = await ensureRuntimeWorkspace(projectPath);
+					return await createRuntimeTrpcClient(workspaceId).runtime.recordCurrentTaskProgress.mutate({
+						progressEntryId: options.progressEntryId ?? randomUUID(),
+						progressText: options.text,
+						progressEntryOutcome: options.outcome,
+						previousProgressEntryId: options.previousEntryId,
+						previousProgressEntryOutcome:
+							options.previousOutcome === undefined
+								? undefined
+								: options.previousOutcome === "completed" || options.previousOutcome === "abandoned"
+									? options.previousOutcome
+									: (() => {
+											throw new Error("previous-outcome 只接受 completed 或 abandoned。");
+										})(),
+						outcomeExplanation: options.outcomeExplanation,
+						taskTitle: options.title,
+						taskDescription: options.description,
+						implementationStarted: options.implementationStarted,
+						expectedTaskCardUpdatedAt: options.expectedTaskUpdatedAt,
+					});
+				});
+			},
+		);
 
 	for (const commandName of ["set-current-work-phase-goal", "clear-current-work-phase-goal"] as const) {
 		const command = task.command(commandName).description("按调用环境身份更新当前对话的阶段目标。");
@@ -2151,6 +2251,7 @@ export function registerTaskCommand(program: Command): void {
 ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		)
 		.option("--title <text>", "Task title.")
+		.option("--description <text>", "独立任务简介：问题、范围与当前方案。")
 		.option("--model <id>", "单次模型覆盖，缺省采用 Agent 当前默认配置。")
 		.option("--profile <id>", "Codex profile；未显式覆盖权限时采用其完整权限。")
 		.requiredOption("--prompt <text>", "Task prompt text.")
@@ -2185,6 +2286,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				model?: string;
 				profile?: string;
 				title?: string;
+				description?: string;
 				prompt: string;
 				projectPath?: string;
 				baseRef?: string;
@@ -2207,6 +2309,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 						codexConfigurationProfileId: options.profile,
 						cwd: process.cwd(),
 						title: options.title,
+						taskDescription: options.description,
 						prompt: options.prompt,
 						projectPath: options.projectPath,
 						baseRef: options.baseRef,
@@ -2242,6 +2345,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		.description("Update an existing task.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--title <text>", "Replacement task title.")
+		.option("--description <text>", "独立任务简介；空字符串清除，不修改 Initial Prompt。")
 		.option("--prompt <text>", "Replacement task prompt.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Replacement base branch/ref.")
@@ -2274,6 +2378,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 			async (options: {
 				taskId: string;
 				title?: string;
+				description?: string;
 				prompt?: string;
 				projectPath?: string;
 				baseRef?: string;
@@ -2294,6 +2399,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 							cwd: process.cwd(),
 							taskId: options.taskId,
 							title: options.title,
+							taskDescription: options.description,
 							projectPath: options.projectPath,
 							prompt: options.prompt,
 							baseRef: options.baseRef,

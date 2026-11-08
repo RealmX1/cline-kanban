@@ -21,6 +21,21 @@ function createBoard(): RuntimeBoardData {
 }
 
 describe("deleteTasksFromBoard", () => {
+	it("独立简介在创建与字段更新时持久保留，不覆盖原始需求", () => {
+		const created = addTaskToColumn(
+			createBoard(),
+			"backlog",
+			{ prompt: "用户原始需求", taskDescription: "问题与方案", baseRef: "main" },
+			() => "aaaaa111",
+		);
+		expect(created.task.taskDescription).toBe("问题与方案");
+		const updated = updateTask(created.board, created.task.id, {
+			...created.task,
+			taskDescription: "已修正的范围与方案",
+		});
+		expect(updated.task?.prompt).toBe("用户原始需求");
+		expect(updated.task?.taskDescription).toBe("已修正的范围与方案");
+	});
 	it("removes multiple trashed tasks at once", () => {
 		const createA = addTaskToColumn(createBoard(), "trash", { prompt: "Task A", baseRef: "main" }, () => "aaaaa111");
 		const createB = addTaskToColumn(createA.board, "trash", { prompt: "Task B", baseRef: "main" }, () => "bbbbb111");

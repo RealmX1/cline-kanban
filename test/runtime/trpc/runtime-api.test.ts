@@ -12,6 +12,7 @@ import { extractCodexUserQuestionPayload } from "../../../src/commands/codex-use
 import type { RuntimeConfigState } from "../../../src/config/runtime-config";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import { getRuntimeLaunchSupportedAgentCatalog } from "../../../src/core/agent-catalog";
+import { advanceAgentWorkProgress } from "../../../src/core/agent-work-progress";
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardData,
@@ -1517,6 +1518,12 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 				observedAt: 1,
 			},
 		});
+		persisted.agentWorkProgressEntries = advanceAgentWorkProgress(
+			persisted,
+			{ progressEntryId: "persisted-progress", progressText: "已确认方案" },
+			"persisted-progress",
+			100,
+		);
 		let active: RuntimeTaskSessionSummary | null = null;
 		const acpService = {
 			getSummary: vi.fn(() => active),
@@ -1555,6 +1562,9 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 				prompt: "",
 				resumePriorAgentConversationWithoutResendingPrompt: true,
 				observedAgentNativeConversationSessionIdentity: persisted.agentNativeConversationSessionIdentity,
+				persistedTaskSessionSummaryForProgressRestoration: expect.objectContaining({
+					agentWorkProgressEntries: persisted.agentWorkProgressEntries,
+				}),
 				startInPlanMode: undefined,
 				taskConversationSessionMetadata: expect.objectContaining({
 					taskConversationSessionLaunchSettings: expect.objectContaining({ startInPlanMode: true }),

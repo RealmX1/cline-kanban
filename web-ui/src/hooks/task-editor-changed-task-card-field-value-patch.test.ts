@@ -44,6 +44,23 @@ function submittedValuesMatching(card: BoardCard): TaskEditorSubmittedTaskCardFi
 }
 
 describe("buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor", () => {
+	it("简介独立保存，未改动时不覆盖服务端并发更新，显式清空才删除", () => {
+		const card = seededTaskCard({ taskDescription: "当前简介" });
+		const submitted = { ...submittedValuesMatching(card), taskDescription: "当前简介" };
+		expect(buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, submitted)).toEqual({});
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskDescription: "修正方案",
+			}),
+		).toEqual({ taskDescription: "修正方案" });
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskDescription: "",
+			}),
+		).toEqual({ taskDescription: null });
+	});
 	it("effort 单独改变进入补丁，恢复继承发送 null", () => {
 		const card = seededTaskCard();
 		expect(

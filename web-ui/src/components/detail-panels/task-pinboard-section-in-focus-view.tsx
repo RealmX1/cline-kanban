@@ -68,7 +68,7 @@ export function TaskPinboardSectionInFocusView({
 	return (
 		<div
 			data-task-pinboard-container="focus-view-section"
-			className="mx-2 mt-1 flex min-h-0 flex-col rounded-lg border border-border bg-surface-1"
+			className="ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 flex min-h-0 flex-col rounded-lg border border-border bg-surface-1"
 			// EXPERIMENT_NODE: Pinned 固定区的高度上限比例（50% 面板高），决定展开全部后给 stage 列表留多少空间。
 			style={{ maxHeight: "50%" }}
 		>

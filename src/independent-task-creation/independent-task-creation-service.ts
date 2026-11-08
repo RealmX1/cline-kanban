@@ -510,6 +510,10 @@ export function createIndependentTaskCreationService(deps: IndependentTaskCreati
 							{
 								taskId,
 								title: record.draft.title,
+								taskDescription:
+									record.draft.userTaskDescription.trim().length <= 4000
+										? record.draft.userTaskDescription.trim() || undefined
+										: undefined,
 								prompt: `${record.draft.initialPrompt}\n\n来源材料：${artifactDirectory}\n工作树来源：${record.draft.worktreeSource}。${inheritedDirty ? "已继承的未提交工作来自来源任务，不能认作本任务独自产出；具体基线见来源材料的 source-git-working-state。" : ""}历史中的原 Task ID、路径和会话权限只代表来源，以本任务当前运行设置为准。`,
 								baseRef: "main",
 								startInPlanMode: config.newTaskStartInPlanModeByDefault,

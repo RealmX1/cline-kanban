@@ -17,6 +17,7 @@ import {
 	runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
 } from "../../src/inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { resolveInterWorkUnitRelationNeighborhoodSessionStartInjection } from "../../src/prompts/inter-work-unit-relation-neighborhood-append-system-prompt";
+import { transferNeverStartedBacklogTaskToProject } from "../../src/state/backlog-task-project-transfer";
 import { registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture } from "../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import { loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
 import { createWorkUnitRelationAssertionWriteApi } from "../../src/trpc/work-unit-relation-assertion-write-api";
@@ -86,6 +87,163 @@ const TRUSTED_USER_GESTURE: WebUiUserDecisionClientCharacteristics = {
 };
 
 describe("reference relation assertion write through the runtime", () => {
+	it(
+		"当前 project 决定单条与批量跨 project 资格，迁移后已落账提交重放仍返回原回执",
+		async () => {
+			const fixture = createIsolatedGitTestWorkspaceFixture();
+			const previousHome = process.env.HOME;
+			process.env.HOME = fixture.isolatedHomeDirectoryPath;
+			try {
+				const source = fixture.createNonBareRepository({
+					repositoryDirectoryName: "relation-source",
+					initialBranchName: "main",
+				});
+				const target = fixture.createNonBareRepository({
+					repositoryDirectoryName: "relation-target",
+					initialBranchName: "main",
+				});
+				await saveWorkspaceState(source.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+					board: boardWithBacklogCards([
+						createCard("root1", "本 Task", 1),
+						createCard("same1", "同 project Task", 2),
+					]),
+					sessions: {},
+				});
+				await saveWorkspaceState(target.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+					board: boardWithBacklogCards([createCard("other", "跨 project Task", 3)]),
+					sessions: {},
+				});
+				const sourceScope = await loadWorkspaceContext(source.repositoryPath);
+				const targetScope = await loadWorkspaceContext(target.repositoryPath);
+				const capture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+				try {
+					await capture.eagerBoardStateBaselineEstablishmentForEveryIndexedWorkspaceCompletion;
+					const api = createWorkUnitRelationAssertionWriteApi({
+						readRecordedInterWorkUnitRelationProjection:
+							readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
+						runInterWorkUnitRelationLedgerClientOperation:
+							runInterWorkUnitRelationLedgerClientOperationOfActiveKanbanRuntimeLiveCapture,
+						getWorkspacePathById: (id) =>
+							id === sourceScope.workspaceId
+								? source.repositoryPath
+								: id === targetScope.workspaceId
+									? target.repositoryPath
+									: null,
+					});
+					const root = {
+						workUnitType: "kanban_board_card" as const,
+						workspaceId: sourceScope.workspaceId,
+						taskId: "root1",
+						taskIncarnationCreatedAtEpochMs: 1,
+					};
+					const same = { ...root, taskId: "same1", taskIncarnationCreatedAtEpochMs: 2 };
+					const other = {
+						...root,
+						workspaceId: targetScope.workspaceId,
+						taskId: "other",
+						taskIncarnationCreatedAtEpochMs: 3,
+					};
+					const subjectWorkUnit = {
+						workUnitSelectorKind: "kanban_board_card_by_qualified_reference" as const,
+						kanbanBoardCard: root,
+					};
+					const relationKind = "reference_is_cross_repository_counterpart_with" as const;
+					const batch = (counterpartWorkUnit: typeof root, modelingSubmissionId: string) => ({
+						workUnit: subjectWorkUnit,
+						modelingSubmissionId,
+						relationRevocations: [],
+						webUiUserDecisionClientCharacteristics: TRUSTED_USER_GESTURE,
+						referenceRelationDrafts: [
+							{
+								draftId: "cross-project",
+								replacesRelationId: null,
+								expectedAssertedRelationStateVersion: null,
+								counterpartWorkUnit,
+								relationKind,
+								currentTaskIsStatementSubject: false,
+								relationAssertionRationaleOneSentence: "",
+								relationAssertionEvidencePointers: [],
+								assertedRelationKindSpecificAttributes: {},
+							},
+						],
+					});
+					const single = (counterpart: typeof root) =>
+						api.assertReferenceRelationDirectlyAsWebUiUser(
+							assertReferenceRelationDirectlyAsWebUiUserRequestSchema.parse({
+								subjectWorkUnit,
+								relationKind,
+								counterpartWorkUnit: {
+									workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
+									kanbanBoardCard: counterpart,
+								},
+								webUiUserDecisionClientCharacteristics: TRUSTED_USER_GESTURE,
+							}),
+							WEB_UI_USER_EVIDENCE,
+						);
+					await expect(single(same)).rejects.toThrow(/仅限不同 project/);
+					await expect(
+						api.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							batch(same, "same-rejected"),
+							WEB_UI_USER_EVIDENCE,
+						),
+					).rejects.toThrow(/仅限不同 project/);
+					const accepted = batch(other, "accepted-before-transfer");
+					expect(
+						await api.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(accepted, WEB_UI_USER_EVIDENCE),
+					).toMatchObject({ alreadyApplied: false });
+					await transferNeverStartedBacklogTaskToProject(
+						targetScope.workspaceId,
+						{
+							operationId: "move-other-to-source",
+							taskId: other.taskId,
+							taskIncarnationCreatedAtEpochMs: other.taskIncarnationCreatedAtEpochMs,
+							targetWorkspaceId: sourceScope.workspaceId,
+							targetBaseRef: "main",
+						},
+						TASK_MUTATION_INTENT_FOR_TEST_FIXTURE,
+					);
+					expect(
+						await api.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(accepted, WEB_UI_USER_EVIDENCE),
+					).toMatchObject({ alreadyApplied: true });
+					await expect(single(other)).rejects.toThrow(/仅限不同 project/);
+					await expect(
+						api.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							batch(other, "new-after-transfer"),
+							WEB_UI_USER_EVIDENCE,
+						),
+					).rejects.toThrow(/仅限不同 project/);
+					await transferNeverStartedBacklogTaskToProject(
+						sourceScope.workspaceId,
+						{
+							operationId: "move-same-to-target",
+							taskId: same.taskId,
+							taskIncarnationCreatedAtEpochMs: same.taskIncarnationCreatedAtEpochMs,
+							targetWorkspaceId: targetScope.workspaceId,
+							targetBaseRef: "main",
+						},
+						TASK_MUTATION_INTENT_FOR_TEST_FIXTURE,
+					);
+					expect(
+						await api.applyReferenceRelationModelingChangesDirectlyAsWebUiUser(
+							batch(same, "same-origin-different-current"),
+							WEB_UI_USER_EVIDENCE,
+						),
+					).toMatchObject({ alreadyApplied: false });
+					expect((await single(same)).relationAssertionWriteOutcome).toBe(
+						"reassertion_merged_into_already_effective_assertion",
+					);
+				} finally {
+					await capture.deactivate();
+				}
+			} finally {
+				registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
+				if (previousHome === undefined) delete process.env.HOME;
+				else process.env.HOME = previousHome;
+			}
+		},
+		REFERENCE_RELATION_ASSERTION_WRITE_INTEGRATION_TEST_TIMEOUT_MS,
+	);
+
 	afterEach(() => {
 		registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
 	});
@@ -630,6 +788,17 @@ describe("reference relation assertion write through the runtime", () => {
 							)
 						).assertedRelation.assertedRelationKindSpecificAttributes,
 					).toEqual({});
+					for (const relationKind of [
+						"reference_fixes_defects_in_produced_outputs_of",
+						"reference_diagnoses_agent_execution_trajectory_of",
+					] as const) {
+						const result = await writeApi.assertReferenceRelationDirectlyAsWebUiUser(
+							{ ...minimalUserRequest, relationKind },
+							WEB_UI_USER_EVIDENCE,
+						);
+						expect(result.assertedRelation.relationKind).toBe(relationKind);
+						expect(result.assertedRelation.assertedRelationKindSpecificAttributes).toEqual({});
+					}
 					expect(
 						assertReferenceRelationAsActingWorkUnitRequestSchema.safeParse({
 							counterpartWorkUnit: cardBSelector,

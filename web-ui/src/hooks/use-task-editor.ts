@@ -226,6 +226,8 @@ export interface UseTaskEditorResult {
 	taskEditorSessionWorkspaceId: string | null;
 	taskEditorDefaultAgentId: RuntimeAgentId | null;
 	newTaskName: string;
+	newTaskDescription: string;
+	setNewTaskDescription: Dispatch<SetStateAction<string>>;
 	setNewTaskName: Dispatch<SetStateAction<string>>;
 	newTaskPrompt: string;
 	setNewTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -262,6 +264,8 @@ export interface UseTaskEditorResult {
 	setNewTaskAgentSessionInitialization: Dispatch<SetStateAction<RuntimeTaskAgentSessionInitialization | undefined>>;
 	editingTaskId: string | null;
 	editTaskName: string;
+	editTaskDescription: string;
+	setEditTaskDescription: Dispatch<SetStateAction<string>>;
 	setEditTaskName: Dispatch<SetStateAction<string>>;
 	editTaskPrompt: string;
 	setEditTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -388,6 +392,7 @@ export function useTaskEditor({
 		string | undefined
 	>();
 	const [newTaskName, setNewTaskName] = useState("");
+	const [newTaskDescription, setNewTaskDescription] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
 	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useState(newTaskStartInPlanModeByDefault);
@@ -405,6 +410,7 @@ export function useTaskEditor({
 	//「改回已保存内容」按钮都挂在它上面；null = 表单就是任务本体，通知栏那一条不出现。
 	const [editTaskFormSeededFromSavedDraftAt, setEditTaskFormSeededFromSavedDraftAt] = useState<number | null>(null);
 	const [editTaskName, setEditTaskName] = useState("");
+	const [editTaskDescription, setEditTaskDescription] = useState("");
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
 	const [editTaskStartInPlanMode, setEditTaskStartInPlanMode] = useState(false);
@@ -633,6 +639,7 @@ export function useTaskEditor({
 	// store 的订阅回调上，而那是 React 之外的调用；进依赖数组则会让订阅随每一次击键重挂一遍。
 	const editTaskFormValues: TaskEditDraftFormValues = {
 		taskTitleOverride: editTaskName,
+		taskDescription: editTaskDescription,
 		prompt: editTaskPrompt,
 		images: editTaskImages,
 		startInPlanMode: editTaskStartInPlanMode,
@@ -752,6 +759,7 @@ export function useTaskEditor({
 			const draft = {
 				taskId: editingTaskId,
 				taskTitleOverride: editTaskName,
+				taskDescription: editTaskDescription,
 				prompt: editTaskPrompt,
 				// 图片可能是几 MB 的 dataURL，深拷贝要等到确定「真的要写盘」之后再做。
 				images: editTaskImages,
@@ -797,6 +805,7 @@ export function useTaskEditor({
 			editTaskAgentSessionInitialization,
 			editTaskImages,
 			editTaskName,
+			editTaskDescription,
 			editTaskPrompt,
 			editTaskStartInPlanMode,
 			editTaskWorktreeMode,
@@ -828,6 +837,7 @@ export function useTaskEditor({
 					defaultAgentId: taskEditorDefaultAgentIdAtSessionOpen,
 					formValues: {
 						taskTitleOverride: newTaskName,
+						taskDescription: newTaskDescription,
 						prompt: newTaskPrompt,
 						images: newTaskImages.map((image) => ({ ...image })),
 						startInPlanMode: newTaskStartInPlanMode,
@@ -864,11 +874,13 @@ export function useTaskEditor({
 			editingTaskId,
 			editTaskWorkspaceId,
 			editTaskName,
+			editTaskDescription,
 			isInlineTaskCreateOpen,
 			taskCreationTargetWorkspaceId,
 			taskEditorSessionWorkspaceId,
 			taskEditorDefaultAgentIdAtSessionOpen,
 			newTaskName,
+			newTaskDescription,
 			newTaskPrompt,
 			newTaskImages,
 			newTaskStartInPlanMode,
@@ -971,6 +983,7 @@ export function useTaskEditor({
 		taskEditorSessionIdentityRef.current = Symbol("closed-task-editor-session");
 		preservedTaskEditorSubmissionRef.current = null;
 		setNewTaskName("");
+		setNewTaskDescription("");
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setIsInlineTaskCreateOpen(false);
 
@@ -995,6 +1008,7 @@ export function useTaskEditor({
 	const resolveEditTaskFormValuesFromTask = useCallback(
 		(task: BoardCard, savedDraft: TaskEditDraft | null): TaskEditDraftFormValues => ({
 			taskTitleOverride: savedDraft?.taskTitleOverride ?? task.title,
+			taskDescription: savedDraft ? (savedDraft.taskDescription ?? task.taskDescription) : task.taskDescription,
 			prompt: savedDraft?.prompt ?? task.prompt.trim(),
 			images: savedDraft
 				? savedDraft.images.map((image) => ({ ...image }))
@@ -1031,6 +1045,7 @@ export function useTaskEditor({
 			editTaskFormSeedRef.current = { savedDraftSavedAt: savedDraft?.savedAt ?? null, formValues };
 			editTaskCardTheFormWasSeededFromRef.current = task;
 			setEditTaskName(formValues.taskTitleOverride ?? task.title);
+			setEditTaskDescription(formValues.taskDescription ?? "");
 			setEditTaskPrompt(formValues.prompt);
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
@@ -1106,6 +1121,7 @@ export function useTaskEditor({
 			setIsInlineTaskCreateOpen(false);
 
 			setNewTaskName("");
+			setNewTaskDescription("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			const savedDraft = readSavedTaskEditDraft(workspaceId, task.id);
@@ -1264,6 +1280,7 @@ export function useTaskEditor({
 			const savedTaskId = editingTaskId;
 			const submitted: TaskEditorSubmittedTaskCardFieldValues = {
 				taskTitleOverride: options?.taskNameOverride ?? editTaskName,
+				taskDescription: options?.taskDescriptionOverride ?? editTaskDescription,
 				prompt,
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
@@ -1301,6 +1318,7 @@ export function useTaskEditor({
 				saveTaskEditDraft(physicalWorkspaceIdAfterSave, {
 					taskId: savedTaskId,
 					taskTitleOverride: submitted.taskTitleOverride,
+					taskDescription: submitted.taskDescription,
 					prompt: submitted.prompt,
 					images: submitted.images.map((image) => ({ ...image })),
 					startInPlanMode: submitted.startInPlanMode,
@@ -1460,6 +1478,7 @@ export function useTaskEditor({
 			editTaskTerminalAgentModelOverrideSettings,
 			editTaskAgentSessionInitialization,
 			editTaskName,
+			editTaskDescription,
 			editTaskPrompt,
 			editTaskImages,
 			editTaskStartInPlanMode,
@@ -1565,7 +1584,7 @@ export function useTaskEditor({
 	const createBacklogTaskCardsInOtherProject = useCallback(
 		(
 			workspaceId: string,
-			newTaskCards: ReadonlyArray<{ prompt: string; title?: string }>,
+			newTaskCards: ReadonlyArray<{ prompt: string; title?: string; taskDescription?: string }>,
 			baseRef: string,
 		): BoardCard[] | null => {
 			const runtimeAllocatedTaskIds = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
@@ -1587,6 +1606,7 @@ export function useTaskEditor({
 					{
 						...(newTaskCard.title !== undefined ? { title: newTaskCard.title } : {}),
 						prompt: newTaskCard.prompt,
+						taskDescription: newTaskCard.taskDescription,
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexConfigurationProfileId: newTaskCodexConfigurationProfileId,
@@ -1689,6 +1709,7 @@ export function useTaskEditor({
 		(_workspaceId: string, options: TaskEditorSubmitOptions | undefined, baseRef: string) => {
 			if (options?.preserveFormUntilCreationConfirmed) return;
 			setNewTaskName("");
+			setNewTaskDescription("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -1759,6 +1780,7 @@ export function useTaskEditor({
 					"backlog",
 					{
 						title,
+						taskDescription: options?.taskDescriptionOverride ?? newTaskDescription,
 						prompt,
 						baseRef,
 						startInPlanMode: newTaskStartInPlanMode,
@@ -1785,7 +1807,7 @@ export function useTaskEditor({
 			if (explicitTargetOtherWorkspaceId) {
 				const createdTaskCard = createBacklogTaskCardsInOtherProject(
 					explicitTargetOtherWorkspaceId,
-					[{ prompt, title }],
+					[{ prompt, title, taskDescription: options?.taskDescriptionOverride ?? newTaskDescription }],
 					baseRef,
 				)?.[0];
 				if (!createdTaskCard) {
@@ -1823,6 +1845,7 @@ export function useTaskEditor({
 				"backlog",
 				{
 					title,
+					taskDescription: options?.taskDescriptionOverride ?? newTaskDescription,
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
@@ -1872,6 +1895,7 @@ export function useTaskEditor({
 			});
 			if (options?.preserveFormUntilCreationConfirmed) return created.task.id;
 			setNewTaskName("");
+			setNewTaskDescription("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -1918,6 +1942,7 @@ export function useTaskEditor({
 			// 用户在设置页切换后新建的卡仍被写成切换前的值。
 			ompAgentSessionTransportForNewTasks,
 			newTaskName,
+			newTaskDescription,
 			newTaskPrompt,
 			newTaskCodexConfigurationPermissionSelectionSource,
 			newTaskCodexConfigurationProfileId,
@@ -2067,6 +2092,7 @@ export function useTaskEditor({
 				});
 			}
 			setNewTaskName("");
+			setNewTaskDescription("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -2178,6 +2204,7 @@ export function useTaskEditor({
 		taskEditorSessionIdentityRef.current = Symbol("reset-task-editor-session");
 		preservedTaskEditorSubmissionRef.current = null;
 		setNewTaskName("");
+		setNewTaskDescription("");
 		setIsInlineTaskCreateOpen(false);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setEditingTaskId(null);
@@ -2229,6 +2256,7 @@ export function useTaskEditor({
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(seed.workspaceId);
 		const values = seed.formValues;
 		setNewTaskName(values.taskTitleOverride ?? "");
+		setNewTaskDescription(values.taskDescription ?? "");
 		setNewTaskPrompt(values.prompt);
 		setNewTaskImages(values.images.map((image) => ({ ...image })));
 		setNewTaskStartInPlanMode(values.startInPlanMode);
@@ -2270,7 +2298,9 @@ export function useTaskEditor({
 		taskEditorSessionWorkspaceId,
 		taskEditorDefaultAgentId,
 		newTaskName,
+		newTaskDescription,
 		setNewTaskName,
+		setNewTaskDescription,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -2304,7 +2334,9 @@ export function useTaskEditor({
 		setNewTaskAgentSessionInitialization,
 		editingTaskId,
 		editTaskName,
+		editTaskDescription,
 		setEditTaskName,
+		setEditTaskDescription,
 		editTaskPrompt,
 		setEditTaskPrompt,
 		editTaskImages,

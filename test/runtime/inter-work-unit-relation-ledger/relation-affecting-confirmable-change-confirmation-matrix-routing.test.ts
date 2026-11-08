@@ -189,6 +189,14 @@ describe("asserted inter-work-unit relation kind registry", () => {
 				]),
 			),
 		).toEqual({
+			reference_fixes_defects_in_produced_outputs_of: [
+				"fixes defects in produced outputs of",
+				"has defects in its produced outputs fixed by",
+			],
+			reference_diagnoses_agent_execution_trajectory_of: [
+				"diagnoses the agent execution trajectory of",
+				"has its agent execution trajectory diagnosed by",
+			],
 			reference_concerns_behavior_or_state_of: [
 				"concerns the behavior or state of",
 				"has its behavior or state concerned by",

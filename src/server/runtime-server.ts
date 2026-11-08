@@ -32,8 +32,10 @@ import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
 	KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME,
 } from "../core/kanban-cli-invocation-environment-actor-claims";
+import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../core/kanban-web-ui-page-load-request-origin-nonce";
 import { resolveHookReviewLifecyclePromptSubmissionOrdering } from "../core/recoverable-hook-review-lifecycle-event";
+import { ensureRuntimeBoundKanbanCliExecutable } from "../core/runtime-bound-kanban-cli-executable";
 import {
 	buildKanbanRuntimeUrl,
 	getKanbanRuntimeHost,
@@ -144,11 +146,11 @@ import { createTaskCommandExecutionService } from "../task-command-execution/tas
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
+import { readTaskSessionIntentMaterial } from "../task-indexing-support/read-task-session-intent-material";
 import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
-import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
-import { loadAndAdvanceSharedTaskIndexingContext } from "../task-indexing-support/task-indexing-support-storage";
 import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
+import { buildTaskLookupCurrentContextMetadata } from "../task-indexing-support/task-lookup-progressive-context";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import {
@@ -335,6 +337,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 工作单元间关系账本：注册后本进程每一次 board 写入先过账本（dd2db 1a）。账本打不开时 board 只读。
 	const activatedInterWorkUnitRelationLedgerLiveCapture =
 		await activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
+	if (process.platform !== "win32") {
+		try {
+			process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH = ensureRuntimeBoundKanbanCliExecutable({
+				commandParts: resolveKanbanCommandParts(),
+				executableStorageDirectoryPath: join(getRuntimeHomePath(), "runtime-bound-cli-executables"),
+			});
+		} catch (error) {
+			deps.warn(
+				`运行时绑定 CLI 入口暂不可用，保留完整启动前缀：${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 
 	const resolveWorkspaceScopeFromRequest = async (
 		request: IncomingMessage,
@@ -1594,18 +1608,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
 		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
 		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
-		collectMaterials: (workspaceId) =>
-			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
-		getExecutorSettings: readTaskAssistanceModelProviderRoutingSettings,
-		getContext: (workspaceId, materials, settings) =>
-			loadAndAdvanceSharedTaskIndexingContext({
+		collectMaterials: (workspaceId, options) =>
+			collectTaskIndexingMaterials({
 				workspaceId,
-				materials,
-				settings,
-				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
-				now: Date.now(),
-				forModelRequest: true,
+				listLiveSessionSummaries: listProjectRuntimeSessionSummaries,
+				...options,
+				readSessionIntentMaterial: readTaskSessionIntentMaterial,
 			}),
+		getExecutorSettings: readTaskAssistanceModelProviderRoutingSettings,
+		getContext: async (workspaceId, materials) =>
+			buildTaskLookupCurrentContextMetadata(workspaceId, materials, Date.now()),
 		executeAgent: executeTaskAnalysisApi,
 		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
 	});

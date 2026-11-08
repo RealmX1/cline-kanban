@@ -17,6 +17,7 @@ const mainSession = { taskId: "abcde", agentId: "codex", workspacePath: "/isolat
 function Harness() {
 	const [open,setOpen] = useState(true);
 	const [prompt,setPrompt] = useState("实现任务编辑器的共享草稿与非模态交互");
+	const [taskDescription,setTaskDescription] = useState("");
 	const [plan,setPlan] = useState(true);
 	const [backgroundClicks,setBackgroundClicks] = useState(0);
 	const [reasoningEffort, setReasoningEffort] = useState<string | undefined>();
@@ -31,6 +32,7 @@ function Harness() {
 		<Toaster />
 		<TaskEditorDialog open={open} onOpenChange={setOpen} prompt={prompt} onPromptChange={setPrompt} images={[]} onImagesChange={() => {}} onCreate={() => { document.body.dataset.taskEditorSubmissionCount = String(Number(document.body.dataset.taskEditorSubmissionCount ?? 0) + 1); return null; }} onCreateAndStart={() => null} onCreateStartAndOpen={() => null} onCreateMultiple={() => []}
 			codexReasoningEffortOverride={reasoningEffort} onCodexReasoningEffortOverrideChange={setReasoningEffort}
+			taskDescription={taskDescription} onTaskDescriptionChange={setTaskDescription}
 			terminalAgentModelOverrideSettings={modelOverride} onTerminalAgentModelOverrideSettingsChange={setModelOverride}
 			startInPlanMode={plan} onStartInPlanModeChange={setPlan} taskAgentPermissionMode="ask_for_every_tool_use" onTaskAgentPermissionModeChange={() => {}}
 			taskConversationMode="operational" onTaskConversationModeChange={() => {}} autoReviewEnabled={false} onAutoReviewEnabledChange={() => {}} autoReviewMode="commit" onAutoReviewModeChange={() => {}}

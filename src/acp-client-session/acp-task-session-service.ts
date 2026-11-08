@@ -6,11 +6,16 @@ import {
 	resolveAgentConversationSessionResumeAddressing,
 	type TaskConversationSessionSharingExecutionWorkingDirectory,
 } from "../core/agent-conversation-session-resume-addressing";
+import {
+	preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot,
+	projectLegacyWorkPhaseGoalIntoExistingProgress,
+} from "../core/agent-work-progress";
 import type {
 	RuntimeAgentCurrentWorkPhaseGoal,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationSessionIdentity,
 	RuntimeAgentSessionReclamationOutcome,
+	RuntimeAgentWorkProgressEntry,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskConversationMode,
 	RuntimeTaskConversationSessionMetadata,
@@ -96,6 +101,7 @@ export interface StartAcpTaskSessionRequest {
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
 	beforeAgentProcessLaunch?: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>;
 	observedAgentNativeConversationSessionIdentity?: RuntimeAgentNativeConversationSessionIdentity | null;
+	persistedTaskSessionSummaryForProgressRestoration?: RuntimeTaskSessionSummary | null;
 	taskConversationSessionsSharingExecutionWorkingDirectory?: TaskConversationSessionSharingExecutionWorkingDirectory[];
 }
 
@@ -326,6 +332,7 @@ export class AcpTaskSessionService {
 		});
 		const startedAt = now();
 		const runtimeSessionIncarnationId = randomUUID();
+		const persistedProgressSummary = request.persistedTaskSessionSummaryForProgressRestoration;
 		const shouldResumeWithoutResendingPrompt = Boolean(request.resumePriorAgentConversationWithoutResendingPrompt);
 		const isForkingMainContext =
 			!shouldResumeWithoutResendingPrompt &&
@@ -359,6 +366,26 @@ export class AcpTaskSessionService {
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
 				workspacePath: request.cwd,
+				...(persistedProgressSummary?.taskId === request.taskId
+					? {
+							agentWorkProgressEntries: preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot(
+								persistedProgressSummary.agentWorkProgressEntries,
+								entry.summary.agentWorkProgressEntries,
+							),
+							...(entry.summary.agentCurrentWorkPhaseGoal === undefined &&
+							persistedProgressSummary.agentCurrentWorkPhaseGoal !== undefined
+								? { agentCurrentWorkPhaseGoal: persistedProgressSummary.agentCurrentWorkPhaseGoal }
+								: {}),
+							...(persistedProgressSummary.agentCurrentWorkPhaseGoalInvalidatedAt !== undefined
+								? {
+										agentCurrentWorkPhaseGoalInvalidatedAt: Math.max(
+											entry.summary.agentCurrentWorkPhaseGoalInvalidatedAt ?? 0,
+											persistedProgressSummary.agentCurrentWorkPhaseGoalInvalidatedAt,
+										),
+									}
+								: {}),
+						}
+					: {}),
 				...(request.observedAgentNativeConversationSessionIdentity
 					? { agentNativeConversationSessionIdentity: request.observedAgentNativeConversationSessionIdentity }
 					: {}),
@@ -849,6 +876,31 @@ export class AcpTaskSessionService {
 		return summary;
 	}
 
+	applyCurrentWorkProgress(
+		taskId: string,
+		entries: RuntimeAgentWorkProgressEntry[],
+	): RuntimeTaskSessionSummary | null {
+		const entry = this.registry.getEntry(taskId);
+		const latest = entries.at(-1);
+		if (
+			!entry ||
+			!latest ||
+			latest.owningKanbanTaskConversationSessionId !== taskId ||
+			latest.owningNativeConversationSessionId !==
+				(entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null) ||
+			latest.owningRuntimeSessionIncarnationId !== (entry.summary.runtimeSessionIncarnationId ?? null)
+		)
+			return null;
+		const summary = updateAcpSummary(entry, {
+			agentWorkProgressEntries: preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot(
+				entry.summary.agentWorkProgressEntries,
+				entries,
+			),
+		});
+		this.emitSummary(summary);
+		return summary;
+	}
+
 	applyCurrentWorkPhaseGoal(
 		taskId: string,
 		goal: RuntimeAgentCurrentWorkPhaseGoal | null,
@@ -865,7 +917,12 @@ export class AcpTaskSessionService {
 						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId))
 		)
 			return null;
-		const summary = updateAcpSummary(entry, { agentCurrentWorkPhaseGoal: goal });
+		const summary = updateAcpSummary(entry, {
+			agentCurrentWorkPhaseGoal: goal,
+			agentWorkProgressEntries:
+				projectLegacyWorkPhaseGoalIntoExistingProgress(entry.summary, goal, Date.now()) ??
+				entry.summary.agentWorkProgressEntries,
+		});
 		this.emitSummary(summary);
 		return summary;
 	}

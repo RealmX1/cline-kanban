@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { collectCodexMainSessionHandoverMaterial } from "../../../src/agent-session-history/codex-main-session-handover-material";
+import { advanceAgentWorkProgress } from "../../../src/core/agent-work-progress";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 
 const directories: string[] = [];
@@ -55,6 +56,21 @@ const assistant = (text: string) => ({
 	payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] },
 });
 describe("Codex 交接材料按可信完整历史采集", () => {
+	it("交接当前阶段优先读取新进展，终态不能回退成旧目标", async () => {
+		const input = await fixture([
+			{ type: "session_meta", payload: { id: "native", source: "cli" } },
+			assistant("准备交接"),
+		]);
+		input.sourceSummary.agentWorkProgressEntries = advanceAgentWorkProgress(
+			input.sourceSummary,
+			{ progressEntryId: "verification", progressText: "正在验证分级索引" },
+			"verification",
+			100,
+		);
+		expect((await collectCodexMainSessionHandoverMaterial(input)).currentWorkPhaseGoal).toBe("正在验证分级索引");
+		input.sourceSummary.agentWorkProgressEntries[0].outcome = "completed";
+		expect((await collectCodexMainSessionHandoverMaterial(input)).currentWorkPhaseGoal).toBeNull();
+	});
 	it("遍历多页、保留内嵌计划来源，去重后提取最后连续正文并排除工具内容", async () => {
 		const records: unknown[] = [
 			{ type: "session_meta", payload: { id: "native", source: "cli" } },

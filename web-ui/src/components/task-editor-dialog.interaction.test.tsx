@@ -214,7 +214,7 @@ function hasPlanModeOverridesPermissionTierNotice(): boolean {
 }
 
 function getPromptTextarea(): HTMLTextAreaElement {
-	const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+	const textarea = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务正文"]');
 	if (!textarea) throw new Error("找不到任务 Prompt 输入框");
 	return textarea;
 }
@@ -416,7 +416,7 @@ describe("TaskEditorDialog interactions", () => {
 			}),
 		);
 		const projectField = document.querySelector('[data-testid="task-creation-target-project-field"]');
-		const taskInput = document.querySelector("textarea");
+		const taskInput = document.querySelector('textarea[aria-label="任务正文"]');
 		expect(projectField).not.toBeNull();
 		expect(taskInput).not.toBeNull();
 		expect(
@@ -638,6 +638,54 @@ describe("TaskEditorDialog interactions", () => {
 		expect(startTask).not.toHaveBeenCalled();
 		expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
 	});
+	it.each(["没有后续修改", "后来修改正文", "后来新增关系"] as const)(
+		"Backlog 关系保存清空草稿后：%s",
+		async (laterChange) => {
+			const actualHook = relationModelingHooks.useReferenceRelationModelingEditor;
+			let controller!: ReturnType<typeof actualHook>;
+			vi.spyOn(relationModelingHooks, "useReferenceRelationModelingEditor").mockImplementation((input) => {
+				controller = actualHook(input);
+				return controller;
+			});
+			const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
+			let completeApply!: () => void;
+			applyChanges.mockImplementation(
+				() =>
+					new Promise((resolve) => {
+						completeApply = () => resolve({ modelingSubmissionId: "restored-submission", alreadyApplied: false });
+					}),
+			);
+			let completeClearedDraftPersistence!: () => void;
+			vi.mocked(relationModelingQueries.persistRelationModelingEditorDraft).mockImplementation(
+				async (_workspace, _scope, draft) => {
+					if (draft === null)
+						await new Promise<void>((resolve) => {
+							completeClearedDraftPersistence = resolve;
+						});
+					return { saved: true };
+				},
+			);
+			const props = makeProps({
+				taskEditorMode: "edit",
+				editingTaskId: "bcdef",
+				prompt: "原始正文",
+				onCreate: vi.fn(() => "bcdef"),
+			});
+			await render(props);
+			const restored = { ...restoredCreationDraft("project-1"), createdTaskId: null };
+			await act(async () => resolveDraftRead(restored));
+			await act(async () => findButtonByText("保存更改")?.click());
+			expect(applyChanges).toHaveBeenCalledOnce();
+			await act(async () => completeApply());
+			expect(controller.readLatestDraft().referenceRelationDrafts).toEqual([]);
+			if (laterChange === "后来修改正文") await typeIntoPrompt("之后输入的正文");
+			if (laterChange === "后来新增关系")
+				await act(async () => controller.addDraft(restored.referenceRelationDrafts[0]!));
+			await act(async () => completeClearedDraftPersistence());
+			if (laterChange === "没有后续修改") expect(props.onOpenChange).toHaveBeenCalledWith(false);
+			else expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+		},
+	);
 	it.each(["create", "edit"] as const)("%s 恢复的无效关系详情阻止提交和启动", async (taskEditorMode) => {
 		const { resolveDraftRead, applyChanges } = prepareDeferredRelationDraftRead();
 		const startTask = mockSuccessfulTaskStart();
@@ -999,12 +1047,14 @@ describe("TaskEditorDialog interactions", () => {
 		expect(creationBrowserRecovery.readPendingTaskEditorCreationSubmission(key)).toBeNull();
 	});
 
-	it("连续创建只清空正文、名称和附件，保留设置", async () => {
+	it("连续创建清空正文、名称、简介和附件，保留设置", async () => {
 		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
 		const props = makeProps({
 			prompt: "连续创建 A",
 			creatingTaskName: "A 的名称",
 			onCreatingTaskNameChange: vi.fn(),
+			taskDescription: "A 的独立简介",
+			onTaskDescriptionChange: vi.fn(),
 			images: [{ id: "image1", name: "附件.png", data: "aW1hZ2U=", mimeType: "image/png" }],
 			startInPlanMode: true,
 			onCreate: vi.fn(() => "more1"),
@@ -1018,6 +1068,7 @@ describe("TaskEditorDialog interactions", () => {
 		await act(async () => findButtonByText("创建任务")?.click());
 		expect(props.onOpenChange).not.toHaveBeenCalled();
 		expect(props.onCreatingTaskNameChange).toHaveBeenCalledWith("");
+		expect(props.onTaskDescriptionChange).toHaveBeenCalledWith("");
 		expect(props.onImagesChange).toHaveBeenCalledWith([]);
 		expect(props.onStartInPlanModeChange).not.toHaveBeenCalled();
 		expect(props.onWorktreeModeChange).not.toHaveBeenCalled();
@@ -1459,7 +1510,7 @@ describe("TaskEditorDialog prompt draft ownership", () => {
 	});
 
 	function getPromptTextarea(): HTMLTextAreaElement {
-		const textarea = document.body.querySelector<HTMLTextAreaElement>("textarea");
+		const textarea = document.body.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务正文"]');
 		if (!textarea) {
 			throw new Error("Expected the prompt textarea to be rendered.");
 		}

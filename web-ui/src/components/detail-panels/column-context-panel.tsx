@@ -439,6 +439,7 @@ export function ColumnContextPanel({
 				<div
 					className={cn("flex min-h-0 flex-1 flex-col", showsCrossProjectRecentlyActiveTaskSwitcher && "hidden")}
 					data-testid="focus-view-current-project-stage-list"
+					data-focus-view-column-scroll-boundary=""
 				>
 					{/* 创建入口与置顶板同属固定区，不随下方 stage 列表滚走。 */}
 					{onCreateTask || onOpenPermanentlyDeletedTaskHistory ? (

@@ -85,6 +85,50 @@ async function setPanelScroll(page: Page, scrollTop: number | "end") {
 	}, scrollTop);
 }
 
+test("Pinned 与普通分组随滚动条宽度变化保持等宽", async ({ page }) => {
+	await page.addStyleTag({ content: "* { scrollbar-width: auto; } *::-webkit-scrollbar { width: 14px; }" });
+	await page.getByRole("button", { name: "加入置顶", exact: true }).click();
+	const scrollRoot = page.locator(scrollContainerSelector);
+	const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
+	const group = page.getByTestId("cross-project-task-switcher-section-running");
+	for (const scrollbarWidth of ["auto", "none", "auto"]) {
+		await scrollRoot.evaluate((element, value) => {
+			element.style.scrollbarGutter = "stable";
+			element.style.scrollbarWidth = value;
+		}, scrollbarWidth);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth))
+			[scrollbarWidth === "none" ? "toBe" : "toBeGreaterThan"](0);
+		await expect
+			.poll(async () => Math.abs((await pinned.boundingBox())!.width - (await group.boundingBox())!.width))
+			.toBeLessThan(1);
+		expect((await pinned.boundingBox())!.x).toBe((await group.boundingBox())!.x);
+	}
+	await page.screenshot({ path: test.info().outputPath("all-projects-pinned-width.png") });
+});
+
+test("吸顶标题与当前任务卡上的滚轮接续整列滚动", async ({ page }) => {
+	const scrollRoot = page.locator(scrollContainerSelector);
+	for (const edge of ["top", "bottom"] as const) {
+		for (const targetSelector of ["[data-focus-view-group-header]", stickySelector]) {
+			await setPanelScroll(page, edge === "top" ? "end" : 0);
+			const rail = page.locator(`.kb-stage-header-rail[data-edge="${edge}"]`);
+			const target = rail.locator(targetSelector).first();
+			await expect(target).toBeVisible();
+			await target.evaluate((element, direction) => {
+				element.scrollTop = direction === "top" ? 0 : element.scrollHeight;
+			}, edge);
+			await target.hover();
+			const before = await scrollRoot.evaluate((element) => element.scrollTop);
+			await page.mouse.wheel(0, edge === "top" ? -100 : 100);
+			await expect
+				.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+				[edge === "top" ? "toBeLessThan" : "toBeGreaterThan"](before);
+		}
+	}
+	expect(await page.evaluate(() => window.scrollY)).toBe(0);
+});
+
 test("Pinned 固定在列表上方且内部限高滚动，重复任务只有真实分组定位源，空收起组没有 body", async ({ page }) => {
 	await page.getByRole("button", { name: "加入置顶", exact: true }).click();
 	const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
@@ -324,6 +368,11 @@ for (const edge of ["top", "bottom"] as const) {
 		const naturalCard = sticky.getByRole("region", { name: "当前聚焦任务", exact: true });
 		const naturalCardHeight = (await naturalCard.boundingBox())!.height;
 		expect(naturalCardHeight).toBeGreaterThan(stickyBox!.height);
+		const columnScrollTop = await scrollRoot.evaluate((element) => element.scrollTop);
+		await sticky.hover();
+		await page.mouse.wheel(0, 60);
+		await expect.poll(() => sticky.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+		expect(await scrollRoot.evaluate((element) => element.scrollTop)).toBe(columnScrollTop);
 		await sticky.evaluate((element) => {
 			element.scrollTop = element.scrollHeight;
 		});
@@ -332,5 +381,13 @@ for (const edge of ["top", "bottom"] as const) {
 		await expect.poll(async () => (await naturalCard.boundingBox())!.height).toBe(naturalCardHeight);
 		expect((await sticky.boundingBox())!.height).toBe(stickyBox!.height);
 		await expect(page.locator(anchorSelector)).toHaveCount(1);
+		await sticky.evaluate((element, direction) => {
+			element.scrollTop = direction === "top" ? 0 : element.scrollHeight;
+		}, edge);
+
+		await page.mouse.wheel(0, edge === "top" ? -100 : 100);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+			[edge === "top" ? "toBeLessThan" : "toBeGreaterThan"](columnScrollTop);
 	});
 }

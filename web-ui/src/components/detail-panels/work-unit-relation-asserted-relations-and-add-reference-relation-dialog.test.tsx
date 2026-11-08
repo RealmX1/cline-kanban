@@ -388,10 +388,8 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		const dialog = findOpenAddRelationDialog();
 
 		// 什么都没填就提交：显示问题、不调用决策传输。
-		await clickElement(findButtonByText(dialog, "Add relation"));
-		expect(dialog.querySelector('[aria-label="Add relation form problems"]')?.textContent).toContain(
-			"Choose the other task.",
-		);
+		await clickElement(findButtonByText(dialog, "添加关系"));
+		expect(dialog.querySelector('[aria-label="添加关系表单问题"]')?.textContent).toContain("Choose the other task.");
 		expect(assertReferenceRelationMock).not.toHaveBeenCalled();
 
 		// 选择器：面板主体自己不在候选里；跨项目卡可选。
@@ -400,7 +398,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 				`[data-counterpart-candidate-kanban-board-card="${CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}:${SUBJECT_KANBAN_BOARD_CARD_TASK_ID_FOR_TEST}"]`,
 			),
 		).toBeNull();
-		await changeFormControlValue(findLabeledFormControl<HTMLInputElement>(dialog, "Other task"), "Creator");
+		await changeFormControlValue(findLabeledFormControl<HTMLInputElement>(dialog, "已有 Task"), "Creator");
 		const crossProjectCandidate = dialog.querySelector(
 			`[data-counterpart-candidate-kanban-board-card="${OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}:def34"] button`,
 		);
@@ -413,29 +411,24 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		).not.toBeNull();
 
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLSelectElement>(dialog, "关系类型（可选）"),
-			"reference_concerns_behavior_or_state_of",
+			dialog.querySelector<HTMLSelectElement>('select[aria-label="关系及方向"]')!,
+			"reference_diagnoses_agent_execution_trajectory_of",
 		);
 		expect(dialog.querySelector("[data-relation-statement-preview]")?.textContent).toContain(
-			"This task concerns the behavior or state of Creator card in other project",
+			"已有 Task：other-project / def34 / Creator card in other project",
 		);
 		await changeFormControlValue(
 			findLabeledFormControl<HTMLInputElement>(dialog, "关系理由（可选）"),
 			"Diagnosing its retry loop.",
 		);
 
-		await changeFormControlValue(findLabeledFormControl<HTMLInputElement>(dialog, "Concerned aspect"), "retry loop");
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLSelectElement>(dialog, "Nature of the concern"),
-			"diagnoses_failure_of",
-		);
-		await changeFormControlValue(
-			findLabeledFormControl<HTMLTextAreaElement>(dialog, "Evidence pointers"),
+			findLabeledFormControl<HTMLTextAreaElement>(dialog, "证据位置"),
 			"docs/retry-notes.md\n",
 		);
-		expect(dialog.querySelector('[aria-label="Add relation form problems"]')).toBeNull();
+		expect(dialog.querySelector('[aria-label="添加关系表单问题"]')).toBeNull();
 		const fetchCallCountBeforeSubmit = fetchRelationNeighborhoodSummaryMock.mock.calls.length;
-		const submitButton = findButtonByText(dialog, "Add relation");
+		const submitButton = findButtonByText(dialog, "添加关系");
 		const keyboardEvent = new KeyboardEvent("keydown", {
 			key: "Enter",
 			ctrlKey: true,
@@ -457,7 +450,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 					bareTaskId: SUBJECT_KANBAN_BOARD_CARD_TASK_ID_FOR_TEST,
 					workspaceId: CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST,
 				},
-				relationKind: "reference_concerns_behavior_or_state_of",
+				relationKind: "reference_diagnoses_agent_execution_trajectory_of",
 				counterpartWorkUnit: {
 					workUnitSelectorKind: "kanban_board_card_by_qualified_reference",
 					kanbanBoardCard: {
@@ -469,10 +462,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 				},
 				relationAssertionRationaleOneSentence: "Diagnosing its retry loop.",
 				relationAssertionEvidencePointers: ["docs/retry-notes.md"],
-				assertedRelationKindSpecificAttributes: {
-					concernedAspectSummary: "retry loop",
-					concernNature: "diagnoses_failure_of",
-				},
+				assertedRelationKindSpecificAttributes: {},
 			},
 		});
 		expect(document.body.querySelector('[role="dialog"]')).toBeNull();
@@ -485,7 +475,7 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		);
 	});
 
-	it("添加关系被 runtime 拒绝（同项目跨仓配对）：对话框不关，原样显示 runtime 那句话", async () => {
+	it("对端选择后迁移导致 runtime 拒绝：对话框不关，原样显示错误", async () => {
 		fetchRelationNeighborhoodSummaryMock.mockImplementation(async () =>
 			buildEmptyRelationNeighborhoodSummaryResponseForTest(),
 		);
@@ -500,15 +490,13 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 		const dialog = findOpenAddRelationDialog();
 		await clickElement(
 			dialog.querySelector(
-				`[data-counterpart-candidate-kanban-board-card="${CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}:ghi56"] button`,
+				`[data-counterpart-candidate-kanban-board-card="${OTHER_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}:def34"] button`,
 			)!,
 		);
 		await changeFormControlValue(
-			findLabeledFormControl<HTMLSelectElement>(dialog, "关系类型（可选）"),
+			dialog.querySelector<HTMLSelectElement>('select[aria-label="关系及方向"]')!,
 			"reference_is_cross_repository_counterpart_with",
 		);
-		// 同项目只提示、不拦（runtime 是权威）。
-		expect(dialog.textContent).toContain("Both tasks are in the same project");
 		await changeFormControlValue(
 			findLabeledFormControl<HTMLInputElement>(dialog, "Shared contract pointer"),
 			"api/schema.json",
@@ -517,10 +505,10 @@ describe("Relations panel · asserted relations and Add relation dialog", () => 
 			findLabeledFormControl<HTMLInputElement>(dialog, "关系理由（可选）"),
 			"They share the API schema.",
 		);
-		await clickElement(findButtonByText(dialog, "Add relation"));
+		await clickElement(findButtonByText(dialog, "添加关系"));
 
 		expect(assertReferenceRelationMock).toHaveBeenCalledTimes(1);
-		expect(findOpenAddRelationDialog().querySelector('[aria-label="Add relation failure"]')?.textContent).toBe(
+		expect(findOpenAddRelationDialog().querySelector('[aria-label="添加关系失败"]')?.textContent).toBe(
 			"关系没有保存：A cross-repository counterpart must live in a different Kanban project; use a generally-related relation instead.",
 		);
 		expect(showAppToastMock).not.toHaveBeenCalled();
