@@ -35,7 +35,7 @@ test("共享快捷操作首次悬停同时显示上方名称与下方菜单，�
 	expect(pageErrors).toEqual([]);
 });
 
-async function mountHoverExpansionHarness(page: Page, host: "home" | "focus") {
+async function mountHoverExpansionHarness(page: Page, host: "home" | "focus", historyCommitCount = 0) {
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	await page.route("**/api/**", async (route) => {
@@ -46,16 +46,35 @@ async function mountHoverExpansionHarness(page: Page, host: "home" | "focus") {
 			json: procedures.map((procedure) => ({
 				result: {
 					data:
-						procedure.includes("DirectlyRelatedTaskPreview") || procedure.includes("directlyRelatedTaskPreview")
+						procedure === "workspace.getTaskRetainedCommittedLineChangeHistory"
 							? {
-									entries: [],
-									totalTaskCount: 125,
-									mutedOnlyTaskCount: 0,
-									standaloneSessionCount: 0,
-									neighborhoodRevision: "empty",
-									nextCursor: null,
+									summary: {
+										status: "complete",
+										commitCount: 1,
+										additions: 123,
+										deletions: 45,
+										historyVersion: "wheel-history",
+										unavailableReason: null,
+									},
+									commits: Array.from({ length: historyCommitCount }, (_, index) => ({
+										commitSha: index.toString(16).padStart(40, "0"),
+										subject: `累计提交 ${index}`,
+										committedAtMs: 1_700_000_000_000 + index,
+										additions: 123,
+										deletions: 45,
+									})),
 								}
-							: { tasks: [] },
+							: procedure.includes("DirectlyRelatedTaskPreview") ||
+									procedure.includes("directlyRelatedTaskPreview")
+								? {
+										entries: [],
+										totalTaskCount: 125,
+										mutedOnlyTaskCount: 0,
+										standaloneSessionCount: 0,
+										neighborhoodRevision: "empty",
+										nextCursor: null,
+									}
+								: { tasks: [] },
 				},
 			})),
 		});
@@ -126,6 +145,76 @@ async function expectFloatingCardWithinViewport(scrollContainer: Locator, row: L
 }
 
 for (const host of ["home", "focus"] as const) {
+	for (const overlay of ["附加菜单", "侧边按钮", "累计统计", "Tooltip"] as const) {
+		test(`${host}：${overlay} 没有内部滚动时，慢速滚轮继续滚动所属列`, async ({ page }) => {
+			const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+			await hoverRow(page, rows.first());
+			let surface: Locator;
+			if (overlay === "附加菜单" || overlay === "Tooltip") {
+				await rows.first().getByRole("button", { name: "View original prompt", exact: true }).hover();
+				surface =
+					overlay === "附加菜单"
+						? page.getByRole("menu", { name: "查看原始 Prompt附加操作" })
+						: page.getByRole("tooltip").filter({ hasText: "查看原始 Prompt" });
+				if (overlay === "Tooltip") surface = surface.locator("..");
+			} else if (overlay === "侧边按钮") {
+				surface = page.locator(
+					`[id="${await rows.first().locator(".kb-board-card-shell").getAttribute("aria-owns")}"]`,
+				);
+			} else {
+				await rows.first().getByRole("button", { name: "已提交 +123 −45", exact: true }).hover();
+				surface = page.getByRole("dialog", { name: "任务已提交增删行明细", exact: true });
+			}
+			await expect(surface).toBeVisible();
+			await surface.hover();
+			const before = await scrollContainer.evaluate((element) => element.scrollTop);
+			await page.mouse.wheel(0, 8);
+			await expect.poll(() => scrollContainer.evaluate((element) => element.scrollTop)).toBeGreaterThan(before);
+			expect(await page.evaluate(() => window.scrollY)).toBe(0);
+			expect(pageErrors).toEqual([]);
+		});
+	}
+
+	test(`${host}：累计面板先内部滚动，到边界后接续原列`, async ({ page }) => {
+		const { scrollContainer, rows, pageErrors } = await mountHoverExpansionHarness(page, host, 60);
+		await hoverRow(page, rows.first());
+		await rows.first().getByRole("button", { name: "已提交 +123 −45", exact: true }).hover();
+		const panel = page.getByRole("dialog", { name: "任务已提交增删行明细", exact: true });
+		await expect(panel.getByText("累计提交 59", { exact: true })).toHaveCount(1);
+		await expect
+			.poll(() => panel.evaluate((element) => element.scrollHeight - element.clientHeight))
+			.toBeGreaterThan(0);
+		await panel.hover();
+		const before = await scrollContainer.evaluate((element) => element.scrollTop);
+		await page.mouse.wheel(0, 20);
+		await expect.poll(() => panel.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+		expect(await scrollContainer.evaluate((element) => element.scrollTop)).toBe(before);
+		await panel.evaluate((element) => {
+			element.scrollTop = element.scrollHeight;
+		});
+		await page.mouse.wheel(0, 8);
+		await expect.poll(() => scrollContainer.evaluate((element) => element.scrollTop)).toBeGreaterThan(before);
+		expect(pageErrors).toEqual([]);
+	});
+
+	test(`${host}：未悬停的紧凑卡片有柔和边界，摘要和标题属于同一卡面`, async ({ page }) => {
+		const { rows, pageErrors } = await mountHoverExpansionHarness(page, host);
+		const surface = rows.first().locator("[data-cross-project-task-switcher-compact-row-placeholder]");
+		await expect(surface).not.toHaveCSS("box-shadow", "none");
+		const box = (await surface.boundingBox())!;
+		for (const item of [
+			surface.locator("[data-task-card-secondary-metadata-row]"),
+			surface.getByText("悬浮任务 0", { exact: true }),
+		]) {
+			await expect(item).toBeVisible();
+			const child = (await item.boundingBox())!;
+			expect(child.y).toBeGreaterThanOrEqual(box.y);
+			expect(child.y + child.height).toBeLessThanOrEqual(box.y + box.height);
+		}
+		await page.screenshot({ path: test.info().outputPath(`${host}-compact-card-boundaries.png`) });
+		expect(pageErrors).toEqual([]);
+	});
+
 	test(`${host}：纯指针进入 Prompt 附加菜单后保持悬浮卡片`, async ({ page }) => {
 		const { rows, pageErrors } = await mountHoverExpansionHarness(page, host);
 		const row = rows.first();

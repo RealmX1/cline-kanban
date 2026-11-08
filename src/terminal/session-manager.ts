@@ -838,7 +838,7 @@ export interface StartTaskSessionRequest {
 	taskConversationSessionMainContextForkSourceCodexHomeDirectoryPath?: string;
 	revalidateTaskConversationSessionMainContextForkSource?: () => Promise<void>;
 	revalidateExistingMainSessionHandoverTargetBeforeLaunch?: () => Promise<void>;
-	beforeAgentProcessLaunch?: () => Promise<void>;
+	beforeAgentProcessLaunch?: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>;
 	terminalAgentModelOverrideSettings?: AgentAdapterLaunchInput["terminalAgentModelOverrideSettings"];
 }
 
@@ -996,7 +996,10 @@ function reconcileSummaryWithUnrecoverableRunningAgentProcessClaim(
 		// 交接冻结的目录与代际用于续跑核验；归零活性不能抹去已持久化的执行归属。
 		...(summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
 			? {}
-			: { workspacePath: null, startedAt: null }),
+			: {
+					workspacePath: summary.taskConversationSessionMetadata?.creationRequestId ? summary.workspacePath : null,
+					startedAt: null,
+				}),
 		pid: null,
 		lastOutputAt: null,
 		reviewReason: null,
@@ -6638,14 +6641,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 					runtimeSessionIncarnationId,
 				});
 			throwIfTaskSessionStartWasCancelled();
-			if (!hostedTerminalPtyProcessSpawner) await request.beforeAgentProcessLaunch?.();
+			const beforeAgentProcessLaunch = request.beforeAgentProcessLaunch
+				? async () =>
+						await request.beforeAgentProcessLaunch?.({
+							...cloneSummary(entry.summary),
+							runtimeSessionIncarnationId,
+							workspacePath: request.cwd,
+						})
+				: undefined;
+			if (!hostedTerminalPtyProcessSpawner) await beforeAgentProcessLaunch?.();
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
 				? await hostedTerminalPtyProcessSpawner.spawnHostedTerminalPtyProcess({
 						taskId: request.taskId,
 						hostedSessionKind: "task_agent_session",
-						beforeAgentProcessLaunch: request.beforeAgentProcessLaunch,
+						beforeAgentProcessLaunch,
 						binary: commandBinary,
 						args: commandArgs,
 						cwd: request.cwd,
@@ -7602,7 +7613,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			}),
 			...(entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover
 				? {}
-				: { workspacePath: null, startedAt: null }),
+				: {
+						workspacePath: entry.summary.taskConversationSessionMetadata?.creationRequestId
+							? entry.summary.workspacePath
+							: null,
+						startedAt: null,
+					}),
 			pid: null,
 			lastOutputAt: null,
 			reviewReason: null,
@@ -10064,6 +10080,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(entry.summary);
 	}
 
+	async stopTaskSessionAndConfirmExit(
+		taskId: string,
+	): Promise<{ summary: RuntimeTaskSessionSummary | null; processExitConfirmed: boolean }> {
+		const active = this.entries.get(taskId)?.active;
+		const stoppedRuntimeSessionIncarnationId = this.getSummary(taskId)?.runtimeSessionIncarnationId;
+		if (active) await this.forceStopTaskSession(taskId);
+		else this.stopTaskSession(taskId);
+		const summary = this.getSummary(taskId);
+		return {
+			summary,
+			processExitConfirmed: active
+				? active.session.hasExited() &&
+					summary?.runtimeSessionIncarnationId === stoppedRuntimeSessionIncarnationId &&
+					!this.entries.get(taskId)?.active
+				: Boolean(summary && summary.exitCode !== null),
+		};
+	}
+
 	// Stop the PTY and wait until the process group has actually exited.
 	// Tries SIGTERM first; escalates to SIGKILL after the graceful window so
 	// a wedged TUI cannot block a user-initiated refresh.
@@ -10124,8 +10158,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			logTuiFreezeError(
 				`[tui-freeze] force-kill-timeout taskId=${taskId} agentId=${entry.summary.agentId ?? "(none)"} pid=${entry.summary.pid ?? "(none)"}`,
 			);
-			entry.active = null;
-			this.applyConnectionRetryState(taskId, null);
+			if (entry.active === active) {
+				entry.active = null;
+				this.applyConnectionRetryState(taskId, null);
+			}
 		}
 		if (cleanupFn) {
 			cleanupFn().catch(() => undefined);

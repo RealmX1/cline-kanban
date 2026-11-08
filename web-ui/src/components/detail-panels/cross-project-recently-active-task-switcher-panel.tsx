@@ -249,6 +249,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
 				<div
 					ref={panelScrollContainerRef}
+					data-task-card-column-scroll-container=""
 					onScroll={(event) =>
 						writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
 					}

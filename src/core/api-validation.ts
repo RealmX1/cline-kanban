@@ -298,6 +298,7 @@ export function parseTaskSessionStopRequest(value: unknown): RuntimeTaskSessionS
 		throw new Error("Invalid task session stop payload.");
 	}
 	return {
+		...parsed,
 		taskId,
 	};
 }

@@ -1,6 +1,7 @@
 import * as Popover from "@radix-ui/react-popover";
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import { useTaskRetainedCommittedLineChangeHistory } from "@/hooks/use-task-retained-committed-line-change-history";
 import type { RuntimeTaskRetainedCommittedLineChangeSummary } from "@/runtime/types";
 
@@ -28,6 +29,7 @@ export function TaskRetainedCommittedLineChangeIndicator({
 	const [isOpen, setIsOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const popoverContentRef = useRef<HTMLDivElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding(triggerRef, popoverContentRef);
 	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const isPinnedOpenRef = useRef(false);
 	const historyVersion = summary?.historyVersion ?? "unavailable";
@@ -134,7 +136,7 @@ export function TaskRetainedCommittedLineChangeIndicator({
 					<Popover.Anchor virtualRef={triggerRef} />
 					<Popover.Portal>
 						<Popover.Content
-							ref={popoverContentRef}
+							ref={forwardWheelRef}
 							side="bottom"
 							align="start"
 							sideOffset={5}

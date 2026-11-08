@@ -3,6 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { type ReactNode, useEffect, useId, useRef } from "react";
 import { Button, type ButtonSize, type ButtonVariant } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 
 export function PrimaryActionButtonWithAdditionalActionMenu({
 	open,
@@ -31,6 +32,7 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 }) {
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const menuRef = useRef<HTMLDivElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding(triggerRef, menuRef);
 	const menuId = useId();
 	const openingInteractionRef = useRef<"hover" | "touch" | "keyboard">("hover");
 	const restoreTriggerFocusAfterEscapeRef = useRef(false);
@@ -211,7 +213,7 @@ export function PrimaryActionButtonWithAdditionalActionMenu({
 			<RadixPopover.Portal>
 				<RadixPopover.Content
 					data-mobile-focus-view-idle-collapse-suspension=""
-					ref={menuRef}
+					ref={forwardWheelRef}
 					id={menuId}
 					role="menu"
 					aria-label={`${primaryLabel}附加操作`}

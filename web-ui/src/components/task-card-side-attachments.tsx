@@ -2,6 +2,7 @@ import { autoUpdate, computePosition, flip, shift } from "@floating-ui/dom";
 import { type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { cn } from "@/components/ui/cn";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import { useMedia } from "@/utils/react-use";
 
 /** 桌面附着区逃离 column 裁切；触屏留在卡底，只有显示时才观察位置。 */
@@ -18,6 +19,7 @@ export function TaskCardSideAttachments({
 }) {
 	const usesTouchActionRow = useMedia("(hover: none), (pointer: coarse)", false);
 	const attachmentsElementRef = useRef<HTMLDivElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding(cardElementRef, attachmentsElementRef);
 	const [hasKeyboardFocus, setHasKeyboardFocus] = useState(false);
 	const [hasOpenPanel, setHasOpenPanel] = useState(false);
 	const isVisible = isCardActive || hasKeyboardFocus || hasOpenPanel;
@@ -50,7 +52,7 @@ export function TaskCardSideAttachments({
 	const attachments = (
 		<div
 			id={id}
-			ref={attachmentsElementRef}
+			ref={forwardWheelRef}
 			data-task-card-side-attachments=""
 			data-task-card-side-attachments-state={usesTouchActionRow || isVisible ? "visible" : "hidden"}
 			onFocusCapture={() => setHasKeyboardFocus(true)}

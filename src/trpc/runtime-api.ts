@@ -909,14 +909,39 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				!summary.agentNativeConversationSessionIdentity ||
 				!summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
 			)
-				return false;
-			return (
-				await runtimeApi.startTaskSession(
-					scope,
-					{ ...request, startInPlanMode: undefined, resumePriorAgentConversationWithoutResendingPrompt: true },
-					beforeLaunch,
-				)
-			).ok;
+				return { ok: false, summary: null, error: "缺少原生身份或原启动设置。" };
+			return await runtimeApi.startTaskSession(
+				scope,
+				{ ...request, startInPlanMode: undefined, resumePriorAgentConversationWithoutResendingPrompt: true },
+				beforeLaunch,
+			);
+		},
+		stopResumedSession: async (scope, ownedSummary) => {
+			const [terminal, acp] = await Promise.all([
+				deps.getScopedTerminalManager(scope),
+				deps.getScopedAcpTaskSessionService(scope),
+			]);
+			const isOwnedGeneration = (summary: RuntimeTaskSessionSummary | null) =>
+				Boolean(
+					ownedSummary.runtimeSessionIncarnationId &&
+						summary?.runtimeSessionIncarnationId === ownedSummary.runtimeSessionIncarnationId &&
+						summary.taskId === ownedSummary.taskId,
+				);
+			const current = acp.getSummary(ownedSummary.taskId) ?? terminal.getSummary(ownedSummary.taskId);
+			if (!isOwnedGeneration(current)) return { cancellationRequested: false, processExitConfirmed: false };
+			// 补偿只撤销本次活体；跨 await 写 side Stop 会把后来启动的新代一起禁止。
+			const currentAcp = acp.getSummary(ownedSummary.taskId);
+			if (isOwnedGeneration(currentAcp)) {
+				const stopped = await acp.stopTaskSessionForReclamation(ownedSummary.taskId);
+				return { cancellationRequested: true, processExitConfirmed: stopped.rootProcessExitConfirmed };
+			}
+			if (!isOwnedGeneration(terminal.getSummary(ownedSummary.taskId)))
+				return { cancellationRequested: false, processExitConfirmed: false };
+			const stopped = await terminal.stopTaskSessionAndConfirmExit(ownedSummary.taskId);
+			return {
+				cancellationRequested: Boolean(stopped.summary),
+				processExitConfirmed: stopped.processExitConfirmed,
+			};
 		},
 		verifyAssistantReportOrigin: async (
 			scope,
@@ -1019,6 +1044,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		createTaskConversationSession: (scope, input, evidence) => conversationSessions.create(scope, input, evidence),
 		listTaskConversationSessions: (scope, input) => conversationSessions.list(scope, input.taskId),
 		getTaskConversationSession: (scope, input) => conversationSessions.get(scope, input),
+		resumeTaskConversationSession: (scope, input, evidence) => conversationSessions.resume(scope, input, evidence),
 		reportTaskConversationSession: (scope, input, evidence) => conversationSessions.report(scope, input, evidence),
 		reconcileTaskConversationSessionOperations: async () => {
 			await reconcileAutomaticTaskNameBackfills(deps.broadcastRuntimeWorkspaceStateUpdated);
@@ -2320,14 +2346,19 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						relatedTaskConversationSessionIds.add(summary.taskId);
 					}
 				}
+				let explicitStopRecorded = false;
 				await conversationSessions
 					.recordExplicitStop(workspaceScope, body.taskId, [...relatedTaskConversationSessionIds])
+					.then(() => {
+						explicitStopRecorded = true;
+					})
 					.catch((error: unknown) => {
 						logAgentSessionRetentionWarning(
 							`侧会话 Stop 标记补充写入失败 taskId=${body.taskId} error=${String(error)}`,
 						);
 					});
 				let summary: RuntimeTaskSessionSummary | null = null;
+				let processExitConfirmed = body.confirmProcessExit === true;
 				for (const taskConversationSessionId of relatedTaskConversationSessionIds) {
 					await requestSessionOwnedBackgroundAgentExecutionCancellation({
 						workspaceId: workspaceScope.workspaceId,
@@ -2337,15 +2368,42 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							`后台 Agent 取消请求写入失败 taskId=${taskConversationSessionId} error=${String(error)}`,
 						);
 					});
-					const acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
-					const terminalSummary = acpSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					let acpSummary: RuntimeTaskSessionSummary | null;
+					let terminalSummary: RuntimeTaskSessionSummary | null;
+					if (body.confirmProcessExit) {
+						acpSummary = acpTaskSessionService.getSummary(taskConversationSessionId);
+						if (acpSummary) {
+							const stoppedRuntimeSessionIncarnationId = acpSummary.runtimeSessionIncarnationId;
+							const hadLiveConnection = acpTaskSessionService.hasLiveTaskSession(taskConversationSessionId);
+							const hadConfirmedProcessExit = acpSummary.pid === null && acpSummary.exitCode !== null;
+							const stopped =
+								await acpTaskSessionService.stopTaskSessionForReclamation(taskConversationSessionId);
+							processExitConfirmed &&=
+								(hadLiveConnection && stopped.rootProcessExitConfirmed) || hadConfirmedProcessExit;
+							acpSummary = acpTaskSessionService.getSummary(taskConversationSessionId);
+							processExitConfirmed &&=
+								acpSummary?.runtimeSessionIncarnationId === stoppedRuntimeSessionIncarnationId &&
+								!acpTaskSessionService.hasLiveTaskSession(taskConversationSessionId);
+							terminalSummary = null;
+						} else {
+							const stopped = await terminalManager.stopTaskSessionAndConfirmExit(taskConversationSessionId);
+							terminalSummary = stopped.summary;
+							processExitConfirmed &&= stopped.processExitConfirmed;
+						}
+					} else {
+						acpSummary = await acpTaskSessionService.stopTaskSession(taskConversationSessionId);
+						terminalSummary = acpSummary ? null : terminalManager.stopTaskSession(taskConversationSessionId);
+					}
 					if (taskConversationSessionId === body.taskId) {
 						summary = acpSummary ?? terminalSummary ?? summary;
 					}
 				}
 				return {
-					ok: relatedTaskConversationSessionIds.size > 1 || Boolean(summary),
+					ok: body.confirmProcessExit
+						? explicitStopRecorded && processExitConfirmed
+						: relatedTaskConversationSessionIds.size > 1 || Boolean(summary),
 					summary,
+					...(body.confirmProcessExit ? { explicitStopRecorded, processExitConfirmed } : {}),
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
