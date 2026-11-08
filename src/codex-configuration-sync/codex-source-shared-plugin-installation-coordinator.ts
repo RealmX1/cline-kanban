@@ -601,13 +601,7 @@ async function assertActualExecutable(
 		`${metadata.size}`,
 		`${metadata.mtimeNs}`,
 	]);
-	if (
-		path !== expected.nativeExecutableRealPath ||
-		digest !== expected.nativeExecutableIdentityDigest ||
-		(
-			await executeFile(binary, ["--version"], { cwd, env: environment, timeout: 3_000, maxBuffer: 4096 })
-		).stdout.trim() !== expected.nativeBinaryVersion
-	)
+	if (path !== expected.nativeExecutableRealPath || digest !== expected.nativeExecutableIdentityDigest)
 		throw new Error("实际 Codex binary 或能力在配置准备后发生变化，等待下一代重新核验。");
 }
 
@@ -1123,15 +1117,17 @@ export async function prepareCodexSharedPluginInstallationForNativeLaunch(input:
 	deferRemotePluginUpdatesUntilAfterConversationResume?: boolean;
 }) {
 	const { binding } = input;
+	await assertCodexConfigurationWriterBindingIdentity(binding);
 	const shared = binding.sourceSharedPluginInstallationDirectoriesBinding;
 	if (!shared)
 		return {
 			arguments: input.nativeLaunchArguments,
-			status: "unverified_native_capability" as const,
+			status:
+				binding.sourceSharedPluginInstallationDirectoriesCompatibilityObservation?.status ??
+				("unverified_native_capability" as const),
 			nativeUpgradeCount: 0,
 			nativePluginInstallationCount: 0,
 		};
-	await assertCodexConfigurationWriterBindingIdentity(binding);
 	await assertActualExecutable(binding, input.binary, input.environment, input.workingDirectory ?? process.cwd());
 	let configuration = await effectiveLaunchConfiguration(binding, input.nativeLaunchArguments);
 	const baseConfiguration = await effectiveLaunchConfiguration(binding, []);

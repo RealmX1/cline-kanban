@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +23,7 @@ import { withCodexAppServerRequestConnection } from "../../src/codex-native-sess
 import type { CodexConfigurationWriterBinding } from "../../src/core/codex-configuration-sync-contract";
 import { readProcessCommandLinesForProcessIds } from "../../src/diagnostics/posix-process-table-with-resource-columns-reader";
 import { lockedFileSystem } from "../../src/fs/locked-file-system";
+import { configureCodexHooks } from "../../src/terminal/codex-hook-config";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { requireDefinedTestFixtureValue } from "../utilities/require-defined-test-fixture-value";
 import {
@@ -301,6 +302,31 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 	"真实 Codex 同源插件安装记录与目录稳定性",
 	{ timeout: 240_000 },
 	() => {
+		it("Kanban 注入的 hooks 在当前原生程序中均已信任，不额外触发启动审批", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.upgrade();
+			const argumentsBeforeSubcommand: string[] = [];
+			configureCodexHooks(argumentsBeforeSubcommand);
+			await withCodexAppServerRequestConnection(
+				{
+					binary: native.binary,
+					workingDirectory: native.root,
+					environment: native.environment,
+					argumentsBeforeSubcommand,
+					experimentalApi: true,
+				},
+				async (connection) => {
+					const response = hooksResponseSchema.parse(
+						await connection.request("hooks/list", { cwds: [native.root] }),
+					);
+					const injectedHooks = response.data
+						.flatMap((entry) => entry.hooks)
+						.filter((hook) => hook.key.includes("<session-flags>"));
+					expect(injectedHooks.length).toBeGreaterThanOrEqual(7);
+					expect(injectedHooks.every((hook) => hook.trustStatus === "trusted")).toBe(true);
+				},
+			);
+		});
 		it("已有完整记录时，新 writer 不重新安装相同 revision 的最终插件目录", async () => {
 			const native = await createNativeInstallationFixture();
 			expect((await native.upgrade()).outcome?.upgradedRoots).toHaveLength(1);
@@ -310,6 +336,24 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			expect(completion, completion.stderr).toMatchObject({ exitCode: 0 });
 			expect(await native.snapshot()).toEqual(before);
 			expect(completion.outcome?.upgradedRoots).toEqual([]);
+		});
+		it("仅版本输出变为未来版本时仍按实际行为共享安装记录，不需要维护白名单", async () => {
+			const native = await createNativeInstallationFixture();
+			await native.upgrade();
+			const before = await native.snapshot();
+			const futureVersionBinary = join(native.root, "codex-future-version-behavior-fixture");
+			await writeFile(
+				futureVersionBinary,
+				`#!${process.execPath}\nconst cp=require('node:child_process');const args=process.argv.slice(2);if(args.length===1&&args[0]==='--version'){process.stdout.write('codex-cli 9.999.0');}else{const child=cp.spawn(${JSON.stringify(native.binary)},args,{stdio:'inherit'});child.on('exit',(code)=>{process.exitCode=code??1;});}\n`,
+				{ mode: 0o700 },
+			);
+			const binding = await native.writer(futureVersionBinary);
+			expect(binding.sourceSharedPluginInstallationDirectoriesBinding?.nativeCapabilityEvidence).toMatchObject({
+				nativeBinaryVersion: "codex-cli 9.999.0",
+				probeProtocolRevision: 1,
+			});
+			expect((await native.upgrade(binding.configurationHomeDirectoryPath)).exitCode).toBe(0);
+			expect(await native.snapshot()).toEqual(before);
 		});
 
 		it("同次启动重复插件 revision 查询只执行一次，后续启动仍重新核验", async () => {
@@ -1135,6 +1179,15 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 				environment: native.environment,
 			});
 			expect(legacy.sourceSharedPluginInstallationDirectoriesBinding).toBeUndefined();
+			// 显式重建历史混合布局；当前不兼容回退已使用完整独立目录。
+			await rm(join(legacy.configurationHomeDirectoryPath, "plugins"), { recursive: true });
+			await symlink(
+				join(native.sourceHome, "plugins"),
+				join(legacy.configurationHomeDirectoryPath, "plugins"),
+				"junction",
+			);
+			await rm(join(legacy.configurationHomeDirectoryPath, ".tmp", "marketplaces"), { recursive: true });
+			await mkdir(join(legacy.configurationHomeDirectoryPath, ".tmp", "marketplaces"));
 			expect((await native.upgrade(legacy.configurationHomeDirectoryPath)).outcome?.upgradedRoots).toHaveLength(1);
 			const before = await native.snapshot();
 			const originalMetadata = await readFile(

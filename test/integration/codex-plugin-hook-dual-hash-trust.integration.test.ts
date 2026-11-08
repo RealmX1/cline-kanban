@@ -6,7 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createCodexConfigurationProfile } from "../../src/codex-configuration-sync/codex-configuration-profiles";
 import { createCodexConfigurationSyncService } from "../../src/codex-configuration-sync/codex-configuration-sync-service";
-import { mutateCodexConfigurationSyncStore } from "../../src/codex-configuration-sync/codex-configuration-sync-store";
+import {
+	mutateCodexConfigurationSyncStore,
+	readCodexConfigurationSyncStore,
+} from "../../src/codex-configuration-sync/codex-configuration-sync-store";
 import { prepareCodexConfigurationWriterBinding } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -124,6 +127,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 					conversationSessionId: randomUUID(),
 					runtimeSessionIncarnationId: randomUUID(),
 					codexConfigurationProfileId,
+					binary: process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY,
+					environment: isolatedGitWorkspaceFixture.createIsolatedChildProcessEnvironment({
+						CODEX_HOME: sourceCodexConfigurationHomeDirectoryPath,
+						CODEX_SQLITE_HOME: sourceCodexConfigurationHomeDirectoryPath,
+					}),
 				});
 			const originConfigurationWriterBinding = await createConfigurationWriterBinding();
 			const otherConfigurationProfile = await mutateCodexConfigurationSyncStore((store) =>
@@ -150,6 +158,18 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 				const originConfigurationTable = parse(await readFile(originConfigurationFilePath, "utf8"));
 				originConfigurationTable.hooks = { state: { [initialNativePluginHook.key]: hookTrustDecision } };
 				await writeFile(originConfigurationFilePath, stringify(originConfigurationTable));
+				// 等待本次原生决定被持久观察；监听触发的旧扫描可能仍在执行。
+				await vi.waitFor(
+					async () => {
+						await configurationSynchronizationService.scan();
+						const stored = await readCodexConfigurationSyncStore();
+						const fieldKey = JSON.stringify(["config.toml", "hooks", "state", initialNativePluginHook.key]);
+						expect(
+							stored.writers[originConfigurationWriterBinding.writerId].lastObservedFields[fieldKey]?.value,
+						).toEqual(hookTrustDecision);
+					},
+					{ timeout: 5000, interval: 50 },
+				);
 			};
 			const buildConfirmedHookStateFromNativeFingerprint = (nativeHookFingerprint: string) => {
 				const [trusted_hash, trusted_content_hash] = nativeHookFingerprint.split("/");

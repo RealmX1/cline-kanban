@@ -5,10 +5,12 @@ export type CodexConfigurationPermissionSelectionSource = z.infer<
 >;
 
 const codexNativePluginInstallationCapabilityEvidenceSchema = z.object({
-	nativeBinaryVersion: z.literal("codex-cli 0.166.0"),
+	nativeBinaryVersion: z.string().min(1).nullable(),
 	nativeExecutableRealPath: z.string().min(1),
 	nativeExecutableIdentityDigest: z.string().min(1),
 	observedAtMs: z.number(),
+	probeProtocolRevision: z.number().int().positive().optional(),
+	evidencePath: z.string().min(1).optional(),
 });
 export const codexSourceSharedPluginInstallationDirectoriesBindingSchema = z.object({
 	layoutVersion: z.literal(1),
@@ -39,10 +41,11 @@ export const codexConfigurationWriterBindingSchema = z.object({
 		codexSourceSharedPluginInstallationDirectoriesBindingSchema.optional(),
 	sourceSharedPluginInstallationDirectoriesCompatibilityObservation: z
 		.object({
-			status: z.literal("unverified_native_capability"),
+			status: z.enum(["unverified_native_capability", "unsupported_native_capability"]),
 			nativeBinaryVersion: z.string().nullable(),
 			nativeExecutableRealPath: z.string().nullable(),
 			automaticRecheckCondition: z.literal("next_native_process_generation"),
+			reason: z.string().optional(),
 		})
 		.optional(),
 	launchConfigurationDigest: z.string().min(1),

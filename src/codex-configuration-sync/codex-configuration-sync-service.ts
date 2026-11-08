@@ -89,6 +89,10 @@ import {
 	resolveVerifiedCodexConfigurationSourceIdentity,
 } from "./codex-configuration-writer-binding";
 import {
+	recoverPendingCodexNativePluginInstallationCapabilityEvidence,
+	waitForPendingCodexNativePluginInstallationCapabilityEvidenceRecovery,
+} from "./codex-native-plugin-installation-capability-evidence";
+import {
 	codexNativeTurnPermissionTranscriptFingerprintOf,
 	codexNativeTurnPermissionTranscriptFingerprintStillCurrent,
 	readCodexNativeTurnPermissionEvidence,
@@ -1766,6 +1770,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		scanning = (async () => {
 			await observe();
 			await recover();
+			void recoverPendingCodexNativePluginInstallationCapabilityEvidence().catch(() => {});
 			void recoverPendingCodexSharedPluginInstallations(
 				Object.values((await readCodexConfigurationSyncStore()).writers).map((writer) => writer.binding),
 			);
@@ -2288,6 +2293,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			for (const watcher of watchers.values()) watcher.close();
 			watchers.clear();
 			await Promise.all([scanning, recovering, traceMonitor.close()]);
+			await waitForPendingCodexNativePluginInstallationCapabilityEvidenceRecovery();
 			await waitForCodexConfigurationRequestWriterOwnershipVerifications();
 		},
 	};
