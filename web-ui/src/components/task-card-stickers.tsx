@@ -6,6 +6,7 @@ import {
 	FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS,
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import {
 	resolveTaskStickerOverlayExplicitActivationSource,
 	type TaskCardStickersController,
@@ -13,6 +14,10 @@ import {
 
 export function TaskCardStickers({ controller }: { controller: TaskCardStickersController }) {
 	const titleId = useId();
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding(
+		controller.cardElementRef,
+		controller.overlayElementRef,
+	);
 	const { entries, editor, open, isSaving, readOnly } = controller;
 	const handlePrimaryActionKeyDown = useFormPrimaryActionSubmitKeyboardShortcut({
 		onSubmit: controller.saveDraft,
@@ -61,7 +66,7 @@ export function TaskCardStickers({ controller }: { controller: TaskCardStickersC
 			{open ? (
 				<Popover.Portal>
 					<Popover.Content
-						ref={controller.overlayElementRef}
+						ref={forwardWheelRef}
 						side="bottom"
 						align="start"
 						sideOffset={8}

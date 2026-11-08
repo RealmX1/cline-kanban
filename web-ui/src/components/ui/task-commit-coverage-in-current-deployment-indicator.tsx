@@ -2,6 +2,7 @@ import * as Popover from "@radix-ui/react-popover";
 import { Rocket } from "lucide-react";
 import { type KeyboardEvent, useEffect, useRef, useState } from "react";
 import { cn } from "@/components/ui/cn";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import type { RuntimeTaskCommitCoverageInCurrentDeployment } from "@/runtime/types";
 
 const unavailableReasonDescriptions: Record<string, string> = {
@@ -24,6 +25,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 }) {
 	const [isOpen, setIsOpen] = useState(false);
 	const triggerRef = useRef<HTMLButtonElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding<HTMLDivElement>(triggerRef);
 	const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const pinnedOpenRef = useRef(false);
 	const clearCloseTimer = () => {
@@ -106,6 +108,7 @@ export function TaskCommitCoverageInCurrentDeploymentIndicator({
 					<Popover.Anchor virtualRef={triggerRef} />
 					<Popover.Portal>
 						<Popover.Content
+							ref={forwardWheelRef}
 							aria-label="当前部署的提交覆盖"
 							side="bottom"
 							align="start"

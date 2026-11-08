@@ -1,9 +1,53 @@
-import { type CSSProperties, type ReactElement, type RefObject, useEffect, useState } from "react";
+import {
+	type CSSProperties,
+	type ReactElement,
+	type RefObject,
+	useCallback,
+	useEffect,
+	useLayoutEffect,
+	useState,
+} from "react";
 import {
 	computeFocusedCardRailContentMaximumHeight,
 	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
 } from "@/components/detail-panels/stage-header-rail-geometry";
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
+import { forwardWheelToScrollContainer } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
+
+/**
+ * Pinned 内容区自己的滚动条占宽时，把滚动槽伸进列滚动条已经预留的右侧空隙。
+ * 分组外框保持对齐，卡片内容宽度也不再被扣第二次。
+ */
+export function useFocusViewPinnedSectionOwnScrollbarSlot(): {
+	ref: (element: HTMLDivElement | null) => void;
+	style: CSSProperties;
+} {
+	const [element, setElement] = useState<HTMLDivElement | null>(null);
+	const [scrollbarWidth, setScrollbarWidth] = useState(0);
+	const ref = useCallback((next: HTMLDivElement | null) => {
+		setElement((current) => (current === next ? current : next));
+	}, []);
+	useLayoutEffect(() => {
+		if (!element) return;
+		const measure = (): void => {
+			const layoutScrollbarWidth = Math.max(0, element.offsetWidth - element.clientWidth);
+			setScrollbarWidth((current) => {
+				if (layoutScrollbarWidth > 0) return layoutScrollbarWidth === current ? current : layoutScrollbarWidth;
+				// 补偿刚好消掉滚动条时，立刻撤销会让占宽滚动条回来并来回抖动。
+				const contentStillFillsViewport = element.scrollHeight > element.clientHeight - 1;
+				return current > 0 && contentStillFillsViewport ? current : 0;
+			});
+		};
+		measure();
+		const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+		observer?.observe(element);
+		return () => observer?.disconnect();
+	}, [element]);
+	return {
+		ref,
+		style: scrollbarWidth > 0 ? { width: `calc(100% + ${scrollbarWidth}px)`, marginRight: -scrollbarWidth } : {},
+	};
+}
 
 /** 同一滚动口的上下分组标题共用 overlay 与滚动条避让。 */
 export function FocusViewGroupHeaderRails({
@@ -37,40 +81,7 @@ export function FocusViewGroupHeaderRails({
 		};
 		measure();
 		const forwardWheelToColumn = (event: WheelEvent): void => {
-			if (
-				event.defaultPrevented ||
-				event.ctrlKey ||
-				event.metaKey ||
-				event.shiftKey ||
-				event.deltaY === 0 ||
-				Math.abs(event.deltaX) > Math.abs(event.deltaY) ||
-				(event.target instanceof Node && root.contains(event.target))
-			)
-				return;
-			// 吸顶栏与固定区在主滚动口之外；内部列表先滚，到边界后由同列接续。
-			const columnCanScroll =
-				event.deltaY < 0 ? root.scrollTop > 1 : root.scrollTop + root.clientHeight < root.scrollHeight - 1;
-			for (const target of event.composedPath()) {
-				if (target === scrollBoundary) break;
-				if (!(target instanceof HTMLElement)) continue;
-				// 外层 rail 的少量标题溢出不能吞掉整次滚轮；主列到边界后仍可滚出剩余标题。
-				if (target.classList.contains("kb-stage-header-rail") && columnCanScroll) continue;
-				if (
-					["auto", "scroll"].includes(getComputedStyle(target).overflowY) &&
-					(event.deltaY < 0
-						? target.scrollTop > 1
-						: target.scrollTop + target.clientHeight < target.scrollHeight - 1)
-				)
-					return;
-			}
-			const deltaUnitHeight =
-				event.deltaMode === WheelEvent.DOM_DELTA_LINE
-					? Number.parseFloat(getComputedStyle(root).lineHeight) || 16
-					: event.deltaMode === WheelEvent.DOM_DELTA_PAGE
-						? root.clientHeight
-						: 1;
-			event.preventDefault();
-			root.scrollTop += event.deltaY * deltaUnitHeight;
+			forwardWheelToScrollContainer(event, root);
 		};
 		scrollBoundary?.addEventListener("wheel", forwardWheelToColumn, { passive: false });
 		const resizeObserver = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);

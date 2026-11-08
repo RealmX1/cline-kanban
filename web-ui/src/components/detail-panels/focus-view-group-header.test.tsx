@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { FocusViewGroupHeader } from "./focus-view-group-header";
-import { FocusViewGroupHeaderRails } from "./focus-view-group-header-rails";
+import { FocusViewGroupHeaderRails, useFocusViewPinnedSectionOwnScrollbarSlot } from "./focus-view-group-header-rails";
 
 it("折叠箭头与标题跳转独立，没有跳转能力时标题为文本", () => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -162,6 +162,42 @@ it("吸顶区滚轮优先内部滚动，到边界后交给同列，保留缩放�
 	} finally {
 		if (container.querySelector("span")) act(() => root.unmount());
 		container.remove();
+		vi.unstubAllGlobals();
+	}
+});
+
+it("Pinned 占宽滚动条伸进预留槽，卡片内容宽度不再被扣第二次", () => {
+	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+	const offsetWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth");
+	const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "clientWidth");
+	Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+		configurable: true,
+		get() {
+			return String(this.className).includes("overflow-y-auto") ? 214 : 200;
+		},
+	});
+	Object.defineProperty(HTMLElement.prototype, "clientWidth", {
+		configurable: true,
+		get() {
+			return 200;
+		},
+	});
+	function Slot() {
+		const slot = useFocusViewPinnedSectionOwnScrollbarSlot();
+		return <div ref={slot.ref} style={slot.style} className="overflow-y-auto" />;
+	}
+	const container = document.body.appendChild(document.createElement("div"));
+	const root = createRoot(container);
+	try {
+		act(() => root.render(<Slot />));
+		const scroller = container.firstElementChild as HTMLElement;
+		expect(scroller.style.width).toBe("calc(100% + 14px)");
+		expect(scroller.style.marginRight).toBe("-14px");
+	} finally {
+		act(() => root.unmount());
+		container.remove();
+		if (offsetWidth) Object.defineProperty(HTMLElement.prototype, "offsetWidth", offsetWidth);
+		if (clientWidth) Object.defineProperty(HTMLElement.prototype, "clientWidth", clientWidth);
 		vi.unstubAllGlobals();
 	}
 });

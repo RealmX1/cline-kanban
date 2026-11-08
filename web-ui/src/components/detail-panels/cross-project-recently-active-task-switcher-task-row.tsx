@@ -181,7 +181,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 					aria-hidden={isHoverFloatingCardVisible || undefined}
 					{...{ inert: isHoverFloatingCardVisible ? "" : undefined }}
 					className={cn(
-						"group relative flex min-w-0 rounded-md hover:bg-surface-3",
+						"group relative flex min-w-0 rounded-md bg-surface-2/35 ring-1 ring-inset ring-border-bright/65 hover:bg-surface-3",
 						isHoverFloatingCardVisible && "invisible pointer-events-none",
 					)}
 				>

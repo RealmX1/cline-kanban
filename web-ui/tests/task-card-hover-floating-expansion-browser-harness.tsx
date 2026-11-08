@@ -24,7 +24,8 @@ const taskCards: BoardCard[] = Array.from({ length: 35 }, (_, index) => ({
 	updatedAt: now - index,
 }));
 for (const card of taskCards) {
-	setTaskWorkspaceSnapshot({ taskId: card.id, path: `/isolated/project-a/${card.id}`, changedFiles: 3, additions: 4, deletions: 1 });
+	setTaskWorkspaceSnapshot({ taskId: card.id, path: `/isolated/project-a/${card.id}`, changedFiles: 3, additions: 4, deletions: 1,
+		taskRetainedCommittedLineChangeSummary: { status: "complete", commitCount: 1, additions: 123, deletions: 45, historyVersion: "wheel-history", unavailableReason: null } });
 }
 const entries: RuntimeCrossProjectTaskSwitcherEntry[] = taskCards.map((card, index) => ({
 	taskId: card.id, title: card.title, agentId: "codex", columnId: "review", createdAt: card.createdAt,

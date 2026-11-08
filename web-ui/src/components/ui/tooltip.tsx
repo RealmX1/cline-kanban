@@ -1,5 +1,6 @@
 import * as RadixTooltip from "@radix-ui/react-tooltip";
-import { isValidElement, type ReactNode } from "react";
+import { isValidElement, type ReactNode, useRef } from "react";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 
 export function TooltipProvider({ children }: { children: ReactNode }): React.ReactElement {
 	return <RadixTooltip.Provider delayDuration={400}>{children}</RadixTooltip.Provider>;
@@ -16,6 +17,8 @@ export function Tooltip({
 	side?: "top" | "right" | "bottom" | "left";
 	delayDuration?: number;
 }): React.ReactElement {
+	const triggerRef = useRef<HTMLButtonElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding<HTMLDivElement>(triggerRef);
 	if (!content) {
 		return <>{children}</>;
 	}
@@ -30,9 +33,12 @@ export function Tooltip({
 		);
 	return (
 		<RadixTooltip.Root delayDuration={delayDuration}>
-			<RadixTooltip.Trigger asChild>{trigger}</RadixTooltip.Trigger>
+			<RadixTooltip.Trigger ref={triggerRef} asChild>
+				{trigger}
+			</RadixTooltip.Trigger>
 			<RadixTooltip.Portal>
 				<RadixTooltip.Content
+					ref={forwardWheelRef}
 					side={side}
 					className="z-50 rounded-md border border-border bg-surface-2 px-2.5 py-1.5 text-xs text-text-primary shadow-lg"
 					style={{ animation: "kb-tooltip-show 100ms ease" }}

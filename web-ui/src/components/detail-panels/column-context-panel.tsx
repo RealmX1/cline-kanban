@@ -489,6 +489,7 @@ export function ColumnContextPanel({
 						<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
 							<div
 								ref={scrollContainerRef}
+								data-task-card-column-scroll-container=""
 								className="kb-detail-task-list-scroll flex flex-col gap-1 p-2"
 								data-selected-pinned={
 									stageHeaderPinLayout.focusedCardRailEdge !== "hidden" ? "true" : undefined
