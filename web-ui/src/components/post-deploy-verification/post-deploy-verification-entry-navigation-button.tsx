@@ -5,6 +5,7 @@ import { showAppToast } from "@/components/app-toaster";
 import { usePostDeployVerificationEntryNavigationHost } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-host-context";
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import { fetchTaskPostDeployVerificationEntryNavigationTargets } from "@/runtime/post-deploy-verification-entry-navigation-query";
 import type { RuntimePostDeployVerificationEntryNavigationTarget } from "@/runtime/types";
 
@@ -16,6 +17,8 @@ export function PostDeployVerificationEntryNavigationButton({
 	workspaceId?: string | null;
 }) {
 	const host = usePostDeployVerificationEntryNavigationHost();
+	const triggerRef = useRef<HTMLButtonElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding<HTMLDivElement>(triggerRef);
 	const targetWorkspaceId = workspaceId ?? host?.workspaceIdOwningHydratedBoard;
 	const [loading, setLoading] = useState(false);
 	const [targets, setTargets] = useState<RuntimePostDeployVerificationEntryNavigationTarget[]>([]);
@@ -97,6 +100,7 @@ export function PostDeployVerificationEntryNavigationButton({
 			<Popover.Root open={open} onOpenChange={setOpen}>
 				<Popover.Anchor asChild>
 					<Button
+						ref={triggerRef}
 						variant="ghost"
 						size="xs"
 						aria-label="定位部署后验证"
@@ -119,6 +123,7 @@ export function PostDeployVerificationEntryNavigationButton({
 				</Popover.Anchor>
 				<Popover.Portal>
 					<Popover.Content
+						ref={forwardWheelRef}
 						aria-label="选择部署后验证记录"
 						side="bottom"
 						align="end"

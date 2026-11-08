@@ -85,24 +85,49 @@ async function setPanelScroll(page: Page, scrollTop: number | "end") {
 	}, scrollTop);
 }
 
-test("Pinned 与普通分组随滚动条宽度变化保持等宽", async ({ page }) => {
+test("Pinned 内部溢出时与普通分组按实际滚动条占宽保持卡片等宽", async ({ page }) => {
 	await page.addStyleTag({ content: "* { scrollbar-width: auto; } *::-webkit-scrollbar { width: 14px; }" });
 	await page.getByRole("button", { name: "加入置顶", exact: true }).click();
 	const scrollRoot = page.locator(scrollContainerSelector);
 	const pinned = page.getByTestId("cross-project-task-switcher-section-pinned");
-	const group = page.getByTestId("cross-project-task-switcher-section-running");
+	const group = page.getByTestId("cross-project-task-switcher-section-remaining");
+	await pinned.getByRole("button", { name: /Show .*more/ }).click();
+	await page.mouse.move(1000, 700);
+	const pinnedScrollContainer = pinned.locator(":scope > div").last();
+	await expect
+		.poll(() => pinnedScrollContainer.evaluate((element) => element.scrollHeight - element.clientHeight))
+		.toBeGreaterThan(0);
+	const taskRowSelector =
+		'[data-cross-project-task-switcher-workspace-id="project-a"][data-cross-project-task-switcher-task-id="recent-0"]';
+	const pinnedCard = pinned.locator(taskRowSelector);
+	const regularCard = group.locator(taskRowSelector);
 	for (const scrollbarWidth of ["auto", "none", "auto"]) {
 		await scrollRoot.evaluate((element, value) => {
 			element.style.scrollbarGutter = "stable";
 			element.style.scrollbarWidth = value;
 		}, scrollbarWidth);
+		// overlay 滚动条实际占宽为 0；补偿必须跟随实测值，不能假定 stable 会强制占宽。
 		await expect
-			.poll(() => scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth))
-			[scrollbarWidth === "none" ? "toBe" : "toBeGreaterThan"](0);
+			.poll(() =>
+				scrollRoot.evaluate((element) => {
+					const boundary = element.closest<HTMLElement>("[data-focus-view-column-scroll-boundary]")!;
+					const reservedWidth = Number.parseFloat(
+						boundary.style.getPropertyValue("--kb-focus-view-column-scrollbar-width"),
+					);
+					return reservedWidth - (element.offsetWidth - element.clientWidth);
+				}),
+			)
+			.toBe(0);
+		if (scrollbarWidth === "none")
+			expect(await scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth)).toBe(0);
 		await expect
 			.poll(async () => Math.abs((await pinned.boundingBox())!.width - (await group.boundingBox())!.width))
 			.toBeLessThan(1);
 		expect((await pinned.boundingBox())!.x).toBe((await group.boundingBox())!.x);
+		await expect
+			.poll(async () => Math.abs((await pinnedCard.boundingBox())!.width - (await regularCard.boundingBox())!.width))
+			.toBeLessThan(1);
+		expect((await pinnedCard.boundingBox())!.x).toBe((await regularCard.boundingBox())!.x);
 	}
 	await page.screenshot({ path: test.info().outputPath("all-projects-pinned-width.png") });
 });

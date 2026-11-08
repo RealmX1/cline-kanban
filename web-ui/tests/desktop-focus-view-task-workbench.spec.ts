@@ -205,24 +205,48 @@ for (const sessionScenario of ["acp&column=review", "column=trash&auto_review"])
 	}
 }
 
-test("Project Specific 的 Pinned 与普通分组随滚动条宽度变化保持等宽", async ({ page }) => {
+test("Project Specific 的 Pinned 内部溢出时与普通分组按实际滚动条占宽保持卡片等宽", async ({ page }) => {
 	await openWorkbench(page, 1280, 700, "column=review&stage_headers");
 	await page.addStyleTag({ content: "* { scrollbar-width: auto; } *::-webkit-scrollbar { width: 14px; }" });
 	const scrollRoot = page.locator(".kb-detail-task-list-scroll");
 	const pinned = page.locator('[data-task-pinboard-container="focus-view-section"]');
 	const group = page.locator('[data-stage-section-id="backlog"]');
+	await pinned.evaluate((element) => {
+		element.style.maxHeight = "100px";
+	});
+	const pinnedScrollContainer = pinned.locator(":scope > div").last();
+	await expect
+		.poll(() => pinnedScrollContainer.evaluate((element) => element.scrollHeight - element.clientHeight))
+		.toBeGreaterThan(0);
+	const pinnedCard = pinned.locator('[data-task-card-render-role="pinned_card_copy_in_task_pinboard"]');
+	const regularCard = group.locator('[data-task-id="backlog-sample-0"]');
 	for (const scrollbarWidth of ["auto", "none", "auto"]) {
 		await scrollRoot.evaluate((element, value) => {
 			element.style.scrollbarGutter = "stable";
 			element.style.scrollbarWidth = value;
 		}, scrollbarWidth);
+		// overlay 滚动条实际占宽为 0；补偿必须跟随实测值，不能假定 stable 会强制占宽。
 		await expect
-			.poll(() => scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth))
-			[scrollbarWidth === "none" ? "toBe" : "toBeGreaterThan"](0);
+			.poll(() =>
+				scrollRoot.evaluate((element) => {
+					const boundary = element.closest<HTMLElement>("[data-focus-view-column-scroll-boundary]")!;
+					const reservedWidth = Number.parseFloat(
+						boundary.style.getPropertyValue("--kb-focus-view-column-scrollbar-width"),
+					);
+					return reservedWidth - (element.offsetWidth - element.clientWidth);
+				}),
+			)
+			.toBe(0);
+		if (scrollbarWidth === "none")
+			expect(await scrollRoot.evaluate((element) => element.offsetWidth - element.clientWidth)).toBe(0);
 		await expect
 			.poll(async () => Math.abs((await pinned.boundingBox())!.width - (await group.boundingBox())!.width))
 			.toBeLessThan(1);
 		expect((await pinned.boundingBox())!.x).toBe((await group.boundingBox())!.x);
+		await expect
+			.poll(async () => Math.abs((await pinnedCard.boundingBox())!.width - (await regularCard.boundingBox())!.width))
+			.toBeLessThan(1);
+		expect((await pinnedCard.boundingBox())!.x).toBe((await regularCard.boundingBox())!.x);
 	}
 	await page.screenshot({ path: test.info().outputPath("project-specific-pinned-width.png") });
 });
@@ -254,6 +278,32 @@ test("Project Specific 吸顶标题与当前任务卡上的滚轮接续整列滚
 	}
 	expect(await page.evaluate(() => window.scrollY)).toBe(0);
 });
+
+for (const source of ["列表卡片", "吸顶副本"] as const) {
+	test(`Project Specific ${source}的附加菜单不会截住慢速滚轮`, async ({ page }) => {
+		await openWorkbench(page, 1280, 700, "column=review&stage_headers");
+		const scrollRoot = page.locator(".kb-detail-task-list-scroll");
+		await scrollRoot.evaluate((element, sticky) => {
+			element.scrollTop = sticky ? element.scrollHeight : 0;
+			element.dispatchEvent(new Event("scroll"));
+		}, source === "吸顶副本");
+		const card =
+			source === "吸顶副本"
+				? page.getByTestId("stage-header-rail-focused-card")
+				: page.locator('[data-task-id="backlog-sample-0"]');
+		await expect(card).toBeVisible();
+		await card.hover();
+		await expect(card.locator(".kb-board-card-surface")).not.toHaveCSS("box-shadow", "none");
+		await card.getByRole("button", { name: "View original prompt", exact: true }).hover();
+		const menu = page.getByRole("menu", { name: "查看原始 Prompt附加操作" });
+		await menu.hover();
+		const before = await scrollRoot.evaluate((element) => element.scrollTop);
+		await page.mouse.wheel(0, source === "吸顶副本" ? -8 : 8);
+		await expect
+			.poll(() => scrollRoot.evaluate((element) => element.scrollTop))
+			[source === "吸顶副本" ? "toBeLessThan" : "toBeGreaterThan"](before);
+	});
+}
 
 test("Stage 与 sticky 标题共享 32px 几何，首卡操作避让标题", async ({ page }) => {
 	await openWorkbench(page, 1280, 900, "column=review&stage_headers");

@@ -27,6 +27,7 @@ import { Children } from "react";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import { CrossProjectTaskSwitcherRecentProjectMultiSelectFilter } from "@/components/detail-panels/cross-project-task-switcher-recent-project-multi-select-filter";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
+import { useFocusViewPinnedSectionOwnScrollbarSlot } from "@/components/detail-panels/focus-view-group-header-rails";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
@@ -110,6 +111,9 @@ function CrossProjectTaskSwitcherSectionFrame({
 	rendersGroupHeaderRailEntry?: boolean;
 	focusedCardContent?: ReactNode;
 }): ReactElement {
+	const pinnedScrollbarSlot = useFocusViewPinnedSectionOwnScrollbarSlot();
+	const reservesPinnedScrollbarSlot =
+		testIdSuffix === "pinned" && sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel";
 	if (rendersGroupHeaderRailEntry)
 		return (
 			<section
@@ -164,7 +168,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 			className={cn(
 				"flex flex-col rounded-lg border border-border bg-surface-1",
 				testIdSuffix === "pinned"
-					? "ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 min-h-0 max-h-[50%]"
+					? "ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 min-h-0 min-w-0 max-h-[50%]"
 					: "shrink-0",
 			)}
 			data-focus-view-group-section-id={testIdSuffix.replaceAll("-", "_")}
@@ -175,7 +179,12 @@ function CrossProjectTaskSwitcherSectionFrame({
 			{controls}
 			{Children.toArray(children).length > 0 ? (
 				<div
-					ref={sectionColumnScrollContainerBinding?.sectionColumnScrollContainerRef}
+					ref={(element) => {
+						if (reservesPinnedScrollbarSlot) pinnedScrollbarSlot.ref(element);
+						const scrollContainerRef = sectionColumnScrollContainerBinding?.sectionColumnScrollContainerRef;
+						if (scrollContainerRef) scrollContainerRef.current = element;
+					}}
+					style={reservesPinnedScrollbarSlot ? pinnedScrollbarSlot.style : undefined}
 					onScroll={sectionColumnScrollContainerBinding?.onSectionColumnScroll}
 					onPointerEnter={sectionColumnScrollContainerBinding?.onSectionColumnPointerEnter}
 					onPointerLeave={sectionColumnScrollContainerBinding?.onSectionColumnPointerLeave}

@@ -2,6 +2,7 @@ import { resolveMainTaskConversationSessionSummary } from "@runtime-session-acti
 import { ChevronDown, ChevronUp, Pin } from "lucide-react";
 import { type ReactElement, useState } from "react";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
+import { useFocusViewPinnedSectionOwnScrollbarSlot } from "@/components/detail-panels/focus-view-group-header-rails";
 
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
@@ -52,6 +53,7 @@ export function TaskPinboardSectionInFocusView({
 	// 只存内存：每次重新挂载都回到「默认 5 张」。
 	const [showsAllPinnedTasksBeyondDefaultVisibleCount, setShowsAllPinnedTasksBeyondDefaultVisibleCount] =
 		useState(false);
+	const pinnedScrollbarSlot = useFocusViewPinnedSectionOwnScrollbarSlot();
 
 	if (pinnedTasks.length === 0) {
 		return null;
@@ -68,7 +70,7 @@ export function TaskPinboardSectionInFocusView({
 	return (
 		<div
 			data-task-pinboard-container="focus-view-section"
-			className="ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 flex min-h-0 flex-col rounded-lg border border-border bg-surface-1"
+			className="ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 flex min-h-0 min-w-0 flex-col rounded-lg border border-border bg-surface-1"
 			// EXPERIMENT_NODE: Pinned 固定区的高度上限比例（50% 面板高），决定展开全部后给 stage 列表留多少空间。
 			style={{ maxHeight: "50%" }}
 		>
@@ -80,7 +82,11 @@ export function TaskPinboardSectionInFocusView({
 				onToggleExpanded={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
 			/>
 			{collapsed ? null : (
-				<div className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2 pt-3">
+				<div
+					ref={pinnedScrollbarSlot.ref}
+					style={pinnedScrollbarSlot.style}
+					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2 pt-3"
+				>
 					{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div key={card.id} className="mb-1.5 last:mb-0">
 							<TaskCardBody

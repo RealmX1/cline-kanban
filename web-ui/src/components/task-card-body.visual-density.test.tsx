@@ -197,7 +197,7 @@ describe("TaskCardBody 的视觉密度", () => {
 		{ dirty: true, committed: false },
 		{ dirty: false, committed: true },
 		{ dirty: true, committed: true },
-	])("dirty=$dirty、已提交=$committed：零值隐藏且 dirty 在组首", ({ dirty, committed }) => {
+	])("dirty=$dirty、已提交=$committed：在固定摘要单元格内分别隐藏零值", ({ dirty, committed }) => {
 		workspaceSnapshotMock.mockReturnValue({
 			path: "/isolated/task-1",
 			changedFiles: dirty ? 3 : 0,
@@ -214,18 +214,18 @@ describe("TaskCardBody 的视觉密度", () => {
 		});
 		for (const density of ["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const) {
 			const host = renderWithDensity(density);
-			const group = host.querySelector("[data-task-card-line-change-statistics-group]");
-			expect(Boolean(group)).toBe(dirty || committed);
-			expect(Boolean(group?.textContent?.includes("3 files"))).toBe(dirty);
-			expect(Boolean(group?.textContent?.includes("已提交 +10 −10"))).toBe(committed);
-			if (dirty && committed) expect(group?.textContent?.startsWith("(3 files +12 -4)")).toBe(true);
+			const dirtyCell = host.querySelector('[data-task-card-summary-cell="dirty"]');
+			const committedCell = host.querySelector('[data-task-card-summary-cell="committed_diff"]');
+			expect(host.querySelectorAll("[data-task-card-summary-cell]")).toHaveLength(6);
+			expect(dirtyCell?.textContent).toBe(dirty ? "(3 files +12 -4)" : "");
+			expect(committedCell?.textContent).toBe(committed ? "已提交 +10 −10" : "");
 		}
 	});
 
 	it("未知已提交统计继续显示为不可用，不当作零值隐藏", () => {
 		workspaceSnapshotMock.mockReturnValue({ path: "/isolated/task-1", changedFiles: 0, additions: 0, deletions: 0 });
 		const host = renderWithDensity("compact_row_in_focus_view_left_column");
-		expect(host.querySelector("[data-task-card-line-change-statistics-group]")?.textContent).toBe("已提交 —");
+		expect(host.querySelector('[data-task-card-summary-cell="committed_diff"]')?.textContent).toBe("已提交 —");
 	});
 
 	it("干净工作区和 Done 卡保留历史累计，dirty 零值仍隐藏", () => {
@@ -273,7 +273,7 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(metadataRow?.querySelector("[data-task-created-at-pill]")?.textContent).toBe("3d");
 		expect(metadataRow?.querySelector("[data-agent-response-generation-stopped-pill]")).not.toBeNull();
 		expect(metadataRow?.querySelector("[data-task-pinboard-pinned-marker]")).not.toBeNull();
-		expect(metadataRow?.querySelector("[data-task-directory]")).not.toBeNull();
+		expect(metadataRow?.hasAttribute("data-task-directory")).toBe(true);
 		const cancelButton = [...host.querySelectorAll("button")].find((button) =>
 			button.textContent?.includes("Cancel"),
 		);

@@ -1051,7 +1051,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 			}
 			style={{
 				...(cardDragBindings?.draggableStyle ?? {}),
-				// 紧凑密度的行之间靠 hover 底色区分，不需要标准卡片那么大的间距。
+				// 紧凑卡片用内描边区分边界，保留现有行间距与测量几何。
 				marginBottom: emitsCanonicalDomIdentity ? (isCompactRowInFocusViewLeftColumn ? 2 : 6) : 0,
 				// 本体可拖 → grab；置顶板分身 / 跨项目展开行 / PDV 面板条目单击进详情 → pointer；sticky 只读镜像什么都不做 → default。
 				cursor: emitsCanonicalDomIdentity
@@ -1073,10 +1073,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 			<div
 				className={
 					isCompactRowInFocusViewLeftColumn
-						? // 紧凑密度：与 All projects 行同一风格的平铺行（无边框、无底色，hover 才显底）。
+						? // 紧凑密度与 All projects 精简行共用低对比边界，hover 保留现有强调。
 							cn(
-								"kb-board-card-surface group/card relative flex flex-col rounded-md px-2 py-1.5",
-								isCrossProjectTaskSwitcherRowCopy && "bg-surface-2 ring-1 ring-border",
+								"kb-board-card-surface group/card relative flex flex-col rounded-md bg-surface-2/35 px-2 py-1.5 ring-1 ring-inset ring-border-bright/65",
+								isCrossProjectTaskSwitcherRowCopy && "bg-surface-2 ring-1 ring-inset ring-border-bright/65",
 
 								historicalSnapshot && "pr-14 sm:pr-10",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",

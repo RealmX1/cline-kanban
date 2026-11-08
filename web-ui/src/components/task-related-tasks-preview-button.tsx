@@ -15,6 +15,7 @@ import {
 	hasOpenModalDialogOutsideRelatedTaskPreview,
 	useRelatedTaskPreviewFocusReturnAfterModalDialog,
 } from "@/hooks/use-related-task-preview-focus-return-after-modal-dialog";
+import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import { resolveAssertedRelationDecisionSourceCategory } from "@/hooks/work-unit-asserted-relation-neighborhood-presentation-model";
 import { RELATION_GRAPH_LABELS } from "@/hooks/work-unit-relation-kind-display-labels";
 import { buildQualifiedTaskPreviewIdentityKey } from "@/runtime/directly-related-task-preview-query";
@@ -313,6 +314,7 @@ export function TaskRelatedTasksPreviewButton({
 	const [knownCount, setKnownCount] = useState<number | null>(null);
 	const triggerRef = useRef<HTMLButtonElement>(null);
 	const contentRef = useRef<HTMLDivElement>(null);
+	const forwardWheelRef = useTaskCardPortalWheelScrollForwarding(triggerRef, contentRef);
 	const isWithinSeparateFloatingForm = (target: EventTarget | null) => {
 		const floatingForm = target instanceof Element ? target.closest("[data-non-modal-floating-form-window]") : null;
 		return floatingForm !== null && !floatingForm.contains(triggerRef.current);
@@ -438,7 +440,7 @@ export function TaskRelatedTasksPreviewButton({
 					<Popover.Anchor virtualRef={triggerRef} />
 					<Popover.Portal>
 						<Popover.Content
-							ref={contentRef}
+							ref={forwardWheelRef}
 							id={dialogId}
 							tabIndex={-1}
 							data-related-tasks-preview-dialog=""

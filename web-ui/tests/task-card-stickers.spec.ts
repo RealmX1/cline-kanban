@@ -457,7 +457,8 @@ test("悬停便签时仍可打开关联任务预览，非模态浮层不阻挡�
 	const card = page.locator("[data-sticker-host='board'] .kb-board-card-shell");
 	await card.hover();
 	await expect(page.locator("[data-task-sticker-overlay]")).toBeVisible();
-	await card.getByRole("button", { name: "查看关联任务", exact: true }).click();
+	const sideAttachments = page.locator(`[id="${await card.getAttribute("aria-owns")}"]`);
+	await sideAttachments.getByRole("button", { name: "查看关联任务", exact: true }).click();
 	await expect(page.getByRole("dialog", { name: "关联任务预览", exact: true })).toBeVisible();
 	await expect(page.getByText("尚无直接关联任务。", { exact: true })).toBeVisible();
 });
