@@ -175,6 +175,7 @@ import type {
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
 	RuntimeTaskSessionStopResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionTransitionToReviewRequest,
 	RuntimeTaskSessionTransitionToReviewResponse,
 	RuntimeTaskTerminalRefreshRequest,
@@ -214,6 +215,8 @@ import {
 	type RuntimeTaskConversationSessionListResponse,
 	type RuntimeTaskConversationSessionReportRequest,
 	type RuntimeTaskConversationSessionReportResponse,
+	type RuntimeTaskConversationSessionResumeRequest,
+	type RuntimeTaskConversationSessionResumeResponse,
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
@@ -387,6 +390,8 @@ import {
 	runtimeTaskConversationSessionRenameRequestSchema,
 	runtimeTaskConversationSessionReportRequestSchema,
 	runtimeTaskConversationSessionReportResponseSchema,
+	runtimeTaskConversationSessionResumeRequestSchema,
+	runtimeTaskConversationSessionResumeResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -760,6 +765,11 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationSessionGetRequest,
 		) => Promise<RuntimeTaskConversationSessionGetResponse>;
+		resumeTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionResumeRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskConversationSessionResumeResponse>;
 		reportTaskConversationSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationSessionReportRequest,
@@ -778,7 +788,7 @@ export interface RuntimeTrpcContext {
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
-			beforeAgentProcessLaunch?: () => Promise<void>,
+			beforeAgentProcessLaunch?: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>,
 		) => Promise<RuntimeTaskSessionStartResponse>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1992,6 +2002,12 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.input(runtimeTaskConversationSessionGetRequestSchema)
 		.output(runtimeTaskConversationSessionGetResponseSchema)
 		.query(({ ctx, input }) => ctx.runtimeApi.getTaskConversationSession(ctx.workspaceScope, input)),
+	resumeTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionResumeRequestSchema)
+		.output(runtimeTaskConversationSessionResumeResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.resumeTaskConversationSession(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	reportTaskConversationSession: workspaceProcedure
 		.input(runtimeTaskConversationSessionReportRequestSchema)
 		.output(runtimeTaskConversationSessionReportResponseSchema)

@@ -21,6 +21,8 @@ import type {
 	RuntimeTaskConversationSessionRenameRequest,
 	RuntimeTaskConversationSessionReportRequest,
 	RuntimeTaskConversationSessionReportResponse,
+	RuntimeTaskConversationSessionResumeRequest,
+	RuntimeTaskConversationSessionResumeResponse,
 	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskSessionStartRequest,
 	RuntimeTaskSessionStartResponse,
@@ -104,8 +106,12 @@ export interface TaskConversationSessionServiceDependencies {
 	resumeSession(
 		scope: TaskConversationSessionWorkspaceScope,
 		summary: RuntimeTaskSessionSummary,
-		beforeLaunch: () => Promise<void>,
-	): Promise<boolean>;
+		beforeLaunch: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>,
+	): Promise<RuntimeTaskSessionStartResponse>;
+	stopResumedSession(
+		scope: TaskConversationSessionWorkspaceScope,
+		ownedSummary: RuntimeTaskSessionSummary,
+	): Promise<{ cancellationRequested: boolean; processExitConfirmed: boolean }>;
 	verifyAssistantReportOrigin(
 		scope: TaskConversationSessionWorkspaceScope,
 		source: RuntimeTaskSessionSummary,
@@ -131,6 +137,14 @@ export interface TaskConversationSessionServiceDependencies {
 
 class TaskConversationSessionExecutionProhibitedError extends Error {}
 class TaskConversationSessionContextSourceChangedError extends Error {}
+class TaskConversationSessionBoundResumeError extends Error {
+	constructor(
+		readonly status: "identity_unknown" | "identity_mismatch" | "unsupported",
+		message: string,
+	) {
+		super(message);
+	}
+}
 class TaskConversationSessionIdempotencyConflictError extends Error {
 	constructor(readonly creation: RuntimeTaskConversationSessionCreateResponse["creation"]) {
 		super("相同幂等键已用于不同的会话创建内容。");
@@ -277,6 +291,10 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 	const launchesInFlight = new Set<string>();
 	const namingInFlight = new Set<string>();
 	const reconciliationsInFlight = new Map<string, Promise<void>>();
+	const boundResumesInFlight = new Map<
+		string,
+		{ fingerprint: string; result: Promise<RuntimeTaskConversationSessionResumeResponse> }
+	>();
 	let closed = false;
 	const resolveStartupSettings = async (
 		scope: TaskConversationSessionWorkspaceScope,
@@ -466,6 +484,76 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 	const assertNotStopped = (store: TaskConversationSessionOperationStore, sessionId: string) => {
 		if (store.explicitlyStoppedSessionIds.includes(sessionId))
 			throw new TaskConversationSessionExecutionProhibitedError("显式 Stop 仍禁止自动执行。");
+	};
+	const assertBoundResumeEligible = async (
+		scope: TaskConversationSessionWorkspaceScope,
+		input: RuntimeTaskConversationSessionResumeRequest,
+		evidence: KanbanRequestOriginActorEvidence,
+		expectedWorkingDirectory?: string | null,
+		expectedRequesterSessionId?: string,
+	) => {
+		if (closed) throw new TaskConversationSessionExecutionProhibitedError("运行时正在关闭，保留原执行。");
+		const state = await deps.readState(scope);
+		const card = findCard(state.board, input.taskId);
+		if (!card || card.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs)
+			throw new TaskConversationSessionBoundResumeError("identity_mismatch", "宿主任务不存在或已换代。");
+		assertTaskAllowsExecution(state.board, input.taskId, input.expectedTaskIncarnationCreatedAtEpochMs);
+		const requesterSessionId = resolveCreatorSessionId(
+			{ taskId: input.taskId, creatorTaskConversationSessionId: expectedRequesterSessionId },
+			evidence,
+			state.sessions,
+			resolveMainTaskConversationSessionId(card),
+			scope.workspaceId,
+		);
+		if (
+			requireSession(state.sessions, requesterSessionId, input.taskId).taskConversationSessionMetadata
+				?.taskConversationSessionRole === "by_the_way"
+		)
+			throw new TaskConversationSessionExecutionProhibitedError("只读旁支会话不能控制其他执行。");
+		if (
+			input.taskConversationSessionId === card.id ||
+			resolveMainTaskConversationSessionId(card) === input.taskConversationSessionId
+		)
+			throw new TaskConversationSessionBoundResumeError(
+				"unsupported",
+				"受限接续只处理精确侧会话，不接续宿主主会话。",
+			);
+		const store = await operations.read(scope);
+		assertNotStopped(store, input.taskId);
+		assertNotStopped(store, requesterSessionId);
+		assertNotStopped(store, input.taskConversationSessionId);
+		const creation = store.creations.find(
+			(record) => record.progress.taskConversationSessionId === input.taskConversationSessionId,
+		);
+		if (!creation) throw new TaskConversationSessionBoundResumeError("identity_unknown", "缺少原会话创建记录。");
+		if (
+			creation.progress.taskId !== input.taskId ||
+			creation.progress.taskIncarnationCreatedAt !== input.expectedTaskIncarnationCreatedAtEpochMs
+		)
+			throw new TaskConversationSessionBoundResumeError("identity_mismatch", "原会话创建归属已变化。");
+		assertNotStopped(store, creation.progress.creatorTaskConversationSessionId);
+		const summary = state.sessions[input.taskConversationSessionId];
+		if (!summary?.agentNativeConversationSessionIdentity)
+			throw new TaskConversationSessionBoundResumeError(
+				"identity_unknown",
+				"原生会话身份缺证，不能以新建执行代替接续。",
+			);
+		if (!summary.workspacePath)
+			throw new TaskConversationSessionBoundResumeError(
+				"identity_unknown",
+				"缺少原执行工作目录，不能在重新解析的目录启动。",
+			);
+		if (
+			!doesConversationSessionBelongToTask(summary, input.taskId) ||
+			summary.agentNativeConversationSessionIdentity.nativeSessionId !== input.expectedNativeConversationSessionId ||
+			(expectedWorkingDirectory !== undefined && summary.workspacePath !== expectedWorkingDirectory)
+		)
+			throw new TaskConversationSessionBoundResumeError("identity_mismatch", "原生身份或原工作目录已变化。");
+		if (summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover)
+			throw new TaskConversationSessionExecutionProhibitedError("主会话交接暂停仍禁止自动接续。");
+		if (!summary.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings)
+			throw new TaskConversationSessionBoundResumeError("unsupported", "缺少该侧会话自己的持久启动设置。");
+		return { summary, requesterSessionId };
 	};
 	const assertCreationEligible = async (
 		scope: TaskConversationSessionWorkspaceScope,
@@ -822,7 +910,7 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 					current.resumeMayHaveStarted = true;
 				});
 			});
-			if (!resumed) return;
+			if (!resumed.ok) return;
 			await operations.update(scope, (store) => {
 				const current = store.reports.find((entry) => entry.receipt.reportId === report.receipt.reportId);
 				if (current) current.resumeMayHaveStarted = false;
@@ -1047,6 +1135,92 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 
 	return {
 		reconcile,
+		async resume(
+			scope: TaskConversationSessionWorkspaceScope,
+			input: RuntimeTaskConversationSessionResumeRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		): Promise<RuntimeTaskConversationSessionResumeResponse> {
+			const key = JSON.stringify([scope.workspaceId, input.taskConversationSessionId]);
+			const fingerprint = JSON.stringify([input, evidence.decodedCliActorClaimsRequestHeader]);
+			const existing = boundResumesInFlight.get(key);
+			if (existing)
+				return existing.fingerprint === fingerprint
+					? existing.result
+					: { ok: false, status: "identity_mismatch", summary: null, error: "该侧会话已有不同绑定的恢复操作。" };
+			const result = (async (): Promise<RuntimeTaskConversationSessionResumeResponse> => {
+				let executionMayHaveOccurred = false;
+				let ownedSummary: RuntimeTaskSessionSummary | null = null;
+				let requestedByTaskConversationSessionId: string | undefined;
+				try {
+					const original = await assertBoundResumeEligible(scope, input, evidence);
+					const originalWorkingDirectory = original.summary.workspacePath;
+					requestedByTaskConversationSessionId = original.requesterSessionId;
+					const resumed = await deps.resumeSession(scope, original.summary, async (launchingSummary) => {
+						await assertBoundResumeEligible(
+							scope,
+							input,
+							evidence,
+							originalWorkingDirectory,
+							requestedByTaskConversationSessionId,
+						);
+						if (!launchingSummary.runtimeSessionIncarnationId)
+							throw new TaskConversationSessionBoundResumeError("identity_unknown", "缺少本次实际启动代际。");
+						if (
+							launchingSummary.taskId !== input.taskConversationSessionId ||
+							launchingSummary.workspacePath !== originalWorkingDirectory ||
+							launchingSummary.agentNativeConversationSessionIdentity?.nativeSessionId !==
+								input.expectedNativeConversationSessionId
+						)
+							throw new TaskConversationSessionBoundResumeError(
+								"identity_mismatch",
+								"实际启动与原会话身份或工作目录不匹配。",
+							);
+						ownedSummary = structuredClone(launchingSummary);
+						executionMayHaveOccurred = true;
+					});
+					const current = await assertBoundResumeEligible(
+						scope,
+						input,
+						evidence,
+						originalWorkingDirectory,
+						requestedByTaskConversationSessionId,
+					);
+					return {
+						ok: resumed.ok,
+						status: resumed.ok ? "resumed" : "execution_failed",
+						summary: current.summary,
+						requestedByTaskConversationSessionId,
+						...(resumed.error ? { error: resumed.error } : {}),
+					};
+				} catch (error) {
+					const postLaunchCancellation = ownedSummary
+						? await deps
+								.stopResumedSession(scope, ownedSummary)
+								.catch(() => ({ cancellationRequested: false, processExitConfirmed: false }))
+						: undefined;
+					return {
+						ok: false,
+						status:
+							error instanceof TaskConversationSessionExecutionProhibitedError
+								? "execution_prohibited"
+								: error instanceof TaskConversationSessionBoundResumeError
+									? error.status
+									: "identity_unknown",
+						summary: null,
+						executionMayHaveOccurred,
+						requestedByTaskConversationSessionId,
+						...(postLaunchCancellation ? { postLaunchCancellation } : {}),
+						error: error instanceof Error ? error.message : String(error),
+					};
+				}
+			})();
+			boundResumesInFlight.set(key, { fingerprint, result });
+			try {
+				return await result;
+			} finally {
+				if (boundResumesInFlight.get(key)?.result === result) boundResumesInFlight.delete(key);
+			}
+		},
 		async lookupCreation(
 			scope: TaskConversationSessionWorkspaceScope,
 			input: RuntimeTaskConversationSessionCreateRequest,
@@ -1452,7 +1626,8 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				listed.creations.find((entry) => entry.taskConversationSessionId === input.taskConversationSessionId) ??
 				null;
 			if (!summary && !creation) throw new Error("会话不存在或不属于同一任务。");
-			const reports = (await operations.read(scope)).reports
+			const sessionOperations = await operations.read(scope);
+			const reports = sessionOperations.reports
 				.filter(
 					(entry) =>
 						entry.taskId === input.taskId &&
@@ -1462,6 +1637,9 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				.map((entry) => entry.receipt);
 			return {
 				summary,
+				taskConversationSessionExplicitlyStopped: sessionOperations.explicitlyStoppedSessionIds.includes(
+					input.taskConversationSessionId,
+				),
 				creation,
 				reports,
 				history: await deps.readHistory(scope, {

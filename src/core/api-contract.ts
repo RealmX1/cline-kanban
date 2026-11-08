@@ -4415,12 +4415,15 @@ export type RuntimeTaskSessionStartResponse = z.infer<typeof runtimeTaskSessionS
 
 export const runtimeTaskSessionStopRequestSchema = z.object({
 	taskId: z.string(),
+	confirmProcessExit: z.boolean().optional(),
 });
 export type RuntimeTaskSessionStopRequest = z.infer<typeof runtimeTaskSessionStopRequestSchema>;
 
 export const runtimeTaskSessionStopResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	explicitStopRecorded: z.boolean().optional(),
+	processExitConfirmed: z.boolean().optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
@@ -4812,6 +4815,36 @@ export const runtimeTaskConversationSessionGetRequestSchema = z.object({
 	cursor: z.string().max(4096).nullish(),
 });
 export type RuntimeTaskConversationSessionGetRequest = z.infer<typeof runtimeTaskConversationSessionGetRequestSchema>;
+export const runtimeTaskConversationSessionResumeRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().int().nonnegative(),
+	taskConversationSessionId: z.string().min(1),
+	expectedNativeConversationSessionId: z.string().min(1),
+});
+export type RuntimeTaskConversationSessionResumeRequest = z.infer<
+	typeof runtimeTaskConversationSessionResumeRequestSchema
+>;
+export const runtimeTaskConversationSessionResumeResponseSchema = z.object({
+	ok: z.boolean(),
+	status: z.enum([
+		"resumed",
+		"identity_unknown",
+		"identity_mismatch",
+		"execution_prohibited",
+		"unsupported",
+		"execution_failed",
+	]),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	executionMayHaveOccurred: z.boolean().optional(),
+	postLaunchCancellation: z
+		.object({ cancellationRequested: z.boolean(), processExitConfirmed: z.boolean() })
+		.optional(),
+	requestedByTaskConversationSessionId: z.string().optional(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskConversationSessionResumeResponse = z.infer<
+	typeof runtimeTaskConversationSessionResumeResponseSchema
+>;
 export const runtimeTaskConversationSessionReportRequestSchema = z.object({
 	taskId: z.string().min(1),
 	idempotencyKey: z.string().trim().min(1).max(200),
@@ -4834,6 +4867,8 @@ export type RuntimeTaskConversationSessionReportResponse = z.infer<
 >;
 export const runtimeTaskConversationSessionGetResponseSchema = z.object({
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	// 只报告该精确会话自己的持久 Stop marker；自然退出及宿主/创建者 marker 不等价。
+	taskConversationSessionExplicitlyStopped: z.boolean().optional(),
 	reports: z.array(runtimeTaskConversationSessionReportResponseSchema),
 	creation: runtimeTaskConversationSessionCreationProgressSchema.nullable(),
 	history: runtimeTaskConversationHistoryPageResponseSchema,

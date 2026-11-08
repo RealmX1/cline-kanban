@@ -147,6 +147,7 @@ import {
 	deferHarnessGeneratedPromptDuringAgentSessionRestoration,
 	listHarnessGeneratedPromptsDeferredDuringAgentSessionRestoration,
 } from "../../../src/state/restoration-deferred-harness-generated-prompt-store";
+import { getRuntimeHomePath as getTaskConversationSessionOperationsRuntimeHomePath } from "../../../src/state/runtime-home-path";
 import { type StartTaskSessionRequest, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import type { HostedTerminalPtyProcessSpawnRequest } from "../../../src/terminal/terminal-pty-process-handle";
 import type { RuntimeTrpcContext } from "../../../src/trpc/app-router";
@@ -455,7 +456,7 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 		const spawnTerminalProcess = vi.fn(() => createSummary());
 		const terminalManager = {
 			startTaskSession: vi.fn(async (request: StartTaskSessionRequest) => {
-				await request.beforeAgentProcessLaunch?.();
+				await request.beforeAgentProcessLaunch?.(createSummary());
 				return spawnTerminalProcess();
 			}),
 			applyTurnCheckpoint: vi.fn(),
@@ -1614,6 +1615,65 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			expect(terminalManager.stopTaskSession).toHaveBeenCalledExactlyOnceWith(side.taskId);
 			if (stopWholeTask) expect(acpService.stopTaskSession).toHaveBeenCalledWith(main.taskId);
 			else expect(acpService.stopTaskSession).not.toHaveBeenCalledWith(main.taskId);
+		},
+	);
+
+	it.each([
+		{ transport: "acp", stopPersistenceFails: false, exitConfirmed: true, hasLiveConnection: true },
+		{ transport: "acp", stopPersistenceFails: false, exitConfirmed: false, hasLiveConnection: true },
+		{ transport: "acp", stopPersistenceFails: true, exitConfirmed: true, hasLiveConnection: true },
+		{ transport: "acp", stopPersistenceFails: false, exitConfirmed: true, hasLiveConnection: false },
+		{ transport: "pty", stopPersistenceFails: false, exitConfirmed: true, hasLiveConnection: true },
+		{ transport: "pty", stopPersistenceFails: false, exitConfirmed: false, hasLiveConnection: true },
+		{ transport: "pty", stopPersistenceFails: true, exitConfirmed: true, hasLiveConnection: true },
+	])(
+		"精确停止分别返回持久撤销和实际退出证据 %j",
+		async ({ transport, stopPersistenceFails, exitConfirmed, hasLiveConnection }) => {
+			const side = createCollaborationSummary();
+			let connectionLive = hasLiveConnection;
+			const workspaceId = `stop-confirmation-${transport}-${stopPersistenceFails}-${exitConfirmed}-${hasLiveConnection}`;
+			const acpService = {
+				listSummaries: () => (transport === "acp" ? [side] : []),
+				getSummary: () => (transport === "acp" ? side : null),
+				hasLiveTaskSession: () => connectionLive,
+				stopTaskSessionForReclamation: vi.fn(async () => {
+					connectionLive = false;
+					return { rootProcessExitConfirmed: exitConfirmed };
+				}),
+			};
+			const terminalManager = {
+				listSummaries: () => (transport === "pty" ? [side] : []),
+				stopTaskSessionAndConfirmExit: vi.fn(async () => ({ summary: side, processExitConfirmed: exitConfirmed })),
+			};
+			if (stopPersistenceFails)
+				mkdirSync(
+					join(
+						getTaskConversationSessionOperationsRuntimeHomePath(),
+						"task-conversation-session-operations",
+						"explicit-session-stop-markers",
+						`${createHash("sha256").update(workspaceId).digest("hex")}.json`,
+					),
+					{ recursive: true },
+				);
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: () => workspaceId,
+				loadScopedRuntimeConfig: async () => createRuntimeConfigState(),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: async () => terminalManager as never,
+				getScopedAcpTaskSessionService: async () => acpService as never,
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			expect(
+				await api.stopTaskSession(
+					{ workspaceId, workspacePath: "/tmp/repo" },
+					{ taskId: side.taskId, confirmProcessExit: true },
+				),
+			).toMatchObject({
+				ok: !stopPersistenceFails && exitConfirmed && (transport === "pty" || hasLiveConnection),
+				explicitStopRecorded: !stopPersistenceFails,
+				processExitConfirmed: exitConfirmed && (transport === "pty" || hasLiveConnection),
+			});
 		},
 	);
 

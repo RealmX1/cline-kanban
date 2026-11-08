@@ -67,6 +67,52 @@ kanban task conversation-session report --task-id <Task ID> --message '检查结
 
 `get` 返回创建进度、摘要、回报接受状态和分页历史；用 `nextCursor` 作为下一次 `--cursor`。追问复用 `task message --attempt-id <会话 ID>`。可写 peer 的 `report` 默认给创建者，`--target-session current_main` 固定受理时当前主会话，也可填同 Task 的任意 Agent 会话 ID；跨 Task 被拒绝。报告正文会标识来源及程序化性质，不解除等待真人的问答、权限、计划或交接门禁。
 
+### 冻结创建请求与受限接续
+
+自动化调用者可以把完整 `RuntimeTaskConversationSessionCreateRequest` 保存为持久 JSON，再用同一份文件预览、查询及创建：
+
+```sh
+kanban task conversation-session preview --project-path <主仓库> --request-file <绝对路径.json>
+kanban task conversation-session lookup --project-path <主仓库> --request-file <同一绝对路径.json>
+kanban task conversation-session create --project-path <主仓库> --request-file <同一绝对路径.json>
+```
+
+请求文件例如：
+
+```json
+{
+  "taskId": "宿主任务ID",
+  "expectedTaskIncarnationCreatedAtEpochMs": 1700000000000,
+  "creatorTaskConversationSessionId": "实际创建者会话ID",
+  "idempotencyKey": "本次执行的稳定请求键",
+  "sessionRole": "task_collaborator",
+  "contextSource": "fresh",
+  "agentId": "codex",
+  "startInPlanMode": false,
+  "initialMessage": "按冻结材料完成指定工作，并发布持久结果。",
+  "creationReason": "独立核对工程材料"
+}
+```
+
+文件按完整 schema 校验，`startInPlanMode` 必须显式存在；正文、模型、权限等创建参数不能再从其他 flags 混入。文件中的 Task 身份优先于环境默认值，显式 `--task-id` 与文件不一致时拒绝。原 flags 模式继续可用，并支持 `--task-incarnation`、`--creator-session-id`；`create --preview` 保持只读预览。`preview/create` 返回 `resolvedSettings`，Plan 与工具权限分别解释。
+
+`lookup` 必须绑定宿主 incarnation，并使用原冻结请求核对原创建者和全部材料。未登记返回 `{ "ok": true, "found": false, "creation": null, "summary": null }`；已登记返回 `found: true` 与原创建进度／摘要；相同 key 不同材料保留 `ok: false, idempotencyConflict: true`。查询没有创建副作用。创建回执丢失后先查原请求；`awaiting_startup_evidence` 仍是启动待证，不能改 key 重开或重投首条消息。
+
+已经拥有精确 side 身份时，可以单独接续或停止它：
+
+```sh
+kanban task conversation-session resume --project-path <主仓库> --task-id <宿主任务ID> --task-incarnation <createdAt> --session-id <side会话ID> --expected-native-session-id <已知nativeID>
+kanban task conversation-session stop --project-path <主仓库> --task-id <宿主任务ID> --task-incarnation <createdAt> --session-id <side会话ID> --expected-native-session-id <已知nativeID>
+```
+
+两者核对宿主代次、精确 side、原创建记录以及可选的已知 native ID，拒绝通过此入口操作宿主或当前主会话。接续还要求原生身份、原工作目录及该 side 自己的持久启动设置；缺证返回 `identity_unknown`，不匹配为 `identity_mismatch`，能力不满足为 `unsupported`。接续不发送初始正文、不新建会话、不移列；停止不影响兄弟会话。冷重建只归零活性，保留原创建记录绑定的执行目录；公共恢复在原目录缺证时于调用 transport 前返回 `identity_unknown`，实际 spawn 前还核对真实目录。
+
+受限接续经公共 `runtime.resumeTaskConversationSession`，沿真实 CLI actor evidence 核对调用者及其已声明 native ID，回执 `requestedByTaskConversationSessionId` 保留实际来源。服务端在准备、实际启动前及启动返回后检查绑定与执行资格，同一 side 的相同请求并发只恢复一次。持久 Stop、Done、搁置和主会话交接暂停继续禁止恢复，真实 Stop 返回 `execution_prohibited`。**旧外部 `startTaskSession` 表示显式启动，会解除对应 Stop；程序化恢复消费者不能用它替代受限接续。**
+
+如果启动已经发生，随后读到 Stop 或绑定漂移，运行时只取消实际启动边界捕获的 `runtimeSessionIncarnationId`，不从可能折叠到既有活体或被新代覆盖的通用返回摘要推断归属。`postLaunchCancellation.cancellationRequested` 表示已请求该代取消，`processExitConfirmed` 独立表示是否取得退出证明；后一字段未确证时保持 unknown，不能把已发信号当成退出。`executionMayHaveOccurred` 保留执行可能已经发生的事实，不能成为重新派发的依据。CLI 的 `serverSideAtomicIdentityCheck: false` 明确这些前后核验不等于跨所有生命周期读写的原子 CAS。
+
+`get` 顶层的 `taskConversationSessionExplicitlyStopped` 只报告**该 side 自身**是否存在持久 Stop marker。它与原生会话同一、进程退出、创建者 Stop 以及宿主 Stop 是不同事实；缺字段的旧服务保持 unknown。取消回执丢失时，调用者须同时核对原执行退出及这个持久撤销事实，不能把自然退出当成取消已生效。预留 side 尚无摘要且未声明 native ID 时，CLI 仍按持久创建归属调用精确撤销入口。CLI stop 请求 `confirmProcessExit: true`，仅持久撤销及真实退出都已确认才返回 `ok: true/status: stopped`；`explicitStopRecorded` 和 `processExitConfirmed` 分别报告两项证据，缺证返回 `awaiting_stop_evidence`，旧服务缺字段保持未知。
+
 By the way 保留只读工具限制，不能调用写 CLI。确需回报时，在新回答末尾、空行后追加独立结构块（真实声明不能包在代码块或引用里）：
 
 ```text

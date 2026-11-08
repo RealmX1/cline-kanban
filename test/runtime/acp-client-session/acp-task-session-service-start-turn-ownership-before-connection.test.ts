@@ -300,4 +300,36 @@ describe("ACP 原生身份恢复", () => {
 		expect(late.close).toHaveBeenCalledOnce();
 		expect(service.getSummary(TASK_ID)?.agentNativeConversationSessionIdentity).toBeUndefined();
 	});
+	it("既有连接折叠不触发本次启动归属回调", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const connection = createIdentityTestConnection("already-live-native");
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValue(connection);
+		const original = await service.startTaskSession(buildStartRequest({ prompt: "" }));
+		acpClientConnectionRuntimeTestDouble.getConnection.mockReturnValueOnce(connection as never);
+		const beforeAgentProcessLaunch = vi.fn(async () => undefined);
+		const folded = await service.startTaskSession(buildStartRequest({ prompt: "", beforeAgentProcessLaunch }));
+		expect(folded.runtimeSessionIncarnationId).toBe(original.runtimeSessionIncarnationId);
+		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
+	});
+	it("启动后被替代的通用返回不改变启动边界捕获的归属", async () => {
+		const { service } = startServiceWithSummaryRecorder();
+		const pending = createPendingTaskConnection();
+		const beforeAgentProcessLaunch = vi.fn(async (_summary: RuntimeTaskSessionSummary) => undefined);
+		const originalStart = service.startTaskSession(buildStartRequest({ prompt: "", beforeAgentProcessLaunch }));
+		const launchBoundary =
+			acpClientConnectionRuntimeTestDouble.startTaskConnection.mock.lastCall?.[0].beforeAgentProcessLaunch;
+		await launchBoundary();
+		const originalGeneration = beforeAgentProcessLaunch.mock.calls[0]?.[0].runtimeSessionIncarnationId;
+		const replacementConnection = createIdentityTestConnection("replacement-native");
+		acpClientConnectionRuntimeTestDouble.startTaskConnection.mockResolvedValueOnce(replacementConnection);
+		const replacement = await service.startTaskSession(buildStartRequest({ prompt: "" }));
+		const lateConnection = createIdentityTestConnection("original-native");
+		pending.settleAsEstablished(lateConnection);
+		const originalReceipt = await originalStart;
+		expect(originalGeneration).toBeTruthy();
+		expect(originalGeneration).not.toBe(replacement.runtimeSessionIncarnationId);
+		expect(beforeAgentProcessLaunch.mock.calls[0]?.[0].runtimeSessionIncarnationId).toBe(originalGeneration);
+		expect(originalReceipt.runtimeSessionIncarnationId).toBe(replacement.runtimeSessionIncarnationId);
+		expect(lateConnection.close).toHaveBeenCalledOnce();
+	});
 });
