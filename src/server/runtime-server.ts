@@ -146,11 +146,11 @@ import { createTaskCommandExecutionService } from "../task-command-execution/tas
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
+import { readTaskSessionIntentMaterial } from "../task-indexing-support/read-task-session-intent-material";
 import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
-import { TASK_ANALYSIS_SHARED_CONTEXT_VERSION } from "../task-indexing-support/task-analysis-shared-prompt-prefix";
 import { createTaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
-import { loadAndAdvanceSharedTaskIndexingContext } from "../task-indexing-support/task-indexing-support-storage";
 import { createTaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
+import { buildTaskLookupCurrentContextMetadata } from "../task-indexing-support/task-lookup-progressive-context";
 import { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
 import { handleTaskVisualizationContentHttpRequest } from "../task-visualization-artifacts/task-visualization-content-http-handler";
 import {
@@ -1608,18 +1608,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		storageDirectoryPath: join(getRuntimeHomePath(), "task-lookup-conversations"),
 		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
 		readRuntimeOwnerLiveness: readRuntimeProcessInstanceLiveness,
-		collectMaterials: (workspaceId) =>
-			collectTaskIndexingMaterials({ workspaceId, listLiveSessionSummaries: listProjectRuntimeSessionSummaries }),
-		getExecutorSettings: readTaskAssistanceModelProviderRoutingSettings,
-		getContext: (workspaceId, materials, settings) =>
-			loadAndAdvanceSharedTaskIndexingContext({
+		collectMaterials: (workspaceId, options) =>
+			collectTaskIndexingMaterials({
 				workspaceId,
-				materials,
-				settings,
-				instructionVersion: TASK_ANALYSIS_SHARED_CONTEXT_VERSION,
-				now: Date.now(),
-				forModelRequest: true,
+				listLiveSessionSummaries: listProjectRuntimeSessionSummaries,
+				...options,
+				readSessionIntentMaterial: readTaskSessionIntentMaterial,
 			}),
+		getExecutorSettings: readTaskAssistanceModelProviderRoutingSettings,
+		getContext: async (workspaceId, materials) =>
+			buildTaskLookupCurrentContextMetadata(workspaceId, materials, Date.now()),
 		executeAgent: executeTaskAnalysisApi,
 		onConversationUpdated: deps.runtimeStateHub.broadcastTaskLookupConversationUpdated,
 	});

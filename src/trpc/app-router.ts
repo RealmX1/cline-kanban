@@ -102,6 +102,7 @@ import type {
 	RuntimePromptLibraryResponse,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
+	RuntimeRecordCurrentTaskProgressRequest,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
 	RuntimeRejectExploratoryFindingRequest,
@@ -175,6 +176,7 @@ import type {
 	RuntimeTaskSessionStartResponse,
 	RuntimeTaskSessionStopRequest,
 	RuntimeTaskSessionStopResponse,
+	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionTransitionToReviewRequest,
 	RuntimeTaskSessionTransitionToReviewResponse,
 	RuntimeTaskTerminalRefreshRequest,
@@ -214,6 +216,8 @@ import {
 	type RuntimeTaskConversationSessionListResponse,
 	type RuntimeTaskConversationSessionReportRequest,
 	type RuntimeTaskConversationSessionReportResponse,
+	type RuntimeTaskConversationSessionResumeRequest,
+	type RuntimeTaskConversationSessionResumeResponse,
 	runtimeAddBacklogTaskRequestSchema,
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
@@ -317,6 +321,7 @@ import {
 	runtimeReadAgentPromptImageAttachmentsRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
+	runtimeRecordCurrentTaskProgressRequestSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
 	runtimeRecordTaskOpenedByUserResponseSchema,
 	runtimeRejectExploratoryFindingRequestSchema,
@@ -387,6 +392,8 @@ import {
 	runtimeTaskConversationSessionRenameRequestSchema,
 	runtimeTaskConversationSessionReportRequestSchema,
 	runtimeTaskConversationSessionReportResponseSchema,
+	runtimeTaskConversationSessionResumeRequestSchema,
+	runtimeTaskConversationSessionResumeResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
@@ -724,6 +731,11 @@ export interface RuntimeTrpcContext {
 			input: RuntimeSetCurrentWorkPhaseGoalRequest,
 			evidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeTaskSessionInputResponse>;
+		recordCurrentTaskProgress: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeRecordCurrentTaskProgressRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskSessionInputResponse & { taskMetadataReviewReminder: string }>;
 
 		requestAutomaticTaskNameBackfill: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -760,6 +772,11 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationSessionGetRequest,
 		) => Promise<RuntimeTaskConversationSessionGetResponse>;
+		resumeTaskConversationSession: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskConversationSessionResumeRequest,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<RuntimeTaskConversationSessionResumeResponse>;
 		reportTaskConversationSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskConversationSessionReportRequest,
@@ -778,7 +795,7 @@ export interface RuntimeTrpcContext {
 		startTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
-			beforeAgentProcessLaunch?: () => Promise<void>,
+			beforeAgentProcessLaunch?: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>,
 		) => Promise<RuntimeTaskSessionStartResponse>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1954,6 +1971,12 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 				),
 		),
 
+	recordCurrentTaskProgress: workspaceProcedure
+		.input(runtimeRecordCurrentTaskProgressRequestSchema)
+		.output(runtimeTaskSessionInputResponseSchema.extend({ taskMetadataReviewReminder: z.string() }))
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.recordCurrentTaskProgress(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	requestAutomaticTaskNameBackfill: workspaceProcedure
 		.input(runtimeAutomaticTaskNameBackfillRequestSchema)
 		.output(z.object({ ok: z.boolean() }))
@@ -1992,6 +2015,12 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.input(runtimeTaskConversationSessionGetRequestSchema)
 		.output(runtimeTaskConversationSessionGetResponseSchema)
 		.query(({ ctx, input }) => ctx.runtimeApi.getTaskConversationSession(ctx.workspaceScope, input)),
+	resumeTaskConversationSession: workspaceProcedure
+		.input(runtimeTaskConversationSessionResumeRequestSchema)
+		.output(runtimeTaskConversationSessionResumeResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.runtimeApi.resumeTaskConversationSession(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	reportTaskConversationSession: workspaceProcedure
 		.input(runtimeTaskConversationSessionReportRequestSchema)
 		.output(runtimeTaskConversationSessionReportResponseSchema)

@@ -118,6 +118,30 @@ function execution(summary: RuntimeTaskSessionSummary): CodexNativeAgentTurnExec
 }
 
 describe("Codex 模型容量不足后的会话交棒", () => {
+	it("确认停止等待原PTY退出，不把已发信号当作退出", async () => {
+		const { manager, session, taskId } = await startSession();
+		const exitProcess = session.stop.getMockImplementation();
+		session.stop.mockImplementation(() => {
+			setTimeout(() => exitProcess?.(), 100);
+		});
+		let receiptReceived = false;
+		const stopping = manager.stopTaskSessionAndConfirmExit(taskId).then((receipt) => {
+			receiptReceived = true;
+			return receipt;
+		});
+		await vi.advanceTimersByTimeAsync(50);
+		expect(receiptReceived).toBe(false);
+		await vi.advanceTimersByTimeAsync(100);
+		expect(await stopping).toMatchObject({ processExitConfirmed: true });
+	});
+	it("SIGKILL后仍无退出事件时，释放注册表也不冒充退出确认", async () => {
+		const { manager, session, taskId } = await startSession();
+		session.stop.mockImplementation(() => undefined);
+		const stopping = manager.stopTaskSessionAndConfirmExit(taskId);
+		await vi.advanceTimersByTimeAsync(2_600);
+		expect(await stopping).toMatchObject({ processExitConfirmed: false });
+		expect(session.stop).toHaveBeenCalledTimes(2);
+	});
 	it("任务 ID 复用后，新进程的新故障绑定当前任务 incarnation", async () => {
 		let incarnation = 1;
 		const manager = new TerminalSessionManager({

@@ -20,6 +20,19 @@ async function mountEditorHarness(page: Page) {
 	await expect(page.getByRole("dialog", { name: /创建任务|编辑 Backlog 任务/ })).toBeVisible();
 }
 
+for (const mode of ["create", "edit"] as const) {
+	test(`任务简介在 ${mode} 窗口独立编辑并保留正文与后台交互`, async ({ page }) => {
+		await openEditorHarness(page, { mode });
+		const prompt = page.getByRole("textbox", { name: "任务正文", exact: true });
+		const original = await prompt.inputValue();
+		const description = page.getByRole("textbox", { name: "任务简介", exact: true });
+		await description.fill("描述观测问题、当前范围和修正后的方案");
+		await expect(prompt).toHaveValue(original);
+		await page.getByRole("button", { name: "操作背景 0" }).click({ force: true });
+		await expect(description).toHaveValue("描述观测问题、当前范围和修正后的方案");
+	});
+}
+
 async function openEditorHarness(
 	page: Page,
 	options: {

@@ -9,7 +9,7 @@ import { resolveKanbanCommandParts } from "../core/kanban-command";
 import { RUNTIME_BOUND_KANBAN_CLI_SHELL_COMMAND_PREFIX } from "../core/runtime-bound-kanban-cli-executable";
 import { buildShellCommandLine } from "../core/shell";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../core/task-initial-prompt-authoring-and-startup-settings-guidance";
-import { renderTaskAgentNamingAndWorkPhaseGoalGuidance } from "../core/task-naming-conventions";
+import { renderTaskAgentOverviewAndWorkProgressMaintenanceGuidance } from "../core/task-naming-conventions";
 import { detectAutoUpdateInstallation, UpdatePackageManager } from "../update/update";
 
 const DEFAULT_COMMAND_PREFIX = "kanban";
@@ -118,7 +118,7 @@ export function renderAppendSystemPrompt(commandPrefix: string, options: RenderA
 命令前缀：\`${kanbanCommand}\`。当前 Agent：\`${options.agentId ?? "unknown"}\`。
 优先 task get 查已知 ID，task list 查列表；task create 创建前核对 resolvedSettings 与来源，task start 启动。--project-path 始终指主仓库，可用 git rev-parse --git-common-dir 的父目录确定。不要从任务标题猜身份。
 
-${renderTaskAgentNamingAndWorkPhaseGoalGuidance()}
+${renderTaskAgentOverviewAndWorkProgressMaintenanceGuidance()}
 ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
 
 按需参考：\`${resolveAgentGuidanceDocumentPath("kanban-command-reference.md")}\`；具体参数用上述前缀的 --help 查询。GitHub 优先 gh，Linear 优先当前 Agent 可用的 MCP；仅在需要时配置。
@@ -151,7 +151,7 @@ export function renderTaskSessionWorktreeGuardPrompt(
 同一 git-common-dir 下由本任务工具创建的派生工作树，以及用户显式调用 workflow 操作的工作树，沿用已有授权。文档指向无关仓库时，先确认其编辑归属。
 命令前缀：\`${kanbanCommand}\`。查询本任务直接运行 \`${kanbanCommand} task get-current-task\`，身份取自会话绑定，切换目录仍有效。查询其他任务用 task get --task-id <id> [--project-path <主仓库路径>]；主仓库路径取 git rev-parse --git-common-dir 的父目录，不能传 task worktree。
 
-${renderTaskAgentNamingAndWorkPhaseGoalGuidance()}
+${renderTaskAgentOverviewAndWorkProgressMaintenanceGuidance()}
 ${renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()}
 
 ${renderAgentWorkDelegationSelectionGuidance()}

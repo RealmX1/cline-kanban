@@ -70,6 +70,7 @@ export function buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawIn
 	});
 	return {
 		title: rawInput.title ?? currentTaskCard.title,
+		taskDescription: rawInput.taskDescription,
 		prompt: rawInput.prompt ?? currentTaskCard.prompt,
 		baseRef: rawInput.baseRef ?? currentTaskCard.baseRef,
 		startInPlanMode: rawInput.startInPlanMode ?? currentTaskCard.startInPlanMode,
@@ -99,6 +100,7 @@ export function buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch
 		// null / 空白 = 不要显式标题，由 updateTask 按 prompt 派生。
 		title: patch.title === undefined ? currentTaskCard.title : (patch.title ?? undefined),
 		prompt: patch.prompt ?? currentTaskCard.prompt,
+		taskDescription: patch.taskDescription,
 		startInPlanMode: patch.startInPlanMode ?? currentTaskCard.startInPlanMode,
 		taskAgentPermissionMode: patch.taskAgentPermissionMode,
 		codexConfigurationProfileId: patch.codexConfigurationProfileId,

@@ -89,6 +89,25 @@ export const taskLookupTurnSchema = z.object({
 	providerRoutingSettings: taskAssistanceModelProviderRoutingSettingsSchema.optional(),
 	providerAttempts: z.array(taskAssistanceModelProviderAttemptSchema).optional(),
 	inputByteCount: z.number().optional(),
+	maximumInputByteCount: z.number().optional(),
+	queryHistorySummary: z
+		.object({
+			historySummaryText: z.string().max(16000),
+			throughHistoricalTurnId: z.string(),
+			sourceHistoryFingerprint: z.string(),
+		})
+		.optional(),
+	contextBatchCoverage: z
+		.object({
+			totalTaskCount: z.number().int().nonnegative(),
+			recalledTaskCount: z.number().int().nonnegative(),
+			failedRecallBatchCount: z.number().int().nonnegative(),
+			validatedCandidateRequirementSegmentCount: z.number().int().nonnegative().optional(),
+			failedCandidateRequirementSegmentCount: z.number().int().nonnegative().optional(),
+			assessedCandidateSessionIntentSegmentCount: z.number().int().nonnegative().optional(),
+			failedCandidateSessionIntentSegmentCount: z.number().int().nonnegative().optional(),
+		})
+		.optional(),
 	modelExecutionTimeoutMs: z.number().optional(),
 	executionFailureDiagnostic: taskLookupExecutionFailureDiagnosticSchema.optional(),
 	startedAt: z.number(),

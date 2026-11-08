@@ -12,6 +12,7 @@ import {
 	runtimeTaskSessionSummarySchema,
 } from "../../../src/core/api-contract";
 import type { KanbanRequestOriginActorEvidence } from "../../../src/inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
+import { createTaskConversationSessionOperationStore } from "../../../src/task-conversation-sessions/task-conversation-session-operation-store";
 import {
 	createTaskConversationSessionService,
 	type TaskConversationSessionServiceDependencies,
@@ -105,9 +106,9 @@ async function fixture() {
 	}));
 	const resumeSession = vi.fn<TaskConversationSessionServiceDependencies["resumeSession"]>(
 		async (_scope, target, beforeLaunch) => {
-			await beforeLaunch();
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "resumed-generation" });
 			state.sessions[target.taskId] = { ...target, liveness: "live", pid: 43 };
-			return true;
+			return { ok: true, summary: state.sessions[target.taskId] };
 		},
 	);
 	const dependencies: TaskConversationSessionServiceDependencies = {
@@ -118,6 +119,7 @@ async function fixture() {
 		readState: async () => state,
 		startSession,
 		resumeSession,
+		stopResumedSession: async () => ({ cancellationRequested: false, processExitConfirmed: false }),
 		enqueueReport,
 		readHistory: async () => ({ availability: "available", messages, nextCursor: null, notice: null }),
 		readReportAcceptance: async (_scope, _taskId, key) =>
@@ -150,6 +152,288 @@ function request(overrides: Record<string, unknown> = {}) {
 		...overrides,
 	});
 }
+
+describe("精确侧会话的持久Stop只读事实", () => {
+	it("启动准备悬而未决且无摘要时，持久撤销阻断原创建的实际启动", async () => {
+		const f = await fixture();
+		let releasePreparation: () => void = () => undefined;
+		const preparation = new Promise<void>((resolve) => {
+			releasePreparation = resolve;
+		});
+		let processLaunches = 0;
+		f.startSession.mockImplementationOnce(async (_scope, launchRequest, beforeLaunch) => {
+			await preparation;
+			await beforeLaunch();
+			processLaunches++;
+			return { ok: true, summary: summary(launchRequest.taskId) };
+		});
+		const creationRequest = request({ expectedTaskIncarnationCreatedAtEpochMs: 1 });
+		const pendingCreation = f.service.create(scope, creationRequest, human);
+		try {
+			await vi.waitFor(() => expect(f.startSession).toHaveBeenCalledTimes(1));
+			const reserved = await f.service.lookupCreation(scope, creationRequest);
+			const sessionId = reserved?.creation?.taskConversationSessionId;
+			if (!sessionId) throw new Error("缺少持久预留side身份");
+			expect(reserved?.summary).toBeNull();
+			await f.service.recordExplicitStop(scope, sessionId);
+			expect(await f.service.get(scope, { taskId: f.card.id, taskConversationSessionId: sessionId })).toMatchObject({
+				summary: null,
+				taskConversationSessionExplicitlyStopped: true,
+			});
+		} finally {
+			releasePreparation();
+		}
+		expect(await pendingCreation).toMatchObject({
+			ok: true,
+			creation: { status: "execution_prohibited" },
+			summary: null,
+		});
+		expect(processLaunches).toBe(0);
+	});
+	it("自然退出及单独宿主或创建者marker不冒充该side已停止", async () => {
+		const f = await fixture();
+		const created = await f.service.create(scope, request(), human);
+		const sessionId = created.creation?.taskConversationSessionId;
+		if (!sessionId) throw new Error("未创建侧会话");
+		f.state.sessions[sessionId].pid = null;
+		f.state.sessions[sessionId].liveness = "exited";
+		const store = createTaskConversationSessionOperationStore(f.dependencies.storageRootDirectoryPath);
+		await store.recordExplicitStopMarkers(scope, [f.card.id, "different-creator-session"]);
+		expect(await f.service.get(scope, { taskId: f.card.id, taskConversationSessionId: sessionId })).toMatchObject({
+			taskConversationSessionExplicitlyStopped: false,
+		});
+	});
+	it("读取该side持久marker，重建服务保留，只有显式启动清除后变false", async () => {
+		const f = await fixture();
+		const created = await f.service.create(scope, request(), human);
+		const sessionId = created.creation?.taskConversationSessionId;
+		if (!sessionId) throw new Error("未创建侧会话");
+		await f.service.recordExplicitStop(scope, sessionId);
+		const restored = createTaskConversationSessionService(f.dependencies);
+		expect(await restored.get(scope, { taskId: f.card.id, taskConversationSessionId: sessionId })).toMatchObject({
+			taskConversationSessionExplicitlyStopped: true,
+		});
+		await restored.recordExplicitSessionStart(scope, sessionId);
+		expect(await restored.get(scope, { taskId: f.card.id, taskConversationSessionId: sessionId })).toMatchObject({
+			taskConversationSessionExplicitlyStopped: false,
+		});
+	});
+});
+
+describe("精确侧会话的受限接续", () => {
+	async function resumableFixture() {
+		const f = await fixture();
+		const created = await f.service.create(scope, request({ expectedTaskIncarnationCreatedAtEpochMs: 1 }), human);
+		expect(created.ok, JSON.stringify(created)).toBe(true);
+		const sessionId = created.creation?.taskConversationSessionId;
+		if (!sessionId) throw new Error("未预留侧会话");
+		const target = f.state.sessions[sessionId];
+		target.liveness = "interrupted";
+		target.pid = null;
+		const binding = {
+			taskId: f.card.id,
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+			taskConversationSessionId: sessionId,
+			expectedNativeConversationSessionId: target.agentNativeConversationSessionIdentity?.nativeSessionId ?? "",
+		};
+		return { ...f, target, binding };
+	}
+	it("程序化接续核对实际调用者原生身份，不冒用其他会话", async () => {
+		const f = await resumableFixture();
+		const evidence = actor(f.state.sessions["host-task"]);
+		if (evidence.decodedCliActorClaimsRequestHeader.cliActorClaimsRequestHeaderStatus === "present")
+			evidence.decodedCliActorClaimsRequestHeader.claims.claimedEnvironmentVariableValuesByName.CODEX_THREAD_ID =
+				"different-caller-native";
+		expect(await f.service.resume(scope, f.binding, evidence)).toMatchObject({ ok: false });
+		expect(f.resumeSession).not.toHaveBeenCalled();
+	});
+
+	it("复用原生身份与已有恢复动作，不重开创建请求", async () => {
+		const f = await resumableFixture();
+		const result = await f.service.resume(scope, f.binding, human);
+		expect(result).toMatchObject({ ok: true, status: "resumed" });
+		expect(f.resumeSession).toHaveBeenCalledTimes(1);
+		expect(f.resumeSession.mock.calls[0]?.[1].taskId).toBe(f.binding.taskConversationSessionId);
+		expect(f.startSession).toHaveBeenCalledTimes(1);
+	});
+
+	it("显式Stop跨服务重建保持禁止，不因程序化接续清除", async () => {
+		const f = await resumableFixture();
+		await f.service.recordExplicitStop(scope, f.binding.taskConversationSessionId);
+		const restored = createTaskConversationSessionService(f.dependencies);
+		expect(await restored.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "execution_prohibited",
+		});
+		expect(await restored.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "execution_prohibited",
+		});
+		expect(f.resumeSession).not.toHaveBeenCalled();
+	});
+
+	it("准备期间到达的Stop在真正启动前阻断", async () => {
+		const f = await resumableFixture();
+		let processLaunches = 0;
+		f.resumeSession.mockImplementationOnce(async (_scope, target, beforeLaunch) => {
+			await f.service.recordExplicitStop(scope, target.taskId);
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "resumed-generation" });
+			processLaunches++;
+			return { ok: true, summary: target };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "execution_prohibited",
+		});
+		expect(processLaunches).toBe(0);
+	});
+
+	it.each(["task", "native", "directory"])("准备期间%s身份变化不启动替代会话", async (changedIdentity) => {
+		const f = await resumableFixture();
+		let processLaunches = 0;
+		f.resumeSession.mockImplementationOnce(async (_scope, target, beforeLaunch) => {
+			if (changedIdentity === "task") f.card.createdAt = 2;
+			else if (changedIdentity === "directory") target.workspacePath = "/changed-directory";
+			else if (target.agentNativeConversationSessionIdentity)
+				target.agentNativeConversationSessionIdentity.nativeSessionId = "different-native";
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "resumed-generation" });
+			processLaunches++;
+			return { ok: true, summary: target };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({ ok: false, status: "identity_mismatch" });
+		expect(processLaunches).toBe(0);
+	});
+});
+
+describe("侧会话启动后的撤销与并发恢复", () => {
+	async function resumableFixture() {
+		const f = await fixture();
+		const created = await f.service.create(scope, request({ expectedTaskIncarnationCreatedAtEpochMs: 1 }), human);
+		const sessionId = created.creation?.taskConversationSessionId;
+		if (!sessionId) throw new Error("未预留侧会话");
+		const target = f.state.sessions[sessionId];
+		target.liveness = "interrupted";
+		target.pid = null;
+		return {
+			...f,
+			target,
+			binding: {
+				taskId: f.card.id,
+				expectedTaskIncarnationCreatedAtEpochMs: 1,
+				taskConversationSessionId: sessionId,
+				expectedNativeConversationSessionId: target.agentNativeConversationSessionIdentity?.nativeSessionId ?? "",
+			},
+		};
+	}
+	it("真正启动后的Stop取消本代执行，不只返回禁止而留下活体", async () => {
+		const f = await resumableFixture();
+		let processRunning = false;
+		const stopResumedSession = vi.fn(async (_scope, target: RuntimeTaskSessionSummary) => {
+			expect(target.runtimeSessionIncarnationId).toBe("resumed-generation");
+			processRunning = false;
+			return { cancellationRequested: true, processExitConfirmed: true };
+		});
+		Object.assign(f.dependencies, { stopResumedSession });
+		f.resumeSession.mockImplementationOnce(async (_scope, target, beforeLaunch) => {
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "resumed-generation" });
+			processRunning = true;
+			const resumed = { ...target, pid: 43, runtimeSessionIncarnationId: "resumed-generation" };
+			f.state.sessions[target.taskId] = resumed;
+			await f.service.recordExplicitStop(scope, target.taskId);
+			return { ok: true, summary: resumed };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "execution_prohibited",
+			postLaunchCancellation: { cancellationRequested: true, processExitConfirmed: true },
+		});
+		expect(processRunning).toBe(false);
+		expect(stopResumedSession).toHaveBeenCalledTimes(1);
+	});
+	it("原工作目录缺证时公共恢复在调用transport前拒绝", async () => {
+		const f = await resumableFixture();
+		f.target.workspacePath = null;
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({ ok: false, status: "identity_unknown" });
+		expect(f.resumeSession).not.toHaveBeenCalled();
+	});
+	it("实际启动目录与原执行不同，启动边界拒绝且不认领任何活体", async () => {
+		const f = await resumableFixture();
+		let processLaunches = 0;
+		const stopResumedSession = vi.fn(f.dependencies.stopResumedSession);
+		f.dependencies.stopResumedSession = stopResumedSession;
+		f.resumeSession.mockImplementationOnce(async (_scope, target, beforeLaunch) => {
+			await beforeLaunch({
+				...target,
+				workspacePath: "/different-directory",
+				runtimeSessionIncarnationId: "not-launched-generation",
+			});
+			processLaunches++;
+			return { ok: true, summary: target };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "identity_mismatch",
+			executionMayHaveOccurred: false,
+		});
+		expect(processLaunches).toBe(0);
+		expect(stopResumedSession).not.toHaveBeenCalled();
+	});
+	it("折叠到既有活体的返回不授予补偿取消归属", async () => {
+		const f = await resumableFixture();
+		const stopResumedSession = vi.fn(f.dependencies.stopResumedSession);
+		f.dependencies.stopResumedSession = stopResumedSession;
+		f.resumeSession.mockImplementationOnce(async (_scope, target) => {
+			await f.service.recordExplicitStop(scope, f.card.id);
+			return { ok: true, summary: target };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({
+			ok: false,
+			status: "execution_prohibited",
+		});
+		expect(stopResumedSession).not.toHaveBeenCalled();
+	});
+	it("通用返回被替代代覆盖时只持有启动边界的原代", async () => {
+		const f = await resumableFixture();
+		const stopResumedSession = vi.fn(f.dependencies.stopResumedSession);
+		f.dependencies.stopResumedSession = stopResumedSession;
+		f.resumeSession.mockImplementationOnce(async (_scope, target, beforeLaunch) => {
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "owned-generation" });
+			const replacement = structuredClone(target);
+			replacement.runtimeSessionIncarnationId = "replacement-generation";
+			if (replacement.agentNativeConversationSessionIdentity)
+				replacement.agentNativeConversationSessionIdentity.nativeSessionId = "replacement-native";
+			f.state.sessions[target.taskId] = replacement;
+			return { ok: true, summary: replacement };
+		});
+		expect(await f.service.resume(scope, f.binding, human)).toMatchObject({ ok: false, status: "identity_mismatch" });
+		expect(stopResumedSession).toHaveBeenCalledExactlyOnceWith(
+			scope,
+			expect.objectContaining({ runtimeSessionIncarnationId: "owned-generation" }),
+		);
+	});
+	it("相同side并发恢复只执行一次原恢复动作", async () => {
+		const f = await resumableFixture();
+		let release: () => void = () => undefined;
+		const barrier = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		f.resumeSession.mockImplementation(async (_scope, target, beforeLaunch) => {
+			await beforeLaunch({ ...target, runtimeSessionIncarnationId: "resumed-generation" });
+			await barrier;
+			return { ok: true, summary: target };
+		});
+		const first = f.service.resume(scope, f.binding, human);
+		const second = f.service.resume(scope, f.binding, human);
+		try {
+			await vi.waitFor(() => expect(f.resumeSession).toHaveBeenCalled());
+		} finally {
+			release();
+		}
+		const results = await Promise.all([first, second]);
+		expect(results.every((result) => result.ok)).toBe(true);
+		expect(f.resumeSession).toHaveBeenCalledTimes(1);
+	});
+});
 
 describe("Agent 侧会话创建与回报", () => {
 	it("核对任务归属后明确拒绝从旧 Cline 会话 fork，不启动其他进程", async () => {

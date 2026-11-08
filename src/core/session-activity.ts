@@ -7,6 +7,7 @@ import {
 import { mergeWorkPhaseGoalConversationOwnership } from "./agent-current-work-phase-goal";
 
 export { resolveAgentCurrentWorkPhaseGoalForDisplay } from "./agent-current-work-phase-goal";
+export { resolveAgentWorkProgressEntriesForDisplay } from "./agent-work-progress";
 export {
 	doesConversationSessionBelongToTask,
 	resolveMainTaskConversationSessionId,

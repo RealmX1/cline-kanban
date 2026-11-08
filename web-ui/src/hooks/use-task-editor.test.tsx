@@ -369,6 +369,7 @@ interface HookSnapshot {
 	handleSaveTaskTitle: (taskId: string, title: string) => void;
 	handleCreateTasks: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
 	setNewTaskPrompt: (value: string) => void;
+	setNewTaskDescription: (value: string) => void;
 	setNewTaskImages: (value: TaskImage[]) => void;
 	setNewTaskBranchRef: (value: string) => void;
 	setNewTaskWorktreeMode: (value: RuntimeTaskWorktreeMode) => void;
@@ -493,6 +494,7 @@ function HookHarness({
 			handleSaveTaskTitle: editor.handleSaveTaskTitle,
 			handleCreateTasks: editor.handleCreateTasks,
 			setNewTaskPrompt: editor.setNewTaskPrompt,
+			setNewTaskDescription: editor.setNewTaskDescription,
 			setNewTaskImages: editor.setNewTaskImages,
 			setNewTaskBranchRef: editor.setNewTaskBranchRef,
 			setNewTaskWorktreeMode: editor.setNewTaskWorktreeMode,
@@ -717,6 +719,7 @@ describe("useTaskEditor", () => {
 			const captured = await renderCreateHarness();
 			await act(async () => {
 				requireSnapshot(captured.current).setNewTaskPrompt("Created with a runtime id");
+				requireSnapshot(captured.current).setNewTaskDescription("独立简介应随真实创建提交保存");
 			});
 			let createdTaskId: string | null = null;
 			await act(async () => {
@@ -732,7 +735,14 @@ describe("useTaskEditor", () => {
 			).toBe("web_ui_user_gesture");
 			expect(beginPersistingNewBacklogTaskCardsMock).toHaveBeenLastCalledWith({
 				workspaceId: "project-1",
-				newBacklogTaskCardsCreatedFromWebUi: [expect.objectContaining({ id: createdTaskId, title: "Named" })],
+				newBacklogTaskCardsCreatedFromWebUi: [
+					expect.objectContaining({
+						id: createdTaskId,
+						title: "Named",
+						taskDescription: "独立简介应随真实创建提交保存",
+						prompt: "Created with a runtime id",
+					}),
+				],
 				boardMutationInitiatorOfNewBacklogTaskCards: "web_ui_user_gesture",
 			});
 		});

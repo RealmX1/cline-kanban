@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
+import { preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot } from "../core/agent-work-progress";
 import {
 	type RuntimeBoardColumnId,
 	type RuntimeBoardData,
@@ -529,6 +530,14 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 					conversationSessionNameVersion: persistedName.conversationSessionNameVersion,
 					conversationSessionNameSource: persistedName.conversationSessionNameSource,
 				},
+			};
+		if (persistedSummary.agentWorkProgressEntries?.length)
+			reconciledSummary = {
+				...reconciledSummary,
+				agentWorkProgressEntries: preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot(
+					persistedSummary.agentWorkProgressEntries,
+					reconciledSummary.agentWorkProgressEntries,
+				),
 			};
 		if (reconciledSummary === incomingSummary) continue;
 		if (reconciledSessions === incomingSessions) reconciledSessions = { ...incomingSessions };
@@ -1217,6 +1226,22 @@ export async function saveWorkspaceState(
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
 		parsedPayload.board = preserveTaskNameVersionsAgainstIncomingBoardSnapshot(persistedBoard, parsedPayload.board);
+		// 简介经显式字段操作写入；旧页面的整板快照不能删除新字段，或复活已被明确清空的简介。
+		const persistedTaskCardsById = new Map(
+			persistedBoard.columns.flatMap((column) => column.cards).map((card) => [card.id, card]),
+		);
+		parsedPayload.board = {
+			...parsedPayload.board,
+			columns: parsedPayload.board.columns.map((column) => ({
+				...column,
+				cards: column.cards.map((card) => {
+					const persistedCard = persistedTaskCardsById.get(card.id);
+					return persistedCard?.createdAt === card.createdAt
+						? { ...card, taskDescription: persistedCard.taskDescription }
+						: card;
+				}),
+			})),
+		};
 		// 无版本的旧整板不能把客户端尚未见过的迁入卡当作删除；正式卡片动作在锁内改最新状态，不走此入口。
 		if (
 			expectedRevision === undefined &&

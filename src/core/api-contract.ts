@@ -429,6 +429,7 @@ export const runtimeBoardCardSchema = z
 		independentTaskCreationProvenance: independentTaskCreationProvenanceSchema.optional(),
 		title: z.string().optional(),
 		taskNameVersion: z.number().int().nonnegative().optional(),
+		taskDescription: z.string().trim().max(4000).optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
 		// 老卡片没有这个字段；读时不在这里补默认值，而是在启动任务处按当时的全局
@@ -1415,7 +1416,50 @@ export const runtimeAgentSessionReclamationOutcomeSchema = z.object({
 });
 export type RuntimeAgentSessionReclamationOutcome = z.infer<typeof runtimeAgentSessionReclamationOutcomeSchema>;
 
-// 阶段目标独立于整个 Task 名称；原生候选与显式声明分开，clear 后可回退原生候选。
+export const runtimeAgentWorkProgressEntrySchema = z.object({
+	progressEntryId: z.string().min(1).max(200),
+	progressText: z.string().trim().min(1).max(160),
+	outcome: z.enum(["in_progress", "completed", "abandoned", "outcome_unknown"]),
+	outcomeExplanation: z.string().max(500).optional(),
+	recordedAt: z.number(),
+	updatedAt: z.number(),
+	owningKanbanTaskConversationSessionId: z.string().min(1),
+	owningNativeConversationSessionId: z.string().nullable(),
+	owningRuntimeSessionIncarnationId: z.string().nullable(),
+	progressMutationFingerprint: z.string(),
+});
+export type RuntimeAgentWorkProgressEntry = z.infer<typeof runtimeAgentWorkProgressEntrySchema>;
+export const runtimeRecordCurrentTaskProgressRequestSchema = z
+	.object({
+		progressEntryId: z.string().trim().min(1).max(200),
+		progressText: z.string().trim().min(1).max(160),
+		progressEntryOutcome: z.enum(["in_progress", "completed", "abandoned"]).optional(),
+		previousProgressEntryId: z.string().min(1).max(200).optional(),
+		previousProgressEntryOutcome: z.enum(["completed", "abandoned"]).optional(),
+		outcomeExplanation: z.string().trim().max(500).optional(),
+		taskTitle: z.string().trim().min(1).max(80).optional(),
+		taskDescription: z.string().trim().max(4000).optional(),
+		implementationStarted: z.boolean().optional(),
+		expectedTaskCardUpdatedAt: z.number().finite().optional(),
+	})
+	.strict()
+	.superRefine((value, context) => {
+		if (
+			(value.taskTitle !== undefined || value.taskDescription !== undefined) &&
+			value.expectedTaskCardUpdatedAt === undefined
+		)
+			context.addIssue({
+				code: "custom",
+				message: "更新任务概况必须提供读取任务时的 expectedTaskCardUpdatedAt，避免覆盖并发修改。",
+			});
+		if (Boolean(value.previousProgressEntryId) !== Boolean(value.previousProgressEntryOutcome))
+			context.addIssue({ code: "custom", message: "更新上一条进展必须同时提供条目身份与完成或放弃结果。" });
+		if (value.implementationStarted && (!value.taskTitle || !value.taskDescription))
+			context.addIssue({ code: "custom", message: "开始实施时必须核对名称并提供独立任务简介。" });
+	});
+export type RuntimeRecordCurrentTaskProgressRequest = z.infer<typeof runtimeRecordCurrentTaskProgressRequestSchema>;
+
+// 旧字段只提供结果未记录的兼容投影，不据此推断某个阶段已经完成。
 export const runtimeAgentCurrentWorkPhaseGoalSchema = z.object({
 	goalText: z.string().trim().min(1).max(160),
 	source: z.enum(["agent_explicit_declaration", "claude_native_task_list", "acp_structured_plan"]),
@@ -1468,6 +1512,7 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	lastSubstantiveOutputAt: z.number().nullable().optional(),
 	lastConversationProgressObservation: runtimeLastConversationProgressObservationSchema.nullable().optional(),
 	agentCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
+	agentWorkProgressEntries: z.array(runtimeAgentWorkProgressEntrySchema).optional(),
 	agentNativeCurrentWorkPhaseGoal: runtimeAgentCurrentWorkPhaseGoalSchema.nullable().optional(),
 	agentCurrentWorkPhaseGoalInvalidatedAt: z.number().optional(),
 	// 旧请求代理仅兼容读；新缓存投影使用 lastAgentConversationPromptCacheReferenceObservation。
@@ -1716,6 +1761,7 @@ export type RuntimeWorkspaceStateNotifyResponse = z.infer<typeof runtimeWorkspac
 export const runtimeAddBacklogTaskRequestSchema = z.object({
 	prompt: z.string(),
 	title: z.string().optional(),
+	taskDescription: z.string().trim().max(4000).optional(),
 	images: z.array(runtimeTaskImageSchema).optional(),
 });
 export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskRequestSchema>;
@@ -1794,6 +1840,7 @@ export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	title: z.string().optional(),
+	taskDescription: z.string().trim().max(4000).optional(),
 	prompt: z.string(),
 	startInPlanMode: z.boolean(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
@@ -2163,6 +2210,7 @@ export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().optional(),
+	taskDescription: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
 	baseRef: z.string().optional(),
 	startInPlanMode: z.boolean().optional(),
@@ -2190,6 +2238,7 @@ export const runtimeTaskCardFieldValuePatchSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().nullable().optional(),
+	taskDescription: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
 	images: z.array(runtimeTaskImageSchema).nullable().optional(),
 	startInPlanMode: z.boolean().optional(),
@@ -4415,12 +4464,15 @@ export type RuntimeTaskSessionStartResponse = z.infer<typeof runtimeTaskSessionS
 
 export const runtimeTaskSessionStopRequestSchema = z.object({
 	taskId: z.string(),
+	confirmProcessExit: z.boolean().optional(),
 });
 export type RuntimeTaskSessionStopRequest = z.infer<typeof runtimeTaskSessionStopRequestSchema>;
 
 export const runtimeTaskSessionStopResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	explicitStopRecorded: z.boolean().optional(),
+	processExitConfirmed: z.boolean().optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionStopResponse = z.infer<typeof runtimeTaskSessionStopResponseSchema>;
@@ -4605,6 +4657,7 @@ export type RuntimeTaskSessionInputRequest = z.infer<typeof runtimeTaskSessionIn
 export const runtimeTaskSessionInputResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	taskMetadataReviewReminder: z.string().optional(),
 	error: z.string().optional(),
 });
 export type RuntimeTaskSessionInputResponse = z.infer<typeof runtimeTaskSessionInputResponseSchema>;
@@ -4812,6 +4865,36 @@ export const runtimeTaskConversationSessionGetRequestSchema = z.object({
 	cursor: z.string().max(4096).nullish(),
 });
 export type RuntimeTaskConversationSessionGetRequest = z.infer<typeof runtimeTaskConversationSessionGetRequestSchema>;
+export const runtimeTaskConversationSessionResumeRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number().int().nonnegative(),
+	taskConversationSessionId: z.string().min(1),
+	expectedNativeConversationSessionId: z.string().min(1),
+});
+export type RuntimeTaskConversationSessionResumeRequest = z.infer<
+	typeof runtimeTaskConversationSessionResumeRequestSchema
+>;
+export const runtimeTaskConversationSessionResumeResponseSchema = z.object({
+	ok: z.boolean(),
+	status: z.enum([
+		"resumed",
+		"identity_unknown",
+		"identity_mismatch",
+		"execution_prohibited",
+		"unsupported",
+		"execution_failed",
+	]),
+	summary: runtimeTaskSessionSummarySchema.nullable(),
+	executionMayHaveOccurred: z.boolean().optional(),
+	postLaunchCancellation: z
+		.object({ cancellationRequested: z.boolean(), processExitConfirmed: z.boolean() })
+		.optional(),
+	requestedByTaskConversationSessionId: z.string().optional(),
+	error: z.string().optional(),
+});
+export type RuntimeTaskConversationSessionResumeResponse = z.infer<
+	typeof runtimeTaskConversationSessionResumeResponseSchema
+>;
 export const runtimeTaskConversationSessionReportRequestSchema = z.object({
 	taskId: z.string().min(1),
 	idempotencyKey: z.string().trim().min(1).max(200),
@@ -4834,6 +4917,8 @@ export type RuntimeTaskConversationSessionReportResponse = z.infer<
 >;
 export const runtimeTaskConversationSessionGetResponseSchema = z.object({
 	summary: runtimeTaskSessionSummarySchema.nullable(),
+	// 只报告该精确会话自己的持久 Stop marker；自然退出及宿主/创建者 marker 不等价。
+	taskConversationSessionExplicitlyStopped: z.boolean().optional(),
 	reports: z.array(runtimeTaskConversationSessionReportResponseSchema),
 	creation: runtimeTaskConversationSessionCreationProgressSchema.nullable(),
 	history: runtimeTaskConversationHistoryPageResponseSchema,
@@ -5135,6 +5220,7 @@ export const runtimeTaskEditDraftSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	taskTitleOverride: z.string().optional(),
+	taskDescription: z.string().max(4000).optional(),
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),

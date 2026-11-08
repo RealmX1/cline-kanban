@@ -130,6 +130,8 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			onAdoptPromotedTaskEditDraft={controller.handleAdoptPromotedTaskEditDraft}
 			prompt={editing ? controller.editTaskPrompt : controller.newTaskPrompt}
 			onPromptChange={editing ? controller.setEditTaskPrompt : controller.setNewTaskPrompt}
+			taskDescription={editing ? controller.editTaskDescription : controller.newTaskDescription}
+			onTaskDescriptionChange={editing ? controller.setEditTaskDescription : controller.setNewTaskDescription}
 			images={editing ? controller.editTaskImages : controller.newTaskImages}
 			onImagesChange={editing ? controller.setEditTaskImages : controller.setNewTaskImages}
 			startInPlanMode={editing ? controller.editTaskStartInPlanMode : controller.newTaskStartInPlanMode}
