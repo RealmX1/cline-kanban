@@ -8,7 +8,13 @@
 
 `CodexConfigurationWriterBinding.schemaVersion` 保持 `1`；新增可选 `sourceSharedPluginInstallationDirectoriesBinding`，保存布局版本、两个容器的 canonical path、持久目录身份，以及实际 executable 的路径、文件身份、版本和观察时间。
 
-首次支持的能力基线为 `codex-cli 0.166.0`。能力核验使用最终启动的 binary、环境及工作目录，不以默认 PATH 中的另一程序代替。未知版本沿用旧布局，持久记录 `unverified_native_capability`，下一代自然启动重新核验；不会猜测兼容。
+共享安装默认按实际 binary 的隔离行为核验，不维护 Codex 版本白名单。版本仅作诊断，连 `--version` 暂不可用也不会否定实际能力。核验使用最终启动的 executable 文件身份及实际 PATH；在独立 HOME、CODEX_HOME、SQLite 和本地合成 Git marketplace 中验证升级、安装、原生 hook 指纹及双目录共享后的重复启动稳定性，不访问真实凭据、插件、外部模型或网络。
+
+能力证据按 executable 文件身份、Git 依赖身份、平台和探测协议修订持久缓存；同进程并发及跨进程均只核验一次。旧绑定仍可读取，后续自然换代重新核验并采用新绑定。实际 binary 被替换后必须重新核验，不能只比较版本字符串。HOME 的合法路径别名使用同一物理证据目录；证据目录自身被替换为软链时继续拒绝。
+
+确证命令、响应或布局不兼容，或相同内容仍反复重装时，记录 `unsupported_native_capability` 并使用完整独立的插件与 marketplace 安装目录；可复制既有缓存，但不能混用共享插件与私有安装记录。暂时超时或缺证保持 `retry_pending`：每轮最多 30 秒，同一次启动自动等待重试，每个窗口最多三次、间隔至少 30 秒；连续三次失败后冷却 15 分钟，已有配置补扫器沿用原 PATH 与工作目录开启下一有界窗口，累计次数及逐次原件不重置。程序或依赖身份变化仍独立重新核验。Stop 在等待后的再次核验前仍须检查。进程回执、原控制器退出和原生进程退出分别核验，未退出或查询失败不能重复启动探测；PID 已知时只有系统明确报告进程不存在才继续，PID 回执缺失时必须完整核验进程表。
+
+旧 `unverified_native_capability` 记录保持历史语义。目录归属异常及已部分执行的真实安装继续经过原有安全与补证门禁，不能通过不兼容回退绕过。实施、版本回归及历史失败对照见 [默认能力核验记录](research/codex-plugin-installation-default-capability-verification.md)。
 
 来源的两个容器须共同存在并通过归属核验后才建立桥接。writer 自己的 `.tmp` 必须为普通目录，只共享其 `marketplaces` 子目录。原顶层 `marketplaces` 兼容桥继续保留。来源首次已有合法软链时绑定其实际目标，之后路径或持久身份变化都会拒绝沿用旧绑定。卷观察在配置 store 锁外预取，锁内只复核现有观察与目录事实。
 

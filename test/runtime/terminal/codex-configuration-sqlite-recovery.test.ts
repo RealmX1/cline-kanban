@@ -79,7 +79,7 @@ describe("配置同步持久边界恢复", () => {
 		});
 		for (const path of [
 			join(binding.configurationHomeDirectoryPath, "plugins"),
-			join(binding.configurationHomeDirectoryPath, ".tmp", "marketplaces"),
+			join(binding.configurationHomeDirectoryPath, ".tmp"),
 		])
 			await filesystem.rm(path, { recursive: true, force: true });
 		await linkCodexSourceSharedPluginInstallationDirectories(home, binding.configurationHomeDirectoryPath, shared);

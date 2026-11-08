@@ -6356,6 +6356,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 							binary: request.binary,
 							environment: { ...process.env, ...request.env },
 							workingDirectory: request.cwd,
+							revalidateNativeCapabilityRetryStillAuthorized: throwIfTaskSessionStartWasCancelled,
 						}),
 				);
 				throwIfTaskSessionStartWasCancelled();

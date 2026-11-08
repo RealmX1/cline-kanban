@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as CodexTranscriptInspection from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
+import * as CodexNativePluginInstallationCapabilityVerification from "../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-verification";
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import {
@@ -171,6 +172,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	for (const manager of managers.splice(0)) manager.dispose();
 	vi.useRealTimers();
+	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	await rm(isolatedHome, { recursive: true, force: true });
 });
@@ -851,6 +853,17 @@ describe("任务会话的原生身份补证恢复", () => {
 		async ({ storedEnvironmentKind, compressed }) => {
 			vi.useFakeTimers();
 			vi.setSystemTime(1_000_000);
+			// 身份恢复使用可读的隔离程序；插件能力替身选择完整独立目录，不启动原生插件命令。
+			const isolatedCodexNativeIdentityRecoveryExecutable = join(isolatedHome, "codex-native-identity-recovery");
+			await writeFile(
+				isolatedCodexNativeIdentityRecoveryExecutable,
+				`#!${process.execPath}\nif (process.argv[2] === '--version') process.stdout.write('codex-cli identity-recovery-fixture'); else process.exitCode = 1;\n`,
+				{ mode: 0o700 },
+			);
+			vi.spyOn(
+				CodexNativePluginInstallationCapabilityVerification,
+				"verifyCodexNativeSharedPluginInstallationCapability",
+			).mockResolvedValue({ status: "unsupported", reason: "身份恢复测试替身不提供插件安装能力" });
 			const userCodexHome = join(isolatedHome, ".codex");
 			const managedStorageHome = await prepareManagedCodexConversationStorageHome(userCodexHome);
 			const childNativeSessionId = compressed ? compressedCodexTranscriptFixtureNativeSessionId : childId;
@@ -865,6 +878,7 @@ describe("任务会话的原生身份补证恢复", () => {
 			});
 			const request: StartTaskSessionRequest = {
 				...resumeRequest(summary),
+				binary: isolatedCodexNativeIdentityRecoveryExecutable,
 				workspaceId: "isolated-managed-storage-workspace",
 				terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "retained-side-session-model" },
 				env:
