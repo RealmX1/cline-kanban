@@ -1,9 +1,18 @@
+import { createHash, randomUUID } from "node:crypto";
 // Streams live runtime state to browser clients over websocket.
 // It listens to terminal and native Cline updates, normalizes them into the
 // shared API contract, and fans out workspace-scoped snapshots and deltas.
 import type { IncomingMessage } from "node:http";
 import { WebSocket, WebSocketServer } from "ws";
 import { subscribeToAgentSessionPtyHostDiagnosticsChanges } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-runtime-diagnostics";
+import {
+	projectTaskSessionSummaryForBrowser,
+	projectWorkspaceStateForBrowser,
+} from "../core/browser-task-session-summary-projection";
+import {
+	applyRuntimeStateEntityUpdate,
+	buildRuntimeStateEntityUpdate,
+} from "../core/runtime-state-stream-entity-synchronization";
 import {
 	createNotificationAssessmentService,
 	isNotificationSpeechSuppressedBecauseAgentEventWasDeliveredLate,
@@ -214,7 +223,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		workspaceId: string,
 		workspacePath: string,
 	) => {
-		const build = () => deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspaceId, workspacePath);
+		const build = async () =>
+			projectWorkspaceStateForBrowser(
+				await deps.workspaceRegistry.buildWorkspaceStateSnapshot(workspaceId, workspacePath),
+			);
 		return operation ? operation.measureAsynchronousStage("workspace_payload_build", build) : build();
 	};
 	let taskVisualizationArtifactService: TaskVisualizationArtifactService | null = null;
@@ -393,9 +405,34 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const taskSessionBroadcastTimersByWorkspaceId = new Map<string, NodeJS.Timeout>();
 	const runtimeStateClientsByWorkspaceId = new Map<string, Set<WebSocket>>();
 	const runtimeStateClients = new Set<WebSocket>();
+	const maximumBufferedBytesByClient = new WeakMap<WebSocket, number>();
+	const runtimeGenerationId = randomUUID();
+	const versionedStateByClient = new Map<
+		WebSocket,
+		{
+			snapshot: RuntimeStateStreamSnapshotMessage | null;
+			sequenceNumber: number;
+			sourceFingerprintByMessageTypeWhileMissingSnapshot: Map<string, string>;
+		}
+	>();
+	const workspaceChangeSerialById = new Map<string, number>();
+	const diagnosticsSubscribers = new Set<WebSocket>();
+	let pendingDiagnosticsRevision: number | null = null;
+	let diagnosticsBroadcastTimer: ReturnType<typeof setTimeout> | null = null;
 	const unsubscribePtyHostDiagnostics = subscribeToAgentSessionPtyHostDiagnosticsChanges((revision) => {
-		for (const client of runtimeStateClients)
-			sendRuntimeStateMessage(client, { type: "agent_session_pty_host_diagnostics_updated", revision });
+		pendingDiagnosticsRevision = revision;
+		if (diagnosticsBroadcastTimer || diagnosticsSubscribers.size === 0) return;
+		diagnosticsBroadcastTimer = setTimeout(() => {
+			diagnosticsBroadcastTimer = null;
+			if (pendingDiagnosticsRevision === null) return;
+			for (const client of diagnosticsSubscribers)
+				sendRuntimeStateMessage(client, {
+					type: "agent_session_pty_host_diagnostics_updated",
+					revision: pendingDiagnosticsRevision,
+				});
+			pendingDiagnosticsRevision = null;
+		}, 250);
+		diagnosticsBroadcastTimer.unref();
 	});
 	const unsubscribePromptLibraryChanges = subscribeToPromptLibraryChanges((workspaceId) => {
 		for (const client of runtimeStateClients) {
@@ -424,7 +461,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		workspaceMetadataSubscriptionByClient.delete(client);
 		workspaceMetadataMonitor.disconnectWorkspace(subscription.workspaceId, subscription.subscriberId);
 	};
-	const runtimeStateWebSocketServer = new WebSocketServer({ noServer: true });
+	const runtimeStateWebSocketServer = new WebSocketServer({
+		noServer: true,
+		perMessageDeflate: {
+			threshold: 1024,
+			serverNoContextTakeover: true,
+			clientNoContextTakeover: true,
+			concurrencyLimit: 4,
+			zlibDeflateOptions: { level: 4 },
+		},
+	});
 	const workspaceMetadataMonitor = createWorkspaceMetadataMonitor({
 		onMetadataUpdated: (workspaceId, workspaceMetadata) => {
 			const clients = runtimeStateClientsByWorkspaceId.get(workspaceId);
@@ -443,6 +489,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 	});
 
+	let lastParsedSerializedMessage: string | null = null;
+	let lastParsedMessage: RuntimeStateStreamMessage | null = null;
 	const sendSerializedRuntimeStateMessage = (
 		client: WebSocket,
 		serializedPayload: string,
@@ -450,8 +498,114 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		if (client.readyState !== WebSocket.OPEN) {
 			return "client_not_open";
 		}
+		if (client.bufferedAmount > (maximumBufferedBytesByClient.get(client) ?? 4 * 1024 * 1024)) {
+			client.close(1013, "状态流接收过慢，请重新建立同步基线");
+			return "client_not_open";
+		}
 		try {
-			client.send(serializedPayload);
+			const versioned = versionedStateByClient.get(client);
+			if (versioned) {
+				if (lastParsedSerializedMessage !== serializedPayload) {
+					lastParsedSerializedMessage = serializedPayload;
+					lastParsedMessage = JSON.parse(serializedPayload) as RuntimeStateStreamMessage;
+				}
+				let message = lastParsedMessage!;
+				if (message.type === "workspace_state_updated" && versioned.snapshot?.workspaceState) {
+					const previous = versioned.snapshot.workspaceState;
+					if (message.workspaceState.revision < previous.revision) return "accepted";
+					message = {
+						...message,
+						workspaceState: {
+							...message.workspaceState,
+							sessions: Object.fromEntries(
+								Object.entries(message.workspaceState.sessions).map(([id, incoming]) => {
+									const current = previous.sessions[id];
+									const sameGeneration =
+										current?.runtimeSessionIncarnationId === incoming.runtimeSessionIncarnationId &&
+										current?.startedAt === incoming.startedAt;
+									return [
+										id,
+										current && sameGeneration && current.updatedAt > incoming.updatedAt ? current : incoming,
+									];
+								}),
+							),
+						},
+					};
+				}
+				if (message.type === "workspace_metadata_updated" && versioned.snapshot?.workspaceState) {
+					message = {
+						...message,
+						workspaceMetadata: workspaceMetadataMonitor.readCachedWorkspaceMetadataSnapshot({
+							workspaceId: message.workspaceId,
+							board: versioned.snapshot.workspaceState.board,
+							probeScope:
+								latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+								ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+						}),
+					};
+				}
+				if (message.type === "notification_log_updated" && versioned.snapshot) {
+					const workspaceId = message.workspaceId;
+					versioned.snapshot = {
+						...versioned.snapshot,
+						notificationLog: [
+							...versioned.snapshot.notificationLog.filter((entry) => entry.workspaceId !== workspaceId),
+							...message.entries,
+						],
+					};
+				}
+				if (message.type === "snapshot") {
+					versioned.snapshot = message;
+					versioned.sourceFingerprintByMessageTypeWhileMissingSnapshot.clear();
+					versioned.sequenceNumber += 1;
+					serializedPayload = JSON.stringify({
+						type: "state_snapshot_v2",
+						runtimeGenerationId,
+						workspaceId: message.currentProjectId,
+						sequenceNumber: versioned.sequenceNumber,
+						snapshot: message,
+					});
+				} else if (
+					[
+						"workspace_state_updated",
+						"task_sessions_updated",
+						"workspace_metadata_updated",
+						"projects_updated",
+					].includes(message.type)
+				) {
+					if (!versioned.snapshot) {
+						const fingerprint = createHash("sha256").update(serializedPayload).digest("hex");
+						if (versioned.sourceFingerprintByMessageTypeWhileMissingSnapshot.get(message.type) === fingerprint)
+							return "accepted";
+						versioned.sourceFingerprintByMessageTypeWhileMissingSnapshot.set(message.type, fingerprint);
+						versioned.sequenceNumber += 1;
+						// 首帧失败后只通知来源变化，浏览器据此重开有界恢复，不能应用没有基线的增量。
+						return sendSerializedRuntimeStateMessage(
+							client,
+							JSON.stringify({
+								type: "state_version_v2",
+								runtimeGenerationId,
+								workspaceId: runtimeStateWorkspaceIdByClient.get(client) ?? null,
+								sequenceNumber: versioned.sequenceNumber,
+							}),
+						);
+					}
+					const update = buildRuntimeStateEntityUpdate(versioned.snapshot, message);
+					if (!update) return "accepted";
+					const snapshot = applyRuntimeStateEntityUpdate(versioned.snapshot, update);
+					serializedPayload = JSON.stringify({
+						type: "state_delta_v2",
+						runtimeGenerationId,
+						workspaceId: versioned.snapshot.currentProjectId,
+						previousSequenceNumber: versioned.sequenceNumber,
+						sequenceNumber: versioned.sequenceNumber + 1,
+						update,
+					});
+					versioned.snapshot = snapshot;
+					versioned.sequenceNumber += 1;
+				}
+			}
+			client.send(serializedPayload, { compress: Buffer.byteLength(serializedPayload) >= 1024 });
 			return "accepted";
 		} catch {
 			// Ignore websocket write errors; close handlers clean up disconnected sockets.
@@ -463,18 +617,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		sendSerializedRuntimeStateMessage(client, JSON.stringify(payload));
 	};
 
-	// projects payload 是全局的（覆盖全部已注册 project、同一份发往所有在场客户端），故去重指纹也只
-	// 需一份全局值：与上次实际发送的序列化结果相同 ⇒ 每个在场客户端都已持有这份数据，可整条跳过。
-	// 命中条件是「两次构建的 payload 字节级相同」：agent 无输出窗口、纯心跳 flush 这类场景挡掉
-	// flushTaskSessionSummaries 触发的重发（前端每收一条 projects_updated 都要重 dispatch 一轮）。为让它在 agent
-	// 活跃输出期间也能命中：flush 这一路先合并到每秒最多一次、且不带各自的 workspaceId（否则 currentProjectId 随
-	// 轮到 flush 的工作区来回切，见 scheduleProjectsBroadcastCoalescedAfterTaskSessionSummaryFlush）；跨项目视图的
-	// lastOutputAt 也按 15 秒取整（见 in-progress-task-detail-projection）。失效是天然的、无需按 workspace 记账：项目增删 /
-	// board 变化 / currentProjectId 切换都会改变序列化结果；新连接的首帧 snapshot 发出后会把指纹
-	// 置回 null（见 releaseRuntimeStateClientFromAwaitingInitialSnapshot），保证此后下一次广播必定发送——snapshot
-	// 全量替换可能把该客户端回滚到旧数据，靠这次必发补洞；payload 构建失败时指纹不动，下次调用照常重试。
-	// 首帧前被跳过的连接不持有本次内容，但它在首帧后由补发 + 指纹复位兜住，故不破坏上面的「在场客户端都已持有」。
+	// 项目广播共用内容指纹；每个连接的首帧建立自己的基线，握手期间错过的变化只定向补给它。
+	// 异步构建以开始序号排除迟到结果，构建失败保留原指纹，下一次来源更新照常重试。
 	let lastBroadcastProjectsPayloadFingerprint: string | null = null;
+	let lastCompletedProjectsMessage: RuntimeStateStreamProjectsMessage | null = null;
 	// 代际判定：广播是 async（先 await 构建、再比对 / 发送 / 打标），flush、tRPC mutation、首帧后补发会并发触发，
 	// 先开始的构建可能后完成。它反映的是更早的状态：若照常发送，会把旧 projects 推给全部在场客户端（含刚补发过
 	// 最新内容的新连接），并把上面的指纹倒退成旧内容，安静系统里没有下一次广播来纠正。故每次广播入口取一个单调
@@ -505,6 +651,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				return;
 			}
 			highestStartSequenceNumberOfCompletedProjectsBroadcast = startSequenceNumberOfThisProjectsBroadcast;
+			lastCompletedProjectsMessage = message;
 			const matchesPreviousPayload = () => serializedPayload === lastBroadcastProjectsPayloadFingerprint;
 			if (
 				operation
@@ -536,7 +683,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
-	// 首帧 snapshot 已发出（或握手失败、不会再发）：此后该连接照常接收 projects_updated。
+	// 首帧已发出或本次构建失败：继续接收项目变化，缺基线的 v2 连接只收来源版本信号。
 	const releaseRuntimeStateClientFromAwaitingInitialSnapshot = (
 		client: WebSocket,
 		preferredCurrentProjectId: string | null,
@@ -544,10 +691,20 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		if (!runtimeStateClientsStillAwaitingInitialSnapshotMessage.delete(client)) {
 			return;
 		}
-		lastBroadcastProjectsPayloadFingerprint = null;
 		// 握手期间被跳过过：snapshot 里的 projects 构建得比那次广播早，安静系统里不会很快再有广播来纠正，立即补一次最新的。
 		if (runtimeStateClientsSkippedByProjectsBroadcastWhileAwaitingInitialSnapshot.delete(client)) {
-			void broadcastRuntimeProjectsUpdated(preferredCurrentProjectId);
+			const observedSequence = highestStartSequenceNumberOfCompletedProjectsBroadcast;
+			void buildProjectsPayloadForStream(undefined, preferredCurrentProjectId)
+				.then((payload) =>
+					sendRuntimeStateMessage(
+						client,
+						highestStartSequenceNumberOfCompletedProjectsBroadcast !== observedSequence &&
+							lastCompletedProjectsMessage
+							? lastCompletedProjectsMessage
+							: { type: "projects_updated", ...payload },
+					),
+				)
+				.catch(() => {});
 		}
 	};
 
@@ -557,7 +714,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			return;
 		}
 		pendingTaskSessionSummariesByWorkspaceId.delete(workspaceId);
-		const summaries = Array.from(pending.values());
+		const summaries = Array.from(pending.values()).map(projectTaskSessionSummaryForBrowser);
 		const runtimeClients = runtimeStateClientsByWorkspaceId.get(workspaceId);
 		if (runtimeClients && runtimeClients.size > 0) {
 			const payload: RuntimeStateStreamTaskSessionsMessage = {
@@ -854,7 +1011,10 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		workspaceMetadataMonitor.disposeWorkspace(workspaceId);
 	};
 
+	const workspaceBuildStartedSequenceById = new Map<string, number>();
+	const workspaceBuildCompletedSequenceById = new Map<string, number>();
 	const broadcastRuntimeWorkspaceStateUpdated = async (workspaceId: string, workspacePath: string): Promise<void> => {
+		workspaceChangeSerialById.set(workspaceId, (workspaceChangeSerialById.get(workspaceId) ?? 0) + 1);
 		// isDone 刷新：board 变更（含 move-to-done）后重建该 workspace 的通知 feed 并全局广播，使铃铛面板
 		// 即时隐藏已完成卡片。放在下方 per-workspace 0-客户端 guard 之前——即便没人正看该 workspace，
 		// 跨 repo 铃铛仍需拿到它的 isDone 变化（内部按全局客户端数自守卫）。
@@ -867,7 +1027,14 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		const operation = broadcastCostRecorder?.beginOperation("workspace_state_updated");
 		let outcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
 		try {
+			const sequence = (workspaceBuildStartedSequenceById.get(workspaceId) ?? 0) + 1;
+			workspaceBuildStartedSequenceById.set(workspaceId, sequence);
 			const workspaceState = await buildWorkspacePayloadForStream(operation, workspaceId, workspacePath);
+			if (sequence < (workspaceBuildCompletedSequenceById.get(workspaceId) ?? 0)) {
+				outcome = "superseded";
+				return;
+			}
+			workspaceBuildCompletedSequenceById.set(workspaceId, sequence);
 			const payload: RuntimeStateStreamWorkspaceStateMessage = {
 				type: "workspace_state_updated",
 				workspaceId,
@@ -895,6 +1062,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		}
 	};
 
+	const lastNotificationFingerprintByClient = new WeakMap<WebSocket, Map<string, string>>();
 	// 重建某 workspace 的派生通知 feed 并全局广播（铃铛跨 repo 聚合，故发给所有连接客户端而非仅本 workspace）。
 	// 0 客户端时直接跳过广播——但注意持久化早已在 appendNotificationLogEntry 完成，这里只管在场客户端的推送。
 	const broadcastNotificationLogUpdated = async (workspaceId: string): Promise<void> => {
@@ -911,7 +1079,12 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			};
 			const serializedPayload = JSON.stringify(payload);
 			for (const client of runtimeStateClients) {
-				sendSerializedRuntimeStateMessage(client, serializedPayload);
+				const fingerprints = lastNotificationFingerprintByClient.get(client) ?? new Map<string, string>();
+				if (fingerprints.get(workspaceId) === serializedPayload) continue;
+				if (sendSerializedRuntimeStateMessage(client, serializedPayload) === "accepted") {
+					fingerprints.set(workspaceId, serializedPayload);
+					lastNotificationFingerprintByClient.set(client, fingerprints);
+				}
 			}
 		} catch {
 			// 通知 feed 重建失败不影响主流程；下次变更会重发。
@@ -1086,11 +1259,35 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		);
 	};
 
+	const reconcileRuntimeStateClientWorkspaceBroadcastSubscription = (
+		client: WebSocket,
+		workspaceId: string | null,
+	) => {
+		const previousWorkspaceId = runtimeStateWorkspaceIdByClient.get(client);
+		if (previousWorkspaceId && previousWorkspaceId !== workspaceId) {
+			const previousWorkspaceClients = runtimeStateClientsByWorkspaceId.get(previousWorkspaceId);
+			previousWorkspaceClients?.delete(client);
+			if (previousWorkspaceClients?.size === 0) runtimeStateClientsByWorkspaceId.delete(previousWorkspaceId);
+		}
+		if (workspaceId === null) {
+			runtimeStateWorkspaceIdByClient.delete(client);
+			return;
+		}
+		const workspaceClients = runtimeStateClientsByWorkspaceId.get(workspaceId) ?? new Set<WebSocket>();
+		workspaceClients.add(client);
+		runtimeStateClientsByWorkspaceId.set(workspaceId, workspaceClients);
+		runtimeStateWorkspaceIdByClient.set(client, workspaceId);
+	};
+	const recoveryReadsInFlightByClient = new Set<WebSocket>();
 	runtimeStateWebSocketServer.on("connection", async (client: WebSocket, context: unknown) => {
+		let initialSnapshotEstablishmentInFlight = false;
 		client.on("error", () => client.terminate());
 		client.on("close", () => {
 			taskVisualizationArtifactService?.forgetBrowserClient(client);
 			cleanupRuntimeStateClient(client);
+			versionedStateByClient.delete(client);
+			diagnosticsSubscribers.delete(client);
+			recoveryReadsInFlightByClient.delete(client);
 		});
 		// 浏览器 → 服务端只有一种消息：改 git 元数据探测范围。解析不了的一律忽略（不断连）。
 		client.on("message", (rawMessage, isBinary) => {
@@ -1105,6 +1302,71 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			}
 			const clientMessage = runtimeStateStreamClientMessageSchema.safeParse(parsedMessage);
 			if (!clientMessage.success) {
+				return;
+			}
+			if (clientMessage.data.type === "declare_pty_host_diagnostics_subscription") {
+				if (clientMessage.data.subscribed) diagnosticsSubscribers.add(client);
+				else diagnosticsSubscribers.delete(client);
+				return;
+			}
+			if (
+				clientMessage.data.type === "request_state_snapshot_v2" ||
+				clientMessage.data.type === "confirm_state_version_v2"
+			) {
+				const versioned = versionedStateByClient.get(client);
+				if (!versioned || recoveryReadsInFlightByClient.has(client)) return;
+				if (!versioned.snapshot) {
+					void establishRuntimeStateClientInitialSnapshot();
+					return;
+				}
+				const request = clientMessage.data;
+				const workspaceId = runtimeStateWorkspaceIdByClient.get(client);
+				const observedProjectsSequence = highestStartSequenceNumberOfCompletedProjectsBroadcast;
+				const forceSnapshot =
+					request.type === "request_state_snapshot_v2" ||
+					request.runtimeGenerationId !== runtimeGenerationId ||
+					request.sequenceNumber !== versioned.sequenceNumber;
+				recoveryReadsInFlightByClient.add(client);
+				void (async () => {
+					const projects = await buildProjectsPayloadForStream(undefined, workspaceId ?? null);
+					if (!versionedStateByClient.has(client)) return;
+					sendRuntimeStateMessage(
+						client,
+						highestStartSequenceNumberOfCompletedProjectsBroadcast !== observedProjectsSequence &&
+							lastCompletedProjectsMessage
+							? lastCompletedProjectsMessage
+							: { type: "projects_updated", ...projects },
+					);
+					if (workspaceId && versioned.snapshot?.workspaceState) {
+						const state = await buildWorkspacePayloadForStream(
+							undefined,
+							workspaceId,
+							versioned.snapshot.workspaceState.repoPath,
+						);
+						if (!versionedStateByClient.has(client)) return;
+						sendRuntimeStateMessage(client, {
+							type: "workspace_state_updated",
+							workspaceId,
+							workspaceState: state,
+						});
+					}
+					if (!versioned.snapshot) return;
+					if (forceSnapshot) sendRuntimeStateMessage(client, versioned.snapshot);
+					else
+						sendRuntimeStateMessage(client, {
+							type: "state_version_v2",
+							runtimeGenerationId,
+							workspaceId: versioned.snapshot.currentProjectId,
+							sequenceNumber: versioned.sequenceNumber,
+						});
+				})()
+					.catch((error: unknown) =>
+						sendRuntimeStateMessage(client, {
+							type: "error",
+							message: error instanceof Error ? error.message : String(error),
+						}),
+					)
+					.finally(() => recoveryReadsInFlightByClient.delete(client));
 				return;
 			}
 			if (clientMessage.data.type !== "declare_workspace_metadata_probe_scope") {
@@ -1136,206 +1398,251 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					subscriberId: subscription.subscriberId,
 					probeScope: workspaceMetadataProbeScope,
 				});
+				const snapshot = versionedStateByClient.get(client)?.snapshot;
+				if (snapshot?.workspaceState)
+					sendRuntimeStateMessage(client, {
+						type: "workspace_metadata_updated",
+						workspaceId: subscription.workspaceId,
+						workspaceMetadata: workspaceMetadataMonitor.readCachedWorkspaceMetadataSnapshot({
+							workspaceId: subscription.workspaceId,
+							board: snapshot.workspaceState.board,
+							probeScope: workspaceMetadataProbeScope,
+						}),
+					});
 			}
 		});
-		try {
-			const requestedWorkspaceId =
-				typeof context === "object" &&
-				context !== null &&
-				"requestedWorkspaceId" in context &&
-				typeof (context as { requestedWorkspaceId?: unknown }).requestedWorkspaceId === "string"
-					? (context as { requestedWorkspaceId: string }).requestedWorkspaceId || null
-					: null;
-			const initialWorkspaceMetadataProbeScope =
-				typeof context === "object" && context !== null && "initialWorkspaceMetadataProbeScope" in context
-					? ((
-							context as {
-								initialWorkspaceMetadataProbeScope?: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient | null;
-							}
-						).initialWorkspaceMetadataProbeScope ?? null)
-					: null;
-			if (initialWorkspaceMetadataProbeScope && !latestWorkspaceMetadataProbeScopeDeclaredByClient.has(client)) {
-				latestWorkspaceMetadataProbeScopeDeclaredByClient.set(client, initialWorkspaceMetadataProbeScope);
-			}
-			const workspace: ResolvedWorkspaceStreamTarget =
-				await deps.workspaceRegistry.resolveWorkspaceForStream(requestedWorkspaceId);
-			if (client.readyState !== WebSocket.OPEN) {
-				cleanupRuntimeStateClient(client);
-				return;
-			}
-
-			// 首帧不等 git：先用缓存或空元数据发送 snapshot，再注册广播，最后登记监视器并启动探测。
-			// 新连接尚未进入 workspace 广播名单时，既有连接的后台探测不会抢在它的 snapshot 前送增量。
-			runtimeStateClients.add(client);
-			// 不变式：snapshot 永远是该连接收到的第一条带 currentProjectId 的状态。组 snapshot 要几百毫秒（负载高时上秒），
-			// 期间别的项目有 agent 在跑就会每 150ms 广播一次 projects_updated；它若先到，浏览器会把 currentProjectId 换成
-			// 本连接的项目、board 却还是上一个项目的，切项目途中点任务就会在旧 board 里找卡、误报任务不在看板。
-			// 故首帧前 projects_updated 跳过本连接，首帧发出后补发（releaseRuntimeStateClientFromAwaitingInitialSnapshot）。
-			// 其余全局广播（通知 / MCP auth / Cline 会话上下文）不改 currentProjectId，照常即时送达。
-			runtimeStateClientsStillAwaitingInitialSnapshotMessage.add(client);
-			let monitorWorkspaceId: string | null = null;
-			const operation = broadcastCostRecorder?.beginOperation("initial_snapshot");
-			let snapshotOutcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
-
+		async function establishRuntimeStateClientInitialSnapshot(): Promise<void> {
+			if (initialSnapshotEstablishmentInFlight) return;
+			initialSnapshotEstablishmentInFlight = true;
 			try {
-				let projectsPayload: {
-					currentProjectId: string | null;
-					projects: RuntimeStateStreamProjectsMessage["projects"];
-				};
-				let workspaceState: RuntimeStateStreamSnapshotMessage["workspaceState"];
-				let workspaceMetadata: RuntimeStateStreamSnapshotMessage["workspaceMetadata"] = null;
-				if (workspace.status === "available") {
-					monitorWorkspaceId = workspace.projectId;
-					[projectsPayload, workspaceState] = await Promise.all([
-						buildProjectsPayloadForStream(operation, workspace.projectId),
-						buildWorkspacePayloadForStream(operation, workspace.projectId, workspace.workspacePath),
-					]);
-				} else {
-					projectsPayload = await buildProjectsPayloadForStream(operation, workspace.projectId);
-					workspaceState = null;
-					workspaceMetadata = null;
+				const requestedWorkspaceId =
+					typeof context === "object" &&
+					context !== null &&
+					"requestedWorkspaceId" in context &&
+					typeof (context as { requestedWorkspaceId?: unknown }).requestedWorkspaceId === "string"
+						? (context as { requestedWorkspaceId: string }).requestedWorkspaceId || null
+						: null;
+				const initialWorkspaceMetadataProbeScope =
+					typeof context === "object" && context !== null && "initialWorkspaceMetadataProbeScope" in context
+						? ((
+								context as {
+									initialWorkspaceMetadataProbeScope?: RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient | null;
+								}
+							).initialWorkspaceMetadataProbeScope ?? null)
+						: null;
+				if (initialWorkspaceMetadataProbeScope && !latestWorkspaceMetadataProbeScopeDeclaredByClient.has(client)) {
+					latestWorkspaceMetadataProbeScopeDeclaredByClient.set(client, initialWorkspaceMetadataProbeScope);
 				}
-				// 聚合全部 workspace 的通知 feed，随首帧快照下发（铃铛跨 repo）。独立于当前连接的 workspace scope。
-				const notificationLog = await buildAggregatedNotificationFeed();
+				const workspace: ResolvedWorkspaceStreamTarget =
+					await deps.workspaceRegistry.resolveWorkspaceForStream(requestedWorkspaceId);
 				if (client.readyState !== WebSocket.OPEN) {
-					snapshotOutcome = "client_closed";
 					cleanupRuntimeStateClient(client);
 					return;
 				}
-				// 通知读取也可能让出事件循环：直到发帧前才读缓存，避免漏掉这段等待期间的 git 更新。
-				if (workspace.status === "available" && workspaceState) {
-					workspaceMetadata = workspaceMetadataMonitor.readCachedWorkspaceMetadataSnapshot({
-						workspaceId: workspace.projectId,
-						board: workspaceState.board,
-						probeScope:
-							latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
-							ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
-					});
-				}
-				const snapshotMessage = {
-					type: "snapshot",
-					currentProjectId: projectsPayload.currentProjectId,
-					projects: projectsPayload.projects,
-					workspaceState,
-					workspaceMetadata,
-					notificationLog,
-				} satisfies RuntimeStateStreamSnapshotMessage;
-				const serializedSnapshot = operation
-					? operation.serializePayload(snapshotMessage)
-					: JSON.stringify(snapshotMessage);
-				const sendSnapshot = () => {
-					const sendOutcome = sendSerializedRuntimeStateMessage(client, serializedSnapshot);
-					operation?.recordWebSocketSendOutcome(sendOutcome);
-				};
-				if (operation) operation.measureSynchronousStage("websocket_send_loop", sendSnapshot);
-				else sendSnapshot();
-				snapshotOutcome = "completed";
-				operation?.finish(snapshotOutcome);
-				releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
 
-				if (client.readyState !== WebSocket.OPEN) {
-					cleanupRuntimeStateClient(client);
-					return;
-				}
-				if (monitorWorkspaceId) {
-					const workspaceClients =
-						runtimeStateClientsByWorkspaceId.get(monitorWorkspaceId) ?? new Set<WebSocket>();
-					workspaceClients.add(client);
-					runtimeStateClientsByWorkspaceId.set(monitorWorkspaceId, workspaceClients);
-					runtimeStateWorkspaceIdByClient.set(client, monitorWorkspaceId);
-					if (workspace.status === "available" && workspaceState) {
-						workspaceMetadataSubscriberSequenceNumber += 1;
-						const subscriberId = `runtime-state-stream-client-${workspaceMetadataSubscriberSequenceNumber}`;
-						workspaceMetadataSubscriptionByClient.set(client, { workspaceId: monitorWorkspaceId, subscriberId });
-						// 登记前再读最新范围：握手途中改变的焦点也能进入首轮，不必先探旧范围。
-						void workspaceMetadataMonitor
-							.connectWorkspace({
-								workspaceId: monitorWorkspaceId,
-								workspacePath: workspace.workspacePath,
-								board: workspaceState.board,
-								subscriberId,
-								probeScope:
-									latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
-									ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
-							})
-							.catch((error: unknown) => {
-								// 监视器已摘掉失败订阅；只处理仍属于本连接的订阅，不留下未捕获 rejection。
-								if (workspaceMetadataSubscriptionByClient.get(client)?.subscriberId !== subscriberId) return;
-								disconnectWorkspaceMetadataSubscriptionOfClient(client);
-								sendRuntimeStateMessage(client, {
-									type: "error",
-									message: error instanceof Error ? error.message : String(error),
-								} satisfies RuntimeStateStreamErrorMessage);
-							});
-					}
-					const conversationSummaries = collectTrackedConversationSummaries(monitorWorkspaceId);
-					if (conversationSummaries.length > 0) {
-						sendRuntimeStateMessage(client, {
-							type: "task_sessions_updated",
-							workspaceId: monitorWorkspaceId,
-							summaries: conversationSummaries,
-						} satisfies RuntimeStateStreamTaskSessionsMessage);
-					}
-					const latestSerializedTaskResourceUsageSnapshotsMessage =
-						latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.get(monitorWorkspaceId);
-					if (latestSerializedTaskResourceUsageSnapshotsMessage !== undefined) {
-						sendSerializedRuntimeStateMessage(client, latestSerializedTaskResourceUsageSnapshotsMessage);
-					}
-				}
-				// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
-				// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
-				// 重放覆盖**全部**项目而不只是本次连接的项目：就绪通知本就投给所有客户端，而单标签页切项目会
-				// 重连 WS，切换那一两秒里别的项目完成的任务只能靠这里补上。已被领取的不重放。
+				// 首帧不等 git：先用缓存或空元数据发送 snapshot，再注册广播，最后登记监视器并启动探测。
+				// 新连接尚未进入 workspace 广播名单时，既有连接的后台探测不会抢在它的 snapshot 前送增量。
+				runtimeStateClients.add(client);
+				// 不变式：snapshot 永远是该连接收到的第一条带 currentProjectId 的状态。组 snapshot 要几百毫秒（负载高时上秒），
+				// 期间别的项目有 agent 在跑就会每 150ms 广播一次 projects_updated；它若先到，浏览器会把 currentProjectId 换成
+				// 本连接的项目、board 却还是上一个项目的，切项目途中点任务就会在旧 board 里找卡、误报任务不在看板。
+				// 故首帧前 projects_updated 跳过本连接，首帧发出后补发（releaseRuntimeStateClientFromAwaitingInitialSnapshot）。
+				// 其余全局广播（通知 / MCP auth / Cline 会话上下文）不改 currentProjectId，照常即时送达。
+				runtimeStateClientsStillAwaitingInitialSnapshotMessage.add(client);
+				let monitorWorkspaceId: string | null = null;
+				const operation = broadcastCostRecorder?.beginOperation("initial_snapshot");
+				let snapshotOutcome: Parameters<RuntimeStateBroadcastCostOperation["finish"]>[0] = "failed";
+
 				try {
-					const replayWorkspaceIds = new Set<string>(
-						(await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
-					);
-					if (workspace.projectId) replayWorkspaceIds.add(workspace.projectId);
-					const replayCandidates = (
-						await Promise.all(
-							[...replayWorkspaceIds].map((replayWorkspaceId) =>
-								getNotificationLifecycleArchive().recentReady(replayWorkspaceId, Date.now() - 60_000),
-							),
-						)
-					).flat();
-					for (const candidate of replayCandidates) {
-						if (candidate.deliveryClaimedBy) continue;
-						sendRuntimeStateMessage(client, {
-							type: "task_ready_for_review",
-							workspaceId: candidate.workspaceId,
-							taskId: candidate.taskId,
-							candidateId: candidate.candidateId,
-							triggeredAt: candidate.notificationPanelVisibilityChangedAt,
-							userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
-							summaryText: candidate.summaryText,
-							summaryLanguage: candidate.summaryLanguage,
-							taskTitleSnapshot: candidate.taskTitleSnapshot,
-							notificationSpeechAnnouncementScript: candidate.notificationSpeechAnnouncementScript ?? undefined,
+					let projectsPayload: {
+						currentProjectId: string | null;
+						projects: RuntimeStateStreamProjectsMessage["projects"];
+					};
+					const workspaceChangeSerialAtSnapshotStart =
+						workspaceChangeSerialById.get(workspace.projectId ?? "") ?? 0;
+					let workspaceState: RuntimeStateStreamSnapshotMessage["workspaceState"];
+					let workspaceMetadata: RuntimeStateStreamSnapshotMessage["workspaceMetadata"] = null;
+					if (workspace.status === "available") {
+						monitorWorkspaceId = workspace.projectId;
+						[projectsPayload, workspaceState] = await Promise.all([
+							buildProjectsPayloadForStream(operation, workspace.projectId),
+							buildWorkspacePayloadForStream(operation, workspace.projectId, workspace.workspacePath),
+						]);
+					} else {
+						projectsPayload = await buildProjectsPayloadForStream(operation, workspace.projectId);
+						workspaceState = null;
+						workspaceMetadata = null;
+					}
+					// 聚合全部 workspace 的通知 feed，随首帧快照下发（铃铛跨 repo）。独立于当前连接的 workspace scope。
+					const notificationLog = await buildAggregatedNotificationFeed();
+					if (client.readyState !== WebSocket.OPEN) {
+						snapshotOutcome = "client_closed";
+						cleanupRuntimeStateClient(client);
+						return;
+					}
+					// 通知读取也可能让出事件循环：直到发帧前才读缓存，避免漏掉这段等待期间的 git 更新。
+					if (workspace.status === "available" && workspaceState) {
+						workspaceMetadata = workspaceMetadataMonitor.readCachedWorkspaceMetadataSnapshot({
+							workspaceId: workspace.projectId,
+							board: workspaceState.board,
+							probeScope:
+								latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+								ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
 						});
 					}
-				} catch {
-					logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
+					const snapshotMessage = {
+						type: "snapshot",
+						currentProjectId: projectsPayload.currentProjectId,
+						projects: projectsPayload.projects,
+						workspaceState,
+						workspaceMetadata,
+						notificationLog,
+					} satisfies RuntimeStateStreamSnapshotMessage;
+					const serializedSnapshot = operation
+						? operation.serializePayload(snapshotMessage)
+						: JSON.stringify(snapshotMessage);
+					maximumBufferedBytesByClient.set(
+						client,
+						Math.max(4 * 1024 * 1024, Buffer.byteLength(serializedSnapshot) * 2),
+					);
+					const sendSnapshot = () => {
+						const sendOutcome = sendSerializedRuntimeStateMessage(client, serializedSnapshot);
+						operation?.recordWebSocketSendOutcome(sendOutcome);
+					};
+					if (operation) operation.measureSynchronousStage("websocket_send_loop", sendSnapshot);
+					else sendSnapshot();
+					snapshotOutcome = "completed";
+					operation?.finish(snapshotOutcome);
+					releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
+
+					if (client.readyState !== WebSocket.OPEN) {
+						cleanupRuntimeStateClient(client);
+						return;
+					}
+					reconcileRuntimeStateClientWorkspaceBroadcastSubscription(client, monitorWorkspaceId);
+					if (monitorWorkspaceId) {
+						if (workspace.status === "available" && workspaceState) {
+							workspaceMetadataSubscriberSequenceNumber += 1;
+							const subscriberId = `runtime-state-stream-client-${workspaceMetadataSubscriberSequenceNumber}`;
+							workspaceMetadataSubscriptionByClient.set(client, {
+								workspaceId: monitorWorkspaceId,
+								subscriberId,
+							});
+							// 登记前再读最新范围：握手途中改变的焦点也能进入首轮，不必先探旧范围。
+							void workspaceMetadataMonitor
+								.connectWorkspace({
+									workspaceId: monitorWorkspaceId,
+									workspacePath: workspace.workspacePath,
+									board: workspaceState.board,
+									subscriberId,
+									probeScope:
+										latestWorkspaceMetadataProbeScopeDeclaredByClient.get(client) ??
+										ALL_TRACKED_TASK_WORKTREES_OF_WORKSPACE_METADATA_PROBE_SCOPE,
+								})
+								.catch((error: unknown) => {
+									// 监视器已摘掉失败订阅；只处理仍属于本连接的订阅，不留下未捕获 rejection。
+									if (workspaceMetadataSubscriptionByClient.get(client)?.subscriberId !== subscriberId) return;
+									disconnectWorkspaceMetadataSubscriptionOfClient(client);
+									sendRuntimeStateMessage(client, {
+										type: "error",
+										message: error instanceof Error ? error.message : String(error),
+									} satisfies RuntimeStateStreamErrorMessage);
+								});
+						}
+						if (
+							(workspaceChangeSerialById.get(monitorWorkspaceId) ?? 0) !==
+								workspaceChangeSerialAtSnapshotStart &&
+							workspace.status === "available"
+						) {
+							const freshWorkspaceState = await buildWorkspacePayloadForStream(
+								undefined,
+								monitorWorkspaceId,
+								workspace.workspacePath,
+							);
+							sendRuntimeStateMessage(client, {
+								type: "workspace_state_updated",
+								workspaceId: monitorWorkspaceId,
+								workspaceState: freshWorkspaceState,
+							});
+						}
+						const conversationSummaries = [
+							...(terminalManagersByWorkspaceId.get(monitorWorkspaceId)?.listSummaries() ?? []),
+							...collectTrackedConversationSummaries(monitorWorkspaceId),
+						];
+						if (conversationSummaries.length > 0) {
+							sendRuntimeStateMessage(client, {
+								type: "task_sessions_updated",
+								workspaceId: monitorWorkspaceId,
+								summaries: conversationSummaries.map(projectTaskSessionSummaryForBrowser),
+							} satisfies RuntimeStateStreamTaskSessionsMessage);
+						}
+						const latestSerializedTaskResourceUsageSnapshotsMessage =
+							latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId.get(monitorWorkspaceId);
+						if (latestSerializedTaskResourceUsageSnapshotsMessage !== undefined) {
+							sendSerializedRuntimeStateMessage(client, latestSerializedTaskResourceUsageSnapshotsMessage);
+						}
+					}
+					// 通知重放是 best-effort：先完成订阅登记，档案慢或故障均不阻塞核心推流。
+					// 重放期间断连由 close handler 释放订阅；这里不再注册或重复释放 monitor。
+					// 重放覆盖**全部**项目而不只是本次连接的项目：就绪通知本就投给所有客户端，而单标签页切项目会
+					// 重连 WS，切换那一两秒里别的项目完成的任务只能靠这里补上。已被领取的不重放。
+					try {
+						const replayWorkspaceIds = new Set<string>(
+							(await listWorkspaceIndexEntries()).map((entry) => entry.workspaceId),
+						);
+						if (workspace.projectId) replayWorkspaceIds.add(workspace.projectId);
+						const replayCandidates = (
+							await Promise.all(
+								[...replayWorkspaceIds].map((replayWorkspaceId) =>
+									getNotificationLifecycleArchive().recentReady(replayWorkspaceId, Date.now() - 60_000),
+								),
+							)
+						).flat();
+						for (const candidate of replayCandidates) {
+							if (candidate.deliveryClaimedBy) continue;
+							sendRuntimeStateMessage(client, {
+								type: "task_ready_for_review",
+								workspaceId: candidate.workspaceId,
+								taskId: candidate.taskId,
+								candidateId: candidate.candidateId,
+								triggeredAt: candidate.notificationPanelVisibilityChangedAt,
+								userTurnKind: candidate.userTurnKind as RuntimeTaskSessionUserTurnKind,
+								summaryText: candidate.summaryText,
+								summaryLanguage: candidate.summaryLanguage,
+								taskTitleSnapshot: candidate.taskTitleSnapshot,
+								notificationSpeechAnnouncementScript:
+									candidate.notificationSpeechAnnouncementScript ?? undefined,
+							});
+						}
+					} catch {
+						logAgentSessionRetentionWarning("notification-replay-failed: 通知档案重放失败，核心状态推流继续。");
+					}
+				} catch (error) {
+					disconnectWorkspaceMetadataSubscriptionOfClient(client);
+					if (versionedStateByClient.has(client))
+						reconcileRuntimeStateClientWorkspaceBroadcastSubscription(client, monitorWorkspaceId);
+					releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
+					const message = error instanceof Error ? error.message : String(error);
+					sendRuntimeStateMessage(client, {
+						type: "error",
+						message,
+					} satisfies RuntimeStateStreamErrorMessage);
+				} finally {
+					operation?.finish(snapshotOutcome);
 				}
 			} catch (error) {
-				disconnectWorkspaceMetadataSubscriptionOfClient(client);
-				// 首帧没发成也不再发：恢复 projects_updated 投递，与改动前「组首帧失败仍收广播」一致。
-				releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
 				const message = error instanceof Error ? error.message : String(error);
 				sendRuntimeStateMessage(client, {
 					type: "error",
 					message,
 				} satisfies RuntimeStateStreamErrorMessage);
+				client.close();
 			} finally {
-				operation?.finish(snapshotOutcome);
+				initialSnapshotEstablishmentInFlight = false;
 			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			sendRuntimeStateMessage(client, {
-				type: "error",
-				message,
-			} satisfies RuntimeStateStreamErrorMessage);
-			client.close();
 		}
+		// 首帧与补快照分别单飞，首帧后的通知重放不能阻塞已有基线的恢复请求。
+		await establishRuntimeStateClientInitialSnapshot();
 	});
 
 	return {
@@ -1447,6 +1754,12 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
 		handleUpgrade: (request, socket, head, context) => {
 			runtimeStateWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
+				if (new URL(request.url ?? "/", "http://localhost").searchParams.get("stateProtocolVersion") === "2")
+					versionedStateByClient.set(ws, {
+						snapshot: null,
+						sequenceNumber: 0,
+						sourceFingerprintByMessageTypeWhileMissingSnapshot: new Map(),
+					});
 				runtimeStateWebSocketServer.emit("connection", ws, context);
 			});
 		},
@@ -1481,6 +1794,9 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		close: async () => {
 			unsubscribePtyHostDiagnostics();
+			if (diagnosticsBroadcastTimer) clearTimeout(diagnosticsBroadcastTimer);
+			diagnosticsSubscribers.clear();
+			versionedStateByClient.clear();
 			broadcastCostRecorder?.close();
 			unsubscribePromptLibraryChanges();
 			notificationAssessment.close();

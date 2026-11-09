@@ -50,6 +50,20 @@ import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focu
 import { isFirefox, isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
 import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
+// EXPERIMENT_NODE: 隐藏页面与切换任务分别通过 10 Mbps/80 ms RTT、20,000 行历史的延迟门槛后才能默认启用。
+const PAUSE_HIDDEN_PAGE_TERMINAL_OUTPUT_BY_DEFAULT = false;
+const PAUSE_INACTIVE_TERMINAL_OUTPUT_BY_DEFAULT = false;
+function terminalOutputDemandExperimentEnabled(strategy: "hidden_page" | "inactive_terminal"): boolean {
+	const enabledByDefault =
+		strategy === "hidden_page"
+			? PAUSE_HIDDEN_PAGE_TERMINAL_OUTPUT_BY_DEFAULT
+			: PAUSE_INACTIVE_TERMINAL_OUTPUT_BY_DEFAULT;
+	return (
+		enabledByDefault ||
+		(typeof window !== "undefined" &&
+			new URL(window.location.href).searchParams.get("terminalOutputDemandExperiment") === strategy)
+	);
+}
 const SHIFT_ENTER_SEQUENCE = "\n";
 const RESIZE_DEBOUNCE_MS = 50;
 const INTERRUPT_IDLE_SETTLE_MS = 250;
@@ -349,6 +363,60 @@ class PersistentTerminal {
 	private documentVisible: boolean;
 	private renderingSuspended: boolean;
 	private needsSnapshotResync = false;
+	private outputDemandSupported = false;
+	private outputDemandFallbackToContinuous = false;
+	private suppressAutomaticResumeForOutputDemandRecovery = false;
+	private outputDemandPaused = false;
+	private outputDemandOutputVersion = -1;
+	private outputDemandStreamGenerationId: string | undefined;
+	private restoreRequestSequenceNumber: number | undefined;
+	private continuousOutputObservationCount = 0;
+	private inactiveOutputPauseTimer: ReturnType<typeof setTimeout> | null = null;
+
+	private updateOutputDemandForVisibility(): boolean {
+		if (this.inactiveOutputPauseTimer) {
+			clearTimeout(this.inactiveOutputPauseTimer);
+			this.inactiveOutputPauseTimer = null;
+		}
+		if (!this.outputDemandSupported || this.outputDemandFallbackToContinuous) return false;
+		const needsContinuous = this.continuousOutputObservationCount > 0;
+		const shouldPauseHidden =
+			!this.documentVisible && terminalOutputDemandExperimentEnabled("hidden_page") && !needsContinuous;
+		const shouldPauseInactive =
+			(!this.visibleContainer || !this.isMountedContainerVisible) &&
+			terminalOutputDemandExperimentEnabled("inactive_terminal") &&
+			!needsContinuous;
+		const pause = () => {
+			if (
+				this.disposed ||
+				!this.outputDemandSupported ||
+				this.continuousOutputObservationCount > 0 ||
+				this.outputDemandPaused
+			)
+				return;
+			this.outputDemandPaused = this.sendControlMessage({ type: "declare_output_demand", demand: "paused_output" });
+		};
+		if (shouldPauseHidden) {
+			pause();
+			return false;
+		}
+		if (shouldPauseInactive) {
+			this.inactiveOutputPauseTimer = setTimeout(pause, 5000);
+			return false;
+		}
+		if (!this.outputDemandPaused) return false;
+		this.outputDemandPaused = false;
+		this.suppressAutomaticResumeForOutputDemandRecovery = true;
+		this.beginAwaitingRestoreSnapshotGate();
+		this.sendControlMessage({
+			type: "declare_output_demand",
+			demand: "continuous_output",
+			knownOutputVersion: this.outputDemandOutputVersion,
+			knownStreamGenerationId: this.outputDemandStreamGenerationId,
+		});
+		return true;
+	}
+
 	// 可见性恢复竞态门控:标签页回归可见、已发出 request_restore、恢复快照尚未落屏的窗口内,
 	// 实时 io chunk 只 ack + 丢弃(不写 xterm)——否则这些 chunk 会先写进过期屏幕(time-lapse
 	// 闪帧),随后又被 reset+快照整段覆盖(双重渲染)。丢弃无损:请求前的在途 chunk 已进服务端
@@ -558,7 +626,8 @@ class PersistentTerminal {
 			this.documentVisible &&
 			this.restoreCompleted &&
 			!this.shouldDeferAutomaticSessionResumeUntilVisibleMount &&
-			!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync
+			!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync &&
+			!this.suppressAutomaticResumeForOutputDemandRecovery
 		);
 	}
 
@@ -584,7 +653,8 @@ class PersistentTerminal {
 		}
 		this.documentVisible = visible;
 		this.renderingSuspended = !visible;
-		if (visible && this.needsSnapshotResync) {
+		const resumedUsingOutputDemand = this.updateOutputDemandForVisibility();
+		if (visible && this.needsSnapshotResync && !resumedUsingOutputDemand) {
 			this.needsSnapshotResync = false;
 			// 先武装 awaiting 门控再发请求:恢复快照到达前的实时 chunk 不再写进过期屏幕
 			// (见 awaitingRestoreSnapshot 字段注释的竞态说明)。
@@ -592,7 +662,7 @@ class PersistentTerminal {
 			this.requestSnapshotResync();
 		}
 		// 标签页切回来 = 用户回到这个任务；切走时还在等停留时长的那一次作废。
-		if (visible) {
+		if (visible && !resumedUsingOutputDemand) {
 			this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
 		} else {
 			this.staleAgentTerminalSessionAutomaticResumeScheduler.cancelPendingVisibleDwell();
@@ -617,6 +687,10 @@ class PersistentTerminal {
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
 		this.awaitingRestoreSnapshotTimeoutTimer = setTimeout(() => {
 			this.awaitingRestoreSnapshotTimeoutTimer = null;
+			if (this.outputDemandSupported) {
+				this.outputDemandFallbackToContinuous = true;
+				this.outputDemandPaused = false;
+			}
 			this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
 		}, AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS);
 	}
@@ -795,7 +869,13 @@ class PersistentTerminal {
 		}
 		// 新 IO 打开才证明服务端已替换旧出口，此前不能让快照之后的输出流向正在关闭的旧 IO。
 		this.endAwaitingRestoreSnapshotGate();
-		this.sendControlMessage({ type: "restore_complete" });
+		this.sendControlMessage({
+			type: "restore_complete",
+			...(this.restoreRequestSequenceNumber === undefined
+				? {}
+				: { restoreRequestSequenceNumber: this.restoreRequestSequenceNumber }),
+		});
+		this.updateOutputDemandForVisibility();
 		this.connectionReady = true;
 		void recoverPendingTerminalInputBoxStash({ workspaceId: this.workspaceId, taskId: this.taskId });
 		this.clearReconnectTimer();
@@ -1134,6 +1214,7 @@ class PersistentTerminal {
 				return;
 			}
 			const ackBytes = getTerminalSocketChunkByteLength(event.data);
+			this.outputDemandOutputVersion = -1;
 			// Decode every chunk regardless of visibility so the streaming TextDecoder and
 			// activity notifications stay consistent across the hidden window.
 			const decoded = decodeTerminalSocketChunk(this.outputTextDecoder, event.data);
@@ -1229,7 +1310,22 @@ class PersistentTerminal {
 				return;
 			}
 
+			if (payload.type === "output_demand_state") {
+				if (payload.demand === "continuous_output" && this.awaitingRestoreSnapshot) {
+					this.endAwaitingRestoreSnapshotGate();
+					this.needsSnapshotResync = false;
+					this.restoreCompleted = true;
+					this.notifyConnectionReady();
+					this.suppressAutomaticResumeForOutputDemandRecovery = false;
+				}
+				return;
+			}
 			if (payload.type === "restore") {
+				this.outputDemandSupported = payload.outputDemandProtocolVersion === 1;
+				this.outputDemandOutputVersion = payload.outputVersion ?? -1;
+				this.outputDemandStreamGenerationId = payload.streamGenerationId;
+				this.restoreRequestSequenceNumber = payload.restoreRequestSequenceNumber;
+				this.outputDemandPaused = false;
 				const shouldReplaceTerminalIoSocketAfterRestoreSnapshot =
 					this.awaitingRestoreSnapshot || this.restoreCompleted;
 				this.awaitingRestoreSnapshot = true;
@@ -1276,9 +1372,12 @@ class PersistentTerminal {
 						// notifyRestoreSnapshotApplied 之前：那个通知会唤醒 resync 的等待者，而等待者返回后
 						// resync 的 finally 就把闩清了。
 						this.latestAppliedRestoreWasEmptyAndNotTriggeredByViewResync =
-							!payload.snapshot && !this.suppressNextStaleSessionAutoResumeTriggeredByViewResync;
+							!payload.snapshot &&
+							!this.suppressNextStaleSessionAutoResumeTriggeredByViewResync &&
+							!this.suppressAutomaticResumeForOutputDemandRecovery;
 						this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
 						this.notifyRestoreSnapshotApplied(arrivedRestoreSnapshotArrivalSequence);
+						this.suppressAutomaticResumeForOutputDemandRecovery = false;
 					})
 					.catch(() => {
 						if (!this.isCurrentTerminalRestore(restoreIdentity)) {
@@ -1286,6 +1385,11 @@ class PersistentTerminal {
 						}
 						this.lastError = "Terminal restore failed.";
 						this.notifyLastError();
+						if (this.outputDemandSupported && !this.outputDemandFallbackToContinuous) {
+							this.outputDemandFallbackToContinuous = true;
+							this.outputDemandPaused = false;
+							this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
+						}
 					});
 				return;
 			}
@@ -1299,6 +1403,15 @@ class PersistentTerminal {
 				return;
 			}
 			if (payload.type === "error") {
+				if (
+					this.outputDemandSupported &&
+					!this.outputDemandFallbackToContinuous &&
+					(this.outputDemandPaused || this.awaitingRestoreSnapshot)
+				) {
+					this.outputDemandFallbackToContinuous = true;
+					this.outputDemandPaused = false;
+					this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
+				}
 				this.lastError = payload.message;
 				this.notifyLastError();
 				void this.enqueueTerminalWrite(`\r\n[kanban] ${payload.message}\r\n`);
@@ -1396,6 +1509,7 @@ class PersistentTerminal {
 			this.visibleContainer = container;
 			container.appendChild(this.hostElement);
 		}
+		const resumedUsingOutputDemand = this.updateOutputDemandForVisibility();
 		if (this.resizeObserver) {
 			this.resizeObserver.disconnect();
 		}
@@ -1424,7 +1538,7 @@ class PersistentTerminal {
 				const isStillMountedOnMountRequestContainer = this.visibleContainer === container;
 				// 每一次可见挂载都是「用户打开了这个任务」，包括从泊车区重新挂回来：那时 socket 没断、
 				// 不会有新的 restore，以前的「只在 restore 落屏时判」在这里永远轮不到。
-				if (isStillMountedOnMountRequestContainer) {
+				if (isStillMountedOnMountRequestContainer && !resumedUsingOutputDemand) {
 					this.shouldDeferAutomaticSessionResumeUntilVisibleMount = false;
 					this.staleAgentTerminalSessionAutomaticResumeScheduler.evaluateOnUserOpenSignal();
 				}
@@ -1455,6 +1569,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.visibleContainer = null;
+		this.updateOutputDemandForVisibility();
 		this.isMountedContainerVisible = false;
 		// 用户已经离开这个任务：还在等停留时长的自动续跑作废（快速翻卡时沿途的卡都走这里）。
 		this.staleAgentTerminalSessionAutomaticResumeScheduler.cancelPendingVisibleDwell();
@@ -1620,6 +1735,8 @@ class PersistentTerminal {
 			return Promise.resolve(false);
 		}
 
+		this.continuousOutputObservationCount += 1;
+		this.updateOutputDemandForVisibility();
 		return new Promise((resolve) => {
 			let buffer = "";
 			let sawInterruptAcknowledgement = false;
@@ -1636,6 +1753,8 @@ class PersistentTerminal {
 					window.clearTimeout(idleTimer);
 				}
 				unsubscribe();
+				this.continuousOutputObservationCount -= 1;
+				this.updateOutputDemandForVisibility();
 				resolve(result);
 			};
 
@@ -1806,6 +1925,7 @@ class PersistentTerminal {
 			return;
 		}
 		this.disposed = true;
+		if (this.inactiveOutputPauseTimer) clearTimeout(this.inactiveOutputPauseTimer);
 		this.staleAgentTerminalSessionAutomaticResumeScheduler.dispose();
 		if (typeof document !== "undefined") {
 			document.removeEventListener("visibilitychange", this.handleVisibilityChange);

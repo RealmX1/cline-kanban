@@ -283,7 +283,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 		expect(onMetadataUpdated).toHaveBeenCalledTimes(initialNotificationCount + 1);
 	});
 
-	it("首帧只读缓存：冷缓存为空，不启动探针；热缓存按当前 board 与订阅并集裁剪", async () => {
+	it("首帧只读缓存：冷缓存为空，不启动探针；热缓存只返回本连接的订阅范围", async () => {
 		const input = {
 			workspaceId: "workspace-1",
 			board: createBoard(),
@@ -300,7 +300,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 				focusedTaskIds: ["task-branch"],
 			},
 		});
-		expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch", "task-inplace", "task-trash"]);
+		expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch"]);
 		expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCount);
 		monitor.disconnectWorkspace(input.workspaceId, "subscriber-declaring-whole-project");
 		expect(
@@ -450,7 +450,7 @@ describe("createWorkspaceMetadataMonitor", () => {
 			]);
 		});
 
-		it("首帧保留已有订阅并集：新连接从 A 切到 B 且并集不变时仍有 B 的缓存", async () => {
+		it("共享探测结果按观看者裁剪，订阅并集不变时仍可定向读取新范围", async () => {
 			const input = {
 				workspaceId: "workspace-1",
 				workspacePath: WORKSPACE_PATH,
@@ -480,9 +480,15 @@ describe("createWorkspaceMetadataMonitor", () => {
 			});
 			await monitor.updateWorkspaceState(input);
 
-			// 并集与 git 均未变，不会再补推，因此首帧必须已经包含 B。
+			// 并集与 git 均未变，hub 用同一缓存定向补给范围变化的连接，无需重新探测。
 			expect(onMetadataUpdated).not.toHaveBeenCalled();
-			expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch", "task-inplace"]);
+			expect(cached.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-branch"]);
+			const newScopeCache = monitor.readCachedWorkspaceMetadataSnapshot({
+				...input,
+				probeScope: focusedTaskProbeScope(["task-inplace"]),
+			});
+			expect(newScopeCache.taskWorkspaces.map((task) => task.taskId)).toEqual(["task-inplace"]);
+			expect(gitSyncMocks.probeGitWorkspaceState.mock.calls.length).toBe(probeCount);
 		});
 
 		it("连接改成整个项目后不等结果，补探完经 onMetadataUpdated 推送全部任务", async () => {
