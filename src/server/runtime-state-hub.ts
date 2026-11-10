@@ -55,6 +55,7 @@ import type {
 	RuntimeStateStreamTaskSessionsMessage,
 	RuntimeStateStreamWorkspaceMetadataMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
+	RuntimeSystemLoadAndRuntimeStatusSnapshot,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionSummary,
 	RuntimeTaskSessionUserTurnKind,
@@ -117,6 +118,7 @@ export interface CreateRuntimeStateHubDependencies {
 }
 
 export interface RuntimeStateHub {
+	broadcastSystemLoadAndRuntimeStatusUpdated: (snapshot: RuntimeSystemLoadAndRuntimeStatusSnapshot) => void;
 	broadcastCodexConfigurationSyncUpdated?: (revision: number) => void;
 	broadcastDailyWorkProgressStatisticsUpdated?: (revision: number) => void;
 	attachTaskVisualizationArtifactService?: (service: TaskVisualizationArtifactService) => void;
@@ -1157,6 +1159,15 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 
 	// 每个 workspace 最近一次资源快照消息（已序列化）：新客户端连上时补发。
 	const latestSerializedTaskResourceUsageSnapshotsMessageByWorkspaceId = new Map<string, string>();
+	let latestSerializedSystemLoadAndRuntimeStatusMessage: string | null = null;
+	const broadcastSystemLoadAndRuntimeStatusUpdated = (snapshot: RuntimeSystemLoadAndRuntimeStatusSnapshot): void => {
+		const payload = { type: "system_load_and_runtime_status_updated", snapshot } satisfies RuntimeStateStreamMessage;
+		latestSerializedSystemLoadAndRuntimeStatusMessage = JSON.stringify(payload);
+		for (const client of runtimeStateClients) {
+			if (!runtimeStateClientsStillAwaitingInitialSnapshotMessage.has(client))
+				sendSerializedRuntimeStateMessage(client, latestSerializedSystemLoadAndRuntimeStatusMessage);
+		}
+	};
 	const broadcastTaskResourceUsageSnapshotsUpdated = (
 		workspaceId: string,
 		snapshots: RuntimeLiveTaskResourceUsageSnapshot[],
@@ -1514,6 +1525,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					snapshotOutcome = "completed";
 					operation?.finish(snapshotOutcome);
 					releaseRuntimeStateClientFromAwaitingInitialSnapshot(client, workspace.projectId);
+					if (latestSerializedSystemLoadAndRuntimeStatusMessage !== null)
+						sendSerializedRuntimeStateMessage(client, latestSerializedSystemLoadAndRuntimeStatusMessage);
 
 					if (client.readyState !== WebSocket.OPEN) {
 						cleanupRuntimeStateClient(client);
@@ -1780,6 +1793,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		broadcastQueuedTaskPromptDeliveriesUpdated,
 		broadcastTaskResourceUsageSnapshotsUpdated,
+		broadcastSystemLoadAndRuntimeStatusUpdated,
 		closeBrowserConnectionsBecauseRuntimeIsRestarting: () => {
 			for (const client of runtimeStateClients) {
 				try {

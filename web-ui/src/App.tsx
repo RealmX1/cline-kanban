@@ -19,6 +19,7 @@ import {
 } from "@/components/daily-work-progress-statistics";
 import { DebugDialog } from "@/components/debug-dialog";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
+import { DesktopSidebarVisibilityEdgeControl } from "@/components/desktop-sidebar-visibility-edge-control";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { FocusViewCrossProjectTaskOpenInTransitShell } from "@/components/detail-panels/focus-view-cross-project-task-open-in-transit-shell";
@@ -50,6 +51,7 @@ import { TaskSpotlightSearchDialog } from "@/components/task-spotlight-search-di
 import { TopBar } from "@/components/top-bar";
 import type { TopBarProjectSwitcherState } from "@/components/top-bar-project-switcher/top-bar-project-switcher";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/components/ui/cn";
 import {
 	AlertDialog,
 	AlertDialogAction,
@@ -1597,6 +1599,9 @@ export default function App(): ReactElement {
 	const isFocusViewChromeShown =
 		selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit || taskLookupWorkbench.isOpen;
 	const canToggleFocusViewTaskSidebars = selectedCard !== null || isFocusViewCrossProjectTaskOpenInTransit;
+	const isDesktopLeftSidebarVisibilityControlVisible =
+		!isMobile && (!isFocusViewChromeShown || canToggleFocusViewTaskSidebars);
+	const isDesktopRightSidebarVisibilityControlVisible = !isMobile && canToggleFocusViewTaskSidebars;
 	const handleToggleCurrentPageLeftSidebar = useCallback(() => {
 		if (isMobile) {
 			handleToggleSidebar();
@@ -1748,21 +1753,6 @@ export default function App(): ReactElement {
 									: undefined
 							}
 							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
-							onToggleCurrentPageLeftSidebar={
-								!isFocusViewChromeShown || canToggleFocusViewTaskSidebars
-									? handleToggleCurrentPageLeftSidebar
-									: undefined
-							}
-							isCurrentPageLeftSidebarHidden={
-								isFocusViewChromeShown
-									? sidebarVisibility.isFocusViewTaskListSidebarHidden || isFocusViewDiffExpanded
-									: sidebarVisibility.isHomeProjectSidebarHidden
-							}
-							currentPageLeftSidebarLabel={isFocusViewChromeShown ? "任务列表" : "项目栏"}
-							onToggleFocusViewWorkbenchSidebar={
-								canToggleFocusViewTaskSidebars ? handleToggleFocusViewWorkbenchSidebar : undefined
-							}
-							isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
 							projectSwitcher={topBarProjectSwitcherState}
 							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
 							onToggleTaskLookupWorkbench={
@@ -1913,7 +1903,33 @@ export default function App(): ReactElement {
 							}
 						/>
 					</div>
-					<div className="relative flex flex-1 min-h-0 min-w-0 overflow-hidden">
+					<div
+						className={cn(
+							"relative flex flex-1 min-h-0 min-w-0 overflow-hidden",
+							isDesktopLeftSidebarVisibilityControlVisible && "pl-6",
+							isDesktopRightSidebarVisibilityControlVisible && "pr-6",
+						)}
+					>
+						{isDesktopLeftSidebarVisibilityControlVisible ? (
+							<DesktopSidebarVisibilityEdgeControl
+								side="left"
+								label={isFocusViewChromeShown ? "任务列表" : "项目栏"}
+								isHidden={
+									isFocusViewChromeShown
+										? sidebarVisibility.isFocusViewTaskListSidebarHidden || isFocusViewDiffExpanded
+										: sidebarVisibility.isHomeProjectSidebarHidden
+								}
+								onToggle={handleToggleCurrentPageLeftSidebar}
+							/>
+						) : null}
+						{isDesktopRightSidebarVisibilityControlVisible ? (
+							<DesktopSidebarVisibilityEdgeControl
+								side="right"
+								label="任务工作台"
+								isHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
+								onToggle={handleToggleFocusViewWorkbenchSidebar}
+							/>
+						) : null}
 						<DailyWorkProgressExpandedRegion
 							progress={dailyWorkProgressStatistics}
 							onOpenTask={handleOpenTaskInProject}
@@ -2065,7 +2081,13 @@ export default function App(): ReactElement {
 							)}
 						</div>
 						{isFocusViewCrossProjectTaskOpenInTransit ? (
-							<div className="absolute inset-0 flex min-h-0 min-w-0">
+							<div
+								className={cn(
+									"absolute inset-0 flex min-h-0 min-w-0",
+									isDesktopLeftSidebarVisibilityControlVisible && "left-6",
+									isDesktopRightSidebarVisibilityControlVisible && "right-6",
+								)}
+							>
 								<FocusViewCrossProjectTaskOpenInTransitShell
 									isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
 									host={crossProjectRecentlyActiveTaskSwitcherHost}
@@ -2075,9 +2097,23 @@ export default function App(): ReactElement {
 								/>
 							</div>
 						) : taskLookupWorkbench.isOpen && (!selectedCardRenderedInFocusView || !detailSession) ? (
-							<div className="absolute inset-0 flex min-h-0 min-w-0">{taskLookupWorkbenchContent}</div>
+							<div
+								className={cn(
+									"absolute inset-0 flex min-h-0 min-w-0",
+									isDesktopLeftSidebarVisibilityControlVisible && "left-6",
+									isDesktopRightSidebarVisibilityControlVisible && "right-6",
+								)}
+							>
+								{taskLookupWorkbenchContent}
+							</div>
 						) : selectedCardRenderedInFocusView && detailSession ? (
-							<div className="absolute inset-0 flex min-h-0 min-w-0">
+							<div
+								className={cn(
+									"absolute inset-0 flex min-h-0 min-w-0",
+									isDesktopLeftSidebarVisibilityControlVisible && "left-6",
+									isDesktopRightSidebarVisibilityControlVisible && "right-6",
+								)}
+							>
 								<CardDetailView
 									isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
 									isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}

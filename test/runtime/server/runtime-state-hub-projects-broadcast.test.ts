@@ -312,6 +312,54 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		tempHome.cleanup();
 	});
 
+	it("无项目连接接收全局系统概况，多标签及重连补发同一缓存，握手期间不漏更新", async () => {
+		const snapshot = {
+			sampledAtEpochMs: Date.now(),
+			cpuUsagePercent: 25,
+			memory: null,
+			disk: null,
+			runtimeUptimeSeconds: 10,
+			liveAgentSessionCount: 3,
+		};
+		harness.hub.broadcastSystemLoadAndRuntimeStatusUpdated(snapshot);
+		expect(
+			await waitForRuntimeMessage(client, (entry) => entry.type === "system_load_and_runtime_status_updated"),
+		).toEqual({ type: "system_load_and_runtime_status_updated", snapshot });
+		const hold = harness.holdNextProjectsPayloadBuildUntilReleased();
+		const secondClient = await openQueuedRuntimeSocket(harness.streamUrl);
+		try {
+			await hold.heldProjectsPayloadBuildStarted;
+			harness.hub.broadcastSystemLoadAndRuntimeStatusUpdated({ ...snapshot, cpuUsagePercent: 50 });
+			hold.releaseHeldProjectsPayloadBuild();
+			await waitForRuntimeMessage(secondClient, (entry) => entry.type === "snapshot");
+			expect(
+				await waitForRuntimeMessage(
+					secondClient,
+					(entry) => entry.type === "system_load_and_runtime_status_updated",
+				),
+			).toMatchObject({ snapshot: { cpuUsagePercent: 50 } });
+			expect(secondClient.receivedMessageTypesInArrivalOrder.indexOf("snapshot")).toBeLessThan(
+				secondClient.receivedMessageTypesInArrivalOrder.indexOf("system_load_and_runtime_status_updated"),
+			);
+		} finally {
+			hold.releaseHeldProjectsPayloadBuild();
+			secondClient.socket.close();
+			await once(secondClient.socket, "close");
+		}
+		const reconnected = await openQueuedRuntimeSocket(harness.streamUrl);
+		try {
+			expect(
+				await waitForRuntimeMessage(
+					reconnected,
+					(entry) => entry.type === "system_load_and_runtime_status_updated",
+				),
+			).toMatchObject({ snapshot: { cpuUsagePercent: 50, sampledAtEpochMs: snapshot.sampledAtEpochMs } });
+		} finally {
+			reconnected.socket.close();
+			await once(reconnected.socket, "close");
+		}
+	});
+
 	it("状态流非法帧只关闭出错连接，其他连接仍收到广播", async () => {
 		const invalidFrameClient = await openQueuedRuntimeSocket(harness.streamUrl);
 		await waitForRuntimeMessage(invalidFrameClient, (message) => message.type === "snapshot");
