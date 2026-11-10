@@ -154,6 +154,21 @@ export const runtimeWorkspaceChangesResponseSchema = z.object({
 });
 export type RuntimeWorkspaceChangesResponse = z.infer<typeof runtimeWorkspaceChangesResponseSchema>;
 
+export const runtimeConditionalWorkspaceChangesRequestSchema = runtimeWorkspaceChangesRequestSchema.extend({
+	knownContentVersion: z.string().optional(),
+});
+export const runtimeConditionalWorkspaceChangesResponseSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("unchanged"), contentVersion: z.string() }),
+	z.object({
+		status: z.literal("changed"),
+		contentVersion: z.string(),
+		changes: runtimeWorkspaceChangesResponseSchema,
+	}),
+]);
+export type RuntimeConditionalWorkspaceChangesResponse = z.infer<
+	typeof runtimeConditionalWorkspaceChangesResponseSchema
+>;
+
 export const runtimeWorkspaceFileSearchRequestSchema = z.object({
 	query: z.string(),
 	limit: z.number().int().positive().optional(),
@@ -1729,6 +1744,18 @@ export const runtimeWorkspaceStateResponseSchema = z.object({
 	revision: z.number(),
 });
 export type RuntimeWorkspaceStateResponse = z.infer<typeof runtimeWorkspaceStateResponseSchema>;
+
+export const runtimeReadTaskCardsForPostDeployVerificationRequestSchema = z.object({
+	taskIds: z.array(z.string()).max(100),
+});
+export const runtimeReadTaskCardsForPostDeployVerificationResponseSchema = runtimeWorkspaceStateResponseSchema.pick({
+	repoPath: true,
+	board: true,
+	sessions: true,
+});
+export type RuntimeReadTaskCardsForPostDeployVerificationResponse = z.infer<
+	typeof runtimeReadTaskCardsForPostDeployVerificationResponseSchema
+>;
 
 export const runtimeWorkspaceStateSaveRequestSchema = z.object({
 	board: runtimeBoardDataSchema,
@@ -3575,7 +3602,87 @@ export const runtimeStateStreamSystemLoadAndRuntimeStatusUpdatedMessageSchema = 
 	snapshot: runtimeSystemLoadAndRuntimeStatusSnapshotSchema,
 });
 
+// v2 只给声明支持的连接发送；序号覆盖实体状态，业务通知继续使用既有独立消息。
+function runtimeEntityCollectionPatchSchema<Schema extends z.ZodType>(entity: Schema) {
+	return z.object({
+		upserts: z.array(entity),
+		removedKeys: z.array(z.string()),
+		orderedKeys: z.array(z.string()).optional(),
+	});
+}
+const runtimeProjectBaseForStateSyncSchema = runtimeProjectSummarySchema.omit({
+	inProgressTaskDetails: true,
+	crossProjectTaskSwitcherEntries: true,
+});
+const runtimeBoardColumnForStateSyncSchema = runtimeBoardColumnSchema
+	.omit({ cards: true })
+	.extend({ cardIds: z.array(z.string()) });
+export const runtimeStateEntityUpdateSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("projects_patch"),
+		currentProjectId: z.string().nullable(),
+		projects: runtimeEntityCollectionPatchSchema(runtimeProjectBaseForStateSyncSchema),
+		projectDetails: z.array(
+			z.object({
+				projectId: z.string(),
+				inProgressTaskDetails: runtimeEntityCollectionPatchSchema(runtimeInProgressTaskDetailSchema),
+				crossProjectTaskSwitcherEntries: runtimeEntityCollectionPatchSchema(
+					runtimeCrossProjectTaskSwitcherEntrySchema,
+				),
+			}),
+		),
+	}),
+	z.object({
+		type: z.literal("workspace_patch"),
+		workspaceId: z.string(),
+		workspace: runtimeWorkspaceStateResponseSchema.omit({ board: true, sessions: true }),
+		cards: runtimeEntityCollectionPatchSchema(runtimeBoardCardSchema),
+		columns: runtimeEntityCollectionPatchSchema(runtimeBoardColumnForStateSyncSchema),
+		sessions: runtimeEntityCollectionPatchSchema(runtimeTaskSessionSummarySchema),
+	}),
+	z.object({
+		type: z.literal("sessions_patch"),
+		workspaceId: z.string(),
+		sessions: runtimeEntityCollectionPatchSchema(runtimeTaskSessionSummarySchema),
+	}),
+	z.object({
+		type: z.literal("metadata_patch"),
+		workspaceId: z.string(),
+		homeGitSummary: runtimeWorkspaceMetadataSchema.shape.homeGitSummary,
+		homeGitStateVersion: z.number().int().nonnegative(),
+		taskWorkspaces: runtimeEntityCollectionPatchSchema(runtimeTaskWorkspaceMetadataSchema),
+	}),
+]);
+export type RuntimeStateEntityUpdate = z.infer<typeof runtimeStateEntityUpdateSchema>;
+export const runtimeStateStreamVersionedSnapshotMessageSchema = z.object({
+	type: z.literal("state_snapshot_v2"),
+	runtimeGenerationId: z.string().uuid(),
+	workspaceId: z.string().nullable(),
+	sequenceNumber: z.number().int().nonnegative(),
+	snapshot: runtimeStateStreamSnapshotMessageSchema,
+});
+export const runtimeStateStreamVersionedDeltaMessageSchema = z.object({
+	type: z.literal("state_delta_v2"),
+	runtimeGenerationId: z.string().uuid(),
+	workspaceId: z.string().nullable(),
+	previousSequenceNumber: z.number().int().nonnegative(),
+	sequenceNumber: z.number().int().positive(),
+	update: runtimeStateEntityUpdateSchema,
+});
+export const runtimeStateStreamVersionConfirmationMessageSchema = z.object({
+	type: z.literal("state_version_v2"),
+	runtimeGenerationId: z.string().uuid(),
+	workspaceId: z.string().nullable(),
+	sequenceNumber: z.number().int().nonnegative(),
+});
+export type RuntimeStateStreamVersionedSnapshotMessage = z.infer<
+	typeof runtimeStateStreamVersionedSnapshotMessageSchema
+>;
+export type RuntimeStateStreamVersionedDeltaMessage = z.infer<typeof runtimeStateStreamVersionedDeltaMessageSchema>;
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
+	runtimeStateStreamVersionedSnapshotMessageSchema,
+	runtimeStateStreamVersionedDeltaMessageSchema,
+	runtimeStateStreamVersionConfirmationMessageSchema,
 	z.object({
 		type: z.literal("agent_session_pty_host_diagnostics_updated"),
 		revision: z.number().int().nonnegative(),
@@ -3634,6 +3741,13 @@ export const runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSc
 });
 // 浏览器 → 服务端的状态流消息（其余消息都是服务端 → 浏览器）。
 export const runtimeStateStreamClientMessageSchema = z.discriminatedUnion("type", [
+	z.object({ type: z.literal("request_state_snapshot_v2") }),
+	z.object({
+		type: z.literal("confirm_state_version_v2"),
+		runtimeGenerationId: z.string().uuid(),
+		sequenceNumber: z.number().int().nonnegative(),
+	}),
+	z.object({ type: z.literal("declare_pty_host_diagnostics_subscription"), subscribed: z.boolean() }),
 	taskVisualizationBrowserContextMessageSchema,
 	taskVisualizationPreviewAcknowledgmentMessageSchema,
 	runtimeStateStreamClientDeclareWorkspaceMetadataProbeScopeMessageSchema,
@@ -5471,6 +5585,7 @@ export type RuntimeTerminalWsOutputAckMessage = z.infer<typeof runtimeTerminalWs
 
 export const runtimeTerminalWsRestoreCompleteMessageSchema = z.object({
 	type: z.literal("restore_complete"),
+	restoreRequestSequenceNumber: z.number().int().nonnegative().optional(),
 });
 export type RuntimeTerminalWsRestoreCompleteMessage = z.infer<typeof runtimeTerminalWsRestoreCompleteMessageSchema>;
 
@@ -5483,6 +5598,12 @@ export const runtimeTerminalWsRequestRestoreMessageSchema = z.object({
 export type RuntimeTerminalWsRequestRestoreMessage = z.infer<typeof runtimeTerminalWsRequestRestoreMessageSchema>;
 
 export const runtimeTerminalWsClientMessageSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("declare_output_demand"),
+		demand: z.enum(["continuous_output", "awaiting_restore_snapshot", "paused_output"]),
+		knownOutputVersion: z.number().int().optional(),
+		knownStreamGenerationId: z.string().uuid().optional(),
+	}),
 	runtimeTerminalWsResizeMessageSchema,
 	runtimeTerminalWsStopMessageSchema,
 	runtimeTerminalWsOutputAckMessageSchema,
@@ -5511,6 +5632,10 @@ export type RuntimeTerminalWsExitMessage = z.infer<typeof runtimeTerminalWsExitM
 
 export const runtimeTerminalWsRestoreMessageSchema = z.object({
 	type: z.literal("restore"),
+	outputDemandProtocolVersion: z.literal(1).optional(),
+	outputVersion: z.number().int().nonnegative().optional(),
+	streamGenerationId: z.string().uuid().optional(),
+	restoreRequestSequenceNumber: z.number().int().nonnegative().optional(),
 	snapshot: z.string(),
 	cols: z.number().int().positive().nullable().optional(),
 	rows: z.number().int().positive().nullable().optional(),
@@ -5518,6 +5643,12 @@ export const runtimeTerminalWsRestoreMessageSchema = z.object({
 export type RuntimeTerminalWsRestoreMessage = z.infer<typeof runtimeTerminalWsRestoreMessageSchema>;
 
 export const runtimeTerminalWsServerMessageSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("output_demand_state"),
+		demand: z.enum(["continuous_output", "awaiting_restore_snapshot", "paused_output"]),
+		outputVersion: z.number().int().nonnegative(),
+		streamGenerationId: z.string().uuid(),
+	}),
 	runtimeTerminalWsStateMessageSchema,
 	runtimeTerminalWsErrorMessageSchema,
 	runtimeTerminalWsExitMessageSchema,
@@ -6431,6 +6562,46 @@ export const runtimePostDeployVerificationDeploymentGroupSchema = z.object({
 });
 export type RuntimePostDeployVerificationDeploymentGroup = z.infer<
 	typeof runtimePostDeployVerificationDeploymentGroupSchema
+>;
+
+export const runtimePostDeployVerificationDeploymentGroupOverviewSchema =
+	runtimePostDeployVerificationDeploymentGroupSchema.omit({ tasks: true }).extend({
+		contentVersion: z.string(),
+		pendingVerificationTaskCount: z.number().int().nonnegative(),
+		closedTaskCount: z.number().int().nonnegative(),
+		taskCountRequiringVerification: z.number().int().nonnegative(),
+		carriedForwardTaskCount: z.number().int().nonnegative(),
+	});
+export type RuntimePostDeployVerificationDeploymentGroupOverview = z.infer<
+	typeof runtimePostDeployVerificationDeploymentGroupOverviewSchema
+>;
+export const runtimePostDeployVerificationWorkspaceOverviewSchema = z.object({
+	activeDeploymentId: z.string().nullable(),
+	pendingVerificationTaskCount: z.number().int().nonnegative(),
+	deploymentGroups: z.array(runtimePostDeployVerificationDeploymentGroupOverviewSchema),
+});
+export type RuntimePostDeployVerificationWorkspaceOverview = z.infer<
+	typeof runtimePostDeployVerificationWorkspaceOverviewSchema
+>;
+export const runtimeGetPostDeployVerificationDeploymentGroupRequestSchema = z.object({
+	deploymentId: z.string().uuid(),
+	knownContentVersion: z.string().optional(),
+});
+export type RuntimeGetPostDeployVerificationDeploymentGroupRequest = z.infer<
+	typeof runtimeGetPostDeployVerificationDeploymentGroupRequestSchema
+>;
+export const runtimeGetPostDeployVerificationDeploymentGroupResponseSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("not_found"), deploymentId: z.string().uuid() }),
+	z.object({ status: z.literal("unchanged"), deploymentId: z.string().uuid(), contentVersion: z.string() }),
+	z.object({
+		status: z.literal("changed"),
+		deploymentId: z.string().uuid(),
+		contentVersion: z.string(),
+		deploymentGroup: runtimePostDeployVerificationDeploymentGroupSchema,
+	}),
+]);
+export type RuntimeGetPostDeployVerificationDeploymentGroupResponse = z.infer<
+	typeof runtimeGetPostDeployVerificationDeploymentGroupResponseSchema
 >;
 
 // ~/.cline/kanban/post-deploy-verification-state.json 全量（plan 1c）：跨 workspace 的单一全局文件。

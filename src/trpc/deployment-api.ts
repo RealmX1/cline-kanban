@@ -6,7 +6,6 @@
 // 本层不触碰 board.json。
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-
 import type {
 	RuntimeConfirmVerificationCompleteRequest,
 	RuntimeConfirmVerificationCompleteResponse,
@@ -54,6 +53,10 @@ import {
 	updateTaskChecklist,
 	validateVerificationExecutionAttemptForDispatch,
 } from "../deployment/post-deploy-verification-state";
+import {
+	postDeployVerificationDeploymentGroupContentVersion,
+	summarizePostDeployVerificationWorkspace,
+} from "../deployment/post-deploy-verification-workspace-overview";
 import { summarizeWorkspacesHavingPostDeployVerificationDeploymentGroupsFromStateSnapshot } from "../deployment/post-deploy-verification-workspaces-having-deployment-groups-summarization";
 import { computeTaskDeploymentAttributionsAgainstDeployment } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
 import { waitWithinVerificationExecutionAbsoluteRpcDeadline } from "../deployment/verification-execution-absolute-rpc-deadline";
@@ -154,7 +157,22 @@ function describeConsumeFailure(reason: ConsumePendingConfirmationFailureReason 
 }
 
 export function createDeploymentApi(deps: CreateDeploymentApiDependencies): RuntimeTrpcContext["deploymentApi"] {
-	return {
+	const api: RuntimeTrpcContext["deploymentApi"] = {
+		getPostDeployVerificationWorkspaceOverview: async (scope) => {
+			const state = await api.getPostDeployVerificationState(scope, {});
+			return summarizePostDeployVerificationWorkspace(state.deploymentGroups, state.activeDeploymentId);
+		},
+		getPostDeployVerificationDeploymentGroup: async (scope, input) => {
+			const snapshot = await readPostDeployVerificationStateSnapshot(true);
+			const deploymentGroup = snapshot.deploymentGroups.find(
+				(group) => group.workspaceId === scope.workspaceId && group.deploymentId === input.deploymentId,
+			);
+			if (!deploymentGroup) return { status: "not_found", deploymentId: input.deploymentId };
+			const contentVersion = postDeployVerificationDeploymentGroupContentVersion(deploymentGroup);
+			if (contentVersion === input.knownContentVersion)
+				return { status: "unchanged", deploymentId: input.deploymentId, contentVersion };
+			return { status: "changed", deploymentId: input.deploymentId, contentVersion, deploymentGroup };
+		},
 		resolveTaskPostDeployVerificationEntryNavigationTargets: async (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
@@ -535,4 +553,5 @@ export function createDeploymentApi(deps: CreateDeploymentApiDependencies): Runt
 					),
 			}),
 	};
+	return api;
 }

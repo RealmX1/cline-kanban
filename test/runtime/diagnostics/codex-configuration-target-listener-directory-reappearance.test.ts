@@ -38,7 +38,7 @@ describe("配置目标目录出现或替换后的监听恢复", () => {
 		const beforeTransientFile = events.length;
 		const transientFile = join(cache, "short-lived-cache-entry.txt");
 		await writeFile(transientFile, "只在两次快照之间存在");
-		await rm(transientFile);
+		// 原生通知可能合并同轮创建和删除；确认监听收到事件后再移除，期间不触发快照。
 		await vi.waitFor(
 			() =>
 				expect(
@@ -52,6 +52,7 @@ describe("配置目标目录出现或替换后的监听恢复", () => {
 				).toBe(true),
 			{ timeout: 5000 },
 		);
+		await rm(transientFile);
 		expect(monitor.getCoverage().fileObservation).toBe("active");
 		expect(events.some((event) => event.event === "target_listener_coverage_gap")).toBe(true);
 	});

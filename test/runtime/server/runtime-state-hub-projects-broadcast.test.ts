@@ -519,7 +519,7 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		).toBe(true);
 	});
 
-	it("新客户端收到首帧后同内容广播仍发送（首帧发出后指纹复位）", async () => {
+	it("新客户端建立独立基线，不使已有连接重收同内容项目列表", async () => {
 		// 既有客户端先收过一轮广播，把去重指纹推进到当前内容。
 		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 		await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
@@ -530,9 +530,10 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		try {
 			await waitForRuntimeMessage(lateClient, (message) => message.type === "snapshot");
 			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
-			const message = await waitForRuntimeMessage(lateClient, isProjectsUpdatedMessage);
-			expect(message.currentProjectId).toBe(WORKSPACE_ID);
-			expect(message.projects).toHaveLength(1);
+
+			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+			expect(lateClient.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
 
 			// 稳态去重不受影响：再下一次同内容广播仍然跳过。
 			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);

@@ -18,6 +18,7 @@ import {
 	runtimeTaskSessionSummarySchema,
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
+import { preserveRuntimeOnlySessionFieldsFromSameGeneration } from "../core/browser-task-session-summary-projection";
 import {
 	applySessionFacets,
 	isNeverStartedPlaceholderTaskSessionSummary,
@@ -443,7 +444,9 @@ function preservePersistedTaskSessionFactsAgainstStaleSnapshots(
 	for (const [taskId, incomingSummary] of Object.entries(incomingSessions)) {
 		const persistedSummary = persistedSessions[taskId];
 		if (!persistedSummary) continue;
-		let reconciledSummary = incomingSummary;
+		let reconciledSummary = preserveRuntimeOwnedSessionControlFactsAgainstIncomingSnapshot
+			? preserveRuntimeOnlySessionFieldsFromSameGeneration(persistedSummary, incomingSummary)
+			: incomingSummary;
 		const persistedReviewReceipt = persistedSummary.lastAppliedHookReviewLifecycleEventDelivery;
 		const incomingReviewReceipt = incomingSummary.lastAppliedHookReviewLifecycleEventDelivery;
 		if (

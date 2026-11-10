@@ -55,6 +55,8 @@ vi.mock("@/hooks/use-post-deploy-verification", () => ({
 					};
 		return {
 			activeGroup,
+			historyGroups: [],
+			collapsed: false,
 			refresh: postDeployVerificationReadModel.refresh,
 		} as unknown as UsePostDeployVerificationResult;
 	},

@@ -445,11 +445,8 @@ export function createWorkspaceMetadataMonitor(
 				...entry,
 				trackedTasks: collectTrackedTasks(board),
 				autoReviewTaskIdsInReviewColumn: collectAutoReviewTaskIdsInReviewColumn(board),
-				// 首帧与后续整包广播都用订阅并集；并集不变时不会补推，不能只给新连接自己的范围。
-				probeScopeBySubscriberId: new Map([
-					...entry.probeScopeBySubscriberId,
-					["initial-stream-snapshot", probeScope],
-				]),
+				// 探测共享并集，投递只取本观看者范围；范围变化由 hub 定向补缓存快照。
+				probeScopeBySubscriberId: new Map([["initial-stream-snapshot", probeScope]]),
 			});
 		},
 		connectWorkspace: async ({ workspaceId, workspacePath, board, subscriberId, probeScope }) => {

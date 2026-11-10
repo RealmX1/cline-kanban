@@ -355,8 +355,12 @@ function setDocumentHidden(hidden: boolean): void {
 	document.dispatchEvent(new Event("visibilitychange"));
 }
 
-function parseControlMessages(socket: { sentMessages: string[] }): Array<{ type: string; bytes?: number }> {
-	return socket.sentMessages.map((message) => JSON.parse(message) as { type: string; bytes?: number });
+function parseControlMessages(socket: {
+	sentMessages: string[];
+}): Array<{ type: string; bytes?: number; demand?: string }> {
+	return socket.sentMessages.map(
+		(message) => JSON.parse(message) as { type: string; bytes?: number; demand?: string },
+	);
 }
 
 function findNewestTerminalSocket(role: "io" | "control") {
@@ -422,6 +426,7 @@ describe("persistent-terminal-manager", () => {
 
 	afterEach(() => {
 		disposeAllPersistentTerminalsForWorkspace("workspace-1");
+		window.history.replaceState(null, "", window.location.pathname);
 		vi.useRealTimers();
 		document.body.replaceChildren();
 	});
@@ -938,6 +943,74 @@ describe("persistent-terminal-manager", () => {
 		await vi.waitFor(() => {
 			expect(terminalContentPresenceChanges).toEqual([false, true, false]);
 		});
+	});
+
+	it("隐藏输出实验在观察操作期间保持接收，观察结束后恢复暂停", async () => {
+		vi.useFakeTimers();
+		window.history.replaceState(null, "", "?terminalOutputDemandExperiment=hidden_page");
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-demand", workspaceId: "workspace-1" });
+		terminal.mount(createContainer(), appearance, { isVisible: true });
+		const control = findNewestTerminalSocket("control");
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore",
+				snapshot: "保留画面",
+				cols: 80,
+				rows: 24,
+				outputDemandProtocolVersion: 1,
+				outputVersion: 0,
+				streamGenerationId: "00000000-0000-4000-8000-000000000001",
+				restoreRequestSequenceNumber: 1,
+			}),
+		);
+		await vi.advanceTimersByTimeAsync(20);
+		setDocumentHidden(true);
+		expect(parseControlMessages(control)).toContainEqual({ type: "declare_output_demand", demand: "paused_output" });
+		const observation = terminal.waitForLikelyPrompt(1000);
+		expect(
+			parseControlMessages(control).some(
+				(message) => message.type === "declare_output_demand" && message.demand === "continuous_output",
+			),
+		).toBe(true);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(await observation).toBe(false);
+		expect(
+			parseControlMessages(control).filter(
+				(message) => message.type === "declare_output_demand" && message.demand === "paused_output",
+			),
+		).toHaveLength(2);
+	});
+
+	it("切换任务实验保留五秒连续接收，快速切回取消暂停", async () => {
+		vi.useFakeTimers();
+		window.history.replaceState(null, "", "?terminalOutputDemandExperiment=inactive_terminal");
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-demand", workspaceId: "workspace-1" });
+		const container = createContainer();
+		terminal.mount(container, appearance, { isVisible: true });
+		const control = findNewestTerminalSocket("control");
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore",
+				snapshot: "保留画面",
+				cols: 80,
+				rows: 24,
+				outputDemandProtocolVersion: 1,
+				outputVersion: 0,
+				streamGenerationId: "00000000-0000-4000-8000-000000000001",
+			}),
+		);
+		await vi.advanceTimersByTimeAsync(20);
+		terminal.unmount(container);
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(parseControlMessages(control).some((message) => message.type === "declare_output_demand")).toBe(false);
+		terminal.mount(container, appearance, { isVisible: true });
+		await vi.advanceTimersByTimeAsync(2);
+		expect(parseControlMessages(control).some((message) => message.type === "declare_output_demand")).toBe(false);
+		terminal.unmount(container);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(parseControlMessages(control)).toContainEqual({ type: "declare_output_demand", demand: "paused_output" });
 	});
 
 	it("suspends rendering while hidden and snaps to a fresh snapshot on return", () => {

@@ -1,12 +1,12 @@
+import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
-
 import type { RawData, WebSocket } from "ws";
 import { WebSocketServer } from "ws";
-
 import { assertRuntimeAgentIsNotRetired } from "../core/agent-catalog";
 import type { RuntimeTerminalWsServerMessage } from "../core/api-contract";
 import { parseTerminalWsClientMessage } from "../core/api-validation";
+import { projectTaskSessionSummaryForBrowser } from "../core/browser-task-session-summary-projection";
 import {
 	WEBSOCKET_CLOSE_CODE_SERVICE_RESTART,
 	WEBSOCKET_CLOSE_REASON_KANBAN_RUNTIME_HANDOVER_RESTART,
@@ -62,6 +62,7 @@ interface IoOutputState {
 	 * 在途字节全部作废，所以此刻归零不但安全，而且是唯一正确的对账方式。
 	 */
 	resetUnacknowledgedOutputAccounting: () => void;
+	suspendOutputForViewer: () => void;
 	dispose: () => void;
 }
 
@@ -70,6 +71,8 @@ interface IoOutputState {
 // buffering, and socket replacement per clientId so one tab cannot evict another.
 interface TerminalViewerState {
 	clientId: string;
+	outputDemand: "continuous_output" | "awaiting_restore_snapshot" | "paused_output";
+	restoreRequestSequenceNumber: number;
 	pendingOutputChunks: Buffer[];
 	pendingOutputByteLength: number;
 	restoreComplete: boolean;
@@ -87,6 +90,8 @@ interface TerminalViewerState {
 }
 
 interface TerminalStreamState {
+	outputVersion: number;
+	streamGenerationId: string;
 	viewers: Map<string, TerminalViewerState>;
 	// There is one real terminal process, but many browser tabs can watch it.
 	// If one tab falls behind, we pause the shared PTY so it does not get flooded.
@@ -206,6 +211,8 @@ export function createTerminalWebSocketBridge({
 		}
 		const created: TerminalStreamState = {
 			viewers: new Map(),
+			outputVersion: 0,
+			streamGenerationId: randomUUID(),
 			backpressuredViewerIds: new Set(),
 			detachOutputListener: null,
 		};
@@ -234,6 +241,8 @@ export function createTerminalWebSocketBridge({
 		}
 		const created: TerminalViewerState = {
 			clientId,
+			outputDemand: "continuous_output",
+			restoreRequestSequenceNumber: 0,
 			pendingOutputChunks: [],
 			pendingOutputByteLength: 0,
 			restoreComplete: false,
@@ -516,6 +525,22 @@ export function createTerminalWebSocketBridge({
 				unacknowledgedOutputBytes = Math.max(0, unacknowledgedOutputBytes - Math.max(0, Math.floor(bytes)));
 				checkResumeAfterBackpressure();
 			},
+			suspendOutputForViewer: () => {
+				if (outputFlushTimer !== null) {
+					clearTimeout(outputFlushTimer);
+					outputFlushTimer = null;
+				}
+				pendingOutputChunks = [];
+				unacknowledgedOutputBytes = 0;
+				clearResumeCheck();
+				clearBackpressureEvictionTimer();
+				if (outputPaused) {
+					outputPaused = false;
+					logOutputPauseEndedIfSlow("dispose");
+					streamState.backpressuredViewerIds.delete(clientId);
+					if (streamState.backpressuredViewerIds.size === 0) terminalManager.resumeOutput(taskId);
+				}
+			},
 			resetUnacknowledgedOutputAccounting: () => {
 				unacknowledgedOutputBytes = 0;
 				checkResumeAfterBackpressure();
@@ -553,7 +578,9 @@ export function createTerminalWebSocketBridge({
 		// last-viewer-wins across tabs.
 		streamState.detachOutputListener = terminalManager.attach(taskId, {
 			onOutput: (chunk) => {
+				streamState.outputVersion += 1;
 				for (const viewerState of streamState.viewers.values()) {
+					if (viewerState.outputDemand === "paused_output") continue;
 					if (viewerState.restoreComplete && viewerState.ioState) {
 						viewerState.ioState.enqueueOutput(chunk);
 						continue;
@@ -726,7 +753,7 @@ export function createTerminalWebSocketBridge({
 			onState: (summary) => {
 				sendControlMessage(ws, {
 					type: "state",
-					summary,
+					summary: projectTaskSessionSummaryForBrowser(summary),
 				});
 			},
 			onExit: (code) => {
@@ -745,6 +772,9 @@ export function createTerminalWebSocketBridge({
 		// snapshot. Used both on initial connect and when a hidden tab returns and asks
 		// to jump straight to the latest screen via request_restore.
 		const sendRestoreSnapshot = (): void => {
+			viewerState.outputDemand = "awaiting_restore_snapshot";
+			const restoreRequestSequenceNumber = ++viewerState.restoreRequestSequenceNumber;
+			const outputVersion = streamState.outputVersion;
 			viewerState.restoreComplete = false;
 			viewerState.resetPendingOutput();
 			// 兜底:客户端迟迟不回 restore_complete(写队列死锁、控制帧丢失)时强开闸门,不让这条 viewer
@@ -758,19 +788,37 @@ export function createTerminalWebSocketBridge({
 			void terminalManager
 				.getRestoreSnapshot(taskId)
 				.then((snapshot) => {
+					if (
+						viewerState.controlSocket !== ws ||
+						viewerState.restoreRequestSequenceNumber !== restoreRequestSequenceNumber ||
+						viewerState.outputDemand === "paused_output"
+					)
+						return;
 					sendControlMessage(ws, {
 						type: "restore",
+						outputDemandProtocolVersion: 1,
+						outputVersion,
+						streamGenerationId: streamState.streamGenerationId,
+						restoreRequestSequenceNumber,
 						snapshot: snapshot?.snapshot ?? "",
 						cols: snapshot?.cols ?? null,
 						rows: snapshot?.rows ?? null,
 					});
 				})
 				.catch(() => {
+					if (
+						viewerState.controlSocket !== ws ||
+						viewerState.restoreRequestSequenceNumber !== restoreRequestSequenceNumber ||
+						viewerState.outputDemand === "paused_output"
+					)
+						return;
+					viewerState.outputDemand = "continuous_output";
+					viewerState.restoreComplete = true;
+					viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
+					viewerState.flushPendingOutput();
 					sendControlMessage(ws, {
-						type: "restore",
-						snapshot: "",
-						cols: null,
-						rows: null,
+						type: "error",
+						message: "读取终端恢复快照失败，已恢复连续输出；保留现有画面并等待重新同步。",
 					});
 				});
 		};
@@ -786,6 +834,34 @@ export function createTerminalWebSocketBridge({
 				return;
 			}
 
+			if (message.type === "declare_output_demand") {
+				if (message.demand === "paused_output") {
+					viewerState.outputDemand = "paused_output";
+					viewerState.restoreComplete = false;
+					viewerState.restoreRequestSequenceNumber += 1;
+					viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
+					viewerState.resetPendingOutput();
+					viewerState.ioState?.suspendOutputForViewer();
+				} else if (
+					message.demand === "continuous_output" &&
+					message.knownOutputVersion === streamState.outputVersion &&
+					message.knownStreamGenerationId === streamState.streamGenerationId
+				) {
+					viewerState.outputDemand = "continuous_output";
+					viewerState.restoreComplete = true;
+					viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
+					viewerState.resetPendingOutput();
+				} else {
+					sendRestoreSnapshot();
+				}
+				sendControlMessage(ws, {
+					type: "output_demand_state",
+					demand: viewerState.outputDemand,
+					outputVersion: streamState.outputVersion,
+					streamGenerationId: streamState.streamGenerationId,
+				});
+				return;
+			}
 			if (message.type === "resize") {
 				terminalManager.resize(taskId, message.cols, message.rows, message.pixelWidth, message.pixelHeight);
 				return;
@@ -802,6 +878,13 @@ export function createTerminalWebSocketBridge({
 			}
 
 			if (message.type === "restore_complete") {
+				if (
+					viewerState.outputDemand === "paused_output" ||
+					(message.restoreRequestSequenceNumber !== undefined &&
+						message.restoreRequestSequenceNumber !== viewerState.restoreRequestSequenceNumber)
+				)
+					return;
+				viewerState.outputDemand = "continuous_output";
 				viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
 				viewerState.restoreComplete = true;
 				viewerState.flushPendingOutput();

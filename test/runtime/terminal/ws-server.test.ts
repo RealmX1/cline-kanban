@@ -497,6 +497,91 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		}
 	});
 
+	it("暂停只影响一个观看者，恢复握手拒绝旧确认且不启动 Agent", async () => {
+		const pairs = [];
+		for (const id of ["paused-viewer", "continuous-viewer"]) {
+			const io = await openQueuedWebSocket(
+				`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=${id}`,
+			);
+			const control = await openQueuedWebSocket(
+				`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=${id}`,
+			);
+			const restore = await waitForControlMessage(control, (message) => message.type === "restore");
+			control.socket.send(JSON.stringify({ type: "restore_complete" }));
+			pairs.push({ io, control, restore });
+		}
+		const first = pairs[0]!;
+		const second = pairs[1]!;
+		const recoveryCountBeforePause = terminalManager.recoverStaleSession.mock.calls.length;
+		first.control.socket.send(JSON.stringify({ type: "declare_output_demand", demand: "paused_output" }));
+		await waitForControlMessage(
+			first.control,
+			(message) => message.type === "output_demand_state" && message.demand === "paused_output",
+		);
+		terminalManager.emitOutput(TASK_ID, "后台持续输出");
+		expect((await waitForIoMessage(second.io)).toString()).toBe("后台持续输出");
+		expect(sumQueuedIoBytes(first.io)).toBe(0);
+		first.control.socket.send(
+			JSON.stringify({ type: "declare_output_demand", demand: "continuous_output", knownOutputVersion: -1 }),
+		);
+		const restored = await waitForControlMessage(first.control, (message) => message.type === "restore");
+		if (restored.type !== "restore") throw new Error("缺少恢复快照");
+		first.control.socket.send(JSON.stringify({ type: "restore_complete", restoreRequestSequenceNumber: 1 }));
+		terminalManager.emitOutput(TASK_ID, "恢复期间输出");
+		await waitForIoMessage(second.io);
+		expect(sumQueuedIoBytes(first.io)).toBe(0);
+		first.control.socket.send(
+			JSON.stringify({
+				type: "restore_complete",
+				restoreRequestSequenceNumber: restored.restoreRequestSequenceNumber,
+			}),
+		);
+		expect((await waitForIoMessage(first.io)).toString()).toBe("恢复期间输出");
+		expect(terminalManager.stopTaskSession).not.toHaveBeenCalled();
+		expect(terminalManager.recoverStaleSession).toHaveBeenCalledTimes(recoveryCountBeforePause);
+		for (const { io, control } of pairs) {
+			await closeSocket(io.socket);
+			await closeSocket(control.socket);
+		}
+	});
+
+	it("输出版本未变化时直接继续，暂停解除该观看者的共享背压", async () => {
+		const io = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=version-viewer`,
+		);
+		const control = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=version-viewer`,
+		);
+		const restore = await waitForControlMessage(control, (message) => message.type === "restore");
+		if (restore.type !== "restore") throw new Error("缺少初始快照");
+		control.socket.send(JSON.stringify({ type: "restore_complete" }));
+		control.socket.send(JSON.stringify({ type: "declare_output_demand", demand: "paused_output" }));
+		await waitForControlMessage(control, (message) => message.type === "output_demand_state");
+		control.socket.send(
+			JSON.stringify({
+				type: "declare_output_demand",
+				demand: "continuous_output",
+				knownOutputVersion: restore.outputVersion,
+				knownStreamGenerationId: restore.streamGenerationId,
+			}),
+		);
+		await waitForControlMessage(
+			control,
+			(message) => message.type === "output_demand_state" && message.demand === "continuous_output",
+		);
+		expect(terminalManager.getRestoreSnapshot).toHaveBeenCalledTimes(1);
+		terminalManager.emitOutput(TASK_ID, "z".repeat(120000));
+		await waitForAssertion(() => expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1));
+		control.socket.send(JSON.stringify({ type: "declare_output_demand", demand: "paused_output" }));
+		await waitForControlMessage(
+			control,
+			(message) => message.type === "output_demand_state" && message.demand === "paused_output",
+		);
+		expect(terminalManager.resumeOutput).toHaveBeenCalledTimes(1);
+		await closeSocket(io.socket);
+		await closeSocket(control.socket);
+	});
+
 	it("无进程时丢弃鼠标报告但保留连接，恢复后同一连接可继续输入", async () => {
 		const ioSocket = await openQueuedWebSocket(
 			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=reclaimed-viewer`,
@@ -623,8 +708,13 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 
 		await waitForControlMessage(controlSocketA, (message) => message.type === "restore");
 		await waitForControlMessage(controlSocketB, (message) => message.type === "restore");
-		controlSocketA.socket.send(JSON.stringify({ type: "restore_complete" }));
-		controlSocketB.socket.send(JSON.stringify({ type: "restore_complete" }));
+		// 同一通道的 pong 证明恢复消息已处理，避免把尚在恢复的观看者误当成已进入背压。
+		for (const controlSocket of [controlSocketA, controlSocketB]) {
+			const restoreProcessed = once(controlSocket.socket, "pong");
+			controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
+			controlSocket.socket.ping();
+			await restoreProcessed;
+		}
 
 		const output = "x".repeat(120_000);
 		const outputTotalBytes = Buffer.byteLength(output);

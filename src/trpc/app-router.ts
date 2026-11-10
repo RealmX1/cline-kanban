@@ -207,6 +207,9 @@ import type {
 } from "../core/api-contract";
 import {
 	type RuntimeAutomaticAgentFailureContinuationActionRequest,
+	type RuntimeGetPostDeployVerificationDeploymentGroupRequest,
+	type RuntimeGetPostDeployVerificationDeploymentGroupResponse,
+	type RuntimePostDeployVerificationWorkspaceOverview,
 	type RuntimeTaskCardActionSetShelvingStateRequest,
 	type RuntimeTaskCardActionSetShelvingStateResponse,
 	type RuntimeTaskConversationSessionCreateRequest,
@@ -241,6 +244,8 @@ import {
 	runtimeClaimDailyWorkProgressCelebrationsResponseSchema,
 	runtimeCommandRunRequestSchema,
 	runtimeCommandRunResponseSchema,
+	runtimeConditionalWorkspaceChangesRequestSchema,
+	runtimeConditionalWorkspaceChangesResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
 	runtimeConfirmExploratoryFindingRequestSchema,
@@ -268,6 +273,8 @@ import {
 	runtimeGetExplorationThreadGraphResponseSchema,
 	runtimeGetExploratoryFindingsRequestSchema,
 	runtimeGetExploratoryFindingsResponseSchema,
+	runtimeGetPostDeployVerificationDeploymentGroupRequestSchema,
+	runtimeGetPostDeployVerificationDeploymentGroupResponseSchema,
 	runtimeGetPostDeployVerificationStateRequestSchema,
 	runtimeGetPostDeployVerificationStateResponseSchema,
 	runtimeGitCheckoutRequestSchema,
@@ -307,6 +314,7 @@ import {
 	runtimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequestSchema,
 	runtimePlannedHandoverRestartRequestSchema,
 	runtimePlannedHandoverRestartResponseSchema,
+	runtimePostDeployVerificationWorkspaceOverviewSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
@@ -319,6 +327,8 @@ import {
 	runtimePromptLibraryReadRequestSchema,
 	runtimePromptLibraryResponseSchema,
 	runtimeReadAgentPromptImageAttachmentsRequestSchema,
+	runtimeReadTaskCardsForPostDeployVerificationRequestSchema,
+	runtimeReadTaskCardsForPostDeployVerificationResponseSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
 	runtimeRecordCurrentTaskProgressRequestSchema,
@@ -443,6 +453,7 @@ import {
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
+import { projectWorkspaceStateForBrowser } from "../core/browser-task-session-summary-projection";
 import {
 	type CodexConfigurationProfileAutomaticAdoptionGuard,
 	type CodexConfigurationSyncApi,
@@ -654,6 +665,7 @@ import {
 	synthesizeNotificationSpeech,
 } from "../notifications/notification-speech-synthesis";
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
+import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -1189,6 +1201,13 @@ export interface RuntimeTrpcContext {
 		ingest: (input: RuntimeHookIngestRequest) => Promise<RuntimeHookIngestResponse>;
 	};
 	deploymentApi: {
+		getPostDeployVerificationWorkspaceOverview: (
+			scope: RuntimeTrpcWorkspaceScope,
+		) => Promise<RuntimePostDeployVerificationWorkspaceOverview>;
+		getPostDeployVerificationDeploymentGroup: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeGetPostDeployVerificationDeploymentGroupRequest,
+		) => Promise<RuntimeGetPostDeployVerificationDeploymentGroupResponse>;
 		resolveTaskPostDeployVerificationEntryNavigationTargets: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequest,
@@ -2389,6 +2408,36 @@ const runtimeApplicationWorkspaceProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.workspaceApi.discardGitChanges(ctx.workspaceScope, input ?? null);
 		}),
+	getChangesConditional: workspaceProcedure
+		.input(runtimeConditionalWorkspaceChangesRequestSchema)
+		.output(runtimeConditionalWorkspaceChangesResponseSchema)
+		.query(async ({ ctx, input }) =>
+			buildConditionalWorkspaceChangesResponse(
+				await ctx.workspaceApi.loadChanges(ctx.workspaceScope, input),
+				input.knownContentVersion,
+			),
+		),
+	readTaskCardsForPostDeployVerification: workspaceProcedure
+		.input(runtimeReadTaskCardsForPostDeployVerificationRequestSchema)
+		.output(runtimeReadTaskCardsForPostDeployVerificationResponseSchema)
+		.query(async ({ ctx, input }) => {
+			const state = await ctx.workspaceApi.loadState(ctx.workspaceScope);
+			const taskIds = new Set(input.taskIds);
+			const board = {
+				columns: state.board.columns.map((column) => ({
+					...column,
+					cards: column.cards.filter((card) => taskIds.has(card.id)),
+				})),
+			};
+			const sessions = Object.fromEntries(
+				Object.entries(state.sessions).filter(
+					([id, summary]) =>
+						taskIds.has(id) || taskIds.has(summary.taskConversationSessionMetadata?.workspaceTaskId ?? ""),
+				),
+			);
+			const projection = projectWorkspaceStateForBrowser({ ...state, board, sessions });
+			return { repoPath: projection.repoPath, board: projection.board, sessions: projection.sessions };
+		}),
 	getChanges: workspaceProcedure
 		.input(runtimeWorkspaceChangesRequestSchema)
 		.output(runtimeWorkspaceChangesResponseSchema)
@@ -2431,7 +2480,10 @@ const runtimeApplicationWorkspaceProcedureRouter = t.router({
 			return await ctx.workspaceApi.searchFiles(ctx.workspaceScope, input);
 		}),
 	getState: workspaceProcedure.output(runtimeWorkspaceStateResponseSchema).query(async ({ ctx }) => {
-		return await ctx.workspaceApi.loadState(ctx.workspaceScope);
+		const state = await ctx.workspaceApi.loadState(ctx.workspaceScope);
+		return ctx.kanbanRequestOriginActorEvidence.webUiPageLoadRequestOriginNonceVerificationStatus === "verified"
+			? projectWorkspaceStateForBrowser(state)
+			: state;
 	}),
 	notifyStateUpdated: workspaceProcedure
 		.output(runtimeWorkspaceStateNotifyResponseSchema)
@@ -2442,7 +2494,14 @@ const runtimeApplicationWorkspaceProcedureRouter = t.router({
 		.input(runtimeWorkspaceStateSaveRequestSchema)
 		.output(runtimeWorkspaceStateResponseSchema)
 		.mutation(async ({ ctx, input }) => {
-			return await ctx.workspaceApi.saveState(ctx.workspaceScope, input, ctx.kanbanRequestOriginActorEvidence);
+			const state = await ctx.workspaceApi.saveState(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			);
+			return ctx.kanbanRequestOriginActorEvidence.webUiPageLoadRequestOriginNonceVerificationStatus === "verified"
+				? projectWorkspaceStateForBrowser(state)
+				: state;
 		}),
 	addBacklogTask: workspaceProcedure
 		.input(runtimeAddBacklogTaskRequestSchema)
@@ -2771,6 +2830,13 @@ const runtimeApplicationHooksProcedureRouter = t.router({
 });
 
 const runtimeApplicationDeploymentProcedureRouter = t.router({
+	getPostDeployVerificationWorkspaceOverview: workspaceProcedure
+		.output(runtimePostDeployVerificationWorkspaceOverviewSchema)
+		.query(({ ctx }) => ctx.deploymentApi.getPostDeployVerificationWorkspaceOverview(ctx.workspaceScope)),
+	getPostDeployVerificationDeploymentGroup: workspaceProcedure
+		.input(runtimeGetPostDeployVerificationDeploymentGroupRequestSchema)
+		.output(runtimeGetPostDeployVerificationDeploymentGroupResponseSchema)
+		.query(({ ctx, input }) => ctx.deploymentApi.getPostDeployVerificationDeploymentGroup(ctx.workspaceScope, input)),
 	resolveTaskPostDeployVerificationEntryNavigationTargets: workspaceProcedure
 		.input(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsRequestSchema)
 		.output(runtimeResolveTaskPostDeployVerificationEntryNavigationTargetsResponseSchema)

@@ -184,9 +184,9 @@ export default function App(): ReactElement {
 	// 「summaries → 一次 setSessions」的 applier，useRuntimeStateStream 收到批次经回调直接调用。
 	// 这样该消息不再经 stream reducer 新建 workspaceState，App 每批只渲染一次而不是两次。
 	const streamedTaskSessionSummariesApplierRef = useRef<StreamedTaskSessionSummariesApplier | null>(null);
-	const handleStreamedTaskSessionSummaries = useCallback(
-		(summaries: RuntimeTaskSessionSummary[], workspaceId: string) => {
-			streamedTaskSessionSummariesApplierRef.current?.(summaries, workspaceId);
+	const handleStreamedTaskSessionSummaries = useCallback<StreamedTaskSessionSummariesApplier>(
+		(...sessionSummariesApplicationArguments) => {
+			streamedTaskSessionSummariesApplierRef.current?.(...sessionSummariesApplicationArguments);
 		},
 		[],
 	);

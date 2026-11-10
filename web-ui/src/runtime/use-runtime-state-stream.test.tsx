@@ -2,7 +2,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { RuntimeLiveTaskResourceUsageSnapshot } from "@/runtime/types";
+import type { RuntimeLiveTaskResourceUsageSnapshot, RuntimeStateStreamClientMessage } from "@/runtime/types";
 import type {
 	StreamedTaskSessionSummariesApplier,
 	UseRuntimeStateStreamResult,
@@ -48,7 +48,7 @@ class MockRuntimeStateWebSocket {
 	onerror: (() => void) | null = null;
 	onclose: ((event: CloseEvent) => void) | null = null;
 	readyState = MockRuntimeStateWebSocket.CONNECTING;
-	readonly sentMessages: unknown[] = [];
+	readonly sentMessages: RuntimeStateStreamClientMessage[] = [];
 
 	constructor(readonly url: string) {
 		MockRuntimeStateWebSocket.instances.push(this);
@@ -221,6 +221,67 @@ describe("useRuntimeStateStream", () => {
 		expect(latestStatus?.snapshot?.cpuUsagePercent).toBe(25);
 	});
 
+	it("首帧错误自动有界补证，范围变化和重连后接续，恢复快照清除错误", async () => {
+		const snapshots: UseRuntimeStateStreamResult[] = [];
+		await act(async () => {
+			root.render(<RuntimeStateStreamHarness onSnapshot={(snapshot) => snapshots.push(snapshot)} />);
+		});
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) throw new Error("未创建初始状态流连接");
+		const countRecoveryRequests = () =>
+			socket.sentMessages.filter((message) => message.type === "request_state_snapshot_v2").length;
+		await act(async () => {
+			socket.triggerOpen();
+			socket.triggerMessage({ type: "error", message: "首帧读取暂时失败" });
+			socket.triggerMessage({ type: "error", message: "首帧读取仍然失败" });
+			await vi.advanceTimersByTimeAsync(20_000);
+		});
+		expect(countRecoveryRequests()).toBe(3);
+		expect(snapshots.at(-1)?.hasReceivedSnapshot).toBe(false);
+		expect(snapshots.at(-1)?.streamError).toContain("已保留现有内容");
+		await act(async () => {
+			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
+				isBoardScopeAllProjectsSelected: true,
+				focusedTaskInProject: { workspaceId: "project-b", taskId: "task-1" },
+			});
+		});
+		expect(socket.sentMessages.slice(-2).map((message) => message.type)).toEqual([
+			"declare_workspace_metadata_probe_scope",
+			"request_state_snapshot_v2",
+		]);
+		await act(async () => {
+			socket.triggerMessage({
+				type: "state_snapshot_v2",
+				runtimeGenerationId: "00000000-0000-4000-8000-000000000001",
+				workspaceId: null,
+				sequenceNumber: 1,
+				snapshot: {
+					type: "snapshot",
+					currentProjectId: null,
+					projects: [],
+					workspaceState: null,
+					workspaceMetadata: null,
+					notificationLog: [],
+				},
+			});
+			await vi.advanceTimersByTimeAsync(20_000);
+		});
+		expect(countRecoveryRequests()).toBe(4);
+		expect(snapshots.at(-1)?.hasReceivedSnapshot).toBe(true);
+		expect(snapshots.at(-1)?.streamError).toBeNull();
+		await act(async () => {
+			socket.triggerClose();
+			await vi.advanceTimersByTimeAsync(500);
+			const reconnectedSocket = MockRuntimeStateWebSocket.instances[1];
+			if (!reconnectedSocket) throw new Error("未创建重连状态流连接");
+			reconnectedSocket.triggerOpen();
+			reconnectedSocket.triggerMessage({ type: "error", message: "重连首帧读取失败" });
+		});
+		expect(MockRuntimeStateWebSocket.instances[1]?.sentMessages).toContainEqual({
+			type: "request_state_snapshot_v2",
+		});
+	});
+
 	it("declares the git metadata probe scope in the connect URL, then sends a message when the focused task changes", async () => {
 		writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
 			isBoardScopeAllProjectsSelected: true,
@@ -243,7 +304,7 @@ describe("useRuntimeStateStream", () => {
 			socket.triggerOpen();
 		});
 		// URL 里已声明过、没变：不重复发。
-		expect(socket.sentMessages).toEqual([]);
+		expect(socket.sentMessages).toEqual([{ type: "declare_pty_host_diagnostics_subscription", subscribed: false }]);
 
 		act(() => {
 			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({
@@ -254,6 +315,7 @@ describe("useRuntimeStateStream", () => {
 			writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab({ isBoardScopeAllProjectsSelected: false });
 		});
 		expect(socket.sentMessages).toEqual([
+			{ type: "declare_pty_host_diagnostics_subscription", subscribed: false },
 			{
 				type: "declare_workspace_metadata_probe_scope",
 				workspaceMetadataProbeScope: {
