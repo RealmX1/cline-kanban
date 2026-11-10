@@ -24,6 +24,13 @@ let fixture: ReturnType<typeof createTempDir>;
 let sourceHome: string;
 let storageHome: string;
 let services: CodexConfigurationSyncService[];
+let capabilityFixtureBinary: string;
+vi.mock("../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-verification", () => ({
+	verifyCodexNativeSharedPluginInstallationCapability: vi.fn(async () => ({
+		status: "supported",
+		reason: "隔离来源测试能力通过",
+	})),
+}));
 const definition = { Stop: [{ hooks: [{ type: "command", command: "printf hook-definition" }] }] };
 const pluginId = "example@fixture-marketplace";
 beforeEach(async () => {
@@ -35,6 +42,10 @@ beforeEach(async () => {
 	vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
 	await mkdir(sourceHome);
 	await writeFile(join(sourceHome, "config.toml"), 'model="initial-model"\n');
+	capabilityFixtureBinary = join(fixture.path, "codex-hook-source-capability-fixture");
+	await writeFile(capabilityFixtureBinary, `#!${process.execPath}\nprocess.stdout.write('codex-cli 0.999.0');\n`, {
+		mode: 0o700,
+	});
 	services = [];
 });
 afterEach(async () => {
@@ -83,6 +94,7 @@ async function writer() {
 		workspaceId: "fixture-workspace",
 		conversationSessionId: randomUUID(),
 		runtimeSessionIncarnationId: randomUUID(),
+		binary: capabilityFixtureBinary,
 		// 来源恢复用例没有真实会话元数据宿主，显式保留 Task 局部权限。
 		sessionPermissionMode: "bypass_all_permission_prompts",
 		sessionPermissionSelectionSource: "task_local",

@@ -11,6 +11,8 @@ import {
 	assertCodexConfigurationWriterBindingIdentity,
 	prepareCodexConfigurationWriterBinding,
 } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
+import * as nativePluginCapabilityEvidence from "../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-evidence";
+import * as nativePluginCapabilityVerification from "../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-verification";
 import { claimCodexSourcePluginInstallationControllerOwnership } from "../../../src/codex-configuration-sync/codex-source-plugin-installation-controller-ownership";
 import {
 	prepareAuxiliaryCodexConfigurationLaunch,
@@ -24,6 +26,12 @@ import { createTempDir } from "../../utilities/temp-dir";
 let fixture: ReturnType<typeof createTempDir>;
 let sourceHome: string;
 let binary: string;
+vi.mock("../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-verification", () => ({
+	verifyCodexNativeSharedPluginInstallationCapability: vi.fn(async () => ({
+		status: "supported",
+		reason: "合成能力通过",
+	})),
+}));
 beforeEach(async () => {
 	fixture = createTempDir("codex-shared-installation-directories-");
 	fixture.path = await realpath(fixture.path);
@@ -39,8 +47,15 @@ beforeEach(async () => {
 		`#!${process.execPath}\nprocess.stdout.write(process.env.ISOLATED_CODEX_VERSION || 'codex-cli 0.166.0');\n`,
 		{ mode: 0o700 },
 	);
+	vi.mocked(nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability)
+		.mockReset()
+		.mockResolvedValue({
+			status: "supported",
+			reason: "合成能力通过",
+		});
 });
 afterEach(() => {
+	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	fixture.cleanup();
 });
@@ -60,6 +75,48 @@ const writer = (previousBinding?: CodexConfigurationWriterBinding, version = "co
 	});
 
 describe("Codex 来源域共享插件容器的绑定", () => {
+	it("同一次启动在瞬时缺证后自动重试并接续，不要求用户重新启动", async () => {
+		const prepareActualCapabilityEvidence =
+			nativePluginCapabilityEvidence.prepareCodexNativePluginInstallationCapabilityEvidence;
+		vi.spyOn(
+			nativePluginCapabilityEvidence,
+			"prepareCodexNativePluginInstallationCapabilityEvidence",
+		).mockImplementationOnce(async (input) => {
+			const pending = await prepareActualCapabilityEvidence(input);
+			vi.spyOn(Date, "now").mockReturnValue(pending.nextAttemptAtMs + 1);
+			return pending;
+		});
+		vi.mocked(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).mockRejectedValueOnce(new Error("瞬时缺证"));
+		const binding = await writer();
+		expect(binding.sourceSharedPluginInstallationDirectoriesBinding).toBeDefined();
+		expect(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).toHaveBeenCalledTimes(2);
+	});
+	it("机器等待期间用户 Stop 继续有效，不再核验或创建原生 writer", async () => {
+		vi.mocked(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).mockRejectedValueOnce(new Error("瞬时缺证"));
+		const revalidateNativeCapabilityRetryStillAuthorized = vi.fn(() => {
+			throw new Error("用户已 Stop");
+		});
+		await expect(
+			prepareCodexConfigurationWriterBinding({
+				purpose: "native_session",
+				storageHome: sourceHome,
+				runtimeSessionIncarnationId: randomUUID(),
+				binary,
+				environment: { HOME: fixture.path, CODEX_HOME: sourceHome, CODEX_SQLITE_HOME: sourceHome },
+				revalidateNativeCapabilityRetryStillAuthorized,
+			}),
+		).rejects.toThrow("用户已 Stop");
+		expect(revalidateNativeCapabilityRetryStillAuthorized).toHaveBeenCalledTimes(1);
+		expect(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).toHaveBeenCalledTimes(1);
+	});
 	it("外层租约被夺取也不能越过仍执行中的来源域控制器，完成后继续核验原生子进程", async () => {
 		const directory = join(fixture.path, "source-installation-controller-ownership");
 		await mkdir(directory);
@@ -266,7 +323,10 @@ describe("Codex 来源域共享插件容器的绑定", () => {
 		expect(next.sqliteHomeDirectoryPath).toBe(first.sqliteHomeDirectoryPath);
 		await assertCodexConfigurationWriterBindingIdentity(next);
 	});
-	it("未知版本不猜测共享布局，持久记录未覆盖；旧绑定仍可接管，下一代再采用已验证布局", async () => {
+	it("确证不支持时使用完整独立布局；旧绑定仍可接管，换代重新核验后共享", async () => {
+		vi.mocked(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).mockResolvedValueOnce({ status: "unsupported", reason: "合成布局不兼容" });
 		const legacy = await writer(undefined, "codex-cli 0.167.0");
 		await assertCodexConfigurationWriterBindingIdentity(legacy);
 		const manifest = JSON.parse(
@@ -275,16 +335,83 @@ describe("Codex 来源域共享插件容器的绑定", () => {
 		expect(legacy).toStrictEqual(manifest);
 		expect(manifest.sourceSharedPluginInstallationDirectoriesBinding).toBeUndefined();
 		expect(manifest.sourceSharedPluginInstallationDirectoriesCompatibilityObservation).toMatchObject({
-			status: "unverified_native_capability",
+			status: "unsupported_native_capability",
 			nativeBinaryVersion: "codex-cli 0.167.0",
 		});
+		await writeFile(binary, `#!${process.execPath}\nprocess.stdout.write('codex-cli 0.168.0');\n`);
 		const next = await writer(legacy);
 		expect(await realpath(join(next.configurationHomeDirectoryPath, ".tmp", "marketplaces"))).toBe(
 			join(sourceHome, ".tmp", "marketplaces"),
 		);
-		await expect(lstat(join(legacy.configurationHomeDirectoryPath, ".tmp"))).rejects.toMatchObject({
-			code: "ENOENT",
-		});
+		expect((await lstat(join(legacy.configurationHomeDirectoryPath, ".tmp", "marketplaces"))).isSymbolicLink()).toBe(
+			false,
+		);
+		expect((await lstat(join(legacy.configurationHomeDirectoryPath, "plugins"))).isSymbolicLink()).toBe(false);
+	});
+	it.each(["unsupported", "unverified", "legacy"] as const)(
+		"无共享绑定的正常 %s 启动保留原生参数与兼容状态",
+		async (compatibilityMode) => {
+			vi.mocked(
+				nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+			).mockResolvedValueOnce({ status: "unsupported", reason: "合成不兼容" });
+			const binding = await prepareCodexConfigurationWriterBinding({
+				purpose: "native_session",
+				storageHome: sourceHome,
+				runtimeSessionIncarnationId: randomUUID(),
+				binary: compatibilityMode === "unsupported" ? binary : undefined,
+				environment: { HOME: fixture.path, CODEX_HOME: sourceHome, CODEX_SQLITE_HOME: sourceHome },
+			});
+			if (compatibilityMode === "legacy") {
+				delete binding.sourceSharedPluginInstallationDirectoriesCompatibilityObservation;
+				await writeFile(
+					join(binding.configurationHomeDirectoryPath, "..", "writer-binding.json"),
+					JSON.stringify(binding),
+				);
+			}
+			expect(binding.sourceSharedPluginInstallationDirectoriesBinding).toBeUndefined();
+			const nativeLaunchArguments = ["app-server", "--stdio"];
+			await expect(
+				prepareCodexSharedPluginInstallationForNativeLaunch({
+					binding,
+					binary,
+					environment: { HOME: fixture.path, CODEX_HOME: binding.configurationHomeDirectoryPath },
+					nativeLaunchArguments,
+				}),
+			).resolves.toStrictEqual({
+				arguments: nativeLaunchArguments,
+				status:
+					compatibilityMode === "unsupported" ? "unsupported_native_capability" : "unverified_native_capability",
+				nativeUpgradeCount: 0,
+				nativePluginInstallationCount: 0,
+			});
+		},
+	);
+	it.each([
+		{ relativePath: "plugins", expectedError: /归属/ },
+		{ relativePath: ".tmp", expectedError: /归属/ },
+		{ relativePath: ".tmp/marketplaces", expectedError: /归属/ },
+		{ relativePath: "config.toml", expectedError: /主配置暂不可读/ },
+		{ relativePath: "../writer-binding.json", expectedError: /清单不是普通文件/ },
+	])("不兼容回退准备后 $relativePath 被换为软链时，启动入口拒绝并保留现场", async (replacement) => {
+		vi.mocked(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).mockResolvedValueOnce({ status: "unsupported", reason: "合成不兼容" });
+		const binding = await writer();
+		const replacedPath = join(binding.configurationHomeDirectoryPath, replacement.relativePath);
+		const preservedOriginalPath = `${replacedPath}-original`;
+		const originalMetadata = await lstat(replacedPath);
+		await rename(replacedPath, preservedOriginalPath);
+		await symlink(preservedOriginalPath, replacedPath, originalMetadata.isDirectory() ? "junction" : "file");
+		await expect(
+			prepareCodexSharedPluginInstallationForNativeLaunch({
+				binding,
+				binary,
+				environment: { HOME: fixture.path, CODEX_HOME: binding.configurationHomeDirectoryPath },
+				nativeLaunchArguments: [],
+			}),
+		).rejects.toThrow(replacement.expectedError);
+		expect((await lstat(replacedPath)).isSymbolicLink()).toBe(true);
+		expect(await realpath(replacedPath)).toBe(preservedOriginalPath);
 	});
 	it("辅助启动和相对路径 binary 使用最终 spawn 的 binary、目录与环境核验能力", async () => {
 		const environment = {
@@ -302,6 +429,7 @@ describe("Codex 来源域共享插件容器的绑定", () => {
 		expect(
 			await realpath(join(requireDefinedTestFixtureValue(supported.environment.CODEX_HOME), ".tmp", "marketplaces")),
 		).toBe(join(sourceHome, ".tmp", "marketplaces"));
+		await writeFile(binary, `#!${process.execPath}\nprocess.stdout.write('codex-cli 0.999.0');\n`);
 		const unknown = await prepareAuxiliaryCodexConfigurationLaunch({
 			environment: { ...environment, ISOLATED_CODEX_VERSION: "codex-cli 0.999.0" },
 			cwd: fixture.path,
@@ -314,10 +442,42 @@ describe("Codex 来源域共享插件容器的绑定", () => {
 				"utf8",
 			),
 		);
-		expect(unknownManifest.sourceSharedPluginInstallationDirectoriesBinding).toBeUndefined();
+		expect(unknownManifest.sourceSharedPluginInstallationDirectoriesBinding).toBeDefined();
 		expect(
-			unknownManifest.sourceSharedPluginInstallationDirectoriesCompatibilityObservation.nativeBinaryVersion,
+			unknownManifest.sourceSharedPluginInstallationDirectoriesBinding.nativeCapabilityEvidence.nativeBinaryVersion,
 		).toBe("codex-cli 0.999.0");
+	});
+	it("不兼容回退复制完整缓存，原生写入不触碰来源；目录被改指向时拒绝", async () => {
+		await mkdir(join(sourceHome, "plugins", "cache"), { recursive: true });
+		await mkdir(join(sourceHome, ".tmp", "marketplaces"), { recursive: true });
+		await writeFile(join(sourceHome, "plugins", "cache", "cached-hook.py"), "已确认的脚本内容");
+		await writeFile(join(sourceHome, ".tmp", "marketplaces", "native-installation-record.json"), "原生安装记录");
+		vi.mocked(
+			nativePluginCapabilityVerification.verifyCodexNativeSharedPluginInstallationCapability,
+		).mockResolvedValueOnce({ status: "unsupported", reason: "合成不兼容" });
+		const independent = await writer();
+		const independentPluginFile = join(
+			independent.configurationHomeDirectoryPath,
+			"plugins",
+			"cache",
+			"cached-hook.py",
+		);
+		expect(await readFile(independentPluginFile, "utf8")).toBe("已确认的脚本内容");
+		expect(
+			await readFile(
+				join(independent.configurationHomeDirectoryPath, ".tmp", "marketplaces", "native-installation-record.json"),
+				"utf8",
+			),
+		).toBe("原生安装记录");
+		await writeFile(independentPluginFile, "只在独立安装中更新");
+		expect(await readFile(join(sourceHome, "plugins", "cache", "cached-hook.py"), "utf8")).toBe("已确认的脚本内容");
+		await rm(join(independent.configurationHomeDirectoryPath, "plugins"), { recursive: true });
+		await symlink(
+			join(sourceHome, "plugins"),
+			join(independent.configurationHomeDirectoryPath, "plugins"),
+			"junction",
+		);
+		await expect(assertCodexConfigurationWriterBindingIdentity(independent)).rejects.toThrow(/归属/);
 	});
 	it("不同物理来源的两个共享容器不互相复用", async () => {
 		const first = await writer();

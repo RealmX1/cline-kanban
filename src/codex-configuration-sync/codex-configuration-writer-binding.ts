@@ -1,9 +1,8 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
-import { lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
-import { promisify } from "node:util";
+import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, symlink, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { setTimeout as waitForNativeCapabilityRetry } from "node:timers/promises";
 import { parse, stringify } from "smol-toml";
 import {
 	preserveCodexConfigurationSourceFileResolution,
@@ -51,13 +50,13 @@ import {
 	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
 	runWithCodexConfigurationSyncStoreSelection,
 } from "./codex-configuration-sync-store";
+import { prepareCodexNativePluginInstallationCapabilityEvidence } from "./codex-native-plugin-installation-capability-evidence";
 import {
 	assertCodexSourceSharedPluginInstallationDirectoriesBinding,
 	linkCodexSourceSharedPluginInstallationDirectories,
 	prepareCodexSourceSharedPluginInstallationDirectoriesBinding,
 } from "./codex-source-shared-plugin-installation-directories";
 
-const execFileAsync = promisify(execFile);
 export async function codexDirectoryIdentity(path: string, expectation?: CodexDirectoryIdentityExpectation) {
 	return prepareCodexPersistentDirectoryIdentity(path, expectation);
 }
@@ -185,6 +184,15 @@ export async function assertCodexConfigurationWriterBindingIdentity(binding: Cod
 			legacyBindingManifestPath: manifestPath,
 		});
 	await assertCodexSourceSharedPluginInstallationDirectoriesBinding(binding);
+	if (
+		binding.sourceSharedPluginInstallationDirectoriesCompatibilityObservation?.status ===
+		"unsupported_native_capability"
+	)
+		for (const relativePath of ["plugins", ".tmp", ".tmp/marketplaces"]) {
+			const ownedPath = join(binding.configurationHomeDirectoryPath, relativePath);
+			if (!(await lstat(ownedPath)).isDirectory() || (await realpath(ownedPath)) !== ownedPath)
+				throw new Error("Codex 独立插件安装目录归属异常，不能通过回退绕过核验。");
+		}
 }
 
 function readCodexLaunchExceptionSelections(arguments_: string[], fields: CodexConfigurationFields) {
@@ -253,6 +261,7 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 	binary?: string;
 	environment?: NodeJS.ProcessEnv;
 	workingDirectory?: string;
+	revalidateNativeCapabilityRetryStillAuthorized?: () => void;
 	nativeLaunchArguments?: string[];
 	codexConfigurationProfileId?: string;
 	sessionModelId?: string;
@@ -280,48 +289,43 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 		preflightParentBinding?.sqliteHomeDirectoryPath ?? input.sqliteHome ?? preflightHistoryHome;
 	await mkdir(preflightSqliteHome, { recursive: true, mode: 0o700 });
 	await prepareCodexDirectoryVolumeObservations([preflightSourceHome, preflightHistoryHome, preflightSqliteHome]);
-	let nativeBinaryVersion: string | null = null;
-	let nativeExecutableRealPath: string | null = null;
-	let nativeExecutableIdentityDigest: string | null = null;
-	if (input.binary)
-		try {
-			const environment = input.environment ?? process.env;
-			for (const candidate of isAbsolute(input.binary) || input.binary.includes("/")
-				? [input.binary]
-				: (environment.PATH ?? "").split(delimiter).map((directory) => join(directory, input.binary ?? "codex"))) {
-				try {
-					nativeExecutableRealPath = await realpath(resolve(input.workingDirectory ?? process.cwd(), candidate));
-					const metadata = await lstat(nativeExecutableRealPath, { bigint: true });
-					nativeExecutableIdentityDigest = configurationDigest([
-						nativeExecutableRealPath,
-						`${metadata.dev}`,
-						`${metadata.ino}`,
-						`${metadata.size}`,
-						`${metadata.mtimeNs}`,
-					]);
-					break;
-				} catch {
-					/* 继续显式 PATH 查找，不启动交互 shell。 */
-				}
-			}
-			nativeBinaryVersion = (
-				await execFileAsync(input.binary, ["--version"], {
-					env: input.environment,
-					cwd: input.workingDirectory,
-					timeout: 3_000,
-					maxBuffer: 4_096,
-				})
-			).stdout.trim();
-		} catch {
-			/* 未核验版本不声明原生重载。 */
-		}
 	const preflightSourceIdentity = await resolveVerifiedCodexConfigurationSourceIdentity(
 		preflightSourceHome,
 		preflightStoreSnapshot,
 		preflightParentBinding?.sourceIdentity,
 	);
+	let pluginInstallationCapability = input.binary
+		? await prepareCodexNativePluginInstallationCapabilityEvidence({
+				binary: input.binary,
+				environment: input.environment,
+				workingDirectory: input.workingDirectory,
+			})
+		: undefined;
+	for (
+		let retry = 0;
+		retry < 2 &&
+		pluginInstallationCapability?.status === "retry_pending" &&
+		pluginInstallationCapability.attemptCount % 3 !== 0;
+		retry++
+	) {
+		input.revalidateNativeCapabilityRetryStillAuthorized?.();
+		await waitForNativeCapabilityRetry(Math.max(0, pluginInstallationCapability.nextAttemptAtMs - Date.now()));
+		input.revalidateNativeCapabilityRetryStillAuthorized?.();
+		pluginInstallationCapability = await prepareCodexNativePluginInstallationCapabilityEvidence({
+			binary: input.binary ?? pluginInstallationCapability.nativeExecutableRealPath,
+			environment: input.environment,
+			workingDirectory: input.workingDirectory,
+		});
+	}
+	if (pluginInstallationCapability?.status === "retry_pending" || pluginInstallationCapability?.status === "running")
+		throw new Error(
+			`Codex 插件安装能力正在等待机器补证，条件恢复后自动重验。证据：${pluginInstallationCapability.evidencePath}；${pluginInstallationCapability.reason}`,
+		);
+	const nativeBinaryVersion = pluginInstallationCapability?.nativeBinaryVersion ?? null;
+	const nativeExecutableRealPath = pluginInstallationCapability?.nativeExecutableRealPath ?? null;
+	const nativeExecutableIdentityDigest = pluginInstallationCapability?.nativeExecutableIdentityDigest ?? null;
 	const sourceSharedPluginInstallationDirectoriesBinding =
-		nativeBinaryVersion === "codex-cli 0.166.0" && nativeExecutableRealPath && nativeExecutableIdentityDigest
+		pluginInstallationCapability?.status === "supported" && nativeExecutableRealPath && nativeExecutableIdentityDigest
 			? await prepareCodexSourceSharedPluginInstallationDirectoriesBinding({
 					sourceHome: preflightSourceHome,
 					existingBindings: Object.values(preflightStoreSnapshot.writers)
@@ -332,6 +336,8 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 						nativeExecutableRealPath,
 						nativeExecutableIdentityDigest,
 						observedAtMs: Date.now(),
+						probeProtocolRevision: pluginInstallationCapability.probeProtocolRevision,
+						evidencePath: pluginInstallationCapability.evidencePath,
 					},
 				})
 			: undefined;
@@ -530,15 +536,38 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 			}
 			await linkVerifiedDirectoryBridge(join(historyHome, name), join(configurationHome, name), false);
 		}
-		for (const name of ["auth.json", ".credentials.json", "AGENTS.md", "skills", "rules", "prompts", "marketplaces"])
+		for (const name of ["auth.json", ".credentials.json", "AGENTS.md", "skills", "rules", "prompts"])
 			await linkVerifiedDirectoryBridge(join(sourceHome, name), join(configurationHome, name), false);
-		if (sourceSharedPluginInstallationDirectoriesBinding)
+		if (sourceSharedPluginInstallationDirectoriesBinding) {
+			await linkVerifiedDirectoryBridge(
+				join(sourceHome, "marketplaces"),
+				join(configurationHome, "marketplaces"),
+				false,
+			);
 			await linkCodexSourceSharedPluginInstallationDirectories(
 				sourceHome,
 				configurationHome,
 				sourceSharedPluginInstallationDirectoriesBinding,
 			);
-		else await linkVerifiedDirectoryBridge(join(sourceHome, "plugins"), join(configurationHome, "plugins"), false);
+		} else {
+			// 不兼容时保持整套安装目录独立，不能把共享插件与私有安装记录混用。
+			for (const name of ["plugins", ".tmp/marketplaces", "marketplaces"]) {
+				const sourcePath = join(copyFrom === initializationSnapshot.directory ? sourceHome : copyFrom, name);
+				try {
+					await cp(sourcePath, join(configurationHome, name), {
+						recursive: true,
+						dereference: true,
+						force: false,
+						errorOnExist: true,
+						filter: (path) => !path.split(/[\\/]/).includes(".kanban-source-installation-coordination"),
+					});
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				}
+			}
+			await mkdir(join(configurationHome, "plugins"), { recursive: true, mode: 0o700 });
+			await mkdir(join(configurationHome, ".tmp", "marketplaces"), { recursive: true, mode: 0o700 });
+		}
 		try {
 			await writeFile(join(configurationHome, "hooks.json"), await readFile(join(copyFrom, "hooks.json")), {
 				mode: 0o600,
@@ -720,10 +749,14 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 				? { sourceSharedPluginInstallationDirectoriesBinding }
 				: {
 						sourceSharedPluginInstallationDirectoriesCompatibilityObservation: {
-							status: "unverified_native_capability",
+							status:
+								pluginInstallationCapability?.status === "unsupported"
+									? "unsupported_native_capability"
+									: "unverified_native_capability",
 							nativeBinaryVersion,
 							nativeExecutableRealPath,
 							automaticRecheckCondition: "next_native_process_generation",
+							...(pluginInstallationCapability ? { reason: pluginInstallationCapability.reason } : {}),
 						},
 					}),
 			storageDirectoryIdentity: await codexDirectoryIdentity(historyHome),

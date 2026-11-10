@@ -158,6 +158,7 @@ async function readStdoutToleratingPartialFailure(
 	command: string,
 	args: readonly string[],
 	maxBuffer: number,
+	requireSuccessfulCommandExecution = false,
 ): Promise<string> {
 	try {
 		const { stdout } = await execFileAsync(command, args, {
@@ -167,6 +168,7 @@ async function readStdoutToleratingPartialFailure(
 		});
 		return stdout;
 	} catch (error) {
+		if (requireSuccessfulCommandExecution) throw error;
 		const partialStdout = (error as { stdout?: unknown }).stdout;
 		return typeof partialStdout === "string" ? partialStdout : "";
 	}
@@ -174,6 +176,7 @@ async function readStdoutToleratingPartialFailure(
 
 export async function readProcessCommandLinesForProcessIds(
 	processIds: readonly number[],
+	options?: { requireSuccessfulCommandExecution?: boolean },
 ): Promise<Map<number, string>> {
 	const commandLinesByProcessId = new Map<number, string>();
 	for (const batch of splitIntoBatches(processIds, PER_INVOCATION_PROCESS_ID_BATCH_SIZE)) {
@@ -181,6 +184,7 @@ export async function readProcessCommandLinesForProcessIds(
 			"ps",
 			["-ww", "-o", "pid=,command=", "-p", batch.join(",")],
 			PROCESS_COMMAND_LINE_READ_MAX_OUTPUT_BYTES,
+			options?.requireSuccessfulCommandExecution,
 		);
 		for (const [processId, commandLine] of parsePsProcessIdAndCommandLineText(stdout)) {
 			commandLinesByProcessId.set(processId, commandLine);

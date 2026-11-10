@@ -1,0 +1,16 @@
+{
+	"verificationId": "87b1e9f5-4490-573e-92c4-e301c7467623",
+	"kind": "automated_script",
+	"label": "真实新会话自动核验共享安装能力，同内容 hook 批准跨自然启动保留",
+	"guidance": null,
+	"script": {
+		"entrypoint": "verify-observed-native-codex-plugin-capability-and-trust-continuity.mjs",
+		"interpreter": "node",
+		"timeoutMs": 30000
+	},
+	"cleanup": {
+		"mode": "automatic",
+		"assetsDir": null,
+		"manualSteps": []
+	}
+}
