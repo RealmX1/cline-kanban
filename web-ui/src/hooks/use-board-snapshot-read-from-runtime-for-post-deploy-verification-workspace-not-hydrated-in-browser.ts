@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createInitialBoardData } from "@/data/board-data";
 import { useDocumentVisibility } from "@/hooks/use-document-visibility";
+import { fetchTaskCardsForPostDeployVerification } from "@/runtime/post-deploy-verification-task-cards-query";
 import type { RuntimeTaskSessionSummary } from "@/runtime/types";
-import { fetchWorkspaceState } from "@/runtime/workspace-state-query";
 import { normalizeBoardData } from "@/state/board-state";
 import type { BoardData } from "@/types";
 import { useDebouncedEffect, useInterval } from "@/utils/react-use";
@@ -23,7 +23,7 @@ const RUNTIME_BOARD_SNAPSHOT_REREAD_AFTER_COLUMN_MEMBERSHIP_CHANGE_HINT_DEBOUNCE
 
 function buildRuntimeBoardSnapshotFromWorkspaceStateResponse(
 	workspaceId: string,
-	response: Awaited<ReturnType<typeof fetchWorkspaceState>>,
+	response: Awaited<ReturnType<typeof fetchTaskCardsForPostDeployVerification>>,
 ): RuntimeBoardSnapshotOfPostDeployVerificationWorkspaceNotHydratedInBrowser {
 	return {
 		workspaceIdOwningRuntimeBoardSnapshot: workspaceId,
@@ -46,6 +46,8 @@ function buildRuntimeBoardSnapshotFromWorkspaceStateResponse(
  */
 export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspaceNotHydratedInBrowser(input: {
 	workspaceIdToReadBoardSnapshotFrom: string | null;
+	taskIdsToRead?: readonly string[];
+	panelExpanded?: boolean;
 	runtimeBoardColumnMembershipChangeHintOfWorkspace: string | null;
 	currentProjectBoardHydratedInBrowserForSeeding: RuntimeBoardSnapshotOfPostDeployVerificationWorkspaceNotHydratedInBrowser | null;
 }): {
@@ -58,6 +60,9 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 		currentProjectBoardHydratedInBrowserForSeeding,
 	} = input;
 	const isDocumentVisible = useDocumentVisibility();
+	const taskIdsJson = JSON.stringify(input.taskIdsToRead ?? []);
+	const panelExpanded = input.panelExpanded ?? true;
+	const readAbortControllerRef = useRef<AbortController | null>(null);
 	const [loadedRuntimeBoardSnapshot, setLoadedRuntimeBoardSnapshot] =
 		useState<RuntimeBoardSnapshotOfPostDeployVerificationWorkspaceNotHydratedInBrowser | null>(null);
 	// 当前项目 board 最近一次水合后的样子；过渡窗口里调用方传 null，这里保留的仍是上一个已水合项目的。
@@ -69,38 +74,49 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 	requestedWorkspaceIdRef.current = workspaceId;
 	const readRequestSequenceNumberRef = useRef(0);
 
-	const readRuntimeBoardSnapshot = useCallback((targetWorkspaceId: string) => {
-		readRequestSequenceNumberRef.current += 1;
-		const readRequestSequenceNumber = readRequestSequenceNumberRef.current;
-		fetchWorkspaceState(targetWorkspaceId).then(
-			(response) => {
-				if (
-					readRequestSequenceNumber !== readRequestSequenceNumberRef.current ||
-					requestedWorkspaceIdRef.current !== targetWorkspaceId
-				) {
-					return;
-				}
-				const nextRuntimeBoardSnapshot = buildRuntimeBoardSnapshotFromWorkspaceStateResponse(
-					targetWorkspaceId,
-					response,
-				);
-				setLoadedRuntimeBoardSnapshot((previousRuntimeBoardSnapshot) =>
-					previousRuntimeBoardSnapshot !== null &&
-					JSON.stringify(previousRuntimeBoardSnapshot) === JSON.stringify(nextRuntimeBoardSnapshot)
-						? previousRuntimeBoardSnapshot
-						: nextRuntimeBoardSnapshot,
-				);
-			},
-			() => {
-				// 读失败保留上一份快照：下一次轮询 / 提示变化再读。
-			},
-		);
-	}, []);
+	const readRuntimeBoardSnapshot = useCallback(
+		(targetWorkspaceId: string) => {
+			readRequestSequenceNumberRef.current += 1;
+			const readRequestSequenceNumber = readRequestSequenceNumberRef.current;
+			readAbortControllerRef.current?.abort();
+			const controller = new AbortController();
+			readAbortControllerRef.current = controller;
+			fetchTaskCardsForPostDeployVerification(
+				targetWorkspaceId,
+				JSON.parse(taskIdsJson) as string[],
+				controller.signal,
+			).then(
+				(response) => {
+					if (
+						readRequestSequenceNumber !== readRequestSequenceNumberRef.current ||
+						requestedWorkspaceIdRef.current !== targetWorkspaceId
+					) {
+						return;
+					}
+					const nextRuntimeBoardSnapshot = buildRuntimeBoardSnapshotFromWorkspaceStateResponse(
+						targetWorkspaceId,
+						response,
+					);
+					setLoadedRuntimeBoardSnapshot((previousRuntimeBoardSnapshot) =>
+						previousRuntimeBoardSnapshot !== null &&
+						JSON.stringify(previousRuntimeBoardSnapshot) === JSON.stringify(nextRuntimeBoardSnapshot)
+							? previousRuntimeBoardSnapshot
+							: nextRuntimeBoardSnapshot,
+					);
+				},
+				() => {
+					// 读失败保留上一份快照：下一次轮询 / 提示变化再读。
+				},
+			);
+		},
+		[taskIdsJson],
+	);
 
 	useEffect(() => {
 		// 不论走哪条分支都让在途的旧读请求作废：它们的结果比种子旧。
 		readRequestSequenceNumberRef.current += 1;
-		if (!workspaceId) {
+		if (!workspaceId || !panelExpanded) {
+			readAbortControllerRef.current?.abort();
 			// 面板改读浏览器里的 board：丢掉旧快照，免得之后切回快照模式时先闪一帧过时数据（那时有更新的种子）。
 			setLoadedRuntimeBoardSnapshot(null);
 			return;
@@ -111,7 +127,8 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 			return;
 		}
 		readRuntimeBoardSnapshot(workspaceId);
-	}, [readRuntimeBoardSnapshot, workspaceId]);
+		return () => readAbortControllerRef.current?.abort();
+	}, [readRuntimeBoardSnapshot, workspaceId, panelExpanded]);
 
 	useInterval(
 		() => {
@@ -119,18 +136,18 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 				readRuntimeBoardSnapshot(workspaceId);
 			}
 		},
-		workspaceId && isDocumentVisible
+		workspaceId && isDocumentVisible && panelExpanded
 			? RUNTIME_BOARD_SNAPSHOT_OF_POST_DEPLOY_VERIFICATION_WORKSPACE_POLL_INTERVAL_MS
 			: null,
 	);
 
 	const wasDocumentVisibleRef = useRef(isDocumentVisible);
 	useEffect(() => {
-		if (isDocumentVisible && !wasDocumentVisibleRef.current && workspaceId) {
+		if (isDocumentVisible && !wasDocumentVisibleRef.current && workspaceId && panelExpanded) {
 			readRuntimeBoardSnapshot(workspaceId);
 		}
 		wasDocumentVisibleRef.current = isDocumentVisible;
-	}, [isDocumentVisible, readRuntimeBoardSnapshot, workspaceId]);
+	}, [isDocumentVisible, readRuntimeBoardSnapshot, workspaceId, panelExpanded]);
 
 	// 只在同一 workspace 的提示变化时重读：workspace 切换由上面的 effect 负责。
 	const lastSeenColumnMembershipChangeHintRef = useRef({ workspaceId, columnMembershipChangeHint });
@@ -140,6 +157,7 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 			lastSeenColumnMembershipChangeHintRef.current = { workspaceId, columnMembershipChangeHint };
 			if (
 				!workspaceId ||
+				!panelExpanded ||
 				lastSeen.workspaceId !== workspaceId ||
 				lastSeen.columnMembershipChangeHint === columnMembershipChangeHint
 			) {
@@ -148,7 +166,7 @@ export function useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspac
 			readRuntimeBoardSnapshot(workspaceId);
 		},
 		RUNTIME_BOARD_SNAPSHOT_REREAD_AFTER_COLUMN_MEMBERSHIP_CHANGE_HINT_DEBOUNCE_MS,
-		[columnMembershipChangeHint, readRuntimeBoardSnapshot, workspaceId],
+		[columnMembershipChangeHint, readRuntimeBoardSnapshot, workspaceId, panelExpanded],
 	);
 
 	const refetchRuntimeBoardSnapshot = useCallback(() => {

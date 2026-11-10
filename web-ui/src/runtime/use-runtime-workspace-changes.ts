@@ -70,6 +70,11 @@ export function useRuntimeWorkspaceChanges(
 	const hasWorkspaceScope = taskId !== null && workspaceId !== null && baseRef !== null;
 	const normalizedViewKey = viewKey ?? "__default__";
 	const requestKey = `${workspaceId ?? "__none__"}:${taskId ?? "__none__"}:${baseRef ?? "__none__"}:${worktreeMode ?? "branch"}:${mode}:${normalizedViewKey}`;
+	const conditionalChangesCacheRef = useRef<{
+		identity: string;
+		contentVersion: string;
+		changes: RuntimeWorkspaceChangesResponse;
+	} | null>(null);
 	const queryFn = useCallback(
 		async (signal: AbortSignal) => {
 			if (!taskId || !workspaceId || !baseRef) {
@@ -77,10 +82,31 @@ export function useRuntimeWorkspaceChanges(
 			}
 			void normalizedViewKey;
 			const trpcClient = getRuntimeTrpcClient(workspaceId);
-			return await trpcClient.workspace.getChanges.query(
-				{ taskId, baseRef, ...(worktreeMode ? { worktreeMode } : {}), mode },
+			const identity = JSON.stringify([workspaceId, taskId, baseRef, worktreeMode, mode, normalizedViewKey]);
+			const cached =
+				conditionalChangesCacheRef.current?.identity === identity ? conditionalChangesCacheRef.current : null;
+			const response = await trpcClient.workspace.getChangesConditional.query(
+				{
+					taskId,
+					baseRef,
+					...(worktreeMode ? { worktreeMode } : {}),
+					mode,
+					...(cached ? { knownContentVersion: cached.contentVersion } : {}),
+				},
 				{ signal, context: { sendAsIndependentHttpRequest: true } },
 			);
+			if (signal.aborted) throw new DOMException("查询已取消", "AbortError");
+			if (response.status === "changed") {
+				conditionalChangesCacheRef.current = {
+					identity,
+					contentVersion: response.contentVersion,
+					changes: response.changes,
+				};
+				return response.changes;
+			}
+			if (!cached || cached.contentVersion !== response.contentVersion)
+				throw new Error("diff 缓存缺失，将自动重新读取");
+			return cached.changes;
 		},
 		[baseRef, mode, normalizedViewKey, taskId, workspaceId, worktreeMode],
 	);

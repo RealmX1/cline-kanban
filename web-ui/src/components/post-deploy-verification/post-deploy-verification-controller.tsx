@@ -647,6 +647,10 @@ export function PostDeployVerificationController({
 			) : null}
 
 			<PostDeployVerificationPanel
+				deploymentGroupOverviews={verification.deploymentGroupOverviews}
+				loadedDeploymentGroupIds={verification.loadedDeploymentGroupIds}
+				deploymentGroupDetailsErrors={verification.deploymentGroupDetailsErrors}
+				onSetDeploymentGroupExpanded={verification.setDeploymentGroupExpanded}
 				entryNavigationRequest={entryNavigationRequest}
 				entryNavigationReadModelRequest={verification.entryNavigationReadModelRequest}
 				onRefreshEntryNavigationReadModel={verification.refreshAndReadActiveGroup}

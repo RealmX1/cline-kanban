@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { act, type Dispatch, type SetStateAction, useEffect, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import ts from "typescript";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialBoardData } from "@/data/board-data";
 import {
@@ -8,7 +12,10 @@ import {
 	type WorkspaceBoardSavedByRuntime,
 } from "@/hooks/use-workspace-sync";
 import type { RuntimeTaskSessionSummary, RuntimeWorkspaceStateResponse } from "@/runtime/types";
-import type { StreamedTaskSessionSummariesApplierRef } from "@/runtime/use-runtime-state-stream";
+import type {
+	StreamedTaskSessionSummariesApplier,
+	StreamedTaskSessionSummariesApplierRef,
+} from "@/runtime/use-runtime-state-stream";
 import type { BoardData } from "@/types";
 
 const fetchWorkspaceStateMock = vi.hoisted(() => vi.fn());
@@ -111,6 +118,34 @@ function createDeferred<T>() {
 		reject = nextReject;
 	});
 	return { promise, resolve, reject };
+}
+
+// 执行 App 的真实中转回调，防止测试自行透传 options 而漏掉组合根的接线回归。
+function readAppStreamedTaskSessionSummariesCallback(
+	applierRef: StreamedTaskSessionSummariesApplierRef,
+): StreamedTaskSessionSummariesApplier {
+	const sourceText = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../App.tsx"), "utf8");
+	const sourceFile = ts.createSourceFile("App.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+	let callbackInitializer: ts.Expression | undefined;
+	const visit = (node: ts.Node): void => {
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "handleStreamedTaskSessionSummaries"
+		) {
+			callbackInitializer = node.initializer;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	if (!callbackInitializer) throw new Error("未找到 App 的会话摘要中转回调");
+	const compiled = ts.transpileModule(`const callback = ${callbackInitializer.getText(sourceFile)};`, {
+		compilerOptions: { target: ts.ScriptTarget.ES2022 },
+	}).outputText;
+	return new Function("useCallback", "streamedTaskSessionSummariesApplierRef", `${compiled}\nreturn callback;`)(
+		(callback: StreamedTaskSessionSummariesApplier) => callback,
+		applierRef,
+	) as StreamedTaskSessionSummariesApplier;
 }
 
 interface HookSnapshot {
@@ -440,6 +475,42 @@ describe("useWorkspaceSync", () => {
 		const afterStaleSnapshot: HookSnapshot = latestSnapshot;
 		expect(afterStaleSnapshot.sessions).toBe(sessionsBeforeStaleBatch);
 		expect(afterStaleSnapshot.sessions["task-1"]?.updatedAt).toBe(2000);
+	});
+
+	it("App 透传权威成员集合：删除会话后水合不复活旧摘要，同号重建采用新摘要", async () => {
+		const applierRef: StreamedTaskSessionSummariesApplierRef = { current: null };
+		const applyThroughApp = readAppStreamedTaskSessionSummariesCallback(applierRef);
+		let latestSnapshot: HookSnapshot | null = null;
+		const renderWorkspace = (workspaceState: RuntimeWorkspaceStateResponse) => {
+			root.render(
+				<HookHarness
+					streamedWorkspaceState={workspaceState}
+					streamedTaskSessionSummariesApplierRef={applierRef}
+					onSnapshot={(snapshot) => {
+						latestSnapshot = snapshot;
+					}}
+				/>,
+			);
+		};
+		await act(async () => {
+			renderWorkspace(
+				createWorkspaceStateWithSessions("persisted-task", 1, {
+					"recreated-task": createSessionSummary("recreated-task", 2000, "旧会话"),
+				}),
+			);
+		});
+		expect(Object.keys((latestSnapshot as HookSnapshot | null)?.sessions ?? {})).toEqual(["recreated-task"]);
+		await act(async () => {
+			applyThroughApp([], "project-a", { replaceSessionMembership: true });
+			renderWorkspace(createWorkspaceState("persisted-task", 2));
+		});
+		expect((latestSnapshot as HookSnapshot | null)?.sessions).toEqual({});
+		const recreatedSession = createSessionSummary("recreated-task", 1000, "新会话");
+		await act(async () => {
+			applyThroughApp([recreatedSession], "project-a", { replaceSessionMembership: true });
+			renderWorkspace(createWorkspaceStateWithSessions("persisted-task", 3, { "recreated-task": recreatedSession }));
+		});
+		expect((latestSnapshot as HookSnapshot | null)?.sessions).toEqual({ "recreated-task": recreatedSession });
 	});
 
 	describe("远端 revision 前进时本地 board 的三方判定（cf427）", () => {

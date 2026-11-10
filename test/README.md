@@ -105,6 +105,8 @@ npm run test:guarded -- --project runtime-integration test/integration/codex-mob
 
 ## 命令
 
+远程访问省流的专项浏览器、网络整形和五分钟矩阵已作为任务验收材料归档，不纳入常规回归或类型检查。日常修改只运行受影响的功能回归；归档位置和需要重新测量的范围见 `docs/remote-access-bandwidth-implementation-and-validation.md`。
+
 ### 旧 RVF 历史与通用会话回归
 
 `task-rvf-history-through-cli-and-api.integration.test.ts` 用隔离 HOME 和 Git fixture 验证旧完成、失败、未完成、缺损及离线重建，只读 API/CLI 不调用旧生产方。通用投递、人工 rewind、原生 fork、配置同步与迁移继续使用各自用例。

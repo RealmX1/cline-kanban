@@ -104,8 +104,6 @@ export function useWorkspaceSync({
 	streamedWorkspaceState,
 	streamedTaskSessionSummariesApplierRef,
 	hasNoProjects,
-	hasReceivedSnapshot,
-	isDocumentVisible,
 	setBoard,
 	setSessions,
 	setCanPersistWorkspaceState,
@@ -347,7 +345,15 @@ export function useWorkspaceSync({
 	// 数组合并规则（含空壳守卫与 updatedAt 单调）。setSessions 身份稳定，整个挂载期注册一次即可；
 	// 切项目时的清场在新项目头一份快照（以快照为底整体替换，见 applyWorkspaceState）一处，与通道无关。
 	useEffect(() => {
-		const applier: StreamedTaskSessionSummariesApplier = (summaries, workspaceId) => {
+		const applier: StreamedTaskSessionSummariesApplier = (summaries, workspaceId, options) => {
+			if (options?.replaceSessionMembership) {
+				latestStreamedSummariesByWorkspaceRef.current = {
+					workspaceId,
+					summaryByTaskId: new Map(summaries.map((summary) => [summary.taskId, summary])),
+				};
+				setSessions(Object.fromEntries(summaries.map((summary) => [summary.taskId, summary])));
+				return;
+			}
 			if (latestStreamedSummariesByWorkspaceRef.current.workspaceId !== workspaceId) {
 				latestStreamedSummariesByWorkspaceRef.current = { workspaceId, summaryByTaskId: new Map() };
 			}
@@ -425,13 +431,6 @@ export function useWorkspaceSync({
 		}
 		applyWorkspaceState(streamedWorkspaceState);
 	}, [applyWorkspaceState, hasNoProjects, streamedWorkspaceState]);
-
-	useEffect(() => {
-		if (!hasReceivedSnapshot || !isDocumentVisible) {
-			return;
-		}
-		void refreshWorkspaceState();
-	}, [hasReceivedSnapshot, isDocumentVisible, refreshWorkspaceState]);
 
 	return {
 		projectIdOwningHydratedBoard,

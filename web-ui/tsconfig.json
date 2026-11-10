@@ -12,6 +12,7 @@
     "resolveJsonModule": true,
     "baseUrl": ".",
     "paths": {
+ "@runtime-state-stream-entity-synchronization": ["../src/core/runtime-state-stream-entity-synchronization.ts"],
       "@/*": ["src/*"],
       "@runtime-agent-prompt-image-attachment-reference": ["../src/core/agent-prompt-image-attachment-reference.ts"],
       "@runtime-project-visual-identity": ["../src/core/project-visual-identity.ts"],

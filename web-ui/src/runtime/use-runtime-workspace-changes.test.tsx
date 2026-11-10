@@ -14,8 +14,12 @@ const getChangesQueryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		workspace: {
-			getChanges: {
-				query: getChangesQueryMock,
+			getChangesConditional: {
+				query: async (...args: unknown[]) => ({
+					status: "changed",
+					contentVersion: "test-content-version",
+					changes: await getChangesQueryMock(...args),
+				}),
 			},
 		},
 	}),
