@@ -36,6 +36,10 @@ import type {
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import {
+	observeRuntimeSystemLoadAndRuntimeStatusSnapshot,
+	updateRuntimeSystemStatusStreamConnectionState,
+} from "@/stores/runtime-system-load-and-runtime-status-store";
 import { observeTaskLookupConversationUpdated } from "@/stores/task-lookup-conversation-update-store";
 import {
 	replaceTaskResourceUsageSnapshots,
@@ -588,6 +592,7 @@ export function useRuntimeStateStream(
 			if (cancelled) {
 				return;
 			}
+			updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 			if (reconnectTimer !== null) {
 				window.clearTimeout(reconnectTimer);
 				reconnectTimer = null;
@@ -600,6 +605,7 @@ export function useRuntimeStateStream(
 				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection, workspaceMetadataProbeScope));
 				workspaceMetadataProbeScopeJsonDeclaredOnSocket = JSON.stringify(workspaceMetadataProbeScope);
 			} catch (error) {
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 				dispatch({
 					type: "stream_disconnected",
@@ -609,6 +615,7 @@ export function useRuntimeStateStream(
 				return;
 			}
 			socket.onopen = () => {
+				updateRuntimeSystemStatusStreamConnectionState("connected");
 				notifyAgentSessionPtyHostDiagnosticsUpdated();
 				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
@@ -633,6 +640,10 @@ export function useRuntimeStateStream(
 			socket.onmessage = (event) => {
 				try {
 					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					if (payload.type === "system_load_and_runtime_status_updated") {
+						observeRuntimeSystemLoadAndRuntimeStatusSnapshot(payload.snapshot);
+						return;
+					}
 					if (payload.type === "agent_session_pty_host_diagnostics_updated") {
 						notifyAgentSessionPtyHostDiagnosticsUpdated();
 						return;
@@ -811,6 +822,7 @@ export function useRuntimeStateStream(
 					return;
 				}
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
 				const runtimeIsHotRestarting = isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent);
 				if (runtimeIsHotRestarting) {
@@ -832,6 +844,7 @@ export function useRuntimeStateStream(
 					return;
 				}
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				dispatch({
 					type: "stream_disconnected",
 					message: "Runtime stream connection failed.",

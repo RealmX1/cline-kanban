@@ -196,6 +196,7 @@ import { createPromptDraftUsageService } from "./prompt-draft-usage-service";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
+import { startRuntimeSystemLoadAndRuntimeStatusSampler } from "./runtime-system-load-and-runtime-status-sampler";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
 import { createTaskMainSessionHandoverCoordinator } from "./task-main-session-handover-coordinator";
 import {
@@ -512,6 +513,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return Array.from(summariesByTaskId.values());
 	};
+	let stopSystemLoadAndRuntimeStatusSampler: (() => void) | undefined;
 	const codexConfigurationSyncService = createCodexConfigurationSyncService({
 		readTaskSourceContext: () =>
 			readCodexConfigurationTaskSourceContext(deps.workspaceRegistry.listManagedWorkspaces()),
@@ -2357,6 +2359,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		await beginRuntimeOwnedBackgroundServicesShutdown();
 		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
 		taskAttributedProcessTreeResourceSampler.stop();
+		stopSystemLoadAndRuntimeStatusSampler?.();
 		taskAgentConversationModelTokenUsageJournalMonitor.stop();
 		taskWorktreeDiskUsageMeasurementMonitor.stop();
 		stopKanbanRuntimeProcessSelfResourceSampleMonitor();
@@ -2422,6 +2425,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskMainSessionHandoverApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
+	stopSystemLoadAndRuntimeStatusSampler = startRuntimeSystemLoadAndRuntimeStatusSampler({
+		dataDirectoryPath: getRuntimeHomePath(),
+		listAgentSessionSummaries: () =>
+			Array.from(
+				new Set([
+					...deps.workspaceRegistry.listManagedWorkspaces().map(({ workspaceId }) => workspaceId),
+					...acpTaskSessionServiceByWorkspaceId.keys(),
+				]),
+			).flatMap((workspaceId) => listProjectRuntimeSessionSummaries(workspaceId)),
+		onSnapshot: deps.runtimeStateHub.broadcastSystemLoadAndRuntimeStatusUpdated,
+	});
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
 	promptDraftUsageService.startInitialHistoricalBackfill();

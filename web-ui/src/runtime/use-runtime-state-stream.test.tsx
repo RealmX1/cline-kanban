@@ -8,6 +8,7 @@ import type {
 	UseRuntimeStateStreamResult,
 } from "@/runtime/use-runtime-state-stream";
 import { useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
+import { useRuntimeSystemLoadAndRuntimeStatus } from "@/stores/runtime-system-load-and-runtime-status-store";
 import {
 	readTaskLookupConversationUpdateGeneration,
 	subscribeToTaskLookupConversationUpdates,
@@ -177,6 +178,47 @@ describe("useRuntimeStateStream", () => {
 				previousActEnvironment;
 		}
 		vi.useRealTimers();
+	});
+
+	it("全局系统概况旁路更新控件，连接恢复状态与原 WebSocket 一致", async () => {
+		let workbenchRenderCount = 0;
+		let latestStatus: ReturnType<typeof useRuntimeSystemLoadAndRuntimeStatus> | undefined;
+		function StatusProbe() {
+			latestStatus = useRuntimeSystemLoadAndRuntimeStatus();
+			return null;
+		}
+		function Workbench() {
+			workbenchRenderCount += 1;
+			useRuntimeStateStream(null);
+			return <StatusProbe />;
+		}
+		await act(async () => root.render(<Workbench />));
+		const socket = MockRuntimeStateWebSocket.instances[0];
+		if (!socket) throw new Error("缺少测试 WebSocket");
+		await act(async () => socket.triggerOpen());
+		const beforeSample = workbenchRenderCount;
+		await act(async () =>
+			socket.triggerMessage({
+				type: "system_load_and_runtime_status_updated",
+				snapshot: {
+					sampledAtEpochMs: Date.now(),
+					cpuUsagePercent: 25,
+					memory: null,
+					disk: null,
+					runtimeUptimeSeconds: 10,
+					liveAgentSessionCount: 2,
+				},
+			}),
+		);
+		expect(latestStatus?.snapshot?.cpuUsagePercent).toBe(25);
+		expect(latestStatus?.connectionState).toBe("connected");
+		expect(workbenchRenderCount).toBe(beforeSample);
+		await act(async () => socket.triggerClose());
+		expect(latestStatus?.connectionState).toBe("reconnecting");
+		await act(async () => vi.advanceTimersByTimeAsync(500));
+		await act(async () => MockRuntimeStateWebSocket.instances.at(-1)?.triggerOpen());
+		expect(latestStatus?.connectionState).toBe("connected");
+		expect(latestStatus?.snapshot?.cpuUsagePercent).toBe(25);
 	});
 
 	it("declares the git metadata probe scope in the connect URL, then sends a message when the focused task changes", async () => {

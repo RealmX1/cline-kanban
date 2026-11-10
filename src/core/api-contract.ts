@@ -3559,6 +3559,22 @@ export const runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema =
 	type: z.literal("daily_work_progress_statistics_updated"),
 	revision: z.number().int().nonnegative(),
 });
+
+export const runtimeSystemLoadAndRuntimeStatusSnapshotSchema = z.object({
+	sampledAtEpochMs: z.number().int().nonnegative(),
+	cpuUsagePercent: z.number().min(0).max(100).nullable(),
+	memory: z.object({ usedBytes: z.number().nonnegative(), totalBytes: z.number().positive() }).nullable(),
+	disk: z.object({ availableBytes: z.number().nonnegative(), totalBytes: z.number().positive() }).nullable(),
+	runtimeUptimeSeconds: z.number().nonnegative().nullable(),
+	liveAgentSessionCount: z.number().int().nonnegative().nullable(),
+});
+export type RuntimeSystemLoadAndRuntimeStatusSnapshot = z.infer<typeof runtimeSystemLoadAndRuntimeStatusSnapshotSchema>;
+
+export const runtimeStateStreamSystemLoadAndRuntimeStatusUpdatedMessageSchema = z.object({
+	type: z.literal("system_load_and_runtime_status_updated"),
+	snapshot: runtimeSystemLoadAndRuntimeStatusSnapshotSchema,
+});
+
 export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	z.object({
 		type: z.literal("agent_session_pty_host_diagnostics_updated"),
@@ -3566,6 +3582,7 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 	}),
 	z.object({ type: z.literal("codex_configuration_sync_updated"), revision: z.number().int().nonnegative() }),
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
+	runtimeStateStreamSystemLoadAndRuntimeStatusUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
 	taskVisualizationPreviewRequestedMessageSchema,
 	z.object({
