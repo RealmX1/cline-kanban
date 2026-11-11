@@ -14,7 +14,13 @@ async function installIsolatedRuntimeResponses(page: Page) {
 					rootPath: "/isolated",
 					currentPath: "/isolated",
 					parentPath: null,
-					entries: [{ name: "project-a", path: "/isolated/project-a", isGitRepository: true }],
+					entries: new URL(page.url()).searchParams.has("prefill")
+						? Array.from({ length: 12 }, (_, index) => ({
+								name: `project-${index}`,
+								path: `/isolated/projects/project-${index}`,
+								isGitRepository: true,
+							}))
+						: [{ name: "project-a", path: "/isolated/project-a", isGitRepository: true }],
 				};
 			else if (procedure === "projects.add") data = { ok: true, project: { id: "isolated-added-project" } };
 			else if (procedure === "projects.getAllProjectsTaskSearchIndex")
@@ -156,6 +162,67 @@ test("目录补全的 Enter 选择候选，组合键提交添加项目", async (
 	await input.press("Meta+Enter");
 	expect((await request).postDataJSON()["0"].path).toBe("/isolated/proj");
 	await expect(page.getByLabel("宿主提交次数")).toHaveText("1");
+});
+
+for (const width of [1440, 320]) {
+	test(`${width}px 项目目录预填与建议不受表单裁切`, async ({ page }) => {
+		await page.setViewportSize({ width, height: 900 });
+		await page.goto(`${harnessPath}?view=projects&prefill`);
+		for (const cloneTab of [false, true]) {
+			if (cloneTab) {
+				await page.getByRole("button", { name: "Git Clone", exact: true }).click();
+				await expect(page.getByRole("textbox", { name: "Git URL input" })).toBeFocused();
+			}
+			const input = page.getByRole("combobox", { name: cloneTab ? "Clone destination path" : "Server path input" });
+			await expect(input).toHaveValue("projects/");
+			await expect(page.getByRole("listbox")).toHaveCount(0);
+			await input.fill("projects/project-");
+			const listbox = page.getByRole("listbox");
+			await expect(page.getByRole("option")).toHaveCount(12);
+			await expect(listbox).toBeVisible();
+			const suggestionsBounds = (await listbox.boundingBox())!;
+			const formBounds = (await page.getByRole("dialog", { name: "Add Project", exact: true }).boundingBox())!;
+			expect(suggestionsBounds.y + suggestionsBounds.height).toBeGreaterThan(formBounds.y + formBounds.height + 12);
+			expect(
+				await listbox.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), {
+					x: suggestionsBounds.x + suggestionsBounds.width / 2,
+					y: formBounds.y + formBounds.height + 12,
+				}),
+			).toBe(true);
+			await listbox.hover();
+			await page.mouse.wheel(0, 600);
+			await expect.poll(() => listbox.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+			await page.getByRole("option").last().click();
+			await expect(input).toHaveValue("projects/project-11/");
+			await expect(input).toBeFocused();
+		}
+	});
+}
+
+test("项目目录预填不覆盖迟到响应之前已经编辑或清空的内容", async ({ page }) => {
+	let releaseDirectoryResponses = () => {};
+	const directoryResponseReady = new Promise<void>((resolve) => {
+		releaseDirectoryResponses = resolve;
+	});
+	await page.route("**/api/trpc/**", async (route) => {
+		await directoryResponseReady;
+		await route.fallback();
+	});
+	await page.goto(`${harnessPath}?view=projects&prefill`);
+	const pathInput = page.getByRole("combobox", { name: "Server path input" });
+	await pathInput.fill("custom/");
+	await pathInput.fill("");
+	await page.getByRole("button", { name: "Git Clone", exact: true }).click();
+	await page.getByRole("combobox", { name: "Clone destination path" }).fill("custom-clone/");
+	const directoryResponse = page.waitForResponse((response) =>
+		response.url().includes("projects.listDirectoryContents"),
+	);
+	releaseDirectoryResponses();
+	await directoryResponse;
+	await page.evaluate(() => new Promise(requestAnimationFrame));
+	await expect(page.getByRole("combobox", { name: "Clone destination path" })).toHaveValue("custom-clone/");
+	await page.getByRole("button", { name: "Server Path", exact: true }).click();
+	await expect(pathInput).toHaveValue("");
 });
 
 test("解锁表单的组合键发送原校验请求且不重复发送", async ({ page }) => {
