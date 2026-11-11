@@ -363,6 +363,10 @@ export function useTaskEditor({
 	const [isInlineTaskCreateOpen, setIsInlineTaskCreateOpen] = useState(false);
 	const [taskEditorSessionWorkspaceId, setTaskEditorSessionWorkspaceId] = useState<string | null>(null);
 	const taskEditorSessionIdentityRef = useRef(Symbol("task-editor-session"));
+	// 关闭也会使旧会话失效；只有显式打开才发布新请求，避免收尾渲染把关闭误判为重开。
+	const [taskEditorOpeningRequestIdentity, setTaskEditorOpeningRequestIdentity] = useState(
+		taskEditorSessionIdentityRef.current,
+	);
 	const [taskEditorDefaultAgentIdAtSessionOpen, setTaskEditorDefaultAgentIdAtSessionOpen] = useState(selectedAgentId);
 	const captureTaskEditorSessionDefaultAgentId = useCallback(
 		(workspaceId: string | null) => {
@@ -909,6 +913,7 @@ export function useTaskEditor({
 			ensureRuntimeAllocatedTaskIdPrefetchPoolFilled(currentProjectId);
 		}
 		taskEditorSessionIdentityRef.current = Symbol("create-task-editor-session");
+		setTaskEditorOpeningRequestIdentity(taskEditorSessionIdentityRef.current);
 		captureTaskEditorSessionDefaultAgentId(currentProjectId);
 		preservedTaskEditorSubmissionRef.current = null;
 		setTaskEditorSessionWorkspaceId(currentProjectId);
@@ -1114,6 +1119,7 @@ export function useTaskEditor({
 	const openEditTaskFormForTaskCardInWorkspace = useCallback(
 		(workspaceId: string | null, task: BoardCard) => {
 			taskEditorSessionIdentityRef.current = Symbol("edit-task-editor-session");
+			setTaskEditorOpeningRequestIdentity(taskEditorSessionIdentityRef.current);
 			captureTaskEditorSessionDefaultAgentId(workspaceId);
 			preservedTaskEditorSubmissionRef.current = null;
 			setTaskEditorSessionWorkspaceId(workspaceId);
@@ -2248,6 +2254,7 @@ export function useTaskEditor({
 		}
 		suspendCurrentTaskEditDraft(false);
 		taskEditorSessionIdentityRef.current = Symbol("resumed-create-task-editor-session");
+		setTaskEditorOpeningRequestIdentity(taskEditorSessionIdentityRef.current);
 		preservedTaskEditorSubmissionRef.current = null;
 		setEditingTaskId(null);
 		setEditingTaskCardInOtherProject(null);
@@ -2286,7 +2293,7 @@ export function useTaskEditor({
 
 	return {
 		editingTaskSnapshot: editTaskCardTheFormWasSeededFromRef.current,
-		taskEditorOpeningRequestIdentity: taskEditorSessionIdentityRef.current,
+		taskEditorOpeningRequestIdentity,
 		suspendedTaskEditorTitle: suspendedTaskEditorSeed
 			? suspendedTaskEditorSeed.kind === "create"
 				? "新建任务草稿"
