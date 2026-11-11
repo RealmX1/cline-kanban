@@ -1,6 +1,10 @@
 import { expect, type Page, test, type WebSocketRoute } from "@playwright/test";
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../src/config/user-interface-preferences-shared-across-browser-origins";
-import type { RuntimeConfigResponse, RuntimeTerminalAgentModelSelectionOptionsResponse } from "../src/runtime/types";
+import type {
+	RuntimeConfigResponse,
+	RuntimeTerminalAgentModelSelectionOptionsResponse,
+	TaskEditorCreationSubmissionStatus,
+} from "../src/runtime/types";
 
 const sourceProjectId = "editor-source-project";
 const backgroundProjectId = "editor-background-project";
@@ -118,6 +122,7 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 	const errors: string[] = [];
 	const requests: Array<{ procedure: string; workspaceId: string; input: unknown }> = [];
 	let savedSettingPresentationPreferences: Record<string, string> = {};
+	let allocatedTaskIdSequence = 0;
 	page.on("pageerror", (error) => {
 		errors.push(error.message);
 		console.error("隔离 App 页面错误：", error.stack);
@@ -248,7 +253,7 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 				};
 			else if (procedure === "runtime.issueKanbanWebUiPageLoadRequestOriginNonce")
 				value = { kanbanWebUiPageLoadIssuedRequestOriginNonce: "isolated-page-nonce" };
-			else if (procedure === "runtime.getCodexConfigurationSyncState")
+			else if (procedure === "runtime.getCodexConfigurationSyncActiveState")
 				value = { revision: 0, changes: [], sourceObservations: [], observationProblem: null };
 			else if (procedure === "runtime.getClineKanbanAccess") value = { enabled: true };
 			else if (procedure === "runtime.listAgentRaisedPendingUserDecisions") value = { decisions: [] };
@@ -312,7 +317,28 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 				};
 			else if (procedure === "workUnit.applyReferenceRelationModelingChangesDirectlyAsWebUiUser") value = {};
 			else if (procedure === "workUnit.saveRelationModelingEditorDraft") value = { saved: true };
-			else if (procedure === "workUnit.reserveKanbanBoardCardIds") value = { taskIds: ["fresh-editor-task"] };
+			else if (procedure === "workspace.allocateTaskIdForNewWebUiTaskCard")
+				value = {
+					allocatedTaskIdUniqueAgainstGlobalTaskIdentityRegistry: `a${String(++allocatedTaskIdSequence).padStart(4, "0")}`,
+				};
+			else if (procedure === "taskEditorCreation.getStatus") value = null;
+			else if (procedure === "taskEditorCreation.submit")
+				value = {
+					submissionId: input.submissionId,
+					workspaceId,
+					taskId: input.newTaskCard.id,
+					taskIncarnationCreatedAtEpochMs: input.newTaskCard.createdAt,
+					cardPersisted: true,
+					relationsCompleted: true,
+					startRequested: input.startAgentAfterCreation,
+					startCompleted: false,
+					phase: input.startAgentAfterCreation ? "waiting_for_dependency" : "completed",
+					lastError: null,
+					recoveryCondition: input.startAgentAfterCreation ? "等待隔离 Agent 启动" : null,
+					attemptsInCurrentRecoveryRound: 1,
+					acceptedAtEpochMs: 1,
+					updatedAtEpochMs: 1,
+				} satisfies TaskEditorCreationSubmissionStatus;
 			else if (
 				procedure === "runtime.getWorkspaceTaskEditDrafts" ||
 				procedure === "runtime.mutateWorkspaceTaskEditDrafts"
@@ -379,6 +405,63 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 		},
 	};
 }
+
+for (const action of ["创建任务", "创建并启动"] as const) {
+	test(`${action}：慢保存确认后关闭真实 App 浮窗，不重新打开空白窗口`, async ({ page }) => {
+		const fixture = await openRealApp(page);
+		let releaseCreationConfirmation = () => {};
+		const creationConfirmationAllowed = new Promise<void>((resolve) => {
+			releaseCreationConfirmation = resolve;
+		});
+		let pendingCreationCount = 0;
+		await page.route("**/api/trpc/taskEditorCreation.submit*", async (route) => {
+			pendingCreationCount += 1;
+			await creationConfirmationAllowed;
+			await route.fallback();
+		});
+		await page.getByRole("button", { name: "Create task", exact: true }).first().click();
+		const dialog = page
+			.getByRole("dialog")
+			.filter({ has: page.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
+		const prompt = "创建成功后应关闭，不能留下空白创建窗口";
+		await dialog.getByRole("textbox", { name: "任务正文", exact: true }).fill(prompt);
+		await expect(dialog.getByRole("switch", { name: "连续创建", exact: true })).not.toBeChecked();
+		await dialog.getByRole("button", { name: action, exact: true }).click();
+		await expect.poll(() => pendingCreationCount).toBe(1);
+		await expect(dialog.getByRole("textbox", { name: "任务正文", exact: true })).toHaveValue(prompt);
+		releaseCreationConfirmation();
+		await expect(dialog).toHaveCount(0);
+		expect(fixture.requests.filter((request) => request.procedure === "taskEditorCreation.submit")).toHaveLength(1);
+		await page.getByRole("button", { name: "Create task", exact: true }).first().click();
+		await expect(dialog).toHaveCount(1);
+		await expect(dialog.getByRole("textbox", { name: "任务正文", exact: true })).toHaveValue("");
+		await dialog.getByRole("button", { name: "关闭任务编辑器", exact: true }).click();
+		await expect(dialog).toHaveCount(0);
+		expect(fixture.errors).toEqual([]);
+	});
+}
+
+test("连续创建保留空白浮窗，关闭开关后再次创建正常关闭", async ({ page }) => {
+	const fixture = await openRealApp(page);
+	await page.getByRole("button", { name: "Create task", exact: true }).first().click();
+	const dialog = page
+		.getByRole("dialog")
+		.filter({ has: page.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
+	const prompt = dialog.getByRole("textbox", { name: "任务正文", exact: true });
+	const createMore = dialog.getByRole("switch", { name: "连续创建", exact: true });
+	await prompt.fill("连续创建的第一张任务");
+	await createMore.check();
+	await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
+	await expect(prompt).toHaveValue("");
+	await expect(createMore).toBeChecked();
+	await prompt.fill("关闭连续创建后的第二张任务");
+	await createMore.uncheck();
+	await dialog.getByRole("button", { name: "创建任务", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+	const submissions = fixture.requests.filter((request) => request.procedure === "taskEditorCreation.submit");
+	expect(submissions).toHaveLength(2);
+	expect(fixture.errors).toEqual([]);
+});
 
 for (const kind of ["create", "edit"] as const) {
 	for (const backgroundBecomesUnavailable of [false, true]) {
@@ -466,7 +549,12 @@ for (const width of [1440, 390]) {
 							await keepExpanded.press("Enter");
 						}
 						await row.getByText(title, { exact: true }).first().click();
-					} else await row.getByRole("button", { name: `打开任务：${title}`, exact: true }).click();
+					} else {
+						// 中央活动详情有独立点击行为，打开任务要点精简行的留白。
+						await row
+							.getByRole("button", { name: `打开任务：${title}`, exact: true })
+							.click({ position: { x: 4, y: 4 } });
+					}
 				};
 				const editor = page
 					.getByRole("dialog")
@@ -521,7 +609,10 @@ for (const entry of ["list", "expanded-card"] as const) {
 				await keepExpanded.press("Enter");
 			}
 			await row.getByText(crossProjectBacklogTask.title, { exact: true }).first().click();
-		} else await row.getByRole("button", { name: `打开任务：${crossProjectBacklogTask.title}`, exact: true }).click();
+		} else
+			await row
+				.getByRole("button", { name: `打开任务：${crossProjectBacklogTask.title}`, exact: true })
+				.click({ position: { x: 4, y: 4 } });
 		const editor = page
 			.getByRole("dialog")
 			.filter({ has: page.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
@@ -579,7 +670,7 @@ for (const entry of ["list", "expanded-card"] as const) {
 			else
 				await crossProjectRow
 					.getByRole("button", { name: `打开任务：${crossProjectBacklogTask.title}`, exact: true })
-					.click();
+					.click({ position: { x: 4, y: 4 } });
 			await readStarted;
 			const editor = page
 				.getByRole("dialog")
@@ -594,7 +685,7 @@ for (const entry of ["list", "expanded-card"] as const) {
 					)
 					.first()
 					.getByRole("button", { name: `打开任务：${task.title}`, exact: true })
-					.click();
+					.click({ position: { x: 4, y: 4 } });
 				await expect(editor).toBeVisible();
 			}
 			const oldReadResponse = page.waitForResponse(

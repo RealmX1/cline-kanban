@@ -326,6 +326,34 @@ describe("任务编辑会话的挂起、目标与迁移生命周期", () => {
 				previousActEnvironment;
 	});
 
+	it.each(["create", "edit", "reset"] as const)("%s 关闭不产生打开请求，显式重开仍产生新请求", async (action) => {
+		await act(async () => root.render(<SessionHarness />));
+		await act(async () => {
+			if (action === "edit") latestEditor.handleOpenEditTask(originalTask);
+			else latestEditor.handleOpenCreateTask();
+		});
+		const openingRequestIdentity = latestEditor.taskEditorOpeningRequestIdentity;
+		await act(async () => {
+			if (action === "edit") latestEditor.handleCancelEditTask();
+			else if (action === "reset") latestEditor.resetTaskEditorState();
+			else latestEditor.handleCancelCreateTask();
+		});
+		expect(latestEditor.isInlineTaskCreateOpen).toBe(false);
+		expect(latestEditor.editingTaskId).toBeNull();
+		expect(latestEditor.taskEditorOpeningRequestIdentity).toBe(openingRequestIdentity);
+		await act(async () => {
+			if (action === "edit") latestEditor.handleOpenEditTask(originalTask);
+			else latestEditor.handleOpenCreateTask();
+		});
+		expect(latestEditor.taskEditorOpeningRequestIdentity).not.toBe(openingRequestIdentity);
+		const reopenedRequestIdentity = latestEditor.taskEditorOpeningRequestIdentity;
+		await act(async () => {
+			if (action === "edit") latestEditor.handleOpenEditTask(originalTask);
+			else latestEditor.handleOpenCreateTask();
+		});
+		expect(latestEditor.taskEditorOpeningRequestIdentity).not.toBe(reopenedRequestIdentity);
+	});
+
 	it("新建草稿挂起后恢复正文、附件、名称、全部设置与原目标，不重新套用默认值", async () => {
 		await act(async () => root.render(<SessionHarness />));
 		await act(async () => latestEditor.handleOpenCreateTaskInBoardScope("target-project"));
@@ -357,7 +385,9 @@ describe("任务编辑会话的挂起、目标与迁移生命周期", () => {
 		);
 		await act(async () => latestEditor.handleOpenEditTask(originalTask));
 		await act(async () => root.render(<SessionHarness currentProjectId="background-project" />));
+		const editingRequestIdentity = latestEditor.taskEditorOpeningRequestIdentity;
 		await act(async () => latestEditor.handleResumeSuspendedTaskEditor());
+		expect(latestEditor.taskEditorOpeningRequestIdentity).not.toBe(editingRequestIdentity);
 		expect(latestEditor).toMatchObject({
 			isInlineTaskCreateOpen: true,
 			editingTaskId: null,
