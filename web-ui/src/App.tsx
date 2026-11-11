@@ -2409,6 +2409,7 @@ export default function App(): ReactElement {
 				/>
 
 				<AddProjectDialog
+					registeredProjectPaths={projects.map((project) => project.path)}
 					openingRequestSequence={addProjectOpeningRequestSequence}
 					open={isAddProjectDialogOpen}
 					onOpenChange={setIsAddProjectDialogOpen}

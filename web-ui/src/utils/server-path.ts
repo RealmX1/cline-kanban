@@ -14,6 +14,31 @@ export function normalizeServerPath(pathValue: string): string {
 	return pathValue.replaceAll("\\", "/");
 }
 
+/** 按宿主已登记项目的直接父目录计数；并列时保留项目列表中最先出现的目录。 */
+export function deriveMostCommonRegisteredProjectParentDirectoryPath(
+	registeredProjectPaths: readonly string[],
+): string | null {
+	const projectCountByParentDirectory = new Map<string, number>();
+	for (const projectPath of registeredProjectPaths) {
+		const normalizedProjectPath = normalizeServerPath(projectPath).replace(/\/+$/, "");
+		const parentSeparatorIndex = normalizedProjectPath.lastIndexOf("/");
+		if (parentSeparatorIndex < 0) continue;
+		const parentDirectoryPath = normalizedProjectPath.slice(0, parentSeparatorIndex + 1);
+		projectCountByParentDirectory.set(
+			parentDirectoryPath,
+			(projectCountByParentDirectory.get(parentDirectoryPath) ?? 0) + 1,
+		);
+	}
+	let mostCommonParentDirectoryPath: string | null = null;
+	let highestProjectCount = 0;
+	for (const [parentDirectoryPath, projectCount] of projectCountByParentDirectory) {
+		if (projectCount <= highestProjectCount) continue;
+		mostCommonParentDirectoryPath = parentDirectoryPath;
+		highestProjectCount = projectCount;
+	}
+	return mostCommonParentDirectoryPath;
+}
+
 /**
  * Split a server path into segments, normalising separators first.
  */

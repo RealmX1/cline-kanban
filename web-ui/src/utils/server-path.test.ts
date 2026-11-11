@@ -1,12 +1,27 @@
 import { describe, expect, it } from "vitest";
 
 import {
+	deriveMostCommonRegisteredProjectParentDirectoryPath,
 	normalizeServerPath,
 	serverRootLabel,
 	splitServerPath,
 	toServerAbsolute,
 	toUiRelative,
 } from "@/utils/server-path";
+
+describe("deriveMostCommonRegisteredProjectParentDirectoryPath", () => {
+	it.each<[string[], string | null]>([
+		[["/elsewhere/one", "/srv/host-projects/two", "/srv/host-projects/three"], "/srv/host-projects/"],
+		[["/first/one", "/second/two", "/second/three", "/first/four"], "/first/"],
+		[["/srv/projects/one/"], "/srv/projects/"],
+		[[], null],
+		[["", "/"], null],
+		[["/one"], "/"],
+		[["C:\\host-projects\\one", "C:/host-projects/two/"], "C:/host-projects/"],
+	])("按宿主项目路径 %j 选择父目录", (paths, expected) => {
+		expect(deriveMostCommonRegisteredProjectParentDirectoryPath(paths)).toBe(expected);
+	});
+});
 
 describe("normalizeServerPath", () => {
 	it("returns Unix paths unchanged", () => {

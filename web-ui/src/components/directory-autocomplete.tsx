@@ -1,3 +1,4 @@
+import * as Popover from "@radix-ui/react-popover";
 import { Folder, GitBranch } from "lucide-react";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
@@ -106,7 +107,7 @@ export function DirectoryAutocomplete({
 					if (filtered.length > 0) {
 						setSuggestions(filtered);
 						// Only open if the user has explicitly interacted
-						if (userInteractedRef.current) {
+						if (userInteractedRef.current && document.activeElement === inputRefToUse.current) {
 							setIsOpen(true);
 						}
 						setHighlightedIndex(-1);
@@ -128,18 +129,7 @@ export function DirectoryAutocomplete({
 		};
 
 		void fetchSuggestions();
-	}, [debouncedValue, disabled, workspaceId]);
-
-	// Close dropdown on outside click
-	useEffect(() => {
-		const handleClickOutside = (e: MouseEvent) => {
-			if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-				setIsOpen(false);
-			}
-		};
-		document.addEventListener("mousedown", handleClickOutside);
-		return () => document.removeEventListener("mousedown", handleClickOutside);
-	}, []);
+	}, [debouncedValue, disabled, workspaceId, inputRefToUse]);
 
 	const selectSuggestion = useCallback(
 		(entry: RuntimeDirectoryListEntry) => {
@@ -208,9 +198,12 @@ export function DirectoryAutocomplete({
 	);
 
 	return (
-		<div ref={containerRef} className="relative">
-			{/* Fixed "/" prefix + input */}
-			<div className="flex items-center h-8 rounded-md border border-border bg-surface-2 focus-within:border-accent">
+		<Popover.Root open={isOpen && suggestions.length > 0} onOpenChange={setIsOpen}>
+			<Popover.Anchor virtualRef={containerRef} />
+			<div
+				ref={containerRef}
+				className="flex items-center h-8 rounded-md border border-border bg-surface-2 focus-within:border-accent"
+			>
 				<span className="pl-2.5 text-[13px] font-mono text-text-tertiary select-none shrink-0">/</span>
 				<input
 					ref={inputRefToUse}
@@ -229,6 +222,7 @@ export function DirectoryAutocomplete({
 						// Using mousedown (not click) so that label-initiated
 						// synthetic clicks don't trigger the dropdown.
 						userInteractedRef.current = true;
+						if (suggestions.length > 0) setIsOpen(true);
 					}}
 					placeholder={placeholder}
 					className="flex-1 min-w-0 h-full px-0.5 pr-2.5 text-[13px] font-mono bg-transparent text-text-primary placeholder:text-text-tertiary focus:outline-none border-none"
@@ -243,11 +237,22 @@ export function DirectoryAutocomplete({
 					aria-activedescendant={highlightedIndex >= 0 ? `${id}-option-${highlightedIndex}` : undefined}
 				/>
 			</div>
-			{isOpen && suggestions.length > 0 ? (
-				<div
+			<Popover.Portal>
+				<Popover.Content
 					id={`${id}-listbox`}
 					role="listbox"
-					className="absolute z-50 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-surface-1 shadow-lg"
+					align="start"
+					sideOffset={4}
+					collisionPadding={8}
+					updatePositionStrategy="always"
+					hideWhenDetached
+					onOpenAutoFocus={(event) => event.preventDefault()}
+					onCloseAutoFocus={(event) => event.preventDefault()}
+					onEscapeKeyDown={(event) => event.preventDefault()}
+					onInteractOutside={(event) => {
+						if (containerRef.current?.contains(event.detail.originalEvent.target as Node)) event.preventDefault();
+					}}
+					className="z-50 w-[var(--radix-popover-trigger-width)] max-h-[min(12rem,var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain rounded-md border border-border bg-surface-1 shadow-lg"
 				>
 					{suggestions.map((entry, index) => (
 						<div
@@ -277,8 +282,8 @@ export function DirectoryAutocomplete({
 							<span className="truncate font-mono">{entry.name}</span>
 						</div>
 					))}
-				</div>
-			) : null}
-		</div>
+				</Popover.Content>
+			</Popover.Portal>
+		</Popover.Root>
 	);
 }
