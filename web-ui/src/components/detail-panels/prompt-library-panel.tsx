@@ -566,10 +566,12 @@ export function PromptLibraryPanel({
 	onQueuePromptForAfterCurrentTurn,
 	headerContent,
 	headerNavigationContent,
+	headerEndActions,
 	taskIdsOnBoard = null,
 	entryKind = "draft_prompt",
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	isTaskAgentExecutionDisabled?: boolean;
 	taskId: string;
 	projectId: string;
@@ -618,6 +620,7 @@ export function PromptLibraryPanel({
 						Add
 					</Button>
 				) : null}
+				{headerEndActions}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-3 pt-1 pb-3">
 				{prompts.length === 0 ? (

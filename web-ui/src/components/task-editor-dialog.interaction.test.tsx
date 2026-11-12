@@ -10,6 +10,8 @@ import {
 	EMPTY_ADD_REFERENCE_RELATION_DIALOG_DRAFT,
 	type SelectedCounterpartKanbanBoardCardForAddReferenceRelation,
 } from "@/hooks/work-unit-relation-add-reference-relation-dialog-draft-validation";
+import { agentPromptFileAttachmentQueries } from "@/runtime/agent-prompt-file-attachment-query";
+import * as taskIdPrefetch from "@/runtime/runtime-allocated-task-id-prefetch-pool-for-new-web-ui-task-cards";
 import * as taskCardActionQueries from "@/runtime/task-card-action-query";
 import * as creationQueries from "@/runtime/task-editor-creation-submission-query";
 import type { TaskEditorCreationSubmissionRequest, TaskEditorCreationSubmissionStatus } from "@/runtime/types";
@@ -323,6 +325,211 @@ describe("TaskEditorDialog interactions", () => {
 			);
 		});
 	}
+
+	it.each(["create", "edit"] as const)(
+		"%s 从读取附件起禁用所有提交入口，完成后提交最新正文",
+		async (taskEditorMode) => {
+			const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+			let finishUpload!: (value: { fileName: string; filePath: string }) => void;
+			const upload = vi.spyOn(agentPromptFileAttachmentQueries, "save").mockReturnValue(
+				new Promise((resolve) => {
+					finishUpload = resolve;
+				}),
+			);
+			const props = makeProps({
+				taskEditorMode,
+				editingTaskId: taskEditorMode === "edit" ? "abcde" : undefined,
+				prompt: "原始正文",
+				onCreateAndStart: vi.fn(() => null),
+				onCreateStartAndOpen: vi.fn(() => null),
+			});
+			await render(props);
+			await act(async () => resolveDraftRead(null));
+			await act(async () => {
+				const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!;
+				Object.defineProperty(input, "files", { configurable: true, value: [new File(["材料"], "notes.txt")] });
+				input.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+			const saveButton = findButtonByText(taskEditorMode === "edit" ? "保存更改" : "创建任务")!;
+			expect(saveButton.disabled).toBe(true);
+			for (const button of Array.from(document.body.querySelectorAll<HTMLButtonElement>("button"))) {
+				if (button.textContent?.includes("并启动") || button.getAttribute("aria-label") === "More start options")
+					expect(button.disabled).toBe(true);
+			}
+			await typeIntoPrompt("上传期间最新正文");
+			await act(async () => {
+				saveButton.click();
+				for (const modifiers of [
+					{ ctrlKey: true },
+					{ metaKey: true, shiftKey: true },
+					{ altKey: true, shiftKey: true },
+				]) {
+					getPromptTextarea().dispatchEvent(
+						new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...modifiers }),
+					);
+				}
+			});
+			expect(props.onCreate).not.toHaveBeenCalled();
+			expect(props.onCreateAndStart).not.toHaveBeenCalled();
+			expect(props.onCreateStartAndOpen).not.toHaveBeenCalled();
+			await act(async () => vi.waitFor(() => expect(upload).toHaveBeenCalledOnce()));
+			await act(async () => finishUpload({ fileName: "notes.txt", filePath: "/persistent/notes.txt" }));
+			expect(saveButton.disabled).toBe(false);
+			await act(async () => saveButton.click());
+			expect(props.onCreate).toHaveBeenCalledWith(
+				expect.objectContaining({
+					promptOverride: '上传期间最新正文\n\n附件："notes.txt"\n持久路径："/persistent/notes.txt"',
+				}),
+			);
+		},
+	);
+
+	it.each([
+		["create", "项目分析", "读取", "选择"],
+		["edit", "项目分析", "上传", "拖放"],
+		["create", "任务 ID 预取", "上传", "拖放"],
+	] as const)(
+		"%s 在%s期间新增附件，%s未完成时停止原提交并保留草稿（%s）",
+		async (taskEditorMode, waitingStage, attachmentStage, attachmentInputMethod) => {
+			const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+			let finishSubmissionPreparation!: () => void;
+			const preparation = new Promise<void>((resolve) => {
+				finishSubmissionPreparation = resolve;
+			});
+			if (waitingStage === "项目分析") {
+				vi.mocked(taskProjectAssignmentPreflight.runTaskProjectAssignmentPreflight).mockImplementationOnce(
+					async ({ workspaceId, baseRef }) => {
+						await preparation;
+						return { workspaceId, baseRef };
+					},
+				);
+			} else {
+				vi.spyOn(taskIdPrefetch, "ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission").mockReturnValueOnce(
+					preparation,
+				);
+			}
+			let attachmentReader!: FileReader;
+			vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader) {
+				attachmentReader = this;
+			});
+			const finishAttachmentRead = () => {
+				Object.defineProperty(attachmentReader, "result", { value: "data:text/plain;base64,eA==" });
+				attachmentReader.dispatchEvent(new Event("load"));
+			};
+			let finishUpload!: (value: { fileName: string; filePath: string }) => void;
+			const upload = vi.spyOn(agentPromptFileAttachmentQueries, "save").mockReturnValue(
+				new Promise((resolve) => {
+					finishUpload = resolve;
+				}),
+			);
+			const props = makeProps({
+				taskEditorMode,
+				editingTaskId: taskEditorMode === "edit" ? "abcde" : undefined,
+				prompt: "原始正文",
+				onCreate: vi.fn(() => "abcde"),
+			});
+			await render(props);
+			await act(async () => resolveDraftRead(null));
+			if (waitingStage === "项目分析")
+				await act(async () =>
+					document.querySelector<HTMLButtonElement>('[role="switch"][aria-label="自动分析项目归属"]')?.click(),
+				);
+			const actionLabel = taskEditorMode === "edit" ? "保存更改" : "创建任务";
+			await act(async () => findButtonByText(actionLabel)?.click());
+			await act(async () => {
+				const files = [new File(["x"], "notes.txt")];
+				if (attachmentInputMethod === "拖放") {
+					const event = new Event("drop", { bubbles: true, cancelable: true });
+					Object.defineProperty(event, "dataTransfer", { value: { files } });
+					getPromptTextarea().dispatchEvent(event);
+				} else {
+					const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!;
+					Object.defineProperty(input, "files", { configurable: true, value: files });
+					input.dispatchEvent(new Event("change", { bubbles: true }));
+				}
+			});
+			if (attachmentStage === "上传") await act(async () => finishAttachmentRead());
+			await act(async () => finishSubmissionPreparation());
+			expect(props.onCreate).not.toHaveBeenCalled();
+			expect(creationQueries.submitTaskEditorCreation).not.toHaveBeenCalled();
+			expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+			expect(getPromptTextarea().value).toBe("原始正文");
+			expect(findButtonByText(actionLabel)?.disabled).toBe(true);
+			await typeIntoPrompt("上传期间最新正文");
+			if (attachmentStage === "读取") await act(async () => finishAttachmentRead());
+			expect(upload).toHaveBeenCalledOnce();
+			await act(async () => finishUpload({ fileName: "notes.txt", filePath: "/persistent/notes.txt" }));
+			expect(findButtonByText(actionLabel)?.disabled).toBe(false);
+			await act(async () => findButtonByText(actionLabel)?.click());
+			expect(props.onCreate).toHaveBeenCalledWith(
+				expect.objectContaining({
+					promptOverride: '上传期间最新正文\n\n附件："notes.txt"\n持久路径："/persistent/notes.txt"',
+				}),
+			);
+		},
+	);
+
+	it.each(["create", "edit"] as const)("%s 已进入保存时不接受拖放附件", async (taskEditorMode) => {
+		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+		let finishPersistence!: () => void;
+		const persistence = new Promise<void>((resolve) => {
+			finishPersistence = resolve;
+		});
+		vi.mocked(creationQueries.submitTaskEditorCreation).mockImplementation(async (workspaceId, request) => {
+			await persistence;
+			return creationStatus(request, workspaceId);
+		});
+		const attachmentRead = vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(() => {});
+		const upload = vi.spyOn(agentPromptFileAttachmentQueries, "save");
+		const props = makeProps({
+			taskEditorMode,
+			editingTaskId: taskEditorMode === "edit" ? "abcde" : undefined,
+			prompt: "已冻结的正文",
+			onCreate: vi.fn((options) => {
+				options?.onTaskPersistenceRequested?.(persistence.then(() => true));
+				return "abcde";
+			}),
+		});
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		await act(async () => findButtonByText(taskEditorMode === "edit" ? "保存更改" : "创建任务")?.click());
+		expect(props.onCreate).toHaveBeenCalledOnce();
+		expect(getPromptTextarea().closest("fieldset")?.disabled).toBe(true);
+		await act(async () => {
+			const event = new Event("drop", { bubbles: true, cancelable: true });
+			Object.defineProperty(event, "dataTransfer", { value: { files: [new File(["x"], "late-notes.txt")] } });
+			getPromptTextarea().dispatchEvent(event);
+		});
+		await act(async () => finishPersistence());
+		expect(attachmentRead).not.toHaveBeenCalled();
+		expect(upload).not.toHaveBeenCalled();
+		expect(props.onOpenChange).toHaveBeenCalledWith(false);
+	});
+
+	it.each(["关闭后重开", "切换编辑任务"])("%s 不接受上一张草稿的迟到附件", async (transition) => {
+		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+		let finishUpload!: (value: { fileName: string; filePath: string }) => void;
+		const upload = vi.spyOn(agentPromptFileAttachmentQueries, "save").mockReturnValue(
+			new Promise((resolve) => {
+				finishUpload = resolve;
+			}),
+		);
+		const props = makeProps({ taskEditorMode: "edit", editingTaskId: "abcde", prompt: "旧正文" });
+		await render(props);
+		await act(async () => resolveDraftRead(null));
+		await act(async () => {
+			const input = document.body.querySelector<HTMLInputElement>('input[type="file"]')!;
+			Object.defineProperty(input, "files", { configurable: true, value: [new File(["材料"], "late.txt")] });
+			input.dispatchEvent(new Event("change", { bubbles: true }));
+		});
+		await act(async () => vi.waitFor(() => expect(upload).toHaveBeenCalledOnce()));
+		if (transition === "关闭后重开") await render({ ...props, open: false });
+		await render({ ...props, editingTaskId: transition === "关闭后重开" ? "abcde" : "bcdef", prompt: "新草稿正文" });
+		await act(async () => finishUpload({ fileName: "late.txt", filePath: "/persistent/late.txt" }));
+		expect(getPromptTextarea().value).toBe("新草稿正文");
+		expect(findButtonByText("保存更改")?.disabled).toBe(false);
+		expect(document.body.textContent).not.toContain("附件正在保存");
+	});
 
 	it.each([
 		["create", "创建任务"],

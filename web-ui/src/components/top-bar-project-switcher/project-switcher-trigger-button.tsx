@@ -9,8 +9,7 @@ import { Spinner } from "@/components/ui/spinner";
 import type { RuntimeProjectSummary } from "@/runtime/types";
 
 interface ProjectSwitcherTriggerButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-	// 选中了 Board Scope：按钮显示「All projects」。Focus View 里后面那段「› 焦点任务所属项目」是另一个按钮
-	//（board-scope-focused-task-project-breadcrumb-narrowing-button），点它收窄到该项目。
+	// 选中了 Board Scope：按钮显示「All projects」，焦点任务所属项目入口放在会话工具栏。
 	isBoardScopeAllProjectsSelected: boolean;
 	projectName: string | null;
 	project?: RuntimeProjectSummary | null;

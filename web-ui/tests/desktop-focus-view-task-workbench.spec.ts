@@ -34,6 +34,64 @@ async function openWorkbench(page: Page, width: number, height: number, scenario
 	return () => terminalConnections;
 }
 
+for (const width of [320, 390, 1440]) {
+	for (const panel of ["terminal", "chat", "history"]) {
+		test(`${width}px ${panel} 项目入口截断长名称且保留工具和会话内容`, async ({ page }) => {
+			const scenario = panel === "chat" ? "acp" : panel === "history" ? "column=trash" : "column=review";
+			const connections = await openWorkbench(
+				page,
+				width,
+				900,
+				`${scenario}&project_navigation&compact&back_to_board`,
+			);
+			const projectButton = page.getByTestId("agent-session-toolbar-focused-task-project-narrowing-button");
+			await expect(projectButton).toBeVisible();
+			const projectName = await projectButton.innerText();
+			expect(await projectButton.getAttribute("title")).toContain(`${projectName} (`);
+			expect(await projectButton.getAttribute("aria-label")).toBe(`仅显示项目 ${projectName}`);
+			expect(
+				await projectButton
+					.locator("span")
+					.last()
+					.evaluate((name) => name.scrollWidth > name.clientWidth),
+			).toBe(true);
+			const question = page.getByRole("button", { name: "展开问答记录", exact: true });
+			expect((await projectButton.boundingBox())!.x).toBeLessThan((await question.boundingBox())!.x);
+			if (width < 769) {
+				const header = page.locator("[data-mobile-focused-task-card-header]");
+				for (const button of await header.locator("button:visible").all()) {
+					const box = (await button.boundingBox())!;
+					expect(box.width).toBeGreaterThanOrEqual(44);
+					expect(box.height).toBeGreaterThanOrEqual(44);
+					expect(box.x).toBeGreaterThanOrEqual(0);
+					expect(box.x + box.width).toBeLessThanOrEqual(width);
+				}
+			}
+			await question.click();
+			await expect(page.getByRole("dialog", { name: "问答记录", exact: true })).toBeVisible();
+			await page.keyboard.press("Escape");
+			if (panel === "terminal") {
+				await page.getByRole("button", { name: "终端工具与更多信息", exact: true }).click();
+				await expect(page.getByRole("dialog", { name: "终端工具与更多信息", exact: true })).toBeVisible();
+				await page.keyboard.press("Escape");
+			}
+			expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+			await page.screenshot({ path: test.info().outputPath(`session-toolbar-project-${panel}-${width}.png`) });
+			const terminal = panel === "terminal" ? await page.locator(".xterm-screen").elementHandle() : null;
+			const beforeConnections = connections();
+			await projectButton.click();
+			await expect(projectButton).toHaveCount(0);
+			expect(
+				await page.evaluate(() =>
+					(window as unknown as { readTaskActionInvocations: () => string[] }).readTaskActionInvocations(),
+				),
+			).toEqual(["project:isolated-workbench"]);
+			if (terminal) expect(await terminal.evaluate((element) => element.isConnected)).toBe(true);
+			expect(connections()).toBe(beforeConnections);
+		});
+	}
+}
+
 for (const width of [320, 360, 390, 768, 960]) {
 	test(`${width}px 紧凑信息入口、浮层与任务操作不压缩终端`, async ({ page }) => {
 		const connections = await openWorkbench(page, width, 812, "compact&column=review");

@@ -1,5 +1,6 @@
 import { expect, type Page, test } from "@playwright/test";
-import type { TaskVisualizationPreviewRequestedMessage } from "../src/runtime/types";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../src/config/user-interface-preferences-shared-across-browser-origins";
+import type { RuntimeConfigResponse, TaskVisualizationPreviewRequestedMessage } from "../src/runtime/types";
 
 const artifact = {
 	workspaceId: "isolated-sidebar-project",
@@ -133,7 +134,7 @@ for (const [width, height] of [
 	[1920, 1080],
 	[1080, 1920],
 ]) {
-	test(`${width}×${height} 顶栏与热键一致，回收空间并保留尺寸、草稿和终端`, async ({ page }) => {
+	test(`${width}×${height} 标题栏与热键一致，回收空间并保留尺寸、草稿和终端`, async ({ page }) => {
 		const evidence = await openSidebarHarness(page, width, height);
 		const agent = page.locator("[data-focus-view-agent-panel]");
 		const left = page.locator("[data-focus-view-task-list-sidebar]");
@@ -175,7 +176,7 @@ for (const [width, height] of [
 		await restoredSessionDraftInput.focus();
 		await page.keyboard.press(`${evidence.modifier}+b`);
 		await expect(left).toBeVisible();
-		await page.getByRole("button", { name: "关闭任务编辑器", exact: true }).click();
+		await page.getByRole("button", { name: "关闭会话创建", exact: true }).click();
 		await expect(page.getByRole("dialog")).toBeHidden();
 		await page.locator(".xterm-helper-textarea").focus();
 		const originalScrollTop = await page.locator(".kb-detail-task-list-scroll").evaluate((element) => {
@@ -202,6 +203,132 @@ for (const [width, height] of [
 			await page.evaluate(() => (window as unknown as SidebarHarnessWindow).readSidebarTerminalMountCount()),
 		).toBe(1);
 		await page.screenshot({ path: test.info().outputPath(`sidebar-restored-${width}x${height}.png`) });
+	});
+
+	test(`${width}×${height} 两种项目范围的标题按钮顺序一致，悬浮入口不占空间且独立恢复`, async ({ page }) => {
+		await openSidebarHarness(page, width, height);
+		const left = page.locator("[data-focus-view-task-list-sidebar]");
+		const workbench = page.locator("[data-focus-view-workbench-sidebar]");
+		for (const allProjects of [false, true]) {
+			if (allProjects) await page.getByRole("button", { name: "切换项目范围", exact: true }).click();
+			const hideLeft = page.getByRole("button", { name: "隐藏任务列表", exact: true });
+			expect(
+				await hideLeft.evaluate((button) => {
+					const header = button.parentElement!;
+					return (
+						header.firstElementChild === button &&
+						header.children[1]?.getAttribute("aria-label") === "Create task"
+					);
+				}),
+			).toBe(true);
+			const leftBounds = (await left.boundingBox())!;
+			expect(leftBounds.x).toBe(0);
+			const workbenchBounds = (await workbench.boundingBox())!;
+			expect(workbenchBounds.x + workbenchBounds.width).toBeCloseTo(width);
+			const hideRight = page.getByRole("button", { name: "隐藏任务工作台", exact: true });
+			await expect(
+				hideRight.locator(height > width ? "svg.lucide-chevron-down" : "svg.lucide-chevron-right"),
+			).toBeVisible();
+			expect((await hideRight.boundingBox())!.height).toBeLessThanOrEqual(32);
+			await hideLeft.click();
+			await expect(page.getByRole("button", { name: "显示任务列表", exact: true })).toBeFocused();
+			await hideRight.click();
+			const revealLeft = page.getByRole("button", { name: "显示任务列表", exact: true });
+			const revealRight = page.getByRole("button", { name: "显示任务工作台", exact: true });
+			await expect(revealRight).toBeFocused();
+			await page.locator(".xterm-helper-textarea").focus();
+			await page.mouse.move(width / 2, 50);
+			expect((await revealLeft.boundingBox())!.width).toBeLessThanOrEqual(36);
+			expect((await revealRight.boundingBox())!.width).toBeLessThanOrEqual(36);
+			const agentBounds = (await page.locator("[data-focus-view-agent-panel]").boundingBox())!;
+			expect(agentBounds.x).toBe(0);
+			expect(agentBounds.width).toBe(width);
+			await revealLeft.hover();
+			expect((await revealLeft.boundingBox())!.width).toBeGreaterThan(90);
+			await expect(page.getByRole("tooltip")).toContainText(/显示任务列表 \((Cmd|Ctrl)\+B\)/);
+			await expect(left).toBeHidden();
+			await page.mouse.move(width / 2, 50);
+			await revealRight.focus();
+			expect((await revealRight.boundingBox())!.width).toBeGreaterThan(90);
+			await expect(workbench).toBeHidden();
+			await revealLeft.click();
+			await expect(hideLeft).toBeFocused();
+			await expect(left).toBeVisible();
+			await expect(workbench).toBeHidden();
+			await revealRight.click();
+			await expect(hideRight).toBeFocused();
+			await expect(workbench).toBeVisible();
+		}
+		await page.screenshot({ path: test.info().outputPath(`sidebar-headers-${width}x${height}.png`) });
+	});
+}
+
+test("首个工作台模块更换后仍在标题右端显示隐藏按钮，Changes 工具栏可隐藏", async ({ page }) => {
+	await openSidebarHarness(page);
+	for (const module of [
+		"prompt_tools",
+		"cross_task_relations",
+		"exploration_map",
+		"task_visualizations",
+		"task_sessions",
+	]) {
+		await page.getByLabel("工作台格位 1", { exact: true }).selectOption(module);
+		const hide = page.getByRole("button", { name: "隐藏任务工作台", exact: true });
+		await expect(hide).toBeVisible();
+		expect(
+			await hide.evaluate((button) => {
+				const header = button.parentElement!.parentElement!;
+				return (
+					header.lastElementChild === button.parentElement &&
+					header.querySelector('[aria-label="工作台格位 1"]') !== null
+				);
+			}),
+		).toBe(true);
+		await expect(
+			page
+				.locator(`[data-task-workbench-module="${module}"]`)
+				.getByRole("button", { name: "隐藏任务工作台", exact: true }),
+		).toBeVisible();
+	}
+	await page.getByRole("button", { name: "Changes", exact: true }).click();
+	const hideChanges = page.getByRole("button", { name: "隐藏任务工作台", exact: true });
+	expect(
+		await hideChanges.evaluate(
+			(button) =>
+				button.parentElement?.lastElementChild === button &&
+				button.parentElement?.textContent?.includes("All Changes"),
+		),
+	).toBe(true);
+	await hideChanges.click();
+	await expect(page.locator("[data-focus-view-workbench-sidebar]")).toBeHidden();
+	await page.getByRole("button", { name: "显示任务工作台", exact: true }).click();
+	await expect(page.getByRole("button", { name: "All Changes", exact: true })).toBeVisible();
+});
+
+for (const [module, expandLabel] of [
+	["task_visualizations", "全屏预览"],
+	["cross_task_relations", "展开关系图"],
+	["exploration_map", "展开探索地图"],
+] as const) {
+	test(`${module} 前景不提供隐藏工作台入口，返回后隐藏和焦点交接正常`, async ({ page }) => {
+		await openSidebarHarness(page);
+		await page.getByLabel("工作台格位 1", { exact: true }).selectOption(module);
+		await page.getByRole("button", { name: expandLabel, exact: true }).click();
+		const foreground = page.locator('[data-expanded-foreground-view="active"]');
+		await expect(foreground).toBeVisible();
+		await expect(foreground.getByRole("button", { name: "隐藏任务工作台", exact: true })).toHaveCount(0);
+		await page.getByRole("button", { name: "返回", exact: true }).click();
+		await expect(foreground).toHaveCount(0);
+		await expect(page).not.toHaveURL(/expandedView=/u);
+		await expect(page.locator("[inert]")).toHaveCount(0);
+		await page.getByRole("button", { name: "隐藏任务工作台", exact: true }).click();
+		await expect(page.locator("[data-focus-view-workbench-sidebar]")).toBeHidden();
+		const restoreWorkbench = page.getByRole("button", { name: "显示任务工作台", exact: true });
+		await expect(restoreWorkbench).toBeFocused();
+		await restoreWorkbench.click();
+		await expect(page.getByRole("button", { name: "隐藏任务工作台", exact: true })).toBeFocused();
+		await page.getByRole("button", { name: "隐藏任务列表", exact: true }).click();
+		await expect(page.locator("[data-focus-view-task-list-sidebar]")).toBeHidden();
 	});
 }
 
@@ -242,7 +369,10 @@ test("隐藏工作台保留 iframe 节点与内容，新请求展开且重放不
 	const counter = page.frameLocator('iframe[title="侧栏连续性图"]').locator("#counter");
 	await expect(counter).toBeVisible();
 	await counter.click();
-	await counter.evaluate(() => window.scrollTo(0, 300));
+	await counter.evaluate((element) => {
+		element.blur();
+		window.scrollTo(0, 300);
+	});
 	await page.evaluate(() => {
 		const target = window as unknown as SidebarHarnessWindow;
 		target.sidebarOriginalIframe = document.querySelector("iframe")!;
@@ -250,6 +380,7 @@ test("隐藏工作台保留 iframe 节点与内容，新请求展开且重放不
 	});
 	await page.getByRole("button", { name: "隐藏任务工作台", exact: true }).click();
 	await expect(iframe).toBeHidden();
+	await page.setViewportSize({ width: 1080, height: 1920 });
 	await page.getByRole("button", { name: "显示任务工作台", exact: true }).click();
 	await expect(counter).toHaveText("1");
 	await expect.poll(() => counter.evaluate(() => window.scrollY)).toBe(300);
@@ -306,7 +437,7 @@ test("Diff 最大化时打开左栏或隐藏右栏都恢复 Agent 区域", async
 	await expect(page.locator("[data-focus-view-agent-panel]")).toBeVisible();
 });
 
-test("Diff 最大化详情经跨项目在途外壳重新挂载后恢复 Agent 区域与顶栏状态", async ({ page }) => {
+test("Diff 最大化详情经跨项目在途外壳重新挂载后恢复 Agent 区域与标题栏入口", async ({ page }) => {
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	await openSidebarHarness(page);
@@ -316,6 +447,10 @@ test("Diff 最大化详情经跨项目在途外壳重新挂载后恢复 Agent �
 	await page.getByRole("button", { name: "切换跨项目在途外壳", exact: true }).click();
 	await expect(page.getByTestId("focus-view-cross-project-task-open-in-transit-shell")).toBeVisible();
 	await expect(page.getByRole("button", { name: "隐藏任务列表", exact: true })).toBeVisible();
+	await page.getByRole("button", { name: "隐藏任务列表", exact: true }).click();
+	await expect(page.getByRole("button", { name: "显示任务列表", exact: true })).toBeFocused();
+	await page.getByRole("button", { name: "显示任务列表", exact: true }).click();
+	await expect(page.getByRole("button", { name: "隐藏任务列表", exact: true })).toBeFocused();
 	await page.getByRole("button", { name: "切换跨项目在途外壳", exact: true }).click();
 	await expect(page.locator("[data-focus-view-agent-panel]")).toBeVisible();
 	await expect(page.getByRole("button", { name: "隐藏任务列表", exact: true })).toBeVisible();
@@ -360,4 +495,183 @@ test("手机忽略桌面隐藏偏好，继续使用页签和首页抽屉", async
 	await expect(page.locator("aside")).toBeVisible();
 	expect((await page.locator("aside").boundingBox())!.width).toBe(390);
 	expect(await page.evaluate(() => localStorage.getItem("kanban.home-project-sidebar-hidden.v1"))).toBe("true");
+});
+
+test("首页项目导航从标题行隐藏并从内容区恢复，展开宽度不变", async ({ page }) => {
+	await openSidebarHarness(page);
+	await page.getByRole("button", { name: "切换首页与 Focus View", exact: true }).click();
+	const initialWidth = (await page.locator("aside").boundingBox())!.width;
+	await page.getByRole("button", { name: "隐藏项目栏", exact: true }).click();
+	await expect(page.locator("aside")).toBeHidden();
+	await expect(page.getByRole("button", { name: "显示项目栏", exact: true })).toBeFocused();
+	await page.getByRole("button", { name: "显示项目栏", exact: true }).click();
+	await expect(page.getByRole("button", { name: "隐藏项目栏", exact: true })).toBeFocused();
+	expect((await page.locator("aside").boundingBox())!.width).toBe(initialWidth);
+});
+
+test.describe("无 hover 设备", () => {
+	test.use({ hasTouch: true });
+	test("悬浮入口可直接触摸点击，不依赖悬停", async ({ page }) => {
+		await openSidebarHarness(page, 1080, 1920);
+		expect(await page.evaluate(() => matchMedia("(hover: none)").matches)).toBe(true);
+		await page.getByRole("button", { name: "隐藏任务列表", exact: true }).tap();
+		await page.getByRole("button", { name: "隐藏任务工作台", exact: true }).tap();
+		await page.getByRole("button", { name: "显示任务列表", exact: true }).tap();
+		await expect(page.locator("[data-focus-view-task-list-sidebar]")).toBeVisible();
+		await expect(page.locator("[data-focus-view-workbench-sidebar]")).toBeHidden();
+		await page.getByRole("button", { name: "显示任务工作台", exact: true }).tap();
+		await expect(page.locator("[data-focus-view-workbench-sidebar]")).toBeVisible();
+	});
+});
+
+const workspaceId = "isolated-task-lookup-sidebar-project";
+const task = {
+	id: "look1",
+	title: "查卡侧栏回归任务",
+	prompt: "核验真实 App 的侧栏状态转换",
+	baseRef: "main",
+	createdAt: 123,
+	updatedAt: 123,
+};
+const workspaceState = {
+	repoPath: `/isolated/${workspaceId}`,
+	statePath: `/isolated/${workspaceId}/state.json`,
+	revision: 1,
+	git: { currentBranch: "main", defaultBranch: "main", branches: [{ name: "main", isCurrent: true }] },
+	sessions: {},
+	board: {
+		columns: ["backlog", "in_progress", "review", "validation", "trash"].map((id) => ({
+			id,
+			title: id,
+			cards: id === "review" ? [task] : [],
+		})),
+	},
+};
+const runtimeConfig: RuntimeConfigResponse = {
+	selectedAgentId: "codex",
+	selectedShortcutLabel: null,
+	agentAutonomousModeEnabled: true,
+	newTaskStartInPlanModeByDefault: false,
+	ompAgentSessionTransportForNewTasks: "pty_terminal",
+	effectiveCommand: "codex",
+	globalConfigPath: "/isolated/config.json",
+	projectConfigPath: `/isolated/${workspaceId}/config.json`,
+	readyForReviewNotificationsEnabled: false,
+	notificationSoundEnabled: false,
+	autoContinueOnConnectionDropEnabled: false,
+	programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: false,
+	postDeployVerificationForceCompleteEnabled: false,
+	detectedCommands: ["codex"],
+	agents: [
+		{
+			id: "codex",
+			label: "OpenAI Codex",
+			binary: "codex",
+			command: "codex",
+			defaultArgs: [],
+			installed: true,
+			configured: true,
+		},
+	],
+	shortcuts: [],
+	commitPromptTemplate: "",
+	openPrPromptTemplate: "",
+	commitPromptTemplateDefault: "",
+	openPrPromptTemplateDefault: "",
+	userInterfacePreferencesSharedAcrossBrowserOrigins:
+		USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
+	runtimeHostRemoteEditorAccessIdentity: {
+		operatingSystemAccountUsername: "isolated-user",
+		operatingSystemHostname: "isolated-host",
+	},
+};
+
+async function openIsolatedRealApp(page: Page) {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	await page.addInitScript(() => {
+		localStorage.setItem("kanban.onboarding.dialog.shown", "true");
+		localStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "single_project_scope");
+	});
+	// 真实 App 与组件照常加载；所有 API 和 WebSocket 均在浏览器内截获，禁止访问真实运行时。
+	await page.route("**/api/**", (route) => route.abort());
+	await page.routeWebSocket("**/*", (socket) => {
+		if (new URL(socket.url()).pathname !== "/api/runtime/ws") return;
+		socket.send(
+			JSON.stringify({
+				type: "snapshot",
+				currentProjectId: workspaceId,
+				projects: [
+					{
+						id: workspaceId,
+						name: "隔离查卡项目",
+						path: workspaceState.repoPath,
+						availability: { status: "available" },
+						taskCounts: { backlog: 0, in_progress: 0, review: 1, validation: 0, trash: 0 },
+						inProgressTaskDetails: [],
+						crossProjectTaskSwitcherEntries: [],
+					},
+				],
+				workspaceState,
+				workspaceMetadata: { homeGitSummary: null, homeGitStateVersion: 0, taskWorkspaces: [] },
+				clineSessionContextVersion: 0,
+				notificationLog: [],
+			}),
+		);
+	});
+	await page.route("**/api/passcode/status", (route) =>
+		route.fulfill({ json: { enabled: false, authenticated: true } }),
+	);
+	await page.route("**/api/trpc/**", async (route) => {
+		const url = new URL(route.request().url());
+		const procedures = decodeURIComponent(url.pathname.split("/api/trpc/")[1] ?? "").split(",");
+		const responses = procedures.map((procedure) => {
+			let data: unknown;
+			if (procedure === "runtime.getConfig" || procedure === "runtime.saveConfig") data = runtimeConfig;
+			else if (procedure === "workspace.getState" || procedure === "workspace.saveState") data = workspaceState;
+			else if (procedure === "support.listTaskLookupConversations") data = [];
+			else if (procedure === "support.getTaskAssistanceModelProviderRoutingSettings")
+				data = { preferredModelProviderId: "minimax", fallbackModelProviderId: "deepseek" };
+			else if (procedure === "workspace.getChangesConditional")
+				data = {
+					status: "changed",
+					contentVersion: "isolated-empty-changes",
+					changes: { files: [], generatedAt: 1 },
+				};
+			else
+				return {
+					error: {
+						message: `隔离测试不执行 ${procedure}`,
+						code: -32004,
+						data: { code: "NOT_FOUND", httpStatus: 404 },
+					},
+				};
+			return { result: { data } };
+		});
+		await route.fulfill({ json: url.searchParams.get("batch") === "1" ? responses : responses[0] });
+	});
+	await page.goto(`/${workspaceId}?task=${task.id}`);
+	await expect(page.getByRole("button", { name: "隐藏任务列表", exact: true })).toBeVisible();
+	return pageErrors;
+}
+
+test("真实 App 在 Changes 最大化后打开查卡，首次隐藏任务列表即生效且可恢复", async ({ page }) => {
+	await page.setViewportSize({ width: 1920, height: 1080 });
+	const pageErrors = await openIsolatedRealApp(page);
+	const taskList = page.locator("[data-focus-view-task-list-sidebar]");
+	await page.getByRole("button", { name: "Show task changes", exact: true }).click();
+	await page.getByRole("button", { name: "Expand split diff view", exact: true }).click();
+	await expect(taskList).toBeHidden();
+	await page.getByRole("button", { name: "切换 AI 查卡工作台", exact: true }).click();
+	await expect(page.getByRole("textbox", { name: "查卡问题", exact: true })).toBeVisible();
+	await expect(taskList).toBeVisible();
+	await page.getByRole("button", { name: "隐藏任务列表", exact: true }).click();
+	await expect(taskList).toBeHidden();
+	await expect(page.getByRole("button", { name: "显示任务列表", exact: true })).toBeFocused();
+	await page.getByRole("button", { name: "显示任务列表", exact: true }).click();
+	await expect(taskList).toBeVisible();
+	await expect(page.getByRole("button", { name: "隐藏任务列表", exact: true })).toBeFocused();
+	await page.getByRole("button", { name: "切换 AI 查卡工作台", exact: true }).click();
+	await expect(page.locator("[data-focus-view-agent-panel]")).toBeVisible();
+	expect(pageErrors).toEqual([]);
 });

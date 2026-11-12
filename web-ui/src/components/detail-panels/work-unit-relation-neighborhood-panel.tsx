@@ -369,11 +369,13 @@ export function WorkUnitRelationNeighborhoodPanel({
 	workspaceId,
 	kanbanBoardCardTaskId,
 	headerNavigationContent,
+	headerEndActions,
 	initiallyExpanded = false,
 	taskIncarnationCreatedAtEpochMs,
 	detachedForeground = false,
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	workspaceId: string | null;
 	kanbanBoardCardTaskId: string;
 	initiallyExpanded?: boolean;
@@ -551,6 +553,7 @@ export function WorkUnitRelationNeighborhoodPanel({
 				) : (
 					relationHeaderActions
 				)}
+				{surface.isExpanded ? null : headerEndActions}
 			</div>
 			{workspaceId ? (
 				<WorkUnitRelationAddReferenceRelationDialog
