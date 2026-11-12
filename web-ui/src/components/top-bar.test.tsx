@@ -165,7 +165,7 @@ describe("TopBar script shortcut onboarding", () => {
 		expect(container.querySelector('[data-testid="top-bar-project-switcher-trigger"]')).toBeNull();
 	});
 
-	it("places the project switcher before the workspace path breadcrumb", async () => {
+	it("保留项目切换入口，移除顶栏目录路径", async () => {
 		await act(async () => {
 			root.render(
 				<TooltipProvider>
@@ -215,12 +215,11 @@ describe("TopBar script shortcut onboarding", () => {
 		});
 
 		const switcherTrigger = container.querySelector('[data-testid="top-bar-project-switcher-trigger"]');
-		const workspacePath = container.querySelector('[data-testid="workspace-path"]');
-		if (!switcherTrigger || !workspacePath) {
-			throw new Error("Expected both the project switcher trigger and the workspace path breadcrumb.");
-		}
-		// 把「切换器在面包屑左侧」这一位置决策钉成回归护栏——面包屑本身刻意一行未改。
-		expect(switcherTrigger.compareDocumentPosition(workspacePath) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+		expect(switcherTrigger).not.toBeNull();
+		expect(container.querySelector('[data-testid="workspace-path"]')).toBeNull();
+		expect(
+			container.querySelector('[data-verification-anchor="runtime-system-load-and-runtime-status"]'),
+		).not.toBeNull();
 	});
 
 	it("renders no task spotlight search trigger unless a handler is supplied", async () => {

@@ -23,6 +23,16 @@ export interface RuntimeAsset {
 	contentType: string;
 }
 
+export function getRuntimeAssetCacheControl(pathname: string, contentType: string): string {
+	const requiresUpdateRevalidation =
+		contentType.startsWith("text/html") ||
+		contentType.startsWith("application/manifest+json") ||
+		/(?:^|\/)(?:sw|service[-.]?worker|manifest)(?:[.-][^/]*)?$/i.test(pathname);
+	return !requiresUpdateRevalidation && /^\/assets\/[^/]+-[\w-]{8,}\.[\w.]+$/.test(pathname)
+		? "public, max-age=31536000, immutable"
+		: "no-cache";
+}
+
 export function getWebUiDir(): string {
 	const here = dirname(fileURLToPath(import.meta.url));
 	// Bundled output (dist/cli.js): web-ui is at dist/web-ui

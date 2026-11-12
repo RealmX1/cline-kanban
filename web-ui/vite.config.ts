@@ -80,6 +80,11 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
+			"@runtime-contract": resolve(__dirname, "../src/core/api-contract.ts"),
+			"@runtime-state-stream-entity-synchronization": resolve(
+				__dirname,
+				"../src/core/runtime-state-stream-entity-synchronization.ts",
+			),
 			"@runtime-agent-session-pty-host-diagnostics-contract": resolve(
 				__dirname,
 				"../src/core/agent-session-pty-host-diagnostics-contract.ts",

@@ -94,6 +94,11 @@ export function usePostDeployVerificationForBoardOrSingleProjectScope(input: {
 	const { runtimeBoardSnapshot, refetchRuntimeBoardSnapshot } =
 		useBoardSnapshotReadFromRuntimeForPostDeployVerificationWorkspaceNotHydratedInBrowser({
 			workspaceIdToReadBoardSnapshotFrom: workspaceIdOwningRuntimeBoardSnapshot,
+			panelExpanded: !postDeployVerification.collapsed,
+			taskIdsToRead: [
+				...(postDeployVerification.activeGroup?.tasks ?? []),
+				...postDeployVerification.historyGroups.flatMap((group) => group.tasks),
+			].map((task) => task.taskId),
 			runtimeBoardColumnMembershipChangeHintOfWorkspace:
 				taskCountsOfWorkspaceOwningRuntimeBoardSnapshot === null
 					? null

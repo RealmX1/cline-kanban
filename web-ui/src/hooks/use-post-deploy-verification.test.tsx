@@ -70,10 +70,58 @@ const updateChecklistMutateMock = vi.hoisted(() =>
 	}),
 );
 
+const failedDetailDeploymentIds = new Set<string>();
+const requestedDetailDeploymentIds: string[] = [];
+const detailFixtureByDeploymentId = new Map<string, RuntimePostDeployVerificationDeploymentGroup>();
 vi.mock("@/runtime/trpc-client", () => ({
-	getRuntimeTrpcClient: () => ({
+	getRuntimeTrpcClient: (workspaceId: string) => ({
 		deployment: {
-			getPostDeployVerificationState: { query: getVerificationStateQueryMock },
+			getPostDeployVerificationWorkspaceOverview: {
+				query: async () => {
+					const response = await getVerificationStateQueryMock();
+					const deploymentGroups = response.deploymentGroups.map((original) => {
+						const group = { ...original, workspaceId };
+						detailFixtureByDeploymentId.set(group.deploymentId, group);
+						const requiring = group.tasks.filter(
+							(task) =>
+								task.droppedReason === null &&
+								!task.includedAsReadOnlyBecauseTaskAlreadyInDoneColumnWhenDeploymentRecorded,
+						);
+						return {
+							...group,
+							contentVersion: JSON.stringify(group),
+							pendingVerificationTaskCount: requiring.filter(
+								(task) =>
+									task.verifiedAt === null &&
+									!task.postDeployVerificationClosure &&
+									!task.carriedForwardIntoDeploymentId,
+							).length,
+							closedTaskCount: requiring.filter(
+								(task) => task.verifiedAt !== null || task.postDeployVerificationClosure,
+							).length,
+							taskCountRequiringVerification: requiring.length,
+							carriedForwardTaskCount: requiring.filter((task) => task.carriedForwardIntoDeploymentId).length,
+						};
+					});
+					return {
+						activeDeploymentId: response.activeDeploymentId,
+						deploymentGroups,
+						pendingVerificationTaskCount:
+							deploymentGroups.find((group) => group.deploymentId === response.activeDeploymentId)
+								?.pendingVerificationTaskCount ?? 0,
+					};
+				},
+			},
+			getPostDeployVerificationDeploymentGroup: {
+				query: async ({ deploymentId }: { deploymentId: string }) => {
+					requestedDetailDeploymentIds.push(deploymentId);
+					if (failedDetailDeploymentIds.has(deploymentId)) throw new Error("部署组详情暂不可用");
+					const group = detailFixtureByDeploymentId.get(deploymentId);
+					return group
+						? { status: "changed", contentVersion: JSON.stringify(group), deploymentId, deploymentGroup: group }
+						: { status: "not_found", deploymentId };
+				},
+			},
 			updateVerificationChecklist: { mutate: updateChecklistMutateMock },
 		},
 	}),
@@ -92,6 +140,7 @@ vi.mock("@/components/app-toaster", () => ({
 const DEPLOYMENT_ID = "11111111-1111-4111-8111-111111111111";
 const TASK_ID = "task-1";
 const CHECKLIST_ITEM_ID = "item-1";
+const SECOND_CHECKLIST_ITEM_ID = "item-2";
 
 function makeGuidedManualChecklistItem(checked: boolean): RuntimePostDeployVerificationTask["checklist"][number] {
 	return {
@@ -112,6 +161,19 @@ function makeTask(checked: boolean): RuntimePostDeployVerificationTask {
 		taskId: TASK_ID,
 		checklist: [makeGuidedManualChecklistItem(checked)],
 	});
+}
+
+function makeTaskWithTwoChecklistItems(
+	firstChecked: boolean,
+	secondChecked: boolean,
+): RuntimePostDeployVerificationTask {
+	return {
+		...makeTask(firstChecked),
+		checklist: [
+			makeGuidedManualChecklistItem(firstChecked),
+			{ ...makeGuidedManualChecklistItem(secondChecked), id: SECOND_CHECKLIST_ITEM_ID, label: "人工核对：退出登录" },
+		],
+	};
 }
 
 function makeGroup(checked: boolean): RuntimePostDeployVerificationDeploymentGroup {
@@ -141,6 +203,10 @@ function makeVerificationStateResponseForDeployment(
 }
 
 interface HookSnapshot {
+	setCollapsed: ReturnType<typeof usePostDeployVerification>["setCollapsed"];
+	addCustomChecklistItem: ReturnType<typeof usePostDeployVerification>["addCustomChecklistItem"];
+	setDeploymentGroupExpanded: ReturnType<typeof usePostDeployVerification>["setDeploymentGroupExpanded"];
+	deploymentGroupDetailsErrors: ReturnType<typeof usePostDeployVerification>["deploymentGroupDetailsErrors"];
 	refreshAndReadActiveGroup: ReturnType<typeof usePostDeployVerification>["refreshAndReadActiveGroup"];
 	entryNavigationReadModelRequest: ReturnType<typeof usePostDeployVerification>["entryNavigationReadModelRequest"];
 	loadError: string | null;
@@ -160,6 +226,10 @@ function HookHarness({
 	const verification = usePostDeployVerification(workspaceId);
 	useEffect(() => {
 		onSnapshot({
+			setCollapsed: verification.setCollapsed,
+			addCustomChecklistItem: verification.addCustomChecklistItem,
+			setDeploymentGroupExpanded: verification.setDeploymentGroupExpanded,
+			deploymentGroupDetailsErrors: verification.deploymentGroupDetailsErrors,
 			refreshAndReadActiveGroup: verification.refreshAndReadActiveGroup,
 			entryNavigationReadModelRequest: verification.entryNavigationReadModelRequest,
 			loadError: verification.loadError,
@@ -170,6 +240,10 @@ function HookHarness({
 		});
 	}, [
 		onSnapshot,
+		verification.setCollapsed,
+		verification.addCustomChecklistItem,
+		verification.setDeploymentGroupExpanded,
+		verification.deploymentGroupDetailsErrors,
 		verification.refreshAndReadActiveGroup,
 		verification.entryNavigationReadModelRequest,
 		verification.loadError,
@@ -198,6 +272,10 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		localStorage.removeItem("kanban.post-deploy-verification-collapsed");
+		requestedDetailDeploymentIds.length = 0;
+		failedDetailDeploymentIds.clear();
+		detailFixtureByDeploymentId.clear();
 		pendingVerificationStateQueryDeferreds.length = 0;
 		pendingUpdateChecklistMutateDeferreds.length = 0;
 		getVerificationStateQueryMock.mockClear();
@@ -224,7 +302,10 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 		}
 	});
 
-	async function mountAndEstablishBaseline(initialWorkspaceId = "workspace-a"): Promise<{
+	async function mountAndEstablishBaseline(
+		initialWorkspaceId = "workspace-a",
+		baselineTask = makeTask(false),
+	): Promise<{
 		getSnapshot: () => HookSnapshot | null;
 		rerenderWithWorkspaceId: (nextWorkspaceId: string) => Promise<void>;
 	}> {
@@ -239,9 +320,10 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 		// 挂载时 workspace 切换 effect 已触发首次 refresh（query #0）；resolve 它建立 checked=false 基线。
 		expect(pendingVerificationStateQueryDeferreds).toHaveLength(1);
 		await act(async () => {
-			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 0).resolve(
-				makeVerificationStateResponse(false),
-			);
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 0).resolve({
+				deploymentGroups: [{ ...makeGroup(false), tasks: [baselineTask] }],
+				activeDeploymentId: DEPLOYMENT_ID,
+			});
 			await flushMicrotasks();
 		});
 		expect(currentCheckedState(latestSnapshot)).toBe(false);
@@ -256,6 +338,88 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 			},
 		};
 	}
+
+	it("历史详情失败仍应用概览与活跃组，定位失败不冒充已清理", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		failedDetailDeploymentIds.add(WORKSPACE_B_DEPLOYMENT_ID);
+		const response = {
+			deploymentGroups: [
+				makeGroup(false),
+				{ ...makeGroup(false), deploymentId: WORKSPACE_B_DEPLOYMENT_ID, foldedAtIso: "2026-07-19T10:00:00Z" },
+			],
+			activeDeploymentId: DEPLOYMENT_ID,
+		};
+		await act(async () => {
+			getSnapshot()?.setDeploymentGroupExpanded?.(WORKSPACE_B_DEPLOYMENT_ID, true);
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve(response);
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.loadError).toBeNull();
+		expect(getSnapshot()?.pendingVerificationTaskCount).toBe(1);
+		expect(getSnapshot()?.deploymentGroupDetailsErrors?.[WORKSPACE_B_DEPLOYMENT_ID]).toContain("暂不可用");
+		let navigationResult: Promise<unknown> | undefined;
+		await act(async () => {
+			navigationResult = getSnapshot()
+				?.refreshAndReadActiveGroup({
+					workspaceId: "workspace-a",
+					requestId: 100,
+					deploymentId: WORKSPACE_B_DEPLOYMENT_ID,
+				})
+				.catch((error) => error);
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(response);
+			await flushMicrotasks();
+		});
+		expect(await navigationResult).toBeInstanceOf(Error);
+		expect(getSnapshot()?.entryNavigationReadModelRequest).toBeNull();
+		expect(getSnapshot()?.loadError).toBeNull();
+		let activeResult: Promise<unknown> | undefined;
+		await act(async () => {
+			activeResult = getSnapshot()?.refreshAndReadActiveGroup();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 3).resolve(response);
+			await flushMicrotasks();
+		});
+		expect(await activeResult).toMatchObject({ deploymentId: DEPLOYMENT_ID });
+		await act(async () => {
+			getSnapshot()?.setCollapsed(true);
+		});
+		const previousDetailReadCount = requestedDetailDeploymentIds.length;
+		await act(async () => {
+			getSnapshot()?.refresh();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 4).resolve(response);
+			await flushMicrotasks();
+		});
+		expect(requestedDetailDeploymentIds).toHaveLength(previousDetailReadCount);
+	});
+
+	it("离开项目再返回时，旧代自定义项写入不能覆盖新快照", async () => {
+		const { getSnapshot, rerenderWithWorkspaceId } = await mountAndEstablishBaseline();
+		let writing: Promise<void> | undefined;
+		await act(async () => {
+			writing = getSnapshot()?.addCustomChecklistItem(DEPLOYMENT_ID, TASK_ID, "旧代自定义项");
+		});
+		await rerenderWithWorkspaceId("workspace-b");
+		await rerenderWithWorkspaceId("workspace-a");
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(
+				makeVerificationStateResponse(false),
+			);
+			await flushMicrotasks();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).resolve({ ok: true, task: makeTask(true) });
+			await writing;
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(false);
+		expect(showAppToastMock).not.toHaveBeenCalled();
+	});
 
 	it("定位前的在途读取不能为新请求补证，逆序返回也不能覆盖新快照", async () => {
 		const { getSnapshot } = await mountAndEstablishBaseline();
@@ -410,6 +574,140 @@ describe("usePostDeployVerification —— 过期轮询覆盖守卫", () => {
 
 		// 断言：守卫丢弃了过期快照，勾选稳定留存为 true（修复前此处会被覆盖回 false）。
 		expect(currentCheckedState(getSnapshot())).toBe(true);
+	});
+
+	it.each([0, 1])("不同核对项并发勾选，回包 %i 先到也不能覆盖另一项", async (firstResponseIndex) => {
+		const { getSnapshot } = await mountAndEstablishBaseline(
+			"workspace-a",
+			makeTaskWithTwoChecklistItems(false, false),
+		);
+		await act(async () => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, SECOND_CHECKLIST_ITEM_ID, true);
+			await flushMicrotasks();
+		});
+		const checkedStates = () => getSnapshot()?.activeGroup?.tasks[0]?.checklist.map((item) => item.checked);
+		expect(checkedStates()).toEqual([true, true]);
+		for (const responseIndex of [firstResponseIndex, 1 - firstResponseIndex]) {
+			await act(async () => {
+				requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, responseIndex).resolve({
+					ok: true,
+					task: makeTaskWithTwoChecklistItems(true, responseIndex === 1),
+				});
+				await flushMicrotasks();
+			});
+			expect(checkedStates()).toEqual([true, true]);
+		}
+	});
+
+	it("同一核对项连续勾选和取消，旧成功回包不能覆盖较新成功回包", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		await act(async () => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, false);
+			await flushMicrotasks();
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(false);
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 1).resolve({ ok: true, task: makeTask(false) });
+			await flushMicrotasks();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).resolve({ ok: true, task: makeTask(true) });
+			await flushMicrotasks();
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(false);
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(1);
+	});
+
+	it("不同核对项一项失败时只回退失败项，等其他写入完成后再对账", async () => {
+		const { getSnapshot } = await mountAndEstablishBaseline(
+			"workspace-a",
+			makeTaskWithTwoChecklistItems(false, false),
+		);
+		await act(async () => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, SECOND_CHECKLIST_ITEM_ID, true);
+			await flushMicrotasks();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).resolve({
+				ok: false,
+				task: makeTaskWithTwoChecklistItems(false, false),
+				error: "第一项保存失败",
+			});
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.activeGroup?.tasks[0]?.checklist.map((item) => item.checked)).toEqual([false, true]);
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(1);
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 1).resolve({
+				ok: true,
+				task: makeTaskWithTwoChecklistItems(false, true),
+			});
+			await flushMicrotasks();
+		});
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(2);
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve({
+				deploymentGroups: [{ ...makeGroup(false), tasks: [makeTaskWithTwoChecklistItems(false, true)] }],
+				activeDeploymentId: DEPLOYMENT_ID,
+			});
+			await flushMicrotasks();
+		});
+		expect(getSnapshot()?.activeGroup?.tasks[0]?.checklist.map((item) => item.checked)).toEqual([false, true]);
+		expect(showAppToastMock).toHaveBeenCalledWith({ intent: "danger", message: "第一项保存失败" });
+	});
+
+	it.each(["拒绝回包", "网络异常"])("同一项连续写入都失败时，%s 后自动读取实际状态", async (failureKind) => {
+		const { getSnapshot } = await mountAndEstablishBaseline();
+		await act(async () => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, false);
+			await flushMicrotasks();
+		});
+		await act(async () => {
+			const latestWrite = requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 1);
+			if (failureKind === "拒绝回包") latestWrite.resolve({ ok: false, task: makeTask(false), error: "保存失败" });
+			else latestWrite.reject(new Error("网络中断"));
+			await flushMicrotasks();
+		});
+		if (failureKind === "拒绝回包") expect(currentCheckedState(getSnapshot())).toBe(false);
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(1);
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).reject(new Error("旧写入失败"));
+			await flushMicrotasks();
+		});
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(2);
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 1).resolve(
+				makeVerificationStateResponse(false),
+			);
+			await flushMicrotasks();
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(false);
+		expect(showAppToastMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("离开项目后返回时，旧代勾选失败不能触发新代回滚或额外对账", async () => {
+		const { getSnapshot, rerenderWithWorkspaceId } = await mountAndEstablishBaseline();
+		await act(async () => {
+			void getSnapshot()?.toggleChecklistItem(DEPLOYMENT_ID, TASK_ID, CHECKLIST_ITEM_ID, true);
+			await flushMicrotasks();
+		});
+		await rerenderWithWorkspaceId("workspace-b");
+		await rerenderWithWorkspaceId("workspace-a");
+		await act(async () => {
+			requireDeferredAtIndex(pendingVerificationStateQueryDeferreds, 2).resolve(makeVerificationStateResponse(true));
+			await flushMicrotasks();
+		});
+		await act(async () => {
+			requireDeferredAtIndex(pendingUpdateChecklistMutateDeferreds, 0).reject(new Error("旧项目写入失败"));
+			await flushMicrotasks();
+		});
+		expect(currentCheckedState(getSnapshot())).toBe(true);
+		expect(pendingVerificationStateQueryDeferreds).toHaveLength(3);
+		expect(showAppToastMock).not.toHaveBeenCalled();
 	});
 
 	it("无并发写入时，正常轮询快照应照常应用（守卫不误伤常规刷新）", async () => {

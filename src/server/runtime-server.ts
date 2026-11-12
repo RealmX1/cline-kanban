@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { createServer, type IncomingMessage } from "node:http";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
@@ -183,10 +183,11 @@ import {
 	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
-import { getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
+import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
+import { withCompressedHttpResponses } from "./http-response-compression";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
 import {
 	startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime,
@@ -196,6 +197,7 @@ import { createPromptDraftUsageService } from "./prompt-draft-usage-service";
 import { createQueuedTaskPromptDeliveryDispatcher } from "./queued-task-prompt-delivery-dispatcher";
 import type { RuntimeStateHub } from "./runtime-state-hub";
 import { parseWorkspaceMetadataProbeScopeFromRuntimeStateStreamUrl } from "./runtime-state-stream-workspace-metadata-probe-scope-url-parameter";
+import { startRuntimeSystemLoadAndRuntimeStatusSampler } from "./runtime-system-load-and-runtime-status-sampler";
 import { scheduleQueuedTaskPromptDeliverySweepsAfterRuntimeRestart } from "./stale-queued-task-prompt-delivery-startup-sweep";
 import { createTaskMainSessionHandoverCoordinator } from "./task-main-session-handover-coordinator";
 import {
@@ -512,6 +514,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return Array.from(summariesByTaskId.values());
 	};
+	let stopSystemLoadAndRuntimeStatusSampler: (() => void) | undefined;
 	const codexConfigurationSyncService = createCodexConfigurationSyncService({
 		readTaskSourceContext: () =>
 			readCodexConfigurationTaskSourceContext(deps.workspaceRegistry.listManagedWorkspaces()),
@@ -2095,7 +2098,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const getRemoteIp = (req: IncomingMessage): string => req.socket.remoteAddress ?? "unknown";
 
 	const tlsConfig = getKanbanRuntimeTls();
-	const requestHandler = async (req: IncomingMessage, res: import("node:http").ServerResponse) => {
+	const requestHandler = withCompressedHttpResponses(async (req: IncomingMessage, res: ServerResponse) => {
 		try {
 			// 内容仅凭单产物只读 capability 访问；opaque sandbox 的 Origin:null 不进入控制面门禁。
 			if (await handleTaskVisualizationContentHttpRequest(req, res, taskVisualizationArtifactApi)) return;
@@ -2219,16 +2222,29 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			}
 
 			const asset = await readAsset(webUiDir, pathname);
+			const etag = `W/"${createHash("sha256").update(asset.content).digest("hex")}"`;
+			res.setHeader("Cache-Control", getRuntimeAssetCacheControl(pathname, asset.contentType));
+			res.setHeader("ETag", etag);
+			res.appendHeader("Vary", "Accept-Encoding");
+			if (
+				req.headers["if-none-match"]
+					?.split(/,\s*/)
+					.some((candidate) => candidate.replace(/^W\//, "") === etag.replace(/^W\//, "") || candidate === "*")
+			) {
+				res.writeHead(304);
+				res.end();
+				return;
+			}
 			res.writeHead(200, {
 				"Content-Type": asset.contentType,
-				"Cache-Control": "no-store",
+				"Content-Length": asset.content.length,
 			});
 			res.end(asset.content);
 		} catch {
 			res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
 			res.end("Not Found");
 		}
-	};
+	});
 	const server = tlsConfig
 		? createHttpsServer({ key: tlsConfig.key, cert: tlsConfig.cert }, requestHandler)
 		: createServer(requestHandler);
@@ -2357,6 +2373,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		await beginRuntimeOwnedBackgroundServicesShutdown();
 		// 先于会话拆除停止：把此刻仍存活进程的生命周期冲刷成 episode，而不是记成「进程退出」。
 		taskAttributedProcessTreeResourceSampler.stop();
+		stopSystemLoadAndRuntimeStatusSampler?.();
 		taskAgentConversationModelTokenUsageJournalMonitor.stop();
 		taskWorktreeDiskUsageMeasurementMonitor.stop();
 		stopKanbanRuntimeProcessSelfResourceSampleMonitor();
@@ -2422,6 +2439,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	taskMainSessionHandoverApi.start();
 	// 与回收调度器同在 listen 之后启动：它要读三种 transport 的会话 summary 作为归因根。
 	taskAttributedProcessTreeResourceSampler.start();
+	stopSystemLoadAndRuntimeStatusSampler = startRuntimeSystemLoadAndRuntimeStatusSampler({
+		dataDirectoryPath: getRuntimeHomePath(),
+		listAgentSessionSummaries: () =>
+			Array.from(
+				new Set([
+					...deps.workspaceRegistry.listManagedWorkspaces().map(({ workspaceId }) => workspaceId),
+					...acpTaskSessionServiceByWorkspaceId.keys(),
+				]),
+			).flatMap((workspaceId) => listProjectRuntimeSessionSummaries(workspaceId)),
+		onSnapshot: deps.runtimeStateHub.broadcastSystemLoadAndRuntimeStatusUpdated,
+	});
 	taskAgentConversationModelTokenUsageJournalMonitor.start();
 	taskWorktreeDiskUsageMeasurementMonitor.start();
 	promptDraftUsageService.startInitialHistoricalBackfill();

@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { realpath } from "node:fs/promises";
@@ -9,7 +9,6 @@ import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-
 import type {
 	RuntimeBoardData,
 	RuntimeHookIngestResponse,
@@ -23,11 +22,13 @@ import type {
 	RuntimeStateStreamSnapshotMessage,
 	RuntimeStateStreamTaskReadyForReviewMessage,
 	RuntimeStateStreamWorkspaceStateMessage,
+	RuntimeSystemLoadAndRuntimeStatusSnapshot,
 	RuntimeTaskWorkspaceInfoResponse,
 	RuntimeWorkspaceStateResponse,
 	RuntimeWorktreeEnsureResponse,
 } from "../../src/core/api-contract";
 import { mutateWorkspaceState } from "../../src/state/workspace-state";
+import type { BrowserType } from "../../web-ui/node_modules/playwright-core";
 import {
 	createIsolatedGitTestWorkspaceFixture,
 	type IsolatedGitTestRepository,
@@ -372,6 +373,8 @@ async function startKanbanServer(input: {
 			cwd: input.cwd,
 			env: input.gitFixture.createIsolatedChildProcessEnvironment({
 				KANBAN_RUNTIME_PORT: String(input.port),
+				CODEX_HOME: join(input.gitFixture.isolatedHomeDirectoryPath, ".codex"),
+				CODEX_SQLITE_HOME: join(input.gitFixture.isolatedHomeDirectoryPath, ".codex"),
 			}),
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 		},
@@ -567,6 +570,221 @@ afterEach(async () => {
 });
 
 describe.sequential("runtime state stream integration", { timeout: RUNTIME_STATE_STREAM_TEST_TIMEOUT_MS }, () => {
+	it.skipIf(process.env.KANBAN_SYSTEM_STATUS_BROWSER_VERIFICATION !== "1")(
+		"系统概况在真实桌面与手机浏览器跨项目可用，侧栏开关移出顶栏并能断连恢复",
+		async (testContext) => {
+			if (!existsSync(resolve("web-ui/dist/assets"))) throw new Error("请先构建隔离的 web-ui/dist 再运行浏览器验证");
+			const integrationFixture = createRuntimeStateStreamIntegrationFixture();
+			const cwd = integrationFixture.createNonGitDirectory("system-status-no-project");
+			const port = await getAvailablePort();
+			const server = await startKanbanServer({ testContext, cwd, port, gitFixture: integrationFixture.gitFixture });
+			const { chromium } = createRequire(resolve("web-ui/package.json"))("playwright-core") as {
+				chromium: BrowserType;
+			};
+			const browser = await chromium.launch({ headless: true });
+			const baseUrl = `http://127.0.0.1:${port}`;
+			const evidenceDirectory = process.env.KANBAN_SYSTEM_STATUS_BROWSER_EVIDENCE_DIRECTORY;
+			const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+			await context.addInitScript(() => localStorage.setItem("kanban.onboarding.dialog.shown", "true"));
+			const page = await context.newPage();
+			await page.addInitScript(() => {
+				const sockets: Array<{ close: () => void }> = [];
+				const NativeWebSocket = globalThis.WebSocket;
+				globalThis.WebSocket = class extends NativeWebSocket {
+					constructor(...arguments_: ConstructorParameters<typeof NativeWebSocket>) {
+						super(...arguments_);
+						sockets.push(this);
+					}
+				};
+				Object.defineProperty(globalThis, "__kanbanSystemStatusVerificationWebSockets", { value: sockets });
+			});
+			if (evidenceDirectory) mkdirSync(evidenceDirectory, { recursive: true });
+			const samples: RuntimeSystemLoadAndRuntimeStatusSnapshot[] = [];
+			page.on("websocket", (socket) =>
+				socket.on("framereceived", ({ payload }) => {
+					try {
+						const message = JSON.parse(String(payload)) as RuntimeStateStreamMessage;
+						if (message.type === "system_load_and_runtime_status_updated") samples.push(message.snapshot);
+					} catch {
+						/* 非状态帧无需处理。 */
+					}
+				}),
+			);
+			try {
+				await page.goto(baseUrl);
+				const trigger = page.getByRole("button", { name: "查看系统负载与运行状态", exact: true });
+				await trigger.waitFor();
+				await trigger.click();
+				await page.getByText("已连接", { exact: true }).waitFor();
+				await vi.waitFor(() => expect(samples.at(-1)?.cpuUsagePercent).toBeTypeOf("number"), { timeout: 20_000 });
+				expect(samples.at(-1)?.memory?.totalBytes).toBeGreaterThan(0);
+				expect(samples.at(-1)?.disk?.availableBytes).toBeGreaterThanOrEqual(0);
+				expect(samples.at(-1)?.liveAgentSessionCount).toBe(0);
+				const deploymentProbe = spawnSync(
+					process.execPath,
+					[resolve(".plan/verification/verify-deployed-runtime-system-load-and-runtime-status.mjs")],
+					{
+						env: integrationFixture.gitFixture.createIsolatedChildProcessEnvironment({
+							KANBAN_RUNTIME_HOST: "127.0.0.1",
+							KANBAN_RUNTIME_PORT: String(port),
+						}),
+						encoding: "utf8",
+						timeout: 25_000,
+					},
+				);
+				expect(deploymentProbe.status, deploymentProbe.stderr + deploymentProbe.stdout).toBe(0);
+				expect(await page.locator('[data-testid="workspace-path"]').count()).toBe(0);
+				if (evidenceDirectory) {
+					mkdirSync(evidenceDirectory, { recursive: true });
+					await page.screenshot({ path: join(evidenceDirectory, "desktop-no-project.png") });
+				}
+				await page.getByRole("button", { name: "关闭系统概况" }).click();
+				const leftControl = page.locator('[data-verification-anchor="desktop-left-sidebar-visibility-control"]');
+				await leftControl.click();
+				expect(await leftControl.getAttribute("aria-label")).toBe("显示项目栏");
+				await leftControl.click();
+				expect(await leftControl.getAttribute("aria-label")).toBe("隐藏项目栏");
+				await page.keyboard.press(process.platform === "darwin" ? "Meta+b" : "Control+b");
+				expect(await leftControl.getAttribute("aria-label")).toBe("显示项目栏");
+				await page.keyboard.press(process.platform === "darwin" ? "Meta+b" : "Control+b");
+				expect(await leftControl.getAttribute("aria-label")).toBe("隐藏项目栏");
+				expect(await page.locator("nav").getByRole("button", { name: "隐藏项目栏" }).count()).toBe(0);
+
+				const projectA = integrationFixture.createRepository("system-status-project-a");
+				const projectB = integrationFixture.createRepository("system-status-project-b");
+				const addedA = await requestJson<RuntimeProjectAddResponse>({
+					baseUrl,
+					procedure: "projects.add",
+					type: "mutation",
+					payload: { path: projectA.repositoryPath },
+				});
+				const addedB = await requestJson<RuntimeProjectAddResponse>({
+					baseUrl,
+					procedure: "projects.add",
+					type: "mutation",
+					payload: { path: projectB.repositoryPath },
+				});
+				const workspaceAId = addedA.payload.project?.id;
+				const workspaceBId = addedB.payload.project?.id;
+				if (!workspaceAId || !workspaceBId) throw new Error("隔离项目添加失败");
+				const projectStream = await connectRuntimeStream(
+					`ws://127.0.0.1:${port}/api/runtime/ws?workspaceId=${workspaceAId}`,
+				);
+				try {
+					const initial = (await projectStream.waitForMessage(
+						(entry) => entry.type === "snapshot",
+					)) as RuntimeStateStreamSnapshotMessage;
+					const board = createBoard("系统概况浏览器测试任务");
+					const card = board.columns[0].cards.pop();
+					const reviewColumn = board.columns.find((column) => column.id === "review");
+					if (!card || !reviewColumn) throw new Error("缺少隔离任务卡或 Review 列");
+					reviewColumn.cards.push(card);
+					const saved = await requestJson<RuntimeWorkspaceStateResponse>({
+						baseUrl,
+						procedure: "workspace.saveState",
+						type: "mutation",
+						workspaceId: workspaceAId,
+						payload: {
+							board,
+							sessions: initial.workspaceState?.sessions ?? {},
+							expectedRevision: initial.workspaceState?.revision,
+						},
+					});
+					expect(saved.status).toBe(200);
+				} finally {
+					await projectStream.close();
+				}
+				await page.goto(`${baseUrl}/${workspaceAId}`);
+				await page.getByText("系统概况浏览器测试任务", { exact: true }).first().click();
+				const rightControl = page.locator('[data-verification-anchor="desktop-right-sidebar-visibility-control"]');
+				await rightControl.waitFor();
+				const detailBounds = await page.locator('[data-verification-anchor^="task-detail:"]').boundingBox();
+				const leftHandleBounds = await page
+					.locator('[data-verification-anchor="desktop-left-sidebar-visibility-control"]')
+					.boundingBox();
+				const rightHandleBounds = await rightControl.boundingBox();
+				if (!detailBounds || !leftHandleBounds || !rightHandleBounds) throw new Error("缺少侧栏布局边界");
+				expect(leftHandleBounds.x + leftHandleBounds.width).toBeLessThanOrEqual(detailBounds.x + 1);
+				expect(rightHandleBounds.x).toBeGreaterThanOrEqual(detailBounds.x + detailBounds.width - 1);
+				await rightControl.click();
+				expect(await rightControl.getAttribute("aria-label")).toBe("显示任务工作台");
+				await rightControl.click();
+				expect(await rightControl.getAttribute("aria-label")).toBe("隐藏任务工作台");
+				await trigger.click();
+				await page.getByText("已连接", { exact: true }).waitFor();
+				if (evidenceDirectory) await page.screenshot({ path: join(evidenceDirectory, "desktop-task-detail.png") });
+				await context.setOffline(true);
+				await page.evaluate(() => {
+					const sockets = (
+						globalThis as typeof globalThis & {
+							__kanbanSystemStatusVerificationWebSockets: Array<{ close: () => void }>;
+						}
+					).__kanbanSystemStatusVerificationWebSockets;
+					for (const socket of sockets) socket.close();
+				});
+				await page.getByText("Kanban 连接已断开", { exact: true }).waitFor();
+				await trigger.click();
+				await page.getByText("重连中", { exact: true }).waitFor();
+				await context.setOffline(false);
+				await page.getByText("Kanban 连接已断开", { exact: true }).waitFor({ state: "hidden", timeout: 20_000 });
+				await trigger.click();
+				await page.getByText("已连接", { exact: true }).waitFor({ timeout: 20_000 });
+				await page.getByRole("button", { name: "关闭系统概况" }).click();
+				await page.goto(`${baseUrl}/${workspaceBId}`);
+				await trigger.click();
+				await page.getByText("已连接", { exact: true }).waitFor();
+
+				const mobileContext = await browser.newContext({
+					viewport: { width: 390, height: 844 },
+					isMobile: true,
+					hasTouch: true,
+				});
+				try {
+					await mobileContext.addInitScript(() => localStorage.setItem("kanban.onboarding.dialog.shown", "true"));
+					const mobilePage = await mobileContext.newPage();
+					await mobilePage.goto(`${baseUrl}/${workspaceBId}`);
+					const mobileTrigger = mobilePage.getByRole("button", { name: "查看系统负载与运行状态", exact: true });
+					await mobileTrigger.waitFor();
+					expect(await mobileTrigger.textContent()).toBe("");
+					const bounds = await mobileTrigger.boundingBox();
+					expect(bounds?.width).toBeGreaterThanOrEqual(44);
+					expect(bounds?.height).toBeGreaterThanOrEqual(44);
+					await mobileTrigger.click();
+					await mobilePage.getByText("已连接", { exact: true }).waitFor();
+					await vi.waitFor(
+						async () => {
+							expect(
+								await mobilePage.getByRole("dialog", { name: "系统负载与运行状态" }).innerText(),
+							).not.toContain("暂不可用");
+						},
+						{ timeout: 20_000 },
+					);
+					const panelBounds = await mobilePage.getByRole("dialog", { name: "系统负载与运行状态" }).boundingBox();
+					expect(panelBounds?.x).toBeGreaterThanOrEqual(0);
+					expect((panelBounds?.x ?? 0) + (panelBounds?.width ?? 0)).toBeLessThanOrEqual(390);
+					if (evidenceDirectory)
+						await mobilePage.screenshot({ path: join(evidenceDirectory, "mobile-project.png") });
+				} finally {
+					await mobileContext.close();
+				}
+			} finally {
+				if (evidenceDirectory) {
+					await page.screenshot({ path: join(evidenceDirectory, "last-browser-state.png") }).catch(() => {});
+					writeFileSync(
+						join(evidenceDirectory, "last-browser-state.txt"),
+						await page
+							.locator("body")
+							.innerText()
+							.catch(() => "页面不可读"),
+					);
+				}
+				await browser.close();
+				await server.stop();
+				integrationFixture.cleanup();
+			}
+		},
+	);
+
 	it("retains indexed project data and selection when the project path becomes unavailable", async (testContext) => {
 		const integrationFixture = createRuntimeStateStreamIntegrationFixture();
 		const tempHome = integrationFixture.homeDirectoryPath;

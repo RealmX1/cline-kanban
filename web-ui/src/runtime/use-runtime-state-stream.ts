@@ -4,7 +4,10 @@ import {
 	resolveWorkspaceMetadataProbeScopeDeclaredForWorkspace,
 } from "@runtime-state-stream-workspace-metadata-probe-scope-declaration";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { notifyAgentSessionPtyHostDiagnosticsUpdated } from "@/runtime/agent-session-pty-host-diagnostics-query";
+import {
+	attachPtyHostDiagnosticsSubscriptionSender,
+	notifyAgentSessionPtyHostDiagnosticsUpdated,
+} from "@/runtime/agent-session-pty-host-diagnostics-query";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
 import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
@@ -14,6 +17,7 @@ import {
 } from "@/runtime/kanban-runtime-hot-restart-websocket-close";
 import { reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime } from "@/runtime/kanban-web-ui-page-load-request-origin-nonce-store";
 import { notifyPromptLibraryInvalidated } from "@/runtime/prompt-library-invalidation-events";
+import { RuntimeStateStreamVersionedReceiver } from "@/runtime/runtime-state-stream-versioned-receiver";
 import type {
 	RuntimeExploratoryFindingEntry,
 	RuntimeNotificationFeedEntry,
@@ -36,6 +40,11 @@ import type {
 	RuntimeWorkspaceMetadataProbeScopeDeclaredByStreamClient,
 	RuntimeWorkspaceStateResponse,
 } from "@/runtime/types";
+import { fetchWorkspaceState } from "@/runtime/workspace-state-query";
+import {
+	observeRuntimeSystemLoadAndRuntimeStatusSnapshot,
+	updateRuntimeSystemStatusStreamConnectionState,
+} from "@/stores/runtime-system-load-and-runtime-status-store";
 import { observeTaskLookupConversationUpdated } from "@/stores/task-lookup-conversation-update-store";
 import {
 	replaceTaskResourceUsageSnapshots,
@@ -100,7 +109,11 @@ export function mergeTaskSessionSummaries(
 // 注册成 applier，stream hook 收到该批消息直接调用；App 持有这个 ref 并在两个 hook 之间接线。
 // workspaceId 是这批摘要所属的项目（流只转发当前连着的项目的批次）。接收方据此分辨「切项目之后新项目推来的
 // 摘要」与「上一个项目残留的同号任务摘要」——taskId 跨项目会撞号。
-export type StreamedTaskSessionSummariesApplier = (summaries: RuntimeTaskSessionSummary[], workspaceId: string) => void;
+export type StreamedTaskSessionSummariesApplier = (
+	summaries: RuntimeTaskSessionSummary[],
+	workspaceId: string,
+	options?: { replaceSessionMembership: boolean },
+) => void;
 export interface StreamedTaskSessionSummariesApplierRef {
 	current: StreamedTaskSessionSummariesApplier | null;
 }
@@ -142,6 +155,7 @@ function getRuntimeStreamUrl(
 ): string {
 	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
 	const url = new URL(`${protocol}//${window.location.host}/api/runtime/ws`);
+	url.searchParams.set("stateProtocolVersion", "2");
 	if (workspaceId) {
 		url.searchParams.set("workspaceId", workspaceId);
 	}
@@ -215,7 +229,7 @@ interface RuntimeStateStreamStore {
 type RuntimeStateStreamAction =
 	| { type: "requested_workspace_changed" }
 	| { type: "stream_connected" }
-	| { type: "snapshot"; payload: RuntimeStateStreamSnapshotMessage }
+	| { type: "snapshot"; payload: RuntimeStateStreamSnapshotMessage; authoritativeSessions?: boolean }
 	| {
 			type: "projects_updated";
 			payload: RuntimeStateStreamProjectsMessage;
@@ -235,7 +249,7 @@ type RuntimeStateStreamAction =
 			type: "exploration_thread_graph_updated";
 			payload: RuntimeStateStreamExplorationThreadGraphUpdatedMessage;
 	  }
-	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse }
+	| { type: "workspace_state_updated"; workspaceState: RuntimeWorkspaceStateResponse; authoritativeSessions?: boolean }
 	| { type: "stream_error"; message: string }
 	| { type: "stream_disconnected"; message: string };
 
@@ -325,10 +339,12 @@ function runtimeStateStreamReducer(
 		const nextWorkspaceState = action.payload.workspaceState
 			? {
 					...action.payload.workspaceState,
-					sessions: mergeTaskSessionSummaries(
-						state.workspaceState?.sessions ?? {},
-						Object.values(action.payload.workspaceState.sessions ?? {}),
-					),
+					sessions: action.authoritativeSessions
+						? action.payload.workspaceState.sessions
+						: mergeTaskSessionSummaries(
+								state.workspaceState?.sessions ?? {},
+								Object.values(action.payload.workspaceState.sessions ?? {}),
+							),
 				}
 			: null;
 		return {
@@ -459,10 +475,12 @@ function runtimeStateStreamReducer(
 	if (action.type === "workspace_state_updated") {
 		const mergedWorkspaceState = {
 			...action.workspaceState,
-			sessions: mergeTaskSessionSummaries(
-				state.workspaceState?.sessions ?? {},
-				Object.values(action.workspaceState.sessions ?? {}),
-			),
+			sessions: action.authoritativeSessions
+				? action.workspaceState.sessions
+				: mergeTaskSessionSummaries(
+						state.workspaceState?.sessions ?? {},
+						Object.values(action.workspaceState.sessions ?? {}),
+					),
 		};
 		return {
 			...state,
@@ -549,14 +567,35 @@ export function useRuntimeStateStream(
 					workspaceMetadataProbeScope,
 				} satisfies RuntimeStateStreamClientMessage),
 			);
+			versionedReceiver?.resumeRecoveryAfterScopeChange();
 		};
+		const confirmStateWhenDocumentBecomesVisible = () => {
+			if (document.visibilityState !== "visible" || socket?.readyState !== WebSocket.OPEN) return;
+			if (versionedReceiver?.hasVersionedBaseline) versionedReceiver.confirmVersion();
+			else if (activeWorkspaceId) {
+				const workspaceId = activeWorkspaceId;
+				void fetchWorkspaceState(workspaceId)
+					.then((workspaceState) => {
+						if (!cancelled && workspaceId === activeWorkspaceId)
+							dispatch({ type: "workspace_state_updated", workspaceState });
+					})
+					.catch(() => {});
+			}
+		};
+		document.addEventListener("visibilitychange", confirmStateWhenDocumentBecomesVisible);
 		const unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs =
 			subscribeToWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab(
 				declareWorkspaceMetadataProbeScopeOnOpenSocketIfChanged,
 			);
 
+		let versionedReceiver: RuntimeStateStreamVersionedReceiver | null = null;
+		let detachDiagnosticsSender: (() => void) | null = null;
 		let detachTaskVisualizationStreamSender: (() => void) | null = null;
 		const cleanupSocket = () => {
+			versionedReceiver?.dispose();
+			versionedReceiver = null;
+			detachDiagnosticsSender?.();
+			detachDiagnosticsSender = null;
 			notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 			detachTaskVisualizationStreamSender?.();
 			detachTaskVisualizationStreamSender = null;
@@ -588,6 +627,7 @@ export function useRuntimeStateStream(
 			if (cancelled) {
 				return;
 			}
+			updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 			if (reconnectTimer !== null) {
 				window.clearTimeout(reconnectTimer);
 				reconnectTimer = null;
@@ -600,6 +640,7 @@ export function useRuntimeStateStream(
 				socket = new WebSocket(getRuntimeStreamUrl(requestedWorkspaceForConnection, workspaceMetadataProbeScope));
 				workspaceMetadataProbeScopeJsonDeclaredOnSocket = JSON.stringify(workspaceMetadataProbeScope);
 			} catch (error) {
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
 				dispatch({
 					type: "stream_disconnected",
@@ -608,7 +649,22 @@ export function useRuntimeStateStream(
 				scheduleReconnect();
 				return;
 			}
+			versionedReceiver = new RuntimeStateStreamVersionedReceiver(
+				(message) => {
+					if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
+				},
+				(message) => dispatch({ type: "stream_error", message }),
+			);
 			socket.onopen = () => {
+				updateRuntimeSystemStatusStreamConnectionState("connected");
+				detachDiagnosticsSender = attachPtyHostDiagnosticsSubscriptionSender((subscribed) =>
+					socket?.send(
+						JSON.stringify({
+							type: "declare_pty_host_diagnostics_subscription",
+							subscribed,
+						} satisfies RuntimeStateStreamClientMessage),
+					),
+				);
 				notifyAgentSessionPtyHostDiagnosticsUpdated();
 				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
@@ -632,7 +688,13 @@ export function useRuntimeStateStream(
 			};
 			socket.onmessage = (event) => {
 				try {
-					const payload = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					const receivedMessage = JSON.parse(String(event.data)) as RuntimeStateStreamMessage;
+					const payload = versionedReceiver?.receive(receivedMessage) ?? null;
+					if (!payload) return;
+					if (payload.type === "system_load_and_runtime_status_updated") {
+						observeRuntimeSystemLoadAndRuntimeStatusSnapshot(payload.snapshot);
+						return;
+					}
 					if (payload.type === "agent_session_pty_host_diagnostics_updated") {
 						notifyAgentSessionPtyHostDiagnosticsUpdated();
 						return;
@@ -668,7 +730,21 @@ export function useRuntimeStateStream(
 						notifyTaskVisualizationStreamReconnected(payload.currentProjectId);
 						notifyPromptLibraryInvalidated(payload.currentProjectId);
 						switchActiveWorkspaceIdAndResetTaskResourceUsageSnapshotsOnChange(payload.currentProjectId);
-						dispatch({ type: "snapshot", payload });
+						if (
+							receivedMessage.type === "state_snapshot_v2" &&
+							payload.currentProjectId &&
+							payload.workspaceState
+						)
+							onTaskSessionSummariesRef.current?.(
+								Object.values(payload.workspaceState.sessions),
+								payload.currentProjectId,
+								{ replaceSessionMembership: true },
+							);
+						dispatch({
+							type: "snapshot",
+							payload,
+							authoritativeSessions: receivedMessage.type === "state_snapshot_v2",
+						});
 						return;
 					}
 					if (payload.type === "projects_updated") {
@@ -691,8 +767,15 @@ export function useRuntimeStateStream(
 						if (payload.workspaceId !== activeWorkspaceId) {
 							return;
 						}
+						if (receivedMessage.type === "state_delta_v2")
+							onTaskSessionSummariesRef.current?.(
+								Object.values(payload.workspaceState.sessions),
+								payload.workspaceId,
+								{ replaceSessionMembership: true },
+							);
 						dispatch({
 							type: "workspace_state_updated",
+							authoritativeSessions: receivedMessage.type === "state_delta_v2",
 							workspaceState: payload.workspaceState,
 						});
 						return;
@@ -801,6 +884,7 @@ export function useRuntimeStateStream(
 							type: "stream_error",
 							message: payload.message,
 						});
+						versionedReceiver?.recoverMissingInitialSnapshot();
 					}
 				} catch {
 					// Ignore malformed stream messages.
@@ -811,6 +895,7 @@ export function useRuntimeStateStream(
 					return;
 				}
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
 				const runtimeIsHotRestarting = isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent);
 				if (runtimeIsHotRestarting) {
@@ -832,6 +917,7 @@ export function useRuntimeStateStream(
 					return;
 				}
 				notifyTaskVisualizationStreamDisconnected(activeWorkspaceId);
+				updateRuntimeSystemStatusStreamConnectionState(hasOpenedRuntimeStream ? "reconnecting" : "connecting");
 				dispatch({
 					type: "stream_disconnected",
 					message: "Runtime stream connection failed.",
@@ -844,6 +930,7 @@ export function useRuntimeStateStream(
 		return () => {
 			cancelled = true;
 			unsubscribeFromWorkspaceMetadataProbeScopeDeclarationInputs();
+			document.removeEventListener("visibilitychange", confirmStateWhenDocumentBecomesVisible);
 			if (reconnectTimer != null) {
 				window.clearTimeout(reconnectTimer);
 			}

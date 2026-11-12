@@ -38,6 +38,10 @@ export interface PostDeployVerificationPanelProps extends PostDeployVerification
 	isVerificationWriteInFlight?: boolean;
 	onEntryNavigationFinished?: (requestId: number) => void;
 	activeGroup: RuntimePostDeployVerificationDeploymentGroup | null;
+	deploymentGroupOverviews?: UsePostDeployVerificationResult["deploymentGroupOverviews"];
+	loadedDeploymentGroupIds?: ReadonlySet<string>;
+	deploymentGroupDetailsErrors?: Record<string, string>;
+	onSetDeploymentGroupExpanded?: UsePostDeployVerificationResult["setDeploymentGroupExpanded"];
 	historyGroups: RuntimePostDeployVerificationDeploymentGroup[];
 	hasLoadedOnce: boolean;
 	loadError: string | null;
@@ -103,6 +107,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		entryNavigationRequest = null,
 		entryNavigationReadModelRequest = null,
 		onRefreshEntryNavigationReadModel,
+		onSetDeploymentGroupExpanded,
 		isVerificationWriteInFlight = false,
 		onEntryNavigationFinished,
 	} = props;
@@ -156,6 +161,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 				await onRefreshEntryNavigationReadModel({
 					workspaceId: entryNavigationRequest.target.entry.workspaceId,
 					requestId: entryNavigationRequest.requestId,
+					deploymentId: entryNavigationRequest.target.entry.deploymentId,
 				});
 			} catch {
 				if (cancelled) return;
@@ -207,6 +213,9 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 			if (target) {
 				spotlightElement(target);
 				target.focus({ preventScroll: true });
+				// 登记展开会触发刷新；先完成定位，避免新读模型取消尚未执行的定位帧。
+				if (historyGroups.some((history) => history.deploymentId === entry.deploymentId))
+					onSetDeploymentGroupExpanded?.(entry.deploymentId, true);
 				onEntryNavigationFinished?.(entryNavigationRequest.requestId);
 			} else if (++attempts < 20) frame = window.requestAnimationFrame(locate);
 			else showAppToast({ intent: "warning", message: "验证条目暂未完成展开，可再次点击 PDV 重试。" });
@@ -221,6 +230,7 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 		loadError,
 		activeGroup,
 		historyGroups,
+		onSetDeploymentGroupExpanded,
 		onEntryNavigationFinished,
 	]);
 
@@ -330,6 +340,14 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 							</div>
 							<p className="m-0 mt-0.5 text-[11px] text-text-secondary">当前部署 · 待核对 {pendingCount}</p>
 						</div>
+						{props.deploymentGroupDetailsErrors?.[activeGroup.deploymentId] ? (
+							<p className="text-[12px] text-status-red">
+								读取详情失败：{props.deploymentGroupDetailsErrors[activeGroup.deploymentId]}
+							</p>
+						) : props.loadedDeploymentGroupIds &&
+							!props.loadedDeploymentGroupIds.has(activeGroup.deploymentId) ? (
+							<p className="text-[12px] text-text-tertiary">正在读取部署组详情…</p>
+						) : null}
 						<PostDeployVerificationPanelExpansionStateContext.Provider value={rememberedExpansionStateByKey}>
 							<PostDeployVerificationActiveDeploymentGroupZoneSections
 								key={JSON.stringify([activeGroup.workspaceId, activeGroup.deploymentId])}
@@ -351,19 +369,23 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 					<section className="space-y-1.5 border-t border-border pt-2">
 						<h3 className="m-0 text-[11px] font-semibold uppercase tracking-wide text-text-tertiary">历史部署</h3>
 						{historyGroups.map((group) => {
-							const progress = summarizeHistoryGroupProgress(group.tasks);
+							const progress =
+								props.deploymentGroupOverviews?.find(
+									(overview) => overview.deploymentId === group.deploymentId,
+								) ?? summarizeHistoryGroupProgress(group.tasks);
 							return (
 								<RadixCollapsible.Root
 									key={group.deploymentId}
 									open={expandedHistoryDeploymentIds.has(group.deploymentId)}
-									onOpenChange={(open) =>
+									onOpenChange={(open) => {
+										onSetDeploymentGroupExpanded?.(group.deploymentId, open);
 										setExpandedHistoryDeploymentIds((previous) => {
 											const next = new Set(previous);
 											if (open) next.add(group.deploymentId);
 											else next.delete(group.deploymentId);
 											return next;
-										})
-									}
+										});
+									}}
 									className="rounded-md border border-border bg-surface-1"
 								>
 									<RadixCollapsible.Trigger asChild>
@@ -396,6 +418,15 @@ export function PostDeployVerificationPanel(props: PostDeployVerificationPanelPr
 										<PostDeployVerificationPanelExpansionStateContext.Provider
 											value={rememberedExpansionStateByKey}
 										>
+											{props.deploymentGroupDetailsErrors?.[group.deploymentId] ? (
+												<p className="px-2 text-[12px] text-status-red">
+													读取详情失败：{props.deploymentGroupDetailsErrors[group.deploymentId]}
+													。可重新展开此组重试。
+												</p>
+											) : props.loadedDeploymentGroupIds &&
+												!props.loadedDeploymentGroupIds.has(group.deploymentId) ? (
+												<p className="px-2 text-text-tertiary">正在读取部署组详情…</p>
+											) : null}
 											<PostDeployVerificationHistoryDeploymentGroupTaskEntries
 												group={group}
 												board={board}

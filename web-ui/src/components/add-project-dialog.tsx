@@ -13,7 +13,12 @@ import {
 	useFormPrimaryActionSubmitKeyboardShortcut,
 } from "@/hooks/use-form-primary-action-submit-keyboard-shortcut";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
-import { toServerAbsolute } from "@/utils/server-path";
+import {
+	deriveMostCommonRegisteredProjectParentDirectoryPath,
+	normalizeServerPath,
+	toServerAbsolute,
+	toUiRelative,
+} from "@/utils/server-path";
 
 type AddProjectTab = "path" | "clone";
 
@@ -22,6 +27,7 @@ export interface AddProjectDialogProps {
 	onOpenChange: (open: boolean) => void;
 	onProjectAdded: (projectId: string) => void;
 	currentProjectId: string | null;
+	registeredProjectPaths?: readonly string[];
 	/** When set, the dialog opens directly to the git-init confirmation for this absolute path. */
 	initialGitInitPath?: string | null;
 	openingRequestSequence?: number;
@@ -32,6 +38,7 @@ function AddProjectDialogForm({
 	onOpenChange,
 	onProjectAdded,
 	currentProjectId,
+	registeredProjectPaths,
 	initialGitInitPath,
 }: AddProjectDialogProps): ReactElement {
 	const [activeTab, setActiveTab] = useState<AddProjectTab>("path");
@@ -46,6 +53,10 @@ function AddProjectDialogForm({
 	const pathInputRef = useRef<HTMLInputElement>(null);
 	const gitUrlInputRef = useRef<HTMLInputElement>(null);
 	const [serverRootPath, setServerRootPath] = useState<string | null>(null);
+	const registeredProjectPathsRef = useRef(registeredProjectPaths);
+	registeredProjectPathsRef.current = registeredProjectPaths;
+	const pathInputWasEditedRef = useRef(false);
+	const cloneDestinationWasEditedRef = useRef(false);
 
 	useEffect(() => {
 		if (!open) {
@@ -60,20 +71,36 @@ function AddProjectDialogForm({
 		setIsCloning(false);
 		setPendingGitInitPath(initialGitInitPath ?? null);
 		setIsInitializingGit(false);
+		pathInputWasEditedRef.current = false;
+		cloneDestinationWasEditedRef.current = false;
+		const mostCommonParentDirectoryPath = deriveMostCommonRegisteredProjectParentDirectoryPath(
+			registeredProjectPathsRef.current ?? [],
+		);
+		let initialDirectoryPrefillCancelled = false;
 
-		// Fetch the server root path to display at the top of the dialog
+		// 预填只使用宿主项目路径；异步根目录响应不能覆盖访问端已经编辑的草稿。
 		const fetchRoot = async () => {
 			try {
 				const trpcClient = getRuntimeTrpcClient(currentProjectId);
 				const response = await trpcClient.projects.listDirectoryContents.query({});
-				if (response.ok && response.rootPath) {
+				if (!initialDirectoryPrefillCancelled && response.ok && response.rootPath) {
 					setServerRootPath(response.rootPath);
+					const normalizedRootPath = normalizeServerPath(response.rootPath).replace(/\/+$/, "");
+					if (mostCommonParentDirectoryPath?.startsWith(`${normalizedRootPath}/`)) {
+						const relativeParentDirectoryPath = toUiRelative(response.rootPath, mostCommonParentDirectoryPath);
+						const initialDirectoryInput = `/${relativeParentDirectoryPath}`;
+						if (!pathInputWasEditedRef.current && !initialGitInitPath) setPathInput(initialDirectoryInput);
+						if (!cloneDestinationWasEditedRef.current) setCloneDestInput(initialDirectoryInput);
+					}
 				}
 			} catch {
 				// Best effort — display will be blank if fetch fails
 			}
 		};
 		void fetchRoot();
+		return () => {
+			initialDirectoryPrefillCancelled = true;
+		};
 	}, [open, currentProjectId, initialGitInitPath]);
 
 	// Focus the git URL input when switching to the clone tab (since it
@@ -258,9 +285,7 @@ function AddProjectDialogForm({
 				onEscapeKeyDown={handleDialogEscapeKeyDown}
 			>
 				<DialogHeader title="Add Project" icon={<FolderOpen size={16} />} />
-				{/* Plain div instead of DialogBody so the autocomplete dropdown
-				    isn't clipped by DialogBody's default overflow-y-auto */}
-				<div className="flex flex-col gap-4 p-4 bg-surface-1">
+				<div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto overscroll-contain p-4 bg-surface-1">
 					{/* Tab switcher */}
 					<div className="rounded-md bg-surface-2 p-1">
 						<div className="grid grid-cols-2 gap-1">
@@ -307,6 +332,7 @@ function AddProjectDialogForm({
 						<PathTabContent
 							pathInput={pathInput}
 							setPathInput={(v) => {
+								pathInputWasEditedRef.current = true;
 								setPathInput(v);
 								setPendingGitInitPath(null);
 							}}
@@ -325,7 +351,10 @@ function AddProjectDialogForm({
 							gitUrlInput={gitUrlInput}
 							setGitUrlInput={setGitUrlInput}
 							cloneDestInput={cloneDestInput}
-							setCloneDestInput={setCloneDestInput}
+							setCloneDestInput={(value) => {
+								cloneDestinationWasEditedRef.current = true;
+								setCloneDestInput(value);
+							}}
 							cloneFolderName={cloneFolderName}
 							setCloneFolderName={setCloneFolderName}
 							gitUrlInputRef={gitUrlInputRef}
@@ -427,7 +456,11 @@ function PathTabContent({
 	};
 
 	return (
-		<form onSubmit={handleSubmit} className="flex flex-col gap-3">
+		<form
+			onSubmit={handleSubmit}
+			className="flex flex-col gap-3"
+			data-verification-anchor="add-project-server-path-form"
+		>
 			<div>
 				<span className="block text-[12px] text-text-secondary mb-1.5">Directory path</span>
 				<DirectoryAutocomplete

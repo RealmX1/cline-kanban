@@ -26,8 +26,8 @@ const fetchWorkspaceStateMock = vi.hoisted(() =>
 			}),
 	),
 );
-vi.mock("@/runtime/workspace-state-query", () => ({
-	fetchWorkspaceState: fetchWorkspaceStateMock,
+vi.mock("@/runtime/post-deploy-verification-task-cards-query", () => ({
+	fetchTaskCardsForPostDeployVerification: (workspaceId: string) => fetchWorkspaceStateMock(workspaceId),
 }));
 
 const documentVisibility = vi.hoisted(() => ({ isDocumentVisible: true }));

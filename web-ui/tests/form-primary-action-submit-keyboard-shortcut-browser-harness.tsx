@@ -39,7 +39,7 @@ function Harness() {
 		<output aria-label="Diff 动作次数">{diffActions}</output>
 		<output aria-label="关系写入次数">{assertions}</output>
 		{view === "unlock" ? <PasscodeGate onAuthenticated={() => setOuterSubmissions((count) => count + 1)} /> : view === "projects" ?
-			<AddProjectDialog open={dialogOpen} onOpenChange={setDialogOpen} onProjectAdded={() => setOuterSubmissions((count) => count + 1)} currentProjectId="isolated-shortcut-workspace" /> : view === "assertion" ?
+			<AddProjectDialog open={dialogOpen} onOpenChange={setDialogOpen} onProjectAdded={() => setOuterSubmissions((count) => count + 1)} currentProjectId="isolated-shortcut-workspace" registeredProjectPaths={new URLSearchParams(location.search).has("prefill") ? ["/isolated/projects/one", "/elsewhere/other", "/isolated/projects/two"] : undefined} /> : view === "assertion" ?
 			<div onKeyDown={handleOuterKeyDown}><WorkUnitRelationAddReferenceRelationDialog isAddReferenceRelationDialogOpen={assertionOpen} onAddReferenceRelationDialogOpenChange={setAssertionOpen} subjectKanbanBoardCardWorkspaceId="isolated-shortcut-workspace" subjectKanbanBoardCardTaskId="source-task" onReferenceRelationAssertionWriteSucceeded={() => { setAssertions((count) => count + 1); setAssertionOpen(false); }} /></div> : <>
 			<div tabIndex={-1} aria-label="Diff 快捷键目标">
 				<DiffViewerPanel workspaceFiles={[]} selectedPath={null} onSelectedPathChange={() => {}} onAddToTerminal={() => setDiffActions((count) => count + 1)} onCommentsChange={() => {}} comments={new Map([["example.ts:added:1", { filePath: "example.ts", lineNumber: 1, lineText: "const value = 1;", variant: "added", comment: "核验 Diff 快捷键" }]])} />

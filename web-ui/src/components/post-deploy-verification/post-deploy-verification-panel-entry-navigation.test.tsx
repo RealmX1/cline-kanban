@@ -8,10 +8,40 @@ import type { RuntimePostDeployVerificationDeploymentGroup } from "@/runtime/typ
 import { PostDeployVerificationPanel, type PostDeployVerificationPanelProps } from "./post-deploy-verification-panel";
 import { createPostDeployVerificationTaskReadModelTestFixture } from "./post-deploy-verification-task-read-model-test-fixtures";
 
+const detailGroups = new Map<string, RuntimePostDeployVerificationDeploymentGroup>();
 const getVerificationStateQueryMock = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
-		deployment: { getPostDeployVerificationState: { query: getVerificationStateQueryMock } },
+		deployment: {
+			getPostDeployVerificationWorkspaceOverview: {
+				query: async () => {
+					const response = (await getVerificationStateQueryMock()) as {
+						deploymentGroups: RuntimePostDeployVerificationDeploymentGroup[];
+						activeDeploymentId: string | null;
+					};
+					const deploymentGroups = response.deploymentGroups.map((group) => {
+						detailGroups.set(group.deploymentId, group);
+						return {
+							...group,
+							contentVersion: JSON.stringify(group),
+							pendingVerificationTaskCount: group.tasks.length,
+							closedTaskCount: 0,
+							taskCountRequiringVerification: group.tasks.length,
+							carriedForwardTaskCount: 0,
+						};
+					});
+					return { ...response, deploymentGroups, pendingVerificationTaskCount: 0 };
+				},
+			},
+			getPostDeployVerificationDeploymentGroup: {
+				query: async ({ deploymentId }: { deploymentId: string }) => ({
+					status: "changed",
+					deploymentId,
+					contentVersion: JSON.stringify(detailGroups.get(deploymentId)),
+					deploymentGroup: detailGroups.get(deploymentId),
+				}),
+			},
+		},
 	}),
 }));
 vi.mock("@/hooks/use-document-visibility", () => ({ useDocumentVisibility: () => true }));
@@ -59,6 +89,7 @@ function props(): PostDeployVerificationPanelProps {
 		onNavigateToBoard: vi.fn(),
 		onCreateFollowUpTaskFromChecklistItems: vi.fn(),
 		onEntryNavigationFinished: vi.fn(),
+		onSetDeploymentGroupExpanded: vi.fn(),
 		entryNavigationRequest: {
 			requestId: 1,
 			target: {
@@ -76,7 +107,11 @@ beforeEach(() => {
 	vi.useFakeTimers();
 	scrollIntoView.mockClear();
 	showAppToastMock.mockClear();
-	getVerificationStateQueryMock.mockReset();
+	getVerificationStateQueryMock.mockReset().mockResolvedValue({
+		deploymentGroups: [group],
+		activeDeploymentId: null,
+	});
+	detailGroups.clear();
 	HTMLElement.prototype.scrollIntoView = scrollIntoView;
 	container = document.body.appendChild(document.createElement("div"));
 	root = createRoot(container);
@@ -97,9 +132,15 @@ function render(input: PostDeployVerificationPanelProps) {
 		),
 	);
 }
-function PanelWithLiveReadModel({ input }: { input: PostDeployVerificationPanelProps }) {
+function PanelWithLiveReadModel({
+	input,
+	pollingEnabled = false,
+}: {
+	input: PostDeployVerificationPanelProps;
+	pollingEnabled?: boolean;
+}) {
 	const verification = usePostDeployVerification(group.workspaceId, {
-		pollingEnabled: false,
+		pollingEnabled,
 		showDeploymentNotifications: false,
 	});
 	return (
@@ -110,6 +151,7 @@ function PanelWithLiveReadModel({ input }: { input: PostDeployVerificationPanelP
 				historyGroups={verification.historyGroups}
 				hasLoadedOnce={verification.hasLoadedOnce}
 				loadError={verification.loadError}
+				onSetDeploymentGroupExpanded={verification.setDeploymentGroupExpanded}
 				entryNavigationReadModelRequest={verification.entryNavigationReadModelRequest}
 				onRefreshEntryNavigationReadModel={verification.refreshAndReadActiveGroup}
 				isVerificationWriteInFlight={verification.isVerificationWriteInFlight}
@@ -146,6 +188,58 @@ describe("精确部署条目的展开与高亮", () => {
 		await act(async () => vi.advanceTimersByTimeAsync(64));
 		expect(document.activeElement?.classList.contains("verification-spotlight-active")).toBe(true);
 		expect(input.onEntryNavigationFinished).toHaveBeenCalledWith(1);
+	});
+	it("真实读模型与面板联动：历史定位结束后，展开组继续接收轮询中的清单变化", async () => {
+		const input = props();
+		const historyGroupBeforeRefresh: RuntimePostDeployVerificationDeploymentGroup = {
+			...group,
+			tasks: [
+				createPostDeployVerificationTaskReadModelTestFixture({
+					checklist: [
+						{
+							id: "history-checklist-item",
+							label: "历史条目的旧核对说明",
+							checked: false,
+							source: "authored",
+							kind: "guided_manual",
+							guidance: null,
+							script: null,
+							run: null,
+							cleanup: null,
+						},
+					],
+				}),
+			],
+		};
+		getVerificationStateQueryMock.mockResolvedValue({
+			deploymentGroups: [historyGroupBeforeRefresh],
+			activeDeploymentId: null,
+		});
+		await act(async () =>
+			root.render(<PanelWithLiveReadModel input={{ ...input, entryNavigationRequest: null }} pollingEnabled />),
+		);
+		await act(async () => root.render(<PanelWithLiveReadModel input={input} pollingEnabled />));
+		await act(async () => vi.advanceTimersByTimeAsync(64));
+		expect(input.onEntryNavigationFinished).toHaveBeenCalledWith(1);
+		expect(document.body.textContent).toContain("历史条目的旧核对说明");
+		await act(async () =>
+			root.render(<PanelWithLiveReadModel input={{ ...input, entryNavigationRequest: null }} pollingEnabled />),
+		);
+		getVerificationStateQueryMock.mockResolvedValue({
+			deploymentGroups: [
+				{
+					...historyGroupBeforeRefresh,
+					tasks: historyGroupBeforeRefresh.tasks.map((task) => ({
+						...task,
+						checklist: task.checklist.map((item) => ({ ...item, label: "历史条目的最新核对说明" })),
+					})),
+				},
+			],
+			activeDeploymentId: null,
+		});
+		await act(async () => vi.advanceTimersByTimeAsync(30_000));
+		expect(document.body.textContent).toContain("历史条目的最新核对说明");
+		expect(document.body.textContent).not.toContain("历史条目的旧核对说明");
 	});
 	it("旧缓存缺目标时保留定位请求，新快照到达后接续高亮", async () => {
 		const input = props();
@@ -221,7 +315,11 @@ describe("精确部署条目的展开与高亮", () => {
 		};
 		render(next);
 		await act(async () => vi.advanceTimersByTimeAsync(64));
-		expect(onRefreshEntryNavigationReadModel).toHaveBeenCalledWith({ workspaceId: group.workspaceId, requestId: 2 });
+		expect(onRefreshEntryNavigationReadModel).toHaveBeenCalledWith({
+			workspaceId: group.workspaceId,
+			requestId: 2,
+			deploymentId: group.deploymentId,
+		});
 		expect(input.onEntryNavigationFinished).not.toHaveBeenCalled();
 		render({ ...next, entryNavigationReadModelRequest: { workspaceId: group.workspaceId, requestId: 2 } });
 		await act(async () => vi.advanceTimersByTimeAsync(64));
@@ -239,6 +337,7 @@ describe("精确部署条目的展开与高亮", () => {
 		expect(target?.querySelector('button[aria-expanded="true"]')).not.toBeNull();
 		expect(input.onEntryNavigationFinished).toHaveBeenCalledWith(1);
 		expect(input.onToggleChecklistItem).not.toHaveBeenCalled();
+		expect(input.onSetDeploymentGroupExpanded).toHaveBeenCalledWith(group.deploymentId, true);
 	});
 	it("对同一来源再次定位会重新展开清单，不被上一轮已定位状态吞掉", async () => {
 		const input = props();

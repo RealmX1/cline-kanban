@@ -312,6 +312,54 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		tempHome.cleanup();
 	});
 
+	it("无项目连接接收全局系统概况，多标签及重连补发同一缓存，握手期间不漏更新", async () => {
+		const snapshot = {
+			sampledAtEpochMs: Date.now(),
+			cpuUsagePercent: 25,
+			memory: null,
+			disk: null,
+			runtimeUptimeSeconds: 10,
+			liveAgentSessionCount: 3,
+		};
+		harness.hub.broadcastSystemLoadAndRuntimeStatusUpdated(snapshot);
+		expect(
+			await waitForRuntimeMessage(client, (entry) => entry.type === "system_load_and_runtime_status_updated"),
+		).toEqual({ type: "system_load_and_runtime_status_updated", snapshot });
+		const hold = harness.holdNextProjectsPayloadBuildUntilReleased();
+		const secondClient = await openQueuedRuntimeSocket(harness.streamUrl);
+		try {
+			await hold.heldProjectsPayloadBuildStarted;
+			harness.hub.broadcastSystemLoadAndRuntimeStatusUpdated({ ...snapshot, cpuUsagePercent: 50 });
+			hold.releaseHeldProjectsPayloadBuild();
+			await waitForRuntimeMessage(secondClient, (entry) => entry.type === "snapshot");
+			expect(
+				await waitForRuntimeMessage(
+					secondClient,
+					(entry) => entry.type === "system_load_and_runtime_status_updated",
+				),
+			).toMatchObject({ snapshot: { cpuUsagePercent: 50 } });
+			expect(secondClient.receivedMessageTypesInArrivalOrder.indexOf("snapshot")).toBeLessThan(
+				secondClient.receivedMessageTypesInArrivalOrder.indexOf("system_load_and_runtime_status_updated"),
+			);
+		} finally {
+			hold.releaseHeldProjectsPayloadBuild();
+			secondClient.socket.close();
+			await once(secondClient.socket, "close");
+		}
+		const reconnected = await openQueuedRuntimeSocket(harness.streamUrl);
+		try {
+			expect(
+				await waitForRuntimeMessage(
+					reconnected,
+					(entry) => entry.type === "system_load_and_runtime_status_updated",
+				),
+			).toMatchObject({ snapshot: { cpuUsagePercent: 50, sampledAtEpochMs: snapshot.sampledAtEpochMs } });
+		} finally {
+			reconnected.socket.close();
+			await once(reconnected.socket, "close");
+		}
+	});
+
 	it("状态流非法帧只关闭出错连接，其他连接仍收到广播", async () => {
 		const invalidFrameClient = await openQueuedRuntimeSocket(harness.streamUrl);
 		await waitForRuntimeMessage(invalidFrameClient, (message) => message.type === "snapshot");
@@ -471,7 +519,7 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		).toBe(true);
 	});
 
-	it("新客户端收到首帧后同内容广播仍发送（首帧发出后指纹复位）", async () => {
+	it("新客户端建立独立基线，不使已有连接重收同内容项目列表", async () => {
 		// 既有客户端先收过一轮广播，把去重指纹推进到当前内容。
 		await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
 		await waitForRuntimeMessage(client, isProjectsUpdatedMessage);
@@ -482,9 +530,10 @@ describe("runtime-state-hub projects_updated 广播去重", { timeout: TEST_TIME
 		try {
 			await waitForRuntimeMessage(lateClient, (message) => message.type === "snapshot");
 			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);
-			const message = await waitForRuntimeMessage(lateClient, isProjectsUpdatedMessage);
-			expect(message.currentProjectId).toBe(WORKSPACE_ID);
-			expect(message.projects).toHaveLength(1);
+
+			await new Promise((resolve) => setTimeout(resolve, FLUSH_OVERSHOOT_MS));
+			expect(lateClient.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
+			expect(client.queue.filter(isProjectsUpdatedMessage)).toHaveLength(0);
 
 			// 稳态去重不受影响：再下一次同内容广播仍然跳过。
 			await harness.hub.broadcastRuntimeProjectsUpdated(WORKSPACE_ID);

@@ -14,8 +14,6 @@ import {
 	Layers,
 	Lightbulb,
 	Menu,
-	PanelLeft,
-	PanelRight,
 	Play,
 	Plus,
 	Settings,
@@ -30,6 +28,7 @@ import {
 	topBarBoardScopeAllProjectsToggleButtonAnchorKey,
 	topBarTaskLookupWorkbenchTriggerAnchorKey,
 } from "@/components/post-deploy-verification/verification-anchor-registry";
+import { RuntimeSystemLoadAndRuntimeStatus } from "@/components/runtime-system-load-and-runtime-status";
 import { MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME } from "@/components/shared/mobile-minimum-touch-target";
 import { getRuntimeShortcutIconComponent } from "@/components/shared/runtime-shortcut-icons";
 import { TaskSpotlightSearchTriggerButton } from "@/components/task-spotlight-search-trigger-button";
@@ -52,18 +51,10 @@ import {
 	useTaskWorkspaceSnapshotValue,
 } from "@/stores/workspace-metadata-store";
 import type { OpenTargetId, OpenTargetOption } from "@/utils/open-targets";
-import { formatPathForDisplay } from "@/utils/path-display";
 import { isMacPlatform } from "@/utils/platform";
 
 type SettingsSection = "shortcuts";
 type CreateShortcutResult = { ok: boolean; message?: string };
-
-function getWorkspacePathSegments(path: string): string[] {
-	return path
-		.replaceAll("\\", "/")
-		.split("/")
-		.filter((segment) => segment.length > 0);
-}
 
 function GitBranchStatusControl({
 	branchLabel,
@@ -252,11 +243,6 @@ function TopBarGitStatusSection({
 export function TopBar({
 	workspaceId,
 	onToggleSidebar,
-	onToggleCurrentPageLeftSidebar,
-	isCurrentPageLeftSidebarHidden = false,
-	currentPageLeftSidebarLabel = "项目栏",
-	onToggleFocusViewWorkbenchSidebar,
-	isFocusViewWorkbenchSidebarHidden = false,
 	projectSwitcher,
 	onOpenTaskSpotlightSearch,
 	onToggleTaskLookupWorkbench,
@@ -314,11 +300,6 @@ export function TopBar({
 }: {
 	workspaceId?: string | null;
 	onToggleSidebar?: () => void;
-	onToggleCurrentPageLeftSidebar?: () => void;
-	isCurrentPageLeftSidebarHidden?: boolean;
-	currentPageLeftSidebarLabel?: string;
-	onToggleFocusViewWorkbenchSidebar?: () => void;
-	isFocusViewWorkbenchSidebarHidden?: boolean;
 	// 顶栏最左侧的项目快速切换器。可选：不传就完全不渲染（既有的 top-bar 测试因此零改动）。
 	// 刻意不受 `hideProjectDependentActions` 影响——切换中、项目不可用、任务详情页里它都必须可用，
 	// 因为任务详情页会把左侧 ProjectNavigationPanel 整个卸载，这里是那时唯一的换项目入口。
@@ -384,9 +365,6 @@ export function TopBar({
 	onOpenPostDeployVerification?: () => void;
 }): React.ReactElement {
 	const isMobile = useIsMobile();
-	const displayWorkspacePath = workspacePath ? formatPathForDisplay(workspacePath) : null;
-	const workspaceSegments = displayWorkspacePath ? getWorkspacePathSegments(displayWorkspacePath) : [];
-	const hasAbsoluteLeadingSlash = Boolean(displayWorkspacePath?.startsWith("/"));
 	const handleAddShortcut = () => {
 		onOpenSettings?.("shortcuts");
 	};
@@ -436,23 +414,6 @@ export function TopBar({
 							className={cn("shrink-0", MOBILE_MINIMUM_TOUCH_TARGET_CLASS_NAME)}
 						/>
 					) : null}
-					{!isMobile && onToggleCurrentPageLeftSidebar ? (
-						<Tooltip
-							side="bottom"
-							content={`${isCurrentPageLeftSidebarHidden ? "显示" : "隐藏"}${currentPageLeftSidebarLabel} (${isMacPlatform ? "Cmd+B" : "Ctrl+B"})`}
-						>
-							<Button
-								variant={isCurrentPageLeftSidebarHidden ? "ghost" : "default"}
-								size="sm"
-								icon={<PanelLeft size={16} />}
-								onClick={onToggleCurrentPageLeftSidebar}
-								aria-label={`${isCurrentPageLeftSidebarHidden ? "显示" : "隐藏"}${currentPageLeftSidebarLabel}`}
-								aria-pressed={!isCurrentPageLeftSidebarHidden}
-								aria-keyshortcuts={isMacPlatform ? "Meta+B" : "Control+B"}
-								className="shrink-0"
-							/>
-						</Tooltip>
-					) : null}
 					{onBack ? (
 						<div className="flex items-center shrink-0 overflow-visible">
 							<Button
@@ -488,43 +449,10 @@ export function TopBar({
 							{isTaskLookupWorkbenchOpen ? "返回工作区" : "AI 查卡"}
 						</Button>
 					) : null}
-					{isWorkspacePathLoading ? (
-						<span
-							className="kb-skeleton inline-block"
-							style={{ height: 14, width: isMobile ? 120 : 320, borderRadius: 3 }}
-							aria-hidden
-						/>
-					) : displayWorkspacePath ? (
-						<div className={cn("shrink min-w-0 overflow-hidden", isMobile ? "max-w-[180px]" : "max-w-[640px]")}>
-							<span
-								className="font-mono truncate block w-full min-w-0 text-xs max-w-full text-text-secondary"
-								title={workspacePath}
-								data-testid="workspace-path"
-							>
-								{isMobile ? (
-									<span className="text-text-primary">{workspaceSegments[workspaceSegments.length - 1]}</span>
-								) : (
-									<>
-										{hasAbsoluteLeadingSlash ? "/" : ""}
-										{workspaceSegments.map((segment, index) => {
-											const isLast = index === workspaceSegments.length - 1;
-											return (
-												<span key={`${segment}-${index}`}>
-													{index === 0 ? "" : "/"}
-													<span className={isLast ? "text-text-primary" : undefined}>{segment}</span>
-												</span>
-											);
-										})}
-									</>
-								)}
-							</span>
-						</div>
-					) : null}
-
 					{/* Desktop-only: open-workspace button, hints, git status */}
 					{!isMobile ? (
 						<>
-							{displayWorkspacePath && !isWorkspacePathLoading ? (
+							{workspacePath && !isWorkspacePathLoading ? (
 								<div className="ml-2 shrink-0">
 									<OpenWorkspaceButton
 										options={openTargetOptions}
@@ -736,23 +664,6 @@ export function TopBar({
 						</>
 					) : null}
 
-					{!isMobile && onToggleFocusViewWorkbenchSidebar ? (
-						<Tooltip
-							side="bottom"
-							content={`${isFocusViewWorkbenchSidebarHidden ? "显示" : "隐藏"}任务工作台 (${isMacPlatform ? "Cmd+Option+B" : "Ctrl+Alt+B"})`}
-						>
-							<Button
-								variant={isFocusViewWorkbenchSidebarHidden ? "ghost" : "default"}
-								size="sm"
-								icon={<PanelRight size={16} />}
-								onClick={onToggleFocusViewWorkbenchSidebar}
-								aria-label={`${isFocusViewWorkbenchSidebarHidden ? "显示" : "隐藏"}任务工作台`}
-								aria-pressed={!isFocusViewWorkbenchSidebarHidden}
-								aria-keyshortcuts={isMacPlatform ? "Meta+Alt+B" : "Control+Alt+B"}
-								className="shrink-0"
-							/>
-						</Tooltip>
-					) : null}
 					{onToggleTaskChangesSidebar ? (
 						<Tooltip side="bottom" content={isTaskChangesSidebarOpen ? "Show sessions" : "Show changes"}>
 							<Button
@@ -772,6 +683,7 @@ export function TopBar({
 					) : null}
 
 					{/* 图标和计数共用常驻边界，当前或历史部署均可从此展开面板。 */}
+					<RuntimeSystemLoadAndRuntimeStatus isMobile={isMobile} />
 					{onOpenPostDeployVerification && postDeployVerificationPendingCount != null ? (
 						<Tooltip
 							side="bottom"
