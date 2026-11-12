@@ -6,6 +6,7 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import * as RadixSelect from "@radix-ui/react-select";
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { getRuntimeAgentCatalogEntry, getRuntimeLaunchSupportedAgentCatalog } from "@runtime-agent-catalog";
+import { runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema } from "@runtime-contract";
 import { areRuntimeProjectShortcutsEqual } from "@runtime-shortcuts";
 import {
 	Bell,
@@ -408,6 +409,10 @@ function RuntimeSettingsDialogForm({
 	const [agentAutonomousModeEnabled, setAgentAutonomousModeEnabled] = useState(true);
 	const [agentSessionPtyHostEnablementPreferenceEnabled, setAgentSessionPtyHostEnablementPreferenceEnabled] =
 		useState(true);
+	const [
+		agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft,
+		setAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft,
+	] = useState("60");
 	const agentSessionPtyHostDiagnostics = useAgentSessionPtyHostDiagnostics(open, workspaceId);
 	const [newTaskStartInPlanModeByDefault, setNewTaskStartInPlanModeByDefault] = useState(true);
 	// omp 新任务的默认通话通道。严格是「新任务默认值」：建卡时固化到卡上，改它不追溯已有卡片。
@@ -504,6 +509,9 @@ function RuntimeSettingsDialogForm({
 	const initialAgentAutonomousModeEnabled = config?.agentAutonomousModeEnabled ?? true;
 	const initialAgentSessionPtyHostEnablementPreferenceEnabled =
 		config?.agentSessionPtyHostEnablementPreference !== "disabled";
+	const initialAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft = String(
+		config?.agentSessionUserTurnIdleProcessRetentionDurationMinutes ?? 60,
+	);
 	const initialNewTaskStartInPlanModeByDefault = config?.newTaskStartInPlanModeByDefault ?? true;
 	const initialOmpAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport =
 		config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal";
@@ -527,6 +535,11 @@ function RuntimeSettingsDialogForm({
 			return true;
 		}
 		if (agentSessionPtyHostEnablementPreferenceEnabled !== initialAgentSessionPtyHostEnablementPreferenceEnabled)
+			return true;
+		if (
+			agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft !==
+			initialAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft
+		)
 			return true;
 		if (agentAutonomousModeEnabled !== initialAgentAutonomousModeEnabled) {
 			return true;
@@ -576,6 +589,8 @@ function RuntimeSettingsDialogForm({
 			normalizeTemplateForComparison(initialOpenPrPromptTemplate)
 		);
 	}, [
+		agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft,
+		initialAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft,
 		agentSessionPtyHostEnablementPreferenceEnabled,
 		initialAgentSessionPtyHostEnablementPreferenceEnabled,
 		agentAutonomousModeEnabled,
@@ -615,6 +630,9 @@ function RuntimeSettingsDialogForm({
 		}
 		setSelectedAgentId(configuredAgentId ?? fallbackAgentId);
 		setAgentAutonomousModeEnabled(config?.agentAutonomousModeEnabled ?? true);
+		setAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft(
+			String(config?.agentSessionUserTurnIdleProcessRetentionDurationMinutes ?? 60),
+		);
 		setAgentSessionPtyHostEnablementPreferenceEnabled(config?.agentSessionPtyHostEnablementPreference !== "disabled");
 		setNewTaskStartInPlanModeByDefault(config?.newTaskStartInPlanModeByDefault ?? true);
 		setOmpAgentSessionTransportForNewTasks(config?.ompAgentSessionTransportForNewTasks ?? "pty_terminal");
@@ -633,6 +651,7 @@ function RuntimeSettingsDialogForm({
 	}, [
 		config?.agentAutonomousModeEnabled,
 		config?.agentSessionPtyHostEnablementPreference,
+		config?.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 		config?.autoContinueOnConnectionDropEnabled,
 		config?.codexModelCapacityErrorAutoContinuationEnabled,
 		config?.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
@@ -791,6 +810,13 @@ function RuntimeSettingsDialogForm({
 			setSaveError("Runtime settings are still loading. Try again in a moment.");
 			return;
 		}
+		const idleRetentionDuration = runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.safeParse(
+			Number(agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft),
+		);
+		if (!idleRetentionDuration.success) {
+			setSaveError("会话待命保留时间：请输入正整数分钟。");
+			return;
+		}
 		const selectedAgent = displayedAgents.find((agent) => agent.id === selectedAgentId);
 		if (!selectedAgent || selectedAgent.installed !== true) {
 			setSaveError("Selected agent is not installed. Install it first or choose an installed agent.");
@@ -807,6 +833,12 @@ function RuntimeSettingsDialogForm({
 		await notificationSettings.save();
 		await taskAnalysisSettings.save();
 		const saved = await save({
+			...(agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft !==
+			initialAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft
+				? {
+						agentSessionUserTurnIdleProcessRetentionDurationMinutes: idleRetentionDuration.data,
+					}
+				: {}),
 			...(agentSessionPtyHostEnablementPreferenceEnabled !== initialAgentSessionPtyHostEnablementPreferenceEnabled
 				? {
 						agentSessionPtyHostEnablementPreference: agentSessionPtyHostEnablementPreferenceEnabled
@@ -1154,6 +1186,32 @@ function RuntimeSettingsDialogForm({
 							<PlugZap size={16} className="text-text-secondary" />
 							终端 agent 可靠性
 						</h2>
+					</div>
+					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
+						<label className="flex flex-wrap items-center gap-2 text-[13px] text-text-primary">
+							会话待命保留时间
+							<input
+								type="number"
+								min={1}
+								step={1}
+								aria-label="会话待命保留时间"
+								aria-describedby="agent-session-user-turn-idle-retention-description"
+								value={agentSessionUserTurnIdleProcessRetentionDurationMinutesDraft}
+								disabled={controlsDisabled}
+								onChange={(event) =>
+									setAgentSessionUserTurnIdleProcessRetentionDurationMinutesDraft(event.target.value)
+								}
+								className="w-24 rounded-md border border-border bg-surface-2 px-2 py-1 text-text-primary disabled:opacity-40"
+							/>
+							分钟
+						</label>
+						<p
+							id="agent-session-user-turn-idle-retention-description"
+							className="text-text-secondary text-[13px] mt-2 mb-0"
+						>
+							默认为 60 分钟，适用于所有项目。会话等待你回复超过此时间后释放进程，再次打开时恢复原对话。
+							保存后一分钟内按原待命起点更新期限，正在执行和等待后台工作的会话继续受到保护。
+						</p>
 					</div>
 					<div className="rounded-lg border border-border bg-surface-0 px-4 py-3 mb-4">
 						<div className="flex items-center gap-2">

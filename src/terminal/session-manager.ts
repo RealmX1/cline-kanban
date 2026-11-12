@@ -4,7 +4,10 @@ import {
 	projectLegacyWorkPhaseGoalIntoExistingProgress,
 } from "../core/agent-work-progress";
 import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
-import { measureTaskSessionStartupPhase } from "../diagnostics/task-session-start-diagnostics-logger";
+import {
+	measureTaskSessionStartupPhase,
+	recordTaskSessionStartDiagnostic,
+} from "../diagnostics/task-session-start-diagnostics-logger";
 import {
 	persistAutomaticAgentFailureContinuation,
 	readAutomaticAgentFailureContinuations,
@@ -44,7 +47,10 @@ import { serializeHostedSessionTerminalModes } from "../agent-session-pty-host/w
 import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
 import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
-import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import {
+	readCodexConfigurationSyncLookupStore,
+	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
+} from "../codex-configuration-sync/codex-configuration-sync-store";
 import {
 	buildCodexConfigurationWriterEnvironment,
 	prepareCodexConfigurationWriterBinding,
@@ -1492,6 +1498,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private readonly entries = new Map<string, SessionEntry>();
+	private readonly nativeInputReadyStartupDiagnosticContextByActiveProcess = new WeakMap<
+		ActiveProcessState,
+		{ workspaceId: string; runtimeSessionIncarnationId: string }
+	>();
+	private readonly nativeInputReadyStartupDiagnosticInspectionsInFlight = new WeakSet<ActiveProcessState>();
 	private readonly startupDeliveryRegistrationFailureCountByActiveProcess = new WeakMap<ActiveProcessState, number>();
 	private readonly managedArgumentStartupDeliveryByTaskId = new Map<
 		string,
@@ -6364,9 +6375,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					...request,
 					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
 				};
-				const preparedCodexWriter = (await readCodexConfigurationSyncStore()).writers[
-					codexConfigurationWriterBinding.writerId
-				];
+				const preparedCodexWriter = (
+					await readCodexConfigurationSyncLookupStore({ writerIds: [codexConfigurationWriterBinding.writerId] })
+				).writers[codexConfigurationWriterBinding.writerId];
 				codexConfigurationProfileLaunchFields = preparedCodexWriter?.launchBaselineFields;
 				codexTaskReasoningEffortFeedbackSelectionId =
 					preparedCodexWriter?.taskReasoningEffortFeedbackSelection?.selectionId;
@@ -6475,6 +6486,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 			throw error;
 		}
 
+		void recordTaskSessionStartDiagnostic({
+			event: "phase_completed",
+			phase: "server_session_preparation",
+			workspaceId: request.workspaceId ?? "(unknown)",
+			taskId: request.taskId,
+			requestedAgentId: request.agentId,
+			effectiveAgentId: request.agentId,
+			runtimeSessionIncarnationId,
+			elapsedMs: Math.max(0, now() - Date.parse(taskSessionStartRequestStartedAtIso)),
+			error: null,
+			session: null,
+		});
 		const taskContextEnv = {
 			...(process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH
 				? { KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH: process.env.KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH }
@@ -6838,6 +6861,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return cloneSummary(entry.summary);
 		}
 		entry.active = active;
+		this.nativeInputReadyStartupDiagnosticContextByActiveProcess.set(active, {
+			workspaceId: request.workspaceId ?? "(unknown)",
+			runtimeSessionIncarnationId,
+		});
 		// 新的一代上来就把 suppress 闩清账。它是一次性闩（shouldAutoRestart 读后即置 false），而有两条
 		// 路径会置了闩却永远没人来消费：① forceStopTaskSession 的强杀超时分支直接置空 entry.active，
 		// 随后真正的 onExit 在空守卫处提前返回；② 加了换代身份守卫之后，迟到的上一代退出事件同样被挡在
@@ -7064,6 +7091,50 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}, trustConfirmDelayMs);
 	}
 
+	private recordNativeInputReadyStartupDiagnosticAfterOutput(entry: SessionEntry): void {
+		const active = entry.active;
+		if (!active || this.nativeInputReadyStartupDiagnosticInspectionsInFlight.has(active)) return;
+		if (
+			entry.summary.agentId !== "codex" &&
+			entry.summary.agentId !== "kimi" &&
+			resolveTerminalInputBoxGrammar(entry.summary.agentId) === null
+		) {
+			this.nativeInputReadyStartupDiagnosticContextByActiveProcess.delete(active);
+			return;
+		}
+		const context = this.nativeInputReadyStartupDiagnosticContextByActiveProcess.get(active);
+		if (!context || !entry.terminalStateMirror) return;
+		this.nativeInputReadyStartupDiagnosticInspectionsInFlight.add(active);
+		void entry.terminalStateMirror
+			.getScreenSnapshot({ includeDimmedTextColumnRanges: entry.summary.agentId === "codex" })
+			.then((screen) => {
+				if (entry.active !== active) return;
+				const text = screen.lines.map((line) => line.text).join("\n");
+				const grammar = resolveTerminalInputBoxGrammar(entry.summary.agentId);
+				const ready =
+					entry.summary.agentId === "codex"
+						? hasCodexStartupPromptReady(text) && readCodexTerminalComposerOccupancy(screen) !== "unreadable"
+						: entry.summary.agentId === "kimi"
+							? hasKimiStartupPromptReady(text, "")
+							: grammar !== null && locateTerminalInputBox(screen, grammar) !== null;
+				if (!ready) return;
+				this.nativeInputReadyStartupDiagnosticContextByActiveProcess.delete(active);
+				void recordTaskSessionStartDiagnostic({
+					...context,
+					event: "native_input_ready",
+					phase: "native_input_ready_after_spawn",
+					taskId: entry.summary.taskId,
+					requestedAgentId: entry.summary.agentId,
+					effectiveAgentId: entry.summary.agentId,
+					elapsedMs: Math.max(0, now() - active.terminalSessionIncarnationSpawnedAtEpochMs),
+					error: null,
+					session: null,
+				});
+			})
+			.catch(() => undefined)
+			.finally(() => this.nativeInputReadyStartupDiagnosticInspectionsInFlight.delete(active));
+	}
+
 	// 任务 agent PTY 一段输出的完整处理链：协议过滤与查询应答 → mirror → 监听者 fan-out → 工作区信任 /
 	// 启动就绪 / 攒批分析。从 startTaskSession 的闭包里原样提出，使「被接管的会话」（热重启后由 PTY host
 	// 继续持有的进程）与新 spawn 的会话走同一条链路。装载前到达的输出由调用方先缓存、装载后补投。
@@ -7090,6 +7161,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			taskListener.onOutput?.(filteredChunk);
 		}
 
+		this.recordNativeInputReadyStartupDiagnosticAfterOutput(entry);
 		const inAgentTurnAtChunkTime =
 			entry.summary.agentId !== null && resolveSessionFacets(entry.summary).turnOwner === "agent";
 		// 攒批重分析的消费者（实质输出检测 / 输出转移检测 / output-reaction 扫描）——命中任一
@@ -10297,7 +10369,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 先停再让下游拒绝，等于用户点一次重启就把一条还活着的会话杀掉、还什么都没续上。
 		// 判据与启动漏斗里那道闸门同源（同一份 entry.summary + 同一批 entries），故结论必然一致。
 		const entryBeforeDestructiveRestart = this.entries.get(request.taskId);
-		if (entryBeforeDestructiveRestart) {
+		const reclaimedOutcome = entryBeforeDestructiveRestart?.summary.agentSessionRuntimeReclamationOutcome;
+		const canRunOnlySharedResumePreflight = Boolean(
+			entryBeforeDestructiveRestart &&
+				!entryBeforeDestructiveRestart.active &&
+				entryBeforeDestructiveRestart.summary.pid === null &&
+				resolveSessionFacets(entryBeforeDestructiveRestart.summary).liveness === "exited" &&
+				reclaimedOutcome?.runtimeSessionIncarnationId ===
+					entryBeforeDestructiveRestart.summary.runtimeSessionIncarnationId &&
+				reclaimedOutcome?.rootProcessExitConfirmed &&
+				reclaimedOutcome.descendantProcessesExitConfirmed &&
+				reclaimedOutcome.survivingDescendantPids.length === 0 &&
+				(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt) &&
+				reclaimedOutcome.failureReason === null &&
+				!request.configurationProfileAutomaticAdoptionGuard &&
+				!forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser &&
+				(request.additionalAgentStartupArgumentsForThisRestart?.length ?? 0) === 0,
+		);
+		// 已确认没有旧进程可拆时，完整预检统一由共享启动入口执行一次。
+		if (entryBeforeDestructiveRestart && !canRunOnlySharedResumePreflight) {
 			const recoveryWasCancelled = () => isPendingNativeIdentityRecoveryStillCurrent?.() === false;
 			if (recoveryWasCancelled()) return cloneSummary(entryBeforeDestructiveRestart.summary);
 			if (

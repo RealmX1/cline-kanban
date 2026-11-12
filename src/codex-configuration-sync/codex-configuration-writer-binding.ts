@@ -863,8 +863,8 @@ export async function recordCodexConfigurationWriterLaunchArguments(
 	binding: CodexConfigurationWriterBinding,
 	arguments_: string[],
 ) {
-	await runWithCodexConfigurationSyncStoreSelection({ writerIds: [binding.writerId] }, () =>
-		mutateCodexConfigurationSyncStore((store) => {
+	await mutateCodexConfigurationSyncStore(
+		(store) => {
 			const writer = store.writers[binding.writerId];
 			if (!writer) throw new Error("Codex 配置启动绑定不存在。");
 			const overrides: string[] = [];
@@ -901,7 +901,8 @@ export async function recordCodexConfigurationWriterLaunchArguments(
 				}
 			}
 			writer.overrideKeyPaths = overrides;
-		}),
+		},
+		{ selection: { scope: "lookup", writerIds: [binding.writerId] } },
 	);
 }
 

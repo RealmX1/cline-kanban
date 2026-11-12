@@ -2473,12 +2473,16 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 		);
 	});
 
-	it("客户端声明的过期自动恢复使用独立来源记录", async () => {
+	it.each([false, true])("客户端声明的过期自动恢复保留来源与持久Stop（已停止=%s）", async (explicitlyStopped) => {
 		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
 		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
 			columns: [{ id: "in_progress", cards: [{ id: "task-1", agentId: "claude" }] }],
 		});
 		const terminalManager = {
+			listSummaries: () => [],
+			stopTaskSession: vi.fn(() =>
+				createSummary({ pid: null, liveness: "exited", turnOwner: "user", userTurnKind: "review" }),
+			),
 			getSummary: vi.fn(() => createSummary({ agentId: "claude", startedAt: null, pid: null })),
 			refreshTaskTerminal: vi.fn(async () => createSummary({ agentId: "claude" })),
 		};
@@ -2491,7 +2495,10 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			runCommand: vi.fn(),
 		});
 
-		await api.refreshTaskTerminal(
+		const scope = { workspaceId: "workspace-1", workspacePath: "/tmp/repo" };
+		await api.recordExplicitTaskConversationSessionStart(scope, "task-1");
+		if (explicitlyStopped) await api.stopTaskSession(scope, { taskId: "task-1" });
+		const result = await api.refreshTaskTerminal(
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{
 				taskId: "task-1",
@@ -2501,10 +2508,15 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			},
 		);
 
-		expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
-			expect.anything(),
-			"stale_session_client_auto_resume",
-		);
+		expect(result.ok).toBe(!explicitlyStopped);
+		if (explicitlyStopped) {
+			expect(result.error).toContain("Stop");
+			expect(terminalManager.refreshTaskTerminal).not.toHaveBeenCalled();
+		} else
+			expect(terminalManager.refreshTaskTerminal).toHaveBeenCalledWith(
+				expect.objectContaining({ revalidateExistingMainSessionHandoverTargetBeforeLaunch: expect.any(Function) }),
+				"stale_session_client_auto_resume",
+			);
 	});
 
 	it.each([
