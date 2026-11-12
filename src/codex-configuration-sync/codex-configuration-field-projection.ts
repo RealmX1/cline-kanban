@@ -3,6 +3,7 @@ import { readdir, readFile, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { parse, type TomlTable } from "smol-toml";
+import { isCodexLocalStateConfigurationField } from "../core/codex-configuration-profile-field-editing";
 
 export interface CodexConfigurationFieldValue {
 	value: unknown;
@@ -177,6 +178,7 @@ export async function projectCodexConfigurationFields(input: {
 			for (const [key, value] of Object.entries(table)) {
 				if (sensitiveConfigurationKey.test(key) || privateConfigurationRootKeys.has(key)) continue;
 				const childPath = [...path, key];
+				if (isCodexLocalStateConfigurationField(JSON.stringify([fileName, ...childPath]))) continue;
 				const hookStateIndex = childPath.indexOf("state");
 				if (hookStateIndex >= 0 && childPath[hookStateIndex - 1] === "hooks") {
 					if (childPath.length === hookStateIndex + 2) {

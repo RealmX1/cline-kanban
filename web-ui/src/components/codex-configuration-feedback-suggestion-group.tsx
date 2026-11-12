@@ -106,7 +106,7 @@ function ConfigurationCandidateValue({
 							void controller.adoptCandidate(candidate.members, details.comparison?.expectedSharedValueDigest);
 						}}
 					>
-						采用此值并广播
+						更新默认并同步
 					</Button>
 				}
 			/>
@@ -137,6 +137,14 @@ export function CodexConfigurationFeedbackSuggestionGroupView({
 	controller: Controller;
 }) {
 	const representative = group.members[0]!;
+	const fieldLabel =
+		representative.exceptionGroup === "permissions"
+			? "完整权限设置"
+			: representative.exceptionGroup === "reasoning_effort"
+				? "推理强度"
+				: representative.exceptionGroup === "model"
+					? "模型"
+					: representative.fieldLabel;
 	const rows = [
 		...new Map(
 			group.members
@@ -148,14 +156,12 @@ export function CodexConfigurationFeedbackSuggestionGroupView({
 		<article
 			className="min-w-0 flex-1 py-3"
 			data-verification-anchor="codex-configuration-proposal-group"
-			aria-label={`${representative.profileName ?? "看板默认"} · ${representative.exceptionGroup === "permissions" ? "完整权限设置" : representative.fieldLabel} 的候选值`}
+			aria-label={`${representative.profileName ?? "看板默认"} · ${fieldLabel} 的候选值`}
 		>
-			<p className="m-0 text-sm font-medium text-text-primary break-words">
-				{representative.exceptionGroup === "permissions" ? "完整权限设置" : representative.fieldLabel}
-			</p>
+			<p className="m-0 text-sm font-medium text-text-primary break-words">{fieldLabel}</p>
 			<p className="mt-1 text-xs text-text-secondary">
-				{representative.profileName ?? "看板 Codex"} · 采用后更新所属 profile
-				并广播；保留默认时各会话继续使用自己的局部选择。
+				{representative.profileName ?? "看板 Codex"} · 采用后更新所属配置
+				并同步；保持默认时各会话继续使用自己的局部选择。
 			</p>
 			<ConfigurationValueDecision
 				label="当前看板默认"
@@ -180,7 +186,7 @@ export function CodexConfigurationFeedbackSuggestionGroupView({
 							);
 						}}
 					>
-						保留当前默认
+						保持默认
 					</Button>
 				}
 			/>

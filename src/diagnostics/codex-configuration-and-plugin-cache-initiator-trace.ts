@@ -200,6 +200,8 @@ export function createCodexConfigurationTargetObservationMonitor(input: {
 	let scanning: Promise<void> | null = null;
 	let closed = false;
 	let changedWhileScanning = false;
+	let lastCheckedAtMs: number | null = null;
+	let automaticRecoveryPending = false;
 	const publish = (event: Record<string, unknown>) =>
 		emit({ monitorIncarnationId, recordedAtEpochMs: Date.now(), actualWriter: "unknown", ...event });
 	const scan = (): Promise<void> => {
@@ -301,10 +303,17 @@ export function createCodexConfigurationTargetObservationMonitor(input: {
 					watcher.close();
 					watchers.delete(path);
 				}
+			lastCheckedAtMs = Date.now();
+			automaticRecoveryPending = false;
 		})()
-			.catch(() =>
-				publish({ event: "target_scan_coverage_gap", recoveryCondition: "下次周期扫描重新核验目录归属与可读性" }),
-			)
+			.catch(() => {
+				lastCheckedAtMs = Date.now();
+				automaticRecoveryPending = true;
+				return publish({
+					event: "target_scan_coverage_gap",
+					recoveryCondition: "下次周期扫描重新核验目录归属与可读性",
+				});
+			})
 			.finally(() => {
 				scanning = null;
 			});
@@ -313,6 +322,8 @@ export function createCodexConfigurationTargetObservationMonitor(input: {
 	return {
 		scan,
 		getCoverage: () => ({
+			lastCheckedAtMs,
+			automaticRecoveryPending,
 			fileObservation: snapshots.size ? ("active" as const) : ("starting" as const),
 			targetCount: snapshots.size,
 			coverageGapCount: [...snapshots.values()].reduce((count, snapshot) => count + snapshot.coverageGaps.length, 0),

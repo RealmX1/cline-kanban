@@ -1577,8 +1577,10 @@ describe("persistent-terminal-manager", () => {
 
 	describe("auto-resume when the user opens or returns to a task whose agent session is gone", () => {
 		beforeEach(() => {
-			// 只假计时器与 Date（冷却按 Date.now 计）；rAF 保持外层装好的同步实现，否则挂载后的评估永远不跑。
-			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
+			// 同时控制冷却与诊断时钟；rAF 保持外层装好的同步实现，否则挂载后的评估永远不跑。
+			vi.useFakeTimers({
+				toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"],
+			});
 		});
 
 		function findControlSocket() {
@@ -1756,13 +1758,26 @@ describe("persistent-terminal-manager", () => {
 		it("runtime 重启丢了 mirror（空快照）→ 停留后续跑一次，再次空 restore 不重复触发", async () => {
 			const terminal = mountedTerminal();
 			const refreshSpy = vi.spyOn(terminal, "refresh").mockResolvedValue({ ok: true, mode: "resume" });
+			let visibleDwellStartedAtMs = performance.now();
+			terminal.subscribe({
+				onAutomaticStaleSessionResumePhaseChange: (phase) => {
+					if (phase === "waiting_for_visible_dwell") visibleDwellStartedAtMs = performance.now();
+				},
+			});
 			dispatchState(runtimeRestartedStaleAgentSessionState);
 			dispatchRestore("");
 			await waitForRestoreCompleted();
+			await vi.advanceTimersByTimeAsync(199 - (performance.now() - visibleDwellStartedAtMs));
 			expect(refreshSpy).not.toHaveBeenCalled();
-			await waitThroughVisibleDwell();
+			await vi.advanceTimersByTimeAsync(1);
 			expect(refreshSpy).toHaveBeenCalledTimes(1);
-			expect(refreshSpy).toHaveBeenCalledWith("stale_session_client_auto_resume");
+			expect(refreshSpy).toHaveBeenCalledWith(
+				"stale_session_client_auto_resume",
+				undefined,
+				undefined,
+				undefined,
+				200,
+			);
 
 			dispatchRestore("");
 			await waitForRestoreCompleted(2);

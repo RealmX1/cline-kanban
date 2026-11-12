@@ -22,7 +22,7 @@ const databaseFileIdentity = lstatSync(databasePath, { bigint: true });
 database.pragma("journal_mode = WAL");
 database.pragma("synchronous = FULL");
 database.pragma("foreign_keys = ON");
-if (database.pragma("user_version", { simple: true }) > 1) throw new Error("配置同步数据库版本高于当前运行时。");
+if (database.pragma("user_version", { simple: true }) > 2) throw new Error("配置同步数据库版本高于当前运行时。");
 const collectionTables = {
  sources: "configuration_sources", profiles: "configuration_profiles", writers: "configuration_writers",
  hookTrustDecisions: "configuration_hook_trust_decisions", mutationReceipts: "configuration_mutation_receipts",
@@ -76,7 +76,6 @@ database.exec(`
   entry_version INTEGER NOT NULL, search_text TEXT NOT NULL, content_fingerprint TEXT NOT NULL, UNIQUE(entry_kind,entry_id)
  );
  CREATE INDEX IF NOT EXISTS configuration_history_kind_sequence ON configuration_history_entries(entry_kind,history_sequence);
- PRAGMA user_version = 1;
 `);
 for (const table of Object.values(collectionTables)) database.exec(`
  CREATE TABLE IF NOT EXISTS ${table} (
@@ -93,6 +92,26 @@ database.exec(`
   WHERE json_extract(payload_json,'$.binding.sourceSharedPluginInstallationDirectoriesBinding') IS NULL;
 `);
 }
+database.exec("CREATE INDEX IF NOT EXISTS configuration_targets_by_writer ON configuration_propagation_targets(writer_id,change_id,status)");
+// 字段身份与目标归属必须处于同一索引，避免扫描旧版本或其他会话的同版本采用历史。
+database.transaction(() => {
+ if (database.pragma("user_version", { simple: true }) < 2) {
+  database.exec(`
+   ALTER TABLE configuration_propagation_targets ADD COLUMN approved_profile_field_value_version_key TEXT;
+   UPDATE configuration_propagation_targets SET approved_profile_field_value_version_key=(
+    SELECT json_array(profile_id,field_key,current_field_value_digest,required_profile_field_version)
+    FROM configuration_changes WHERE change_id=configuration_propagation_targets.change_id AND approval_status='approved' AND profile_id IS NOT NULL
+   );
+   PRAGMA user_version = 2;
+  `);
+ }
+ database.exec(`
+  CREATE INDEX IF NOT EXISTS configuration_targets_current_writer_adoption_field ON configuration_propagation_targets(writer_id,approved_profile_field_value_version_key);
+  CREATE INDEX IF NOT EXISTS configuration_targets_startup_writer_adoption_field ON configuration_propagation_targets(
+   json_extract(payload_json,'$.appliedAtStartupByWriterId'),json_extract(payload_json,'$.workspaceId'),json_extract(payload_json,'$.conversationSessionId'),approved_profile_field_value_version_key
+  );
+ `);
+}).immediate();
 const reader = new Database(databasePath, { readonly: true, fileMustExist: true, timeout: 5000 });
 reader.pragma("query_only = ON");
 let queryMetrics = { decodedRows: 0, decodedBytes: 0 };
@@ -148,6 +167,7 @@ function readSnapshot(input = {}, connection = reader) {
   const scope = input.scope ?? "full";
   const full = scope === "full";
   const observe = scope === "active";
+  const overview = scope === "overview";
   const result = { ...stored.storeHeader, storageIdentity: stored.storageIdentity, storageGeneration: stored.storageGeneration,
    sourceDecisionGenerations: stored.sourceDecisionGenerations, historyTotalCount: stored.historyTotalCount,
    historyMaximumSequence: stored.historyMaximumSequence, historyProjectionGeneration: stored.historyProjectionGeneration,
@@ -175,7 +195,7 @@ function readSnapshot(input = {}, connection = reader) {
    if (row && !targetRows.some((target) => target.change_id === changeId && target.writer_id === writerId)) targetRows.push(row);
   }
   const observationRows = new Map();
-  if (full || observe) for (const row of connection.prepare(`SELECT * FROM configuration_source_observations${full ? "" : " WHERE is_unread=1"}`).all()) observationRows.set(row.observation_id,row);
+  if (full || observe || overview) for (const row of connection.prepare(`SELECT * FROM configuration_source_observations${full ? "" : " WHERE is_unread=1"}`).all()) observationRows.set(row.observation_id,row);
   for (const row of rowsByIds(connection,"configuration_source_observations","observation_id",input.observationIds ?? [])) observationRows.set(row.observation_id,row);
   const changeIds = new Set([...(input.changeIds ?? []), ...targetRows.map((row) => row.change_id)]);
   for (const row of observationRows.values()) {
@@ -195,7 +215,7 @@ function readSnapshot(input = {}, connection = reader) {
    }
   }
   const changeRows = new Map();
-  if (full || observe) for (const row of connection.prepare(`SELECT * FROM configuration_changes${full ? "" : " WHERE requires_processing=1"}`).all()) changeRows.set(row.change_id,row);
+  if (full || observe || overview) for (const row of connection.prepare(`SELECT * FROM configuration_changes${full ? "" : " WHERE requires_processing=1"}`).all()) changeRows.set(row.change_id,row);
   for (const row of rowsByIds(connection,"configuration_changes","change_id",[...changeIds])) changeRows.set(row.change_id,row);
   const changes = [...changeRows.values()].map((row) => ({ row, change: decode(row) }));
   const dependencyIds = new Set();
@@ -240,6 +260,65 @@ function readSnapshot(input = {}, connection = reader) {
   }
   for (const row of full ? connection.prepare("SELECT * FROM configuration_mutation_receipts").all() : rowsByIds(connection,"configuration_mutation_receipts","record_id",input.receiptKeys ?? [])) result.mutationReceipts[row.record_id] = decode(row);
   return result;
+ })();
+}
+function sessionAdoptionRows(input, connection = reader, aggregate = false) {
+ const current = [...new Map((input.sessions ?? []).filter((session) => session.workspaceId && session.conversationSessionId && session.runtimeSessionIncarnationId).map((session) => [JSON.stringify([session.workspaceId,session.conversationSessionId,session.runtimeSessionIncarnationId]),session])).values()];
+ const targetOwnershipPaths = [
+  {indexName:"configuration_targets_current_writer_adoption_field",predicate:"t.writer_id=s.writer_id"},
+  {indexName:"configuration_targets_startup_writer_adoption_field",predicate:"json_extract(t.payload_json,'$.appliedAtStartupByWriterId')=s.writer_id AND json_extract(t.payload_json,'$.workspaceId')=s.workspace_id AND json_extract(t.payload_json,'$.conversationSessionId')=s.session_id"},
+ ];
+ const currentSessionTargetQueries = targetOwnershipPaths.flatMap(({indexName,predicate}) => ["f.field_version","NULL"].map((fieldVersion) => `
+  SELECT s.workspace_id,s.session_id,s.incarnation_id,f.field_key,${fieldVersion} AS required_field_version,
+   CASE WHEN t.status='conflict' THEN 5 WHEN t.status IN ('accepted','pending_reload','pending_next_start') THEN CASE WHEN json_extract(t.payload_json,'$.diskSavedAt') IS NOT NULL THEN 3 ELSE 4 END WHEN t.status='applied' AND (json_extract(t.payload_json,'$.ownerReloadedAt') IS NOT NULL OR json_extract(t.payload_json,'$.appliedAtStartupByWriterId')=s.writer_id) THEN 1 ELSE 0 END AS target_rank
+  FROM attributed_sessions s CROSS JOIN configuration_profile_current_fields f
+  CROSS JOIN configuration_propagation_targets t INDEXED BY ${indexName}
+  WHERE s.writer_payload IS NOT NULL AND f.profile_id=s.profile_id AND ${predicate}
+   AND t.approved_profile_field_value_version_key=json_array(s.profile_id,f.field_key,f.value_digest,${fieldVersion})
+ `));
+ const sql = `WITH current_sessions AS (
+  SELECT json_extract(value,'$.workspaceId') AS workspace_id,json_extract(value,'$.conversationSessionId') AS session_id,
+   json_extract(value,'$.runtimeSessionIncarnationId') AS incarnation_id,json_extract(value,'$.writerId') AS writer_id,json_extract(value,'$.profileId') AS declared_profile_id FROM json_each(?)
+ ), attributed_sessions AS MATERIALIZED (
+  SELECT s.*,w.payload_json AS writer_payload,coalesce(json_extract(w.payload_json,'$.codexConfigurationProfileId'),s.declared_profile_id) AS profile_id
+  FROM current_sessions s LEFT JOIN configuration_writers w ON w.record_id=s.writer_id
+   AND json_extract(w.payload_json,'$.binding.workspaceId')=s.workspace_id
+   AND json_extract(w.payload_json,'$.binding.conversationSessionId')=s.session_id
+   AND json_extract(w.payload_json,'$.binding.runtimeSessionIncarnationId')=s.incarnation_id
+ ), current_session_targets AS MATERIALIZED (${currentSessionTargetQueries.join(" UNION ALL ")}), adoption_evidence AS (
+  SELECT s.*,
+   (SELECT coalesce(max(t.target_rank),0) FROM current_session_targets t WHERE t.workspace_id=s.workspace_id AND t.session_id=s.session_id AND t.incarnation_id=s.incarnation_id) AS target_rank,
+   EXISTS(SELECT 1 FROM configuration_profile_current_fields f LEFT JOIN json_each(s.writer_payload,'$.consumedProfileFieldVersions') consumed ON consumed.key=f.field_key WHERE f.profile_id=s.profile_id AND (consumed.value IS NULL OR consumed.value<f.field_version) AND NOT EXISTS (SELECT 1 FROM current_session_targets t WHERE t.workspace_id=s.workspace_id AND t.session_id=s.session_id AND t.incarnation_id=s.incarnation_id AND t.field_key=f.field_key AND t.required_field_version=f.field_version AND t.target_rank=1)) AS has_unconsumed_fields,
+   (SELECT json_group_array(key) FROM json_each(s.writer_payload,'$.localExceptionOverrides')) AS local_groups
+  FROM attributed_sessions s WHERE s.profile_id IS NOT NULL
+ ), classified_sessions AS (SELECT workspace_id,session_id,incarnation_id,CASE WHEN writer_payload IS NULL THEN NULL ELSE writer_id END AS writer_id,profile_id,local_groups,CASE WHEN writer_payload IS NULL THEN 'unverified' WHEN target_rank=5 THEN 'conflict' WHEN target_rank=4 THEN 'pending' WHEN target_rank=3 THEN 'saved'
+  WHEN has_unconsumed_fields THEN 'unverified' WHEN local_groups<>'[]' THEN 'local_selection' WHEN target_rank=1 THEN 'adopted' ELSE 'unverified' END AS adoption_status
+ FROM adoption_evidence)
+ SELECT ${aggregate ? "profile_id AS profileId,count(*) AS total," + ["adopted","local_selection","saved","pending","conflict","unverified"].map((status) => `sum(adoption_status='${status}') AS ${status}`).join(",") : "*"} FROM classified_sessions
+ ${aggregate ? "WHERE writer_id IS NOT NULL GROUP BY profile_id" : "ORDER BY workspace_id COLLATE BINARY,session_id COLLATE BINARY,incarnation_id COLLATE BINARY"}`;
+ return connection.prepare(sql).all(JSON.stringify(current));
+}
+function readOverview(input) {
+ return reader.transaction(() => ({store:readSnapshot({scope:"overview"},reader),adoptionCounts:sessionAdoptionRows(input,reader,true)}))();
+}
+function listSessionAdoptionProgress(input) {
+ return reader.transaction(() => {
+  const meta = metadata(reader);
+  const filterDigest = canonicalContentDigest([input.profileId ?? null,input.workspaceId ?? null,input.conversationSessionId ?? null]);
+  let after = null;
+  if (input.cursor) {
+   const cursor = JSON.parse(Buffer.from(input.cursor,"base64url").toString("utf8"));
+   if (cursor.storageIdentity!==meta.storageIdentity || cursor.filterDigest!==filterDigest || !Array.isArray(cursor.after)) throw new Error("采用进度分页身份已变化，请重新读取。");
+   after=cursor.after;
+  }
+  const rows = sessionAdoptionRows(input).filter((row) => (!input.profileId || row.profile_id===input.profileId) && (!input.workspaceId || row.workspace_id===input.workspaceId) && (!input.conversationSessionId || row.session_id===input.conversationSessionId));
+  const identity = (row) => [row.workspace_id,row.session_id,row.incarnation_id];
+  const compare = (left,right) => { for (let i=0;i<left.length;i++) { if (left[i]<right[i]) return -1; if (left[i]>right[i]) return 1; } return 0; };
+  const remaining = after ? rows.filter((row) => compare(identity(row),after)>0) : rows;
+  const limit=Math.max(1,Math.min(input.limit ?? 50,100));
+  const page=remaining.slice(0,limit);
+  return {storageIdentity:meta.storageIdentity,totalCount:rows.length,nextCursor:remaining.length>limit ? Buffer.from(JSON.stringify({storageIdentity:meta.storageIdentity,filterDigest,after:identity(page.at(-1))})).toString("base64url") : null,
+   entries:page.map((row) => ({workspaceId:row.workspace_id,conversationSessionId:row.session_id,runtimeSessionIncarnationId:row.incarnation_id,writerId:row.writer_id,profileId:row.profile_id,status:row.adoption_status,localExceptionGroups:JSON.parse(row.local_groups),recoveryCondition:["pending","saved","conflict","unverified"].includes(row.adoption_status) ? "原所有者可达、原生身份补齐或会话达到安全采用条件后自动重验。" : null}))};
  })();
 }
 function storeHeader(store) {
@@ -289,15 +368,22 @@ function writeChange(change,meta,searchText) {
   requires_processing=excluded.requires_processing,payload_json=excluded.payload_json,approval_status=excluded.approval_status,required_profile_field_version=excluded.required_profile_field_version,current_field_value_digest=excluded.current_field_value_digest,requires_legacy_target_observation=excluded.requires_legacy_target_observation,search_text=excluded.search_text,is_accepted_field_origin=excluded.is_accepted_field_origin`).run(change.changeId,sequence,change.sourceIdentity,
   change.codexConfigurationProfileId ?? null,change.fieldKey,change.acceptedProfileFieldVersion ?? change.version,
   change.approvalStatus === "pending" || change.mergeStatus === "conflict" ? 1 : 0,JSON.stringify(head),change.approvalStatus ?? "historical",change.acceptedProfileFieldVersion ?? null,canonicalContentDigest(change.value ?? null),change.codexConfigurationProfileId && change.approvalStatus === "approved" ? 0 : 1,searchText,change.approvalStatus === "approved" || (change.approvalStatus === "historical" && change.mergeStatus === "shared_default_updated") ? 1 : 0);
- database.prepare("UPDATE configuration_propagation_targets SET requires_legacy_observation=? WHERE change_id=? AND requires_legacy_observation<>?").run(change.codexConfigurationProfileId && change.approvalStatus === "approved" ? 0 : 1,change.changeId,change.codexConfigurationProfileId && change.approvalStatus === "approved" ? 0 : 1);
+ const approvedFieldIdentity = change.codexConfigurationProfileId && change.approvalStatus === "approved"
+  ? JSON.stringify([change.codexConfigurationProfileId,change.fieldKey,canonicalContentDigest(change.value ?? null),change.acceptedProfileFieldVersion ?? null]) : null;
+ const requiresLegacyObservation = change.codexConfigurationProfileId && change.approvalStatus === "approved" ? 0 : 1;
+ database.prepare(`UPDATE configuration_propagation_targets SET requires_legacy_observation=?,approved_profile_field_value_version_key=?
+  WHERE change_id=? AND (requires_legacy_observation<>? OR approved_profile_field_value_version_key IS NOT ?)`)
+  .run(requiresLegacyObservation,approvedFieldIdentity,change.changeId,requiresLegacyObservation,approvedFieldIdentity);
  updateHistory("settings",change.changeId,change,change.recordKind !== "source_observation" && change.approvalStatus !== "pending",meta,searchText);
 }
 function writeTarget(changeId,target,previous,full) {
  const {conflictHistory,...head} = target;
  const existing = database.prepare("SELECT insertion_sequence,status FROM configuration_propagation_targets WHERE change_id=? AND writer_id=?").get(changeId,target.writerId);
  const sequence = existing?.insertion_sequence ?? database.prepare("SELECT coalesce(max(insertion_sequence),0)+1 AS sequence FROM configuration_propagation_targets WHERE change_id=?").get(changeId).sequence;
- const legacyObservation = database.prepare("SELECT requires_legacy_target_observation AS required FROM configuration_changes WHERE change_id=?").get(changeId).required;
- database.prepare(`INSERT INTO configuration_propagation_targets VALUES (?,?,?,?,?,?) ON CONFLICT(change_id,writer_id) DO UPDATE SET status=excluded.status,payload_json=excluded.payload_json,requires_legacy_observation=excluded.requires_legacy_observation`).run(changeId,target.writerId,sequence,target.status,JSON.stringify(head),legacyObservation);
+ database.prepare(`INSERT INTO configuration_propagation_targets(change_id,writer_id,insertion_sequence,status,payload_json,requires_legacy_observation,approved_profile_field_value_version_key)
+  SELECT change_id,?,?,?,?,requires_legacy_target_observation,CASE WHEN approval_status='approved' AND profile_id IS NOT NULL THEN json_array(profile_id,field_key,current_field_value_digest,required_profile_field_version) END FROM configuration_changes WHERE change_id=?
+  ON CONFLICT(change_id,writer_id) DO UPDATE SET status=excluded.status,payload_json=excluded.payload_json,requires_legacy_observation=excluded.requires_legacy_observation,approved_profile_field_value_version_key=excluded.approved_profile_field_value_version_key`)
+  .run(target.writerId,sequence,target.status,JSON.stringify(head),changeId);
  if (!existing) database.prepare("UPDATE configuration_changes SET propagation_target_total_count=propagation_target_total_count+1 WHERE change_id=?").run(changeId);
  const activeDelta = Number(activeTargetStatuses.includes(target.status))-Number(Boolean(existing && activeTargetStatuses.includes(existing.status)));
  if (activeDelta) database.prepare("UPDATE configuration_changes SET active_propagation_target_count=active_propagation_target_count+? WHERE change_id=?").run(activeDelta,changeId);
@@ -460,6 +546,8 @@ parentPort.on("message", ({ requestId,command,input }) => {
   switch (command) {
    case "import": result = importStore(input); break;
    case "snapshot": result = readSnapshot(input); break;
+   case "overview": result = readOverview(input); break;
+   case "session_adoption_progress": result = listSessionAdoptionProgress(input); break;
    case "commit": result = commit(input); break;
    case "metadata": result = metadata(); break;
    case "storage_health_probe": result = database.transaction(() => {

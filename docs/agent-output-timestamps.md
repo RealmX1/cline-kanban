@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `lastEffectiveAgentConversationActivityObservation` | 最后一次有效活动及其证据 | Progress、默认活动排序、近期活动、持续自动流转 |
 | `lastAgentConversationUserHandoffObservation` | 最后一次真正结束、中断或可信待答 | 交棒药丸、需要新交棒的投递触发 |
-| `currentAgentProcessUserTurnIdleRetentionStarted` | 当前进程开始用户回合待命的边沿 | 普通五小时回收、资源诊断 |
+| `currentAgentProcessUserTurnIdleRetentionStarted` | 当前进程开始用户回合待命的边沿 | 普通待命回收（默认60分钟，可全局调整）、资源诊断 |
 | `lastAgentConversationPromptCacheReferenceObservation` | 请求或压缩的缓存参考证据 | Cache warm 估算 |
 
 活动种类包括已接受输入、Agent 输出、工具、上下文压缩、真实回合边界及请求；带发生时间、证据来源，可附原生消息身份。合并单调，迟到 Agent 转录不能回拉更晚的可信输入或压缩。明确的旧 TUI 猜测才可纠偏。
@@ -53,7 +53,7 @@
 
 ## 历史与生命周期
 
-新进程就绪可以刷新本代待命起点，不能制造历史交棒。接管同一活进程保留原待命起点。Agent 继续清待命、保留历史；Agent 回合及 park 时交棒药丸隐藏。普通五小时、park 独立期限及 incarnation＋turnSequence 旧定时器保护不变。
+新进程就绪可以刷新本代待命起点，不能制造历史交棒。接管同一活进程保留原待命起点。Agent 继续清待命、保留历史；Agent 回合及 park 时交棒药丸隐藏。普通待命默认60分钟，最新全局设置按原锚点更新期限；park 独立期限及 incarnation＋turnSequence 旧定时器保护继续保留。设置与恢复测量见 [会话待命回收时间与恢复耗时](agent-session-user-turn-idle-process-retention-and-resume-latency.md)。
 
 当前主身份统一解析 `mainTaskConversationSessionId ?? card.id`。主药丸、Direct 和默认活动排序只取主对话；hover 分列协作、By the way、前主的时间与来源。内部 subagent 不直接刷新主活动，主对话收到结果后才推进。
 

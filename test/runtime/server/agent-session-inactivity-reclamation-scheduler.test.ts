@@ -112,6 +112,8 @@ function createScheduler(
 	harness: SchedulerHarness,
 	options: {
 		nowMs?: number;
+		readUserTurnIdleProcessRetentionDurationMinutes?: () => Promise<number>;
+		deadlineWriteFailure?: () => boolean;
 		hasBackgroundAgentExecutionRequiringRetention?: () => Promise<boolean>;
 		reclaim?: (request: AgentSessionReclamationRequest) => Promise<RuntimeAgentSessionReclamationOutcome>;
 		markPendingUserDecisionsReclaimed?: (workspaceId: string, taskId: string, reclaimedAt: number) => Promise<number>;
@@ -123,6 +125,8 @@ function createScheduler(
 	const nowMs = options.nowMs ?? NOW;
 	return createAgentSessionInactivityReclamationScheduler({
 		now: () => nowMs,
+		readUserTurnIdleProcessRetentionDurationMinutes:
+			options.readUserTurnIdleProcessRetentionDurationMinutes ?? (async () => 60),
 		hasBackgroundAgentExecutionRequiringRetention:
 			options.hasBackgroundAgentExecutionRequiringRetention ?? (async () => false),
 		getTaskSessionSummary: (_workspaceId, taskId) => harness.summaryByTaskId.get(taskId) ?? null,
@@ -139,6 +143,19 @@ function createScheduler(
 		},
 		readAllDeadlineRecords: async (): Promise<Record<string, PersistedAgentSessionReclamationDeadlineRecord[]>> =>
 			harness.records.length > 0 ? { [WORKSPACE_ID]: harness.records } : {},
+		refreshUserTurnIdleProcessRetentionDeadline: async (_workspaceId, recordId, minutes, updatedAt) => {
+			if (options.deadlineWriteFailure?.()) throw new Error("期限写入暂时不可用");
+			const index = harness.records.findIndex((record) => record.recordId === recordId);
+			const existing = harness.records[index];
+			if (!existing) return null;
+			const refreshed = {
+				...existing,
+				reclamationEligibleAt: existing.retentionAnchorAt + minutes * 60_000,
+				updatedAt,
+			};
+			harness.records[index] = refreshed;
+			return refreshed;
+		},
 		updateReclamationProgress: async (_workspaceId, recordId, input) => {
 			harness.progressUpdates.push({ recordId, ...input });
 			const index = harness.records.findIndex((candidate) => candidate.recordId === recordId);
@@ -279,7 +296,7 @@ describe("到期判定", () => {
 	});
 
 	it("未到期 → 跳过，不动进程也不动账本", async () => {
-		harness.records = [makeRecord({ reclamationEligibleAt: NOW + 1 })];
+		harness.records = [makeRecord({ retentionAnchorAt: NOW - ONE_HOUR_MS + 1, reclamationEligibleAt: NOW + 1 })];
 		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
 		const result = await createScheduler(harness).runSweepNow();
 
@@ -377,7 +394,7 @@ describe("重启恢复", () => {
 		expect(result.reclaimedCount).toBe(1);
 	});
 
-	it("状态卡在 reclaiming（回收执行到一半进程没了）→ 重跑幂等回收，不看是否到期", async () => {
+	it("重启按当前设置复算已到期的 reclaiming 记录后重跑幂等回收", async () => {
 		harness.records = [
 			makeRecord({
 				reclamationState: "reclaiming",
@@ -390,6 +407,41 @@ describe("重启恢复", () => {
 		expect(result.reclaimedCount).toBe(1);
 		expect(result.skippedNotDueCount).toBe(0);
 	});
+
+	it.each([NOW, NOW + ONE_HOUR_MS])(
+		"重启遇到 reclaiming 的持久期限 %s，延长后等待新期限再恢复回收",
+		async (reclamationEligibleAt) => {
+			harness.records = [
+				makeRecord({ reclamationState: "reclaiming", reclamationAttemptCount: 1, reclamationEligibleAt }),
+			];
+			harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+			const inspectNativeTurnExecutionBeforeReviewReclamation = vi.fn(async () => "allow_reclamation" as const);
+			const result = await createScheduler(harness, {
+				readUserTurnIdleProcessRetentionDurationMinutes: async () => 120,
+				inspectNativeTurnExecutionBeforeReviewReclamation,
+			}).runSweepNow();
+
+			expect(result.skippedNotDueCount).toBe(1);
+			expect(inspectNativeTurnExecutionBeforeReviewReclamation).not.toHaveBeenCalled();
+			expect(harness.reclaimRequests).toEqual([]);
+			expect(harness.pendingUserDecisionReclaimMarkings).toEqual([]);
+			expect(harness.progressUpdates).toEqual([]);
+			expect(harness.records[0]).toMatchObject({
+				reclamationState: "reclaiming",
+				reclamationAttemptCount: 1,
+				retentionAnchorAt: NOW - ONE_HOUR_MS,
+				reclamationEligibleAt: NOW + ONE_HOUR_MS,
+			});
+
+			const resumedResult = await createScheduler(harness, {
+				nowMs: NOW + ONE_HOUR_MS,
+				readUserTurnIdleProcessRetentionDurationMinutes: async () => 120,
+			}).runSweepNow();
+			expect(resumedResult.reclaimedCount).toBe(1);
+			expect(harness.reclaimRequests).toHaveLength(1);
+			expect(harness.records[0]?.reclamationAttemptCount).toBe(2);
+		},
+	);
 });
 
 describe("回收失败与退避", () => {
@@ -594,4 +646,80 @@ describe("后台 Agent 优先于闲置与 park 回收", () => {
 			expect(harness.reclaimRequests).toHaveLength(1);
 		},
 	);
+});
+
+describe("最新全局待命时间先于到期判定", () => {
+	it.each(["grace_running", "reclaiming", "reclaim_failed"] as const)(
+		"%s 的原生补证等待期间延长设置，回收前重新核实并暂停旧期限",
+		async (reclamationState) => {
+			const harness = createHarness();
+			harness.records = [makeRecord({ reclamationState })];
+			harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+			let minutes = 60;
+			const scheduler = createScheduler(harness, {
+				readUserTurnIdleProcessRetentionDurationMinutes: async () => minutes,
+				inspectNativeTurnExecutionBeforeReviewReclamation: async () => {
+					minutes = 120;
+					return "allow_reclamation";
+				},
+			});
+			expect((await scheduler.runSweepNow()).reclaimedCount).toBe(0);
+			expect(harness.records[0]?.reclamationEligibleAt).toBe(NOW + ONE_HOUR_MS);
+			expect(harness.reclaimRequests).toHaveLength(0);
+			expect(harness.pendingUserDecisionReclaimMarkings).toEqual([]);
+			expect(harness.progressUpdates).toEqual([]);
+		},
+	);
+
+	it("缩短既有5小时期限时仍从原起点计算并回收", async () => {
+		const harness = createHarness();
+		harness.records = [makeRecord({ reclamationEligibleAt: NOW + 4 * ONE_HOUR_MS })];
+		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+		const scheduler = createScheduler(harness);
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(1);
+		expect(harness.reclaimRequests[0]?.record.reclamationEligibleAt).toBe(NOW);
+		expect(harness.reclaimRequests[0]?.record.retentionAnchorAt).toBe(NOW - ONE_HOUR_MS);
+	});
+
+	it("延长已到期的期限后不回收，下一次扫描读取新的设置", async () => {
+		const harness = createHarness();
+		harness.records = [makeRecord()];
+		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+		let minutes = 120;
+		const scheduler = createScheduler(harness, {
+			readUserTurnIdleProcessRetentionDurationMinutes: async () => minutes,
+		});
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(0);
+		expect(harness.records[0]?.reclamationEligibleAt).toBe(NOW + ONE_HOUR_MS);
+		minutes = 60;
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(1);
+	});
+
+	it("期限写入失败暂停回收，扫描重试成功后继续", async () => {
+		const harness = createHarness();
+		harness.records = [makeRecord({ reclamationEligibleAt: NOW + 4 * ONE_HOUR_MS })];
+		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+		let fail = true;
+		const scheduler = createScheduler(harness, { deadlineWriteFailure: () => fail });
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(0);
+		expect(harness.records[0]?.reclamationEligibleAt).toBe(NOW + 4 * ONE_HOUR_MS);
+		fail = false;
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(1);
+	});
+
+	it("配置读取失败保留期限和进程，恢复读取后重试", async () => {
+		const harness = createHarness();
+		harness.records = [makeRecord()];
+		harness.summaryByTaskId.set("task-a", makeDeadlineBearingSummary());
+		let fail = true;
+		const scheduler = createScheduler(harness, {
+			readUserTurnIdleProcessRetentionDurationMinutes: async () => {
+				if (fail) throw new Error("配置读取暂时不可用");
+				return 60;
+			},
+		});
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(0);
+		fail = false;
+		expect((await scheduler.runSweepNow()).reclaimedCount).toBe(1);
+	});
 });

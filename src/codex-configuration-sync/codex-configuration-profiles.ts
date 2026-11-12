@@ -1,5 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { codexConfigurationExceptionGroup } from "../core/codex-configuration-profile-field-editing";
+
+export { codexConfigurationExceptionGroup } from "../core/codex-configuration-profile-field-editing";
+
 import { captureCodexConfigurationChangePresentationEvidence } from "./codex-configuration-change-presentation";
 import {
 	type CodexConfigurationFields,
@@ -9,7 +13,7 @@ import {
 	configurationTable,
 	sameConfigurationField,
 } from "./codex-configuration-field-projection";
-import { isCodexDesktopConfigurationField } from "./codex-configuration-settings-isolation";
+import { isCodexLocalStateConfigurationField } from "./codex-configuration-settings-isolation";
 import type {
 	CodexConfigurationSyncStore,
 	StoredCodexConfigurationChange,
@@ -18,21 +22,6 @@ import type {
 } from "./codex-configuration-sync-store";
 
 export const CODEX_PROFILE_FEEDBACK_OPPORTUNITY_DURATION_MS = 10 * 60_000;
-export function codexConfigurationExceptionGroup(
-	fieldKey: string,
-): "model" | "reasoning_effort" | "permissions" | undefined {
-	const { keyPath } = configurationFieldAddress(fieldKey);
-	const rootKey = keyPath[0] === "profiles" ? keyPath[2] : keyPath[0];
-	if (rootKey === "model") return "model";
-	if (rootKey === "model_reasoning_effort") return "reasoning_effort";
-	if (
-		["approval_policy", "approvals_reviewer", "sandbox_mode", "sandbox_workspace_write", "permissions"].includes(
-			rootKey ?? "",
-		)
-	)
-		return "permissions";
-	return undefined;
-}
 
 export function ensureCodexConfigurationSourceProfile(store: CodexConfigurationSyncStore, sourceIdentity: string) {
 	const existing = Object.values(store.profiles).find((profile) => profile.sourceIdentity === sourceIdentity);
@@ -191,10 +180,11 @@ export function updateCodexConfigurationProfileFields(
 ) {
 	const profile = store.profiles[profileId];
 	if (!profile) throw new Error("Codex profile 不存在。");
-	if (Object.keys(fields).some(isCodexDesktopConfigurationField))
-		throw new Error("desktop 设置不属于 Kanban 可共享或编辑的配置。");
+	if (Object.keys(fields).some(isCodexLocalStateConfigurationField))
+		throw new Error("本地状态不属于 Kanban 可共享或编辑的配置。");
 	for (const [fieldKey, value] of Object.entries(fields)) {
 		const previous = profile.fields[fieldKey];
+		if (sameConfigurationField(previous, value)) continue;
 		const priorFieldVersion = profile.fieldVersions[fieldKey];
 		const priorChange = store.changes.find(
 			(entry) =>

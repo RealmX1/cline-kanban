@@ -338,7 +338,7 @@ const TERMINAL_AGENT_MODEL_CATALOG_PROBE_CONTRACTS: Record<
 		binary: "codex",
 		args: ["debug", "models"],
 		timeoutMs: 10_000,
-		maxBufferBytes: 1024 * 1024,
+		maxBufferBytes: 4 * 1024 * 1024,
 		parseStdout: parseCodexModelCatalog,
 	},
 	cursor: {

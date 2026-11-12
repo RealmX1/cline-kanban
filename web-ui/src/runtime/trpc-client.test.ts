@@ -163,7 +163,7 @@ describe("runtime tRPC client page-load nonce", () => {
 		await reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime();
 		fakeRuntime.state.nonceAcceptedByRuntime = "isolated-restarted-runtime";
 		await fetchCodexConfigurationSyncState("isolated-independent-restart");
-		const requests = requestsTo(fakeRuntime.observedRequests, "runtime.getCodexConfigurationSyncActiveState");
+		const requests = requestsTo(fakeRuntime.observedRequests, "runtime.getCodexConfigurationSyncOverview");
 		expect(
 			requests.map((request) => request.headers[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME]),
 		).toEqual(["nonce-1", "nonce-2"]);
