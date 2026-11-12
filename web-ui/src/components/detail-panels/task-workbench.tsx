@@ -56,8 +56,13 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 	queueAnnouncement,
 	onOpenQueue,
 	mobileModuleLayout,
+	firstModuleHeaderEndActions,
 }: {
-	modules: Record<Module, ReactNode | ((headerNavigationContent: ReactNode) => ReactNode)>;
+	modules: Record<
+		Module,
+		ReactNode | ((headerNavigationContent: ReactNode, headerEndActions: ReactNode) => ReactNode)
+	>;
+	firstModuleHeaderEndActions?: ReactNode;
 	moduleLabels?: Record<Module, string>;
 	defaultSlots?: readonly [Module, Module];
 	moduleSlotsStorageKey?: LocalStorageKey;
@@ -155,7 +160,11 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 					const isModuleVisible = mobileModuleLayout
 						? mobileModuleLayout.visibleModules.includes(module)
 						: slot !== -1 || module === foregroundModule;
-					const moduleContent: ReactNode | ((headerNavigationContent: ReactNode) => ReactNode) = modules[module];
+					const moduleContent = modules[module];
+					const headerEndActions =
+						!isMobileModuleLayout && slot === 0 && firstModuleHeaderEndActions ? (
+							<div className="ml-auto flex shrink-0 items-center">{firstModuleHeaderEndActions}</div>
+						) : null;
 					const headerNavigationContent = (
 						<div
 							data-task-workbench-header-navigation=""
@@ -245,7 +254,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 					);
 					const renderedModuleContent: ReactNode =
 						typeof moduleContent === "function"
-							? moduleContent(isMobileModuleLayout ? undefined : headerNavigationContent)
+							? moduleContent(isMobileModuleLayout ? undefined : headerNavigationContent, headerEndActions)
 							: moduleContent;
 					return (
 						<div
@@ -272,6 +281,7 @@ export function TaskWorkbench<Module extends string = TaskWorkbenchModule>({
 									)}
 								>
 									{headerNavigationContent}
+									{headerEndActions}
 								</div>
 							) : null}
 							<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto">

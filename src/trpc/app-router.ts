@@ -225,6 +225,7 @@ import {
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
+	runtimeAgentPromptFileAttachmentReferenceSchema,
 	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
@@ -345,6 +346,7 @@ import {
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveAgentPromptFileAttachmentRequestSchema,
 	runtimeSaveAgentPromptImageAttachmentsRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
@@ -669,6 +671,7 @@ import {
 } from "../notifications/notification-speech-synthesis";
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
+import { savePersistentAgentPromptFileAttachment } from "../state/persistent-agent-prompt-file-attachments";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -1657,6 +1660,10 @@ const runtimeApplicationNotificationIntelligenceProcedureRouter = t.router({
 });
 
 const runtimeApplicationSupportProcedureRouter = t.router({
+	saveAgentPromptFileAttachment: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeSaveAgentPromptFileAttachmentRequestSchema)
+		.output(runtimeAgentPromptFileAttachmentReferenceSchema)
+		.mutation(({ input }) => savePersistentAgentPromptFileAttachment(input)),
 	saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
 		.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))

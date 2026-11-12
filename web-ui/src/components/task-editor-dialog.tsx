@@ -442,6 +442,12 @@ export function TaskEditorDialogForm({
 	const [mode, setMode] = useState<"single" | "multi">("single");
 	const [createMore, setCreateMore] = useState(false);
 	const [composerResetKey, setComposerResetKey] = useState(0);
+	const [isPreparingAttachments, setIsPreparingAttachments] = useState(false);
+	const attachmentPreparationPendingRef = useRef(false);
+	const handleAttachmentPreparationPendingChange = useCallback((pending: boolean) => {
+		attachmentPreparationPendingRef.current = pending;
+		setIsPreparingAttachments(pending);
+	}, []);
 	const [taskPrompts, setTaskPrompts] = useState<string[]>([]);
 	const inputRefs = useRef<(HTMLInputElement | null)[]>([]);
 	const nextFocusIndexRef = useRef<number | null>(null);
@@ -796,6 +802,7 @@ export function TaskEditorDialogForm({
 		acceptedBatchGestureCharacteristics?: WebUiUserDecisionClientCharacteristics,
 	) => {
 		if (
+			attachmentPreparationPendingRef.current ||
 			submissionInFlightRef.current ||
 			(batchSubmissionInFlightRef.current && !promptOverride) ||
 			isTaskCreationWaitingForRelationDraftHydration ||
@@ -882,7 +889,8 @@ export function TaskEditorDialogForm({
 			setTaskEditorOperationStatusText("正在保存任务…");
 			if (taskEditorMode === "create" && !priorPending)
 				await ensureOneRuntimeAllocatedTaskIdReadyForTaskEditorSubmission(assignment.workspaceId);
-			if (latestSubmissionInputRef.current !== inputSnapshot) return false;
+			if (attachmentPreparationPendingRef.current || latestSubmissionInputRef.current !== inputSnapshot)
+				return false;
 			acceptedAssignmentInputSnapshot = JSON.stringify({
 				...(JSON.parse(inputSnapshot) as Record<string, unknown>),
 				workspaceId: assignment.workspaceId,
@@ -1240,7 +1248,12 @@ export function TaskEditorDialogForm({
 	);
 
 	const submitMultipleTasks = async (action: "create" | "start") => {
-		if (batchSubmissionInFlightRef.current || submissionInFlightRef.current) return;
+		if (
+			attachmentPreparationPendingRef.current ||
+			batchSubmissionInFlightRef.current ||
+			submissionInFlightRef.current
+		)
+			return;
 		const gesture = lastCreationGestureRef.current;
 		if (!gesture || performance.now() - gesture.observedAt > 1000) return;
 		const batchGestureCharacteristics = collectWebUiUserDecisionClientCharacteristicsFromTriggeringUserGestureEvent(
@@ -1341,6 +1354,7 @@ export function TaskEditorDialogForm({
 	}, []);
 
 	const primaryActionDisabled =
+		isPreparingAttachments ||
 		!branchRef ||
 		(mode === "multi" ? validTaskCount === 0 : !hasPromptDraftContent) ||
 		Boolean(codexReasoningEffortValidationError) ||
@@ -1835,12 +1849,16 @@ export function TaskEditorDialogForm({
 												</label>
 
 												<TaskPromptComposer
-													key={`task-prompt-composer-${composerResetKey}`}
+													key={`task-prompt-composer-${editorSessionWorkspaceId}-${editingTaskId}-${composerResetKey}`}
 													value={promptDraft}
 													onValueChange={setPromptDraft}
 													onValueBlur={() => propagatePromptDraft(promptDraft)}
 													images={images}
 													onImagesChange={onImagesChange}
+													allowFileAttachments
+													onAttachmentPreparationPendingChange={handleAttachmentPreparationPendingChange}
+													enabled={open}
+													disabled={isTaskEditorPersisting}
 													placeholder="描述要完成的任务…"
 													aria-label="任务正文"
 													minimumTextareaHeight={180}
@@ -1851,21 +1869,22 @@ export function TaskEditorDialogForm({
 												/>
 												<div className="flex items-center justify-between mt-1.5">
 													<p className="text-[11px] text-text-tertiary">
-														Use{" "}
+														使用{" "}
 														<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
 															@file
 														</code>{" "}
-														to reference files. Drag and drop or{" "}
+														引用项目文件。可拖放附件，或按{" "}
 														<code className="rounded bg-surface-3 px-1 py-px font-mono text-[11px]">
 															{pasteShortcutLabel}
 														</code>{" "}
-														also adds images.
+														粘贴图片。单文件最大 20MB。
 													</p>
 													{taskEditorMode === "create" && detectedItems.length >= 2 ? (
 														<button
 															type="button"
 															onClick={handleSplitIntoTasks}
 															disabled={
+																isPreparingAttachments ||
 																isTaskCreationWaitingForRelationDraftHydration ||
 																relationModeling.hasChanges ||
 																Boolean(relationModeling.draft.createdTaskId) ||
@@ -2056,13 +2075,7 @@ export function TaskEditorDialogForm({
 										size="sm"
 										onClick={handleCreateSingle}
 										{...FORM_PRIMARY_ACTION_SUBMIT_SHORTCUT_BUTTON_PROPS}
-										disabled={
-											!hasPromptDraftContent ||
-											Boolean(codexReasoningEffortValidationError) ||
-											!branchRef ||
-											isTaskCreationWaitingForRelationDraftHydration ||
-											isRelationAwareCreationInFlight
-										}
+										disabled={primaryActionDisabled}
 									>
 										<span className="inline-flex items-center">
 											{taskEditorMode === "edit" ? "保存更改" : "创建任务"}
@@ -2076,13 +2089,7 @@ export function TaskEditorDialogForm({
 													variant="primary"
 													size="sm"
 													onClick={() => handleRunSingleStartAction(primaryStartAction)}
-													disabled={
-														!hasPromptDraftContent ||
-														Boolean(codexReasoningEffortValidationError) ||
-														!branchRef ||
-														isTaskCreationWaitingForRelationDraftHydration ||
-														isRelationAwareCreationInFlight
-													}
+													disabled={primaryActionDisabled}
 													className={onCreateStartAndOpen ? "rounded-r-none" : undefined}
 												>
 													<span className="inline-flex items-center">
@@ -2095,13 +2102,7 @@ export function TaskEditorDialogForm({
 														<Button
 															variant="primary"
 															size="sm"
-															disabled={
-																!hasPromptDraftContent ||
-																Boolean(codexReasoningEffortValidationError) ||
-																!branchRef ||
-																isTaskCreationWaitingForRelationDraftHydration ||
-																isRelationAwareCreationInFlight
-															}
+															disabled={primaryActionDisabled}
 															className="rounded-l-none border-l border-white/20 px-1"
 															aria-label="More start options"
 														>

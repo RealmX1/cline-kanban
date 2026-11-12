@@ -406,6 +406,38 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 	};
 }
 
+for (const width of [320, 390, 1440]) {
+	test(`${width}px 真实 App 项目入口从全局顶栏移至会话工具栏，收窄范围保留原终端`, async ({ page }) => {
+		await page.setViewportSize({ width, height: 900 });
+		const fixture = await openRealApp(page, true);
+		const projectSwitcher = page.getByTestId("top-bar-project-switcher-trigger");
+		const projectButton = page.getByTestId("agent-session-toolbar-focused-task-project-narrowing-button");
+		await expect(projectSwitcher).toContainText("All projects");
+		await expect(projectButton).toHaveText("编辑来源项目");
+		await expect(page.locator("[data-focus-view-session-information-toolbar]")).toContainText("编辑来源项目");
+		await expect(
+			page.locator('[data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"]'),
+		).toHaveCount(0);
+		const terminal = await page.locator(".xterm-screen").elementHandle();
+		await expect.poll(fixture.terminalConnectionCount).toBe(1);
+		const connectionsBeforeScopeChange = fixture.terminalConnectionCount();
+		await projectButton.click();
+		await expect(projectSwitcher).toContainText("编辑来源项目");
+		await expect(projectButton).toHaveCount(0);
+		expect(await terminal!.evaluate((element) => element.isConnected)).toBe(true);
+		expect(fixture.terminalConnectionCount()).toBe(connectionsBeforeScopeChange);
+		expect(new URL(page.url()).searchParams.get("task")).toBe(focusedTask.id);
+		const expandNavigation = page.getByRole("button", { name: "展开上方导航与工具", exact: true });
+		if (await expandNavigation.isVisible()) await expandNavigation.click();
+		await projectSwitcher.click();
+		await page.getByTestId("project-switcher-board-scope-all-projects-pseudo-row").click();
+		await page.goto(`/${sourceProjectId}`);
+		await expect(projectSwitcher).toContainText("All projects");
+		await expect(projectButton).toHaveCount(0);
+		expect(fixture.errors).toEqual([]);
+	});
+}
+
 for (const action of ["创建任务", "创建并启动"] as const) {
 	test(`${action}：慢保存确认后关闭真实 App 浮窗，不重新打开空白窗口`, async ({ page }) => {
 		const fixture = await openRealApp(page);

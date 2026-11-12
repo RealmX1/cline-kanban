@@ -14,7 +14,7 @@ Focus View 的 `Option/Alt + ↑/↓` 在 All projects 下按左栏 Pinned → R
 按住 Option 连续切换期间，Recent 的显示与导航顺序一起锁定，内容和打开时间照常更新；新项追加到末尾，失效项立即移除。松开 Option、失焦、页面隐藏、退出 Focus View、切换范围或改变排序/筛选后恢复实时排序。导航所有者常驻 App，跨项目加载期间以在途目标为当前位置，不依赖详情组件是否挂载。单项目范围按当前展示分组循环，Shelved 可包含来自不同原 Stage 的任务。
 
 **Selected Board Or Single Project Scope（范围）**：
-顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，触发按钮后面接一个「› 项目名」按钮）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、点「› 项目名」、`⌘⇧E` 或顶栏 Layers 按钮（与 `⌘⇧E` 同一个处理器）。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
+顶栏项目切换器选中的范围，`board_scope_all_projects`（首行 All projects）或 `single_project_scope`（选了某个项目），只有一份状态（`web-ui/src/hooks/use-selected-board-or-single-project-scope.ts`，App 持有、经宿主 context 下发）。看板页据此在 All projects 首页（分区列看板）与项目看板之间切换，Focus View 左栏据此在本面板与当前项目的 stage 列表之间切换。从面板里跨项目打开任务时范围不变，变的只是当前项目（焦点任务所属的项目，Agent 会话工具栏最左侧显示所属项目按钮，全局顶栏仅保留 All projects 切换器）；只有用户明确选了某个项目才收窄到单项目：切换器、数字槽热键（Board Scope 下按到当前项目也收窄，不是 no-op）、首页侧栏、点会话工具栏的项目按钮、`⌘⇧E` 或顶栏 Layers 按钮（与 `⌘⇧E` 同一个处理器）。旧键 `kanban.focus-view-left-column-task-list-scope.v1` 一次性迁移后删除。
 - **每个标签页各存一份**（2026-10-05）：实际范围存 sessionStorage（重载、Chrome 丢弃后恢复都保留），localStorage 同名键只是新开标签页的默认值。共用 localStorage 时，重载会让每个标签页继承「最后写入者」的范围，多标签页下表现为「没操作就跳了」。
 - **`⌘⇧E`（非 mac 为 Ctrl+Shift+E）**：Board Scope ⇄ 焦点任务所属项目（看板页没有焦点任务时是当前项目）。精确匹配平台修饰键，保留 Ctrl+E 的原生行尾移动。捕获阶段接管新组合，终端有焦点时也能切换且不向 agent 发送字符；长按只切换一次。对话框内或没有可切换项目时不响应、不吞键。
 - **探测范围**：范围决定状态流要哪些任务的 git 元数据，见下方 **Workspace Metadata Probe Scope**。

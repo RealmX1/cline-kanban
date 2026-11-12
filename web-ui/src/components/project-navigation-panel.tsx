@@ -43,6 +43,7 @@ interface TaskCountBadge {
 }
 
 export function ProjectNavigationPanel({
+	desktopSidebarVisibilityButton,
 	projects,
 	isLoadingProjects = false,
 	currentProjectId,
@@ -62,6 +63,7 @@ export function ProjectNavigationPanel({
 	isDesktopSidebarHidden = false,
 	setSidebarCollapsed,
 }: {
+	desktopSidebarVisibilityButton?: ReactNode;
 	projects: RuntimeProjectSummary[];
 	isLoadingProjects?: boolean;
 	currentProjectId: string | null;
@@ -216,6 +218,7 @@ export function ProjectNavigationPanel({
 					borderRight: "1px solid var(--color-divider)",
 				}}
 			>
+				{!isMobile ? desktopSidebarVisibilityButton : null}
 				{!isMobile && (
 					<div
 						role="separator"
@@ -329,7 +332,9 @@ export function ProjectNavigationPanel({
 							aria-label="Close sidebar"
 							className="min-w-[44px] min-h-[44px] -mr-2"
 						/>
-					) : null}
+					) : (
+						desktopSidebarVisibilityButton
+					)}
 				</div>
 				<div className="mt-2 rounded-md bg-surface-2 border border-border p-1">
 					<div className="grid grid-cols-2 gap-1">

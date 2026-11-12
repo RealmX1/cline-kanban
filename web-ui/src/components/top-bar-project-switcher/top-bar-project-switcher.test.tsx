@@ -46,7 +46,6 @@ function createSwitcherState(overrides: Partial<TopBarProjectSwitcherState> = {}
 		onClearNumericSlotGroupNumber: () => {},
 		selectedBoardOrSingleProjectScope: "single_project_scope",
 		onSelectBoardScopeAllProjects: () => {},
-		boardScopeFocusViewFocusedTaskProjectId: null,
 		...overrides,
 	};
 }
@@ -283,28 +282,19 @@ describe("TopBarProjectSwitcher", () => {
 		expect(onSelectBoardScopeAllProjects).toHaveBeenCalledTimes(1);
 	});
 
-	it("in Board Scope: trigger reads All projects › focused task's project, Current moves to the pseudo-row, and open + Enter narrows back to the current project", async () => {
+	it("All Projects 顶栏只保留项目切换器，打开后按 Enter 仍收窄到当前项目", async () => {
 		const onSelectProject = vi.fn();
 		await renderSwitcher(
 			createSwitcherState({
 				onSelectProject,
 				selectedBoardOrSingleProjectScope: "board_scope_all_projects",
-				boardScopeFocusViewFocusedTaskProjectId: "bravo",
 			}),
 		);
 		expect(queryTrigger()?.textContent).toContain("All projects");
-		const focusedTaskProjectBreadcrumbButton = document.body.querySelector<HTMLButtonElement>(
-			'[data-testid="top-bar-project-switcher-board-scope-focused-task-project-breadcrumb"]',
-		);
-		expect(focusedTaskProjectBreadcrumbButton?.textContent).toContain("bravo");
-		// 面包屑是独立按钮：点它直接收窄到焦点任务所属项目，不打开切换器。
-		expect(queryTrigger()?.contains(focusedTaskProjectBreadcrumbButton ?? null)).toBe(false);
-		await act(async () => {
-			focusedTaskProjectBreadcrumbButton?.click();
-		});
-		expect(onSelectProject).toHaveBeenCalledWith("bravo");
+		expect(container.querySelectorAll("button")).toHaveLength(1);
+		expect(container.textContent).not.toContain("bravo");
+		expect(onSelectProject).not.toHaveBeenCalled();
 		expect(document.body.querySelector('[data-testid="top-bar-project-switcher-panel"]')).toBeNull();
-		onSelectProject.mockClear();
 
 		await openSwitcher(
 			createSwitcherState({ onSelectProject, selectedBoardOrSingleProjectScope: "board_scope_all_projects" }),

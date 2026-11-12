@@ -6,7 +6,11 @@
 
 ## 侧栏显隐与快捷键
 
-桌面顶栏常驻显示左栏开关；Focus View 还提供任务工作台开关，按钮按当前显隐状态显示提示与快捷键。右侧开关控制整个工作台，包括 Sessions、Prompts、可视化和 Changes；上下布局时同样控制终端下方的工作台。
+桌面隐藏按钮位于各面板自身的标题行：首页项目导航放在品牌行右端，图标列模式放在列顶；单项目与 All Projects 的任务列表固定标题行统一为「隐藏按钮 → Create task → 其他操作」。工作台隐藏按钮位于首个模块标题行右端，Changes 模式放在对应工具栏右端；上下布局继续控制终端下方的整个工作台，箭头随方向调整。
+
+可视化、Relations 与探索地图进入全屏前景后，不显示工作台隐藏入口；先返回嵌入面板再隐藏，避免保留不可见前景的焦点与背景交互限制。Task Lookup 显示任务列表时，隐藏按钮按列表实际显隐切换，不受后台 Diff 最大化标记影响。
+
+面板隐藏后，内容区顶部对应的左侧或右侧提供悬浮恢复入口，不占布局空间。入口默认仅图标，悬停或键盘聚焦时显示完整操作名，Tooltip 同时标注快捷键；只有明确点击才恢复面板。`DesktopSidebarVisibilityButton` 复用公共 Button 与 Tooltip，点击后在标题入口和悬浮入口之间交接焦点。
 
 | 操作 | macOS | Windows / Linux |
 | --- | --- | --- |
@@ -15,6 +19,8 @@
 | 启动全部就绪 Backlog 任务 | `Cmd+Shift+B` | `Ctrl+Shift+B` |
 
 首页项目栏、Focus View 任务列表与工作台分别记忆隐藏偏好，切任务、切项目和刷新后保留，重置布局后全部显示。隐藏保留原尺寸、首页图标列状态、模块选择、草稿、滚动位置及已挂载的终端和 iframe。Diff 最大化时重新打开左栏会退出最大化，隐藏工作台也会恢复 Agent 区域。
+
+工作台隐藏时保留离屏布局，并通过 `visibility: hidden` 与 `aria-hidden` 隔离交互；不要改回 `display: none`，否则隐藏期间的响应式重排可能使 iframe 内部滚动范围归零。离屏位置由内容区裁剪，保持预览可见性观察为不可见。跨项目打开任务的加载外壳也提供相同的列表标题和悬浮入口。
 
 热键在普通输入框与终端中有效，精确匹配平台修饰键，macOS 的 `Ctrl+B` 留给原生输入操作。输入法组字和对话框内的操作不触发；长按只执行一次。新的有效自动预览请求在现有接受与去重协议通过后展开工作台，旧请求重放和失败抑制保持原规则。
 
@@ -38,7 +44,7 @@
 
 Focus View 的 Stage、Pinned、Running、Cache Warm、Recent 和 Shelved 复用 `FocusViewGroupHeader`，桌面标题高 32px、分组间距 4px。只有箭头切换展开态；分组标题使用共享跳转计算，落在此前吸顶标题的下方。行内与 sticky 孪生标题共享视觉和状态，滚动落点仍以 `stage-header-rail-geometry.ts` 为单一来源。Recent 的筛选与排序收入标题右侧浮层，并显示生效条件数量；首页横列暂保留原呈现。
 
-工作台保留无障碍区域名「任务工作台」，每区的模块下拉与内容动作共用一条标题栏。布局按钮直接打开「自动／左右／上下」单层单选菜单，沿用持久偏好与重置逻辑。可视化首行保留模块选择以及新标签、全屏、关闭入口，产物选择和刷新位于第二行；任务署名只在独立页和全屏保留。响应式 container 只加在首行工具栏，不加到全屏宿主，避免跨断点时其子元素失去布局。`TaskWorkbench.modules` 接受内容或渲染函数，后者将宿主的 `headerNavigationContent` 放入模块原有标题行；已有 `headerContent` 继续承载工具内部导航。没有内容或内部标题时仍提供宿主工具栏，避免空模块失去切换入口。
+工作台保留无障碍区域名「任务工作台」，每区的模块下拉与内容动作共用一条标题栏。布局按钮直接打开「自动／左右／上下」单层单选菜单，沿用持久偏好与重置逻辑。可视化首行保留模块选择以及新标签、全屏、关闭入口，产物选择和刷新位于第二行；任务署名只在独立页和全屏保留。响应式 container 只加在首行工具栏，不加到全屏宿主，避免跨断点时其子元素失去布局。`TaskWorkbench.modules` 接受内容或渲染函数，后者将宿主的 `headerNavigationContent` 和 `headerEndActions` 分别放入模块原有标题行的导航区和右端；隐藏按钮仅传给首格。已有 `headerContent` 继续承载工具内部导航。没有内容或内部标题时仍提供宿主工具栏，避免空模块失去切换入口。
 
 All Projects 的 Pinned 与 Project Specific View 一样位于主滚动口之外，最多占面板高度的 50%，内容独立滚动，折叠和显示数量沿用原偏好。其余分组通过 `useStageHeaderPinLayout`、`useFocusViewGroupSectionNavigation` 和 `FocusViewGroupHeaderRails` 共享测量、上下吸顶及滚动补偿；跨项目传入分组属性与 workspace/task 复合身份的源行选择器。Pinned 副本不增加定位源，当前任务副本跟随真实分组标题，分组收起仍保留焦点源行；空 body 不渲染。两种 Focus View 的已删除 Task 入口均位于 Create task 同行右侧。
 
@@ -68,4 +74,4 @@ Comments 已从工具页签移出。`TaskCommentsDialogProvider` 由应用根提
 
 自动化入口为 `web-ui/tests/desktop-focus-view-task-workbench.spec.ts`，覆盖 1080×1920、1440×2560、769×1024、1920×1080、格位交换、终端连接连续性、草稿保留、拖动及刷新恢复、手机评论触控入口与读取失败。fixture 拦截 API 和 WebSocket，不访问真实任务或关系账本。
 
-侧栏专项入口为 `web-ui/tests/sidebar-visibility.spec.ts`，覆盖横竖桌面布局、按钮与热键、独立持久化与重置、尺寸和滚动恢复、草稿及终端连接、iframe 连续性、自动预览去重、Diff 最大化协调与手机抽屉和页签。
+侧栏专项入口为 `web-ui/tests/sidebar-visibility.spec.ts`，覆盖两种项目范围的标题按钮顺序、横竖桌面布局、悬浮入口的默认尺寸及悬停／聚焦展开、无 hover 触摸、焦点交接、按钮与热键、独立持久化与重置、尺寸和滚动恢复、草稿及终端连接、隐藏期间响应式切换的 iframe 连续性、自动预览去重、Diff 最大化协调、跨项目加载与手机抽屉和页签。

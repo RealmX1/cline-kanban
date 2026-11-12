@@ -18,8 +18,8 @@ import type {
 	RuntimeProjectPermanentDeletionResult,
 } from "@/runtime/types";
 import { type StreamedTaskSessionSummariesApplier, useRuntimeStateStream } from "@/runtime/use-runtime-state-stream";
-import { isLocalhostAccess } from "@/utils/localhost-detection";
 import { useWindowEvent } from "@/utils/react-use";
+import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
 const DIRECTORY_PICKER_UNAVAILABLE_MARKERS = [
 	"could not open directory picker",
@@ -179,7 +179,7 @@ export function useProjectNavigation({
 	);
 
 	const handleAddProject = useCallback(async () => {
-		if (!isLocalhostAccess()) {
+		if (!isBrowserOnTheSameMachineAsAgentRuntimeHost()) {
 			openAddProjectDialog();
 			return;
 		}

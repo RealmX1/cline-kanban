@@ -16,12 +16,14 @@ export function TaskVisualizationArtifactsPanel({
 	taskId,
 	controller,
 	headerNavigationContent,
+	headerEndActions,
 	onClosePreview,
 	taskIncarnationCreatedAtEpochMs,
 	detachedForeground = false,
 	initialSelection,
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	workspaceId: string | null;
 	taskId: string;
 	controller: ReturnType<typeof useTaskVisualizationArtifacts>;
@@ -370,6 +372,7 @@ export function TaskVisualizationArtifactsPanel({
 					</div>
 				) : null}
 				<div className="ml-auto flex shrink-0 items-center gap-1">{visualizationHeaderActions}</div>
+				{isExpanded ? null : headerEndActions}
 			</div>
 			<div className="flex h-8 min-w-0 shrink-0 items-center gap-1 border-b border-border px-2">
 				<select

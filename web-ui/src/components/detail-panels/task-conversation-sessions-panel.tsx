@@ -126,6 +126,7 @@ function readTaskConversationSessionReadReceipts(): Record<string, number> {
 export function TaskConversationSessionsPanel({
 	isTaskAgentExecutionDisabled = false,
 	headerNavigationContent,
+	headerEndActions,
 	workspaceId,
 	taskCard,
 	workspaceTaskId,
@@ -140,6 +141,7 @@ export function TaskConversationSessionsPanel({
 	onCreateTaskConversationSession: _onCreateTaskConversationSession,
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	isTaskAgentExecutionDisabled?: boolean;
 	workspaceId?: string | null;
 	taskCard?: BoardCard;
@@ -253,6 +255,7 @@ export function TaskConversationSessionsPanel({
 				>
 					新建会话
 				</Button>
+				{headerEndActions}
 			</div>
 			<div className="min-h-0 flex-1 overflow-y-auto p-1.5">
 				{workspaceId && taskCard?.independentTaskCreationProvenance && (

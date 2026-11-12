@@ -130,6 +130,26 @@ it("工作台省略重复任务名，独立页面仍显示完整归属", async (
 	expect(container.querySelector('[aria-label="可视化任务署名"]')?.textContent).toContain("真实任务名称");
 });
 
+it("前景不提供隐藏工作台入口，返回后恢复该入口", async () => {
+	await act(async () =>
+		root.render(
+			<TaskVisualizationArtifactsPanel
+				workspaceId="workspace-a"
+				taskId="task-a"
+				controller={controller}
+				headerEndActions={<button type="button" aria-label="隐藏任务工作台" />}
+			/>,
+		),
+	);
+	expect(container.querySelector('[aria-label="隐藏任务工作台"]')).not.toBeNull();
+	await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="全屏预览"]')!.click());
+	expect(container.querySelector('[data-expanded-foreground-view="active"]')).not.toBeNull();
+	expect(container.querySelector('[aria-label="隐藏任务工作台"]')).toBeNull();
+	await act(async () => container.querySelector<HTMLButtonElement>("[data-foreground-view-return]")!.click());
+	expect(container.querySelector('[data-expanded-foreground-view="active"]')).toBeNull();
+	expect(container.querySelector('[aria-label="隐藏任务工作台"]')).not.toBeNull();
+});
+
 it("来自另一个 workspace 的同号任务署名不会串入当前预览", async () => {
 	const mismatched = {
 		...controller,
