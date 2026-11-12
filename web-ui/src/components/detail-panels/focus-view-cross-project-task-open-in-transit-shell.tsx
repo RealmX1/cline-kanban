@@ -1,5 +1,6 @@
 import { X } from "lucide-react";
 import { type ReactElement, useState } from "react";
+import { DesktopSidebarVisibilityButton } from "@/components/desktop-sidebar-visibility-button";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
 import { Button } from "@/components/ui/button";
@@ -22,20 +23,30 @@ export function FocusViewCrossProjectTaskOpenInTransitShell({
 	targetTaskTitle,
 	onCancel,
 	isFocusViewTaskListSidebarHidden = false,
+	onToggleFocusViewTaskListSidebar,
 }: {
 	host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue;
 	targetProjectName: string | null;
 	targetTaskTitle: string | null;
 	onCancel: () => void;
 	isFocusViewTaskListSidebarHidden?: boolean;
+	onToggleFocusViewTaskListSidebar?: () => void;
 }): ReactElement {
 	const [taskCardsPanelRatio] = useState(loadDetailTaskCardsPanelRatioPreference);
 	const isMobile = useIsMobile();
 	return (
 		<div
-			className="flex min-h-0 flex-1 overflow-hidden bg-surface-0"
+			className="relative flex min-h-0 flex-1 overflow-hidden bg-surface-0"
 			data-testid="focus-view-cross-project-task-open-in-transit-shell"
 		>
+			{!isMobile && isFocusViewTaskListSidebarHidden && onToggleFocusViewTaskListSidebar ? (
+				<DesktopSidebarVisibilityButton
+					side="left"
+					label="任务列表"
+					isHidden
+					onToggle={onToggleFocusViewTaskListSidebar}
+				/>
+			) : null}
 			<div
 				className="flex min-h-0 min-w-0 flex-col border-r border-border"
 				style={{
@@ -43,7 +54,19 @@ export function FocusViewCrossProjectTaskOpenInTransitShell({
 					display: !isMobile && isFocusViewTaskListSidebarHidden ? "none" : undefined,
 				}}
 			>
-				<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />
+				<CrossProjectRecentlyActiveTaskSwitcherPanel
+					host={host}
+					sidebarVisibilityButton={
+						!isMobile && onToggleFocusViewTaskListSidebar ? (
+							<DesktopSidebarVisibilityButton
+								side="left"
+								label="任务列表"
+								isHidden={false}
+								onToggle={onToggleFocusViewTaskListSidebar}
+							/>
+						) : undefined
+					}
+				/>
 			</div>
 			<div className="flex min-h-0 min-w-0 flex-1 flex-col items-center justify-center gap-3 text-text-secondary">
 				<div className="flex items-center gap-2 text-sm">

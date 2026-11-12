@@ -96,12 +96,14 @@ it("区域选择进入内容标题行，布局变化保留模块和 iframe 身�
 			mobileModuleLayout={
 				isMobile ? { visibleModules: ["task_sessions"], heightFillingModule: "task_sessions" } : undefined
 			}
+			firstModuleHeaderEndActions={<button type="button" aria-label="隐藏任务工作台" />}
 			modules={{
-				task_sessions: (headerNavigationContent) => (
+				task_sessions: (headerNavigationContent, headerEndActions) => (
 					<>
 						<header>
 							{headerNavigationContent}
 							<button type="button">新建会话</button>
+							{headerEndActions}
 						</header>
 						<input defaultValue="草稿" />
 						<iframe title="持续预览" />
@@ -119,9 +121,13 @@ it("区域选择进入内容标题行，布局变化保留模块和 iframe 身�
 		const module = container.querySelector('[data-task-workbench-module="task_sessions"]')!;
 		expect(module.querySelectorAll("header")).toHaveLength(1);
 		expect(module.querySelector('header [aria-label="工作台格位 1"]')).not.toBeNull();
+		expect(
+			module.querySelector("header")?.lastElementChild?.querySelector("button")?.getAttribute("aria-label"),
+		).toBe("隐藏任务工作台");
 		const input = module.querySelector("input");
 		const frame = module.querySelector("iframe");
 		await act(async () => root.render(renderWorkbench(true)));
+		expect(container.querySelector('[aria-label="隐藏任务工作台"]')).toBeNull();
 		await act(async () => root.render(renderWorkbench(false)));
 		expect(module.querySelector("input")).toBe(input);
 		expect(module.querySelector("iframe")).toBe(frame);
@@ -131,6 +137,10 @@ it("区域选择进入内容标题行，布局变化保留模块和 iframe 身�
 			selector.dispatchEvent(new Event("change", { bubbles: true }));
 		});
 		expect(container.querySelector('[data-task-workbench-module="task_visualizations"] select')).not.toBeNull();
+		expect(
+			container.querySelector('[data-task-workbench-module="task_visualizations"] [aria-label="隐藏任务工作台"]'),
+		).not.toBeNull();
+		expect(module.querySelector('[aria-label="隐藏任务工作台"]')).toBeNull();
 	} finally {
 		act(() => root.unmount());
 		container.remove();
