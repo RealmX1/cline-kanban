@@ -292,7 +292,11 @@ if(owner.pid===process.pid) {
   return {launchNonce:nonce,systemBootIdentity:materials.systemBootIdentity,pidNamespaceIdentity,capturedAtEpochMs:Date.now(),ancestorEvidenceComplete:frozenDispatchAncestorEvidenceComplete,ancestorProcesses:baseline.filter(entry=>frozenDispatchAncestorPids.has(entry.pid)).map(({pid,parent,nativeProcessGenerationIdentity})=>({pid,parent,nativeProcessGenerationIdentity})),baselineDescendantProcesses:baseline.filter(entry=>frozenBaselineDescendantPids.has(entry.pid)).map(({pid,parent,nativeProcessGenerationIdentity})=>({pid,parent,nativeProcessGenerationIdentity}))};
  }
  function readProcessGroupSnapshot() {
-  try{return execFileSync('ps',['-axo','pid=,pgid=,stat='],{encoding:'utf8',timeout:5000,maxBuffer:32*1024*1024}).split('\n');}
+  try {
+   const processGroupSnapshotMatches=execFileSync('ps',['-axo','pid=,pgid=,stat='],{encoding:'utf8',timeout:5000,maxBuffer:32*1024*1024}).split('\n').filter(line=>line.trim()).map(line=>line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/));
+   if(processGroupSnapshotMatches.some(match=>!match)||!processGroupSnapshotMatches.some(match=>Number(match?.[1])===process.pid))throw new Error('完整进程组表缺少可核验的监管器身份或包含不可解析的行');
+   return processGroupSnapshotMatches.map(match=>({pid:Number(match[1]),processGroupPid:Number(match[2]),processIsZombie:/^[ZX]/.test(match[3])}));
+  }
   catch(error){throw Object.assign(error,{processSnapshotQuery:'process_group_snapshot'});}
  }
  async function collect() {
@@ -335,7 +339,13 @@ if(owner.pid===process.pid) {
   if(materials.superviseProcessGroup) {
    // Linux 已从同一份 /proc stat 读取代际与 PGID，保留双快照核验而不再派生第三次 ps。
    if(process.platform==='linux'){for(const entry of entries)if(entry.observedProcessGroupPid===process.pid && entry.pid!==process.pid && !entry.processIsZombie)groupMembers.add(entry.pid);}
-   else for(const line of readProcessGroupSnapshot()){const match=line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)/);if(!match)continue;const pid=Number(match[1]);if(match[3].startsWith('Z'))zombies.add(pid);else if(Number(match[2])===process.pid && pid!==process.pid)groupMembers.add(pid);}
+   else {
+    const processGroupSnapshot=readProcessGroupSnapshot();const currentProcessGroupSnapshotPids=new Set(processGroupSnapshot.map(entry=>entry.pid));
+    // 原生枚举后已退出的 PID 由随后完整 ps 进程表补证；表内缺精度进程继续保持未知。
+    entries=entries.filter(entry=>currentProcessGroupSnapshotPids.has(entry.pid));
+    for(const pid of unprovenOwnershipPids)if(pid>0&&!currentProcessGroupSnapshotPids.has(pid))unprovenOwnershipPids.delete(pid);
+    for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid)groupMembers.add(entry.pid);
+   }
   }
   const parents=new Set(entries.filter(entry=>!zombies.has(entry.pid)&&(groupMembers.has(entry.pid)||hasSameProcessGeneration(entry,owned.get(entry.pid)))).map(entry=>entry.pid)); if(linuxKernelContainmentVerified&&!linuxKernelContainmentContinuityLost)parents.add(process.pid); let changed=true;
   while(changed){changed=false;for(const entry of entries)if(entry.pid!==process.pid && parents.has(entry.parent)&&!parents.has(entry.pid)){const parent=entries.find(candidate=>candidate.pid===entry.parent);const current=currentParentGeneration(entry);const currentParent=currentParentGeneration(parent);if(!materials.superviseProcessGroup || (current?.generation===entry.nativeProcessGenerationIdentity && current?.parent===entry.parent && currentParent?.generation===parent?.nativeProcessGenerationIdentity && entry.nativeProcessGenerationIdentity && parent?.nativeProcessGenerationIdentity)){parents.add(entry.pid);changed=true;}}}

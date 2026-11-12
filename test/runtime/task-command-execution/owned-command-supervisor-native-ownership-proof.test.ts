@@ -10,6 +10,11 @@ import { createTempDir } from "../../utilities/temp-dir";
 it.each([
 	"complete",
 	"darwin_unrelated_native_precision_unavailable",
+	"darwin_expired_native_snapshot_rows",
+	"darwin_expired_native_snapshot_rows_nonzero_exit",
+	"darwin_current_native_snapshot_precision_unavailable",
+	"darwin_malformed_process_group_snapshot",
+	"darwin_incomplete_process_group_snapshot",
 	"legacy_zombie_descendant",
 	"native_snapshot_failure_budget_recovers",
 	"process_group_snapshot_failure_budget_recovers",
@@ -286,6 +291,17 @@ it.each([
 							},
 						);
 						if (args[1] === "--snapshot") {
+							if (scenario.startsWith("darwin_expired_native_snapshot_rows") && cycle >= 1)
+								rows.push({
+									pid: 4000 + cycle,
+									processUniqueIdentity: undefined,
+									parentProcessPid: -1,
+									processIdVersion: 0,
+									originalParentProcessIdVersion: 0,
+									outsideCurrentUser: false,
+									processIsZombie: false,
+									hasExecutionOwnershipToken: false,
+								});
 							fullProcessSnapshotCycles.push(cycle);
 							return JSON.stringify({
 								queryProcessPid: 9999,
@@ -297,6 +313,8 @@ it.each([
 					}
 					if (args[0] === "-axo" && args[1] === "pid=,pgid=,stat=") {
 						processGroupSnapshotQueryCount++;
+						if (scenario === "darwin_malformed_process_group_snapshot" && cycle >= 1) return "unreadable row";
+						if (scenario === "darwin_incomplete_process_group_snapshot" && cycle >= 1) return "1 1 S\n";
 						if (processGroupSnapshotFailure && cycle <= 4)
 							throw Object.assign(new Error("故障注入：进程组快照暂时不可读"), { status: 1 });
 					}
@@ -354,7 +372,17 @@ it.each([
 							const reused = processes.get(201);
 							if (reused) processes.set(201, { ...reused, preciseIdentityUnavailable: true, hasNonce: false });
 						} else processes.delete(201);
-						if (!spawnFailureWithoutPid) child.emit("exit", 0);
+						if (!spawnFailureWithoutPid) child.emit("exit", scenario.endsWith("nonzero_exit") ? 3 : 0);
+						if (scenario === "darwin_current_native_snapshot_precision_unavailable")
+							processes.set(401, {
+								parent: -1,
+								group: 401,
+								version: 1401,
+								originalParentVersion: 99999,
+								hasNonce: false,
+								preciseIdentityUnavailable: true,
+								startAndCommand: "Wed Oct 28 12:00:02 2026 current-process-without-native-precision",
+							});
 						if (retiredOwnedCount !== null)
 							for (let index = 0; index < retiredOwnedCount; index++) processes.delete(10_000 + index);
 						if (
@@ -405,6 +433,9 @@ it.each([
 			[
 				"unproven_orphan",
 				"darwin_missing_precision_after_dispatch",
+				"darwin_current_native_snapshot_precision_unavailable",
+				"darwin_malformed_process_group_snapshot",
+				"darwin_incomplete_process_group_snapshot",
 				"unchanged_unproven_process_budget",
 				"unproven_process_changes_after_budget",
 			].includes(scenario)
@@ -419,6 +450,27 @@ it.each([
 		}
 		if (scenario === "legacy_zombie_descendant") {
 			expect(progress.status).toBe("exited");
+			expect(signals).toEqual([]);
+		}
+		if (scenario.startsWith("darwin_expired_native_snapshot_rows")) {
+			expect(progress.status).toBe("exited");
+			expect(progress.returncode).toBe(scenario.endsWith("nonzero_exit") ? 3 : 0);
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(cycle).toBe(1);
+			expect(dispatchCount).toBe(1);
+			expect(signals).toEqual([]);
+		}
+		if (scenario === "darwin_current_native_snapshot_precision_unavailable") {
+			expect(progress.nativeOwnershipUnproven).toBe(true);
+			expect(progress.unprovenOwnershipProcesses.map((entry: { pid: number }) => entry.pid)).toContain(401);
+			expect(progress.status).not.toBe("exited");
+			expect(signals).toEqual([]);
+		}
+		if (["darwin_malformed_process_group_snapshot", "darwin_incomplete_process_group_snapshot"].includes(scenario)) {
+			expect(progress.nativeOwnershipUnproven).toBe(true);
+			expect(progress.nativeQueryFailureObservations[0].query).toBe("process_group_snapshot");
+			expect(progress.status).not.toBe("exited");
+			expect(dispatchCount).toBe(1);
 			expect(signals).toEqual([]);
 		}
 		if (spawnFailureWithoutPid) {
