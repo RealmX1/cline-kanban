@@ -2,6 +2,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import { createRoot as createReactRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DesktopSidebarVisibilityButton } from "@/components/desktop-sidebar-visibility-button";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -976,6 +977,9 @@ describe("ColumnContextPanel left column task list scope", () => {
 				onTaskDragEnd={() => {}}
 				onCreateTask={() => {}}
 				onOpenPermanentlyDeletedTaskHistory={() => {}}
+				sidebarVisibilityButton={
+					<DesktopSidebarVisibilityButton side="left" label="任务列表" isHidden={false} onToggle={() => {}} />
+				}
 			/>
 		);
 		return withHost ? (
@@ -1039,6 +1043,9 @@ describe("ColumnContextPanel left column task list scope", () => {
 		)!;
 		const createButton = visibleHost.querySelector('[aria-label="Create task"]')!;
 		const historyButton = visibleHost.querySelector('[aria-label="已删除 Task"]')!;
+		const hideButton = visibleHost.querySelector('[aria-label="隐藏任务列表"]')!;
+		expect(hideButton).not.toBeNull();
+		expect(createButton.parentElement?.firstElementChild).toBe(hideButton);
 		expect(createButton).not.toBeNull();
 		expect(historyButton).not.toBeNull();
 		expect(createButton.parentElement?.contains(historyButton)).toBe(true);

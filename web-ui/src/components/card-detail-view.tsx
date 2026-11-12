@@ -26,6 +26,7 @@ import { flushSync } from "react-dom";
 import { useHotkeys } from "react-hotkeys-hook";
 import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { showAppToast } from "@/components/app-toaster";
+import { DesktopSidebarVisibilityButton } from "@/components/desktop-sidebar-visibility-button";
 import {
 	AgentConversationChatPanel,
 	type AgentConversationChatPanelHandle,
@@ -675,12 +676,14 @@ function DiffModeButton({
 }
 
 function DiffToolbar({
+	headerEndActions,
 	mode,
 	onModeChange,
 	isExpanded,
 	onToggleExpand,
 	hideExpand,
 }: {
+	headerEndActions?: ReactNode;
 	mode: RuntimeWorkspaceChangesMode;
 	onModeChange: (mode: RuntimeWorkspaceChangesMode) => void;
 	isExpanded: boolean;
@@ -717,6 +720,7 @@ function DiffToolbar({
 					aria-label={isExpanded ? "Collapse split diff view" : "Expand split diff view"}
 				/>
 			) : null}
+			{headerEndActions}
 		</div>
 	);
 }
@@ -793,6 +797,7 @@ export function CardDetailView({
 	isDocumentVisible = true,
 	isTaskChangesSidebarOpen = false,
 	isFocusViewTaskListSidebarHidden = false,
+	onToggleFocusViewTaskListSidebar,
 	isFocusViewWorkbenchSidebarHidden = false,
 	onFocusViewWorkbenchSidebarHiddenChange,
 	isDiffExpanded: controlledIsDiffExpanded,
@@ -805,6 +810,7 @@ export function CardDetailView({
 }: {
 	taskLookupWorkbenchContent?: React.ReactNode;
 	isFocusViewTaskListSidebarHidden?: boolean;
+	onToggleFocusViewTaskListSidebar?: () => void;
 	isFocusViewWorkbenchSidebarHidden?: boolean;
 	onFocusViewWorkbenchSidebarHiddenChange?: (hidden: boolean) => void;
 	isDiffExpanded?: boolean;
@@ -998,9 +1004,10 @@ export function CardDetailView({
 			(foregroundBelongsToThisTask && foregroundView.target.viewKind === "task_visualization"),
 		onAutomaticPreview: showAutomaticVisualizationPreview,
 	});
-	const taskVisualizationPanel = (headerNavigationContent?: ReactNode) => (
+	const taskVisualizationPanel = (headerNavigationContent?: ReactNode, headerEndActions?: ReactNode) => (
 		<TaskVisualizationArtifactsPanel
 			headerNavigationContent={headerNavigationContent}
+			headerEndActions={headerEndActions}
 			workspaceId={currentProjectId}
 			taskId={selection.card.id}
 			taskIncarnationCreatedAtEpochMs={selection.card.createdAt}
@@ -1263,7 +1270,19 @@ export function CardDetailView({
 						width: detailTerminalPanelWidth,
 					};
 	const diffPanelStyle: CSSProperties = isFocusViewWorkbenchSidebarHidden
-		? { display: "none" }
+		? {
+				// 隐藏时保留离屏布局，避免响应式重排把 iframe 的内部滚动范围归零。
+				position: "absolute",
+				left: "100%",
+				top: 0,
+				visibility: "hidden",
+				width: isWorkbenchBelowAgent
+					? "100%"
+					: showAgentConversationChatPanel
+						? diffPanelPercent
+						: `max(${MIN_DETAIL_DIFF_PANEL_WIDTH_PX}px, calc(100% - ${detailTerminalPanelWidth}px - 1px))`,
+				height: isWorkbenchBelowAgent ? `calc(${(1 - stackedAgentPanelHeightRatio) * 100}% - 1px)` : "100%",
+			}
 		: isWorkbenchBelowAgent
 			? { flex: "1 1 0", width: "100%", minHeight: 0 }
 			: showAgentConversationChatPanel
@@ -1529,10 +1548,11 @@ export function CardDetailView({
 			</span>
 		</>
 	);
-	const detailUtilityPanel = (headerNavigationContent?: ReactNode) =>
+	const detailUtilityPanel = (headerNavigationContent?: ReactNode, headerEndActions?: ReactNode) =>
 		detailUtilityTab === "prompts" || detailUtilityTab === "commands" ? (
 			<PromptLibraryPanel
 				headerNavigationContent={headerNavigationContent}
+				headerEndActions={headerEndActions}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				entryKind={detailUtilityTab === "commands" ? "reusable_command" : "draft_prompt"}
 				taskId={selectedTaskConversationSessionId}
@@ -1547,6 +1567,7 @@ export function CardDetailView({
 		) : (
 			<QueuedTaskPromptDeliveryQueuePanel
 				headerNavigationContent={headerNavigationContent}
+				headerEndActions={headerEndActions}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				controller={queuedPromptQueueController}
 				headerContent={detailUtilityTabs(Boolean(headerNavigationContent))}
@@ -1577,10 +1598,11 @@ export function CardDetailView({
 					userTurnKind: null,
 				}
 			: null);
-	const taskConversationSessionsPanel = (headerNavigationContent?: ReactNode) =>
+	const taskConversationSessionsPanel = (headerNavigationContent?: ReactNode, headerEndActions?: ReactNode) =>
 		mainSessionSummaryForSessionsPanel ? (
 			<TaskConversationSessionsPanel
 				headerNavigationContent={headerNavigationContent}
+				headerEndActions={headerEndActions}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly || !onCreateTaskConversationSession}
 				key={JSON.stringify([currentProjectId, selection.card.id])}
 				workspaceId={currentProjectId}
@@ -1638,10 +1660,11 @@ export function CardDetailView({
 	// exploration thread graph 面板（B.2）：挂在 sessions 面板与「本会话 findings」之间——
 	// 图在上、从图里长出来的结论在下。explorationId 恒取**卡片 id**（不是当前选中的会话 id）：
 	// 图挂在探索场次上，by-the-way 会话的轮次也归进同一张图。
-	const explorationThreadGraphPanel = (headerNavigationContent?: ReactNode) =>
+	const explorationThreadGraphPanel = (headerNavigationContent?: ReactNode, headerEndActions?: ReactNode) =>
 		explorationThreadGraph !== undefined && currentProjectId ? (
 			<ExplorationThreadGraphPanel
 				headerNavigationContent={headerNavigationContent}
+				headerEndActions={headerEndActions}
 				initiallyExpanded={!isMobile}
 				isTaskAgentExecutionDisabled={isDoneTaskReadOnly}
 				workspaceId={currentProjectId}
@@ -1663,9 +1686,10 @@ export function CardDetailView({
 		) : null;
 	// dd2db 1b Relations（只读邻域 + 静音切换）：与探索线 / findings 同位的独立可折叠 section，主体恒为**卡片**
 	// （关系挂在卡上，不随选中的 by-the-way 会话变）。只放在详情视图里，不在 BoardCard 上加入口。
-	const workUnitRelationNeighborhoodPanel = (headerNavigationContent?: ReactNode) => (
+	const workUnitRelationNeighborhoodPanel = (headerNavigationContent?: ReactNode, headerEndActions?: ReactNode) => (
 		<WorkUnitRelationNeighborhoodPanel
 			headerNavigationContent={headerNavigationContent}
+			headerEndActions={headerEndActions}
 			initiallyExpanded={!isMobile}
 			workspaceId={currentProjectId}
 			kanbanBoardCardTaskId={selection.card.id}
@@ -1933,6 +1957,30 @@ export function CardDetailView({
 					: [];
 
 	// 断点只改变布局与可见性；Agent、工作台模块和 iframe 始终留在同一棵内容树。
+	const isTaskListSidebarEffectivelyHidden =
+		isFocusViewTaskListSidebarHidden || (isDiffExpanded && !taskLookupWorkbenchContent);
+	const taskListSidebarHideButton =
+		!isMobile && onToggleFocusViewTaskListSidebar ? (
+			<DesktopSidebarVisibilityButton
+				side="left"
+				label="任务列表"
+				isHidden={false}
+				onToggle={onToggleFocusViewTaskListSidebar}
+			/>
+		) : undefined;
+	const toggleWorkbenchSidebar = () => {
+		onFocusViewWorkbenchSidebarHiddenChange?.(!isFocusViewWorkbenchSidebarHidden);
+		setIsDiffExpanded(false);
+	};
+	const workbenchSidebarHideButton =
+		!isMobile && onFocusViewWorkbenchSidebarHiddenChange ? (
+			<DesktopSidebarVisibilityButton
+				side={isWorkbenchBelowAgent ? "bottom" : "right"}
+				label="任务工作台"
+				isHidden={false}
+				onToggle={toggleWorkbenchSidebar}
+			/>
+		) : undefined;
 	return (
 		<MobileFocusViewIdleCollapseControllerProvider value={isMobile ? mobileFocusViewIdleCollapseController : null}>
 			<MobileFocusViewCollapsibleControlsProvider value={isMobile ? mobileControls : null}>
@@ -2017,7 +2065,23 @@ export function CardDetailView({
 							</div>
 						</>
 					) : null}
-					<div ref={detailLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+					<div ref={detailLayoutRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+						{!isMobile && isTaskListSidebarEffectivelyHidden && onToggleFocusViewTaskListSidebar ? (
+							<DesktopSidebarVisibilityButton
+								side="left"
+								label="任务列表"
+								isHidden
+								onToggle={onToggleFocusViewTaskListSidebar}
+							/>
+						) : null}
+						{!isMobile && isFocusViewWorkbenchSidebarHidden && onFocusViewWorkbenchSidebarHiddenChange ? (
+							<DesktopSidebarVisibilityButton
+								side={isWorkbenchBelowAgent ? "bottom" : "right"}
+								label="任务工作台"
+								isHidden
+								onToggle={toggleWorkbenchSidebar}
+							/>
+						) : null}
 						{!isMobile ? (
 							<>
 								<div
@@ -2032,6 +2096,7 @@ export function CardDetailView({
 									}}
 								>
 									<ColumnContextPanel
+										sidebarVisibilityButton={taskListSidebarHideButton}
 										onOpenPermanentlyDeletedTaskHistory={onOpenPermanentlyDeletedTaskHistory}
 										selection={selection}
 										workspacePath={workspacePath}
@@ -2092,7 +2157,7 @@ export function CardDetailView({
 									ref={mainRowRef}
 									data-focus-view-panel-arrangement={isMobile ? undefined : desktopArrangement.arrangement}
 									className={cn(
-										"flex min-h-0 flex-1 overflow-hidden",
+										"relative flex min-h-0 flex-1 overflow-hidden",
 										(isMobile || isWorkbenchBelowAgent) && "flex-col",
 									)}
 									style={{ display: gitHistoryPanel && !isMobile ? "none" : undefined }}
@@ -2124,6 +2189,7 @@ export function CardDetailView({
 									) : null}
 									<div
 										data-focus-view-workbench-sidebar=""
+										aria-hidden={!isMobile && isFocusViewWorkbenchSidebarHidden ? true : undefined}
 										className="flex min-h-0 min-w-0 flex-col"
 										style={
 											isMobile
@@ -2249,6 +2315,7 @@ export function CardDetailView({
 																onModeChange={setDiffMode}
 																isExpanded={isDiffExpanded}
 																onToggleExpand={handleToggleDiffExpand}
+																headerEndActions={workbenchSidebarHideButton}
 															/>
 															{isWorkspaceChangesStaleAfterRefreshError && workspaceChangesError ? (
 																<WorkspaceChangesStaleDataWarning
@@ -2344,6 +2411,7 @@ export function CardDetailView({
 											}}
 										>
 											<TaskWorkbench
+												firstModuleHeaderEndActions={workbenchSidebarHideButton}
 												mobileModuleLayout={
 													isMobile
 														? {
@@ -2387,13 +2455,14 @@ export function CardDetailView({
 												modules={{
 													task_sessions: taskConversationSessionsPanel,
 													cross_task_relations: workUnitRelationNeighborhoodPanel,
-													exploration_map: (headerNavigationContent) => (
+													exploration_map: (headerNavigationContent, headerEndActions) => (
 														<>
 															{explorationThreadGraph !== undefined && currentProjectId ? (
-																explorationThreadGraphPanel(headerNavigationContent)
+																explorationThreadGraphPanel(headerNavigationContent, headerEndActions)
 															) : (
 																<div className="flex h-8 shrink-0 items-center border-b border-border px-2">
 																	{headerNavigationContent ?? "探索地图"}
+																	{headerEndActions}
 																</div>
 															)}
 															{sessionFindingsSection}

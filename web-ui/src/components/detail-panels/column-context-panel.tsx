@@ -1,6 +1,6 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail-panels/cross-project-recently-active-task-switcher-panel";
@@ -217,6 +217,7 @@ function ColumnSection({
 }
 
 export function ColumnContextPanel({
+	sidebarVisibilityButton,
 	selection,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
@@ -244,6 +245,7 @@ export function ColumnContextPanel({
 	moveToTrashLoadingById,
 	panelWidth,
 }: {
+	sidebarVisibilityButton?: ReactNode;
 	selection: CardSelection;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCardModel) => Promise<string | null>;
@@ -430,6 +432,7 @@ export function ColumnContextPanel({
 			>
 				{showsCrossProjectRecentlyActiveTaskSwitcher && crossProjectRecentlyActiveTaskSwitcherHost ? (
 					<CrossProjectRecentlyActiveTaskSwitcherPanel
+						sidebarVisibilityButton={sidebarVisibilityButton}
 						host={crossProjectRecentlyActiveTaskSwitcherHost}
 						currentProjectTaskCards={currentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion}
 						defaultAgentId={defaultAgentId ?? null}
@@ -442,8 +445,9 @@ export function ColumnContextPanel({
 					data-focus-view-column-scroll-boundary=""
 				>
 					{/* 创建入口与置顶板同属固定区，不随下方 stage 列表滚走。 */}
-					{onCreateTask || onOpenPermanentlyDeletedTaskHistory ? (
+					{sidebarVisibilityButton || onCreateTask || onOpenPermanentlyDeletedTaskHistory ? (
 						<div className="flex shrink-0 items-center gap-1 px-2 pt-2">
+							{sidebarVisibilityButton}
 							{onCreateTask ? (
 								<Button
 									icon={<span className="text-base leading-none">+</span>}
