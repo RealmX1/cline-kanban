@@ -8,6 +8,7 @@ import type {
 const effortFieldKey = JSON.stringify(["config.toml", "model_reasoning_effort"]);
 const modelFieldKey = JSON.stringify(["config.toml", "model"]);
 async function openConfigurationFixture(page: Page) {
+	const observedAtMs = await page.evaluate(() => Date.now());
 	const requests: Array<CodexConfigurationBatchActionRequest | CodexConfigurationProfileMutationRequest> = [];
 	const queriedProcedures: string[] = [];
 	let state: CodexConfigurationSyncState = {
@@ -47,7 +48,7 @@ async function openConfigurationFixture(page: Page) {
 		observationHealth: {
 			status: "healthy",
 			impact: "正在观察配置变化，默认保持不变。",
-			checkedAtMs: Date.now(),
+			checkedAtMs: observedAtMs,
 			recoveryCondition: null,
 		},
 		adoptionCounts: [
@@ -78,8 +79,8 @@ async function openConfigurationFixture(page: Page) {
 				completeCandidateValueDigest: "effort-xhigh",
 				previousValueSummary: "max",
 				valueSummary: "xhigh",
-				observedAt: Date.now(),
-				feedbackExpiresAtMs: Date.now() + 600_000,
+				observedAt: observedAtMs,
+				feedbackExpiresAtMs: observedAtMs + 600_000,
 				recordKind: "settings_proposal",
 				approvalStatus: "pending",
 				decidedAt: null,
