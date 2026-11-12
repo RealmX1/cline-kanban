@@ -9,6 +9,19 @@ import { createTempDir } from "../../utilities/temp-dir";
 
 it.each([
 	"complete",
+	"darwin_unrelated_native_precision_unavailable",
+	"legacy_zombie_descendant",
+	"native_snapshot_failure_budget_recovers",
+	"process_group_snapshot_failure_budget_recovers",
+	"process_group_snapshot_failure_budget_recovers_after_timeout",
+	"darwin_spawn_failure_without_pid",
+	"linux_spawn_failure_without_pid",
+	"darwin_spawn_failure_without_pid_precision_budget_recovers",
+	...[0, 100, 1582, 10_000].flatMap((count) => [
+		`native_retired_owned_${count}`,
+		`legacy_retired_owned_${count}`,
+		`linux_retired_owned_${count}`,
+	]),
 	"bulk_parent_fences_avoid_per_pid_helpers",
 	"unchanged_unproven_process_budget",
 	"unproven_process_changes_after_budget",
@@ -30,7 +43,11 @@ it.each([
 		const source = sourceFile.split("const supervisorSource = String.raw`")[1]?.split("`;\n")[0];
 		if (!source) throw new Error("未找到监督入口");
 		const linux = scenario.startsWith("linux_");
+		const retiredOwnedCount = scenario.includes("retired_owned") ? Number(scenario.split("_").at(-1)) : null;
+		const legacy = scenario.startsWith("legacy_");
 		const kernelContainmentRequired = scenario.startsWith("linux_kernel_");
+		const processGroupSnapshotFailure = scenario.startsWith("process_group_snapshot_failure");
+		const spawnFailureWithoutPid = scenario.includes("spawn_failure_without_pid");
 		const materialsFile = join(sandbox.path, "materials.json");
 		await writeFile(
 			materialsFile,
@@ -41,9 +58,15 @@ it.each([
 				revocationFile: join(sandbox.path, "revoked.json"),
 				command: ["isolated-command"],
 				workingDirectory: sandbox.path,
-				superviseProcessGroup: true,
+				superviseProcessGroup: !legacy,
 				preventRedispatch: true,
-				deadlineAtEpochMs: 12_000,
+				deadlineAtEpochMs: scenario.endsWith("after_timeout")
+					? 12_000
+					: retiredOwnedCount !== null ||
+							scenario.includes("snapshot_failure") ||
+							scenario.includes("precision_budget")
+						? 120_000
+						: 12_000,
 				darwinOriginalParentGenerationProbePath: linux ? null : "native-probe",
 				linuxKernelChildSubreaperContainmentRequired: kernelContainmentRequired,
 				linuxKernelChildSubreaperContainmentAddonPath: "native-containment-addon",
@@ -56,7 +79,9 @@ it.each([
 			originalParentVersion: number;
 			hasNonce: boolean;
 			preciseIdentityUnavailable?: boolean;
+			outsideCurrentUser?: boolean;
 			startAndCommand: string;
+			zombie?: boolean;
 		};
 		const processes = new Map<number, SimulatedProcess>([
 			[
@@ -83,6 +108,17 @@ it.each([
 			const owner = processes.get(900);
 			if (owner) owner.preciseIdentityUnavailable = true;
 		}
+		if (scenario === "darwin_unrelated_native_precision_unavailable")
+			processes.set(401, {
+				parent: 1,
+				group: 401,
+				version: 1401,
+				originalParentVersion: 1,
+				hasNonce: false,
+				preciseIdentityUnavailable: true,
+				outsideCurrentUser: true,
+				startAndCommand: "Wed Oct 28 11:00:00 2026 unrelated-protected-process",
+			});
 		if (scenario === "bulk_parent_fences_avoid_per_pid_helpers")
 			for (let pid = 4000; pid < 4300; pid++)
 				processes.set(pid, {
@@ -93,13 +129,16 @@ it.each([
 					hasNonce: false,
 					startAndCommand: "Wed Oct 28 11:00:00 2026 unrelated-baseline-process",
 				});
-		const child = Object.assign(new EventEmitter(), { pid: 201 });
+		const child = Object.assign(new EventEmitter(), { pid: spawnFailureWithoutPid ? undefined : 201 });
 		const signals: number[] = [];
 		let cycle = 0;
 		let now = 10_000;
 		let inheritedNonce = false;
 		let dispatchCount = 0;
 		let nativeProbeCallCount = 0;
+		let processGroupSnapshotQueryCount = 0;
+		const regularQueryCountsByCycle = new Map<number, { ps: number; native: number }>();
+		let unchangedProgressWriteCount = 0;
 		const fullProcessSnapshotCycles: number[] = [];
 		function nativeStat(pid: number): string {
 			const entry = processes.get(pid);
@@ -107,6 +146,7 @@ it.each([
 			const fields = Array.from({ length: 20 }, () => "0");
 			fields[0] = "S";
 			fields[1] = String(entry.parent);
+			fields[2] = String(entry.group);
 			fields[19] = String(entry.version);
 			return `${pid} (simulated-command) ${fields.join(" ")}`;
 		}
@@ -137,7 +177,10 @@ it.each([
 					reapAndObserve: () =>
 						[...processes].some(([pid, entry]) => pid !== 900 && entry.parent === 900) ? 1 : 0,
 				}),
-				rename,
+				rename: async (from: string, to: string) => {
+					if (cycle >= 2 && cycle < 8 && to.includes("supervisor-progress-")) unchangedProgressWriteCount++;
+					await rename(from, to);
+				},
 				mkdir,
 				unlink,
 				join,
@@ -145,6 +188,14 @@ it.each([
 				spawn: (_command: string, _arguments: string[], options: { env: Record<string, string> }) => {
 					dispatchCount++;
 					inheritedNonce = options.env.KANBAN_OWNED_COMMAND_EXECUTION_NONCE === "nonce";
+					if (spawnFailureWithoutPid) {
+						if (scenario.includes("precision_budget")) {
+							const owner = processes.get(900);
+							if (owner) owner.preciseIdentityUnavailable = true;
+						}
+						queueMicrotask(() => child.emit("error", new Error("spawn isolated-command ENOENT")));
+						return child;
+					}
 					processes.set(201, {
 						parent: 900,
 						group: 900,
@@ -153,21 +204,66 @@ it.each([
 						hasNonce: inheritedNonce,
 						startAndCommand: "Wed Oct 28 12:00:01 2026 root-command",
 					});
+					if (scenario === "legacy_zombie_descendant")
+						processes.set(301, {
+							parent: 201,
+							group: 900,
+							version: 1301,
+							originalParentVersion: 1201,
+							hasNonce: false,
+							zombie: true,
+							startAndCommand: "Wed Oct 28 12:00:02 2026 exited-descendant",
+						});
+					if (retiredOwnedCount !== null)
+						for (let index = 0; index < retiredOwnedCount + 3; index++)
+							processes.set(10_000 + index, {
+								parent: 201,
+								group: 900,
+								version: 20_000 + index,
+								originalParentVersion: 1201,
+								hasNonce: inheritedNonce,
+								startAndCommand: "Wed Oct 28 12:00:02 2026 owned-history-descendant",
+							});
 					return child;
 				},
 				spawnSync: () => {
+					if (cycle >= 1 && cycle < 8) {
+						const counts = regularQueryCountsByCycle.get(cycle) ?? { ps: 0, native: 0 };
+						counts.ps++;
+						regularQueryCountsByCycle.set(cycle, counts);
+					}
 					fullProcessSnapshotCycles.push(cycle);
 					return {
 						status: 0,
 						pid: 9999,
 						stdout: [...processes]
-							.map(([pid, entry]) => `${pid} ${entry.parent} ${entry.startAndCommand}`)
+							.map(
+								([pid, entry]) => `${pid} ${entry.parent} ${entry.zombie ? "Z" : "S"} ${entry.startAndCommand}`,
+							)
 							.join("\n"),
 					};
 				},
 				execFileSync: (command: string, args: string[]) => {
+					if (cycle >= 1 && cycle < 8) {
+						const counts = regularQueryCountsByCycle.get(cycle) ?? { ps: 0, native: 0 };
+						if (command === "ps") counts.ps++;
+						else counts.native++;
+						regularQueryCountsByCycle.set(cycle, counts);
+					}
 					if (command === "native-probe") {
 						nativeProbeCallCount++;
+						if (
+							scenario === "native_snapshot_failure_budget_recovers" &&
+							args[1] === "--snapshot" &&
+							(cycle === 1 || cycle === 2)
+						) {
+							if (cycle === 2)
+								expect(
+									JSON.parse(readFileSync(join(sandbox.path, "supervisor-progress-nonce.json"), "utf8"))
+										.nativeOwnershipUnproven,
+								).toBe(true);
+							throw Object.assign(new Error("故障注入：完整快照暂时不可读"), { code: "EACCES" });
+						}
 						const rows = (args[1] === "--snapshot" ? [...processes.keys()] : args.slice(1).map(Number)).flatMap(
 							(pid) => {
 								const entry = processes.get(pid);
@@ -181,7 +277,8 @@ it.each([
 												parentProcessPid: entry.parent,
 												processIdVersion: entry.version,
 												originalParentProcessIdVersion: entry.originalParentVersion,
-												outsideCurrentUser: false,
+												outsideCurrentUser: entry.outsideCurrentUser === true,
+												processIsZombie: entry.zombie === true,
 												hasExecutionOwnershipToken: entry.hasNonce,
 											},
 										]
@@ -190,15 +287,30 @@ it.each([
 						);
 						if (args[1] === "--snapshot") {
 							fullProcessSnapshotCycles.push(cycle);
-							return JSON.stringify({ queryProcessPid: 9999, snapshotComplete: true, processes: rows });
+							return JSON.stringify({
+								queryProcessPid: 9999,
+								snapshotComplete: rows.every((row) => row.processUniqueIdentity !== undefined),
+								processes: rows,
+							});
 						}
 						return JSON.stringify(rows);
 					}
+					if (args[0] === "-axo" && args[1] === "pid=,pgid=,stat=") {
+						processGroupSnapshotQueryCount++;
+						if (processGroupSnapshotFailure && cycle <= 4)
+							throw Object.assign(new Error("故障注入：进程组快照暂时不可读"), { status: 1 });
+					}
 					if (args[0] === "-axo")
-						return [...processes].map(([pid, entry]) => `${pid} ${entry.group} S`).join("\n");
+						return [...processes]
+							.map(([pid, entry]) =>
+								args[1] === "pid=,ppid=,stat=,lstart="
+									? `${pid} ${entry.parent} ${entry.zombie ? "Z" : "S"} ${entry.startAndCommand}`
+									: `${pid} ${entry.group} ${entry.zombie ? "Z" : "S"}`,
+							)
+							.join("\n");
 					const entry = processes.get(Number(args[1]));
 					if (!entry) throw Object.assign(new Error("进程已退出"), { status: 1 });
-					return args.includes("stat=") ? "S" : entry.startAndCommand;
+					return args.includes("stat=") ? (entry.zombie ? "Z" : "S") : entry.startAndCommand;
 				},
 				process: {
 					pid: 900,
@@ -214,13 +326,37 @@ it.each([
 				},
 				setTimeout: (callback: () => void, delayMs?: number) => {
 					cycle++;
-					now += Math.max(1000, delayMs ?? 0);
+					now += Math.max(scenario.includes("budget") ? 15_000 : 1000, delayMs ?? 0);
+					if (cycle === 5 && processGroupSnapshotFailure) {
+						const budget = JSON.parse(
+							readFileSync(join(sandbox.path, "post-script-ownership-recovery-budget-nonce.json"), "utf8"),
+						);
+						expect(budget.unchangedEvidenceProbeCount).toBe(3);
+					}
+					if (cycle === 5 && scenario.includes("precision_budget")) {
+						const progress = JSON.parse(
+							readFileSync(join(sandbox.path, "supervisor-progress-nonce.json"), "utf8"),
+						);
+						expect(progress.unprovenOwnershipProcesses.length).toBeLessThanOrEqual(2);
+						expect(progress.postScriptOwnershipRecoveryBudget.unchangedEvidenceProbeCount).toBe(3);
+						const owner = processes.get(900);
+						if (owner) owner.preciseIdentityUnavailable = false;
+					}
 					if (cycle === 1) {
+						if (scenario === "darwin_unrelated_native_precision_unavailable") {
+							expect(
+								JSON.parse(readFileSync(join(sandbox.path, "supervisor-progress-nonce.json"), "utf8"))
+									.nativeOwnershipUnproven,
+							).toBe(true);
+							processes.delete(401);
+						}
 						if (scenario === "darwin_missing_precision_after_dispatch") {
 							const reused = processes.get(201);
 							if (reused) processes.set(201, { ...reused, preciseIdentityUnavailable: true, hasNonce: false });
 						} else processes.delete(201);
-						child.emit("exit", 0);
+						if (!spawnFailureWithoutPid) child.emit("exit", 0);
+						if (retiredOwnedCount !== null)
+							for (let index = 0; index < retiredOwnedCount; index++) processes.delete(10_000 + index);
 						if (
 							[
 								"detached_descendant",
@@ -255,7 +391,11 @@ it.each([
 						const current = processes.get(301);
 						if (current) current.version++;
 					}
-					if (cycle > (scenario.includes("budget") ? 12 : 5)) throw new Error("故障注入：退出归属仍未知");
+					if (cycle === 8 && retiredOwnedCount !== null)
+						for (let index = retiredOwnedCount; index < retiredOwnedCount + 3; index++)
+							processes.delete(10_000 + index);
+					if (cycle > (scenario.includes("budget") || retiredOwnedCount !== null ? 12 : 5))
+						throw new Error("故障注入：退出归属仍未知");
 					queueMicrotask(callback);
 				},
 			},
@@ -272,6 +412,42 @@ it.each([
 			await expect(evaluation).rejects.toThrow("退出归属仍未知");
 		else await evaluation;
 		const progress = JSON.parse(await readFile(join(sandbox.path, "supervisor-progress-nonce.json"), "utf8"));
+		if (scenario === "darwin_unrelated_native_precision_unavailable") {
+			expect(progress.status).toBe("exited");
+			expect(signals).toEqual([]);
+			expect(dispatchCount).toBe(1);
+		}
+		if (scenario === "legacy_zombie_descendant") {
+			expect(progress.status).toBe("exited");
+			expect(signals).toEqual([]);
+		}
+		if (spawnFailureWithoutPid) {
+			expect(progress.status).toBe("exited");
+			expect(progress.error).toContain("ENOENT");
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(progress.ownedProcesses).toEqual([]);
+			expect(dispatchCount).toBe(1);
+			expect(signals).toEqual([]);
+			if (scenario.includes("precision_budget")) expect(cycle).toBeGreaterThanOrEqual(5);
+		}
+		if (scenario.includes("snapshot_failure")) {
+			expect(progress.status).toBe(scenario.endsWith("after_timeout") ? "cancelled" : "exited");
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(signals).toEqual([]);
+			expect(dispatchCount).toBe(1);
+		}
+		if (processGroupSnapshotFailure) expect(processGroupSnapshotQueryCount).toBeGreaterThan(4);
+		if (retiredOwnedCount !== null) {
+			expect(progress.status).toBe("exited");
+			expect(progress.ownedProcesses).toHaveLength(retiredOwnedCount + 4);
+			expect(signals).toEqual([]);
+			expect(unchangedProgressWriteCount).toBe(0);
+			expect(regularQueryCountsByCycle.size).toBe(7);
+			for (const counts of regularQueryCountsByCycle.values()) {
+				expect(counts.ps).toBeLessThanOrEqual(2);
+				expect(counts.native).toBeLessThanOrEqual(4);
+			}
+		}
 		if (
 			["complete", "bulk_parent_fences_avoid_per_pid_helpers", "linux_kernel_unrelated_late_child"].includes(
 				scenario,
@@ -313,7 +489,7 @@ it.each([
 		}
 
 		if (scenario === "bulk_parent_fences_avoid_per_pid_helpers") expect(nativeProbeCallCount).toBeLessThan(30);
-		if (scenario.includes("budget")) {
+		if (scenario === "unchanged_unproven_process_budget" || scenario === "unproven_process_changes_after_budget") {
 			const budget = JSON.parse(
 				await readFile(join(sandbox.path, "post-script-ownership-recovery-budget-nonce.json"), "utf8"),
 			);

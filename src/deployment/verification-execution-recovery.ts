@@ -9,7 +9,7 @@ import {
 	hasSameProcessGeneration,
 	inspectOwnedCommandSupervisor,
 	type OwnedProcessIdentity,
-	readProcessIdentity,
+	observeOwnedProcessGenerations,
 	readSystemBootIdentity,
 } from "../task-command-execution/task-command-execution-supervisor";
 import { cleanupAuthoredVerificationDefinitionAndAssets } from "./authored-verification-definitions";
@@ -85,22 +85,6 @@ async function finalizeConfirmedInterruptedVerificationExecution(
 	});
 }
 
-// 身份读取失败保留不同于“进程不存在”的证据，不用心跳、年龄或 PID 本身判断死亡。
-async function observeProcessGeneration(identity: OwnedProcessIdentity, nativeProbePath?: string | null) {
-	try {
-		return {
-			expected: identity,
-			current: await readProcessIdentity(
-				identity.pid,
-				nativeProbePath,
-				identity.nativeProcessGenerationIdentity !== undefined,
-			),
-		};
-	} catch {
-		return { expected: identity, current: "unreadable" as const };
-	}
-}
-
 export async function observeVerificationExecutionAttempt(
 	attemptId: string,
 	nowEpochMs = Date.now(),
@@ -162,7 +146,7 @@ export async function observeVerificationExecutionAttempt(
 	} catch {
 		/* 缺少补证原件不推断退出。 */
 	}
-	const processObservations = await Promise.all(
+	const processObservations = await observeOwnedProcessGenerations(
 		[
 			...(owner ? [owner] : []),
 			...(progress?.ownedProcesses ?? []),
@@ -172,7 +156,8 @@ export async function observeVerificationExecutionAttempt(
 				nativeProcessGenerationIdentity: entry.nativeProcessGenerationIdentity,
 			})),
 			...supplementalOwnedProcesses,
-		].map((identity) => observeProcessGeneration(identity, nativeProbePath)),
+		],
+		nativeProbePath,
 	);
 	const ownerObservation = processObservations.find((entry) => entry.expected.pid === owner?.pid);
 	const ownerStillAlive =
