@@ -2,7 +2,6 @@ import * as RadixPopover from "@radix-ui/react-popover";
 import { Plus } from "lucide-react";
 import { type KeyboardEvent as ReactKeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton } from "@/components/top-bar-project-switcher/board-scope-focused-task-project-breadcrumb-narrowing-button";
 import { ProjectSwitcherBoardScopeAllProjectsPseudoRow } from "@/components/top-bar-project-switcher/project-switcher-board-scope-all-projects-pseudo-row";
 import { ProjectSwitcherColumnVisibilityMenu } from "@/components/top-bar-project-switcher/project-switcher-column-visibility-menu";
 import {
@@ -57,8 +56,6 @@ export interface TopBarProjectSwitcherState {
 	// 选具体项目行由 onSelectProject 负责切回单项目范围。
 	selectedBoardOrSingleProjectScope: SelectedBoardOrSingleProjectScope;
 	onSelectBoardScopeAllProjects: () => void;
-	// Board Scope 下 Focus View 打开着的任务所属的项目：触发按钮后面接一个「› 项目名」按钮，点它收窄到该项目。
-	boardScopeFocusViewFocusedTaskProjectId: string | null;
 }
 
 const BOARD_SCOPE_ALL_PROJECTS_PSEUDO_ROW_LABEL = "all projects";
@@ -77,7 +74,6 @@ export function TopBarProjectSwitcher({
 	onClearNumericSlotGroupNumber,
 	selectedBoardOrSingleProjectScope,
 	onSelectBoardScopeAllProjects,
-	boardScopeFocusViewFocusedTaskProjectId,
 }: TopBarProjectSwitcherState): React.ReactElement | null {
 	const isMobile = useIsMobile();
 	const [isOpen, setIsOpen] = useState(false);
@@ -284,13 +280,9 @@ export function TopBarProjectSwitcher({
 	}
 
 	const shouldShowFilterInput = projects.length >= PROJECT_COUNT_THRESHOLD_FOR_FILTER_INPUT;
-	const boardScopeFocusViewFocusedTaskProject =
-		isBoardScopeAllProjectsSelected && boardScopeFocusViewFocusedTaskProjectId
-			? (projects.find((project) => project.id === boardScopeFocusViewFocusedTaskProjectId) ?? null)
-			: null;
 
 	return (
-		// 与触发按钮同样的收缩规则：桌面不收缩，否则这一组被挤得比内容窄、搜索按钮压在「› 项目名」上。
+		// 桌面保持触发按钮宽度，手机允许项目名截断让位。
 		<span className={cn("flex items-center", isMobile ? "min-w-0 shrink" : "shrink-0")}>
 			<RadixPopover.Root open={isOpen} onOpenChange={handleOpenChange}>
 				<RadixPopover.Trigger asChild>
@@ -429,14 +421,6 @@ export function TopBarProjectSwitcher({
 					</RadixPopover.Content>
 				</RadixPopover.Portal>
 			</RadixPopover.Root>
-			{boardScopeFocusViewFocusedTaskProject ? (
-				<BoardScopeFocusedTaskProjectBreadcrumbNarrowingButton
-					focusedTaskProjectName={boardScopeFocusViewFocusedTaskProject.name}
-					project={boardScopeFocusViewFocusedTaskProject}
-					isMobile={isMobile}
-					onNarrowToFocusedTaskProject={() => onSelectProject(boardScopeFocusViewFocusedTaskProject.id)}
-				/>
-			) : null}
 		</span>
 	);
 }
