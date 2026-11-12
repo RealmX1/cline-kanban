@@ -9,6 +9,10 @@ import { withRunningCodexAppServerControlSocketConnection } from "../codex-nativ
 import type { CodexAppServerRequestPort } from "../codex-native-session-protocol/codex-native-conversation-history";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
+	codexConfigurationProfileFieldVersionRequirements,
+	expandCodexConfigurationProfileFieldEdit,
+} from "../core/codex-configuration-profile-field-editing";
+import {
 	type CodexConfigurationBatchActionRequest,
 	type CodexConfigurationBatchActionResult,
 	type CodexConfigurationChangeDetailsRequest,
@@ -16,10 +20,12 @@ import {
 	type CodexConfigurationProfileMutationRequest,
 	type CodexConfigurationResolveConflictRequest,
 	type CodexConfigurationResolveTargetConflictRequest,
+	type CodexConfigurationSessionAdoptionProgressRequest,
 	type CodexConfigurationSyncHistoryRequest,
 	type CodexConfigurationSynchronizeRequest,
 	type CodexConfigurationSyncState,
 	codexConfigurationSyncActiveStateSchema,
+	codexConfigurationSyncOverviewSchema,
 	codexConfigurationSyncStateSchema,
 } from "../core/codex-configuration-sync-contract";
 import { resolveSessionFacets } from "../core/session-activity";
@@ -28,6 +34,7 @@ import {
 	listRuntimeCodexConfigurationTraceTargets,
 	waitForCodexConfigurationRequestWriterOwnershipVerifications,
 } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
+import { getTerminalAgentModelSelectionOptions } from "../terminal/terminal-agent-model-selection";
 import {
 	type CodexConfigurationTaskSourceContext,
 	completeCodexConfigurationCandidateValueDigest,
@@ -69,15 +76,17 @@ import {
 } from "./codex-configuration-proposal-approval";
 import {
 	isCodexConfigurationChangeExcludedFromSettingsSynchronization,
-	isCodexDesktopConfigurationField,
+	isCodexLocalStateConfigurationField,
 } from "./codex-configuration-settings-isolation";
 import {
 	type CodexConfigurationSyncStore,
 	getCodexConfigurationSyncDirectory,
+	listCodexConfigurationStoredSessionAdoptionProgress,
 	listCodexConfigurationSyncStoredHistory,
 	mutateCodexConfigurationSyncActiveStore as mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore as readCodexConfigurationSyncCompleteStore,
 	readCodexConfigurationSyncLookupStore,
+	readCodexConfigurationSyncOverviewStore,
 	readCodexConfigurationSyncStorageMetadata,
 	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
 	runOutsideCodexConfigurationSyncStoreSelection,
@@ -146,7 +155,7 @@ function publicState(
 	sessions: SessionTarget[],
 	diagnosticCoverage?: CodexConfigurationSyncState["diagnosticCoverage"],
 	taskSourceContext?: CodexConfigurationTaskSourceContext,
-	stateResponseScope: "full" | "active" = "full",
+	stateResponseScope: "full" | "active" | "overview" = "full",
 ): CodexConfigurationSyncState {
 	return codexConfigurationSyncStateSchema.parse({
 		revision: store.revision,
@@ -169,7 +178,7 @@ function publicState(
 				exceptionGroup: codexConfigurationExceptionGroup(fieldKey) ?? null,
 			})),
 		})),
-		sessionProfileBindings: sessions.flatMap<
+		sessionProfileBindings: (stateResponseScope === "overview" ? [] : sessions).flatMap<
 			NonNullable<CodexConfigurationSyncState["sessionProfileBindings"]>[number]
 		>(({ workspaceId, summary }) => {
 			const writer = store.writers[summary.codexConfigurationWriterBinding?.writerId ?? ""];
@@ -296,7 +305,7 @@ function publicState(
 
 function withoutConfigurationStateResponseScope<T extends object>(input: T) {
 	const { stateResponseScope: _excludedStateResponseScope, ...businessInput } = input as T & {
-		stateResponseScope?: "full" | "active";
+		stateResponseScope?: "full" | "active" | "overview";
 	};
 	return businessInput;
 }
@@ -345,10 +354,60 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			},
 			operation,
 		);
-	const responseStore = (input: { stateResponseScope?: "full" | "active" }) =>
-		input.stateResponseScope === "active"
-			? readCodexConfigurationSyncStore()
-			: readCodexConfigurationSyncCompleteStore();
+	const currentSessionIdentities = () =>
+		deps
+			.listSessions()
+			.filter(({ summary }) => summary.agentId === "codex")
+			.map(({ workspaceId, summary }) => ({
+				workspaceId,
+				conversationSessionId: summary.taskId,
+				runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? "",
+				writerId: summary.codexConfigurationWriterBinding?.writerId ?? null,
+				profileId:
+					summary.codexConfigurationProfileId ??
+					summary.codexConfigurationWriterBinding?.codexConfigurationProfileId ??
+					null,
+			}));
+	const getOverview = async () => {
+		await refreshTaskSourceContext();
+		const { store, adoptionCounts } = await readCodexConfigurationSyncOverviewStore(currentSessionIdentities());
+		const coverage = traceMonitor.getCoverage();
+		const status = store.observationProblem
+			? "limited"
+			: coverage.automaticRecoveryPending
+				? "recovering"
+				: coverage.targetCount === 0 || coverage.lastCheckedAtMs === null
+					? "unverified"
+					: "healthy";
+		return codexConfigurationSyncOverviewSchema.parse({
+			...publicState(store, deps.listSessions(), coverage, taskSourceContext, "overview"),
+			adoptionCounts,
+			observationHealth: {
+				status,
+				impact:
+					store.observationProblem ??
+					(status === "healthy"
+						? "正在观察配置变化；暂无可选反馈时默认保持不变。"
+						: status === "recovering"
+							? "配置观察正在自动恢复，已保存默认与局部选择保留。"
+							: "尚无可核验的配置观察目标。"),
+				checkedAtMs: coverage.lastCheckedAtMs,
+				recoveryCondition: status === "healthy" ? null : "来源或端点恢复、版本变化或会话达到安全条件后自动重验。",
+			},
+		});
+	};
+	const responseState = async (input: { stateResponseScope?: "full" | "active" | "overview" }) =>
+		input.stateResponseScope === "overview"
+			? getOverview()
+			: publicState(
+					input.stateResponseScope === "active"
+						? await readCodexConfigurationSyncStore()
+						: await readCodexConfigurationSyncCompleteStore(),
+					deps.listSessions(),
+					traceMonitor.getCoverage(),
+					taskSourceContext,
+					input.stateResponseScope ?? "full",
+				);
 	let taskSourceContext: CodexConfigurationTaskSourceContext | undefined;
 	let taskSourceContextReadInFlight: Promise<void> | null = null;
 	const refreshTaskSourceContext = async () => {
@@ -497,6 +556,24 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			reconcilingSessionProfileBindings = null;
 		});
 		return reconcilingSessionProfileBindings;
+	};
+	const recordVerifiedProfileFieldConsumption = (
+		store: CodexConfigurationSyncStore,
+		writerId: string,
+		fieldKey: string,
+		value: CodexConfigurationFields[string] | undefined,
+	) => {
+		const writer = store.writers[writerId];
+		const profile = writer?.codexConfigurationProfileId
+			? store.profiles[writer.codexConfigurationProfileId]
+			: undefined;
+		const fieldVersion = profile?.fieldVersions[fieldKey];
+		if (!writer || !profile || fieldVersion === undefined || !sameConfigurationField(profile.fields[fieldKey], value))
+			return false;
+		if ((writer.consumedProfileFieldVersions?.[fieldKey] ?? 0) >= fieldVersion) return false;
+		writer.consumedProfileFieldVersions ??= {};
+		writer.consumedProfileFieldVersions[fieldKey] = fieldVersion;
+		return true;
 	};
 	const observe = async () => {
 		await refreshTaskSourceContext();
@@ -958,6 +1035,26 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							}
 						}
 					}
+					for (const change of store.changes) {
+						const reloadedTarget = change.targets.find(
+							(target) =>
+								target.writerId === writer.binding.writerId &&
+								target.status === "applied" &&
+								typeof target.ownerReloadedAt === "number",
+						);
+						if (
+							reloadedTarget &&
+							!unavailableObservedHookFieldKeys.has(change.fieldKey) &&
+							sameConfigurationField(observed[change.fieldKey], change.value) &&
+							recordVerifiedProfileFieldConsumption(
+								store,
+								writer.binding.writerId,
+								change.fieldKey,
+								change.value,
+							)
+						)
+							store.revision++;
+					}
 					mergeObservedCodexConfigurationWriter(store, writer, observed);
 					if (
 						observedNativePermissionChange &&
@@ -1225,11 +1322,19 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						{ observedAt: Date.now(), value: latestTargetValue },
 					];
 				}
+				const consumptionRecorded = Boolean(
+					latestTarget &&
+						sourceDecisionIsCurrent &&
+						guardedPatch.status === "applied" &&
+						typeof guardedPatch.ownerReloadedAt === "number" &&
+						recordVerifiedProfileFieldConsumption(latest, writerId, change.fieldKey, change.value),
+				);
 				if (
 					latestTarget &&
-					Object.entries(guardedPatch).some(
-						([key, value]) => !isDeepStrictEqual(latestTarget[key as keyof typeof latestTarget], value),
-					)
+					(consumptionRecorded ||
+						Object.entries(guardedPatch).some(
+							([key, value]) => !isDeepStrictEqual(latestTarget[key as keyof typeof latestTarget], value),
+						))
 				) {
 					Object.assign(latestTarget, guardedPatch);
 					latest.revision++;
@@ -1872,13 +1977,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await publish();
 		return {
 			results,
-			state: publicState(
-				await responseStore(input),
-				deps.listSessions(),
-				traceMonitor.getCoverage(),
-				taskSourceContext,
-				input.stateResponseScope ?? "full",
-			),
+			state: await responseState(input),
 		};
 	};
 	const mutateChange = async (
@@ -1889,7 +1988,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					changeId: string;
 					expectedVersion: number;
 					idempotencyKey: string;
-					stateResponseScope?: "full" | "active";
+					stateResponseScope?: "full" | "active" | "overview";
 			  },
 		kind: "synchronize" | "resolve_conflict" | "acknowledge",
 	) => {
@@ -1970,13 +2069,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(
-			await responseStore(input),
-			deps.listSessions(),
-			traceMonitor.getCoverage(),
-			taskSourceContext,
-			input.stateResponseScope ?? "full",
-		);
+		return await responseState(input);
 	};
 	const resolveTargetConflict = async (input: CodexConfigurationResolveTargetConflictRequest) => {
 		await observe();
@@ -2060,16 +2153,17 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		});
 		await recover();
 		await publish();
-		return publicState(
-			await responseStore(input),
-			deps.listSessions(),
-			traceMonitor.getCoverage(),
-			taskSourceContext,
-			input.stateResponseScope ?? "full",
-		);
+		return await responseState(input);
 	};
 	const mutateProfile = async (input: CodexConfigurationProfileMutationRequest) => {
 		await observe();
+		const modelCatalog =
+			input.action === "update" &&
+			input.fields?.some((edit) =>
+				["model", "reasoning_effort"].includes(codexConfigurationExceptionGroup(edit.fieldKey) ?? ""),
+			)
+				? await getTerminalAgentModelSelectionOptions("codex")
+				: null;
 		await mutateCodexConfigurationSyncStore((store) => {
 			const requestDigest = configurationDigest(["profile", withoutConfigurationStateResponseScope(input)]);
 			const receipt = store.mutationReceipts[input.idempotencyKey];
@@ -2086,22 +2180,59 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					store.defaultCodexConfigurationProfileId = profile.profileId;
 					store.revision++;
 				} else if (input.action === "update") {
-					if (profile.version !== input.expectedVersion) throw new Error("Codex profile 已更新，请刷新后重试。");
+					const profileFieldEdits = (input.fields ?? []).flatMap((edit) =>
+						expandCodexConfigurationProfileFieldEdit(edit),
+					);
+					if (input.expectedFieldVersions && input.name === undefined) {
+						const requirements = codexConfigurationProfileFieldVersionRequirements(
+							profile.fieldVersions,
+							profileFieldEdits.map((edit) => edit.fieldKey),
+						);
+						const matchesExpectedVersion = (fieldKey: string, version: number | null) => {
+							const expected = input.expectedFieldVersions;
+							if (!expected) return false;
+							if (Object.hasOwn(expected, fieldKey)) return expected[fieldKey] === version;
+							const address = JSON.parse(fieldKey) as string[];
+							for (let end = address.length - 1; end > 1; end--) {
+								const ancestor = JSON.stringify(address.slice(0, end));
+								if (!(input.fields ?? []).some((edit) => edit.fieldKey === ancestor)) continue;
+								if (!Object.hasOwn(expected, ancestor)) return false;
+								return version === null && expected[ancestor] === (profile.fieldVersions[ancestor] ?? null);
+							}
+							return false;
+						};
+						if (Object.entries(requirements).some(([key, version]) => !matchesExpectedVersion(key, version)))
+							throw new Error("相关默认字段已更新，请查看最新默认并重新确认；草稿已保留。");
+					} else if (profile.version !== input.expectedVersion)
+						throw new Error("Codex profile 已更新，请刷新后重试。");
 					const fields: Record<string, CodexConfigurationFields[string] | undefined> = {};
-					for (const edit of input.fields ?? []) {
+					for (const edit of profileFieldEdits) {
 						const { keyPath } = configurationFieldAddress(edit.fieldKey);
-						// 管理页只编辑已知的可共享字段；信任决定只能来自原生确认，不能由任意 JSON 授权。
+						const exceptionGroup = codexConfigurationExceptionGroup(edit.fieldKey);
+						// 管理页只编辑已知的可共享字段；权限表的新叶子与磁盘投影一致。信任决定只能来自原生确认。
 						if (
-							isCodexDesktopConfigurationField(edit.fieldKey) ||
-							!(edit.fieldKey in profile.fields) ||
+							isCodexLocalStateConfigurationField(edit.fieldKey) ||
+							(!(edit.fieldKey in profile.fields) &&
+								!(
+									exceptionGroup &&
+									(keyPath.length === 1 ||
+										Object.hasOwn(profile.fieldVersions, edit.fieldKey) ||
+										(exceptionGroup === "permissions" && keyPath.length > 1 && !keyPath.includes("state")))
+								)) ||
 							keyPath.some((key) => ["__proto__", "prototype", "constructor"].includes(key))
 						)
 							throw new Error("此字段不属于可编辑的 profile 设置。");
 						const previous = profile.fields[edit.fieldKey];
+						if (
+							!edit.delete &&
+							["model", "reasoning_effort"].includes(codexConfigurationExceptionGroup(edit.fieldKey) ?? "") &&
+							(typeof edit.value !== "string" || !edit.value.trim())
+						)
+							throw new Error("模型与推理强度必须是非空原生标识符。");
 						if (keyPath.includes("state")) {
 							if (
 								!configurationTable(edit.value) ||
-								!configurationTable(previous.value) ||
+								!configurationTable(previous?.value) ||
 								edit.delete ||
 								!isDeepStrictEqual(edit.value.trusted_hash, previous.value.trusted_hash) ||
 								Object.keys(edit.value).some((key) => !["enabled", "trusted_hash"].includes(key))
@@ -2110,18 +2241,32 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						}
 						fields[edit.fieldKey] = edit.delete ? undefined : { ...previous, value: edit.value };
 					}
-					if (Object.keys(fields).some((key) => codexConfigurationExceptionGroup(key) === "permissions"))
-						for (const [key, value] of Object.entries(profile.fields))
-							if (codexConfigurationExceptionGroup(key) === "permissions" && !(key in fields))
-								fields[key] = value;
-					if (input.name !== undefined) profile.name = input.name;
+					if (modelCatalog && !modelCatalog.warning) {
+						const nextFields = { ...profile.fields, ...fields };
+						for (const fieldKey of Object.keys(fields)) {
+							if (!["model", "reasoning_effort"].includes(codexConfigurationExceptionGroup(fieldKey) ?? ""))
+								continue;
+							const prefix = (JSON.parse(fieldKey) as string[]).slice(0, -1);
+							const modelId =
+								nextFields[JSON.stringify([...prefix, "model"])]?.value ?? modelCatalog.defaultModelId;
+							const effort = nextFields[JSON.stringify([...prefix, "model_reasoning_effort"])]?.value;
+							const supported = modelCatalog.options.find(
+								(option) => option.modelId === modelId,
+							)?.supportedReasoningEfforts;
+							if (effort !== undefined && supported && !supported.some((option) => option.effort === effort))
+								throw new Error(`模型 ${modelId} 不支持推理强度 ${effort}，请选择兼容的档位。`);
+						}
+					}
+					if (input.name !== undefined && profile.name !== input.name) {
+						profile.name = input.name;
+						profile.version = ++store.revision;
+					}
 					updateCodexConfigurationProfileFields(store, profile.profileId, fields, {
 						modificationInitiator: {
 							status: "confirmed",
 							description: "看板 profile 编辑操作（未记录具体操作者身份）",
 						},
 					});
-					profile.version = ++store.revision;
 				} else {
 					const session = deps
 						.listSessions()
@@ -2156,13 +2301,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await reconcileSessionProfileBindings();
 		await recover();
 		await publish();
-		return publicState(
-			await responseStore(input),
-			deps.listSessions(),
-			traceMonitor.getCoverage(),
-			taskSourceContext,
-			input.stateResponseScope ?? "full",
-		);
+		return await responseState(input);
 	};
 	return {
 		mutateProfile: (input: CodexConfigurationProfileMutationRequest) =>
@@ -2181,6 +2320,20 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				throw new Error("目标不属于此配置记录。");
 			return {
 				...describeCodexConfigurationChange(store, change, true, input.targetWriterId, taskSourceContext),
+				...(change.exceptionGroup && !isCodexConfigurationChangeExcludedFromSettingsSynchronization(change)
+					? {
+							profileEditFields: [
+								...new Set([
+									change.fieldKey,
+									...Object.keys(change.relatedFields ?? {}),
+									...(change.relatedDeletedFieldKeys ?? []),
+								]),
+							].map((fieldKey) => {
+								const field = fieldKey === change.fieldKey ? change.value : change.relatedFields?.[fieldKey];
+								return { fieldKey, value: field?.value, delete: field === undefined };
+							}),
+						}
+					: {}),
 				...(input.includePropagationHistory ? { propagationTargets: change.targets } : {}),
 			};
 		},
@@ -2193,6 +2346,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				taskSourceContext,
 			);
 		},
+		getOverview,
+		listSessionAdoptionProgress: (input: CodexConfigurationSessionAdoptionProgressRequest) =>
+			listCodexConfigurationStoredSessionAdoptionProgress(input, currentSessionIdentities()),
 		getActiveState: async () => {
 			await refreshTaskSourceContext();
 			return codexConfigurationSyncActiveStateSchema.parse(
@@ -2252,6 +2408,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			const receipt = store.mutationReceipts[input.idempotencyKey] ?? null;
 			if (
 				receipt &&
+				input.expectedProfileMutation &&
+				receipt.requestDigest !==
+					configurationDigest(["profile", withoutConfigurationStateResponseScope(input.expectedProfileMutation)])
+			)
+				throw new Error("幂等凭证与原配置编辑请求不符，未确认其他操作的结果。");
+			if (
+				receipt &&
 				input.expectedAction &&
 				input.expectedEntry &&
 				receipt.requestDigest !== configurationDigest(["batch_action", input.expectedAction, input.expectedEntry])
@@ -2272,7 +2435,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			changeId: string;
 			expectedVersion: number;
 			idempotencyKey: string;
-			stateResponseScope?: "full" | "active";
+			stateResponseScope?: "full" | "active" | "overview";
 		}) => withRequestSelection(input, () => mutateChange(input, "acknowledge")),
 		start: () => {
 			void traceMonitor.start();

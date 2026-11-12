@@ -5,6 +5,9 @@ import { z } from "zod";
 import { runWithCodexDirectoryVolumeSystemQueriesDisabled } from "../codex-conversation-storage/codex-persistent-directory-identity";
 import {
 	type CodexConfigurationPropagationTarget,
+	type CodexConfigurationSessionAdoptionCounts,
+	type CodexConfigurationSessionAdoptionProgressPage,
+	type CodexConfigurationSessionAdoptionProgressRequest,
 	type CodexConfigurationSourceEvidence,
 	type CodexConfigurationSourceObservation,
 	type CodexConfigurationTaskSourceSnapshot,
@@ -160,6 +163,7 @@ export interface StoredCodexConfigurationSourceObservation extends CodexConfigur
 	detectedWriterIds: string[];
 }
 export interface CodexConfigurationSyncStore {
+	settingsIsolationProjectionVersion?: number;
 	storageIdentity?: string;
 	storageGeneration?: number;
 	sourceDecisionGenerations?: Record<string, number>;
@@ -205,6 +209,7 @@ export interface CodexConfigurationSyncStore {
 const fieldSchema = z.object({ value: z.unknown(), definitionDigest: z.string().optional() });
 const fieldsSchema = z.record(z.string(), fieldSchema);
 const storeSchema = z.object({
+	settingsIsolationProjectionVersion: z.number().int().nonnegative().optional(),
 	storageIdentity: z.string().optional(),
 	storageGeneration: z.number().int().nonnegative().optional(),
 	sourceDecisionGenerations: z.record(z.string(), z.number()).optional(),
@@ -587,6 +592,26 @@ export async function readCodexConfigurationSyncLookupStore(
 	return storeSchema.parse(
 		await (await configurationDatabaseClient()).request("snapshot", { ...selection, scope: "lookup" }),
 	);
+}
+export interface CodexConfigurationCurrentSessionIdentity {
+	workspaceId: string;
+	conversationSessionId: string;
+	runtimeSessionIncarnationId: string;
+	writerId: string | null;
+	profileId: string | null;
+}
+export async function readCodexConfigurationSyncOverviewStore(sessions: CodexConfigurationCurrentSessionIdentity[]) {
+	const result = await (await configurationDatabaseClient()).request<{
+		store: CodexConfigurationSyncStore;
+		adoptionCounts: CodexConfigurationSessionAdoptionCounts[];
+	}>("overview", { sessions });
+	return { store: storeSchema.parse(result.store), adoptionCounts: result.adoptionCounts };
+}
+export async function listCodexConfigurationStoredSessionAdoptionProgress(
+	input: CodexConfigurationSessionAdoptionProgressRequest,
+	sessions: CodexConfigurationCurrentSessionIdentity[],
+): Promise<CodexConfigurationSessionAdoptionProgressPage> {
+	return await (await configurationDatabaseClient()).request("session_adoption_progress", { ...input, sessions });
 }
 export async function listCodexConfigurationSyncStoredHistory(input: {
 	category?: "all" | "settings" | "sources";

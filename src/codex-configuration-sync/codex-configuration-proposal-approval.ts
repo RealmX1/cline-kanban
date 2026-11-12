@@ -92,7 +92,7 @@ export async function approveStoredCodexConfigurationProposal(
 ) {
 	expireCodexConfigurationProfileFeedbackSuggestions(store);
 	if (isCodexConfigurationChangeExcludedFromSettingsSynchronization(change))
-		throw new CodexConfigurationApprovalError("not_approvable", "外部配置与 desktop 设置已退出 Kanban 设置审批。");
+		throw new CodexConfigurationApprovalError("not_approvable", "外部配置与本地状态已退出 Kanban 设置审批。");
 	if (change.recordKind !== "settings_proposal" || change.approvalStatus !== "pending")
 		throw new CodexConfigurationApprovalError("not_approvable", "此记录不是待审批设置提案。");
 	const source = store.sources[change.sourceIdentity];

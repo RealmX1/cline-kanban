@@ -69,12 +69,14 @@ export const codexConfigurationProfileSchema = z.object({
 	sourceIdentity: z.string(),
 	version: z.number().int().nonnegative(),
 	fields: z.array(codexConfigurationProfileFieldSchema),
+	fieldVersions: z.record(z.string(), z.number().int().nonnegative()).optional(),
 });
 export interface CodexConfigurationProfile {
 	profileId: string;
 	name: string;
 	sourceIdentity: string;
 	version: number;
+	fieldVersions?: Record<string, number>;
 	fields: Array<{
 		fieldKey: string;
 		fieldLabel: string;
@@ -90,25 +92,30 @@ const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnio
 		name: z.string().trim().min(1).max(100),
 		copyFromProfileId: z.string().min(1),
 		idempotencyKey: z.string().min(1).max(200),
-		stateResponseScope: z.enum(["full", "active"]).optional(),
+		stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	}),
 	z.object({
 		action: z.literal("update"),
 		profileId: z.string().min(1),
 		expectedVersion: z.number().int().nonnegative(),
+		expectedFieldVersions: z.record(z.string(), z.number().int().nonnegative().nullable()).optional(),
 		name: z.string().trim().min(1).max(100).optional(),
 		fields: z
-			.array(z.object({ fieldKey: z.string().min(1), value: z.unknown(), delete: z.boolean().optional() }))
+			.array(
+				z
+					.object({ fieldKey: z.string().min(1), value: z.unknown().optional(), delete: z.boolean().optional() })
+					.refine((edit) => edit.delete === true || edit.value !== undefined, "必须提供设置值或明确删除。"),
+			)
 			.max(200)
 			.optional(),
 		idempotencyKey: z.string().min(1).max(200),
-		stateResponseScope: z.enum(["full", "active"]).optional(),
+		stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	}),
 	z.object({
 		action: z.literal("set_default"),
 		profileId: z.string().min(1),
 		idempotencyKey: z.string().min(1).max(200),
-		stateResponseScope: z.enum(["full", "active"]).optional(),
+		stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	}),
 	z.object({
 		action: z.literal("bind_session"),
@@ -117,7 +124,7 @@ const codexConfigurationProfileMutationRequestObjectSchema = z.discriminatedUnio
 		conversationSessionId: z.string().min(1),
 		expectedRuntimeSessionIncarnationId: z.string().uuid(),
 		idempotencyKey: z.string().min(1).max(200),
-		stateResponseScope: z.enum(["full", "active"]).optional(),
+		stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	}),
 ]);
 export type CodexConfigurationProfileMutationRequest = z.infer<
@@ -220,6 +227,9 @@ export const codexConfigurationChangeDetailsRequestSchema = z.object({
 });
 export type CodexConfigurationChangeDetailsRequest = z.infer<typeof codexConfigurationChangeDetailsRequestSchema>;
 export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeComparisonSchema.extend({
+	profileEditFields: z
+		.array(z.object({ fieldKey: z.string(), value: z.unknown().optional(), delete: z.boolean().optional() }))
+		.optional(),
 	propagationTargets: z.array(codexConfigurationPropagationTargetSchema).optional(),
 	changeId: z.string(),
 	version: z.number(),
@@ -284,8 +294,66 @@ export const codexConfigurationSourceObservationSchema = z.object({
 	detectedLocations: z.array(z.object({ workspaceId: z.string(), conversationSessionId: z.string() })).optional(),
 });
 export type CodexConfigurationSourceObservation = z.infer<typeof codexConfigurationSourceObservationSchema>;
+export const codexConfigurationSessionAdoptionStatusSchema = z.enum([
+	"adopted",
+	"local_selection",
+	"saved",
+	"pending",
+	"conflict",
+	"unverified",
+]);
+export const codexConfigurationSessionAdoptionCountsSchema = z.object({
+	profileId: z.string(),
+	total: z.number().int().nonnegative(),
+	adopted: z.number().int().nonnegative(),
+	local_selection: z.number().int().nonnegative(),
+	saved: z.number().int().nonnegative(),
+	pending: z.number().int().nonnegative(),
+	conflict: z.number().int().nonnegative(),
+	unverified: z.number().int().nonnegative(),
+});
+export type CodexConfigurationSessionAdoptionCounts = z.infer<typeof codexConfigurationSessionAdoptionCountsSchema>;
+export const codexConfigurationSessionAdoptionProgressRequestSchema = z.object({
+	profileId: z.string().min(1).optional(),
+	workspaceId: z.string().min(1).optional(),
+	conversationSessionId: z.string().min(1).optional(),
+	limit: z.number().int().min(1).max(100).default(50),
+	cursor: z.string().min(1).max(4096).optional(),
+});
+export type CodexConfigurationSessionAdoptionProgressRequest = z.infer<
+	typeof codexConfigurationSessionAdoptionProgressRequestSchema
+>;
+export const codexConfigurationSessionAdoptionProgressPageSchema = z.object({
+	entries: z.array(
+		z.object({
+			workspaceId: z.string(),
+			conversationSessionId: z.string(),
+			runtimeSessionIncarnationId: z.string(),
+			writerId: z.string().nullable(),
+			profileId: z.string(),
+			status: codexConfigurationSessionAdoptionStatusSchema,
+			localExceptionGroups: z.array(z.string()),
+			recoveryCondition: z.string().nullable(),
+		}),
+	),
+	totalCount: z.number().int().nonnegative(),
+	nextCursor: z.string().nullable(),
+	storageIdentity: z.string(),
+});
+export type CodexConfigurationSessionAdoptionProgressPage = z.infer<
+	typeof codexConfigurationSessionAdoptionProgressPageSchema
+>;
+export const codexConfigurationObservationHealthSchema = z.object({
+	status: z.enum(["healthy", "recovering", "limited", "unverified"]),
+	impact: z.string(),
+	checkedAtMs: z.number().nullable(),
+	recoveryCondition: z.string().nullable(),
+});
+export type CodexConfigurationObservationHealth = z.infer<typeof codexConfigurationObservationHealthSchema>;
 const codexConfigurationSyncStateObjectSchema = z.object({
-	stateResponseScope: z.enum(["full", "active"]).optional(),
+	adoptionCounts: z.array(codexConfigurationSessionAdoptionCountsSchema).optional(),
+	observationHealth: codexConfigurationObservationHealthSchema.optional(),
+	stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	storageIdentity: z.string().optional(),
 	storageGeneration: z.number().int().nonnegative().optional(),
 	historyTotalCount: z.number().int().nonnegative().optional(),
@@ -311,6 +379,8 @@ const codexConfigurationSyncStateObjectSchema = z.object({
 		.optional(),
 	diagnosticCoverage: z
 		.object({
+			lastCheckedAtMs: z.number().nullable().optional(),
+			automaticRecoveryPending: z.boolean().optional(),
 			fileObservation: z.enum(["starting", "active"]),
 			targetCount: z.number(),
 			coverageGapCount: z.number(),
@@ -327,7 +397,9 @@ export interface CodexConfigurationSessionProfileBinding {
 	runtimeSessionIncarnationId?: string;
 }
 export interface CodexConfigurationSyncState {
-	stateResponseScope?: "full" | "active";
+	adoptionCounts?: CodexConfigurationSessionAdoptionCounts[];
+	observationHealth?: CodexConfigurationObservationHealth;
+	stateResponseScope?: "full" | "active" | "overview";
 	storageIdentity?: string;
 	storageGeneration?: number;
 	historyTotalCount?: number;
@@ -341,6 +413,8 @@ export interface CodexConfigurationSyncState {
 	defaultCodexConfigurationProfileId?: string | null;
 	sessionProfileBindings?: CodexConfigurationSessionProfileBinding[];
 	diagnosticCoverage?: {
+		lastCheckedAtMs?: number | null;
+		automaticRecoveryPending?: boolean;
 		fileObservation: "starting" | "active";
 		targetCount: number;
 		coverageGapCount: number;
@@ -374,6 +448,12 @@ export const codexConfigurationSyncActiveStateSchema = codexConfigurationSyncSta
 	historyProjectionGeneration: z.number().int().nonnegative(),
 });
 export type CodexConfigurationSyncActiveState = z.infer<typeof codexConfigurationSyncActiveStateSchema>;
+export const codexConfigurationSyncOverviewSchema = codexConfigurationSyncStateObjectSchema.extend({
+	stateResponseScope: z.literal("overview"),
+	adoptionCounts: z.array(codexConfigurationSessionAdoptionCountsSchema),
+	observationHealth: codexConfigurationObservationHealthSchema,
+});
+export type CodexConfigurationSyncOverview = z.infer<typeof codexConfigurationSyncOverviewSchema>;
 export const codexConfigurationSourceObservationRequestSchema = z.object({ observationId: z.string().min(1) });
 export const codexConfigurationMutationReceiptSchema = z
 	.object({ requestDigest: z.string(), changeId: z.string() })
@@ -386,11 +466,11 @@ export const codexConfigurationChangeMutationRequestSchema = z.object({
 	changeId: z.string().min(1),
 	expectedVersion: z.number().int().positive(),
 	idempotencyKey: z.string().min(1).max(200),
-	stateResponseScope: z.enum(["full", "active"]).optional(),
+	stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 });
 export const codexConfigurationBatchActionRequestSchema = z.object({
 	action: z.enum(["approve", "reject", "defer", "confirm_source"]),
-	stateResponseScope: z.enum(["full", "active"]).optional(),
+	stateResponseScope: z.enum(["full", "active", "overview"]).optional(),
 	items: z
 		.array(
 			codexConfigurationChangeMutationRequestSchema.omit({ stateResponseScope: true }).extend({
@@ -403,8 +483,9 @@ export const codexConfigurationBatchActionRequestSchema = z.object({
 });
 export const codexConfigurationMutationReceiptRequestSchema = z.object({
 	idempotencyKey: z.string().min(1).max(200),
-	expectedAction: z.enum(["confirm_source", "defer"]).optional(),
+	expectedAction: z.enum(["confirm_source", "defer", "approve", "reject"]).optional(),
 	expectedEntry: codexConfigurationBatchActionRequestSchema.shape.items.element.optional(),
+	expectedProfileMutation: codexConfigurationProfileMutationRequestSchema.optional(),
 });
 export type CodexConfigurationMutationReceiptRequest = z.infer<typeof codexConfigurationMutationReceiptRequestSchema>;
 export type CodexConfigurationBatchActionRequest = z.infer<typeof codexConfigurationBatchActionRequestSchema>;
@@ -449,6 +530,10 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
+	getOverview: () => Promise<CodexConfigurationSyncOverview>;
+	listSessionAdoptionProgress: (
+		input: CodexConfigurationSessionAdoptionProgressRequest,
+	) => Promise<CodexConfigurationSessionAdoptionProgressPage>;
 	getActiveState: () => Promise<CodexConfigurationSyncActiveState>;
 	listHistory: (input: CodexConfigurationSyncHistoryRequest) => Promise<CodexConfigurationSyncHistoryPage>;
 	getSourceObservation: (input: { observationId: string }) => Promise<CodexConfigurationSourceObservation | null>;

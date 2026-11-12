@@ -418,8 +418,9 @@ describe("Codex 外部配置只导入一次", () => {
 			"not_applicable",
 			"not_applicable",
 			"not_applicable",
-			"conflict",
+			"not_applicable",
 		]);
+		expect(change.targets.at(-1)?.settingsIsolationCancellation?.previousStatus).toBe("conflict");
 		expect(change.targets[0]).toMatchObject({ diskSavedAt: 2, ownerReloadedAt: 3, reason: "原始历史" });
 		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
 		try {

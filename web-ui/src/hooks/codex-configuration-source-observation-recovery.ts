@@ -176,7 +176,10 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 		);
 		if (!observation) {
 			const individuallyRead = individuallyReadObservations.get(operation.item.changeId);
-			if (!individuallyRead) return snapshot.state.stateResponseScope === "active" ? "unknown" : "superseded";
+			if (!individuallyRead)
+				return snapshot.state.stateResponseScope === "active" || snapshot.state.stateResponseScope === "overview"
+					? "unknown"
+					: "superseded";
 			return classifyObservation(individuallyRead, operation);
 		}
 		return classifyObservation(observation, operation);
@@ -278,7 +281,7 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 				if (!isCurrent(operation, signal)) return [];
 				try {
 					if (delayMs) await waitBeforeRead(delayMs, signal);
-					const latest = await runCodexConfigurationSyncRequestWithinBudget(
+					const latest: CodexConfigurationSyncState = await runCodexConfigurationSyncRequestWithinBudget(
 						(requestSignal) => fetchCodexConfigurationSyncState(workspaceId, requestSignal),
 						signal,
 					);
@@ -287,7 +290,7 @@ export function createCodexConfigurationSourceObservationRecoveryController(
 					if (!acceptState(latest)) return [];
 					if (!isCurrent(operation, signal)) return [];
 					if (
-						latest.stateResponseScope === "active" &&
+						(latest.stateResponseScope === "active" || latest.stateResponseScope === "overview") &&
 						!latest.sourceObservations.some((entry) => entry.observationId === operation.item.changeId)
 					) {
 						const receipt = await runCodexConfigurationSyncRequestWithinBudget(

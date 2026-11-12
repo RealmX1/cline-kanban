@@ -55,7 +55,7 @@ async function openGroupedCandidateFixture(page: Page) {
 		const procedure = url.pathname.split("/api/trpc/")[1];
 		const batched = url.searchParams.has("batch");
 		let response: unknown;
-		if (procedure === "runtime.getCodexConfigurationSyncActiveState") response = state;
+		if (procedure === "runtime.getCodexConfigurationSyncOverview") response = state;
 		else if (procedure === "runtime.batchCodexConfigurationAction") {
 			const body = route.request().postDataJSON();
 			const input: CodexConfigurationBatchActionRequest = batched ? body["0"] : body;
@@ -97,7 +97,7 @@ async function openGroupedCandidateFixture(page: Page) {
 	await page.goto("/isolated-grouped-configuration");
 	await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
 	const settings = page.getByRole("region", { name: "隔离配置设置页" });
-	await expect(settings.getByRole("heading", { name: "设置待反馈 · 2", exact: true })).toBeVisible({ timeout: 20000 });
+	await expect(settings.getByRole("heading", { name: "可选反馈 · 2", exact: true })).toBeVisible({ timeout: 20000 });
 	return { settings, requests };
 }
 
@@ -107,15 +107,16 @@ for (const width of [390, 1280])
 	}, testInfo) => {
 		await page.setViewportSize({ width, height: 900 });
 		const { settings, requests } = await openGroupedCandidateFixture(page);
-		const notice = page.getByRole("region", { name: "Codex 配置变更提示" });
-		for (const surface of [settings, notice]) {
+		const notice = page.getByRole("dialog", { name: "Codex 配置变更提示" });
+		if (await notice.isVisible()) await notice.getByRole("button", { name: "收起", exact: true }).click();
+		for (const surface of [settings]) {
 			const group = surface.getByRole("article", { name: "工作配置 · config.toml · model 的候选值", exact: true });
 			await expect(group).toBeVisible();
 			await expect(group.locator('[data-configuration-value-choice="current"]')).toContainText('"A"');
 			await expect(group.locator('[data-configuration-value-choice="candidate"]')).toHaveCount(2);
 			const candidate = group.getByRole("region", { name: "候选值 · 2 个来源", exact: true });
 			await expect(candidate).toContainText('"B"');
-			await expect(candidate.getByRole("button", { name: "采用此值并广播", exact: true })).toBeVisible();
+			await expect(candidate.getByRole("button", { name: "更新默认并同步", exact: true })).toBeVisible();
 			for (const decision of await group.locator("[data-configuration-value-choice]").all()) {
 				const gap = await decision.evaluate((element) => {
 					const value = element.querySelector("[data-configuration-compared-value]")?.getBoundingClientRect();
@@ -134,7 +135,7 @@ for (const width of [390, 1280])
 		await group.screenshot({ path: testInfo.outputPath(`grouped-candidates-${width}.png`) });
 		await group
 			.getByRole("region", { name: "候选值 · 2 个来源", exact: true })
-			.getByRole("button", { name: "采用此值并广播" })
+			.getByRole("button", { name: "更新默认并同步" })
 			.focus();
 		await page.keyboard.press("Enter");
 		await expect(group).toHaveCount(0);
@@ -144,21 +145,21 @@ for (const width of [390, 1280])
 		]);
 		await page.reload();
 		await page.getByRole("region", { name: "隔离配置设置页" }).waitFor({ timeout: 30_000 });
-		await expect(settings.getByRole("heading", { name: "设置待反馈 · 1", exact: true })).toBeVisible();
+		await expect(settings.getByRole("heading", { name: "可选反馈 · 1", exact: true })).toBeVisible();
 		await expect(
 			settings.getByRole("article", { name: "另一配置 · config.toml · model 的候选值", exact: true }),
 		).toBeVisible();
 		expect(await page.locator("body").evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
 	});
 
-test("保留当前默认只处理本组已展示的全部候选，来源历史将相同的修改前与当前默认合并", async ({ page }) => {
+test("保持默认只处理本组已展示的全部候选，来源历史将相同的修改前与当前默认合并", async ({ page }) => {
 	const { settings, requests } = await openGroupedCandidateFixture(page);
 	const group = settings.getByRole("article", { name: "工作配置 · config.toml · model 的候选值", exact: true });
 	await group.getByText("来源历史 · 2 条", { exact: true }).click();
 	await group.getByText(/来源会话 0 · 记录版本/).click();
 	await expect(group.getByText("当前看板默认（同修改前）", { exact: true }).first()).toBeVisible();
 	await expect(group.getByText("修改前", { exact: true })).toHaveCount(0);
-	await group.getByRole("button", { name: "保留当前默认", exact: true }).click();
+	await group.getByRole("button", { name: "保持默认", exact: true }).click();
 	await expect(group).toHaveCount(0);
 	expect(requests).toHaveLength(1);
 	expect(requests[0]?.action).toBe("reject");

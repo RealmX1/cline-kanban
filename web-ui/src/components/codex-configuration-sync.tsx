@@ -1,6 +1,7 @@
+import * as Popover from "@radix-ui/react-popover";
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { ChevronDown, ClipboardCheck } from "lucide-react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
 	CodexConfigurationComparisonRows,
 	CodexConfigurationFullComparisonControls,
@@ -8,6 +9,7 @@ import {
 } from "@/components/codex-configuration-change-comparison";
 import { CodexConfigurationFeedbackSuggestionGroupView } from "@/components/codex-configuration-feedback-suggestion-group";
 import { CodexConfigurationProfileManagement } from "@/components/codex-configuration-profile-management";
+import { CodexConfigurationSessionAdoptionProgress } from "@/components/codex-configuration-session-adoption-progress";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import {
@@ -60,7 +62,11 @@ function CodexConfigurationChangeActions({
 	const isPending = controller.pendingChangeId === change.changeId;
 	const isProfileManaged = Boolean(change.codexConfigurationProfileId);
 	const isArchivedBySettingsIsolation = change.settingsIsolationArchivedAtMs !== undefined;
-	const feedbackExpired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
+	const feedbackExpired =
+		change.approvalStatus === "expired" ||
+		(change.approvalStatus === "pending" &&
+			change.feedbackExpiresAtMs !== undefined &&
+			change.feedbackExpiresAtMs <= Date.now());
 	return (
 		<article
 			className="min-w-0 flex-1 py-3"
@@ -140,12 +146,23 @@ function CodexConfigurationChangeActions({
 					? "此记录已退出设置同步；此前的接受、保存与加载事实以下方历史进度为准。"
 					: change.mergeStatus === "shared_default_updated"
 						? isProfileManaged
-							? "profile 已更新，正在自动广播；实际采用见下方进度。"
+							? "配置默认已保存；原所有者在安全时采用，确认进度另行展示。"
 							: change.sourceWriterId.startsWith("user-source:")
 								? "已用于未来会话。现有会话保持各自配置。"
 								: "已用于本会话及未来会话。现有会话保持各自配置。"
 						: configurationChangeMergeStatusDescriptions[change.mergeStatus]}
 			</p>
+			{feedbackExpired && <p className="text-sm text-text-secondary">未更新默认，局部选择保留。</p>}
+			{feedbackExpired && !isArchivedBySettingsIsolation && change.codexConfigurationProfileId && (
+				<Button
+					size="sm"
+					variant="ghost"
+					disabled={disabled}
+					onClick={() => void controller.beginHistoricalDefaultEdit(change)}
+				>
+					重新发起共享
+				</Button>
+			)}
 			{change.approvalStatus === "pending" && change.mergeStatus !== "conflict" && !feedbackExpired ? (
 				<div className="flex flex-wrap gap-2">
 					<Button
@@ -366,8 +383,6 @@ function CodexConfigurationTargetConflict({
 	);
 }
 
-type ReviewFilter = "all" | "settings" | "sources" | "history";
-
 function CodexConfigurationSourceObservationEntry({
 	observation,
 	controller,
@@ -376,7 +391,7 @@ function CodexConfigurationSourceObservationEntry({
 	controller: Controller;
 }) {
 	const operation = controller.sourceOperations[observation.observationId];
-	const isHistory = observation.acknowledgedAt !== null;
+	const isHistorySection = observation.acknowledgedAt !== null;
 	const observedChanges = (controller.state?.changes ?? []).filter((change) =>
 		observation.changeIds?.includes(change.changeId),
 	);
@@ -407,7 +422,7 @@ function CodexConfigurationSourceObservationEntry({
 						controller={controller}
 					/>
 				))}
-			{isHistory && (
+			{isHistorySection && (
 				<p>
 					{observation.reminderDisposition === "deferred" ? "已稍后处理" : "已标记已读"} ·{" "}
 					<time dateTime={new Date(observation.acknowledgedAt!).toISOString()}>
@@ -415,10 +430,10 @@ function CodexConfigurationSourceObservationEntry({
 					</time>
 				</p>
 			)}
-			{(!isHistory || observation.reminderDisposition === "deferred") && (
+			{(!isHistorySection || observation.reminderDisposition === "deferred") && (
 				<div className="flex flex-wrap gap-2">
 					{(
-						[["confirm_source", "标记已读"], ...(!isHistory ? [["defer", "稍后处理"]] : [])] as Array<
+						[["confirm_source", "标记已读"], ...(!isHistorySection ? [["defer", "稍后处理"]] : [])] as Array<
 							["confirm_source" | "defer", string]
 						>
 					).map(([action, label]) => (
@@ -496,19 +511,22 @@ const selectionIdentity = (group: CodexConfigurationFeedbackSuggestionGroup) =>
 	JSON.stringify(group.members.map((change) => [change.changeId, change.version]));
 function CodexConfigurationReviewList({
 	controller,
-	remindersOnly = false,
+	section,
+	profileId,
 }: {
 	controller: Controller;
-	remindersOnly?: boolean;
+	section: "feedback" | "history";
+	profileId?: string;
 }) {
-	const [filter, setFilter] = useState<ReviewFilter>("all");
+	const isHistorySection = section === "history";
 	const [search, setSearch] = useState("");
 	const [selected, setSelected] = useState(new Set<string>());
 	const [historyCategory, setHistoryCategory] = useState<"all" | "settings" | "sources">("all");
-	const usesActiveResponse = controller.state?.stateResponseScope === "active";
+	const usesActiveResponse =
+		controller.state?.stateResponseScope === "active" || controller.state?.stateResponseScope === "overview";
 	const pagedHistory = useCodexConfigurationSyncHistory(
 		controller.workspaceId,
-		!remindersOnly && usesActiveResponse && filter === "history",
+		usesActiveResponse && isHistorySection,
 		search,
 		historyCategory,
 		controller.state,
@@ -528,7 +546,7 @@ function CodexConfigurationReviewList({
 	const changes = (controller.state?.changes ?? []).filter(
 		(change) =>
 			change.recordKind !== "source_observation" &&
-			(!remindersOnly || (change.acknowledgedAt === null && change.recordKind !== "historical_record")) &&
+			(!profileId || !change.codexConfigurationProfileId || change.codexConfigurationProfileId === profileId) &&
 			matching(
 				`${change.fieldLabel} ${change.fieldKey ?? ""} ${change.sourceConversationSessionId} ${change.sourceWorkspaceId} ${JSON.stringify(change.sourceEvidence ?? {})} ${(change.comparison?.rows ?? []).map((row) => row.label).join(" ")}`,
 			),
@@ -539,15 +557,6 @@ function CodexConfigurationReviewList({
 			(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
 	);
 	const proposalGroups = groupCodexConfigurationFeedbackSuggestions(proposals);
-	const propagationChanges = usesActiveResponse
-		? changes.filter(
-				(change) =>
-					change.approvalStatus !== "pending" &&
-					change.targets.some((target) =>
-						["accepted", "pending_reload", "pending_next_start", "conflict"].includes(target.status),
-					),
-			)
-		: [];
 	const history = (
 		usesActiveResponse ? pagedHistory.changes.filter((change) => change.recordKind !== "source_observation") : changes
 	).filter(
@@ -569,14 +578,13 @@ function CodexConfigurationReviewList({
 	const observations = (controller.state?.sourceObservations ?? []).filter(
 		(observation) => observation.acknowledgedAt === null && matching(observationSearchText(observation)),
 	);
-	const processedObservations = remindersOnly
-		? []
-		: (usesActiveResponse ? pagedHistory.sourceObservations : (controller.state?.sourceObservations ?? [])).filter(
-				(observation) =>
-					observation.acknowledgedAt !== null &&
-					(usesActiveResponse || matching(observationSearchText(observation))),
-			);
-	const selectable = filter === "all" || filter === "settings" ? proposalGroups : [];
+	const processedObservations = (
+		usesActiveResponse ? pagedHistory.sourceObservations : (controller.state?.sourceObservations ?? [])
+	).filter(
+		(observation) =>
+			observation.acknowledgedAt !== null && (usesActiveResponse || matching(observationSearchText(observation))),
+	);
+	const selectable = isHistorySection ? [] : proposalGroups;
 	const selectedProposalGroups = selectable.filter((group) => selected.has(selectionIdentity(group)));
 	const selectedProposals = selectedProposalGroups.flatMap((group) => group.members);
 	const disabled = controller.pendingChangeId !== null;
@@ -629,24 +637,6 @@ function CodexConfigurationReviewList({
 	return (
 		<>
 			<div className="flex flex-wrap items-center gap-2 py-2">
-				{(
-					[
-						["all", "全部"],
-						["settings", "设置待反馈"],
-						["sources", "来源更新"],
-						...(!remindersOnly ? [["history", "历史记录"]] : []),
-					] as Array<[ReviewFilter, string]>
-				).map(([value, label]) => (
-					<Button
-						key={value}
-						size="sm"
-						variant="ghost"
-						aria-pressed={filter === value}
-						onClick={() => setFilter(value)}
-					>
-						{label}
-					</Button>
-				))}
 				<input
 					type="search"
 					aria-label="筛选配置记录"
@@ -656,7 +646,7 @@ function CodexConfigurationReviewList({
 					className="min-w-0 w-full sm:w-56 rounded border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
 				/>
 			</div>
-			{selectable.length > 0 && (
+			{selectable.length > 1 && (
 				<div className="flex flex-wrap items-center gap-2 border-y border-border py-2">
 					<label className="flex items-center gap-2 text-xs text-text-primary">
 						<input
@@ -704,33 +694,33 @@ function CodexConfigurationReviewList({
 					))}
 				</div>
 			)}
-			{(filter === "all" || filter === "settings") && (
+			{!isHistorySection && (
 				<div role="group" aria-label="设置待反馈">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
-						设置待反馈 · {proposalGroups.length}
-					</h3>
-					{proposals.length === 0 && <p className="text-xs text-text-secondary">暂无待反馈设置。</p>}
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">可选反馈 · {proposalGroups.length}</h3>
+					{proposals.length === 0 && <p className="text-xs text-text-secondary">暂无可选反馈，默认保持不变。</p>}
 					<div className="divide-y divide-border">
 						{proposalGroups.map((group) => {
 							const change = group.members[0]!;
 							return (
 								<div key={group.fieldGroupKey} className="flex min-w-0 items-start gap-2">
-									<input
-										type="checkbox"
-										className="mt-4 shrink-0"
-										aria-label={`选择 ${change.fieldLabel}`}
-										checked={selected.has(selectionIdentity(group))}
-										disabled={disabled}
-										onChange={(event) => {
-											const checked = event.target.checked;
-											setSelected((previous) => {
-												const next = new Set(previous);
-												if (checked) next.add(selectionIdentity(group));
-												else next.delete(selectionIdentity(group));
-												return next;
-											});
-										}}
-									/>
+									{selectable.length > 1 && (
+										<input
+											type="checkbox"
+											className="mt-4 shrink-0"
+											aria-label={`选择 ${change.fieldLabel}`}
+											checked={selected.has(selectionIdentity(group))}
+											disabled={disabled}
+											onChange={(event) => {
+												const checked = event.target.checked;
+												setSelected((previous) => {
+													const next = new Set(previous);
+													if (checked) next.add(selectionIdentity(group));
+													else next.delete(selectionIdentity(group));
+													return next;
+												});
+											}}
+										/>
+									)}
 									{change.candidateFieldGroupKey ? (
 										<CodexConfigurationFeedbackSuggestionGroupView group={group} controller={controller} />
 									) : (
@@ -742,19 +732,7 @@ function CodexConfigurationReviewList({
 					</div>
 				</div>
 			)}
-			{filter === "all" && propagationChanges.length > 0 && (
-				<div role="group" aria-label="会话采用进度">
-					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
-						会话采用进度 · {propagationChanges.length}
-					</h3>
-					<div className="divide-y divide-border">
-						{propagationChanges.map((change) => (
-							<CodexConfigurationChangeActions key={change.changeId} change={change} controller={controller} />
-						))}
-					</div>
-				</div>
-			)}
-			{(filter === "all" || filter === "sources") && (
+			{!isHistorySection && (
 				<div role="group" aria-label="来源更新">
 					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">来源更新 · {observations.length}</h3>
 					{observations.length === 0 && <p className="text-xs text-text-secondary">暂无来源更新。</p>}
@@ -769,89 +747,86 @@ function CodexConfigurationReviewList({
 					</div>
 				</div>
 			)}
-			{(filter === "history" || (!usesActiveResponse && filter === "all")) &&
-				(usesActiveResponse || history.length + processedObservations.length > 0) && (
-					<div role="group" aria-label="历史记录">
-						<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
-							历史记录 ·{" "}
-							{usesActiveResponse ? pagedHistory.totalCount : history.length + processedObservations.length}
-						</h3>
-						{usesActiveResponse && (
-							<div className="flex flex-wrap items-center gap-2 py-2">
-								<select
-									aria-label="历史记录类别"
-									value={historyCategory}
-									onChange={(event) =>
-										setHistoryCategory(event.target.value as "all" | "settings" | "sources")
-									}
-									className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary"
-								>
-									<option value="all">全部历史</option>
-									<option value="settings">设置历史</option>
-									<option value="sources">来源历史</option>
-								</select>
-								{pagedHistory.hasNewHistory && (
-									<span role="status" className="text-xs text-text-secondary">
-										有新的历史记录
-									</span>
+			{isHistorySection && (usesActiveResponse || history.length + processedObservations.length > 0) && (
+				<div role="group" aria-label="历史记录">
+					<h3 className="mt-3 mb-0 text-sm font-semibold text-text-primary">
+						历史记录 ·{" "}
+						{usesActiveResponse ? pagedHistory.totalCount : history.length + processedObservations.length}
+					</h3>
+					{usesActiveResponse && (
+						<div className="flex flex-wrap items-center gap-2 py-2">
+							<select
+								aria-label="历史记录类别"
+								value={historyCategory}
+								onChange={(event) => setHistoryCategory(event.target.value as "all" | "settings" | "sources")}
+								className="rounded border border-border bg-surface-2 px-2 py-1.5 text-xs text-text-primary"
+							>
+								<option value="all">全部历史</option>
+								<option value="settings">设置历史</option>
+								<option value="sources">来源历史</option>
+							</select>
+							{pagedHistory.hasNewHistory && (
+								<span role="status" className="text-xs text-text-secondary">
+									有新的历史记录
+								</span>
+							)}
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={pagedHistory.loading}
+								onClick={() => void pagedHistory.refresh()}
+							>
+								刷新历史
+							</Button>
+						</div>
+					)}
+					<div className="divide-y divide-border">
+						{history.map((change) => (
+							<CodexConfigurationChangeActions
+								key={change.changeId}
+								change={change}
+								controller={historyController}
+							/>
+						))}
+						{processedObservations.map((observation) => (
+							<CodexConfigurationSourceObservationEntry
+								key={observation.observationId}
+								observation={observation}
+								controller={historyController}
+							/>
+						))}
+					</div>
+					{usesActiveResponse && (
+						<div className="py-2">
+							{pagedHistory.loading && (
+								<p role="status" className="text-xs text-text-secondary">
+									正在读取历史记录…
+								</p>
+							)}
+							{pagedHistory.error && (
+								<p role="alert" className="text-xs text-status-red">
+									{pagedHistory.error}
+								</p>
+							)}
+							{!pagedHistory.loading &&
+								!pagedHistory.error &&
+								history.length + processedObservations.length === 0 && (
+									<p className="text-xs text-text-secondary">没有匹配的历史记录。</p>
 								)}
+							{pagedHistory.hasMore && (
 								<Button
 									size="sm"
 									variant="ghost"
 									disabled={pagedHistory.loading}
-									onClick={() => void pagedHistory.refresh()}
+									onClick={() => void pagedHistory.loadMore()}
 								>
-									刷新历史
+									加载更多历史
 								</Button>
-							</div>
-						)}
-						<div className="divide-y divide-border">
-							{history.map((change) => (
-								<CodexConfigurationChangeActions
-									key={change.changeId}
-									change={change}
-									controller={historyController}
-								/>
-							))}
-							{processedObservations.map((observation) => (
-								<CodexConfigurationSourceObservationEntry
-									key={observation.observationId}
-									observation={observation}
-									controller={historyController}
-								/>
-							))}
+							)}
 						</div>
-						{usesActiveResponse && (
-							<div className="py-2">
-								{pagedHistory.loading && (
-									<p role="status" className="text-xs text-text-secondary">
-										正在读取历史记录…
-									</p>
-								)}
-								{pagedHistory.error && (
-									<p role="alert" className="text-xs text-status-red">
-										{pagedHistory.error}
-									</p>
-								)}
-								{!pagedHistory.loading &&
-									!pagedHistory.error &&
-									history.length + processedObservations.length === 0 && (
-										<p className="text-xs text-text-secondary">没有匹配的历史记录。</p>
-									)}
-								{pagedHistory.hasMore && (
-									<Button
-										size="sm"
-										variant="ghost"
-										disabled={pagedHistory.loading}
-										onClick={() => void pagedHistory.loadMore()}
-									>
-										加载更多历史
-									</Button>
-								)}
-							</div>
-						)}
-					</div>
-				)}
+					)}
+				</div>
+			)}
 			{controller.batchResults
 				.filter((result) => result.status !== "applied" && result.status !== "replayed")
 				.map((result) => (
@@ -875,7 +850,7 @@ function CodexConfigurationReviewList({
 
 export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexConfigurationSyncNoticePresentation }) {
 	if (!notice.hasReminders) return null;
-	const summary = `待反馈 ${notice.pendingApprovalCount} 项 · 来源更新 ${notice.sourceUpdateCount} 条`;
+	const summary = `可选反馈 ${notice.pendingApprovalCount} 项 · 来源更新 ${notice.sourceUpdateCount} 条`;
 	return (
 		<button
 			ref={notice.summaryButtonRef}
@@ -893,7 +868,14 @@ export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexC
 		>
 			<ClipboardCheck size={14} aria-hidden="true" />
 			<span className="hidden xl:inline">配置</span>
-			<span className="font-mono tabular-nums">{notice.pendingApprovalCount + notice.sourceUpdateCount}</span>
+			<span className="font-mono tabular-nums">
+				{notice.pendingApprovalCount + notice.sourceUpdateCount ||
+					(notice.controller.state?.observationHealth
+						? { healthy: "观察正常", recovering: "自动恢复中", limited: "观察受限", unverified: "待核验" }[
+								notice.controller.state.observationHealth.status
+							]
+						: 0)}
+			</span>
 			<ChevronDown
 				size={12}
 				aria-hidden="true"
@@ -903,6 +885,76 @@ export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexC
 	);
 }
 
+function CodexConfigurationFeedbackPopoverCandidate({
+	change,
+	members,
+	controller,
+}: {
+	change: CodexConfigurationChange;
+	members: CodexConfigurationChange[];
+	controller: Controller;
+}) {
+	const current = controller.state?.changes.find((entry) => entry.changeId === change.changeId);
+	const expired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
+	const stale = !current || current.version !== change.version || current.approvalStatus !== "pending";
+	const disabled = controller.pendingChangeId !== null || stale || expired || !change.comparison;
+	const label =
+		change.exceptionGroup === "reasoning_effort"
+			? "推理强度"
+			: change.exceptionGroup === "model"
+				? "模型"
+				: change.exceptionGroup === "permissions"
+					? "完整权限"
+					: change.fieldLabel;
+	const rows = change.comparison?.rows ?? [];
+	return (
+		<article className="min-w-0 space-y-3 py-3" aria-label={`${label}建议`}>
+			<h3 className="m-0 text-base font-semibold text-text-primary">
+				{label}：
+				<span className="break-all font-mono">
+					{rows[0]?.sharedCurrent?.text ?? change.previousValueSummary} →{" "}
+					{rows[0]?.detected.text ?? change.valueSummary}
+				</span>
+			</h3>
+			<p className="m-0 break-words text-sm text-text-secondary">
+				来源：{change.sourceEvidence?.detectedOwner.task?.taskTitle ?? change.sourceConversationSessionId} ·{" "}
+				{change.profileName ?? "默认配置"}
+			</p>
+			{rows.length > 1 && <CodexConfigurationComparisonRows comparison={change.comparison!} />}
+			<div className="flex flex-wrap gap-2">
+				<Button
+					size="sm"
+					variant="primary"
+					className="min-h-9"
+					disabled={disabled}
+					onClick={() => void controller.adoptCandidate(members, change.comparison?.expectedSharedValueDigest)}
+				>
+					更新默认并同步
+				</Button>
+				<Button
+					size="sm"
+					variant="ghost"
+					className="min-h-9"
+					disabled={controller.pendingChangeId !== null || stale || expired}
+					onClick={() =>
+						void controller.batch("reject", [
+							{ entryKind: "settings_proposal", changeId: change.changeId, expectedVersion: change.version },
+						])
+					}
+				>
+					保持默认
+				</Button>
+			</div>
+			<p className="m-0 text-xs text-text-secondary">
+				{expired
+					? "未更新默认，局部选择保留。"
+					: stale
+						? "此比较已更新或处理，请重新核对建议。"
+						: "同配置的现有会话在安全时采用；不操作会保留默认。"}
+			</p>
+		</article>
+	);
+}
 export function CodexConfigurationSyncNotice({
 	notice,
 	onOpenSettings,
@@ -910,59 +962,147 @@ export function CodexConfigurationSyncNotice({
 	notice: CodexConfigurationSyncNoticePresentation;
 	onOpenSettings: () => void;
 }) {
+	const anchor = useRef({
+		getBoundingClientRect: () => notice.summaryButtonRef.current?.getBoundingClientRect() ?? new DOMRect(),
+	});
+	const [showOtherCandidates, setShowOtherCandidates] = useState(false);
+	const candidates = groupCodexConfigurationFeedbackSuggestions(
+		notice.displayedChanges,
+		Number.NEGATIVE_INFINITY,
+	).flatMap((group) =>
+		group.candidates.flatMap((candidate) => {
+			const representative = candidate.members[0];
+			return representative ? [{ representative, members: candidate.members }] : [];
+		}),
+	);
 	if (!notice.hasReminders) return null;
 	return (
-		<section
-			ref={notice.panelRef}
-			id={notice.contentId}
-			hidden={!notice.isVisible}
-			tabIndex={-1}
-			className="absolute inset-x-0 top-0 z-40 flex max-h-[min(36rem,100%)] min-h-0 min-w-0 flex-col overflow-hidden border-b border-border bg-surface-1 shadow-md focus-visible:outline-2 focus-visible:outline-accent focus-visible:-outline-offset-2"
-			aria-label="Codex 配置变更提示"
-			data-verification-anchor="codex-configuration-sync-notice"
-			data-mobile-focus-view-idle-collapse-suspension=""
-			data-state={notice.isVisible ? "open" : "closed"}
-			onKeyDown={(event) => {
-				if (event.key !== "Escape" || event.defaultPrevented) return;
-				event.preventDefault();
-				event.stopPropagation();
-				notice.closeAndRestoreSummaryFocus();
+		<Popover.Root
+			modal={false}
+			open={notice.isVisible}
+			onOpenChange={(open) => {
+				if (!open) notice.closeForSettings();
 			}}
 		>
-			<div className="flex shrink-0 items-center justify-between gap-2 px-3 py-2 sm:px-4">
-				<span className="min-w-0 text-xs font-medium text-text-primary" role="status">
-					待反馈 {notice.pendingApprovalCount} 项 · 来源更新 {notice.sourceUpdateCount} 条
-				</span>
-				<div className="flex shrink-0 items-center gap-1">
-					<Button
-						size="sm"
-						variant="ghost"
-						className="min-h-11 md:min-h-8"
-						onClick={() => {
-							notice.closeForSettings();
-							onOpenSettings();
-						}}
+			<Popover.Anchor virtualRef={anchor} />
+			<Popover.Portal>
+				<Popover.Content
+					ref={notice.bindPanelRef}
+					id={notice.contentId}
+					side="bottom"
+					align="end"
+					sideOffset={8}
+					collisionPadding={12}
+					aria-label="Codex 配置变更提示"
+					data-codex-configuration-feedback-popover=""
+					data-verification-anchor="codex-configuration-sync-notice"
+					data-mobile-focus-view-idle-collapse-suspension=""
+					className="z-50 flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-[min(27rem,calc(100vw-1.5rem))] min-w-0 flex-col rounded-lg border border-border bg-surface-1 p-4 focus-visible:outline-2 focus-visible:outline-accent"
+					onOpenAutoFocus={(event) => event.preventDefault()}
+					onCloseAutoFocus={(event) => event.preventDefault()}
+					onEscapeKeyDown={() => notice.closeAndRestoreSummaryFocus()}
+				>
+					<div className="flex shrink-0 items-center justify-between gap-2">
+						<span className="text-xs text-text-secondary">可选反馈 · {notice.pendingApprovalCount} 项</span>
+						<Button size="sm" variant="ghost" onClick={notice.closeAndRestoreSummaryFocus}>
+							收起
+						</Button>
+					</div>
+					{notice.hasNewSuggestions && (
+						<Button
+							size="sm"
+							variant="ghost"
+							className="my-2 justify-start text-accent"
+							disabled={notice.controller.pendingChangeId !== null}
+							onClick={notice.showLatestSuggestions}
+						>
+							有新建议，查看最新比较
+						</Button>
+					)}
+					<div
+						ref={notice.scrollContainerRef}
+						className="min-h-0 overflow-y-auto overscroll-contain"
+						onScroll={notice.recordReadingPosition}
 					>
-						配置同步设置
-					</Button>
-					<Button
-						size="sm"
-						variant="ghost"
-						className="min-h-11 md:min-h-8"
-						onClick={notice.closeAndRestoreSummaryFocus}
-					>
-						收起
-					</Button>
-				</div>
-			</div>
-			<div
-				ref={notice.scrollContainerRef}
-				className="min-h-0 overflow-y-auto overscroll-contain px-3 pb-2 sm:px-4"
-				onScroll={notice.recordReadingPosition}
-			>
-				<CodexConfigurationReviewList controller={notice.controller} remindersOnly />
-			</div>
-		</section>
+						{candidates[0] ? (
+							<CodexConfigurationFeedbackPopoverCandidate
+								change={candidates[0].representative}
+								members={candidates[0].members}
+								controller={notice.controller}
+							/>
+						) : (
+							<p className="text-sm text-text-secondary">
+								暂无可选反馈。
+								{notice.controller.state?.observationHealth?.impact ?? "默认保持不变，观察状态可在配置页查看。"}
+							</p>
+						)}
+						{candidates.length > 1 && (
+							<>
+								<Button
+									size="sm"
+									variant="ghost"
+									aria-expanded={showOtherCandidates}
+									onClick={() => setShowOtherCandidates((value) => !value)}
+								>
+									其他建议 · {candidates.length - 1} 项
+								</Button>
+								{showOtherCandidates &&
+									candidates
+										.slice(1)
+										.map((candidate) => (
+											<CodexConfigurationFeedbackPopoverCandidate
+												key={candidate.representative.changeId}
+												change={candidate.representative}
+												members={candidate.members}
+												controller={notice.controller}
+											/>
+										))}
+							</>
+						)}
+						{candidates.some(
+							(candidate) =>
+								!notice.controller.state?.changes.some(
+									(entry) =>
+										entry.changeId === candidate.representative.changeId &&
+										entry.version === candidate.representative.version,
+								),
+						) && (
+							<Button
+								size="sm"
+								variant="ghost"
+								disabled={notice.controller.pendingChangeId !== null}
+								onClick={notice.showLatestSuggestions}
+							>
+								重新核对建议
+							</Button>
+						)}
+						{notice.controller.error && (
+							<p
+								role={notice.controller.errorIsConfirmed ? "alert" : "status"}
+								className={
+									notice.controller.errorIsConfirmed ? "text-sm text-status-red" : "text-sm text-status-orange"
+								}
+							>
+								{notice.controller.error}
+							</p>
+						)}
+					</div>
+					<div className="mt-2 flex shrink-0 items-center justify-between border-t border-border pt-2">
+						<span className="text-xs text-text-secondary">来源更新 {notice.sourceUpdateCount} 条</span>
+						<Button
+							size="sm"
+							variant="ghost"
+							onClick={() => {
+								notice.closeForSettings();
+								onOpenSettings();
+							}}
+						>
+							配置同步设置
+						</Button>
+					</div>
+				</Popover.Content>
+			</Popover.Portal>
+		</Popover.Root>
 	);
 }
 
@@ -974,54 +1114,99 @@ export function CodexConfigurationSyncSettings({
 	enabled?: boolean;
 }) {
 	const controller = useCodexConfigurationSync(workspaceId, enabled);
+	const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+	const [section, setSection] = useState<"feedback" | "adoption" | "history">("feedback");
+	const sectionId = useId();
+	const sections = [
+		["feedback", "可选反馈"],
+		["adoption", "自动采用"],
+		["history", "历史"],
+	] as const;
+	useEffect(() => {
+		if (controller.historicalDefaultEditRequest) {
+			setSelectedProfileId(controller.historicalDefaultEditRequest.profileId);
+			setSection("feedback");
+		}
+	}, [controller.historicalDefaultEditRequest]);
+	const profileId =
+		selectedProfileId ??
+		controller.state?.defaultCodexConfigurationProfileId ??
+		controller.state?.profiles?.[0]?.profileId;
 	return (
 		<section
 			aria-label="Codex 配置同步"
-			className="mb-5 min-w-0"
+			className="mb-5 min-w-0 space-y-4"
 			data-verification-anchor="codex-configuration-sync-settings"
 		>
-			<div className="sticky top-0 pt-4 pb-2 bg-surface-1 z-10">
-				<h2 className="m-0 text-base font-semibold text-text-primary">Codex 配置同步</h2>
-			</div>
-			<p className="text-[13px] text-text-secondary">
-				普通设置自动共享到所属 profile。模型、Effort、权限先保留为本次局部选择，十分钟内可一次反馈并广播。hook
-				信任按可信来源和相同定义跨 profile 复用。
-			</p>
-			{controller.state && <CodexConfigurationProfileManagement controller={controller} />}
-			{controller.state?.diagnosticCoverage && (
-				<p className="text-xs text-text-secondary" role="status">
-					基础诊断：
-					{controller.state.diagnosticCoverage.fileObservation === "active" ? "正在只读观察" : "正在启动"} ·{" "}
-					{controller.state.diagnosticCoverage.targetCount} 个目标 ·{" "}
-					{controller.state.diagnosticCoverage.coverageGapCount}{" "}
-					处覆盖缺口。系统级实际写入者采集需单独运行追踪脚本。
-				</p>
+			<h2 className="m-0 pt-4 text-xl font-semibold text-text-primary">Codex 配置</h2>
+			{controller.state && (
+				<CodexConfigurationProfileManagement
+					controller={controller}
+					selectedProfileId={selectedProfileId}
+					onSelectedProfileIdChange={setSelectedProfileId}
+				/>
 			)}
-			{!controller.state ? (
-				<>
-					<p role={controller.error ? "alert" : "status"} className="text-xs text-text-secondary">
-						{controller.error ?? "正在读取配置记录…"}
+			<p className="max-w-prose text-sm leading-relaxed text-text-secondary">
+				普通偏好自动共享。模型、推理强度和完整权限先保留为会话局部选择，明确反馈后才更新默认。hook
+				信任来自原生确认。外部 Codex 配置只在首次导入，后续修改不会自动成为 Kanban 默认。
+			</p>
+			<div role="tablist" aria-label="配置记录分区" className="flex gap-1 border-b border-border pb-2">
+				{sections.map(([value, label], index) => (
+					<Button
+						key={value}
+						id={`${sectionId}-${value}-tab`}
+						role="tab"
+						tabIndex={section === value ? 0 : -1}
+						aria-controls={`${sectionId}-${value}-panel`}
+						aria-selected={section === value}
+						variant={section === value ? "primary" : "ghost"}
+						onClick={() => setSection(value)}
+						onKeyDown={(event) => {
+							const targetIndex =
+								event.key === "ArrowRight"
+									? (index + 1) % sections.length
+									: event.key === "ArrowLeft"
+										? (index + sections.length - 1) % sections.length
+										: event.key === "Home"
+											? 0
+											: event.key === "End"
+												? sections.length - 1
+												: null;
+							if (targetIndex === null) return;
+							event.preventDefault();
+							setSection(sections[targetIndex]![0]);
+							event.currentTarget.parentElement
+								?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
+								[targetIndex]?.focus();
+						}}
+					>
+						{label}
+					</Button>
+				))}
+			</div>
+			<div role="tabpanel" id={`${sectionId}-${section}-panel`} aria-labelledby={`${sectionId}-${section}-tab`}>
+				{!controller.state ? (
+					<p role="status" className="text-sm text-text-secondary">
+						{controller.error ?? "正在读取配置概览…"}
 					</p>
-					{Object.keys(controller.sourceOperations).length > 0 && (
-						<p role="status" className="text-xs text-text-secondary">
-							来源处理回执尚未确认，正在核验或等待连接恢复；原决定已保存。
-						</p>
-					)}
-					{controller.error && (
-						<Button
-							size="sm"
-							variant="ghost"
-							onClick={() => {
-								void controller.refresh();
-								controller.retryUnconfirmedSourceActions();
-							}}
-						>
-							重新核验
-						</Button>
-					)}
-				</>
-			) : (
-				<CodexConfigurationReviewList controller={controller} />
+				) : section === "adoption" && profileId ? (
+					<CodexConfigurationSessionAdoptionProgress controller={controller} profileId={profileId} />
+				) : (
+					<CodexConfigurationReviewList
+						key={section}
+						controller={controller}
+						section={section === "history" ? "history" : "feedback"}
+						profileId={profileId ?? undefined}
+					/>
+				)}
+			</div>
+			{controller.error && (
+				<p
+					role={controller.errorIsConfirmed ? "alert" : "status"}
+					className={controller.errorIsConfirmed ? "text-sm text-status-red" : "text-sm text-status-orange"}
+				>
+					{controller.error}
+				</p>
 			)}
 		</section>
 	);
