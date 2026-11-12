@@ -45,10 +45,12 @@ describe("广播成本窗口记录", () => {
 			advance(2);
 		});
 		operation.measureSynchronousStage("websocket_send_loop", () => {
-			operation.recordWebSocketSendOutcome("accepted");
-			operation.recordWebSocketSendOutcome("accepted");
-			operation.recordWebSocketSendOutcome("client_not_open");
-			operation.recordWebSocketSendOutcome("threw");
+			operation.recordWebSocketSendOutcome({ outcome: "accepted", submittedApplicationPayloadBytes: 17 });
+			operation.recordWebSocketSendOutcome({ outcome: "accepted", submittedApplicationPayloadBytes: 23 });
+			operation.recordWebSocketSendOutcome({ outcome: "deduplicated" });
+			operation.recordWebSocketSendOutcome({ outcome: "client_not_open" });
+			operation.recordWebSocketSendOutcome({ outcome: "threw" });
+			operation.recordWebSocketSendOutcome({ outcome: "message_preparation_threw" });
 			operation.recordInitialSnapshotAwaitingClientSkip();
 			advance(3);
 		});
@@ -56,6 +58,7 @@ describe("广播成本窗口记录", () => {
 		operation.finish("failed");
 		recorder.flushWindow();
 		const window = samples[0].operations.projects_updated;
+		expect(samples[0].schemaVersion).toBe("runtime-state-broadcast-cost-window/v2");
 		expect(window).toMatchObject({
 			startedOperationCount: 1,
 			completedOperationCount: 1,
@@ -66,7 +69,9 @@ describe("广播成本窗口记录", () => {
 			webSocketAcceptedSendCount: 2,
 			webSocketClosedClientSkipCount: 1,
 			webSocketThrownSendCount: 1,
-			webSocketAcceptedSendPayloadBytes: 2 * Buffer.byteLength(serialized),
+			webSocketSubmittedApplicationPayloadBytes: 40,
+			webSocketDeduplicatedClientSkipCount: 1,
+			webSocketMessagePreparationFailureCount: 1,
 			initialSnapshotAwaitingClientSkipCount: 1,
 			totalOperationDurationMs: 16,
 		});

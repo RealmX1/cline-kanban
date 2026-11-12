@@ -498,12 +498,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		serializedPayload: string,
 	): RuntimeStateWebSocketSendOutcome => {
 		if (client.readyState !== WebSocket.OPEN) {
-			return "client_not_open";
+			return { outcome: "client_not_open" };
 		}
 		if (client.bufferedAmount > (maximumBufferedBytesByClient.get(client) ?? 4 * 1024 * 1024)) {
 			client.close(1013, "状态流接收过慢，请重新建立同步基线");
-			return "client_not_open";
+			return { outcome: "client_not_open" };
 		}
+		let sendAttempted = false;
 		try {
 			const versioned = versionedStateByClient.get(client);
 			if (versioned) {
@@ -514,7 +515,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				let message = lastParsedMessage!;
 				if (message.type === "workspace_state_updated" && versioned.snapshot?.workspaceState) {
 					const previous = versioned.snapshot.workspaceState;
-					if (message.workspaceState.revision < previous.revision) return "accepted";
+					if (message.workspaceState.revision < previous.revision) return { outcome: "deduplicated" };
 					message = {
 						...message,
 						workspaceState: {
@@ -578,7 +579,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					if (!versioned.snapshot) {
 						const fingerprint = createHash("sha256").update(serializedPayload).digest("hex");
 						if (versioned.sourceFingerprintByMessageTypeWhileMissingSnapshot.get(message.type) === fingerprint)
-							return "accepted";
+							return { outcome: "deduplicated" };
 						versioned.sourceFingerprintByMessageTypeWhileMissingSnapshot.set(message.type, fingerprint);
 						versioned.sequenceNumber += 1;
 						// 首帧失败后只通知来源变化，浏览器据此重开有界恢复，不能应用没有基线的增量。
@@ -593,7 +594,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 						);
 					}
 					const update = buildRuntimeStateEntityUpdate(versioned.snapshot, message);
-					if (!update) return "accepted";
+					if (!update) return { outcome: "deduplicated" };
 					const snapshot = applyRuntimeStateEntityUpdate(versioned.snapshot, update);
 					serializedPayload = JSON.stringify({
 						type: "state_delta_v2",
@@ -607,11 +608,13 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 					versioned.sequenceNumber += 1;
 				}
 			}
-			client.send(serializedPayload, { compress: Buffer.byteLength(serializedPayload) >= 1024 });
-			return "accepted";
+			const submittedApplicationPayloadBytes = Buffer.byteLength(serializedPayload, "utf8");
+			sendAttempted = true;
+			client.send(serializedPayload, { compress: submittedApplicationPayloadBytes >= 1024 });
+			return { outcome: "accepted", submittedApplicationPayloadBytes };
 		} catch {
-			// Ignore websocket write errors; close handlers clean up disconnected sockets.
-			return "threw";
+			// 转换失败未触及 socket；关闭回调仍负责断连清理。
+			return { outcome: sendAttempted ? "threw" : "message_preparation_threw" };
 		}
 	};
 
@@ -1083,7 +1086,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 			for (const client of runtimeStateClients) {
 				const fingerprints = lastNotificationFingerprintByClient.get(client) ?? new Map<string, string>();
 				if (fingerprints.get(workspaceId) === serializedPayload) continue;
-				if (sendSerializedRuntimeStateMessage(client, serializedPayload) === "accepted") {
+				if (sendSerializedRuntimeStateMessage(client, serializedPayload).outcome === "accepted") {
 					fingerprints.set(workspaceId, serializedPayload);
 					lastNotificationFingerprintByClient.set(client, fingerprints);
 				}

@@ -5,6 +5,7 @@ import {
 	type CodexConfigurationSyncService,
 	createCodexConfigurationSyncService,
 } from "../../../src/codex-configuration-sync/codex-configuration-sync-service";
+import * as configurationSyncStore from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import {
 	mutateCodexConfigurationSyncStore,
 	readCodexConfigurationSyncStore,
@@ -318,5 +319,13 @@ describe("Codex 配置扫描和查询的持久化开销", () => {
 		});
 		await instance.scan();
 		expect((await readCodexConfigurationSyncStore()).changes.at(-1)?.targets[0].status).toBe("pending_next_start");
+		await mutateCodexConfigurationSyncStore((store) => {
+			store.changes.push(...Array.from({ length: 40 }, (_, index) => seed("pending_next_start", index + 200)));
+		});
+		const activeReads = vi.spyOn(configurationSyncStore, "readCodexConfigurationSyncActiveStore");
+		const targetedReads = vi.spyOn(configurationSyncStore, "readCodexConfigurationSyncLookupStore");
+		await instance.scan();
+		expect(activeReads.mock.calls.length).toBeLessThan(10);
+		expect(targetedReads).not.toHaveBeenCalled();
 	});
 });
