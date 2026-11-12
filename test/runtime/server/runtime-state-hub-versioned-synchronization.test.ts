@@ -14,6 +14,10 @@ import {
 	runtimeWorkspaceStateResponseSchema,
 } from "../../../src/core/api-contract";
 import { applyRuntimeStateEntityUpdate } from "../../../src/core/runtime-state-stream-entity-synchronization";
+import {
+	createRuntimeStateBroadcastCostRecorder,
+	type RuntimeStateBroadcastCostWindowSample,
+} from "../../../src/diagnostics/runtime-state-broadcast-cost-recorder";
 import { getNotificationLifecycleArchive } from "../../../src/notifications/notification-lifecycle-archive";
 import { createRuntimeStateHub, type RuntimeStateHub } from "../../../src/server/runtime-state-hub";
 import { createTempDir } from "../../utilities/temp-dir";
@@ -109,8 +113,12 @@ describe("状态流 v2 首帧失败的内存传输恢复", () => {
 			.fn(async () => workspaceState)
 			.mockRejectedValueOnce(new Error("首帧读取失败"))
 			.mockRejectedValueOnce(new Error("首次补证失败"));
+		const broadcastCostSamples: RuntimeStateBroadcastCostWindowSample[] = [];
+		const broadcastCostRecorder = createRuntimeStateBroadcastCostRecorder({
+			writeWindowSample: (sample) => broadcastCostSamples.push(sample),
+		});
 		const hub = createRuntimeStateHub({
-			runtimeStateBroadcastCostRecorder: null,
+			runtimeStateBroadcastCostRecorder: broadcastCostRecorder,
 			workspaceRegistry: {
 				resolveWorkspaceForStream: async () =>
 					workspaceIsAvailable
@@ -137,12 +145,20 @@ describe("状态流 v2 首帧失败的内存传输恢复", () => {
 			await vi.waitFor(() => expect(client.messages).toContainEqual({ type: "error", message: "首帧读取失败" }));
 			client.emit("message", JSON.stringify({ type: "request_state_snapshot_v2" }), false);
 			await vi.waitFor(() => expect(client.messages).toContainEqual({ type: "error", message: "首次补证失败" }));
+			broadcastCostRecorder.flushWindow();
 			workspaceState = { ...workspaceState, revision: 2 };
 			await hub.broadcastRuntimeWorkspaceStateUpdated("workspace", temporaryHome.path);
 			const sourceVersion = client.messages.find((message) => message.type === "state_version_v2");
 			expect(sourceVersion?.workspaceId).toBe("workspace");
 			await hub.broadcastRuntimeWorkspaceStateUpdated("workspace", temporaryHome.path);
 			expect(client.messages.filter((message) => message.type === "state_version_v2")).toHaveLength(1);
+			broadcastCostRecorder.flushWindow();
+			expect(broadcastCostSamples.at(-1)?.operations.workspace_state_updated).toMatchObject({
+				webSocketSendAttemptCount: 1,
+				webSocketAcceptedSendCount: 1,
+				webSocketDeduplicatedClientSkipCount: 1,
+				webSocketSubmittedApplicationPayloadBytes: Buffer.byteLength(JSON.stringify(sourceVersion)),
+			});
 			client.emit("message", JSON.stringify({ type: "request_state_snapshot_v2" }), false);
 			await vi.waitFor(() =>
 				expect(client.messages.some((message) => message.type === "state_snapshot_v2")).toBe(true),
@@ -169,8 +185,17 @@ describe("状态流 v2 首帧失败的内存传输恢复", () => {
 				expect(client.messages.filter((message) => message.type === "state_snapshot_v2")).toHaveLength(3),
 			);
 			releaseNotificationReplay();
+			broadcastCostRecorder.flushWindow();
 			workspaceState = { ...workspaceState, revision: 3 };
 			await hub.broadcastRuntimeWorkspaceStateUpdated("workspace", temporaryHome.path);
+			broadcastCostRecorder.flushWindow();
+			const submittedDelta = [...client.messages].reverse().find((message) => message.type === "state_delta_v2");
+			expect(broadcastCostSamples.at(-1)?.operations.workspace_state_updated).toMatchObject({
+				webSocketSendAttemptCount: 1,
+				webSocketAcceptedSendCount: 1,
+				webSocketDeduplicatedClientSkipCount: 0,
+				webSocketSubmittedApplicationPayloadBytes: Buffer.byteLength(JSON.stringify(submittedDelta)),
+			});
 			expect(client.messages).toContainEqual(
 				expect.objectContaining({
 					type: "state_delta_v2",
@@ -181,6 +206,30 @@ describe("状态流 v2 首帧失败的内存传输恢复", () => {
 					}),
 				}),
 			);
+			broadcastCostRecorder.flushWindow();
+			workspaceState = { ...workspaceState, revision: 4 };
+			const originalStringify = JSON.stringify;
+			const preparationFailure = vi.spyOn(JSON, "stringify").mockImplementation((value) => {
+				if (value?.type === "state_delta_v2") throw new Error("隔离消息转换失败");
+				return originalStringify(value);
+			});
+			try {
+				await hub.broadcastRuntimeWorkspaceStateUpdated("workspace", temporaryHome.path);
+			} finally {
+				preparationFailure.mockRestore();
+			}
+			broadcastCostRecorder.flushWindow();
+			expect(broadcastCostSamples.at(-1)?.operations.workspace_state_updated).toMatchObject({
+				webSocketSendAttemptCount: 0,
+				webSocketAcceptedSendCount: 0,
+				webSocketMessagePreparationFailureCount: 1,
+				webSocketSubmittedApplicationPayloadBytes: 0,
+			});
+			await hub.broadcastRuntimeWorkspaceStateUpdated("workspace", temporaryHome.path);
+			expect(client.messages.filter((message) => message.type === "state_delta_v2").at(-1)?.update).toMatchObject({
+				type: "workspace_patch",
+				workspace: { revision: 4 },
+			});
 			client.close();
 			client = new InMemoryStateStreamClient();
 			buildWorkspaceStateSnapshot.mockRejectedValueOnce(new Error("项目移除前首帧失败"));

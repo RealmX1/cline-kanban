@@ -22,7 +22,9 @@ type BroadcastOperationOutcome =
 	| "no_clients"
 	| "client_closed"
 	| "failed";
-export type RuntimeStateWebSocketSendOutcome = "accepted" | "client_not_open" | "threw";
+export type RuntimeStateWebSocketSendOutcome =
+	| { outcome: "accepted"; submittedApplicationPayloadBytes: number }
+	| { outcome: "deduplicated" | "client_not_open" | "threw" | "message_preparation_threw" };
 
 interface BroadcastStageCost {
 	completedStageCount: number;
@@ -40,7 +42,9 @@ interface BroadcastOperationCost {
 	webSocketAcceptedSendCount: number;
 	webSocketClosedClientSkipCount: number;
 	webSocketThrownSendCount: number;
-	webSocketAcceptedSendPayloadBytes: number;
+	webSocketSubmittedApplicationPayloadBytes: number;
+	webSocketDeduplicatedClientSkipCount: number;
+	webSocketMessagePreparationFailureCount: number;
 	initialSnapshotAwaitingClientSkipCount: number;
 }
 
@@ -63,7 +67,7 @@ interface BroadcastOperationWindow extends BroadcastOperationCost {
 }
 
 export interface RuntimeStateBroadcastCostWindowSample {
-	schemaVersion: "runtime-state-broadcast-cost-window/v1";
+	schemaVersion: "runtime-state-broadcast-cost-window/v2";
 	runtimeStateHubInstanceId: string;
 	windowStartedAtIso: string;
 	windowEndedAtIso: string;
@@ -103,7 +107,9 @@ function createOperationCost(): BroadcastOperationCost {
 		webSocketAcceptedSendCount: 0,
 		webSocketClosedClientSkipCount: 0,
 		webSocketThrownSendCount: 0,
-		webSocketAcceptedSendPayloadBytes: 0,
+		webSocketSubmittedApplicationPayloadBytes: 0,
+		webSocketDeduplicatedClientSkipCount: 0,
+		webSocketMessagePreparationFailureCount: 0,
 		initialSnapshotAwaitingClientSkipCount: 0,
 	};
 }
@@ -165,7 +171,7 @@ export function createRuntimeStateBroadcastCostRecorder(
 			operations[kind].inFlightOperationCountAtWindowEnd = inFlightOperationCounts[kind];
 		}
 		const sample: RuntimeStateBroadcastCostWindowSample = {
-			schemaVersion: "runtime-state-broadcast-cost-window/v1",
+			schemaVersion: "runtime-state-broadcast-cost-window/v2",
 			runtimeStateHubInstanceId,
 			windowStartedAtIso,
 			windowEndedAtIso,
@@ -254,14 +260,18 @@ export function createRuntimeStateBroadcastCostRecorder(
 					);
 					return serializedPayload;
 				},
-				recordWebSocketSendOutcome: (outcome) => {
-					if (outcome === "client_not_open") {
+				recordWebSocketSendOutcome: (result) => {
+					if (result.outcome === "deduplicated") {
+						cost.webSocketDeduplicatedClientSkipCount += 1;
+					} else if (result.outcome === "message_preparation_threw") {
+						cost.webSocketMessagePreparationFailureCount += 1;
+					} else if (result.outcome === "client_not_open") {
 						cost.webSocketClosedClientSkipCount += 1;
 					} else {
 						cost.webSocketSendAttemptCount += 1;
-						if (outcome === "accepted") {
+						if (result.outcome === "accepted") {
 							cost.webSocketAcceptedSendCount += 1;
-							cost.webSocketAcceptedSendPayloadBytes += serializedPayloadBytes;
+							cost.webSocketSubmittedApplicationPayloadBytes += result.submittedApplicationPayloadBytes;
 						} else cost.webSocketThrownSendCount += 1;
 					}
 				},

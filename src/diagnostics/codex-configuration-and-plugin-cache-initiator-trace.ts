@@ -5,7 +5,10 @@ import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
-import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
+import {
+	readCodexConfigurationSyncActiveStore,
+	readCodexConfigurationSyncLookupStore,
+} from "../codex-configuration-sync/codex-configuration-sync-store";
 import { assertCodexConfigurationWriterBindingIdentity } from "../codex-configuration-sync/codex-configuration-writer-binding";
 import { codexSourceSharedPluginInstallationIdentityDirectoryPaths } from "../codex-configuration-sync/codex-source-shared-plugin-installation-directories";
 import {
@@ -77,9 +80,8 @@ export function recordKnownCodexConfigurationNativeRequest(input: {
 			]);
 			await runWithCodexDirectoryVolumeSystemQueriesDisabled(async () => {
 				await assertCodexConfigurationWriterBindingIdentity(writerBinding);
-				const stored = (await readCodexConfigurationSyncStore({ writerIds: [writerBinding.writerId] })).writers[
-					writerBinding.writerId
-				];
+				const stored = (await readCodexConfigurationSyncLookupStore({ writerIds: [writerBinding.writerId] }))
+					.writers[writerBinding.writerId];
 				if (!stored || !isDeepStrictEqual(stored.binding, writerBinding)) throw new Error("持久绑定不符");
 			});
 			recordCodexConfigurationInitiatorTrace({
@@ -124,10 +126,11 @@ export async function readCodexConfigurationTargetSnapshot(
 	targetPath: string,
 ): Promise<CodexConfigurationTargetSnapshot> {
 	const snapshot: CodexConfigurationTargetSnapshot = { entries: {}, coverageGaps: [] };
+	let collectedEntryCount = 0;
 	let remainingHashedBytes = 8 * 1024 * 1024;
 	const visit = async (path: string, depth: number): Promise<void> => {
 		const key = relative(targetPath, path) || ".";
-		if (Object.keys(snapshot.entries).length >= 4000 || depth > 16) {
+		if (collectedEntryCount >= 4000 || depth > 16) {
 			snapshot.coverageGaps.push({ path: key, code: "bounded_snapshot_budget_exhausted" });
 			return;
 		}
@@ -140,10 +143,11 @@ export async function readCodexConfigurationTargetSnapshot(
 				physicalIdentity: `${before.dev}:${before.ino}`,
 			};
 			snapshot.entries[key] = entry;
+			if (Object.hasOwn(snapshot.entries, key)) collectedEntryCount += 1;
 			if (before.isSymbolicLink()) entry.sha256 = digest(await readlink(path));
 			else if (before.isDirectory()) {
 				for (const name of (await readdir(path)).sort()) {
-					if (Object.keys(snapshot.entries).length >= 4000) {
+					if (collectedEntryCount >= 4000) {
 						snapshot.coverageGaps.push({ path: key, code: "bounded_snapshot_budget_exhausted" });
 						break;
 					}
@@ -338,7 +342,7 @@ export function createCodexConfigurationTargetObservationMonitor(input: {
 }
 
 export async function listRuntimeCodexConfigurationTraceTargets() {
-	const store = await readCodexConfigurationSyncStore();
+	const store = await readCodexConfigurationSyncActiveStore();
 	const homes = [
 		...Object.values(store.sources).map((source) => source.home),
 		...Object.values(store.writers)
