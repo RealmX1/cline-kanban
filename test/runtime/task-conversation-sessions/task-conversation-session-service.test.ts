@@ -804,6 +804,20 @@ describe("Agent 侧会话创建与回报", () => {
 			).ok,
 		).toBe(false);
 	});
+	it("自动刷新读取持久 Stop，跨重启保留禁止，显式启动仅解除目标", async () => {
+		const f = await fixture();
+		await f.service.assertAutomaticSessionResumeNotExplicitlyStopped(scope, "host-task");
+		await f.service.recordExplicitStop(scope, "host-task");
+		const restarted = createTaskConversationSessionService(f.dependencies);
+		await expect(restarted.assertAutomaticSessionResumeNotExplicitlyStopped(scope, "host-task")).rejects.toThrow(
+			"Stop",
+		);
+		await restarted.recordExplicitSessionStart(scope, "host-task");
+		await expect(
+			restarted.assertAutomaticSessionResumeNotExplicitlyStopped(scope, "host-task"),
+		).resolves.toBeUndefined();
+	});
+
 	it("只按回收目标自己的身份和快照恢复；Stop 跨重启阻止唤醒", async () => {
 		const f = await fixture();
 		const created = await f.service.create(scope, request(), human);

@@ -6,6 +6,7 @@ const TASK_SESSION_START_DIAGNOSTICS_DIRECTORY_NAME = "task-session-start-diagno
 const TASK_SESSION_START_DIAGNOSTICS_FILE_NAME = "task-session-start-diagnostics.log";
 
 export type TaskSessionStartDiagnosticEvent =
+	| "native_input_ready"
 	| "runtime_started"
 	| "response_ready"
 	| "failed"

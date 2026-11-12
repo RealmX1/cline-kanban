@@ -74,6 +74,66 @@ describe("TerminalSessionManager refreshTaskTerminal", () => {
 		}));
 	});
 
+	it.each([
+		{ reclaimed: true, forcedTakeover: false, expectedPreflightCount: 1 },
+		{ reclaimed: false, forcedTakeover: false, expectedPreflightCount: 2 },
+		{ reclaimed: true, forcedTakeover: true, expectedPreflightCount: 2 },
+	])(
+		"已确认回收=$reclaimed、显式后台接管=$forcedTakeover 的完整预检次数",
+		async ({ reclaimed, forcedTakeover, expectedPreflightCount }) => {
+			const sessions: MockPtySession[] = [];
+			ptySessionSpawnMock.mockImplementation((spawnRequest: MockSpawnRequest) => {
+				const session = createMockPtySession(sessions.length + 100, spawnRequest);
+				session.stop.mockImplementation(() => session.triggerExit(0));
+				sessions.push(session);
+				return session;
+			});
+			const manager = new TerminalSessionManager();
+			const request = {
+				taskId: "reclaimed-preflight",
+				agentId: "claude" as const,
+				binary: "claude",
+				args: [],
+				cwd: "/isolated-reclaimed",
+				prompt: "",
+				resumeFromTrash: true,
+			};
+			try {
+				const started = await manager.startTaskSession(request);
+				await manager.forceStopTaskSession(request.taskId);
+				if (!started.runtimeSessionIncarnationId) throw new Error("缺少测试会话代次");
+				if (reclaimed)
+					manager.applyAgentSessionReclamationOutcome(request.taskId, {
+						runtimeSessionIncarnationId: started.runtimeSessionIncarnationId,
+						sessionTransport: "pty_terminal",
+						reclamationTrigger: "response_generation_grace_period_expired",
+						attemptedAt: Date.now(),
+						completedAt: Date.now(),
+						rootProcessExitConfirmed: true,
+						descendantProcessesExitConfirmed: true,
+						survivingDescendantPids: [],
+						usedForcefulEscalation: false,
+						releasedResources: ["pty"],
+						failureReason: null,
+						nextRetryAt: null,
+					});
+				const preflight = vi.spyOn(
+					manager as unknown as {
+						resolveTaskSessionRequestWithCodexConversationStorageHome: () => Promise<unknown>;
+					},
+					"resolveTaskSessionRequestWithCodexConversationStorageHome",
+				);
+				await manager.refreshTaskTerminal(request, "refresh_task_terminal", {
+					forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser: forcedTakeover,
+				});
+				expect(preflight).toHaveBeenCalledTimes(expectedPreflightCount);
+				expect(sessions).toHaveLength(2);
+			} finally {
+				manager.dispose();
+			}
+		},
+	);
+
 	it("stops the running PTY, emits a banner, and spawns a fresh PTY", async () => {
 		const spawnedSessions: MockPtySession[] = [];
 		ptySessionSpawnMock.mockImplementation((request: MockSpawnRequest) => {

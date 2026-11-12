@@ -1336,6 +1336,12 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 			closed = true;
 			await Promise.allSettled(reconciliationsInFlight.values());
 		},
+		async assertAutomaticSessionResumeNotExplicitlyStopped(
+			scope: TaskConversationSessionWorkspaceScope,
+			sessionId: string,
+		) {
+			assertNotStopped(await operations.read(scope), sessionId);
+		},
 		async recordExplicitStop(
 			scope: TaskConversationSessionWorkspaceScope,
 			sessionId: string,
