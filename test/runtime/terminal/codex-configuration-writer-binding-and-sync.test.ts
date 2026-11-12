@@ -581,7 +581,13 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		);
 		expect(JSON.stringify(result)).not.toContain("must-not");
 		expect(owner.writes).toHaveLength(0);
+		const otherWriterBeforeLaunchArgumentRegistration = structuredClone(
+			(await readCodexConfigurationSyncStore()).writers[first.writerId],
+		);
 		await recordCodexConfigurationWriterLaunchArguments(second, ["-c", 'model="from-arguments"']);
+		expect((await readCodexConfigurationSyncStore()).writers[first.writerId]).toEqual(
+			otherWriterBeforeLaunchArgumentRegistration,
+		);
 		await changeConfiguration(first, (configuration) => {
 			configuration.model = "shared-model";
 		});

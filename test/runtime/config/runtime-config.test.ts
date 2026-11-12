@@ -11,6 +11,7 @@ import {
 	updateGlobalRuntimeConfig,
 	updateRuntimeConfig,
 } from "../../../src/config/runtime-config";
+import { runtimeConfigSaveRequestSchema } from "../../../src/core/api-contract";
 import { createTempDir } from "../../utilities/temp-dir";
 
 function withTemporaryEnv<T>(
@@ -958,4 +959,57 @@ it("容量自动恢复默认开启，关闭及重开均独立于网络自动续�
 	} finally {
 		directory.cleanup();
 	}
+});
+
+describe.sequential("会话待命保留时间的全局配置", () => {
+	it("旧配置缺省为60分钟，跨项目共享，省略更新与完整保存均保留已有值", async () => {
+		const isolatedHome = createTempDir("kanban-idle-retention-config-home-");
+		try {
+			const directory = join(isolatedHome.path, ".cline", "kanban");
+			mkdirSync(directory, { recursive: true });
+			writeFileSync(join(directory, "config.json"), JSON.stringify({ selectedAgentId: "codex" }));
+			await withTemporaryEnv({ home: isolatedHome.path }, async () => {
+				const first = await loadRuntimeConfig(join(isolatedHome.path, "project-alpha"));
+				expect(first.agentSessionUserTurnIdleProcessRetentionDurationMinutes).toBe(60);
+				await updateRuntimeConfig(join(isolatedHome.path, "project-alpha"), {
+					agentSessionUserTurnIdleProcessRetentionDurationMinutes: 125,
+				});
+				const second = await loadRuntimeConfig(join(isolatedHome.path, "project-beta"));
+				expect(second.agentSessionUserTurnIdleProcessRetentionDurationMinutes).toBe(125);
+				const updated = await updateGlobalRuntimeConfig(first, { notificationSoundEnabled: false });
+				expect(updated.agentSessionUserTurnIdleProcessRetentionDurationMinutes).toBe(125);
+				const { agentSessionUserTurnIdleProcessRetentionDurationMinutes: _omitted, ...legacySave } = second;
+				const saved = await saveRuntimeConfig(join(isolatedHome.path, "project-beta"), legacySave);
+				expect(saved.agentSessionUserTurnIdleProcessRetentionDurationMinutes).toBe(125);
+				expect(JSON.parse(readFileSync(join(directory, "config.json"), "utf8"))).toHaveProperty(
+					"agentSessionUserTurnIdleProcessRetentionDurationMinutes",
+					125,
+				);
+			});
+		} finally {
+			isolatedHome.cleanup();
+		}
+	});
+
+	it.each([0, -1, 1.5, "60", null])("请求与持久配置均拒绝无效分钟数 %s", async (value) => {
+		expect(
+			runtimeConfigSaveRequestSchema.safeParse({
+				agentSessionUserTurnIdleProcessRetentionDurationMinutes: value,
+			}).success,
+		).toBe(false);
+		const isolatedHome = createTempDir("kanban-invalid-retention-config-home-");
+		try {
+			const directory = join(isolatedHome.path, ".cline", "kanban");
+			mkdirSync(directory, { recursive: true });
+			const configPath = join(directory, "config.json");
+			const invalidConfig = JSON.stringify({ agentSessionUserTurnIdleProcessRetentionDurationMinutes: value });
+			writeFileSync(configPath, invalidConfig);
+			await withTemporaryEnv({ home: isolatedHome.path }, async () => {
+				await expect(loadGlobalRuntimeConfig()).rejects.toThrow("已保留原文件");
+				expect(readFileSync(configPath, "utf8")).toBe(invalidConfig);
+			});
+		} finally {
+			isolatedHome.cleanup();
+		}
+	});
 });

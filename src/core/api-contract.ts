@@ -4355,7 +4355,12 @@ export type RuntimeAgentSessionPtyHostEnablementPreference = z.infer<
 	typeof runtimeAgentSessionPtyHostEnablementPreferenceSchema
 >;
 
+export const DEFAULT_AGENT_SESSION_USER_TURN_IDLE_PROCESS_RETENTION_DURATION_MINUTES = 60;
+export const runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema = z.number().int().positive();
+
 export const runtimeConfigResponseSchema = z.object({
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+		runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.optional(),
 	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema,
 	selectedShortcutLabel: z.string().nullable(),
@@ -4388,6 +4393,8 @@ export const runtimeConfigResponseSchema = z.object({
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 
 export const runtimeConfigSaveRequestSchema = z.object({
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+		runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.optional(),
 	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema.optional(),
 	selectedShortcutLabel: z.string().nullable().optional(),
@@ -4761,6 +4768,8 @@ export type RuntimeDismissConnectionRetrySessionsResponse = z.infer<
 >;
 
 export const runtimeTaskTerminalRefreshRequestSchema = z.object({
+	// 仅作诊断，由浏览器时钟测得；不参与启动资格判断。
+	automaticResumeFrontendVisibleDwellElapsedMs: z.number().nonnegative().optional(),
 	taskId: z.string(),
 	// 仅本次手动重启及其有界自动重试使用；不写入卡片或全局默认。
 	additionalAgentStartupArgumentsForThisRestart: z

@@ -109,6 +109,8 @@ export function buildRuntimeConfigResponse(runtimeConfig: RuntimeConfigState): R
 		selectedAgentId: runtimeConfig.selectedAgentId,
 		selectedShortcutLabel: runtimeConfig.selectedShortcutLabel,
 		agentAutonomousModeEnabled: runtimeConfig.agentAutonomousModeEnabled,
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+			runtimeConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes ?? 60,
 		agentSessionPtyHostEnablementPreference: runtimeConfig.agentSessionPtyHostEnablementPreference,
 		newTaskStartInPlanModeByDefault: runtimeConfig.newTaskStartInPlanModeByDefault,
 		ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
