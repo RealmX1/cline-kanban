@@ -8,7 +8,7 @@ import { CardDetailView } from "../src/components/card-detail-view";
 import { TaskCommentsDialogProvider } from "../src/components/task-comments-dialog-provider";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { LayoutCustomizationsProvider, useLayoutCustomizations } from "../src/resize/layout-customizations";
-import type { RuntimeTaskSessionSummary } from "../src/runtime/types";
+import type { RuntimeProjectSummary, RuntimeTaskSessionSummary } from "../src/runtime/types";
 import { setTaskWorkspaceSnapshot } from "../src/stores/workspace-metadata-store";
 import type { BoardCard, CardSelection } from "../src/types";
 import "../src/styles/globals.css";
@@ -18,6 +18,15 @@ const openTerminal = Terminal.prototype.open;
 Terminal.prototype.open = function (parent) { openTerminal.call(this, parent); terminals.push(this); };
 Object.assign(window, {readWorkbenchTerminalCount: () => terminals.length, readWorkbenchTerminalColumns: () => terminals[0]?.cols});
 const scenario = new URLSearchParams(location.search);
+const focusedTaskProject: RuntimeProjectSummary = {
+	id: "isolated-workbench",
+	name: "当前任务所属的超长项目名称 LongUnbreakableProjectNameForSessionToolbar".repeat(2),
+	path: "/isolated/workbench",
+	availability: { status: "available" },
+	taskCounts: { backlog: 0, in_progress: 1, review: 0, validation: 0, trash: 0 },
+	inProgressTaskDetails: [],
+	crossProjectTaskSwitcherEntries: [],
+};
 const actionInvocations: string[] = [];
 Object.assign(window, {readTaskActionInvocations: () => actionInvocations});
 const card: BoardCard = {id: "workbench-test-task", title: "任务工作台布局验证", prompt: "隔离浏览器验证", agentId: "codex", startInPlanMode: false, baseRef: "main", createdAt: Date.now(), updatedAt: 1};
@@ -45,10 +54,11 @@ const sideSummary: RuntimeTaskSessionSummary = {...summary, taskId: "workbench-s
 setTaskWorkspaceSnapshot({taskId: card.id, path: "/isolated/workbench", changedFiles: columnId === "review" ? 1 : 0, additions: 0, deletions: 0, commitsAheadOfBaseRef: 0, commitsBehindBaseRef: 0});
 function Harness() {
 	const [changesOpen, setChangesOpen] = useState(false);
+	const [isBoardScopeAllProjectsSelected, setIsBoardScopeAllProjectsSelected] = useState(true);
 	const {resetLayoutCustomizations} = useLayoutCustomizations();
 	return <div className="flex h-dvh flex-col overflow-hidden bg-surface-0 text-text-primary">
 		<header className="flex h-10 shrink-0 gap-3 px-3"><button type="button" onClick={() => setChangesOpen((value) => !value)}>Changes</button><button type="button" onClick={resetLayoutCustomizations}>重置布局</button></header>
-		<CardDetailView onBackToBoard={scenario.has("back_to_board") ? () => actionInvocations.push("back") : undefined} onCancelAutomaticTaskAction={scenario.has("auto_review") ? () => actionInvocations.push("cancel-automatic") : undefined} onRequestStartAllReadyBacklogTasks={() => actionInvocations.push("start-backlog")} onRestoreTaskFromTrash={(taskId) => actionInvocations.push(`restore:${taskId}`)} onClearTrash={() => actionInvocations.push("clear-done")} selection={selection} currentProjectId="isolated-workbench" workspacePath="/isolated/workbench" selectedAgentId="codex" sessionSummary={summary} taskSessions={{[card.id]: summary, ...(scenario.has("side") ? {[sideSummary.taskId]: sideSummary} : {})}} onSessionSummary={() => {}} onCardSelect={() => {}} onTaskDragEnd={() => {}} onMoveToTrash={() => actionInvocations.push("done")} onMoveToValidation={() => actionInvocations.push("validation")} onAgentCommitTask={() => actionInvocations.push("commit")} onAgentOpenPrTask={() => actionInvocations.push("pr")} bottomTerminalOpen={false} bottomTerminalTaskId={null} bottomTerminalSummary={null} onBottomTerminalClose={() => {}} isTaskChangesSidebarOpen={changesOpen} onCreateTaskConversationSession={async () => ({ok: false, message: "隔离环境：创建失败后保留草稿"})} explorationThreadGraph={{queryPhase: "ready", view: null, turnSourceUnavailableSessionIds: []}} />
+		<CardDetailView boardScopeFocusedTaskProject={scenario.has("project_navigation") && isBoardScopeAllProjectsSelected ? focusedTaskProject : null} onNarrowToFocusedTaskProject={() => {actionInvocations.push(`project:${focusedTaskProject.id}`); setIsBoardScopeAllProjectsSelected(false);}} onBackToBoard={scenario.has("back_to_board") ? () => actionInvocations.push("back") : undefined} onCancelAutomaticTaskAction={scenario.has("auto_review") ? () => actionInvocations.push("cancel-automatic") : undefined} onRequestStartAllReadyBacklogTasks={() => actionInvocations.push("start-backlog")} onRestoreTaskFromTrash={(taskId) => actionInvocations.push(`restore:${taskId}`)} onClearTrash={() => actionInvocations.push("clear-done")} selection={selection} currentProjectId="isolated-workbench" workspacePath="/isolated/workbench" selectedAgentId="codex" sessionSummary={summary} taskSessions={{[card.id]: summary, ...(scenario.has("side") ? {[sideSummary.taskId]: sideSummary} : {})}} onSessionSummary={() => {}} onCardSelect={() => {}} onTaskDragEnd={() => {}} onMoveToTrash={() => actionInvocations.push("done")} onMoveToValidation={() => actionInvocations.push("validation")} onAgentCommitTask={() => actionInvocations.push("commit")} onAgentOpenPrTask={() => actionInvocations.push("pr")} bottomTerminalOpen={false} bottomTerminalTaskId={null} bottomTerminalSummary={null} onBottomTerminalClose={() => {}} isTaskChangesSidebarOpen={changesOpen} onCreateTaskConversationSession={async () => ({ok: false, message: "隔离环境：创建失败后保留草稿"})} explorationThreadGraph={{queryPhase: "ready", view: null, turnSourceUnavailableSessionIds: []}} />
 	</div>;
 }
 createRoot(document.body.appendChild(document.createElement("div"))).render(<TooltipProvider><NonModalFloatingFormWindowHostProvider><LayoutCustomizationsProvider onResetBottomTerminalLayoutCustomizations={() => {}}><TaskCommentsDialogProvider currentWorkspaceId="isolated-workbench"><Harness /><SideSessionCreationWorkbench /></TaskCommentsDialogProvider></LayoutCustomizationsProvider></NonModalFloatingFormWindowHostProvider></TooltipProvider>);
