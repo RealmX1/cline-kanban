@@ -97,6 +97,7 @@ import {
 	resolveTaskCreateEffectiveSettings,
 	type TaskCreateRequestedSettings,
 } from "./task-create-effective-settings-resolution";
+import { registerTaskExternalWorkflowCommands } from "./task-external-workflow";
 import { registerTaskRvfHistoryCommand } from "./task-rvf-history";
 import { registerTaskVisualizationCommand } from "./task-visualization";
 
@@ -393,6 +394,7 @@ function formatTaskRecordWithSessionSummary(
 		// 这里直接透出，让 CLI 消费方看到的标题与看板一致。
 		title: task.title,
 		taskDescription: task.taskDescription,
+		externalWorkflowRunBinding: task.externalWorkflowRunBinding,
 		prompt: task.prompt,
 		column: columnId,
 		taskShelvingState: task.taskShelvingState ?? null,
@@ -1973,6 +1975,12 @@ async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void>
 export function registerTaskCommand(program: Command): void {
 	const task = program.command("task").alias("tasks").description("Manage Kanban board tasks from the CLI.");
 	registerTaskVisualizationCommand(task);
+	registerTaskExternalWorkflowCommands(task, {
+		resolveWorkspace: async (projectPath) =>
+			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
+		createClient: createRuntimeTrpcClient,
+		run: runTaskCommand,
+	});
 	registerTaskConversationSessionCommands(task, {
 		resolveWorkspace: async (projectPath) =>
 			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),

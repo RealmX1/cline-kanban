@@ -4,6 +4,7 @@ import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
 	RuntimeBoardColumnId,
+	RuntimeExternalWorkflowRunBinding,
 	RuntimeTaskAgentPermissionMode,
 	RuntimeTaskAgentSessionInitialization,
 	RuntimeTaskAutoReviewMode,
@@ -90,6 +91,7 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 }
 
 export interface BoardCard {
+	externalWorkflowRunBinding?: RuntimeExternalWorkflowRunBinding;
 	taskDescription?: string;
 	taskNameVersion?: number;
 	codexConfigurationProfileId?: string;
