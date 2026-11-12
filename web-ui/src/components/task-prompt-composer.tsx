@@ -20,6 +20,7 @@ import { buildTaskPromptWithPseudoHtmlBlockInserted } from "@/components/task-pr
 import { Button } from "@/components/ui/button";
 import { cn } from "@/components/ui/cn";
 import { usePersistentAgentPromptImageAttachments } from "@/hooks/use-persistent-agent-prompt-image-attachments";
+import { useTaskPromptAttachmentUploads } from "@/hooks/use-task-prompt-attachment-uploads";
 import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
 import type { TaskImage } from "@/types";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
@@ -46,6 +47,8 @@ interface TaskPromptComposerProps {
 	autoFocus?: boolean;
 	workspaceId?: string | null;
 	showAttachImageButton?: boolean;
+	allowFileAttachments?: boolean;
+	onAttachmentPreparationPendingChange?: (pending: boolean) => void;
 	showPseudoHtmlBlockInsertButton?: boolean;
 	"aria-label"?: string;
 	textareaRef?: Ref<HTMLTextAreaElement>;
@@ -72,6 +75,8 @@ export function TaskPromptComposer({
 	autoFocus = false,
 	workspaceId = null,
 	showAttachImageButton = true,
+	allowFileAttachments = false,
+	onAttachmentPreparationPendingChange,
 	showPseudoHtmlBlockInsertButton = true,
 	"aria-label": ariaLabel,
 	textareaRef: providedTextareaRef,
@@ -92,6 +97,22 @@ export function TaskPromptComposer({
 	const latestImagesRef = useRef(images);
 	latestImagesRef.current = images;
 	const onImagesChange = onProvidedImagesChange ?? persistentAttachments.onImagesChange;
+	const appendImages = useCallback(
+		(newImages: TaskImage[]) => {
+			if (!newImages.length) return;
+			latestImagesRef.current = [...latestImagesRef.current, ...newImages];
+			onImagesChange(latestImagesRef.current);
+		},
+		[onImagesChange],
+	);
+	const attachmentUploads = useTaskPromptAttachmentUploads({
+		value: storedPromptValue,
+		onValueChange: onStoredPromptValueChange,
+		onImagesPrepared: appendImages,
+		onPreparationPendingChange: onAttachmentPreparationPendingChange,
+		enabled: allowFileAttachments && enabled,
+	});
+	const isPreparingAttachments = attachmentUploads.isPreparingAttachments || persistentAttachments.isPreparingImages;
 	const [isExpanded, setIsExpanded] = useState(false);
 	const [hasOverflow, setHasOverflow] = useState(false);
 	const [expandedMaximumHeight, setExpandedMaximumHeight] = useState(400);
@@ -249,10 +270,10 @@ export function TaskPromptComposer({
 				const submit = event.shiftKey ? onSubmitAndStart : onSubmit;
 				// 无匹配回调时交给宿主表单，也不能把组合键当成补全候选的 Enter。
 				if (event.altKey) return;
-				if (!submit && !persistentAttachments.isPreparingImages) return;
+				if (!submit && !isPreparingAttachments) return;
 				event.preventDefault();
 				event.stopPropagation();
-				if (disabled || !enabled || event.repeat || persistentAttachments.isPreparingImages) return;
+				if (disabled || !enabled || event.repeat || isPreparingAttachments) return;
 				submit?.();
 				return;
 			}
@@ -304,19 +325,8 @@ export function TaskPromptComposer({
 			onSubmitAndStart,
 			selectedSuggestionIndex,
 			suggestions,
-			persistentAttachments.isPreparingImages,
+			isPreparingAttachments,
 		],
-	);
-
-	const appendImages = useCallback(
-		(newImages: TaskImage[]) => {
-			if (!onImagesChange || newImages.length === 0) {
-				return;
-			}
-			latestImagesRef.current = [...latestImagesRef.current, ...newImages];
-			onImagesChange(latestImagesRef.current);
-		},
-		[onImagesChange],
 	);
 
 	const handlePaste = useCallback(
@@ -329,18 +339,29 @@ export function TaskPromptComposer({
 				return;
 			}
 			event.preventDefault();
+			if (allowFileAttachments) {
+				if (!disabled && enabled) attachmentUploads.addAttachments(imageFiles);
+				return;
+			}
 			void (async () => {
 				const newImages = await extractImagesFromDataTransfer(event.clipboardData);
 				appendImages(newImages);
 			})();
 		},
-		[appendImages, onImagesChange],
+		[allowFileAttachments, appendImages, attachmentUploads.addAttachments, disabled, enabled, onImagesChange],
 	);
 
 	const handleDrop = useCallback(
 		(event: DragEvent<HTMLDivElement>) => {
 			setIsDragOver(false);
 			if (!onImagesChange || !event.dataTransfer) {
+				return;
+			}
+			if (allowFileAttachments) {
+				const files = Array.from(event.dataTransfer.files);
+				if (!files.length) return;
+				event.preventDefault();
+				if (!disabled && enabled) attachmentUploads.addAttachments(files);
 				return;
 			}
 			const imageFiles = collectImageFilesFromDataTransfer(event.dataTransfer);
@@ -353,7 +374,7 @@ export function TaskPromptComposer({
 				appendImages(newImages);
 			})();
 		},
-		[appendImages, onImagesChange],
+		[allowFileAttachments, appendImages, attachmentUploads.addAttachments, disabled, enabled, onImagesChange],
 	);
 
 	const handleDragOver = useCallback(
@@ -453,6 +474,11 @@ export function TaskPromptComposer({
 			}
 			const fileInput = event.currentTarget;
 			const files = Array.from(fileInput.files ?? []);
+			if (allowFileAttachments) {
+				if (!disabled && enabled) attachmentUploads.addAttachments(files);
+				fileInput.value = "";
+				return;
+			}
 			void (async () => {
 				const newImages: TaskImage[] = [];
 				for (const file of files) {
@@ -465,7 +491,7 @@ export function TaskPromptComposer({
 				fileInput.value = "";
 			})();
 		},
-		[appendImages, onImagesChange],
+		[allowFileAttachments, appendImages, attachmentUploads.addAttachments, disabled, enabled, onImagesChange],
 	);
 
 	const showSuggestions = Boolean(enabled && isSuggestionPickerOpen && activeToken);
@@ -477,6 +503,7 @@ export function TaskPromptComposer({
 		<div
 			data-agent-prompt-composer=""
 			data-image-preparation-pending={persistentAttachments.isPreparingImages || undefined}
+			data-attachment-preparation-pending={isPreparingAttachments || undefined}
 		>
 			<div className="relative" onDrop={handleDrop} onDragOver={handleDragOver} onDragLeave={handleDragLeave}>
 				<InlineCompletionPicker
@@ -533,7 +560,7 @@ export function TaskPromptComposer({
 					<div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-md bg-accent/5">
 						<div className="flex items-center gap-1.5 text-[12px] text-accent font-medium">
 							<ImagePlus size={14} />
-							<span>Drop image here</span>
+							<span>{allowFileAttachments ? "拖放文件以添加附件" : "Drop image here"}</span>
 						</div>
 					</div>
 				) : null}
@@ -547,7 +574,7 @@ export function TaskPromptComposer({
 				<input
 					ref={fileInputRef}
 					type="file"
-					accept={ACCEPTED_TASK_IMAGE_INPUT_ACCEPT}
+					accept={allowFileAttachments ? undefined : ACCEPTED_TASK_IMAGE_INPUT_ACCEPT}
 					multiple
 					className="hidden"
 					onChange={handleFileInputChange}
@@ -571,7 +598,7 @@ export function TaskPromptComposer({
 							onClick={handleAttachClick}
 							disabled={disabled || !enabled}
 						>
-							Attach image
+							{allowFileAttachments ? "添加附件" : "Attach image"}
 						</Button>
 					) : null}
 					{showExpandedEditingControl && (hasOverflow || isExpanded) ? (
@@ -592,14 +619,14 @@ export function TaskPromptComposer({
 					) : null}
 				</div>
 			) : null}
-			{persistentAttachments.isPreparingImages ? (
+			{isPreparingAttachments ? (
 				<p role="status" className="mt-1 text-xs text-text-secondary">
-					图片正在保存，完成后再提交。
+					{allowFileAttachments ? "附件正在保存，完成后再提交。" : "图片正在保存，完成后再提交。"}
 				</p>
 			) : null}
-			{persistentAttachments.errorMessage ? (
+			{(attachmentUploads.errorMessage ?? persistentAttachments.errorMessage) ? (
 				<p role="alert" className="mt-1 text-xs text-status-red">
-					{persistentAttachments.errorMessage}
+					{attachmentUploads.errorMessage ?? persistentAttachments.errorMessage}
 				</p>
 			) : null}
 		</div>
