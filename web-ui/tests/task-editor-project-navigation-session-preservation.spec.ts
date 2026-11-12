@@ -253,7 +253,7 @@ async function openRealApp(page: Page, includesFocusedTask = false) {
 				};
 			else if (procedure === "runtime.issueKanbanWebUiPageLoadRequestOriginNonce")
 				value = { kanbanWebUiPageLoadIssuedRequestOriginNonce: "isolated-page-nonce" };
-			else if (procedure === "runtime.getCodexConfigurationSyncActiveState")
+			else if (procedure === "runtime.getCodexConfigurationSyncOverview")
 				value = { revision: 0, changes: [], sourceObservations: [], observationProblem: null };
 			else if (procedure === "runtime.getClineKanbanAccess") value = { enabled: true };
 			else if (procedure === "runtime.listAgentRaisedPendingUserDecisions") value = { decisions: [] };

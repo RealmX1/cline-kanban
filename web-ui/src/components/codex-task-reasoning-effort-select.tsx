@@ -6,11 +6,13 @@ export function CodexTaskReasoningEffortSelect({
 	onChange,
 	selection,
 	onRetry,
+	scope = "task_local",
 }: {
 	value: string | undefined;
 	onChange: (value: string | undefined) => void;
 	selection: ReturnType<typeof resolveCodexTaskReasoningEffortSelection>;
 	onRetry: () => void;
+	scope?: "task_local" | "profile_default";
 }) {
 	const id = useId();
 	return (
@@ -27,7 +29,8 @@ export function CodexTaskReasoningEffortSelect({
 				className="min-h-9 w-full rounded border border-border bg-surface-2 px-2 text-sm text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
 			>
 				<option value="">
-					沿用 Codex 配置{selection.inheritedEffort ? `（${selection.inheritedEffort}）` : ""}
+					{scope === "profile_default" ? "沿用原生默认" : "沿用 Codex 配置"}
+					{selection.inheritedEffort ? `（${selection.inheritedEffort}）` : ""}
 				</option>
 				{value && !selection.options.some((option) => option.effort === value) && (
 					<option value={value}>{value}（保留原选择）</option>
@@ -39,7 +42,9 @@ export function CodexTaskReasoningEffortSelect({
 				))}
 			</select>
 			<p id={`${id}-description`} className="m-0 text-xs text-text-secondary">
-				手选值仅用于当前任务。启动成功后可在配置提醒中反馈到 profile。
+				{scope === "profile_default"
+					? "保存后更新所属配置默认，并同步到此配置的会话。"
+					: "手选值仅用于当前任务。启动成功后可在配置提醒中反馈到所属配置。"}
 			</p>
 			{selection.recoveryMessage && (
 				<p role="status" className="text-xs text-text-secondary">

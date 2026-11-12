@@ -6,6 +6,7 @@ import { Worker } from "node:worker_threads";
 import { z } from "zod";
 import { lockedFileSystem, releaseFilesystemKernelWriteLock } from "../fs/locked-file-system";
 import { describeCodexConfigurationHistorySearchText } from "./codex-configuration-change-presentation";
+import { CODEX_CONFIGURATION_SETTINGS_ISOLATION_PROJECTION_VERSION } from "./codex-configuration-settings-isolation";
 import type { CodexConfigurationSyncStore } from "./codex-configuration-sync-store";
 
 const configurationStorageNativeBindingPath = join(
@@ -596,6 +597,22 @@ async function initializeConfigurationSyncDatabaseWithoutRecoveryGate(
 			if (stored.writeGateClosed) {
 				await prepareAndFinishLegacyRollback(directory, authority, client, parseLegacy, prepareLegacyRollback);
 				throw new Error("已自动完成中断的旧格式回退，SQLite 写入保持关闭。");
+			}
+			const metadata = await client.request<{ storeHeader: { settingsIsolationProjectionVersion?: number } }>(
+				"metadata",
+			);
+			if (
+				(metadata.storeHeader.settingsIsolationProjectionVersion ?? 0) <
+				CODEX_CONFIGURATION_SETTINGS_ISOLATION_PROJECTION_VERSION
+			) {
+				const before = await client.request<CodexConfigurationSyncStore>("snapshot", { scope: "full" });
+				const after = parseLegacy(structuredClone(before));
+				await client.request("commit", {
+					before,
+					after,
+					expectedStorageGeneration: before.storageGeneration,
+					scope: "full",
+				});
 			}
 		}
 		return client;

@@ -1,4 +1,6 @@
 export enum LocalStorageKey {
+	CodexConfigurationUnconfirmedSettingActions = "kanban.codex-configuration-unconfirmed-setting-actions.v1",
+	CodexConfigurationFeedbackNoticePresentationReceipts = "kanban.codex-configuration-feedback-notice-presentation-receipts.v1",
 	SideSessionCreationWorkbenchDrafts = "kanban.side-session-creation-workbench-drafts.v1",
 	SideSessionCreationWorkbenchUnreadableDraftRecoveryCopies = "kanban.side-session-creation-workbench-unreadable-draft-recovery-copies.v1",
 	CodexConfigurationChangeNoticeCollapsed = "codex-configuration-change-notice-collapsed",
