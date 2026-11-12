@@ -8,7 +8,7 @@
 
 每个 hub 每 60 秒输出一个窗口，关闭时再输出剩余窗口。定时器迟到时 `observedWindowDurationMs` 是实际单调时钟跨度，不能假定每行恰好一分钟。每分钟频率应以计数乘 `60000 / observedWindowDurationMs` 计算；未满一分钟的关闭窗口单列，不与完整窗口等权平均。
 
-分析前必须同时筛选 `journalWriterProcessId`、`journalWriterProcessStartedAtIso` 及 `runtimeStateHubInstanceId`。PID 可能复用，同一进程也可能创建多个 hub。`schemaVersion` 为 `runtime-state-broadcast-cost-window/v1`。
+分析前必须同时筛选 `journalWriterProcessId`、`journalWriterProcessStartedAtIso` 及 `runtimeStateHubInstanceId`。PID 可能复用，同一进程也可能创建多个 hub。当前 `schemaVersion` 为 `runtime-state-broadcast-cost-window/v2`；历史 v1 保留原记录，不与 v2 发送刻度混算。
 
 ```sh
 jq --argjson pid 12345 --arg started '2026-10-25T16:00:00.000Z' \
@@ -40,9 +40,11 @@ jq --argjson pid 12345 --arg started '2026-10-25T16:00:00.000Z' \
 
 `outcomeCounts` 区分完成、去重、过期丢弃、无连接早退、首帧途中断连及操作失败。构建失败没有伪造序列化计数；过期结果仍保留实际已执行的构建和序列化成本。workspace 的无连接早退不包括原有的跨项目通知刷新路径。
 
-`totalSerializedPayloadBytes` 是实际业务消息字符串的 UTF-8 字节，`maximumSerializedPayloadBytes` 是其中最大单帧。workspace 与首帧字节包含对应的消息信封；首帧还包含 projects、通知等字段，不代表单独的 workspace 子对象大小。不会为测量子对象另做一次序列化。
+`totalSerializedPayloadBytes` 是转换为逐连接 v2 差量之前的候选业务消息字符串的 UTF-8 字节，`maximumSerializedPayloadBytes` 是其中最大候选消息。workspace 与首帧字节包含对应的消息信封；首帧还包含 projects、通知等字段，不代表单独的 workspace 子对象大小，也不代表最终发出的帧。不会为测量子对象另做一次序列化。
 
-`webSocketSendAttemptCount` 只计 OPEN 连接上的 `client.send` 调用；`webSocketAcceptedSendCount` 计未同步抛错的调用，`webSocketThrownSendCount` 计同步抛错，关闭连接另计 `webSocketClosedClientSkipCount`。成功调用的业务字符串字节累计在 `webSocketAcceptedSendPayloadBytes`；它不包含帧头、压缩和 TCP 开销，也不证明浏览器收到或绘制完成。握手待首帧连接的跳过次数单列为 `initialSnapshotAwaitingClientSkipCount`。
+v2 的 `webSocketSendAttemptCount` 只计 OPEN 连接上的 `client.send` 调用；`webSocketAcceptedSendCount` 计未同步抛错的调用，`webSocketThrownSendCount` 计同步抛错，关闭连接另计 `webSocketClosedClientSkipCount`。消息解析、差量转换或序列化失败另计 `webSocketMessagePreparationFailureCount`，此时没有尝试发送。`webSocketSubmittedApplicationPayloadBytes` 累计最终提交给 `client.send` 的 UTF-8 字节，包含 v2 差量／版本／首帧信封。它是压缩前应用载荷，不包含帧头、压缩和 TCP 开销，也不证明浏览器收到或绘制完成。逐连接去重、过期版本跳过计入 `webSocketDeduplicatedClientSkipCount`，不计发送次数或字节。握手待首帧连接的跳过次数单列为 `initialSnapshotAwaitingClientSkipCount`。
+
+历史 v1 的 `webSocketAcceptedSendPayloadBytes` 实际按转换前的候选完整载荷乘「accepted」次数计算；当时逐连接去重也返回 accepted，因此其发送次数和字节都可能高估。不能将该字段解释为实际网络流量，也不能通过重命名字段把旧值升级成 v2 证据。
 
 每类最多保留首条及最慢一条完成操作样本，以 `operationSequenceNumber` 关联同次操作的全部阶段。没有按项目增长的历史 Map，也不保存业务对象、prompt、凭据或异常正文。
 
