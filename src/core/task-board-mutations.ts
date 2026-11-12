@@ -69,6 +69,7 @@ export interface RuntimeCreateTaskInput {
 }
 
 export interface RuntimeUpdateTaskInput {
+	externalWorkflowRunBinding?: RuntimeBoardCard["externalWorkflowRunBinding"];
 	taskDescription?: string | null;
 	codexConfigurationProfileId?: string | null;
 	codexReasoningEffortOverride?: string | null;
@@ -607,6 +608,7 @@ export function updateTask(
 				: resolveTaskDescriptionLastUpdatedAt(card);
 			const nextTask: RuntimeBoardCard = {
 				...card,
+				externalWorkflowRunBinding: input.externalWorkflowRunBinding ?? card.externalWorkflowRunBinding,
 				codexReasoningEffortOverride:
 					input.codexReasoningEffortOverride === undefined
 						? card.codexReasoningEffortOverride

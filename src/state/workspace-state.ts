@@ -1229,7 +1229,7 @@ export async function saveWorkspaceState(
 			throw new WorkspaceStateConflictError(expectedRevision, currentMeta.revision);
 		}
 		parsedPayload.board = preserveTaskNameVersionsAgainstIncomingBoardSnapshot(persistedBoard, parsedPayload.board);
-		// 简介经显式字段操作写入；旧页面的整板快照不能删除新字段，或复活已被明确清空的简介。
+		// 简介与外部 Run 引用经显式字段操作写入；整板快照只保留当前代次的服务端事实。
 		const persistedTaskCardsById = new Map(
 			persistedBoard.columns.flatMap((column) => column.cards).map((card) => [card.id, card]),
 		);
@@ -1240,8 +1240,12 @@ export async function saveWorkspaceState(
 				cards: column.cards.map((card) => {
 					const persistedCard = persistedTaskCardsById.get(card.id);
 					return persistedCard?.createdAt === card.createdAt
-						? { ...card, taskDescription: persistedCard.taskDescription }
-						: card;
+						? {
+								...card,
+								taskDescription: persistedCard.taskDescription,
+								externalWorkflowRunBinding: persistedCard.externalWorkflowRunBinding,
+							}
+						: { ...card, externalWorkflowRunBinding: undefined };
 				}),
 			})),
 		};

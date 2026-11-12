@@ -45,6 +45,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 ## 架构 orientation（读单个文件看不出来的部分）
 
 - **三层职责**：浏览器是控制面；本地运行时是长驻唯一真相源；执行层才是 agent 本体。session/board 摘要状态**不靠浏览器轮询**——`src/server/runtime-state-hub.ts` 批量广播 → `use-runtime-state-stream.ts` → `App.tsx`，加 summary 字段只改契约即可搭车。但 **workspace diff 仍是定时轮询**，别假设它在推流链路上。
+- **外部工作流只保存引用与观察快照**：`task external-workflow bind/get` 绑定 workspace/task/incarnation 与原 Run；业务阶段、Stop 和当前资格仍由所属 Plugin 判断，不用卡片投影授权执行。见 `docs/task-external-workflow-run-references.md`。
 - **两种可执行 session transport** 由 `src/core/agent-catalog.ts` 声明：`pty_terminal` → `src/terminal/`；`acp_stdio_subprocess`（omp 可切换，默认仍为 PTY）→ `src/acp-client-session/`。共享聊天面板与 hooks 使用 `agent-conversation-*` 命名，判断活会话时必须读取 summary 的实际通道。
 - **Cline agent 已彻底退役**：SDK、CLI adapter、专属账号/provider/MCP/telemetry/反馈界面已删除；`cline` 身份、旧 transport 和存储字段只为读取历史保留，所有执行入口必须明确拒绝。恢复依据与重新接入边界见 `docs/cline-agent-retirement.md`；不得把历史字段当成仍可启动的能力。
 - **Factory Droid 与 Kiro 保留接入、停止后续适配**：`droid` / `kiro` 的现有实现、启动入口、历史数据及回归测试保留；不再跟进其 CLI / 协议变化、补齐专属能力，也不作为新功能的适配或验收要求。共享能力改动可自然覆盖；只有用户明确要求时再恢复针对性适配。
