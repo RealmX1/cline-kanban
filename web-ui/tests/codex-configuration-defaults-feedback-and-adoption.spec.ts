@@ -214,13 +214,18 @@ for (const width of [390, 1280])
 	test(`配置默认、反馈浮层和采用分页在 ${width}px 下可用`, async ({ page }, testInfo) => {
 		await page.setViewportSize({ width, height: 900 });
 		await page.clock.install({ time: new Date() });
+		// 首次编译不能提前消耗稳定期，否则提醒会在输入框聚焦前展开并关闭。
+		await page.clock.pauseAt(new Date(Date.now() + 60_000));
 		const fixture = await openConfigurationFixture(page);
-		await page.getByRole("textbox", { name: "Agent 输入", exact: true }).focus();
-		await page.clock.fastForward(10_001);
 		const notice = page.getByRole("dialog", { name: "Codex 配置变更提示" });
+		await page.getByRole("textbox", { name: "Agent 输入", exact: true }).focus();
+		await page.clock.fastForward(9_999);
+		await expect(notice).not.toBeVisible();
+		await page.clock.fastForward(2);
 		await expect(notice).toBeVisible();
 		await expect(page.getByRole("textbox", { name: "Agent 输入", exact: true })).toBeFocused();
 		await expect(notice.getByRole("heading", { name: "推理强度：max → xhigh" })).toBeVisible();
+		await page.clock.resume();
 		await page.screenshot({ path: testInfo.outputPath(`feedback-${width}.png`) });
 		await notice.getByRole("button", { name: "保持默认", exact: true }).focus();
 		await page.keyboard.press("Enter");
