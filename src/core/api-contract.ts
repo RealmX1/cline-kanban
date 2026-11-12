@@ -309,6 +309,17 @@ export const runtimeSaveAgentPromptImageAttachmentsRequestSchema = z.object({
 export const runtimeReadAgentPromptImageAttachmentsRequestSchema = z.object({
 	imageAttachmentIds: z.array(z.string().regex(/^[a-f0-9]{64}$/u)),
 });
+export const runtimeSaveAgentPromptFileAttachmentRequestSchema = z.object({
+	fileName: z.string().min(1).max(255),
+	fileContentBase64: z.string().max(Math.ceil((20 * 1024 * 1024) / 3) * 4),
+});
+export type RuntimeSaveAgentPromptFileAttachmentRequest = z.infer<
+	typeof runtimeSaveAgentPromptFileAttachmentRequestSchema
+>;
+export const runtimeAgentPromptFileAttachmentReferenceSchema = z.object({
+	fileName: z.string(),
+	filePath: z.string(),
+});
 export const runtimeTaskCommentEntrySchema = z.object({
 	taskCommentEntryId: z.string(),
 	commentText: z.string(),
