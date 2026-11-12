@@ -1,6 +1,6 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { type ReactElement, useEffect, useRef } from "react";
+import { type ReactElement, type ReactNode, useEffect, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
@@ -37,11 +37,13 @@ import { useMeasure } from "@/utils/react-use";
  * 移动端首页直接渲染本面板。
  */
 export function CrossProjectRecentlyActiveTaskSwitcherPanel({
+	sidebarVisibilityButton,
 	host,
 	currentProjectTaskCards = null,
 	defaultAgentId = null,
 	onOpenPermanentlyDeletedTaskHistory,
 }: {
+	sidebarVisibilityButton?: ReactNode;
 	host: CrossProjectRecentlyActiveTaskSwitcherHostContextValue;
 	// Focus View 左栏挂载时由 ColumnContextPanel 给出（当前项目的展开行与 This project 同数据、同动作）；
 	// 过渡外壳里没有，当前项目的展开行改读服务端。
@@ -185,8 +187,9 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			data-focus-view-column-scroll-boundary=""
 			data-verification-anchor={crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey()}
 		>
-			{host.onRequestCreateTaskInBoardScope || onOpenPermanentlyDeletedTaskHistory ? (
+			{sidebarVisibilityButton || host.onRequestCreateTaskInBoardScope || onOpenPermanentlyDeletedTaskHistory ? (
 				<div className="flex shrink-0 items-center gap-1 px-2 pt-2">
+					{sidebarVisibilityButton}
 					{host.onRequestCreateTaskInBoardScope ? (
 						<Button
 							icon={<span className="text-base leading-none">+</span>}

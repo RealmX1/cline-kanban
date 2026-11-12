@@ -207,7 +207,6 @@ describe("TopBar script shortcut onboarding", () => {
 							onClearNumericSlotGroupNumber: () => {},
 							selectedBoardOrSingleProjectScope: "single_project_scope",
 							onSelectBoardScopeAllProjects: () => {},
-							boardScopeFocusViewFocusedTaskProjectId: null,
 						}}
 					/>
 				</TooltipProvider>,

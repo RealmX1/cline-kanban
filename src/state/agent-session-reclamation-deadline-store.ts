@@ -286,6 +286,33 @@ export async function recordAgentSessionRetentionDeadline(
 	});
 }
 
+// 只更新仍然有效的普通待命期限，保留原始锚点、回收尝试与历史；迟到更新不得复活已失效记录。
+export async function refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+	workspaceId: string,
+	recordId: string,
+	durationMinutes: number,
+	updatedAt: number,
+): Promise<PersistedAgentSessionReclamationDeadlineRecord | null> {
+	return await enqueueWrite(workspaceId, async () => {
+		const records = await readRawRecords(workspaceId);
+		const existing = records.find((record) => record.recordId === recordId);
+		if (
+			!existing ||
+			!isLiveAgentSessionReclamationState(existing.reclamationState) ||
+			existing.retentionAnchorKind !== "agent_response_generation_stopped"
+		)
+			return null;
+		const reclamationEligibleAt = existing.retentionAnchorAt + durationMinutes * 60_000;
+		if (existing.reclamationEligibleAt === reclamationEligibleAt) return existing;
+		const refreshed = { ...existing, reclamationEligibleAt, updatedAt };
+		await writeRecords(
+			workspaceId,
+			records.map((record) => (record.recordId === recordId ? refreshed : record)),
+		);
+		return refreshed;
+	});
+}
+
 // 会话在到期前继续跑了（用户提交 / agent 复生 / unpark）⇒ 作废该 task 的全部 live 期限记录。
 // 返回被作废的记录数，便于调用方与测试断言「确实作废过」。
 export async function supersedeAgentSessionRetentionDeadlinesForTask(

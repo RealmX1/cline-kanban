@@ -20,13 +20,15 @@ const queries = vi.hoisted(() => ({
 	resolveTarget: vi.fn(),
 	batch: vi.fn(),
 	profile: vi.fn(),
+	adoption: vi.fn(),
 }));
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			getCodexConfigurationSyncActiveState: { query: queries.fetch },
+			getCodexConfigurationSyncOverview: { query: queries.fetch },
 			getCodexConfigurationChangeDetails: { query: queries.details },
 			mutateCodexConfigurationProfile: { mutate: queries.profile },
+			listCodexConfigurationSessionAdoptionProgress: { query: queries.adoption },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 			synchronizeCodexConfigurationChange: { mutate: queries.synchronize },
 			acknowledgeCodexConfigurationChange: { mutate: queries.acknowledge },
@@ -54,14 +56,14 @@ function NoticeHarness(props: Parameters<typeof useCodexConfigurationSyncNotice>
 }
 async function renderConfigurationNotice(props: Partial<ComponentProps<typeof NoticeHarness>> = {}) {
 	await act(async () => root.render(<NoticeHarness workspaceId="workspace" {...props} />));
-	return container.querySelector<HTMLElement>('[aria-label="Codex 配置变更提示"]')!;
+	return document.querySelector<HTMLElement>('[aria-label="Codex 配置变更提示"]')!;
 }
 const button = (label: string) =>
 	label === "展开"
 		? (container.querySelector(
 				'[data-verification-anchor="codex-configuration-sync-summary"][aria-expanded="false"]',
 			) as HTMLButtonElement)
-		: ([...container.querySelectorAll("button")].find(
+		: ([...document.querySelectorAll("button")].find(
 				(element) => element.textContent === label,
 			) as HTMLButtonElement);
 beforeEach(() => {
@@ -71,6 +73,18 @@ beforeEach(() => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	queries.batch.mockReset();
 	queries.profile.mockReset().mockImplementation(async () => state);
+	queries.adoption.mockReset().mockImplementation(async () => ({
+		storageIdentity: "fixture",
+		totalCount: 1,
+		nextCursor: null,
+		entries: (state.sessionProfileBindings ?? []).map((entry) => ({
+			...entry,
+			profileId: entry.codexConfigurationProfileId,
+			status: "local_selection",
+			writerId: "current-writer",
+			recoveryCondition: null,
+		})),
+	}));
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
@@ -152,6 +166,7 @@ describe("Codex 配置同步提示和设置", () => {
 			acknowledgedAt: 1,
 		};
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		expect(container.textContent).toContain("此记录已退出设置同步");
 		expect(container.textContent).not.toContain("正在自动广播");
 		expect(button("同步设置")).toBeUndefined();
@@ -196,17 +211,17 @@ describe("Codex 配置同步提示和设置", () => {
 			})),
 		}));
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
-		expect(container.textContent).toContain("设置待反馈 · 1");
+		expect(container.textContent).toContain("可选反馈 · 1");
 		expect(
 			container.querySelectorAll('[data-verification-anchor="codex-configuration-proposal-group"]'),
 		).toHaveLength(1);
 		const candidates = container.querySelectorAll('[data-configuration-value-choice="candidate"]');
 		expect(candidates).toHaveLength(2);
 		expect(candidates[0]?.textContent).toContain('"B"');
-		expect(candidates[0]?.textContent).toContain("采用此值并广播");
+		expect(candidates[0]?.textContent).toContain("更新默认并同步");
 		expect(container.textContent).toContain("2 个来源");
 		expect(container.querySelector('[data-configuration-value-choice="current"]')?.textContent).toContain('"A"');
-		await act(async () => button("保留当前默认").click());
+		await act(async () => button("保持默认").click());
 		expect(queries.batch).toHaveBeenCalledWith(
 			expect.objectContaining({
 				action: "reject",
@@ -352,6 +367,7 @@ describe("Codex 配置同步提示和设置", () => {
 		for (const group of sourceGroups)
 			expect(group.querySelector("h3")?.textContent).toBe(`来源更新 · ${unreadCount}`);
 		if (alreadyRead) {
+			await act(async () => button("历史").click());
 			const historical = container.querySelector('[role="group"][aria-label="历史记录"] article')!;
 			expect(historical.querySelector("button")).toBeNull();
 			expect(historical.querySelector("time")?.dateTime).toBe(new Date(42).toISOString());
@@ -406,6 +422,7 @@ describe("Codex 配置同步提示和设置", () => {
 			];
 			await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 			await flush();
+			await act(async () => button("历史").click());
 			const input = container.querySelector<HTMLInputElement>('[aria-label="筛选配置记录"]')!;
 			await act(async () => {
 				Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, search);
@@ -424,6 +441,7 @@ describe("Codex 配置同步提示和设置", () => {
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 		await flush();
 		expect(container.querySelector('[role="group"][aria-label="来源更新"] h3')?.textContent).toBe("来源更新 · 0");
+		await act(async () => button("历史").click());
 		const historical = container.querySelector('[role="group"][aria-label="历史记录"]')!;
 		expect(historical.textContent).toContain("已稍后处理");
 		expect(historical.querySelectorAll("button")).toHaveLength(1);
@@ -434,6 +452,7 @@ describe("Codex 配置同步提示和设置", () => {
 			sourceObservations: [{ ...sourceObservationFixture(0), version: 3, observationCount: 2 }],
 		};
 		await act(async () => notifyCodexConfigurationSyncUpdated());
+		await act(async () => button("可选反馈").click());
 		expect(container.querySelector('[role="group"][aria-label="来源更新"] h3')?.textContent).toBe("来源更新 · 1");
 	});
 	it("来源挂起只禁用自身，通知和设置共享等待，profile 操作锁不影响来源", async () => {
@@ -465,6 +484,7 @@ describe("Codex 配置同步提示和设置", () => {
 			feedbackExpiresAtMs: Date.now() - 1,
 		};
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		await flush();
 		expect(container.textContent).toContain("已反馈到 profile；所属现有和未来会话自动采用");
 		expect(container.textContent).not.toContain("反馈机会已结束，局部选择保留");
@@ -536,16 +556,20 @@ describe("Codex 配置同步提示和设置", () => {
 			feedbackExpiresAtMs: deadline,
 		};
 		await renderConfigurationNotice();
-		expect(container.textContent).toContain("反馈到 profile 并广播");
+		expect(document.querySelector('[aria-label="Codex 配置变更提示"]')?.textContent).toContain("更新默认并同步");
 		await act(async () => vi.advanceTimersByTime(300_000));
 		await act(async () => root.render(<NoticeHarness key="reloaded" workspaceId="workspace" />));
 		await flush();
 		queries.fetch.mockRejectedValue(new Error("隔离的离线状态"));
 		await act(async () => vi.advanceTimersByTime(300_001));
-		expect(container.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]')).toBeNull();
+		expect(
+			container
+				.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]')
+				?.getAttribute("aria-label"),
+		).toContain("可选反馈 0 项");
 		expect(queries.batch).not.toHaveBeenCalled();
 	});
-	it("profile 管理按会话代际切换绑定，修改设置后一次更新并广播", async () => {
+	it("自动采用分区按会话代际切换配置绑定", async () => {
 		state.profiles = ["first", "second"].map((profileId) => ({
 			profileId,
 			name: profileId === "first" ? "常用配置" : "独立配置",
@@ -574,7 +598,8 @@ describe("Codex 配置同步提示和设置", () => {
 		];
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 		await flush();
-		const select = container.querySelector<HTMLSelectElement>('[aria-label="会话 owned-session 所属 profile"]');
+		await act(async () => button("自动采用").click());
+		const select = container.querySelector<HTMLSelectElement>('[aria-label="会话 owned-session 所属配置"]');
 		if (!select) throw new Error("缺少会话 profile 选择");
 		await act(async () => {
 			select.value = "second";
@@ -586,217 +611,8 @@ describe("Codex 配置同步提示和设置", () => {
 				profileId: "second",
 				expectedRuntimeSessionIncarnationId: "original-incarnation",
 			}),
+			expect.objectContaining({ signal: expect.any(AbortSignal) }),
 		);
-		const field = container.querySelector<HTMLInputElement>(
-			'[data-verification-anchor="codex-configuration-profile-management"] details input',
-		);
-		if (!field) throw new Error("缺少 profile 设置编辑器");
-		const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-		await act(async () => {
-			setter?.call(field, "updated-model");
-			field.dispatchEvent(new Event("input", { bubbles: true }));
-		});
-		await act(async () => button("更新并广播").click());
-		expect(queries.profile).toHaveBeenLastCalledWith(
-			expect.objectContaining({
-				action: "update",
-				profileId: "first",
-				expectedVersion: 10,
-				fields: [{ fieldKey: '["config.toml","model"]', value: "updated-model" }],
-			}),
-		);
-	});
-
-	it("元数据刷新不续期，首次 8 秒后收起且不提交审批或移动焦点", async () => {
-		const workspaceInput = document.createElement("input");
-		document.body.append(workspaceInput);
-		workspaceInput.focus();
-		try {
-			await renderConfigurationNotice();
-			expect(document.activeElement).toBe(workspaceInput);
-			await act(async () => vi.advanceTimersByTime(6_000));
-			state = { ...state, revision: 2 };
-			await act(async () => notifyCodexConfigurationSyncUpdated());
-			await act(async () => vi.advanceTimersByTime(1_999));
-			expect(button("收起")).toBeDefined();
-			await act(async () => vi.advanceTimersByTime(1));
-			expect(localStorage.getItem("codex-configuration-change-notice-collapsed")).toBe("true");
-			expect(document.activeElement).toBe(workspaceInput);
-			expect(queries.batch).not.toHaveBeenCalled();
-			expect(queries.acknowledge).not.toHaveBeenCalled();
-			expect(queries.synchronize).not.toHaveBeenCalled();
-		} finally {
-			workspaceInput.remove();
-		}
-	});
-	it.each(["true", "false"])("旧值 %s 均可进入手动展开，失去内部焦点后仍保持", async (savedCollapsedState) => {
-		localStorage.setItem("codex-configuration-change-notice-collapsed", savedCollapsedState);
-		const panel = await renderConfigurationNotice();
-		if (savedCollapsedState === "true") await act(async () => button("展开").click());
-		await act(async () => container.querySelector<HTMLButtonElement>("button")!.focus());
-		await act(async () => vi.advanceTimersByTime(80_000));
-		expect(panel.hidden).toBe(false);
-	});
-	it.each(["pointer", "focus", "selection", "touch", "confirmation", "hidden-page", "delayed-visibility"])(
-		"%s 保护期间暂停，解除后重新给予完整 8 秒",
-		async (protection) => {
-			const panel = await renderConfigurationNotice();
-			const confirmation = document.createElement("div");
-			confirmation.setAttribute("role", "alertdialog");
-			const visibility = vi.spyOn(document, "visibilityState", "get");
-			await act(async () => vi.advanceTimersByTime(6_000));
-			await act(async () => {
-				if (protection === "pointer") panel.dispatchEvent(new Event("pointerenter"));
-				if (protection === "focus") container.querySelector<HTMLInputElement>('[type="search"]')!.focus();
-				if (protection === "selection") {
-					const range = document.createRange();
-					range.selectNodeContents(panel.querySelector("p")!);
-					document.getSelection()?.addRange(range);
-					document.dispatchEvent(new Event("selectionchange"));
-				}
-				if (protection === "touch") panel.dispatchEvent(new Event("touchstart", { bubbles: true }));
-				if (protection === "confirmation") document.body.append(confirmation);
-				if (protection === "hidden-page" || protection === "delayed-visibility") {
-					visibility.mockReturnValue("hidden");
-					if (protection === "hidden-page") document.dispatchEvent(new Event("visibilitychange"));
-				}
-			});
-			await act(async () => vi.advanceTimersByTime(80_000));
-			expect(panel.hidden).toBe(false);
-			await act(async () => {
-				if (protection === "pointer") panel.dispatchEvent(new Event("pointerleave"));
-				if (protection === "focus") container.querySelector<HTMLButtonElement>("button")!.focus();
-				if (protection === "selection") {
-					document.getSelection()?.removeAllRanges();
-					document.dispatchEvent(new Event("selectionchange"));
-				}
-				if (protection === "touch") document.dispatchEvent(new Event("touchend"));
-				if (protection === "confirmation") confirmation.remove();
-				if (protection === "hidden-page" || protection === "delayed-visibility") {
-					visibility.mockReturnValue("visible");
-					document.dispatchEvent(new Event("visibilitychange"));
-				}
-			});
-			await act(async () => vi.advanceTimersByTime(7_999));
-			expect(panel.hidden).toBe(false);
-			await act(async () => vi.advanceTimersByTime(1));
-			expect(panel.hidden).toBe(true);
-		},
-	);
-	it.each(["scroll", "wheel", "touchmove"])("%s 后完整重新计时", async (eventName) => {
-		const panel = await renderConfigurationNotice();
-		await act(async () => vi.advanceTimersByTime(6_000));
-		await act(async () => panel.dispatchEvent(new Event(eventName)));
-		await act(async () => vi.advanceTimersByTime(7_999));
-		expect(panel.hidden).toBe(false);
-		await act(async () => vi.advanceTimersByTime(1));
-		expect(panel.hidden).toBe(true);
-	});
-	it("提交中的同步保护展示，回执后完整重新计时", async () => {
-		let finish!: (value: CodexConfigurationSyncState) => void;
-		queries.synchronize.mockImplementation(
-			() =>
-				new Promise<CodexConfigurationSyncState>((resolve) => {
-					finish = resolve;
-				}),
-		);
-		const panel = await renderConfigurationNotice();
-		await act(async () => vi.advanceTimersByTime(6_000));
-		await act(async () => button("同步设置").click());
-		await act(async () => vi.advanceTimersByTime(80_000));
-		expect(panel.hidden).toBe(false);
-		await act(async () => finish(state));
-		await act(async () => vi.advanceTimersByTime(7_999));
-		expect(panel.hidden).toBe(false);
-		await act(async () => vi.advanceTimersByTime(1));
-		expect(panel.hidden).toBe(true);
-		expect(queries.synchronize).toHaveBeenCalledTimes(1);
-	});
-	it("隐藏手机导航时暂停且保留展开意图，卸载清理倒计时与监听", async () => {
-		const panel = await renderConfigurationNotice();
-		await act(async () => vi.advanceTimersByTime(6_000));
-		await renderConfigurationNotice({ isPresentationAvailable: false });
-		expect(panel.hidden).toBe(true);
-		expect(panel.dataset.state).toBe("closed");
-		await act(async () => vi.advanceTimersByTime(80_000));
-		expect(localStorage.getItem("codex-configuration-change-notice-collapsed")).toBeNull();
-		await renderConfigurationNotice();
-		expect(panel.hidden).toBe(false);
-		expect(panel.dataset.state).toBe("open");
-		await act(async () => vi.advanceTimersByTime(7_999));
-		expect(panel.hidden).toBe(false);
-		await act(async () => root.render(null));
-		expect(vi.getTimerCount()).toBe(0);
-		await act(async () => {
-			panel.dispatchEvent(new Event("pointerleave"));
-			document.dispatchEvent(new Event("visibilitychange"));
-		});
-		expect(vi.getTimerCount()).toBe(0);
-	});
-	it("持续挂载保留筛选、选择、同步选项与阅读位置，配置设置关闭不恢复摘要焦点", async () => {
-		state.changes.push({
-			...state.changes[0]!,
-			changeId: "pending",
-			approvalStatus: "pending",
-			mergeStatus: "pending_approval",
-		});
-		const onOpenSettings = vi.fn();
-		await renderConfigurationNotice({ onOpenSettings });
-		const selection = container.querySelector<HTMLInputElement>('[aria-label^="选择 "]')!;
-		const synchronizationToggle = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
-		const searchInput = container.querySelector<HTMLInputElement>('[aria-label="筛选配置记录"]')!;
-		const scroller = container.querySelector<HTMLElement>(".overflow-y-auto")!;
-		await act(async () => {
-			Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(searchInput, "hook");
-			searchInput.dispatchEvent(new Event("input", { bubbles: true }));
-			selection.click();
-			synchronizationToggle.click();
-			scroller.scrollTop = 120;
-			scroller.dispatchEvent(new Event("scroll"));
-		});
-		await act(async () => button("收起").click());
-		await act(async () => button("展开").click());
-		expect(container.querySelector('[aria-label^="选择 "]')).toBe(selection);
-		expect(selection.checked).toBe(true);
-		expect(container.querySelector('[role="switch"]')).toBe(synchronizationToggle);
-		expect(synchronizationToggle.getAttribute("aria-checked")).toBe("true");
-		expect(searchInput.value).toBe("hook");
-		expect(scroller.scrollTop).toBe(120);
-		await act(async () => button("来源更新").click());
-		await act(async () => button("收起").click());
-		await act(async () => button("展开").click());
-		expect(button("来源更新").getAttribute("aria-pressed")).toBe("true");
-		await act(async () => button("配置同步设置").click());
-		expect(onOpenSettings).toHaveBeenCalledTimes(1);
-		expect(container.querySelector<HTMLElement>('[aria-label="Codex 配置变更提示"]')!.hidden).toBe(true);
-		expect(document.activeElement).not.toBe(
-			container.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]'),
-		);
-		expect(queries.batch).not.toHaveBeenCalled();
-	});
-	it("收起只改变显示，跨项目与刷新及新条目保持收起，并保留选择", async () => {
-		state.changes[0]!.approvalStatus = "pending";
-		state.changes[0]!.mergeStatus = "pending_approval";
-		await renderConfigurationNotice();
-		await act(async () => button("收起").click());
-		expect(queries.acknowledge).not.toHaveBeenCalled();
-		expect(queries.batch).not.toHaveBeenCalled();
-		expect(button("展开").getAttribute("aria-expanded")).toBe("false");
-		state = {
-			...state,
-			revision: 2,
-			changes: [...state.changes, { ...state.changes[0]!, changeId: "new-change", version: 2 }],
-		};
-		await act(async () => notifyCodexConfigurationSyncUpdated());
-		await flush();
-		expect(button("展开")).toBeDefined();
-		await renderConfigurationNotice({ workspaceId: "another-project" });
-		await flush();
-		expect(button("展开")).toBeDefined();
-		await act(async () => root.unmount());
-		root = createRoot(container);
-		await renderConfigurationNotice();
-		expect(button("展开")).toBeDefined();
 	});
 	it("来源更新不显示审批或相同设置箭头，设置支持当前筛选全选与批量部分失败", async () => {
 		state.sourceObservations = [
@@ -814,9 +630,13 @@ describe("Codex 配置同步提示和设置", () => {
 		];
 		state.changes[0]!.approvalStatus = "pending";
 		state.changes[0]!.mergeStatus = "pending_approval";
+		state.changes.push({ ...state.changes[0]!, changeId: "change-second", fieldLabel: "另一可选设置" });
 		queries.batch.mockResolvedValue({
 			state,
-			results: [{ changeId: "change-first", status: "source_unverifiable", message: "来源暂不可核验" }],
+			results: [
+				{ changeId: "change-first", status: "source_unverifiable", message: "来源暂不可核验" },
+				{ changeId: "change-second", status: "applied", message: "已保存" },
+			],
 		});
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
 		await flush();
@@ -838,6 +658,7 @@ describe("Codex 配置同步提示和设置", () => {
 						changeId: "change-first",
 						expectedVersion: 1,
 					}),
+					expect.objectContaining({ changeId: "change-second", expectedVersion: 1 }),
 				],
 			}),
 			expect.objectContaining({ context: { sendAsIndependentHttpRequest: false } }),
@@ -845,57 +666,97 @@ describe("Codex 配置同步提示和设置", () => {
 		expect(container.textContent).toContain("来源暂不可核验");
 	});
 
-	it("非模态提示展示范围，toggle 默认关闭，只提交本次变更", async () => {
+	it("紧凑浮层不抢焦点，只处理展示的候选，Escape 返回顶栏", async () => {
+		const original = state.changes[0]!;
+		state.changes = ["max", "ultra"].map((value, index) => ({
+			...original,
+			changeId: `compact-${index}`,
+			recordKind: "settings_proposal" as const,
+			approvalStatus: "pending" as const,
+			mergeStatus: "pending_approval" as const,
+			candidateFieldGroupKey: "reasoning",
+			completeCandidateValueDigest: value,
+			exceptionGroup: "reasoning_effort" as const,
+			observedAt: Date.now() - 20_000,
+			feedbackExpiresAtMs: Date.now() + 600_000,
+			comparison: {
+				expectedSharedValueDigest: "current",
+				rows: [
+					{
+						fieldKey: "effort",
+						label: "推理强度",
+						changeKind: "modified" as const,
+						previous: { state: "present" as const, text: "xhigh" },
+						detected: { state: "present" as const, text: value },
+						sharedCurrent: { state: "present" as const, text: "xhigh" },
+					},
+				],
+			},
+		}));
+		queries.batch.mockImplementation(async (input) => ({
+			state,
+			results: input.items.map((item: { changeId: string }) => ({
+				changeId: item.changeId,
+				status: "applied",
+				message: "已处理",
+			})),
+		}));
+		const input = document.createElement("input");
+		document.body.append(input);
+		input.focus();
 		await renderConfigurationNotice();
-		expect(container.querySelector('[role="dialog"]')).toBeNull();
-		expect(container.textContent).toContain("来源会话");
-		expect(container.textContent).toContain("未来会话");
-		expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
-		await act(async () => button("同步设置").click());
-		expect(queries.synchronize).toHaveBeenCalledWith(
-			expect.objectContaining({
-				changeId: "change-first",
-				expectedVersion: 1,
-				synchronizeExistingSessions: false,
-				idempotencyKey: expect.any(String),
-			}),
+		expect(document.activeElement).toBe(input);
+		const panel = document.querySelector<HTMLElement>('[aria-label="Codex 配置变更提示"]')!;
+		expect(panel.textContent).toContain("其他建议 · 1 项");
+		await act(async () => button("保持默认").click());
+		expect(queries.batch.mock.calls[0]?.[0].items).toHaveLength(1);
+		await act(async () => panel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+		expect(document.activeElement).toBe(
+			container.querySelector('[data-verification-anchor="codex-configuration-sync-summary"]'),
 		);
-		expect(container.querySelector('[aria-label="Codex 配置变更提示"]')).toBeNull();
+		input.remove();
 	});
-	it("显式开启后才同步，重复点击保护，新变更重新关闭 toggle", async () => {
-		let finish: ((value: CodexConfigurationSyncState) => void) | undefined;
-		queries.synchronize.mockImplementation(
-			() =>
-				new Promise<CodexConfigurationSyncState>((resolve) => {
-					finish = resolve;
-				}),
-		);
+	it("浮层采用会继续尝试同一候选的其他已展示来源", async () => {
+		const original = state.changes[0]!;
+		state.changes = [0, 1].map((index) => ({
+			...original,
+			changeId: `equivalent-${index}`,
+			recordKind: "settings_proposal" as const,
+			approvalStatus: "pending" as const,
+			mergeStatus: "pending_approval" as const,
+			candidateFieldGroupKey: "reasoning",
+			completeCandidateValueDigest: "same-value",
+			exceptionGroup: "reasoning_effort" as const,
+			observedAt: Date.now() - 20_000,
+			feedbackExpiresAtMs: Date.now() + 600_000,
+			comparison: {
+				expectedSharedValueDigest: "current",
+				rows: [
+					{
+						fieldKey: "effort",
+						label: "推理强度",
+						changeKind: "modified" as const,
+						previous: { state: "present" as const, text: "xhigh" },
+						detected: { state: "present" as const, text: "max" },
+						sharedCurrent: { state: "present" as const, text: "xhigh" },
+					},
+				],
+			},
+		}));
+		queries.batch.mockImplementation(async (input) => ({
+			state,
+			results: input.items.map((item: { changeId: string }) => ({
+				changeId: item.changeId,
+				status: item.changeId === "equivalent-1" ? "source_unverifiable" : "applied",
+				message: "来源",
+			})),
+		}));
 		await renderConfigurationNotice();
-		await act(async () => (container.querySelector('[role="switch"]') as HTMLButtonElement).click());
-		await act(async () => {
-			button("同步设置").click();
-			button("同步设置")?.click();
-		});
-		expect(queries.synchronize).toHaveBeenCalledTimes(1);
-		expect(queries.synchronize).toHaveBeenCalledWith(expect.objectContaining({ synchronizeExistingSessions: true }));
-		await act(async () => {
-			finish?.(state);
-		});
-		state = { ...state, revision: 2, changes: [{ ...state.changes[0]!, changeId: "change-next", version: 2 }] };
-		await act(async () => notifyCodexConfigurationSyncUpdated());
-		await flush();
-		expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
-	});
-	it("稍后处理保留设置页条目，重连不会再弹同一提醒", async () => {
-		await renderConfigurationNotice();
-		await act(async () => button("稍后处理").click());
-		await act(async () => notifyCodexConfigurationSyncUpdated());
-		await flush();
-		expect(container.textContent).toBe("");
-		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
-		await flush();
-		expect(container.textContent).toContain("开启 → 关闭");
-		expect(container.querySelector('[role="switch"]')?.getAttribute("aria-checked")).toBe("false");
+		await act(async () => button("更新默认并同步").click());
+		expect(queries.batch.mock.calls.map((call) => call[0].items[0].changeId)).toEqual([
+			"equivalent-1",
+			"equivalent-0",
+		]);
 	});
 	it("逐项显示目标进度和冲突选择，携带目标值摘要防止覆盖后来的决定", async () => {
 		state.changes[0]!.targets = ["applied", "pending_reload", "pending_next_start", "conflict", "not_applicable"].map(
@@ -915,6 +776,7 @@ describe("Codex 配置同步提示和设置", () => {
 		);
 		setTargetComparisonFixture("writer-3", "expected-target-digest");
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		await flush();
 		for (const label of ["已应用", "待重载", "待下次启动", "冲突", "不适用"])
 			expect(container.textContent).toContain(label);
@@ -985,6 +847,7 @@ describe("Codex 配置同步提示和设置", () => {
 			return state;
 		});
 		await act(async () => root.render(<CodexConfigurationSyncSettings key="initial" workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		await flush();
 		await act(async () => button(scenario.buttonLabel).click());
 		await flush();
@@ -1001,6 +864,7 @@ describe("Codex 配置同步提示和设置", () => {
 		}
 		const fetchCountBeforeReconnect = queries.fetch.mock.calls.length;
 		await act(async () => root.render(<CodexConfigurationSyncSettings key="reconnected" workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		await flush();
 		expect(queries.fetch.mock.calls.length).toBeGreaterThan(fetchCountBeforeReconnect);
 		expect(localArticle()?.textContent).toContain(scenario.expectedDecisionLabel);
@@ -1012,6 +876,7 @@ describe("Codex 配置同步提示和设置", () => {
 		state.changes[0]!.mergeStatus = "kept_shared_value";
 		state.changes[0]!.acknowledgedAt = 2;
 		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await act(async () => button("历史").click());
 		await flush();
 		expect(container.textContent).toContain("已保留共享默认");
 		expect(container.textContent).not.toContain("本会话保留自己的决定");

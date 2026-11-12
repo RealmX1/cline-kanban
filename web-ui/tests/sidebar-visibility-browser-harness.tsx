@@ -2,12 +2,15 @@ import { Terminal } from "@xterm/xterm";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { CardDetailView } from "../src/components/card-detail-view";
+import { CrossProjectRecentlyActiveTaskSwitcherHostContextProvider } from "../src/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import { FocusViewCrossProjectTaskOpenInTransitShell } from "../src/components/detail-panels/focus-view-cross-project-task-open-in-transit-shell";
+import { DesktopSidebarVisibilityButton } from "../src/components/desktop-sidebar-visibility-button";
 import { ProjectNavigationPanel } from "../src/components/project-navigation-panel";
 import { SideSessionCreationWorkbench } from "../src/components/side-session-creation-workbench";
 import { TaskCommentsDialogProvider } from "../src/components/task-comments-dialog-provider";
 import { TopBar } from "../src/components/top-bar";
 import { TooltipProvider } from "../src/components/ui/tooltip";
+import { ExpandedForegroundViewProvider } from "../src/expanded-foreground-view/expanded-foreground-view-provider";
 import { useAppHotkeys } from "../src/hooks/use-app-hotkeys";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "../src/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { useIsMobile } from "../src/hooks/use-is-mobile";
@@ -126,6 +129,7 @@ function Harness() {
 	const [isCrossProjectTaskOpenInTransit, setIsCrossProjectTaskOpenInTransit] = useState(false);
 	const [isDiffExpanded, setIsDiffExpanded] = useState(false);
 	const [changesOpen, setChangesOpen] = useState(false);
+	const [isBoardScopeAllProjectsSelected, setIsBoardScopeAllProjectsSelected] = useState(false);
 	const [startAllRequests, setStartAllRequests] = useState(0);
 	const crossProjectTaskSwitcherSectionsModel = useCrossProjectRecentlyActiveTaskSwitcherSections({
 		projects: [],
@@ -146,6 +150,19 @@ function Harness() {
 	const toggleWorkbenchSidebar = () => {
 		sidebarVisibility.setFocusViewWorkbenchSidebarHidden(!sidebarVisibility.isFocusViewWorkbenchSidebarHidden);
 		setIsDiffExpanded(false);
+	};
+	const crossProjectTaskSwitcherHost = {
+		crossProjectTaskSwitcherSectionsModel,
+		projects: [],
+		notificationLogByWorkspaceId: {},
+		currentProjectId: workspaceId,
+		isBoardScopeAllProjectsSelected,
+		focusedTaskInProject: null,
+		onOpenTaskInProject() {},
+		onRequestCreateTaskInBoardScope() {},
+		onRequestPinCurrentProjectTaskToTaskPinboard() {},
+		onUnpinCurrentProjectTaskFromTaskPinboard() {},
+		onEditCurrentProjectTaskPinboardPinReason() {},
 	};
 	useAppHotkeys({
 		selectedCard: isHomePage ? null : selection,
@@ -177,6 +194,7 @@ function Harness() {
 			}}
 		>
 			<TaskCommentsDialogProvider currentWorkspaceId={workspaceId}>
+			<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectTaskSwitcherHost}>
 				<div className="flex h-dvh overflow-hidden bg-surface-0 text-text-primary">
 					{isHomePage ? (
 						<ProjectNavigationPanel
@@ -195,6 +213,9 @@ function Harness() {
 							isCollapsed={projectNavigationLayout.isCollapsed}
 							setSidebarCollapsed={projectNavigationLayout.setSidebarCollapsed}
 							isDesktopSidebarHidden={sidebarVisibility.isHomeProjectSidebarHidden}
+							desktopSidebarVisibilityButton={!isMobile ? (
+								<DesktopSidebarVisibilityButton side="left" label="项目栏" isHidden={false} onToggle={toggleLeftSidebar} />
+							) : undefined}
 						/>
 					) : null}
 					<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -206,15 +227,6 @@ function Harness() {
 							canOpenWorkspace={false}
 							isOpeningWorkspace={false}
 							onToggleSidebar={isHomePage ? toggleLeftSidebar : undefined}
-							onToggleCurrentPageLeftSidebar={toggleLeftSidebar}
-							isCurrentPageLeftSidebarHidden={
-								isHomePage
-									? sidebarVisibility.isHomeProjectSidebarHidden
-									: sidebarVisibility.isFocusViewTaskListSidebarHidden || isDiffExpanded
-							}
-							currentPageLeftSidebarLabel={isHomePage ? "项目栏" : "任务列表"}
-							onToggleFocusViewWorkbenchSidebar={isHomePage ? undefined : toggleWorkbenchSidebar}
-							isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
 						/>
 						<header className="flex h-10 shrink-0 items-center gap-3 px-2">
 							<button type="button" onClick={() => setIsHomePage((value) => !value)}>
@@ -226,29 +238,27 @@ function Harness() {
 							<button type="button" onClick={() => setIsCrossProjectTaskOpenInTransit((value) => !value)}>
 								切换跨项目在途外壳
 							</button>
+							<button type="button" onClick={() => setIsBoardScopeAllProjectsSelected((value) => !value)}>
+								切换项目范围
+							</button>
 							<ResetLayoutButton />
 							<output aria-label="启动全部请求次数">{startAllRequests}</output>
 						</header>
 						{isHomePage ? (
-							<main className="flex-1">隔离首页</main>
+							<main className="relative flex-1">
+								{!isMobile && sidebarVisibility.isHomeProjectSidebarHidden ? (
+									<DesktopSidebarVisibilityButton side="left" label="项目栏" isHidden onToggle={toggleLeftSidebar} />
+								) : null}
+								隔离首页
+							</main>
 						) : isCrossProjectTaskOpenInTransit ? (
 							<FocusViewCrossProjectTaskOpenInTransitShell
-								host={{
-									crossProjectTaskSwitcherSectionsModel,
-									projects: [],
-									notificationLogByWorkspaceId: {},
-									currentProjectId: workspaceId,
-									isBoardScopeAllProjectsSelected: true,
-									focusedTaskInProject: null,
-									onOpenTaskInProject() {},
-									onRequestPinCurrentProjectTaskToTaskPinboard() {},
-									onUnpinCurrentProjectTaskFromTaskPinboard() {},
-									onEditCurrentProjectTaskPinboardPinReason() {},
-								}}
+								host={crossProjectTaskSwitcherHost}
 								targetProjectName="隔离目标项目"
 								targetTaskTitle="隔离目标任务"
 								onCancel={() => setIsCrossProjectTaskOpenInTransit(false)}
 								isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
+								onToggleFocusViewTaskListSidebar={toggleLeftSidebar}
 							/>
 						) : (
 							<CardDetailView
@@ -260,6 +270,7 @@ function Harness() {
 								taskSessions={{ [card.id]: summary }}
 								onSessionSummary={() => {}}
 								onCardSelect={() => {}}
+								onCreateTask={() => {}}
 								onTaskDragEnd={() => {}}
 								onMoveToTrash={() => {}}
 								bottomTerminalOpen={false}
@@ -268,6 +279,7 @@ function Harness() {
 								onBottomTerminalClose={() => {}}
 								isTaskChangesSidebarOpen={changesOpen}
 								isFocusViewTaskListSidebarHidden={sidebarVisibility.isFocusViewTaskListSidebarHidden}
+								onToggleFocusViewTaskListSidebar={toggleLeftSidebar}
 								isFocusViewWorkbenchSidebarHidden={sidebarVisibility.isFocusViewWorkbenchSidebarHidden}
 								onFocusViewWorkbenchSidebarHiddenChange={sidebarVisibility.setFocusViewWorkbenchSidebarHidden}
 								isDiffExpanded={isDiffExpanded}
@@ -283,6 +295,7 @@ function Harness() {
 					</div>
 				</div>
 				<SideSessionCreationWorkbench />
+			</CrossProjectRecentlyActiveTaskSwitcherHostContextProvider>
 			</TaskCommentsDialogProvider>
 		</LayoutCustomizationsProvider>
 	);
@@ -290,6 +303,8 @@ function Harness() {
 
 createRoot(document.body.appendChild(document.createElement("div"))).render(
 	<TooltipProvider>
-		<Harness />
+		<ExpandedForegroundViewProvider>
+			<Harness />
+		</ExpandedForegroundViewProvider>
 	</TooltipProvider>,
 );

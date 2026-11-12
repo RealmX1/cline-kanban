@@ -11,6 +11,7 @@ import * as taskVisualizationQueries from "@/runtime/task-visualization-query";
 import type {
 	RuntimeAgentSessionTransport,
 	RuntimeConfigResponse,
+	RuntimeProjectSummary,
 	RuntimeTaskSessionSummary,
 	TaskVisualizationPreviewRequestedMessage,
 } from "@/runtime/types";
@@ -43,6 +44,7 @@ const {
 			panelBackgroundColor?: string;
 			terminalBackgroundColor?: string;
 			isMountedInsideAdjacentTaskCardNavigationHotkeyOwnerView?: boolean;
+			headerInformationContent?: ReactNode;
 		}): ReactNode => null,
 	),
 	mockAgentConversationChatPanel: vi.fn((..._args: unknown[]) => null),
@@ -349,6 +351,79 @@ describe("CardDetailView", () => {
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
+	it.each(
+		(["terminal", "chat", "history"] as const).flatMap((panel) =>
+			[false, true].map((isMobile) => ({ panel, isMobile })),
+		),
+	)("项目入口位于会话信息最左侧，随归属更新且不重建内容（$panel，mobile=$isMobile）", async ({ panel, isMobile }) => {
+		mockUseIsMobile.mockReturnValue(isMobile);
+		mockAgentTerminalPanel.mockImplementation(({ headerInformationContent }) => (
+			<div data-testid="agent-terminal-panel">{headerInformationContent}</div>
+		));
+		const project: RuntimeProjectSummary = {
+			id: "workspace-1",
+			name: "很长的项目名称 LongProjectNameForSessionToolbar",
+			path: "/isolated/workspace-1",
+			availability: { status: "available" },
+			taskCounts: { backlog: 0, in_progress: 1, review: 0, validation: 0, trash: 0 },
+			inProgressTaskDetails: [],
+			crossProjectTaskSwitcherEntries: [],
+		};
+		const selection = createSelectionInColumn(panel === "history" ? "trash" : "in_progress");
+		const summary = createSessionSummary("task-1", {
+			agentId: panel === "chat" ? "omp" : "codex",
+			sessionTransport: panel === "chat" ? "acp_stdio_subprocess" : "pty_terminal",
+		});
+		const onNarrowToFocusedTaskProject = vi.fn();
+		const renderProject = async (focusedProject: RuntimeProjectSummary | null) =>
+			act(async () =>
+				root.render(
+					<CardDetailView
+						selection={selection}
+						currentProjectId={focusedProject?.id ?? project.id}
+						boardScopeFocusedTaskProject={focusedProject}
+						onNarrowToFocusedTaskProject={onNarrowToFocusedTaskProject}
+						sessionSummary={summary}
+						taskSessions={{ "task-1": summary }}
+						onSessionSummary={() => {}}
+						onCardSelect={() => {}}
+						onTaskDragEnd={() => {}}
+						onMoveToTrash={() => {}}
+						bottomTerminalOpen={false}
+						bottomTerminalTaskId={null}
+						bottomTerminalSummary={null}
+						onBottomTerminalClose={() => {}}
+					/>,
+				),
+			);
+		const projectButtonSelector = '[data-testid="agent-session-toolbar-focused-task-project-narrowing-button"]';
+		await renderProject(project);
+		const projectButton = container.querySelector<HTMLButtonElement>(projectButtonSelector);
+		expect(projectButton).not.toBeNull();
+		expect(projectButton?.nextElementSibling?.querySelector("button")?.getAttribute("aria-label")).toBe(
+			"展开问答记录",
+		);
+		expect(projectButton?.textContent).toBe(project.name);
+		expect(projectButton?.getAttribute("aria-label")).toBe(`仅显示项目 ${project.name}`);
+		expect(projectButton?.title).toContain(`${project.name} (`);
+		await act(async () => projectButton?.click());
+		expect(onNarrowToFocusedTaskProject).toHaveBeenCalledTimes(1);
+
+		const contentSelector =
+			panel === "history"
+				? '[data-testid="read-only-task-history"]'
+				: panel === "chat"
+					? '[data-testid="agent-conversation-chat-panel"]'
+					: '[data-testid="agent-terminal-panel"]';
+		const contentBeforeScopeChange = container.querySelector(contentSelector);
+		await renderProject(null);
+		expect(container.querySelector(projectButtonSelector)).toBeNull();
+		expect(container.querySelector(contentSelector)).toBe(contentBeforeScopeChange);
+
+		await renderProject({ ...project, id: "workspace-2", name: "另一个任务所属项目" });
+		expect(container.querySelector(projectButtonSelector)?.textContent).toBe("另一个任务所属项目");
+		expect(container.textContent).not.toContain(project.name);
+	});
 	it("详情重新渲染保留受控最大化，卸载时仅通知当前宿主恢复布局", async () => {
 		const originalOnDiffExpandedChange = vi.fn();
 		const currentOnDiffExpandedChange = vi.fn();

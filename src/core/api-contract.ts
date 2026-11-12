@@ -324,6 +324,17 @@ export const runtimeSaveAgentPromptImageAttachmentsRequestSchema = z.object({
 export const runtimeReadAgentPromptImageAttachmentsRequestSchema = z.object({
 	imageAttachmentIds: z.array(z.string().regex(/^[a-f0-9]{64}$/u)),
 });
+export const runtimeSaveAgentPromptFileAttachmentRequestSchema = z.object({
+	fileName: z.string().min(1).max(255),
+	fileContentBase64: z.string().max(Math.ceil((20 * 1024 * 1024) / 3) * 4),
+});
+export type RuntimeSaveAgentPromptFileAttachmentRequest = z.infer<
+	typeof runtimeSaveAgentPromptFileAttachmentRequestSchema
+>;
+export const runtimeAgentPromptFileAttachmentReferenceSchema = z.object({
+	fileName: z.string(),
+	filePath: z.string(),
+});
 export const runtimeTaskCommentEntrySchema = z.object({
 	taskCommentEntryId: z.string(),
 	commentText: z.string(),
@@ -432,6 +443,41 @@ export const runtimeTaskShelvingStateSchema = z.object({
 	lastChangedAt: z.number().finite().nonnegative(),
 });
 
+export const runtimeExternalWorkflowRunReferenceSchema = z
+	.object({
+		workflowProviderId: z.string().trim().min(1).max(160),
+		workflowKind: z.string().trim().min(1).max(160),
+		workItemId: z.string().trim().min(1).max(160),
+		runId: z.string().trim().min(1).max(160),
+		workflowDatabasePath: z.string().startsWith("/"),
+		artifactDirectoryPath: z.string().startsWith("/"),
+		lastObservedState: z
+			.object({
+				observedAtEpochMs: z.number().int().nonnegative(),
+				availability: z.enum(["observed", "unavailable"]),
+				businessStage: z.string().max(300).nullable(),
+				executionQualification: z.string().max(300).nullable(),
+				waitingReason: z.string().max(4000).nullable(),
+				materialFilePaths: z.array(z.string().startsWith("/")).max(100),
+			})
+			.strict()
+			.optional(),
+	})
+	.strict();
+export const runtimeExternalWorkflowRunBindingSchema = runtimeExternalWorkflowRunReferenceSchema.extend({
+	owningWorkspaceId: z.string().min(1),
+	owningTaskId: z.string().min(1),
+	owningTaskIncarnationCreatedAtEpochMs: z.number().int().nonnegative(),
+});
+export type RuntimeExternalWorkflowRunBinding = z.infer<typeof runtimeExternalWorkflowRunBindingSchema>;
+export const runtimeBindTaskExternalWorkflowRunRequestSchema = z
+	.object({
+		taskId: z.string().min(1),
+		expectedTaskIncarnationCreatedAtEpochMs: z.number().int().nonnegative(),
+		externalWorkflowRunBinding: runtimeExternalWorkflowRunReferenceSchema,
+	})
+	.strict();
+
 export const runtimeBoardCardSchema = z
 	.object({
 		id: z.string(),
@@ -445,6 +491,8 @@ export const runtimeBoardCardSchema = z
 		title: z.string().optional(),
 		taskNameVersion: z.number().int().nonnegative().optional(),
 		taskDescription: z.string().trim().max(4000).optional(),
+		// shortcut: 首版每 Task 只绑定一个原 Run；需要合法新一轮时再设计显式换绑与历史保留。
+		externalWorkflowRunBinding: runtimeExternalWorkflowRunBindingSchema.optional(),
 		prompt: z.string(),
 		startInPlanMode: z.boolean(),
 		// 老卡片没有这个字段；读时不在这里补默认值，而是在启动任务处按当时的全局
@@ -2261,6 +2309,7 @@ export type RuntimeKanbanCliTaskCardFieldUpdateRawInput = z.infer<
 // taskAgentSessionInitialization 出现在 patch 里（含 null）而 parentSessionId 缺省时，parentSessionId 一并清除——
 // 否则卡片 schema 会从遗留 parentSessionId 重新派生出刚被清掉的初始化（与浏览器 updateTask 同语义）。
 export const runtimeTaskCardFieldValuePatchSchema = z.object({
+	externalWorkflowRunBinding: runtimeExternalWorkflowRunBindingSchema.optional(),
 	codexConfigurationProfileId: z.string().min(1).nullable().optional(),
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
@@ -4344,7 +4393,12 @@ export type RuntimeAgentSessionPtyHostEnablementPreference = z.infer<
 	typeof runtimeAgentSessionPtyHostEnablementPreferenceSchema
 >;
 
+export const DEFAULT_AGENT_SESSION_USER_TURN_IDLE_PROCESS_RETENTION_DURATION_MINUTES = 60;
+export const runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema = z.number().int().positive();
+
 export const runtimeConfigResponseSchema = z.object({
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+		runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.optional(),
 	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema,
 	selectedShortcutLabel: z.string().nullable(),
@@ -4377,6 +4431,8 @@ export const runtimeConfigResponseSchema = z.object({
 export type RuntimeConfigResponse = z.infer<typeof runtimeConfigResponseSchema>;
 
 export const runtimeConfigSaveRequestSchema = z.object({
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+		runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.optional(),
 	agentSessionPtyHostEnablementPreference: runtimeAgentSessionPtyHostEnablementPreferenceSchema.optional(),
 	selectedAgentId: runtimeAgentIdSchema.optional(),
 	selectedShortcutLabel: z.string().nullable().optional(),
@@ -4750,6 +4806,8 @@ export type RuntimeDismissConnectionRetrySessionsResponse = z.infer<
 >;
 
 export const runtimeTaskTerminalRefreshRequestSchema = z.object({
+	// 仅作诊断，由浏览器时钟测得；不参与启动资格判断。
+	automaticResumeFrontendVisibleDwellElapsedMs: z.number().nonnegative().optional(),
 	taskId: z.string(),
 	// 仅本次手动重启及其有界自动重试使用；不写入卡片或全局默认。
 	additionalAgentStartupArgumentsForThisRestart: z

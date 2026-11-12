@@ -225,6 +225,7 @@ import {
 	runtimeAddBacklogTaskResponseSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueRequestSchema,
 	runtimeAgentIdleGatedProgrammaticTaskChatMessageEnqueueResponseSchema,
+	runtimeAgentPromptFileAttachmentReferenceSchema,
 	runtimeAgentPromptImageAttachmentReferenceSchema,
 	runtimeAgentSessionTransportSwitchRequestSchema,
 	runtimeAgentSessionTransportSwitchResponseSchema,
@@ -345,6 +346,7 @@ import {
 	runtimeRunPostDeployVerificationItemRequestSchema,
 	runtimeRunPostDeployVerificationItemResponseSchema,
 	runtimeRunUpdateResponseSchema,
+	runtimeSaveAgentPromptFileAttachmentRequestSchema,
 	runtimeSaveAgentPromptImageAttachmentsRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema,
 	runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema,
@@ -467,12 +469,15 @@ import {
 	codexConfigurationProfileMutationRequestSchema,
 	codexConfigurationResolveConflictRequestSchema,
 	codexConfigurationResolveTargetConflictRequestSchema,
+	codexConfigurationSessionAdoptionProgressPageSchema,
+	codexConfigurationSessionAdoptionProgressRequestSchema,
 	codexConfigurationSourceObservationRequestSchema,
 	codexConfigurationSourceObservationSchema,
 	codexConfigurationSyncActiveStateSchema,
 	codexConfigurationSyncHistoryPageSchema,
 	codexConfigurationSyncHistoryRequestSchema,
 	codexConfigurationSynchronizeRequestSchema,
+	codexConfigurationSyncOverviewSchema,
 	codexConfigurationSyncStateSchema,
 } from "../core/codex-configuration-sync-contract";
 import {
@@ -666,6 +671,7 @@ import {
 } from "../notifications/notification-speech-synthesis";
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
+import { savePersistentAgentPromptFileAttachment } from "../state/persistent-agent-prompt-file-attachments";
 import {
 	readPersistentAgentPromptImageAttachments,
 	savePersistentAgentPromptImageAttachments,
@@ -1654,6 +1660,10 @@ const runtimeApplicationNotificationIntelligenceProcedureRouter = t.router({
 });
 
 const runtimeApplicationSupportProcedureRouter = t.router({
+	saveAgentPromptFileAttachment: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeSaveAgentPromptFileAttachmentRequestSchema)
+		.output(runtimeAgentPromptFileAttachmentReferenceSchema)
+		.mutation(({ input }) => savePersistentAgentPromptFileAttachment(input)),
 	saveAgentPromptImageAttachments: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeSaveAgentPromptImageAttachmentsRequestSchema)
 		.output(z.array(runtimeAgentPromptImageAttachmentReferenceSchema))
@@ -1892,6 +1902,19 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.output(runtimeConfigResponseSchema)
 		.query(async ({ ctx }) => {
 			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
+		}),
+	getCodexConfigurationSyncOverview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(codexConfigurationSyncOverviewSchema)
+		.query(({ ctx }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.getOverview();
+		}),
+	listCodexConfigurationSessionAdoptionProgress: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationSessionAdoptionProgressRequestSchema)
+		.output(codexConfigurationSessionAdoptionProgressPageSchema)
+		.query(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.listSessionAdoptionProgress(input);
 		}),
 	getCodexConfigurationSyncActiveState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.output(codexConfigurationSyncActiveStateSchema)

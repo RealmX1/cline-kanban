@@ -9,6 +9,7 @@ import {
 	type InterWorkUnitRelationLedgerEventDraft,
 } from "../core/inter-work-unit-relation-ledger-event-contract";
 import type { ReferenceRelationModelingLedgerCommit } from "../core/work-unit-relation-modeling-api-contract";
+import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rotating-jsonl-diagnostic-event-journal";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type {
 	TaskCardFieldValueRetainedContent,
@@ -140,13 +141,29 @@ export class InterWorkUnitRelationLedgerDatabaseWorkerClient {
 				workerData: { directory: this.ledgerStorageRootDirectory },
 			});
 			this.worker = worker;
-			worker.on("message", (message: { requestId: string; result?: unknown; error?: string }) => {
-				const pendingRequest = this.pendingRequestsByRequestId.get(message.requestId);
-				this.pendingRequestsByRequestId.delete(message.requestId);
-				if (message.error !== undefined) pendingRequest?.reject(new Error(message.error));
-				else pendingRequest?.resolve(message.result);
-				if (this.pendingRequestsByRequestId.size === 0) worker.unref();
-			});
+			worker.on(
+				"message",
+				(message: {
+					requestId?: string;
+					result?: unknown;
+					error?: string;
+					terminalBoardMutationSnapshotCompaction?: Record<string, unknown>;
+				}) => {
+					if (message.terminalBoardMutationSnapshotCompaction) {
+						appendDiagnosticEventToRotatingJsonlJournal("terminal-board-mutation-snapshot-compaction", {
+							ledgerStorageRootDirectory: this.ledgerStorageRootDirectory,
+							...message.terminalBoardMutationSnapshotCompaction,
+						});
+						return;
+					}
+					if (!message.requestId) return;
+					const pendingRequest = this.pendingRequestsByRequestId.get(message.requestId);
+					this.pendingRequestsByRequestId.delete(message.requestId);
+					if (message.error !== undefined) pendingRequest?.reject(new Error(message.error));
+					else pendingRequest?.resolve(message.result);
+					if (this.pendingRequestsByRequestId.size === 0) worker.unref();
+				},
+			);
 			const failAllPendingRequests = (error: Error) => {
 				if (this.worker !== worker) return;
 				const unavailableError = new InterWorkUnitRelationLedgerUnavailableError(error.message);

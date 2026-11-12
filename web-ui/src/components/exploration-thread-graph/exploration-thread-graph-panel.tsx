@@ -49,6 +49,7 @@ export function ExplorationThreadGraphPanel({
 	workspaceId,
 	explorationId,
 	headerNavigationContent,
+	headerEndActions,
 	data,
 	initiallyExpanded = false,
 	isTaskAgentExecutionDisabled = false,
@@ -58,6 +59,7 @@ export function ExplorationThreadGraphPanel({
 	readError,
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	workspaceId: string;
 	explorationId: string;
 	data: ExplorationThreadGraphData;
@@ -187,6 +189,7 @@ export function ExplorationThreadGraphPanel({
 						<Maximize2 size={14} />
 					</Button>
 				) : null}
+				{surface.isExpanded ? null : headerEndActions}
 			</div>
 
 			{open ? (

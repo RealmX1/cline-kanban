@@ -1,5 +1,6 @@
 import type { TaskImage } from "@/types";
 import { createRandomUuidV4WithInsecureContextFallback } from "@/utils/create-random-uuid-v4-with-insecure-context-fallback";
+import { readBrowserFileAsBase64 } from "@/utils/read-browser-file-as-base64";
 
 const MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024;
 const ACCEPTED_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -12,37 +13,19 @@ export function isAcceptedTaskImageFile(file: File): boolean {
 }
 
 export async function fileToTaskImage(file: File): Promise<TaskImage | null> {
-	return await new Promise((resolve) => {
-		if (!isAcceptedTaskImageFile(file)) {
-			resolve(null);
-			return;
-		}
-		if (file.size > MAX_IMAGE_SIZE_BYTES) {
-			resolve(null);
-			return;
-		}
-		const reader = new FileReader();
-		reader.onload = () => {
-			const result = reader.result;
-			if (typeof result !== "string") {
-				resolve(null);
-				return;
-			}
-			const base64 = result.split(",")[1];
-			if (!base64) {
-				resolve(null);
-				return;
-			}
-			resolve({
-				id: createRandomUuidV4WithInsecureContextFallback().replaceAll("-", "").slice(0, 12),
-				data: base64,
-				mimeType: file.type,
-				name: file.name || undefined,
-			});
+	if (!isAcceptedTaskImageFile(file) || file.size > MAX_IMAGE_SIZE_BYTES) return null;
+	try {
+		const base64 = await readBrowserFileAsBase64(file);
+		if (!base64) return null;
+		return {
+			id: createRandomUuidV4WithInsecureContextFallback().replaceAll("-", "").slice(0, 12),
+			data: base64,
+			mimeType: file.type,
+			name: file.name || undefined,
 		};
-		reader.onerror = () => resolve(null);
-		reader.readAsDataURL(file);
-	});
+	} catch {
+		return null;
+	}
 }
 
 /**

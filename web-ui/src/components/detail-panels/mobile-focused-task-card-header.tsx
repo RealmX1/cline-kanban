@@ -85,7 +85,7 @@ export function MobileFocusedTaskCardHeader({
 				{terminalToolbarHostRef ? (
 					<div
 						ref={terminalToolbarHostRef}
-						className="flex shrink-0 items-center"
+						className="flex min-w-0 shrink items-center"
 						data-mobile-focused-task-session-toolbar-host=""
 					/>
 				) : null}

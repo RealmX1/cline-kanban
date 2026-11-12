@@ -713,8 +713,10 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 	controller,
 	headerContent,
 	headerNavigationContent,
+	headerEndActions,
 }: {
 	headerNavigationContent?: ReactNode;
+	headerEndActions?: ReactNode;
 	isTaskAgentExecutionDisabled?: boolean;
 	controller: QueuedTaskPromptDeliveryQueueController;
 	headerContent?: ReactNode;
@@ -828,6 +830,7 @@ export function QueuedTaskPromptDeliveryQueuePanel({
 				) : (
 					queueFilterControls
 				)}
+				{headerEndActions}
 			</div>
 			<div className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto px-3 pt-1 pb-3">
 				{!allowDeliveryOrderEditing ? (

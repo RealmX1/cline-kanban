@@ -1,14 +1,18 @@
 // 会话回收期限账本：绝对期限落盘、每 task 至多一条 live、supersede、状态机推进、
 // 上限裁剪、损坏容错、路径遍历拒绝、并发写串行、跨 workspace 聚合。
-import { writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import { getRuntimeGlobalConfigPath } from "../../src/config/runtime-config";
+import { runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
 import {
 	AGENT_SESSION_RUNTIME_RECLAMATION_GRACE_PERIOD_AFTER_RESPONSE_GENERATION_STOPPED_MS,
 	computeAgentSessionRuntimeReclamationEligibleAt,
 } from "../../src/core/session-activity";
+import { lockedFileSystem } from "../../src/fs/locked-file-system";
+import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "../../src/server/hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
 import {
 	buildAgentSessionReclamationDeadlineRecordId,
 	clearAgentSessionReclamationDeadlineRecords,
@@ -18,6 +22,7 @@ import {
 	readAgentSessionReclamationDeadlineRecords,
 	readAllAgentSessionReclamationDeadlineRecords,
 	recordAgentSessionRetentionDeadline,
+	refreshAgentSessionUserTurnIdleProcessRetentionDeadline,
 	supersedeAgentSessionRetentionDeadlinesForTask,
 	updateAgentSessionReclamationProgress,
 } from "../../src/state/agent-session-reclamation-deadline-store";
@@ -45,6 +50,122 @@ function stopAnchorInput(
 }
 
 describe.sequential("agent-session-reclamation-deadline-store integration", () => {
+	it("宿主交接使用最新持久期限，写入失败不给宿主旧期限，后续重试可恢复", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("host-detach-retention-policy");
+			const configPath = getRuntimeGlobalConfigPath();
+			await mkdir(dirname(configPath), { recursive: true });
+			await writeFile(configPath, JSON.stringify({ agentSessionUserTurnIdleProcessRetentionDurationMinutes: 120 }));
+			await recordAgentSessionRetentionDeadline(workspaceId, stopAnchorInput());
+			const summary = runtimeTaskSessionSummarySchema.parse({
+				taskId: "task-a",
+				agentId: "claude",
+				workspacePath: "/isolated",
+				pid: 42,
+				state: "awaiting_review",
+				turnOwner: "user",
+				liveness: "live",
+				userTurnKind: "review",
+				startedAt: STOPPED_AT,
+				updatedAt: STOPPED_AT,
+				lastOutputAt: STOPPED_AT,
+				reviewReason: "hook",
+				exitCode: null,
+				runtimeSessionIncarnationId: "incarnation-1",
+				agentResponseGenerationTurnSequence: 0,
+			});
+			const warn = vi.fn();
+			const initialReader = await loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace(workspaceId, warn);
+			expect(initialReader(summary)).toBe(STOPPED_AT + 120 * 60_000);
+			await writeFile(configPath, JSON.stringify({ agentSessionUserTurnIdleProcessRetentionDurationMinutes: 30 }));
+			const writeFailure = vi
+				.spyOn(lockedFileSystem, "writeJsonFileAtomic")
+				.mockRejectedValueOnce(new Error("隔离期限写入故障"));
+			try {
+				const failedReader = await loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace(
+					workspaceId,
+					warn,
+				);
+				expect(failedReader(summary)).toBeNull();
+				expect(warn).toHaveBeenCalledWith(expect.stringContaining("隔离期限写入故障"));
+				expect((await readAgentSessionReclamationDeadlineRecords(workspaceId))[0]?.reclamationEligibleAt).toBe(
+					STOPPED_AT + 120 * 60_000,
+				);
+			} finally {
+				writeFailure.mockRestore();
+			}
+			const retriedReader = await loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace(workspaceId, warn);
+			expect(retriedReader(summary)).toBe(STOPPED_AT + 30 * 60_000);
+		});
+	});
+
+	it("缩短与延长持久期限保留原锚点和失败历史，迟到更新不复活旧代，park不受影响", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("retention-policy-project");
+			const initial = await recordAgentSessionRetentionDeadline(
+				workspaceId,
+				stopAnchorInput({ reclamationEligibleAt: STOPPED_AT + 5 * 60 * 60_000 }),
+			);
+			await updateAgentSessionReclamationProgress(workspaceId, initial.recordId, {
+				reclamationState: "reclaim_failed",
+				updatedAt: STOPPED_AT + 1,
+				incrementAttemptCount: true,
+				lastReclaimFailureReason: "历史退出确认失败",
+			});
+			await refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+				workspaceId,
+				initial.recordId,
+				60,
+				STOPPED_AT + 2,
+			);
+			let persisted = (await readAgentSessionReclamationDeadlineRecords(workspaceId))[0];
+			expect(persisted).toMatchObject({
+				retentionAnchorAt: STOPPED_AT,
+				reclamationEligibleAt: STOPPED_AT + 60 * 60_000,
+				reclamationState: "reclaim_failed",
+				reclamationAttemptCount: 1,
+				lastReclaimFailureReason: "历史退出确认失败",
+			});
+			await refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+				workspaceId,
+				initial.recordId,
+				120,
+				STOPPED_AT + 3,
+			);
+			persisted = (await readAgentSessionReclamationDeadlineRecords(workspaceId))[0];
+			expect(persisted?.reclamationEligibleAt).toBe(STOPPED_AT + 120 * 60_000);
+			await supersedeAgentSessionRetentionDeadlinesForTask(workspaceId, initial.taskId, STOPPED_AT + 4);
+			expect(
+				await refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+					workspaceId,
+					initial.recordId,
+					60,
+					STOPPED_AT + 5,
+				),
+			).toBeNull();
+			const park = await recordAgentSessionRetentionDeadline(
+				workspaceId,
+				stopAnchorInput({
+					taskId: "parked",
+					retentionAnchorKind: "session_parked_awaiting_dispatched_background_work",
+					reclamationEligibleAt: null,
+				}),
+			);
+			expect(
+				await refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+					workspaceId,
+					park.recordId,
+					1,
+					STOPPED_AT + 6,
+				),
+			).toBeNull();
+			expect(
+				(await readAgentSessionReclamationDeadlineRecords(workspaceId)).find((record) => record.taskId === "parked")
+					?.reclamationEligibleAt,
+			).toBeNull();
+		});
+	});
+
 	it("落盘的是绝对可回收时刻（锚点 + 宽限期），不是剩余时长", async () => {
 		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
 			const { workspaceId } = await registerIsolatedWorkspace("project-a");

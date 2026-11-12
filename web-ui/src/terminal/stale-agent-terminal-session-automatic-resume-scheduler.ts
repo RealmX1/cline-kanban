@@ -8,8 +8,8 @@ import { decideStaleAgentTerminalSessionAutomaticResumeEligibility } from "@/ter
 // 刻意不随 summary 变化评估：用户把一个任务一直开在屏幕上、人离开了，回收发生的那一刻若立刻续跑，
 // 回收就白做了。
 
-// EXPERIMENT_NODE: 自动续跑前要求终端连续可见挂载的时长；初值 1000ms，权衡「alt+↑/↓ 快速翻卡不批量拉起 agent」与「停下来后多快接回会话」。
-export const STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS = 1_000;
+// EXPERIMENT_NODE: 自动续跑前要求终端连续可见挂载的时长；当前 200ms，权衡「alt+↑/↓ 快速翻卡不批量拉起 agent」与「停下来后多快接回会话」。
+export const STALE_AGENT_TERMINAL_SESSION_AUTOMATIC_RESUME_VISIBLE_DWELL_MS = 200;
 
 // 陈旧会话自动续跑的**跨实例**冷却。
 //
@@ -75,7 +75,7 @@ export interface StaleAgentTerminalSessionAutomaticResumeSchedulerOptions {
 	readLatestSummary: () => RuntimeTaskSessionSummary | null;
 	// 语义见资格判定的同名输入字段：只有可信的空快照才算「服务端 mirror 已丢」。
 	readLatestRestoreSnapshotTrustedAsEvidenceOfServerTerminalMirrorLoss: () => boolean;
-	requestAutomaticResume: () => Promise<unknown>;
+	requestAutomaticResume: (frontendVisibleDwellElapsedMs: number) => Promise<unknown>;
 	onPhaseChange: (phase: StaleAgentTerminalSessionAutomaticResumePhase | null) => void;
 }
 
@@ -86,6 +86,7 @@ export class StaleAgentTerminalSessionAutomaticResumeScheduler {
 	// 取代旧的一生一次 boolean：那一版让活过两次 runtime 重启的实例第二次不再续跑。
 	private automaticResumeAttemptedForRuntimeSessionIncarnationKey: string | null = null;
 	private disposed = false;
+	private visibleDwellStartedAtMs = 0;
 
 	constructor(private readonly options: StaleAgentTerminalSessionAutomaticResumeSchedulerOptions) {}
 
@@ -101,6 +102,7 @@ export class StaleAgentTerminalSessionAutomaticResumeScheduler {
 		if (this.resolveIncarnationKeyIfAutomaticResumeWarrantedNow() === null) {
 			return;
 		}
+		this.visibleDwellStartedAtMs = performance.now();
 		this.setPhase("waiting_for_visible_dwell");
 		this.visibleDwellTimer = setTimeout(() => {
 			this.visibleDwellTimer = null;
@@ -163,7 +165,7 @@ export class StaleAgentTerminalSessionAutomaticResumeScheduler {
 		);
 		this.setPhase("resume_request_in_flight");
 		try {
-			await this.options.requestAutomaticResume();
+			await this.options.requestAutomaticResume(Math.max(0, performance.now() - this.visibleDwellStartedAtMs));
 		} catch {
 			// 续跑失败不打断终端；面板上的重启按钮仍可手动重试。
 		} finally {

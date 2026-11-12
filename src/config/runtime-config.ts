@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentLaunchSupported } from "../core/agent-catalog";
 import {
+	DEFAULT_AGENT_SESSION_USER_TURN_IDLE_PROCESS_RETENTION_DURATION_MINUTES,
 	type RuntimeAgentId,
 	type RuntimeAgentSessionPtyHostEnablementPreference,
 	type RuntimeAgentSessionTransport,
@@ -15,6 +16,7 @@ import {
 	runtimeAgentIdSchema,
 	runtimeAgentSessionPtyHostEnablementPreferenceSchema,
 	runtimeAgentSessionTransportSchema,
+	runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema,
 } from "../core/api-contract";
 import { type LockRequest, lockedFileSystem } from "../fs/locked-file-system";
 import { detectInstalledCommands } from "../terminal/agent-registry";
@@ -31,6 +33,7 @@ interface RuntimeGlobalConfigFileShape {
 	selectedShortcutLabel?: string;
 	agentAutonomousModeEnabled?: boolean;
 	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 	newTaskStartInPlanModeByDefault?: boolean;
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
@@ -60,6 +63,7 @@ export interface RuntimeConfigState {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 	newTaskStartInPlanModeByDefault: boolean;
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
@@ -81,6 +85,7 @@ export interface RuntimeConfigUpdateInput {
 	selectedShortcutLabel?: string | null;
 	agentAutonomousModeEnabled?: boolean;
 	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 	newTaskStartInPlanModeByDefault?: boolean;
 	ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled?: boolean;
@@ -290,6 +295,19 @@ export async function readAgentSessionPtyHostPersistentPreferenceWithoutWritingC
 		?.agentSessionPtyHostEnablementPreference;
 }
 
+function resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(value: unknown): number {
+	return runtimeAgentSessionUserTurnIdleProcessRetentionDurationMinutesSchema.parse(
+		value === undefined ? DEFAULT_AGENT_SESSION_USER_TURN_IDLE_PROCESS_RETENTION_DURATION_MINUTES : value,
+	);
+}
+
+export async function readAgentSessionUserTurnIdleProcessRetentionDurationMinutes(): Promise<number> {
+	const config = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(getRuntimeGlobalConfigPath());
+	return resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+		config?.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+	);
+}
+
 export function getRuntimeProjectConfigPath(cwd: string): string {
 	return join(resolve(cwd), PROJECT_CONFIG_PARENT_DIR, PROJECT_CONFIG_DIR, PROJECT_CONFIG_FILENAME);
 }
@@ -359,6 +377,10 @@ function toRuntimeConfigState({
 	return {
 		globalConfigPath,
 		projectConfigPath,
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+			resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+				globalConfig?.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+			),
 		agentSessionPtyHostEnablementPreference: globalConfig?.agentSessionPtyHostEnablementPreference,
 		selectedAgentId: normalizeAgentId(globalConfig?.selectedAgentId),
 		selectedShortcutLabel: normalizeShortcutLabel(globalConfig?.selectedShortcutLabel),
@@ -420,6 +442,11 @@ async function readRuntimeConfigFile<T>(configPath: string): Promise<T | null> {
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 			throw new Error("配置必须为 JSON 对象");
 		}
+		if ("agentSessionUserTurnIdleProcessRetentionDurationMinutes" in parsed) {
+			resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+				parsed.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+			);
+		}
 		if ("agentSessionPtyHostEnablementPreference" in parsed) {
 			runtimeAgentSessionPtyHostEnablementPreferenceSchema.parse(parsed.agentSessionPtyHostEnablementPreference);
 		}
@@ -440,6 +467,7 @@ async function writeRuntimeGlobalConfigFile(
 		selectedShortcutLabel?: string | null;
 		agentAutonomousModeEnabled?: boolean;
 		agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 		newTaskStartInPlanModeByDefault?: boolean;
 		ompAgentSessionTransportForNewTasks?: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled?: boolean;
@@ -454,6 +482,11 @@ async function writeRuntimeGlobalConfigFile(
 	},
 ): Promise<void> {
 	const existing = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(configPath);
+	const agentSessionUserTurnIdleProcessRetentionDurationMinutes =
+		resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+			config.agentSessionUserTurnIdleProcessRetentionDurationMinutes ??
+				existing?.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+		);
 	const selectedAgentId = config.selectedAgentId === undefined ? undefined : normalizeAgentId(config.selectedAgentId);
 	const existingSelectedAgentId = hasOwnKey(existing, "selectedAgentId")
 		? normalizeAgentId(existing?.selectedAgentId)
@@ -523,7 +556,9 @@ async function writeRuntimeGlobalConfigFile(
 			? DEFAULT_OPEN_PR_PROMPT_TEMPLATE
 			: normalizePromptTemplate(config.openPrPromptTemplate, DEFAULT_OPEN_PR_PROMPT_TEMPLATE);
 
-	const payload: RuntimeGlobalConfigFileShape = {};
+	const payload: RuntimeGlobalConfigFileShape = {
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+	};
 	const agentSessionPtyHostEnablementPreference =
 		config.agentSessionPtyHostEnablementPreference ?? existing?.agentSessionPtyHostEnablementPreference;
 	if (agentSessionPtyHostEnablementPreference !== undefined) {
@@ -694,6 +729,7 @@ function createRuntimeConfigStateFromValues(input: {
 	selectedShortcutLabel: string | null;
 	agentAutonomousModeEnabled: boolean;
 	agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+	agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 	newTaskStartInPlanModeByDefault: boolean;
 	ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 	readyForReviewNotificationsEnabled: boolean;
@@ -708,6 +744,10 @@ function createRuntimeConfigStateFromValues(input: {
 	userInterfacePreferencesSharedAcrossBrowserOrigins: RuntimeUserInterfacePreferencesSharedAcrossBrowserOrigins;
 }): RuntimeConfigState {
 	return {
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+			resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+				input.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+			),
 		agentSessionPtyHostEnablementPreference: input.agentSessionPtyHostEnablementPreference,
 		globalConfigPath: input.globalConfigPath,
 		projectConfigPath: input.projectConfigPath,
@@ -764,6 +804,8 @@ export function toGlobalRuntimeConfigState(current: RuntimeConfigState): Runtime
 		selectedAgentId: current.selectedAgentId,
 		selectedShortcutLabel: current.selectedShortcutLabel,
 		agentAutonomousModeEnabled: current.agentAutonomousModeEnabled,
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+			current.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 		agentSessionPtyHostEnablementPreference: current.agentSessionPtyHostEnablementPreference,
 		newTaskStartInPlanModeByDefault: current.newTaskStartInPlanModeByDefault,
 		ompAgentSessionTransportForNewTasks: current.ompAgentSessionTransportForNewTasks,
@@ -810,6 +852,7 @@ export async function saveRuntimeConfig(
 		selectedShortcutLabel: string | null;
 		agentAutonomousModeEnabled: boolean;
 		agentSessionPtyHostEnablementPreference?: RuntimeAgentSessionPtyHostEnablementPreference;
+		agentSessionUserTurnIdleProcessRetentionDurationMinutes?: number;
 		newTaskStartInPlanModeByDefault: boolean;
 		ompAgentSessionTransportForNewTasks: RuntimeAgentSessionTransport;
 		readyForReviewNotificationsEnabled: boolean;
@@ -828,6 +871,11 @@ export async function saveRuntimeConfig(
 	const { globalConfigPath, projectConfigPath } = resolveRuntimeConfigPaths(cwd);
 	return await lockedFileSystem.withLocks(getRuntimeConfigLockRequests(cwd), async () => {
 		const existingGlobalConfig = await readRuntimeConfigFile<RuntimeGlobalConfigFileShape>(globalConfigPath);
+		const agentSessionUserTurnIdleProcessRetentionDurationMinutes =
+			resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+				config.agentSessionUserTurnIdleProcessRetentionDurationMinutes ??
+					existingGlobalConfig?.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+			);
 		const agentSessionPtyHostEnablementPreference =
 			config.agentSessionPtyHostEnablementPreference ??
 			existingGlobalConfig?.agentSessionPtyHostEnablementPreference;
@@ -841,6 +889,7 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 			agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
@@ -862,6 +911,7 @@ export async function saveRuntimeConfig(
 			selectedAgentId: config.selectedAgentId,
 			selectedShortcutLabel: config.selectedShortcutLabel,
 			agentAutonomousModeEnabled: config.agentAutonomousModeEnabled,
+			agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 			agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: config.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: config.ompAgentSessionTransportForNewTasks,
@@ -892,6 +942,11 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedShortcutLabel:
 				updates.selectedShortcutLabel === undefined ? current.selectedShortcutLabel : updates.selectedShortcutLabel,
 			agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+			agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+				resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+					updates.agentSessionUserTurnIdleProcessRetentionDurationMinutes ??
+						current.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+				),
 			agentSessionPtyHostEnablementPreference:
 				updates.agentSessionPtyHostEnablementPreference ?? current.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault:
@@ -926,6 +981,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			nextConfig.selectedAgentId !== current.selectedAgentId ||
 			nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 			nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+			nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes !==
+				current.agentSessionUserTurnIdleProcessRetentionDurationMinutes ||
 			nextConfig.agentSessionPtyHostEnablementPreference !== current.agentSessionPtyHostEnablementPreference ||
 			nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 			nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
@@ -953,6 +1010,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+				nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 			agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
@@ -977,6 +1036,8 @@ export async function updateRuntimeConfig(cwd: string, updates: RuntimeConfigUpd
 			selectedAgentId: nextConfig.selectedAgentId,
 			selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 			agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+			agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+				nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 			agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 			newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 			ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
@@ -1039,6 +1100,11 @@ export async function updateGlobalRuntimeConfig(
 						? current.selectedShortcutLabel
 						: updates.selectedShortcutLabel,
 				agentAutonomousModeEnabled: updates.agentAutonomousModeEnabled ?? current.agentAutonomousModeEnabled,
+				agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+					resolveAgentSessionUserTurnIdleProcessRetentionDurationMinutes(
+						updates.agentSessionUserTurnIdleProcessRetentionDurationMinutes ??
+							current.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
+					),
 				agentSessionPtyHostEnablementPreference:
 					updates.agentSessionPtyHostEnablementPreference ?? current.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault:
@@ -1073,6 +1139,8 @@ export async function updateGlobalRuntimeConfig(
 				nextConfig.selectedAgentId !== current.selectedAgentId ||
 				nextConfig.selectedShortcutLabel !== current.selectedShortcutLabel ||
 				nextConfig.agentAutonomousModeEnabled !== current.agentAutonomousModeEnabled ||
+				nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes !==
+					current.agentSessionUserTurnIdleProcessRetentionDurationMinutes ||
 				nextConfig.agentSessionPtyHostEnablementPreference !== current.agentSessionPtyHostEnablementPreference ||
 				nextConfig.newTaskStartInPlanModeByDefault !== current.newTaskStartInPlanModeByDefault ||
 				nextConfig.ompAgentSessionTransportForNewTasks !== current.ompAgentSessionTransportForNewTasks ||
@@ -1100,6 +1168,8 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+					nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 				agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,
@@ -1122,6 +1192,8 @@ export async function updateGlobalRuntimeConfig(
 				selectedAgentId: nextConfig.selectedAgentId,
 				selectedShortcutLabel: nextConfig.selectedShortcutLabel,
 				agentAutonomousModeEnabled: nextConfig.agentAutonomousModeEnabled,
+				agentSessionUserTurnIdleProcessRetentionDurationMinutes:
+					nextConfig.agentSessionUserTurnIdleProcessRetentionDurationMinutes,
 				agentSessionPtyHostEnablementPreference: nextConfig.agentSessionPtyHostEnablementPreference,
 				newTaskStartInPlanModeByDefault: nextConfig.newTaskStartInPlanModeByDefault,
 				ompAgentSessionTransportForNewTasks: nextConfig.ompAgentSessionTransportForNewTasks,

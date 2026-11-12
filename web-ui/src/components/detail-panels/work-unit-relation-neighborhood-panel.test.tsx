@@ -79,6 +79,7 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 				<CrossProjectRecentlyActiveTaskSwitcherHostContextProvider value={crossProjectTaskOpenHost}>
 					<WorkUnitRelationNeighborhoodPanel
 						headerNavigationContent={withHeaderNavigation ? <span>区域导航</span> : undefined}
+						headerEndActions={<button type="button" aria-label="隐藏任务工作台" />}
 						workspaceId={CURRENT_KANBAN_PROJECT_WORKSPACE_ID_FOR_TEST}
 						kanbanBoardCardTaskId={SUBJECT_KANBAN_BOARD_CARD_TASK_ID_FOR_TEST}
 					/>
@@ -143,6 +144,17 @@ describe("WorkUnitRelationNeighborhoodPanel", () => {
 			root.unmount();
 		});
 		container.remove();
+	});
+
+	it("前景不提供隐藏工作台入口，返回后恢复该入口", async () => {
+		await renderPanel(true);
+		expect(container.querySelector('[aria-label="隐藏任务工作台"]')).not.toBeNull();
+		await clickElement(findButtonByAccessibleLabel(container, "展开关系图"));
+		expect(container.querySelector('[data-expanded-foreground-view="active"]')).not.toBeNull();
+		expect(container.querySelector('[aria-label="隐藏任务工作台"]')).toBeNull();
+		await clickElement(container.querySelector<HTMLButtonElement>("[data-foreground-view-return]")!);
+		expect(container.querySelector('[data-expanded-foreground-view="active"]')).toBeNull();
+		expect(container.querySelector('[aria-label="隐藏任务工作台"]')).not.toBeNull();
 	});
 
 	it.each(["empty", "loading", "populated"])("合并标题的 Relations 在 %s 时保留折叠按钮名称", async (state) => {

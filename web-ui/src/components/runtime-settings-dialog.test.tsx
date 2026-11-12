@@ -345,6 +345,28 @@ describe("RuntimeSettingsDialog", () => {
 			select.dispatchEvent(new Event("change", { bubbles: true }));
 		});
 	}
+	it("待命保留时间默认60分钟，修改后标记未保存并统一保存", async () => {
+		await renderSettings();
+		expect(document.querySelector<HTMLInputElement>('input[aria-label="会话待命保留时间"]')?.value).toBe("60");
+		await changeInput("会话待命保留时间", "95");
+		expect(findButtonByText(document.body, "Save")?.disabled).toBe(false);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(useRuntimeConfigSaveMock).toHaveBeenCalledWith(
+			expect.objectContaining({
+				agentSessionUserTurnIdleProcessRetentionDurationMinutes: 95,
+			}),
+		);
+	});
+
+	it.each(["", "0", "-2", "1.5"])("待命保留时间 %s 无效时阻止全部保存", async (value) => {
+		await renderSettings();
+		await changeInput("会话待命保留时间", value);
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(document.body.textContent).toContain("请输入正整数分钟");
+		expect(useRuntimeConfigSaveMock).not.toHaveBeenCalled();
+		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
+	});
+
 	it("语言模型与 TTS 各自选择和添加 Provider，草稿与用途不串组", async () => {
 		await renderSettings();
 		const languageSelect = document.querySelector<HTMLSelectElement>('select[aria-label="编辑语言模型 provider"]');

@@ -48,6 +48,7 @@ import {
 	taskClosureDetailsSchema,
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
+import { validateExternalWorkflowRunBindingUpdate } from "../core/task-external-workflow-run-binding";
 import {
 	resolveMainTaskConversationSessionId,
 	resolveMainTaskConversationSessionSummaryForTaskId,
@@ -2404,6 +2405,20 @@ export function createTaskCardActionApi(
 						found.taskCard.createdAt !== input.expectedTaskIncarnationCreatedAtEpochMs
 					)
 						throw new TRPCError({ code: "CONFLICT", message: "任务身份已变化，未写入编辑内容。" });
+					if (
+						input.taskCardFieldUpdate.taskCardFieldUpdateInputKind === "three_state_task_card_field_value_patch"
+					) {
+						const binding = input.taskCardFieldUpdate.taskCardFieldValuePatch.externalWorkflowRunBinding;
+						if (binding)
+							runPureTaskBoardMutationRejectingInvalidInputAsBadRequest(() =>
+								validateExternalWorkflowRunBindingUpdate(
+									found.taskCard,
+									binding,
+									workspaceScope.workspaceId,
+									input.expectedTaskIncarnationCreatedAtEpochMs,
+								),
+							);
+					}
 					const expected = input.expectedTaskTitleAndPromptForAiNameBackfill;
 					if (expected && (found.taskCard.title !== expected.title || found.taskCard.prompt !== expected.prompt)) {
 						return {

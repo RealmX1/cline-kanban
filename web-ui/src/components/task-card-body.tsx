@@ -56,6 +56,7 @@ import { TaskCardStickers } from "@/components/task-card-stickers";
 import { TaskCardSummaryMetadata } from "@/components/task-card-summary-metadata";
 import { TaskClosureSummaryAndHistory } from "@/components/task-closure-summary-and-history";
 import { useTaskCommentsDialog } from "@/components/task-comments-dialog-provider";
+import { TaskExternalWorkflowRunReference } from "@/components/task-external-workflow-run-reference";
 import { TaskOriginalPromptDialog } from "@/components/task-original-prompt-dialog";
 import { TaskPromptSubmissionAcceptanceNotice } from "@/components/task-prompt-submission-acceptance-notice";
 import { TaskRelatedTasksPreviewButton } from "@/components/task-related-tasks-preview-button";
@@ -1506,6 +1507,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</p>
 				) : null}
 				<AgentWorkProgress summary={sessionSummary} />
+				<TaskExternalWorkflowRunReference
+					card={card}
+					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+				/>
 				{sessionActivity ? (
 					<div
 						data-task-card-session-activity=""
