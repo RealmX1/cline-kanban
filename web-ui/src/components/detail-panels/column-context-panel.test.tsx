@@ -59,7 +59,6 @@ vi.mock("@/components/board-card", () => ({
 // 置顶板分身都走这里。mock 忠实还原真实契约：只有 canonical 角色输出 data-task-id（保全局唯一），
 // 且 data-card-variant="static"（不可拖），供断言「peek 卡不带假 Draggable index、不可拖」。
 vi.mock("@/components/task-card-body", () => ({
-	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX: 12,
 	TaskCardBody: ({
 		card,
 		selected,
@@ -893,9 +892,9 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 
 		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("true");
 		// 目标 index 4 → 基值 R = 4 × 38 = 152；焦点 stage（review，index 2）在目标之上，且以基值试算时
-		// 焦点卡会落到视口上沿之上（210 − 500 + 152 = −138 ≤ 0）→ 预留克隆 20 + 80。
-		// scrollTop = 1000 + (500 − 0) − (152 + 20 + 80) = 1248。
-		expect(scrollRoot.scrollTop).toBe(1248);
+		// 焦点卡会落到视口上沿之上（210 − 500 + 152 = −138 ≤ 0）→ 预留克隆 8 + 80。
+		// scrollTop = 1000 + (500 − 0) − (152 + 8 + 80) = 1260。
+		expect(scrollRoot.scrollTop).toBe(1260);
 	});
 
 	it("parks the jumped-to stage below the top rail instead of under it", async () => {
@@ -924,8 +923,8 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		});
 
 		// 目标 index 3 → 基值 R = 114；焦点 stage（index 2）在目标之上，试算 210 − 420 + 114 = −96 ≤ 0
-		// → 预留 20 + 80。scrollTop = 1000 + 420 − (114 + 20 + 80) = 1206。
-		expect(scrollRoot.scrollTop).toBe(1206);
+		// → 预留 8 + 80。scrollTop = 1000 + 420 − (114 + 8 + 80) = 1218。
+		expect(scrollRoot.scrollTop).toBe(1218);
 	});
 });
 

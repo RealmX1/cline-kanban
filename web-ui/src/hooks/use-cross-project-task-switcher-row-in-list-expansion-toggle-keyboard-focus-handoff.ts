@@ -1,4 +1,8 @@
 import { useCallback, useRef } from "react";
+import {
+	focusTaskCardKeyboardEntryIncludingPortalledActionToolbars,
+	getTaskCardDomRootsIncludingPortalledActionToolbars,
+} from "@/components/task-card-action-toolbar";
 
 // 「固定展开 / 收起」开关在一行的三态里各是一个独立实例：精简行的 hover 动作组、完整卡体的 hover 动作组、
 // 卡快照未到时的兜底。切换形态时旧实例随旧形态的 DOM 一起卸载，键盘焦点会落到 body。
@@ -15,7 +19,12 @@ function handOffKeyboardFocusFromSupportedEntryInsideElementAboutToBeRemoved(
 ): void {
 	const ownerDocument = elementAboutToBeRemoved.ownerDocument;
 	const focusedElement = ownerDocument.activeElement;
-	if (!(focusedElement instanceof HTMLElement) || !elementAboutToBeRemoved.contains(focusedElement)) {
+	if (
+		!(focusedElement instanceof HTMLElement) ||
+		!getTaskCardDomRootsIncludingPortalledActionToolbars(elementAboutToBeRemoved).some((root) =>
+			root.contains(focusedElement),
+		)
+	) {
 		return;
 	}
 	// 只接力键盘焦点。鼠标点开关时 Chrome 也会把焦点给按钮（但不 :focus-visible）：那种焦点照旧随卸载丢掉，
@@ -48,14 +57,12 @@ function handOffKeyboardFocusFromSupportedEntryInsideElementAboutToBeRemoved(
 			return;
 		}
 		// 精简行 hover 意图期间完整卡片隐藏挂载（hidden），里面的开关不算。
-		const matchingKeyboardEntryInNewRowState = [
-			...rowRootElement.querySelectorAll<HTMLElement>(
-				isFocusedExpansionToggle
-					? CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR
-					: "[data-task-card-title][role=button]",
-			),
-		].find((keyboardEntry) => keyboardEntry.closest("[hidden], [inert]") === null);
-		matchingKeyboardEntryInNewRowState?.focus({ preventScroll: true });
+		focusTaskCardKeyboardEntryIncludingPortalledActionToolbars(
+			rowRootElement,
+			isFocusedExpansionToggle
+				? CROSS_PROJECT_TASK_SWITCHER_IN_LIST_EXPANSION_TOGGLE_BUTTON_SELECTOR
+				: "[data-task-card-title][role=button]",
+		);
 	});
 }
 

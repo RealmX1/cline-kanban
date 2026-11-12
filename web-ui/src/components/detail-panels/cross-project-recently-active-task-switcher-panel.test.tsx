@@ -23,6 +23,7 @@ import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-pr
 import { clearAllTaskCardActionCommandsInFlight } from "@/stores/task-card-action-commands-in-flight-store";
 import { replaceWorkspaceMetadata, resetWorkspaceMetadataStore } from "@/stores/workspace-metadata-store";
 import type { BoardColumnId } from "@/types";
+import { queryTaskCardElementIncludingPortalledActionToolbars } from "../../../tests/task-card-action-toolbar-dom-test-queries";
 
 function CrossProjectRecentlyActiveTaskSwitcherPanel(
 	props: ComponentProps<typeof ProductionCrossProjectRecentlyActiveTaskSwitcherPanel>,
@@ -222,11 +223,19 @@ function section(name: string): HTMLElement {
 }
 
 function recentFilterPanel(): HTMLElement {
-	if (!document.querySelector('[role="dialog"][aria-label="Recent 筛选与排序"]'))
+	if (
+		!queryTaskCardElementIncludingPortalledActionToolbars(document, '[role="dialog"][aria-label="Recent 筛选与排序"]')
+	)
 		act(() =>
-			section("remaining").querySelector<HTMLButtonElement>('button[aria-label^="Recent 筛选与排序"]')!.click(),
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				section("remaining"),
+				'button[aria-label^="Recent 筛选与排序"]',
+			)!.click(),
 		);
-	return document.querySelector<HTMLElement>('[role="dialog"][aria-label="Recent 筛选与排序"]')!;
+	return queryTaskCardElementIncludingPortalledActionToolbars<HTMLElement>(
+		document,
+		'[role="dialog"][aria-label="Recent 筛选与排序"]',
+	)!;
 }
 
 function rowInPlaceExpansionState(row: HTMLElement | null | undefined): string | undefined {
@@ -272,11 +281,16 @@ async function movePointerFromRowToRow(
 const IN_LIST_EXPANSION_TOGGLE_SELECTOR =
 	'[data-testid="cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button"]';
 
+// jsdom 没有可测量的滚动视口；位置与裁切由隔离浏览器覆盖，这里验证键盘接力。
+vi.mock("@floating-ui/dom", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	computePosition: async () => ({ x: 0, y: 0, placement: "top-end", middlewareData: {} }),
+}));
+
 function queryInListExpansionToggle(scope: ParentNode | null | undefined): HTMLButtonElement | null {
-	return (
-		[...(scope?.querySelectorAll<HTMLButtonElement>(IN_LIST_EXPANSION_TOGGLE_SELECTOR) ?? [])].find(
-			(toggle) => toggle.closest("[hidden], [inert]") === null,
-		) ?? null
+	return queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+		scope,
+		IN_LIST_EXPANSION_TOGGLE_SELECTOR,
 	);
 }
 
@@ -360,7 +374,12 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			row.querySelector<HTMLButtonElement>("[data-cross-project-task-switcher-compact-row-open-task]")!.click(),
 		);
 		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
-		act(() => row.querySelector<HTMLButtonElement>('[aria-label="Keep expanded in list"]')!.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				row,
+				'[aria-label="Keep expanded in list"]',
+			)!.click(),
+		);
 		expect(host.onOpenTaskInProject).toHaveBeenCalledTimes(2);
 	});
 
@@ -532,7 +551,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
 		expect(container.querySelector('[data-testid="cross-project-task-switcher-section-backlog"]')).toBeNull();
-		const filters = recentFilterPanel().querySelector('[aria-label="Filter recent tasks by stage"]');
+		const filters = queryTaskCardElementIncludingPortalledActionToolbars(
+			recentFilterPanel(),
+			'[aria-label="Filter recent tasks by stage"]',
+		);
 		const filterButton = (label: string) =>
 			[...(filters?.querySelectorAll("button") ?? [])].find((button) => button.textContent === label);
 		expect(filterButton("In progress / Review")?.getAttribute("aria-pressed")).toBe("true");
@@ -637,7 +659,12 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				.find((button) => button.textContent === "All")
 				?.click(),
 		);
-		act(() => section("remaining").querySelector<HTMLButtonElement>('button[aria-label="收起 Recent"]')?.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				section("remaining"),
+				'button[aria-label="收起 Recent"]',
+			)?.click(),
+		);
 		expect(section("remaining").querySelector('button[aria-expanded="false"]')).not.toBeNull();
 		expect(rowTaskIds(section("remaining"))).toEqual(["focused-backlog"]);
 		expect(
@@ -658,7 +685,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:outside"]'),
 		).toHaveLength(1);
 		expect(rowTaskIds(section("remaining"))).not.toContain("outside");
-		const restore = fallback?.querySelector<HTMLButtonElement>('button[aria-label="重新打开已结案任务"]');
+		const restore = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			fallback,
+			'button[aria-label="重新打开已结案任务"]',
+		);
 		act(() => restore?.click());
 		expect(taskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith("outside");
 	});
@@ -850,9 +880,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			expect(queryTargetAnchor()?.textContent).not.toContain("旧项目同号任务");
 			if (scenario !== "running_collapsed") {
 				act(() =>
-					queryTargetAnchor()
-						?.querySelector<HTMLButtonElement>('button[aria-label="重新打开已结案任务"]')
-						?.click(),
+					queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+						queryTargetAnchor(),
+						'button[aria-label="重新打开已结案任务"]',
+					)?.click(),
 				);
 				expect(hydratedTaskCards.currentProjectTaskCardActionHandlers.onRestoreFromTrashTask).toHaveBeenCalledWith(
 					targetTaskId,
@@ -1247,19 +1278,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded)).toBe("true");
 	});
 
-	// hover 动作组伸出行顶边 12px（-top-3），最右一格展开开关的命中区伪元素再向上扩 4px（after:-top-1）。分区第一行上方是
-	// 分区 header（Pinned / Running 的折叠按钮、Recent 的排序下拉框）：首行若贴着 header，动作组与开关命中区会盖住它们的
-	// 右下沿、截走点击。jsdom 不排版，这里断言的几何约定是「紧挨 header 的首行 = 分区内容容器的第一个子节点，行根节点带
-	// first:mt-4（16px = 伸出量 12px + 命中区向上扩展 4px）」，开关命中区顶边因此落在 header 底边上；首行前是小标题时它不是
-	// 第一个子节点，上外边距不生效、不多出空白。真实像素与命中区由集成测试阶段 6 用 elementFromPoint 量。
-	it("分区第一行留出 hover 动作组伸出量 + 展开开关命中区向上扩展量的上外边距：动作组不压分区 header 的折叠按钮 / 排序下拉框", () => {
+	it("分区首行不为悬浮操作预留顶部空白", () => {
 		window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={makeHost()} />));
 		for (const sectionName of ["pinned", "running", "prompt-cache-warm", "remaining"]) {
 			const firstRow = section(sectionName).querySelector<HTMLElement>("[data-cross-project-task-switcher-task-id]");
 			expect(firstRow?.matches(":first-child"), `${sectionName} 首行紧挨 header`).toBe(true);
-			expect(firstRow?.classList.contains("first:mt-4"), `${sectionName} 首行上外边距`).toBe(true);
-			expect(queryInListExpansionToggle(firstRow)?.parentElement?.classList.contains("-top-3")).toBe(true);
+			expect(firstRow?.classList.contains("first:mt-4"), `${sectionName} 首行上外边距`).toBe(false);
 		}
 	});
 
@@ -1370,7 +1395,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		const queryRecentRow = () =>
 			section("remaining").querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="recent"]');
 		// 行上不再有常驻占位的展开 chevron。
-		expect(queryRecentRow()?.querySelector('[aria-label="Expand task card"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(queryRecentRow(), '[aria-label="Expand task card"]'),
+		).toBeNull();
 		await act(async () => dispatchPointerMoveAtFreshCoordinates(queryRecentRow()?.querySelector("button")));
 		// 还没到 hover 意图的延时：完整卡片已隐藏挂载在这一行里（预取），行仍是精简行。
 		expect(readTaskCardWithBoardColumnInWorkspace).toHaveBeenCalledWith("project-b", "recent");
@@ -1413,12 +1440,13 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		).toBe("project-b");
 		// 展开开关在卡体 hover 动作组的最右一格；展开发生在静止的光标下，动作组第一帧就可见，精简行上的开关不会闪没。
 		const hoverExpandedToggle = queryInListExpansionToggle(expandedRow);
+		const hoverExpandedActionToolbar = hoverExpandedToggle?.closest<HTMLElement>("[data-task-card-primary-actions]");
 		expect(hoverExpandedToggle?.parentElement?.lastElementChild).toBe(hoverExpandedToggle);
-		expect(hoverExpandedToggle?.parentElement?.classList.contains("opacity-100")).toBe(true);
+		expect(hoverExpandedActionToolbar?.dataset.taskCardActionToolbarState).toBe("visible");
 		// 卡体动作组（铅笔、置顶、原始 prompt、移列、删除……）与精简行同一坐标：叠在首行上方，不压首行的字。
 		// 一般紧凑密度（Focus View 左栏列表）的 top-1 压在首行右端，这里不能用。
-		expect(hoverExpandedToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
-		expect(hoverExpandedToggle?.parentElement?.classList.contains("top-1")).toBe(false);
+		expect(hoverExpandedActionToolbar?.parentElement).toBe(document.body);
+		expect(hoverExpandedActionToolbar?.classList.contains("top-1")).toBe(false);
 		expect(hoverExpandedToggle?.dataset.crossProjectTaskSwitcherFullTaskCardInListExpansionState).toBe(
 			"collapsed_to_compact_row",
 		);
@@ -1435,11 +1463,16 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		);
 		expect(keptExpandedToggle?.getAttribute("aria-label")).toBe("Collapse to compact row");
 		// 固定展开的卡在列表里常驻：动作组照常只在 hover / 聚焦时显形。
-		expect(keptExpandedToggle?.parentElement?.classList.contains("opacity-0")).toBe(true);
+		expect(keptExpandedToggle?.closest("[data-task-card-primary-actions]")?.classList.contains("opacity-0")).toBe(
+			true,
+		);
 
 		// 复制使用卡片所属项目的只读查询，不能借当前项目 project-a 的路径。
 		await act(async () =>
-			keptExpandedRow?.querySelector<HTMLButtonElement>('[aria-label="Copy directory path"]')?.click(),
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				keptExpandedRow,
+				'[aria-label="Copy directory path"]',
+			)?.click(),
 		);
 		expect(fetchTaskWorkspaceInfoForWorkspace).toHaveBeenCalledWith("project-b", {
 			taskId: "recent",
@@ -1448,7 +1481,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		});
 
 		await act(async () =>
-			keptExpandedRow?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				keptExpandedRow,
+				'[aria-label="Move task to validation"]',
+			)?.click(),
 		);
 		expect(moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace).toHaveBeenCalledWith("project-b", {
 			taskId: "recent",
@@ -1584,9 +1620,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			"collapsed_to_compact_row",
 		);
 		// 与完整卡片同一几何：hover 动作组叠在首行上方（不压首行的字）、开关是最右一格。
-		expect(compactRowToggle?.parentElement?.classList.contains("absolute")).toBe(true);
-		expect(compactRowToggle?.parentElement?.classList.contains("right-1")).toBe(true);
-		expect(compactRowToggle?.parentElement?.classList.contains("-top-3")).toBe(true);
+		const compactRowActionToolbar = compactRowToggle?.closest("[data-task-card-primary-actions]");
+		expect(compactRowActionToolbar?.classList.contains("fixed")).toBe(true);
+		expect(compactRowActionToolbar?.getAttribute("data-task-card-primary-actions")).toBe("");
+		expect(compactRowActionToolbar?.parentElement).toBe(document.body);
 		expect(compactRowToggle?.parentElement?.lastElementChild).toBe(compactRowToggle);
 		expect(queryRecentRow()?.querySelector("[data-task-card-corner-status-indicator]")).not.toBeNull();
 
@@ -1640,7 +1677,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			const row = section("remaining").querySelector<HTMLElement>(
 				'[data-cross-project-task-switcher-task-id="recent"]',
 			);
-			const compactEntry = row?.querySelector<HTMLButtonElement>('button[aria-label="打开任务：Title recent"]');
+			const compactEntry = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				row,
+				'button[aria-label="打开任务：Title recent"]',
+			);
 			act(() => compactEntry?.focus());
 			await hoverRowUntilExpandedInPlace(row);
 			const fallbackEntry = row?.querySelector<HTMLElement>(
@@ -2110,7 +2150,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
 		expect(queryWarmRow()?.textContent).toContain("Warm task from the in-browser board");
 		await act(async () =>
-			queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="Move task to validation"]')?.click(),
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				queryWarmRow(),
+				'[aria-label="Move task to validation"]',
+			)?.click(),
 		);
 		expect(onMoveToValidationTask).toHaveBeenCalledWith("warm");
 	});
@@ -2162,7 +2205,10 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			expect(rowInPlaceExpansionState(queryWarmRow())).toBe("expanded_in_place_by_hover");
 
 			await act(async () =>
-				queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="View original prompt"]')?.click(),
+				queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+					queryWarmRow(),
+					'[aria-label="View original prompt"]',
+				)?.click(),
 			);
 			const originalPromptDialog = queryOriginalPromptDialog();
 			expect(originalPromptDialog?.textContent).toContain("Original prompt of the warm task");
@@ -2208,7 +2254,8 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 	it("对非当前项目的卡取消置顶走 runtime；当前项目的卡走浏览器既有链路", async () => {
 		const host = makeHost();
 		act(() => root.render(<CrossProjectRecentlyActiveTaskSwitcherPanel host={host} />));
-		const unpinOtherProject = section("pinned").querySelector<HTMLButtonElement>(
+		const unpinOtherProject = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			section("pinned"),
 			'[aria-label="Unpin from Pinboard"]',
 		);
 		await act(async () => unpinOtherProject?.click());
@@ -2219,7 +2266,8 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 			boardMutationInitiator: "web_ui_user_gesture",
 		});
 
-		const pinCurrentProject = section("prompt-cache-warm").querySelector<HTMLButtonElement>(
+		const pinCurrentProject = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			section("prompt-cache-warm"),
 			'[aria-label="Pin to Pinboard"]',
 		);
 		act(() => pinCurrentProject?.click());

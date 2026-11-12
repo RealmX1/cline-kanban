@@ -2,11 +2,11 @@ import type { ReactNode } from "react";
 import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { TaskCardBody, type TaskCardBodyRenderRole } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { BoardCard } from "@/types";
+import { queryTaskCardElementIncludingPortalledActionToolbars } from "../../tests/task-card-action-toolbar-dom-test-queries";
 
 // 三种 renderRole 的行为矩阵。这里钉死的是整套 Task Pinboard 的地基：同一张卡在界面上可能同时存在多份
 // DOM，而**只有** canonical 那份携带 data-task-id / data-verification-anchor。程序化拖动、依赖连线锚点
@@ -111,7 +111,10 @@ describe("TaskCardBody 的渲染角色", () => {
 			}
 			await act(async () => root.render(<TaskCardDeleteConfirmationHarness />));
 			await act(async () => cardShell(container)!.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
-			const deleteTaskButton = container.querySelector<HTMLButtonElement>('[aria-label="Delete task permanently"]')!;
+			const deleteTaskButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'[aria-label="Delete task permanently"]',
+			)!;
 			await act(async () => deleteTaskButton.dispatchEvent(new MouseEvent("pointermove", { bubbles: true })));
 			expect(document.querySelector('[role="tooltip"]')).toBeNull();
 			const deleteTaskMouseDown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
@@ -149,7 +152,10 @@ describe("TaskCardBody 的渲染角色", () => {
 			),
 		);
 		const relatedPreviewCardShell = cardShell(container)!;
-		const originatingEditTaskButton = container.querySelector<HTMLButtonElement>('[aria-label="Edit task title"]')!;
+		const originatingEditTaskButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'[aria-label="Edit task title"]',
+		)!;
 		act(() => originatingEditTaskButton.focus());
 		act(() =>
 			relatedPreviewCardShell.dispatchEvent(
@@ -161,7 +167,9 @@ describe("TaskCardBody 的渲染角色", () => {
 				new MouseEvent("mouseout", { bubbles: true, relatedTarget: document.body }),
 			),
 		);
-		expect(container.querySelector('[aria-label="Edit task title"]')).toBe(originatingEditTaskButton);
+		expect(queryTaskCardElementIncludingPortalledActionToolbars(container, '[aria-label="Edit task title"]')).toBe(
+			originatingEditTaskButton,
+		);
 		expect(document.activeElement).toBe(originatingEditTaskButton);
 	});
 
@@ -239,7 +247,12 @@ describe("TaskCardBody 的渲染角色", () => {
 		});
 		expect(onClick).not.toHaveBeenCalled();
 		expect(container.querySelector("textarea")).toBeNull();
-		act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Move task to validation"]')?.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Move task to validation"]',
+			)?.click(),
+		);
 		expect(onMoveToValidation).toHaveBeenCalledWith("task-1");
 	});
 
@@ -379,7 +392,12 @@ describe("TaskCardBody 的渲染角色", () => {
 		const onUnpinFromTaskPinboard = vi.fn();
 
 		const unpinnedCard = renderCardBody({ onRequestPinToTaskPinboard, onUnpinFromTaskPinboard });
-		act(() => unpinnedCard.querySelector<HTMLButtonElement>('[aria-label="Pin task to pinboard"]')?.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				unpinnedCard,
+				'[aria-label="Pin task to pinboard"]',
+			)?.click(),
+		);
 		expect(onRequestPinToTaskPinboard).toHaveBeenCalledWith("task-1");
 		expect(onUnpinFromTaskPinboard).not.toHaveBeenCalled();
 
@@ -388,13 +406,22 @@ describe("TaskCardBody 的渲染角色", () => {
 			onRequestPinToTaskPinboard,
 			onUnpinFromTaskPinboard,
 		});
-		act(() => pinnedCard.querySelector<HTMLButtonElement>('[aria-label="Unpin task from pinboard"]')?.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				pinnedCard,
+				'[aria-label="Unpin task from pinboard"]',
+			)?.click(),
+		);
 		expect(onUnpinFromTaskPinboard).toHaveBeenCalledWith("task-1");
 	});
 
 	it("没接 pin 回调时不渲染 pin 按钮", () => {
 		const host = renderCardBody({});
-		expect(host.querySelector('[aria-label="Pin task to pinboard"]')).toBeNull();
-		expect(host.querySelector('[aria-label="Unpin task from pinboard"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(host, '[aria-label="Pin task to pinboard"]'),
+		).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(host, '[aria-label="Unpin task from pinboard"]'),
+		).toBeNull();
 	});
 });

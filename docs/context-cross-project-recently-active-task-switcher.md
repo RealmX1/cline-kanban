@@ -62,14 +62,14 @@ _Avoid_: hot tasks, urgent
 
 **Hover Floating Expansion / Keep Expanded In List（原位悬浮展开与固定展开）**：
 - All Projects 首页各列与 Focus View 左栏共用 `use-cross-project-task-switcher-row-hover-expansion-in-place.ts` 和行渲染逻辑。2026-10-26 起，hover 临时展开改为覆盖相邻内容的浮层：精简行保留自然高度，以 `visibility: hidden`、`inert`、`aria-hidden` 隐藏展示、指针交互与键盘入口；完整卡片留在同一行的 DOM / React 子树中绝对定位。展开、收起和切换都不改变下方行坐标、列表 `scrollTop` 或 `scrollHeight`，不再做手风琴交接和滚动补偿。
-- 浮层与原行等宽，背景不透明、层级高于相邻行。默认卡体左上角对齐原行；所属滚动可视区底部不足时向上偏移，顶边也夹在可视区内。动作组伸出卡体顶边 12px，展开开关命中区另向上扩 4px，定位为二者合计预留 16px。卡体连同预留区域超过整个可视区高度时才启用浮层内部滚动，并阻止滚动链传到列表。
+- 浮层与原行等宽，背景不透明、层级高于相邻行。默认卡体左上角对齐原行；所属滚动可视区底部不足时向上偏移，顶边也夹在可视区内。按钮经独立 Portal 定位，不计入卡体的高度或滚动边界。仅卡体超过整个可视区高度时才启用浮层内部滚动，并阻止滚动链传到列表。
 - `use-cross-project-task-switcher-hover-floating-card-viewport-position.ts` 在 layout effect 中完成首帧定位，用 ResizeObserver 观察行、完整卡体与滚动容器，滚动和窗口缩放时重算；Floating UI 的布局位移观察另行跟踪锚点只移动、不变尺寸的情形，不依赖当前行重新渲染。只改变浮层的位置和最大高度，不写列表滚动位置。只有向上避让时浮层标题、开关与原行有纵向偏移。
 - 指针真实移动后停留约 350ms（`EXPERIMENT_NODE`）才展开；相同坐标的布局 / 滚动合成事件不发起新意图。意图期间隐藏挂载完整卡片，预取其他项目快照；展开时沿用同一个 `TaskCardBody` 实例，不重新读取。触屏长按约 500ms 展开，滚动手势取消长按，紧随长按的点击被吞掉。
 - 指针离开展开卡片约 300ms（`EXPERIMENT_NODE`）后收起，延时内返回取消收起。离开卡片但仍停留在面板空白处也会收起。键盘焦点在卡片或其菜单、Portal 弹窗内时保留展开，避免卸载正在交互的卡体；焦点离开后再按延时收起。
 - Esc 优先交给事件目标所属的 dialog / alertdialog / menu / listbox，先关闭弹窗或菜单；其他位置的 Esc 收起临时浮层。在面板外按下也收起，「外部」按 React 子树与原生事件身份判断，卡片弹出的 Portal 内按下不算外部。不以 `defaultPrevented` 判断 Esc 归属，因为 App 常驻的 Esc 热键会先 preventDefault。
 - 手动「Keep expanded in list」继续用完整卡片高度占位。固定状态按任务记，Pinned 与下方区同一任务一起切换，仍由 `cross-project-task-switcher-panel-view-continuity-store` 保存；首页与左栏共用，按标签页隔离，刷新即清。固定展开后的收起会抑制同一行的 hover，直到指针离开。转成固定展开时结束悬浮定位，卡体回到原行左上角；这是用户主动改变占位的操作。
 - 精简行、完整卡体与读取失败兜底沿用相同的首行度量（`…-task-row-first-line.tsx`），行级项目名、Cache warm 药丸并入卡体已有位置，不另叠顶条。运行 / 未读角标在悬浮时跟随浮层卡体，其他形态跟随原行。
-- hover 动作组在首行上方（共享 `-top-3`），精简行、完整卡体与兜底一致；紧挨分区 header 的第一行仍保留 `first:mt-4`，避免动作组及展开开关扩展命中区截走 header 控件的点击。展开开关仍为 20×20 盒子与 24×24 命中区，tooltip「Keep expanded in list」/「Collapse to compact row」，读屏语义仍为 `aria-pressed`。
+- 普通卡、精简行、完整卡体与兜底共用 `TaskCardActionToolbar`，经 Floating UI 与 Portal 逃离滚动裁切。紧凑动作组定位在卡体顶边上方 12px，允许覆盖分组标题；隐藏后不截获标题点击。首卡紧贴标题或筛选控件，无按钮占位；Focus View 标题统一 32px，看板标题统一 40px。展开开关仍为 20×20 盒子与 24×24 命中区，tooltip「Keep expanded in list」/「Collapse to compact row」，读屏语义仍为 `aria-pressed`。
 - 点卡片非按钮位置与点精简行共用激活函数：Backlog 原地编辑，其他任务打开工作台，Pinned 行揭示下方本体。卡体角色 `expanded_card_copy_in_cross_project_task_switcher_row` 不可拖、不持有 `data-task-id`，不延迟单击、不接双击改标题。按下指针会取消待发的 hover 意图，避免按下到抬起之间切换 DOM 丢失 click。
 - 键盘切换固定展开 / 收起、快照兜底升级为卡体时，仍由 `use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff.ts` 交接开关焦点；兜底首行升级为卡体标题时也接力打开任务入口的键盘焦点，若用户已将焦点移走则不抢回；临时悬浮时若焦点在精简行，则交给对应开关或卡体标题，隐藏占位不进入 Tab 顺序。卡体标题（兜底首行）可用 Enter / Space 打开任务。
 - 当前项目直接使用浏览器 board、推流 summary 与现有动作；其他项目按需只读 `taskCardAction.readTaskCardWithBoardColumn`，条目变化后去抖重读并保留上一份快照。其他项目卡体使用带 workspace 身份的元数据轮询，动作、在途 spinner 与确认框沿用 `use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher.tsx`，无接口或存储格式变化。

@@ -19,7 +19,7 @@ describe("stage header rail geometry constants", () => {
 		expect(STAGE_HEADER_HEIGHT_PX).toBe(32);
 		expect(STAGE_SECTION_BORDER_PX).toBe(2);
 		expect(STAGE_RAIL_GAP_PX).toBe(4);
-		expect(STAGE_RAIL_FOCUSED_CARD_PADDING_PX).toBe(20);
+		expect(STAGE_RAIL_FOCUSED_CARD_PADDING_PX).toBe(8);
 	});
 });
 

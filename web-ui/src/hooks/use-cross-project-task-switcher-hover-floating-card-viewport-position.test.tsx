@@ -95,7 +95,7 @@ describe("悬浮卡片跟随行的布局位移", () => {
 		act(() => root?.render(<Row host={{ current: hostElement }} />));
 		const floating = hostElement.querySelector<HTMLElement>('[data-kind="floating"]')!;
 		expect(Number.parseFloat(floating.style.maxHeight)).toBe(260);
-		expect(Number.parseFloat(floating.style.top) + rowTop).toBe(edge === "top" ? 140 : 110);
+		expect(Number.parseFloat(floating.style.top) + rowTop).toBe(edge === "top" ? 150 : 126);
 		await act(async () => headerRail.remove());
 		expect(Number.parseFloat(floating.style.maxHeight)).toBe(300);
 	});
@@ -130,13 +130,13 @@ describe("悬浮卡片跟随行的布局位移", () => {
 		const floating = container.querySelector<HTMLElement>('[data-kind="floating"]')!;
 		const action = container.querySelector<HTMLButtonElement>('[data-kind="card"] button')!;
 		action.focus();
-		expect(Number.parseFloat(floating.style.top)).toBe(-180);
+		expect(Number.parseFloat(floating.style.top)).toBe(-164);
 		// 模拟独立兄弟节点异步增高，只有锚点 top 改变。
 		rowTop = 350;
 		act(() =>
 			observerCallback?.([{ intersectionRatio: 1 } as IntersectionObserverEntry], {} as IntersectionObserver),
 		);
-		expect(Number.parseFloat(floating.style.top)).toBe(-200);
+		expect(Number.parseFloat(floating.style.top)).toBe(-184);
 		const countBeforeSiblingDeletion = rowRenderCount;
 		// 删除上方节点导致纯位移，memo 行没有重新渲染。
 		rowTop = 250;
@@ -146,7 +146,7 @@ describe("悬浮卡片跟随行的布局位移", () => {
 		act(() =>
 			observerCallback?.([{ intersectionRatio: 1 } as IntersectionObserverEntry], {} as IntersectionObserver),
 		);
-		expect(Number.parseFloat(floating.style.top)).toBe(-100);
+		expect(Number.parseFloat(floating.style.top)).toBe(-84);
 		expect(rowRenderCount).toBe(countBeforeSiblingDeletion + 1);
 		expect(document.activeElement).toBe(action);
 		expect(container.scrollTop).toBe(37);
