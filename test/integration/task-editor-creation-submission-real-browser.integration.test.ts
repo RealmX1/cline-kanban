@@ -1,20 +1,15 @@
-import { spawn } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { createServer } from "node:http";
-import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
-import { createTRPCProxyClient, httpLink } from "@trpc/client";
+import { join } from "node:path";
 import { afterEach, expect, it } from "vitest";
 import { buildAllProjectsTaskGroupQueryResult } from "../../src/core/all-projects-task-group-query";
 import { lockedFileSystem } from "../../src/fs/locked-file-system";
-import type { RuntimeAppRouter } from "../../src/trpc/app-router";
-import type { Browser, BrowserType } from "../../web-ui/node_modules/playwright-core";
-import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import type { Browser } from "../../web-ui/node_modules/playwright-core";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
 	waitForChildProcessExit,
-	waitForRuntimeServerStartupBannerOrSigkillChild,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
+
+import { createTaskEditorPackagedRuntimeBrowserTestFixture } from "./task-editor-packaged-runtime-browser-test-fixture";
 
 const packagedCliPath = process.env.KANBAN_TASK_EDITOR_CREATION_PACKAGED_CLI_PATH;
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
@@ -24,7 +19,8 @@ it.skipIf(!packagedCliPath)(
 	"打包浏览器：保存即关闭、跨项目独立创建、响应丢失、批量与重启恢复",
 	async () => {
 		if (!packagedCliPath) throw new Error("缺少本任务隔离构建的 CLI");
-		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const browserFixture = await createTaskEditorPackagedRuntimeBrowserTestFixture(packagedCliPath, children);
+		const { fixture, evidenceDirectory, client, origin } = browserFixture;
 		const repositories = ["editor-creation-source", "editor-creation-target"].map((repositoryDirectoryName) => {
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName, initialBranchName: "main" });
 			writeFileSync(join(repository.repositoryPath, "initial.txt"), "隔离任务创建浏览器验收\n");
@@ -36,21 +32,6 @@ it.skipIf(!packagedCliPath)(
 		});
 		const [source, target] = repositories;
 		if (!source || !target) throw new Error("隔离仓库初始化失败");
-		const evidenceDirectory =
-			process.env.KANBAN_TASK_EDITOR_CREATION_BROWSER_EVIDENCE_DIRECTORY ??
-			join(fixture.fixtureRootDirectoryPath, "browser-evidence");
-		mkdirSync(evidenceDirectory, { recursive: true });
-		const socket = createServer();
-		await new Promise<void>((done) => socket.listen(0, "127.0.0.1", done));
-		const address = socket.address();
-		if (!address || typeof address === "string") throw new Error("隔离端口分配失败");
-		const port = address.port;
-		await new Promise<void>((done) => socket.close(() => done()));
-		expect(port).not.toBe(3484);
-		const environment = fixture.createIsolatedChildProcessEnvironment();
-		for (const key of Object.keys(environment))
-			if (/^(KANBAN_|ANTHROPIC_|OPENAI_|CLAUDE_|CODEX_|CURSOR_|GEMINI_|GOOGLE_|KIMI_)/u.test(key))
-				delete environment[key];
 		const isolatedAgentExecutableDirectory = join(fixture.isolatedHomeDirectoryPath, "isolated-agent-executables");
 		mkdirSync(isolatedAgentExecutableDirectory, { recursive: true });
 		writeFileSync(
@@ -58,51 +39,8 @@ it.skipIf(!packagedCliPath)(
 			`#!${process.execPath}\nif(process.argv.includes('--version'))process.stdout.write('2.1.0 (Claude Code)\\n');else if(process.argv.includes('--help'))process.stdout.write('--settings --session-id --model');else{process.stdout.write('Claude Code v2.1.0\\n> ');process.stdin.resume();setInterval(()=>{},1000);}\n`,
 			{ mode: 0o700 },
 		);
-		const isolatedCodexConfigurationDirectory = join(
-			fixture.isolatedHomeDirectoryPath,
-			"isolated-codex-configuration",
-		);
-		mkdirSync(isolatedCodexConfigurationDirectory, { recursive: true });
-		// 创建设置会读取 profile 默认模型；fixture 继续不提供 Codex binary，以核验真实启动失败。
-		writeFileSync(
-			join(isolatedCodexConfigurationDirectory, "config.toml"),
-			'model = "isolated-non-runnable-codex-model"\n',
-		);
-
-		Object.assign(environment, {
-			PATH: `${isolatedAgentExecutableDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`,
-			KANBAN_RUNTIME_PORT: String(port),
-			CODEX_HOME: isolatedCodexConfigurationDirectory,
-			CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-storage"),
-		});
-		const sourcePath = resolve(import.meta.dirname, "../..");
-		const origin = `http://127.0.0.1:${port}`;
-		let runtimeOutput = "";
-		const startRuntime = async () => {
-			const child = children.register(
-				spawn(
-					process.execPath,
-					[
-						"--require",
-						join(sourcePath, "test/integration/shutdown-ipc-hook.cjs"),
-						packagedCliPath,
-						"--port",
-						String(port),
-						"--no-open",
-						"--no-passcode",
-					],
-					{ cwd: source.repositoryPath, env: environment, stdio: ["ignore", "pipe", "pipe", "ipc"] },
-				),
-			);
-			child.stdout?.on("data", (chunk) => {
-				runtimeOutput += String(chunk);
-			});
-			child.stderr?.on("data", (chunk) => {
-				runtimeOutput += String(chunk);
-			});
-			await waitForRuntimeServerStartupBannerOrSigkillChild(child);
-			return child;
-		};
+		browserFixture.environment.PATH = `${isolatedAgentExecutableDirectory}:/usr/bin:/bin:/usr/sbin:/sbin`;
+		const startRuntime = () => browserFixture.startRuntime(source.repositoryPath);
 		let runtime = await startRuntime();
 		let browser: Browser | undefined;
 		let releaseWorktreeSetup = () => {};
@@ -112,15 +50,6 @@ it.skipIf(!packagedCliPath)(
 		let savedConfirmationToVisibleMs = 0;
 		let launchedFixtureTaskId: string | undefined;
 		let fixtureTaskWorkspaceId: string | undefined;
-		const client = (workspaceId?: string) =>
-			createTRPCProxyClient<RuntimeAppRouter>({
-				links: [
-					httpLink({
-						url: `${origin}/api/trpc`,
-						headers: workspaceId ? { "x-kanban-workspace-id": workspaceId } : {},
-					}),
-				],
-			});
 		try {
 			const addedSource = await client().projects.add.mutate({ path: source.repositoryPath });
 			const addedTarget = await client().projects.add.mutate({ path: target.repositoryPath });
@@ -131,10 +60,7 @@ it.skipIf(!packagedCliPath)(
 			const targetClient = client(targetId);
 			await sourceClient.runtime.saveConfig.mutate({ selectedAgentId: "codex" });
 			await targetClient.runtime.saveConfig.mutate({ selectedAgentId: "codex" });
-			const { chromium } = createRequire(join(sourcePath, "web-ui/package.json"))("playwright-core") as {
-				chromium: BrowserType;
-			};
-			browser = await chromium.launch({ headless: true });
+			browser = await browserFixture.launchBrowser();
 			const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
 			page.setDefaultTimeout(15_000);
 			const pageErrors: string[] = [];
@@ -160,7 +86,7 @@ it.skipIf(!packagedCliPath)(
 				const nameInput = editor.getByRole("textbox", { name: "任务名称（可选）", exact: true });
 				await nameInput.click();
 				await nameInput.fill(title);
-				const promptInput = editor.locator("textarea").first();
+				const promptInput = editor.getByRole("textbox", { name: "任务正文", exact: true });
 				await promptInput.click();
 				await promptInput.fill(prompt);
 				expect(await nameInput.inputValue()).toBe(title);
@@ -408,7 +334,7 @@ it.skipIf(!packagedCliPath)(
 			await browser?.close();
 			runtime.kill("SIGINT");
 			await waitForChildProcessExit(runtime, 30_000);
-			writeFileSync(join(evidenceDirectory, "isolated-runtime.log"), runtimeOutput);
+			browserFixture.writeRuntimeOutput();
 		}
 	},
 	300_000,
