@@ -30,7 +30,7 @@ export function TaskSessionInformationActions({
 	const phaseGoal = resolveAgentCurrentWorkPhaseGoalForDisplay(summary);
 	const latestProgress = resolveAgentWorkProgressEntriesForDisplay(summary).at(-1);
 	return (
-		<div className="flex min-w-0 flex-1 items-center gap-1">
+		<div className="flex min-w-0 flex-1 items-center gap-1 max-[769px]:flex-none">
 			<AgentRaisedUserDecisionHistoryPanel
 				presentation="toolbar_popover"
 				workspaceId={workspaceId}

@@ -32,6 +32,7 @@ import {
 	type AgentConversationChatPanelHandle,
 } from "@/components/detail-panels/agent-conversation-chat-panel";
 import { AgentRaisedPendingUserDecisionPanel } from "@/components/detail-panels/agent-raised-pending-user-decision-panel";
+import { AgentSessionToolbarFocusedTaskProjectNarrowingButton } from "@/components/detail-panels/agent-session-toolbar-focused-task-project-narrowing-button";
 import { AgentTerminalPanel } from "@/components/detail-panels/agent-terminal-panel";
 import { ColumnContextPanel } from "@/components/detail-panels/column-context-panel";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
@@ -99,6 +100,7 @@ import type {
 	RuntimeAgentSessionTransport,
 	RuntimeConfigResponse,
 	RuntimeExploratoryFindingEntry,
+	RuntimeProjectSummary,
 	RuntimeTaskChatMessage,
 	RuntimeTaskSessionMode,
 	RuntimeTaskSessionSummary,
@@ -730,6 +732,8 @@ export function CardDetailView({
 	onBackToBoard,
 	selection,
 	currentProjectId,
+	boardScopeFocusedTaskProject,
+	onNarrowToFocusedTaskProject,
 	workspacePath,
 	resolveTaskWorkspaceAbsoluteDirectoryPath,
 	taskIdsOnBoard,
@@ -816,6 +820,8 @@ export function CardDetailView({
 	onBackToBoard?: () => void;
 	selection: CardSelection;
 	currentProjectId: string | null;
+	boardScopeFocusedTaskProject?: RuntimeProjectSummary | null;
+	onNarrowToFocusedTaskProject?: () => void;
 	workspacePath?: string | null;
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCard) => Promise<string | null>;
 	/** 看板上此刻存在的任务 id。Prompt Library 靠它认出「归属任务已被删掉」的孤儿条目。 */
@@ -1695,25 +1701,34 @@ export function CardDetailView({
 		(isMainTaskConversationSessionSelected ? streamedAgentConversationChatMessages : null);
 
 	const sessionInformationActions = (
-		<TaskSessionInformationActions
-			key={JSON.stringify([
-				currentProjectId,
-				selection.card.id,
-				selection.card.createdAt,
-				selectedTaskConversationSessionId,
-			])}
-			workspaceId={currentProjectId}
-			taskId={selection.card.id}
-			taskConversationSessionId={selectedTaskConversationSessionId}
-			taskCreatedAtEpochMs={selection.card.createdAt}
-			summary={activeTaskConversationSessionSummary}
-			hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showAgentConversationChatPanel}
-			pendingUserDecisionIdentityForRefresh={
-				pendingUserDecision.decision
-					? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
-					: null
-			}
-		/>
+		<>
+			{boardScopeFocusedTaskProject && onNarrowToFocusedTaskProject ? (
+				<AgentSessionToolbarFocusedTaskProjectNarrowingButton
+					project={boardScopeFocusedTaskProject}
+					isMobile={isMobile}
+					onNarrowToFocusedTaskProject={onNarrowToFocusedTaskProject}
+				/>
+			) : null}
+			<TaskSessionInformationActions
+				key={JSON.stringify([
+					currentProjectId,
+					selection.card.id,
+					selection.card.createdAt,
+					selectedTaskConversationSessionId,
+				])}
+				workspaceId={currentProjectId}
+				taskId={selection.card.id}
+				taskConversationSessionId={selectedTaskConversationSessionId}
+				taskCreatedAtEpochMs={selection.card.createdAt}
+				summary={activeTaskConversationSessionSummary}
+				hasNarrowMobileResourceDetailsInTerminalTools={!isDoneTaskReadOnly && !showAgentConversationChatPanel}
+				pendingUserDecisionIdentityForRefresh={
+					pendingUserDecision.decision
+						? `${pendingUserDecision.decision.decisionId}:${pendingUserDecision.decision.answerDeliveryState}`
+						: null
+				}
+			/>
+		</>
 	);
 	const agentSessionContent = isDoneTaskReadOnly ? (
 		<ReadOnlyTaskConversationHistoryPanel

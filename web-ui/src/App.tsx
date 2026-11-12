@@ -1492,10 +1492,8 @@ export default function App(): ReactElement {
 			onClearNumericSlotGroupNumber: clearNumericSlotGroupNumber,
 			selectedBoardOrSingleProjectScope,
 			onSelectBoardScopeAllProjects: selectBoardScopeAllProjects,
-			boardScopeFocusViewFocusedTaskProjectId,
 		}),
 		[
-			boardScopeFocusViewFocusedTaskProjectId,
 			selectBoardScopeAllProjects,
 			selectedBoardOrSingleProjectScope,
 			assignProjectToNumericSlotGroupNumber,
@@ -2107,6 +2105,14 @@ export default function App(): ReactElement {
 									onBackToBoard={handleBackFromFocusView}
 									selection={selectedCardRenderedInFocusView}
 									currentProjectId={currentProjectId}
+									boardScopeFocusedTaskProject={
+										isBoardScopeAllProjectsSelected && !pendingCrossProjectTaskOpen && !isProjectSwitching
+											? (displayedProjects.find(
+													(project) => project.id === boardScopeFocusViewFocusedTaskProjectId,
+												) ?? null)
+											: null
+									}
+									onNarrowToFocusedTaskProject={handleToggleBetweenBoardScopeAndFocusedTaskProjectScope}
 									taskIdsOnBoard={taskIdsOnBoard}
 									workspacePath={workspacePath}
 									resolveTaskWorkspaceAbsoluteDirectoryPath={resolveTaskWorkspaceAbsoluteDirectoryPath}
