@@ -12,13 +12,15 @@ import { TaskCardBody, type TaskCardBusinessProps } from "@/components/task-card
  */
 export const BoardCard = memo(function BoardCard({
 	index,
+	compactRowWithExpandableDetails,
 	...businessProps
-}: TaskCardBusinessProps & { index: number }): React.ReactElement {
+}: TaskCardBusinessProps & { index: number; compactRowWithExpandableDetails?: boolean }): React.ReactElement {
 	return (
 		<Draggable draggableId={businessProps.card.id} index={index}>
 			{(provided, snapshot) => (
 				<TaskCardBody
 					{...businessProps}
+					compactRowWithExpandableDetails={compactRowWithExpandableDetails}
 					drag={{
 						innerRef: provided.innerRef,
 						draggableProps: provided.draggableProps,
