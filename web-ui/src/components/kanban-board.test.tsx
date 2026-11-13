@@ -12,6 +12,8 @@ const dndMock = vi.hoisted(() => ({
 		tryGetLock: ReturnType<typeof vi.fn>;
 	} | null,
 }));
+const mobileViewportForTest = vi.hoisted(() => ({ isMobile: false }));
+vi.mock("@/hooks/use-is-mobile", () => ({ useIsMobile: () => mobileViewportForTest.isMobile }));
 
 // 记录每个 BoardColumn 实际收到的 onSaveTitle，用于断言父级 wiring 是否对每一列（含 done/trash）传入保存回调。
 const boardColumnMock = vi.hoisted(() => ({
@@ -77,8 +79,8 @@ vi.mock("@/components/board-column", () => ({
 }));
 
 // 折叠竖条的真实实现依赖 Droppable（本文件的 dnd mock 只提供 DragDropContext），这里只保留可点击展开的骨架。
-vi.mock("@/components/board-column-collapsed-vertical-strip", () => ({
-	BoardColumnCollapsedVerticalStrip: ({
+vi.mock("@/components/board-column-collapsed-section", () => ({
+	BoardColumnCollapsedSection: ({
 		column,
 		onExpandColumn,
 	}: {
@@ -111,6 +113,7 @@ describe("KanbanBoard", () => {
 	let previousActEnvironment: boolean | undefined;
 
 	beforeEach(() => {
+		mobileViewportForTest.isMobile = false;
 		boardColumnMock.onSaveTitleByColumnId.clear();
 		boardColumnMock.onRequestStartAllReadyBacklogTasksByColumnId.clear();
 		boardColumnMock.onCollapseColumnByColumnId.clear();
@@ -168,6 +171,55 @@ describe("KanbanBoard", () => {
 			(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
 				previousActEnvironment;
 		}
+	});
+
+	it("手机竖排阶段沿用直接移卡兜底，不启动横向 snap 动画", async () => {
+		mobileViewportForTest.isMobile = true;
+		dndMock.sensorApi = { tryGetLock: vi.fn() };
+		const requestMove = { current: null as RequestProgrammaticCardMove | null };
+		await act(async () => {
+			root.render(
+				<KanbanBoard
+					data={{
+						columns: [
+							{
+								id: "backlog",
+								title: "Backlog",
+								cards: [
+									{
+										id: "source-task",
+										title: "待移动任务",
+										prompt: "",
+										baseRef: "main",
+										startInPlanMode: false,
+										createdAt: 1,
+										updatedAt: 1,
+									},
+								],
+							},
+							{ id: "in_progress", title: "In Progress", cards: [] },
+						],
+					}}
+					taskSessions={{}}
+					onCardSelect={() => {}}
+					onCreateTask={() => {}}
+					onDragEnd={() => {}}
+					onRequestProgrammaticCardMoveReady={(request) => {
+						requestMove.current = request;
+					}}
+				/>,
+			);
+		});
+		expect(
+			requestMove.current?.({
+				taskId: "source-task",
+				fromColumnId: "backlog",
+				toColumnId: "in_progress",
+				insertAtTop: true,
+			}),
+		).toBe(false);
+		expect(dndMock.sensorApi.tryGetLock).not.toHaveBeenCalled();
+		expect(container.querySelector("[data-mobile-single-project-home-scroll-container]")).not.toBeNull();
 	});
 
 	it("marks the board while a programmatic move is active", async () => {

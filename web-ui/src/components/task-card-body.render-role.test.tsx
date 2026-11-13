@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeleteTaskDialog } from "@/components/delete-task-dialog";
 import { TaskCardBody, type TaskCardBodyRenderRole } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { clearCompactTaskRowExpansionSessionForTests } from "@/stores/compact-task-row-expansion-session";
 import type { BoardCard } from "@/types";
 import { queryTaskCardElementIncludingPortalledActionToolbars } from "../../tests/task-card-action-toolbar-dom-test-queries";
 
@@ -70,6 +71,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	clearCompactTaskRowExpansionSessionForTests();
 	act(() => root.unmount());
 	vi.useRealTimers();
 	vi.restoreAllMocks();
@@ -79,6 +81,140 @@ afterEach(() => {
 });
 
 describe("TaskCardBody 的渲染角色", () => {
+	it("手机首页开始拖拽时保留按下的 DOM 节点及原生 touch 事件归属", () => {
+		const card = createCard({ createdAt: 1 });
+		const renderDraggable = (isDragging: boolean) =>
+			act(() =>
+				root.render(
+					<TaskCardBody
+						card={card}
+						columnId="backlog"
+						compactRowWithExpandableDetails
+						drag={{
+							innerRef: () => {},
+							draggableProps: {
+								"data-rfd-draggable-context-id": "mobile-test",
+								"data-rfd-draggable-id": card.id,
+							},
+							dragHandleProps: null,
+							isDragging,
+							draggableStyle: undefined,
+						}}
+					/>,
+				),
+			);
+		renderDraggable(false);
+		const pressedCardElement = cardShell(container);
+		renderDraggable(true);
+		expect(cardShell(container)).toBe(pressedCardElement);
+		expect(pressedCardElement?.isConnected).toBe(true);
+	});
+
+	it.each<TaskCardBodyRenderRole>(["canonical_card_in_its_stage_list", "pinned_card_copy_in_task_pinboard"])(
+		"手机首页的 %s 默认只显示紧凑摘要，展开操作不触发导航",
+		(renderRole) => {
+			const card = createCard({ createdAt: 1, taskDescription: "只在展开后显示的任务简介" });
+			const activateTask = vi.fn();
+			const deleteTask = vi.fn();
+			act(() =>
+				root.render(
+					<TaskCardBody
+						card={card}
+						columnId="review"
+						renderRole={renderRole}
+						compactRowWithExpandableDetails
+						workspacePath="/isolated/mobile-home"
+						onClick={activateTask}
+						onDeleteTask={deleteTask}
+					/>,
+				),
+			);
+			expect(container.querySelector("[data-task-card-secondary-metadata-row]")).not.toBeNull();
+			expect(container.querySelector("[data-task-card-title]")?.textContent).toBe(card.title);
+			expect(container.querySelector("[data-task-card-primary-actions]")?.hasAttribute("hidden")).toBe(true);
+			expect(container.querySelector("[data-task-card-expandable-details]")?.hasAttribute("hidden")).toBe(true);
+			const toggle = container.querySelector<HTMLButtonElement>('[aria-label="展开任务卡详情与操作"]')!;
+			expect(toggle).not.toBeNull();
+			expect(toggle.getAttribute("aria-expanded")).toBe("false");
+			act(() => toggle.click());
+			expect(toggle.getAttribute("aria-expanded")).toBe("true");
+			expect(container.textContent).toContain(card.taskDescription);
+			const deleteButton = container.querySelector<HTMLButtonElement>('[aria-label="Delete task permanently"]')!;
+			act(() => deleteButton.click());
+			expect(deleteTask).toHaveBeenCalledExactlyOnceWith(card.id);
+			expect(activateTask).not.toHaveBeenCalled();
+			act(() => toggle.click());
+			expect(container.querySelector("[data-task-card-primary-actions]")?.hasAttribute("hidden")).toBe(true);
+			expect(container.querySelector("[data-task-card-expandable-details]")?.hasAttribute("hidden")).toBe(true);
+			expect(container.querySelectorAll("[data-task-id]")).toHaveLength(
+				renderRole === "canonical_card_in_its_stage_list" ? 1 : 0,
+			);
+		},
+	);
+
+	it("手机首页展开状态不随普通重绘复位，也不串到其他项目、任务或新一世", () => {
+		const card = createCard({ createdAt: 1 });
+		const renderCompactRow = (workspacePath = "/isolated/project-a", taskCard = card) =>
+			act(() =>
+				root.render(
+					<TaskCardBody
+						card={taskCard}
+						columnId="review"
+						workspacePath={workspacePath}
+						compactRowWithExpandableDetails
+					/>,
+				),
+			);
+		const isExpanded = () =>
+			container.querySelector("[data-task-card-compact-row-toggle]")?.getAttribute("aria-expanded");
+		renderCompactRow();
+		act(() => container.querySelector<HTMLButtonElement>("[data-task-card-compact-row-toggle]")!.click());
+		renderCompactRow(undefined, { ...card, title: "推流更新后的标题", updatedAt: 2 });
+		expect(isExpanded()).toBe("true");
+		renderCompactRow("/isolated/project-b");
+		expect(isExpanded()).toBe("false");
+		act(() => container.querySelector<HTMLButtonElement>("[data-task-card-compact-row-toggle]")!.click());
+		renderCompactRow("/isolated/project-b", { ...card, id: "another-task" });
+		expect(isExpanded()).toBe("false");
+		act(() => container.querySelector<HTMLButtonElement>("[data-task-card-compact-row-toggle]")!.click());
+		renderCompactRow("/isolated/project-b", { ...card, id: "another-task", createdAt: 2 });
+		expect(isExpanded()).toBe("false");
+	});
+
+	it("离开看板再挂载时恢复同一张卡的展开，置顶副本和新一世仍收起", () => {
+		const card = createCard({ createdAt: 1, taskDescription: "只在展开后显示的任务简介" });
+		const renderCompactRow = (
+			renderRole: TaskCardBodyRenderRole = "canonical_card_in_its_stage_list",
+			taskCard: BoardCard = card,
+		) =>
+			act(() =>
+				root.render(
+					<TaskCardBody
+						card={taskCard}
+						columnId="review"
+						renderRole={renderRole}
+						workspacePath="/isolated/project-a"
+						compactRowWithExpandableDetails
+					/>,
+				),
+			);
+		const isExpanded = () =>
+			container.querySelector("[data-task-card-compact-row-toggle]")?.getAttribute("aria-expanded");
+		renderCompactRow();
+		act(() => container.querySelector<HTMLButtonElement>("[data-task-card-compact-row-toggle]")!.click());
+		expect(isExpanded()).toBe("true");
+		act(() => root.render(<></>));
+		renderCompactRow();
+		expect(isExpanded()).toBe("true");
+		expect(container.textContent).toContain(card.taskDescription);
+		renderCompactRow("pinned_card_copy_in_task_pinboard");
+		expect(isExpanded()).toBe("false");
+		renderCompactRow("canonical_card_in_its_stage_list", { ...card, createdAt: 2 });
+		expect(isExpanded()).toBe("false");
+		renderCompactRow();
+		expect(isExpanded()).toBe("true");
+	});
+
 	it.each<TaskCardBodyRenderRole>(["canonical_card_in_its_stage_list", "task_card_copy_in_related_task_preview"])(
 		"删除确认取消延时 Tooltip，首次 Escape 关闭确认框且不触发卡片导航：%s",
 		async (renderRole) => {

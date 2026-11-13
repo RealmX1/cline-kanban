@@ -205,6 +205,8 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 
 卡片的 Tooltip、快捷菜单、侧边按钮及统计／便签／关联预览通过 `use-task-card-portal-wheel-scroll-forwarding.ts` 在挂载时关联触发控件，嵌套 Portal 沿原入口找到所属卡片和列。浮层自身能滚时保留原生滚动，到边界后复用吸顶栏的滚轮接续；所属列到边界后停住，不滚动页面或相邻列。普通卡片之外的 Tooltip 不转交滚轮。紧凑卡片和跨项目精简行使用同一低对比灰色内描边与浅底色，让摘要和标题归属于同一卡面，内描边不改变测量尺寸。
 
+单项目手机首页（≤768px）按阶段竖排，置顶区与阶段共用 `data-mobile-single-project-home-scroll-container` 滚动边界，渐进加载也以此为 root。仅该宿主传入 `compactRowWithExpandableDetails`：卡片默认只显示摘要、Agent、标题与状态提示，44px 展开按钮显示完整详情和原动作；触屏样式不得覆盖动作区的 `hidden`。展开状态按项目、任务及创建时间隔离，不随推流复位；主列表滚动位置和已加载数量在进入任务后返回时恢复。真实触屏拖拽继续使用原 DnD；旧横向程序化动画在手机上返回未启动，由既有直接移卡路径处理。桌面列宽与折叠偏好保持原有合同。
+
 同一个 `BoardCard` 组件通过两条平行宿主链渲染；卡片阶段动作（移入 validation、移入 done、restore）必须贯通两条链。commit / open PR 已从所有卡片入口移除，仅保留 Focus View 的 agent 面板入口（`card-detail-view.tsx` 中的 `AgentTerminalPanel` / `AgentConversationChatPanel`）：
 
 - the main board: `kanban-board.tsx` → `board-column.tsx`

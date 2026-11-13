@@ -21,6 +21,8 @@ import {
 	Archive,
 	ArchiveRestore,
 	Check,
+	ChevronDown,
+	ChevronUp,
 	ClipboardCheck,
 	Copy,
 	Eye,
@@ -37,7 +39,7 @@ import {
 	Trash2,
 } from "lucide-react";
 import type { KeyboardEvent, MouseEvent, ReactNode } from "react";
-import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { notifyError, showAppToast } from "@/components/app-toaster";
@@ -77,6 +79,10 @@ import type {
 	RuntimeTaskConversationSessionActivityObservation,
 	RuntimeTaskSessionSummary,
 } from "@/runtime/types";
+import {
+	isCompactTaskRowExpandedInSession,
+	setCompactTaskRowExpandedInSession,
+} from "@/stores/compact-task-row-expansion-session";
 import { useCrossProjectTaskWorktreeGitMetadataSnapshotValue } from "@/stores/cross-project-task-worktree-git-metadata-store";
 import { useQueuedTaskPromptDeliveryProjectionsForTask } from "@/stores/queued-task-prompt-delivery-projection-store";
 import { useTaskWorkspaceInfoValue, useTaskWorkspaceSnapshotValue } from "@/stores/workspace-metadata-store";
@@ -242,6 +248,7 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
 type TaskCardBodyLivePresentationProps = TaskCardBusinessProps & {
 	drag?: TaskCardBodyDragBindings | null;
 	renderRole?: TaskCardBodyRenderRole;
+	compactRowWithExpandableDetails?: boolean;
 	/**
 	 * 非 null = 这张卡属于**另一个**项目（All projects 面板的展开行）。卡体里几个推流 store 只按 taskId 分键、只装
 	 * 当前项目的数据，跨项目同号会读到别人的值，所以此时一律不读它们：git 元数据改读跨项目轮询 store，资源占用与
@@ -320,6 +327,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 		defaultAgentId = null,
 		drag = null,
 		renderRole = "canonical_card_in_its_stage_list",
+		compactRowWithExpandableDetails = false,
 		stageDisplayNameForTaskPinboardCopy,
 		onNavigateToCanonicalCardInItsStage,
 		onEditTaskPinboardPinReason,
@@ -329,7 +337,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 		crossProjectTaskSwitcherRowElementsMergedIntoCardCopy = null,
 	} = presentation;
 
-	const isCompactRowInFocusViewLeftColumn = useTaskCardBodyVisualDensity() === "compact_row_in_focus_view_left_column";
+	const visualDensity = useTaskCardBodyVisualDensity();
+	const isCompactRowInFocusViewLeftColumn =
+		compactRowWithExpandableDetails || visualDensity === "compact_row_in_focus_view_left_column";
 	const isRelatedTaskPreviewCopy = renderRole === "task_card_copy_in_related_task_preview";
 	const sideAttachmentsId = useId();
 	const [isHovered, setIsHovered] = useState(false);
@@ -346,6 +356,16 @@ export const TaskCardBody = memo(function TaskCardBody(
 		taskCommentsDialog?.currentWorkspaceId;
 	const taskWorkspaceId =
 		taskCardOwnedByOtherProjectWorkspaceId ?? taskCardWorkspaceIdForCrossProjectGitMetadataPolling;
+	const compactTaskRowIdentity = JSON.stringify([
+		renderRole,
+		taskCommentsWorkspaceId ?? workspacePath ?? null,
+		card.id,
+		card.createdAt,
+		compactRowWithExpandableDetails,
+	]);
+	const [, refreshCompactTaskRowExpansion] = useReducer((revision: number) => revision + 1, 0);
+	const isCompactTaskRowExpanded = isCompactTaskRowExpandedInSession(compactTaskRowIdentity);
+	const isCompactTaskRowCollapsed = compactRowWithExpandableDetails && !isCompactTaskRowExpanded;
 	const usesIdentityBoundRelatedTaskPreviewGitMetadata = renderRole === "task_card_copy_in_related_task_preview";
 	const currentProjectReviewWorkspaceSnapshot = useTaskWorkspaceSnapshotValue(
 		isTaskCardOwnedByOtherProject || usesIdentityBoundRelatedTaskPreviewGitMetadata ? null : card.id,
@@ -380,7 +400,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 在下面每个派生布尔里都落在与置顶板分身相同的一侧：不可拖、无 DOM 身份、可单击 / 双击。
 	const isTaskPinboardCopy = renderRole === "pinned_card_copy_in_task_pinboard";
 	// All projects 切换面板的行副本：单击必须与点精简行同一结果（见 TaskCardBodyRenderRole），Done 卡也能点开。
-	const usesInFlowActionToolbar = isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy;
+	const usesInFlowActionToolbar =
+		compactRowWithExpandableDetails || isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy;
 	const isCrossProjectTaskSwitcherRowCopy = renderRole === "expanded_card_copy_in_cross_project_task_switcher_row";
 	const crossProjectTaskSwitcherRowElements = isCrossProjectTaskSwitcherRowCopy
 		? crossProjectTaskSwitcherRowElementsMergedIntoCardCopy
@@ -958,6 +979,9 @@ export const TaskCardBody = memo(function TaskCardBody(
 			// Post-Deploy Verification 引导定位锚点：guidance.anchor 可指向此看板任务卡（副本不输出，保唯一）。
 			data-verification-anchor={emitsCanonicalDomIdentity ? boardTaskCardAnchorKey(card.id) : undefined}
 			data-task-card-render-role={renderRole}
+			data-task-card-compact-row-details-expanded={
+				compactRowWithExpandableDetails ? isCompactTaskRowExpanded : undefined
+			}
 			data-column-id={columnId ?? undefined}
 			data-selected={selected}
 			onClick={
@@ -1054,6 +1078,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 							cn(
 								"kb-board-card-surface group/card relative flex flex-col rounded-md bg-surface-2/35 px-2 py-1.5 ring-1 ring-inset ring-border-bright/65",
 								isCrossProjectTaskSwitcherRowCopy && "bg-surface-2 ring-1 ring-inset ring-border-bright/65",
+								compactRowWithExpandableDetails &&
+									"[&_[data-task-card-primary-actions]_button]:min-h-11 [&_[data-task-card-primary-actions]_button]:min-w-11 [&_[data-task-card-primary-actions]_button_svg]:size-4",
 
 								historicalSnapshot && "pr-14 sm:pr-10",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
@@ -1078,8 +1104,29 @@ export const TaskCardBody = memo(function TaskCardBody(
 						sessionSummary={sessionSummary}
 					/>
 				)}
+				{compactRowWithExpandableDetails ? (
+					<button
+						type="button"
+						data-task-card-compact-row-toggle=""
+						aria-label={isCompactTaskRowExpanded ? "收起任务卡详情与操作" : "展开任务卡详情与操作"}
+						aria-expanded={isCompactTaskRowExpanded}
+						className="absolute right-0 top-0 z-10 inline-flex h-11 w-11 items-center justify-center rounded-md text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+						onMouseDown={stopEvent}
+						onClick={(event) => {
+							stopEvent(event);
+							const nextExpanded = !isCompactTaskRowExpanded;
+							setCompactTaskRowExpandedInSession(compactTaskRowIdentity, nextExpanded);
+							refreshCompactTaskRowExpansion();
+							setOpenedQuickActionMenu(null);
+							setIsPromptViewerOpen(false);
+						}}
+					>
+						{isCompactTaskRowExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+					</button>
+				) : null}
 				{crossProjectTaskSwitcherRowElements?.summaryMetadata ?? (
 					<TaskCardSummaryMetadata
+						className={compactRowWithExpandableDetails ? "pr-11" : undefined}
 						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
 						projectName={
 							isCrossProjectTaskSwitcherRowCopy
@@ -1100,9 +1147,10 @@ export const TaskCardBody = memo(function TaskCardBody(
 					/>
 				)}
 				<div
-					className={
-						isCompactRowInFocusViewLeftColumn ? "flex items-start gap-1.5" : "flex items-start gap-2 pt-0.5"
-					}
+					className={cn(
+						isCompactRowInFocusViewLeftColumn ? "flex items-start gap-1.5" : "flex items-start gap-2 pt-0.5",
+						compactRowWithExpandableDetails && "pr-11",
+					)}
 					style={isCompactRowInFocusViewLeftColumn ? undefined : { minHeight: 24 }}
 				>
 					{!isCrossProjectTaskSwitcherRowCopy && statusMarker ? (
@@ -1184,6 +1232,7 @@ export const TaskCardBody = memo(function TaskCardBody(
 					</div>
 				</div>
 				<TaskCardActionToolbar
+					hidden={isCompactTaskRowCollapsed}
 					sourceCardAnchorElementRef={taskStickers.cardElementRef}
 					isSourceCardInteractionActive={isHoverPresentationShown || taskStickers.open}
 					isCompactTaskRow={isCrossProjectTaskSwitcherRowCopy || isCompactRowInFocusViewLeftColumn}
@@ -1467,147 +1516,153 @@ export const TaskCardBody = memo(function TaskCardBody(
 						executionForbidden={isTrashCard || !!card.taskShelvingState?.isShelved}
 					/>
 				</div>
-				{historicalSnapshot ? (
-					<div
-						className="mt-1 flex flex-col gap-1 text-xs text-text-secondary"
-						data-permanently-deleted-task-card=""
-					>
-						<div className="flex flex-wrap items-center gap-2">
-							<span
-								className="min-w-0 break-words"
-								title={historicalSnapshot.workspaceRepositoryPath ?? undefined}
-							>
-								{historicalContext?.historicalProjectName ?? historicalSnapshot.kanbanBoardCard.workspaceId}
-							</span>
-							<span className="font-mono">{card.id}</span>
-							<span>已永久删除</span>
-							<time
-								className="min-w-0 break-words"
-								dateTime={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toISOString()}
-								title={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toString()}
-							>
-								{new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toLocaleString()}
-							</time>
+				<div
+					data-task-card-expandable-details=""
+					hidden={isCompactTaskRowCollapsed}
+					className={isCompactTaskRowCollapsed ? undefined : "contents"}
+				>
+					{historicalSnapshot ? (
+						<div
+							className="mt-1 flex flex-col gap-1 text-xs text-text-secondary"
+							data-permanently-deleted-task-card=""
+						>
+							<div className="flex flex-wrap items-center gap-2">
+								<span
+									className="min-w-0 break-words"
+									title={historicalSnapshot.workspaceRepositoryPath ?? undefined}
+								>
+									{historicalContext?.historicalProjectName ?? historicalSnapshot.kanbanBoardCard.workspaceId}
+								</span>
+								<span className="font-mono">{card.id}</span>
+								<span>已永久删除</span>
+								<time
+									className="min-w-0 break-words"
+									dateTime={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toISOString()}
+									title={new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toString()}
+								>
+									{new Date(historicalSnapshot.permanentlyRemovedFromBoardAt).toLocaleString()}
+								</time>
+							</div>
+							{historicalSnapshot.promptPreview !== null ? (
+								<p className="m-0 line-clamp-3 whitespace-pre-wrap break-words">
+									{historicalSnapshot.promptPreview || "删除前 Prompt 为空"}
+								</p>
+							) : (
+								<p className="m-0">删除前 Prompt 未留存或正文不可用，可查看其他版本。</p>
+							)}
+							{historicalSnapshot.matchedPromptVersions.includes("at_creation") ? (
+								<span>命中创建时 Prompt</span>
+							) : null}
 						</div>
-						{historicalSnapshot.promptPreview !== null ? (
-							<p className="m-0 line-clamp-3 whitespace-pre-wrap break-words">
-								{historicalSnapshot.promptPreview || "删除前 Prompt 为空"}
-							</p>
-						) : (
-							<p className="m-0">删除前 Prompt 未留存或正文不可用，可查看其他版本。</p>
-						)}
-						{historicalSnapshot.matchedPromptVersions.includes("at_creation") ? (
-							<span>命中创建时 Prompt</span>
-						) : null}
-					</div>
-				) : null}
-				{card.taskDescription ? (
-					<p className="mt-1 line-clamp-2 break-words text-xs text-text-secondary" title={card.taskDescription}>
-						{card.taskDescription}
-					</p>
-				) : null}
-				<AgentWorkProgress summary={sessionSummary} />
-				<TaskExternalWorkflowRunReference
-					card={card}
-					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
-				/>
-				{sessionActivity ? (
-					<div
-						data-task-card-session-activity=""
-						className={cn("flex gap-1.5 items-start", isCompactRowInFocusViewLeftColumn ? "mt-1" : "mt-[6px]")}
-						style={{
-							color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
-						}}
-					>
-						<span
-							className="inline-block shrink-0 rounded-full"
-							data-session-activity-dot-breathing-on-shared-fine-clock={
-								sessionActivityDotBreathingOpacity !== undefined ? "true" : undefined
-							}
-							title={
-								!isTrashCard && isExitedAwaiting
-									? "Agent process exited — still awaiting your review"
-									: isAgentRecentlyActive
-										? "近期有效活动（不能推断模型是否正在计算）"
-										: undefined
-							}
+					) : null}
+					{card.taskDescription ? (
+						<p className="mt-1 line-clamp-2 break-words text-xs text-text-secondary" title={card.taskDescription}>
+							{card.taskDescription}
+						</p>
+					) : null}
+					<AgentWorkProgress summary={sessionSummary} />
+					<TaskExternalWorkflowRunReference
+						card={card}
+						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+					/>
+					{sessionActivity ? (
+						<div
+							data-task-card-session-activity=""
+							className={cn("flex gap-1.5 items-start", isCompactRowInFocusViewLeftColumn ? "mt-1" : "mt-[6px]")}
 							style={{
-								width: 6,
-								height: 6,
-								// exited（进程已退）：空心环（transparent 底 + 同色描边，box-sizing:border-box 下留中空）；
-								// 否则实心点。trash 卡一律 muted 实心、不参与 exited 区分。
-								backgroundColor:
-									isTrashCard || isExitedAwaiting
-										? isTrashCard
-											? SESSION_ACTIVITY_COLOR.muted
-											: "transparent"
-										: sessionActivity.dotColor,
-								border:
-									!isTrashCard && isExitedAwaiting ? `1.5px solid ${sessionActivity.dotColor}` : undefined,
-								marginTop: 4,
-								opacity: sessionActivityDotBreathingOpacity,
+								color: isTrashCard ? SESSION_ACTIVITY_COLOR.muted : undefined,
 							}}
-						/>
-						<div className="min-w-0 flex-1">
-							<p className="m-0 font-mono break-words line-clamp-2" style={{ fontSize: 12 }}>
-								{sessionActivity.text}
-							</p>
+						>
+							<span
+								className="inline-block shrink-0 rounded-full"
+								data-session-activity-dot-breathing-on-shared-fine-clock={
+									sessionActivityDotBreathingOpacity !== undefined ? "true" : undefined
+								}
+								title={
+									!isTrashCard && isExitedAwaiting
+										? "Agent process exited — still awaiting your review"
+										: isAgentRecentlyActive
+											? "近期有效活动（不能推断模型是否正在计算）"
+											: undefined
+								}
+								style={{
+									width: 6,
+									height: 6,
+									// exited（进程已退）：空心环（transparent 底 + 同色描边，box-sizing:border-box 下留中空）；
+									// 否则实心点。trash 卡一律 muted 实心、不参与 exited 区分。
+									backgroundColor:
+										isTrashCard || isExitedAwaiting
+											? isTrashCard
+												? SESSION_ACTIVITY_COLOR.muted
+												: "transparent"
+											: sessionActivity.dotColor,
+									border:
+										!isTrashCard && isExitedAwaiting ? `1.5px solid ${sessionActivity.dotColor}` : undefined,
+									marginTop: 4,
+									opacity: sessionActivityDotBreathingOpacity,
+								}}
+							/>
+							<div className="min-w-0 flex-1">
+								<p className="m-0 font-mono break-words line-clamp-2" style={{ fontSize: 12 }}>
+									{sessionActivity.text}
+								</p>
+							</div>
 						</div>
-					</div>
-				) : null}
-				{crossProjectTaskSwitcherRowElements?.summaryMetadata ? (
-					<div
-						data-task-card-expanded-resource-usage=""
-						className="flex flex-wrap items-center gap-1 empty:hidden [&:not(:empty)]:mt-1"
-					>
-						{resourceUsagePill}
-					</div>
-				) : null}
-				<TaskClosureSummaryAndHistory
-					card={card}
-					workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
-					isClosed={isTrashCard}
-				/>
-				{showsTaskPinboardPinReasonRowOnThisCopy ? (
-					// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
-					<button
-						type="button"
-						data-task-pinboard-pin-reason=""
-						data-task-pinboard-pin-reason-state={
-							hasTaskPinboardPinReasonText ? "shows_user_written_reason" : "blank_invites_adding_reason"
-						}
-						onMouseDown={stopEvent}
-						onClick={(event) => {
-							stopEvent(event);
-							onEditTaskPinboardPinReason?.(card.id);
-						}}
-						className={cn(
-							"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
-							hasTaskPinboardPinReasonText ? "text-text-secondary" : "italic text-text-tertiary",
-						)}
-						title={hasTaskPinboardPinReasonText ? "Edit pin reason" : "Add pin reason"}
-					>
-						<Pin size={10} className="mt-[2px] shrink-0" />
-						<span className="line-clamp-2">
-							{hasTaskPinboardPinReasonText ? taskPinboardPinReasonTextOrEmpty : "Add pin reason"}
-						</span>
-					</button>
-				) : null}
-				{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
-					<Button
-						size="sm"
-						className="mt-2 self-start text-accent"
-						onMouseDown={stopEvent}
-						onClick={(event) => {
-							stopEvent(event);
-							onCancelAutomaticAction(card.id);
-						}}
-					>
-						{cancelAutomaticActionLabel}
-					</Button>
-				) : null}
+					) : null}
+					{crossProjectTaskSwitcherRowElements?.summaryMetadata ? (
+						<div
+							data-task-card-expanded-resource-usage=""
+							className="flex flex-wrap items-center gap-1 empty:hidden [&:not(:empty)]:mt-1"
+						>
+							{resourceUsagePill}
+						</div>
+					) : null}
+					<TaskClosureSummaryAndHistory
+						card={card}
+						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+						isClosed={isTrashCard}
+					/>
+					{showsTaskPinboardPinReasonRowOnThisCopy ? (
+						// 置顶原因只在分身上铺开：本体卡上铺开会让每张卡凭空变高，那里原因走 pin 标记的 tooltip。
+						<button
+							type="button"
+							data-task-pinboard-pin-reason=""
+							data-task-pinboard-pin-reason-state={
+								hasTaskPinboardPinReasonText ? "shows_user_written_reason" : "blank_invites_adding_reason"
+							}
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								onEditTaskPinboardPinReason?.(card.id);
+							}}
+							className={cn(
+								"mt-1 flex w-full items-start gap-1 rounded-sm text-left text-[11px] leading-snug hover:text-text-primary",
+								hasTaskPinboardPinReasonText ? "text-text-secondary" : "italic text-text-tertiary",
+							)}
+							title={hasTaskPinboardPinReasonText ? "Edit pin reason" : "Add pin reason"}
+						>
+							<Pin size={10} className="mt-[2px] shrink-0" />
+							<span className="line-clamp-2">
+								{hasTaskPinboardPinReasonText ? taskPinboardPinReasonTextOrEmpty : "Add pin reason"}
+							</span>
+						</button>
+					) : null}
+					{cancelAutomaticActionLabel && onCancelAutomaticAction ? (
+						<Button
+							size="sm"
+							className="mt-2 self-start text-accent"
+							onMouseDown={stopEvent}
+							onClick={(event) => {
+								stopEvent(event);
+								onCancelAutomaticAction(card.id);
+							}}
+						>
+							{cancelAutomaticActionLabel}
+						</Button>
+					) : null}
+				</div>
 			</div>
-			{!historicalContext ? (
+			{!historicalContext && !isCompactTaskRowCollapsed ? (
 				<TaskCardSideAttachments
 					id={sideAttachmentsId}
 					cardElementRef={taskStickers.cardElementRef}
@@ -1624,7 +1679,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 	// 拖拽中把卡壳 portal 到 document.body，避免被祖先 overflow 裁切（@hello-pangea/dnd 惯用法）。
 	// 关键：portal 只切换无状态的卡壳 DOM，TaskCardBody 组件本身始终挂载在原位，
 	// 故 isHovered/isEditingTitle/最近活动记忆等 hooks 状态在拖拽前后不被重置（与拆分前一致）。
-	if (cardDragBindings?.isDragging && typeof document !== "undefined") {
+	// 原生 touch 绑定按下时的 DOM；手机首页保留原节点，避免切到 Portal 后丢失移动和抬手。
+	if (cardDragBindings?.isDragging && !compactRowWithExpandableDetails && typeof document !== "undefined") {
 		return createPortal(cardShell, document.body);
 	}
 	return cardShell;

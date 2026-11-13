@@ -8,10 +8,11 @@ import {
 	type SensorAPI,
 	type SnapDragActions,
 } from "@hello-pangea/dnd";
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { BoardColumn } from "@/components/board-column";
-import { BoardColumnCollapsedVerticalStrip } from "@/components/board-column-collapsed-vertical-strip";
+import { BoardColumnCollapsedSection } from "@/components/board-column-collapsed-section";
 import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
+import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useKanbanBoardColumnCollapseAndWidthPreferences } from "@/hooks/use-kanban-board-column-collapse-and-width-preferences";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
 import { ResizeHandle } from "@/resize/resize-handle";
@@ -33,6 +34,7 @@ const BOARD_COLUMN_ORDER: BoardDisplayGroupId[] = [
 	"trash",
 	"shelved",
 ];
+const mobileHomeScrollTopByWorkspacePath = new Map<string | null, number>();
 
 // sensors 数组与其中的 sensor 本体都放在模块级：写在 JSX 里的 `[programmaticSensor]` 字面量
 // 每次渲染都会新建数组。看板全应用只挂载一个，sensor 拿到的 api 用模块级 holder 承接即可。
@@ -108,6 +110,16 @@ export const KanbanBoard = memo(function KanbanBoard({
 	resolveTaskWorkspaceAbsoluteDirectoryPath?: (task: BoardCard) => Promise<string | null>;
 	defaultAgentId?: RuntimeAgentId | null;
 }): React.ReactElement {
+	const isMobile = useIsMobile();
+	const mobileHomeScrollContainerRef = useRef<HTMLDivElement>(null);
+	useLayoutEffect(() => {
+		const container = mobileHomeScrollContainerRef.current;
+		if (!isMobile || !container) return;
+		container.scrollTop = mobileHomeScrollTopByWorkspacePath.get(workspacePath ?? null) ?? 0;
+		return () => {
+			mobileHomeScrollTopByWorkspacePath.set(workspacePath ?? null, container.scrollTop);
+		};
+	}, [isMobile, workspacePath]);
 	const dragOccurredRef = useRef(false);
 	const boardRef = useRef<HTMLElement>(null);
 	const latestDataRef = useRef<BoardData>(data);
@@ -240,6 +252,8 @@ export const KanbanBoard = memo(function KanbanBoard({
 
 	const requestProgrammaticCardMove = useCallback<RequestProgrammaticCardMove>(
 		(move) => {
+			// 手机阶段纵向排列，横向 snap 动画交给调用方既有的直接移卡兜底。
+			if (isMobile) return false;
 			const { taskId, toColumnId: targetColumnId } = move;
 			const board = latestDataRef.current;
 			const sourceColumnId = findCardColumnId(board.columns, taskId);
@@ -371,6 +385,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 			return true;
 		},
 		[
+			isMobile,
 			canAnimateProgrammaticTopInsertion,
 			clearProgrammaticCardMoveInFlight,
 			getElementClientCenter,
@@ -417,10 +432,14 @@ export const KanbanBoard = memo(function KanbanBoard({
 			onDragEnd={handleDragEnd}
 			sensors={PROGRAMMATIC_SENSORS}
 		>
-			{/* 置顶板横条在 DragDropContext 之内、`.kb-board` 之外：见 TaskPinboardStripOnKanbanBoard 的注释，
-			    进了 `.kb-board` 会被移动端的「直接子 section 即一列」规则拉宽，也会落进 getPrimaryBoardTaskElement 的查询范围。 */}
-			<div className="flex min-h-0 flex-1 flex-col">
+			{/* 置顶分身留在 `.kb-board` 外，避免被本体卡的查询与程序化移卡命中。 */}
+			<div
+				ref={mobileHomeScrollContainerRef}
+				data-mobile-single-project-home-scroll-container={isMobile ? "" : undefined}
+				className="kb-single-project-home-board-scroll-container flex min-h-0 min-w-0 flex-1 flex-col"
+			>
 				<TaskPinboardStripOnKanbanBoard
+					compactRowWithExpandableDetails={isMobile}
 					pinnedTasks={pinnedTasks}
 					taskSessions={taskSessions}
 					handlers={{
@@ -454,7 +473,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 				>
 					{displayGroups.map((column) =>
 						columnCollapseAndWidthPreferences.isColumnCollapsed(column.id) ? (
-							<BoardColumnCollapsedVerticalStrip
+							<BoardColumnCollapsedSection
 								key={column.id}
 								column={column}
 								onExpandColumn={columnCollapseAndWidthPreferences.toggleColumnCollapsed}
@@ -465,6 +484,7 @@ export const KanbanBoard = memo(function KanbanBoard({
 						) : (
 							<Fragment key={column.id}>
 								<BoardColumn
+									compactRowWithExpandableDetails={isMobile}
 									column={column}
 									onCollapseColumn={columnCollapseAndWidthPreferences.toggleColumnCollapsed}
 									columnFlexStyle={columnCollapseAndWidthPreferences.getExpandedColumnFlexStyle(column.id)}
