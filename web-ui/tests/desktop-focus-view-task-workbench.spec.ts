@@ -80,6 +80,9 @@ for (const width of [320, 390, 1440]) {
 			await page.screenshot({ path: test.info().outputPath(`session-toolbar-project-${panel}-${width}.png`) });
 			const terminal = panel === "terminal" ? await page.locator(".xterm-screen").elementHandle() : null;
 			const beforeConnections = connections();
+			// 先关闭前一工具的提示，再独立验证项目入口的点击与会话连续性。
+			await page.keyboard.press("Escape");
+			await expect(page.getByRole("tooltip")).toHaveCount(0);
 			await projectButton.click();
 			await expect(projectButton).toHaveCount(0);
 			expect(
