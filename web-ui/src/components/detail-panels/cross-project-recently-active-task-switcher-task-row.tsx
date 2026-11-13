@@ -16,9 +16,10 @@ import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-pa
 import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
 import { crossProjectTaskSwitcherSectionRowAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import {
-	CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
-	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
-} from "@/components/task-card-body";
+	focusTaskCardKeyboardEntryIncludingPortalledActionToolbars,
+	getTaskCardDomRootsIncludingPortalledActionToolbars,
+	TaskCardActionToolbar,
+} from "@/components/task-card-action-toolbar";
 import { TaskCardCornerStatusIndicators } from "@/components/task-card-corner-status-indicators";
 import { TaskPromptSubmissionAcceptanceNotice } from "@/components/task-prompt-submission-acceptance-notice";
 import { Button } from "@/components/ui/button";
@@ -124,7 +125,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 		const activeElement = document.activeElement;
 		if (
 			activeElement instanceof HTMLElement &&
-			compactRowPlaceholderRef.current?.contains(activeElement) &&
+			compactRowPlaceholderRef.current != null &&
+			getTaskCardDomRootsIncludingPortalledActionToolbars(compactRowPlaceholderRef.current).some((root) =>
+				root.contains(activeElement),
+			) &&
 			activeElement.matches(":focus-visible")
 		) {
 			const targetSelector = activeElement.hasAttribute(
@@ -132,9 +136,8 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			)
 				? '[data-testid="cross-project-task-switcher-full-task-card-in-list-expansion-toggle-button"]'
 				: "[data-task-card-title], [data-cross-project-task-switcher-full-task-card-unavailable-fallback-open-task-keyboard-entry]";
-			fullTaskCardContentElementRef.current
-				?.querySelector<HTMLElement>(targetSelector)
-				?.focus({ preventScroll: true });
+			const fullCard = fullTaskCardContentElementRef.current;
+			if (fullCard) focusTaskCardKeyboardEntryIncludingPortalledActionToolbars(fullCard, targetSelector);
 		}
 	}, [isHoverFloatingCardVisible, fullTaskCardContentElementRef]);
 	// 键盘按展开开关切换形态时，旧形态（连同它的开关）整块卸载：把焦点交给新形态下同一坐标的开关，不落到 body。
@@ -155,8 +158,6 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			ref={rowElementRef}
 			className={cn(
 				"relative flex min-w-0 shrink-0 flex-col",
-				// 分区第一行给伸出行顶边的 hover 动作组（连同展开开关向上扩的命中区）让出 header 下方的空间（不压 header 的折叠按钮 / 排序下拉框）。
-				CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME,
 				inPlaceExpansionState === "kept_expanded_in_list"
 					? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME
 					: "rounded-md",
@@ -246,16 +247,10 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							</span>
 						) : null}
 					</div>
-					{/* hover 动作组：与完整卡片的 hover 动作组同一几何（叠在首行上方 + right-1 + px-0.5、Button xs），
-				    最右一格的展开开关因此与 hover 展开 / 固定展开卡上的开关同一坐标；不压首行的字。常驻 DOM（只切透明度），
-				    键盘 Tab 得到，聚焦时显形。 */}
-					<div
-						className={cn(
-							"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
-							CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
-							"pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100",
-							"focus-within:pointer-events-auto focus-within:opacity-100",
-						)}
+					<TaskCardActionToolbar
+						sourceCardAnchorElementRef={compactRowPlaceholderRef}
+						isCompactTaskRow
+						actionToolbarRightInsetPx={4}
 					>
 						{section === "pinned" && onEditTaskPinboardPinReason ? (
 							<Button
@@ -283,7 +278,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 								onToggleInListExpansion={onKeepExpandedInListAsFullTaskCard}
 							/>
 						) : null}
-					</div>
+					</TaskCardActionToolbar>
 				</div>
 			)}
 			{/* 保持固定的 React 子节点位置：精简行 ↔ 展开之间完整卡片是同一个实例，不重挂载、不重读。 */}

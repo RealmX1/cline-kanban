@@ -19,6 +19,10 @@ vi.mock("node:child_process", () => ({
 		callback: (error: Error | null, result?: { stdout: string }) => void,
 	) => {
 		if (_command === "sysctl") return callback(null, { stdout: "same-boot" });
+		if (arguments_[0] === "-axo")
+			return callback(null, {
+				stdout: `301 S Wed Oct 28 ${nativeIdentityFailureSimulation.sameSecondReuse ? "12:00:00" : "12:01:00"} 2026 unrelated-reused-pid`,
+			});
 		if (arguments_[1] === "301")
 			return callback(null, {
 				stdout: nativeIdentityFailureSimulation.sameSecondReuse

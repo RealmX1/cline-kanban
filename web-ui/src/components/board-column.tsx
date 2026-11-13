@@ -6,6 +6,7 @@ import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
+import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
@@ -187,9 +188,9 @@ export const BoardColumn = memo(function BoardColumn({
 			<div className="flex flex-col min-h-0" style={{ flex: "1 1 0" }}>
 				<div
 					data-kanban-board-stage-section-header=""
-					className="flex items-center justify-between"
+					className="flex shrink-0 items-center justify-between"
 					style={{
-						height: compactRowWithExpandableDetails ? 44 : 40,
+						height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX,
 						padding: "0 12px",
 					}}
 				>

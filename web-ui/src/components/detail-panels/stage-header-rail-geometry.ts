@@ -1,3 +1,5 @@
+import { FOCUS_VIEW_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
+
 /**
  * Focus View 左侧「全 stage 卡头钉住 rail」的几何单一真源。
  *
@@ -10,7 +12,7 @@
  */
 
 /** stage 卡头槽高（与 `ColumnSection` / rail 条目卡头内联 `height` 一致）。 */
-export const STAGE_HEADER_HEIGHT_PX = 32;
+export const STAGE_HEADER_HEIGHT_PX = FOCUS_VIEW_TASK_GROUP_HEADER_HEIGHT_PX;
 /** rail 条目间距（复刻 scrollport 的 `gap-1` = 4px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
 export const STAGE_RAIL_GAP_PX = 4;
 /**
@@ -19,13 +21,8 @@ export const STAGE_RAIL_GAP_PX = 4;
  * 阈值须逐条计入，否则多条堆叠后累计误差会让「首个未钉卡头」落进不透明 rail 之后被遮住（RVF-002 遮挡类 bug）。
  */
 export const STAGE_SECTION_BORDER_PX = 2;
-/**
- * 焦点卡克隆外层 `pt-3 pb-2` 的上下 padding 之和（12px 上 + 8px 下），顶部避让悬停操作组。仅焦点条目
- * （`withCard`）挂此包裹层；`focusedCardHeight` 取真实卡 border box（`getBoundingClientRect().height` 不含其
- * `marginBottom: 6`，与 rail 内 sticky 卡头副本的 `marginBottom: 0` 一致），故焦点条目真实高
- * = 卡头槽高 + 外框 + 此 padding + 焦点卡高。漏计这 20px 会使焦点条目严重低估、吞掉相邻随流卡头。
- */
-export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 20;
+/** 焦点卡副本外层只保留 pb-2（8px）；悬浮按钮不参与卡体与 rail 的测量。 */
+export const STAGE_RAIL_FOCUSED_CARD_PADDING_PX = 8;
 
 /** 一个不含焦点卡克隆的普通 rail 条目所占的纵向空间（条目自身高 + 其下的堆叠间距）。 */
 const PLAIN_STAGE_RAIL_ENTRY_STRIDE_PX = STAGE_HEADER_HEIGHT_PX + STAGE_SECTION_BORDER_PX + STAGE_RAIL_GAP_PX;

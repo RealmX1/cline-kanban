@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import type * as FileSystemPromises from "node:fs/promises";
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +18,21 @@ import {
 } from "../../../src/task-command-execution/task-command-execution-store";
 
 const isolatedHome = vi.hoisted(() => ({ path: "" }));
+const ledgerIo = vi.hoisted(() => ({ reads: 0, writes: 0 }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+	const actual = await importOriginal<typeof FileSystemPromises>();
+	return {
+		...actual,
+		readFile: (...args: Parameters<typeof actual.readFile>) => {
+			if (String(args[0]).endsWith("task-command-executions.json")) ledgerIo.reads++;
+			return actual.readFile(...args);
+		},
+		rename: (...args: Parameters<typeof actual.rename>) => {
+			if (String(args[1]).endsWith("task-command-executions.json")) ledgerIo.writes++;
+			return actual.rename(...args);
+		},
+	};
+});
 vi.mock("../../../src/state/workspace-state", () => ({
 	getWorkspaceDirectoryPath: (workspaceId: string) => join(isolatedHome.path, workspaceId),
 	getRuntimeHomePath: () => isolatedHome.path,
@@ -33,6 +49,7 @@ afterEach(async () => {
 
 function fixture(
 	readDeliveryRecoveryEvidenceSha256?: TaskCommandExecutionDependencies["readDeliveryRecoveryEvidenceSha256"],
+	readCancellationRecoveryEvidenceSha256?: TaskCommandExecutionDependencies["readCancellationRecoveryEvidenceSha256"],
 ) {
 	const summary = {
 		taskId: "task-session",
@@ -93,6 +110,7 @@ function fixture(
 	const service = createTaskCommandExecutionService({
 		readOwner,
 		readDeliveryRecoveryEvidenceSha256,
+		readCancellationRecoveryEvidenceSha256,
 		launch,
 		cancel,
 		deliver,
@@ -130,6 +148,198 @@ function fixture(
 		readOwner,
 	};
 }
+
+it.each(["running", "unknown"] as const)(
+	"65 条 %s 的未变化等待记录每轮最多解析两次账本且不写盘",
+	async (workerState) => {
+		const f = fixture();
+		const first = await f.service.start("workspace", f.request);
+		const result = { disposition: "machine_evidence_pending", evidence: "x".repeat(40_000) };
+		await writeFile(f.request.specification.resultFile, JSON.stringify(result));
+		f.inspectWorker.mockResolvedValue(workerState);
+		await f.service.sweepExecution("workspace", first.executionId);
+		const observed = await f.service.inspect("workspace", first);
+		await mutateTaskCommandExecutions("workspace", () => ({
+			records: Array.from({ length: 65 }, (_, index) => ({
+				...observed,
+				executionId: index === 0 ? first.executionId : randomUUID(),
+				businessDisposition: "machine_evidence_pending" as const,
+				progress: result,
+			})),
+			result: undefined,
+		}));
+		ledgerIo.reads = 0;
+		ledgerIo.writes = 0;
+		f.inspectWorker.mockClear();
+		try {
+			f.service.startRecovery();
+			await vi.waitFor(() => expect(f.inspectWorker).toHaveBeenCalledTimes(65));
+		} finally {
+			f.service.stop();
+		}
+		expect(ledgerIo.reads).toBeLessThanOrEqual(2);
+		expect(ledgerIo.writes).toBe(0);
+	},
+);
+
+it("原地修改并返回原数组的存储调用继续持久化", async () => {
+	const f = fixture();
+	const record = await f.service.start("workspace", f.request);
+	await mutateTaskCommandExecutions("workspace", (records) => {
+		const current = records[0];
+		if (!current) throw new Error("缺少夹具执行");
+		current.businessDisposition = "machine_evidence_pending";
+		return { records, result: undefined };
+	});
+	expect((await f.service.inspect("workspace", record)).businessDisposition).toBe("machine_evidence_pending");
+});
+
+it("取消补证失败两次后自动恢复，旧 rechecked 不阻止接续", async () => {
+	let now = Date.now();
+	const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+	const f = fixture(undefined, async () => "unchanged-native-evidence");
+	try {
+		const record = await f.service.start("workspace", f.request);
+		await f.service.cancel("workspace", record);
+		await mutateTaskCommandExecutions("workspace", (records) => ({
+			records: records.map((entry) => ({
+				...entry,
+				cancellationObservation: { nativeCancellationStatus: "unknown", rechecked: true },
+			})),
+			result: undefined,
+		}));
+		f.cancel
+			.mockRejectedValueOnce(new Error("身份查询暂时失败"))
+			.mockRejectedValueOnce(new Error("身份查询再次失败"))
+			.mockResolvedValueOnce({ nativeCancellationStatus: "confirmed" });
+		await expect(f.service.sweepExecution("workspace", record.executionId)).rejects.toThrow("暂时失败");
+		now += 15_000;
+		await expect(f.service.sweepExecution("workspace", record.executionId)).rejects.toThrow("再次失败");
+		now += 15_000;
+		await f.service.sweepExecution("workspace", record.executionId);
+		expect(f.cancel).toHaveBeenCalledTimes(4);
+		expect((await f.service.inspect("workspace", record)).cancellationObservation?.nativeCancellationStatus).toBe(
+			"confirmed",
+		);
+		expect(f.launch).toHaveBeenCalledTimes(1);
+		expect(f.deliver).not.toHaveBeenCalled();
+	} finally {
+		f.service.stop();
+		clock.mockRestore();
+	}
+});
+
+it("取消补证预算跨重启保留，证据变化后恢复且不重派业务", async () => {
+	let now = Date.now();
+	let fingerprint = "unavailable";
+	const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+	const f = fixture(undefined, async () => fingerprint);
+	const resumed = fixture(undefined, async () => fingerprint);
+	try {
+		const record = await f.service.start("workspace", f.request);
+		await f.service.cancel("workspace", record);
+		for (let index = 0; index < 5; index++) {
+			await f.service.sweepExecution("workspace", record.executionId);
+			now += 15_000;
+		}
+		expect(f.cancel).toHaveBeenCalledTimes(4);
+		await resumed.service.sweepExecution("workspace", record.executionId);
+		expect(resumed.cancel).not.toHaveBeenCalled();
+		fingerprint = "native-generation-now-proven";
+		now += 15_000;
+		await resumed.service.sweepExecution("workspace", record.executionId);
+		expect(resumed.cancel).toHaveBeenCalledTimes(1);
+		expect(resumed.launch).not.toHaveBeenCalled();
+		expect(resumed.deliver).not.toHaveBeenCalled();
+		expect((await resumed.service.inspect("workspace", record)).revokedAtEpochMs).not.toBeNull();
+	} finally {
+		f.service.stop();
+		resumed.service.stop();
+		clock.mockRestore();
+	}
+});
+
+it("两个恢复服务并发观察同一撤销执行时只领取一次补查资格", async () => {
+	const first = fixture(undefined, async () => "same-cancellation-evidence");
+	const second = fixture(undefined, async () => "same-cancellation-evidence");
+	try {
+		const record = await first.service.start("workspace", first.request);
+		await first.service.cancel("workspace", record);
+		first.cancel.mockClear();
+		await Promise.all([
+			first.service.sweepExecution("workspace", record.executionId),
+			second.service.sweepExecution("workspace", record.executionId),
+		]);
+		expect(first.cancel.mock.calls.length + second.cancel.mock.calls.length).toBe(1);
+		expect(
+			(await first.service.inspect("workspace", record)).cancellationObservation?.unchangedEvidenceProbeCount,
+		).toBe(1);
+	} finally {
+		first.service.stop();
+		second.service.stop();
+	}
+});
+
+it.each(["unknown", "confirmed"] as const)(
+	"初次取消迟到的结果保留已完成的 %s 补查与跨重启预算",
+	async (recoveryCancellationStatus) => {
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const first = fixture(undefined, async () => "same-cancellation-evidence");
+		const resumed = fixture(undefined, async () => "same-cancellation-evidence");
+		let releaseInitialCancellation: () => void = () => undefined;
+		const initialCancellationBlocked = new Promise<void>((resolve) => {
+			releaseInitialCancellation = () => resolve();
+		});
+		let reportInitialCancellationEntered: () => void = () => undefined;
+		const initialCancellationEntered = new Promise<void>((resolve) => {
+			reportInitialCancellationEntered = () => resolve();
+		});
+		first.cancel
+			.mockImplementationOnce(async () => {
+				reportInitialCancellationEntered();
+				await initialCancellationBlocked;
+				return { nativeCancellationStatus: "unknown" };
+			})
+			.mockResolvedValueOnce({ nativeCancellationStatus: recoveryCancellationStatus });
+		let initialCancellation: ReturnType<typeof first.service.cancel> | undefined;
+		try {
+			const record = await first.service.start("workspace", first.request);
+			initialCancellation = first.service.cancel("workspace", record);
+			await initialCancellationEntered;
+			await first.service.sweepExecution("workspace", record.executionId);
+			const completedRecoveryObservation = (await first.service.inspect("workspace", record))
+				.cancellationObservation;
+			expect(completedRecoveryObservation).toMatchObject({
+				nativeCancellationStatus: recoveryCancellationStatus,
+				evidenceFingerprint: "same-cancellation-evidence",
+				unchangedEvidenceProbeCount: 1,
+				nextActiveProbeAtEpochMs: now + 15_000,
+			});
+			releaseInitialCancellation();
+			const afterLateCancellation = await initialCancellation;
+			expect(afterLateCancellation.cancellationObservation).toEqual(completedRecoveryObservation);
+			await resumed.service.sweepExecution("workspace", record.executionId);
+			expect(resumed.cancel).not.toHaveBeenCalled();
+			for (let index = 0; index < 4; index++) {
+				now += 15_000;
+				await resumed.service.sweepExecution("workspace", record.executionId);
+			}
+			expect(resumed.cancel).toHaveBeenCalledTimes(recoveryCancellationStatus === "unknown" ? 2 : 0);
+			expect(first.cancel).toHaveBeenCalledTimes(2);
+			expect(first.launch).toHaveBeenCalledTimes(1);
+			expect(resumed.launch).not.toHaveBeenCalled();
+			expect(first.deliver).not.toHaveBeenCalled();
+			expect(resumed.deliver).not.toHaveBeenCalled();
+		} finally {
+			releaseInitialCancellation();
+			await initialCancellation;
+			first.service.stop();
+			resumed.service.stop();
+			clock.mockRestore();
+		}
+	},
+);
 
 it("生产方先持久撤销后崩溃，旧业务结果和通知清单也不能恢复交回", async () => {
 	const f = fixture();

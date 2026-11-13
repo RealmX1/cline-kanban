@@ -18,6 +18,14 @@ beforeEach(() => {
 		vi.stubEnv(key, isolatedRuntimeHome.path);
 	vi.spyOn(commandSupervisor, "readSystemBootIdentity").mockResolvedValue("unchanged-system-boot");
 	vi.spyOn(commandSupervisor, "inspectOwnedCommandSupervisor").mockResolvedValue("running");
+	vi.spyOn(commandSupervisor, "observeOwnedProcessGenerations").mockImplementation(async (identities) =>
+		Promise.all(
+			identities.map(async (expected) => ({
+				expected,
+				current: await commandSupervisor.readProcessIdentity(expected.pid),
+			})),
+		),
+	);
 });
 
 afterEach(() => {

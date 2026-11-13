@@ -30,7 +30,12 @@ vi.mock("node:child_process", () => ({
 	) => {
 		if (command === "sysctl") return callback(null, { stdout: machine.boot });
 		if (machine.unreadable) return callback(Object.assign(new Error("不可读"), { code: "EPERM" }));
-		if (arguments_[0] === "-axo") return callback(null, { stdout: "" });
+		if (arguments_[0] === "-axo")
+			return callback(null, {
+				stdout: machine.liveDescendant
+					? "301 S Wed Oct 28 12:00:00 2026 owned-descendant"
+					: "999 S Wed Oct 28 12:00:00 2026 unrelated",
+			});
 		if (machine.liveDescendant && arguments_[1] === "301")
 			return callback(null, { stdout: "Wed Oct 28 12:00:00 2026 owned-descendant" });
 		callback(Object.assign(new Error("进程不存在"), { code: 1 }));

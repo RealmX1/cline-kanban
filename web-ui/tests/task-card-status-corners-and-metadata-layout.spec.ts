@@ -1,4 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 
 async function visibleBox(locator: Locator) {
 	const box = await locator.boundingBox();
@@ -114,7 +115,9 @@ for (const cardWidth of [200, 240]) {
 					"data-cross-project-task-switcher-row-in-place-expansion-state",
 					"expanded_in_place_by_hover",
 				);
-				await row.getByRole("button", { name: "Keep expanded in list", exact: true }).click();
+				await (await taskCardActionToolbar(row))
+					.getByRole("button", { name: "Keep expanded in list", exact: true })
+					.click();
 				await page.mouse.move(1275, 5);
 				await expect(row).toHaveAttribute(
 					"data-cross-project-task-switcher-row-in-place-expansion-state",
@@ -285,7 +288,7 @@ for (const width of [1280, 768, 390, 360]) {
 			}
 			const standardCard = page.locator('[data-layout-host="standard-board"]');
 			await standardCard.locator("[data-task-card-title]").hover();
-			const actionsBounds = await visibleBox(standardCard.locator("[data-task-card-primary-actions]"));
+			const actionsBounds = await visibleBox(await taskCardActionToolbar(standardCard));
 			const attachmentsId = await standardCard.locator(".kb-board-card-shell").getAttribute("aria-owns");
 			const attachments = page.locator(`[id="${attachmentsId}"]`);
 			await expect(attachments).toHaveCSS("opacity", "1");
@@ -333,8 +336,12 @@ for (const width of [1280, 768, 390, 360]) {
 			const initialGroups = await Promise.all(
 				metadataGroupSelectors.map((selector) => visibleBox(row.locator(`${selector}:visible`))),
 			);
+			await row
+				.locator("[data-cross-project-task-switcher-compact-row-placeholder]")
+				.dispatchEvent("pointerenter", { pointerType: "mouse" });
+			await expect(await taskCardActionToolbar(row)).toHaveCSS("visibility", "visible");
 			const initialExpansionToggle = await visibleBox(
-				row.getByRole("button", { name: "Keep expanded in list", exact: true }),
+				(await taskCardActionToolbar(row)).getByRole("button", { name: "Keep expanded in list", exact: true }),
 			);
 			const initialTitle = await visibleBox(title);
 			const initialMetadata = await visibleBox(metadata);
@@ -371,13 +378,15 @@ for (const width of [1280, 768, 390, 360]) {
 				await expect(metadata).not.toContainText("输入确认待补证");
 			}
 			const expandedToggle = await visibleBox(
-				row.getByRole("button", { name: "Keep expanded in list", exact: true }),
+				(await taskCardActionToolbar(row)).getByRole("button", { name: "Keep expanded in list", exact: true }),
 			);
 			for (const dimension of ["x", "y", "width", "height"] as const)
 				expect(Math.abs(expandedToggle[dimension] - initialExpansionToggle[dimension])).toBeLessThanOrEqual(1);
 			const sessionActivity = row.locator("[data-task-card-session-activity]");
 			expect(Math.abs((await visibleBox(sessionActivity)).x - initialMetadata.x)).toBeLessThan(1);
-			await row.getByRole("button", { name: "Keep expanded in list", exact: true }).click();
+			await (await taskCardActionToolbar(row))
+				.getByRole("button", { name: "Keep expanded in list", exact: true })
+				.click();
 			await page.mouse.move(width - 5, 5);
 			await expect(row).toHaveAttribute(
 				"data-cross-project-task-switcher-row-in-place-expansion-state",
@@ -454,7 +463,9 @@ for (const width of [1280, 768, 390, 360]) {
 			await page.getByRole("button", { name: "切换快照可用性", exact: true }).click();
 			await expect(row.locator("[data-task-card-title]")).toBeVisible();
 			await row.hover();
-			await row.getByRole("button", { name: "Collapse to compact row", exact: true }).click();
+			await (await taskCardActionToolbar(row))
+				.getByRole("button", { name: "Collapse to compact row", exact: true })
+				.click();
 			await expect(row).toHaveAttribute(
 				"data-cross-project-task-switcher-row-in-place-expansion-state",
 				"compact_row",

@@ -9,6 +9,7 @@ import { TaskCardBody } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskSessionSummary, RuntimeTaskWorkspaceInfoResponse } from "@/runtime/types";
 import type { ReviewTaskWorkspaceSnapshot } from "@/types";
+import { queryTaskCardElementIncludingPortalledActionToolbars } from "../../tests/task-card-action-toolbar-dom-test-queries";
 
 class DeferredClipboardItem {
 	constructor(readonly representations: { "text/plain": Promise<Blob> }) {}
@@ -127,7 +128,11 @@ function Harness(): React.ReactElement {
 // agent 角标改为纯图标 + accessible name（aria-label）+ hover tooltip：完整「agent · 模型」
 // 信息不再作为可见正文渲染，故从角标的可访问名读取断言。
 function getAgentBadgeLabel(container: HTMLElement): string {
-	return container.querySelector("[data-agent-badge]")?.getAttribute("aria-label") ?? "";
+	return (
+		queryTaskCardElementIncludingPortalledActionToolbars(container, "[data-agent-badge]")?.getAttribute(
+			"aria-label",
+		) ?? ""
+	);
 }
 
 describe("BoardCard", () => {
@@ -207,7 +212,10 @@ describe("BoardCard", () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="in_progress" onStart={onStart} />);
 		});
 
-		const retryButton = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task start"]');
+		const retryButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="Retry task start"]',
+		);
 		expect(retryButton).not.toBeNull();
 		await act(async () => {
 			retryButton?.click();
@@ -225,7 +233,9 @@ describe("BoardCard", () => {
 				/>,
 			);
 		});
-		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="Retry task start"]'),
+		).toBeNull();
 	});
 
 	function createNeverStartedPlaceholderSummary(): RuntimeTaskSessionSummary {
@@ -267,7 +277,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const retryButton = container.querySelector<HTMLButtonElement>('button[aria-label="Retry task start"]');
+		const retryButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="Retry task start"]',
+		);
 		expect(retryButton).not.toBeNull();
 		await act(async () => {
 			retryButton?.click();
@@ -293,7 +306,9 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.querySelector('button[aria-label="Retry task start"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="Retry task start"]'),
+		).toBeNull();
 	});
 
 	it("shows a loading state on the review done button while moving to done", async () => {
@@ -305,7 +320,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const trashButton = container.querySelector('button[aria-label="结案任务"]');
+		const trashButton = queryTaskCardElementIncludingPortalledActionToolbars(
+			container,
+			'button[aria-label="结案任务"]',
+		);
 		expect(trashButton).toBeInstanceOf(HTMLButtonElement);
 		expect((trashButton as HTMLButtonElement | null)?.disabled).toBe(true);
 		expect(trashButton?.querySelector("svg.animate-spin")).toBeTruthy();
@@ -320,7 +338,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const doneButton = container.querySelector('button[aria-label="结案任务"]');
+		const doneButton = queryTaskCardElementIncludingPortalledActionToolbars(
+			container,
+			'button[aria-label="结案任务"]',
+		);
 		expect(doneButton?.querySelector("svg.lucide-archive")).toBeTruthy();
 		expect(doneButton?.querySelector("svg.lucide-trash-2")).toBeFalsy();
 	});
@@ -599,8 +620,15 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.querySelector('button[aria-label="结案任务"]')).toBeNull();
-		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="结案任务"]'),
+		).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(
+				container,
+				'button[aria-label="Move task to validation"]',
+			),
+		).toBeNull();
 	});
 
 	it("shows the move-to-review action on an in-progress terminal-agent card and fires onMoveToReview", async () => {
@@ -620,7 +648,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const reviewButton = container.querySelector<HTMLButtonElement>('button[aria-label="Move task to review"]');
+		const reviewButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="Move task to review"]',
+		);
 		expect(reviewButton).toBeInstanceOf(HTMLButtonElement);
 
 		await act(async () => {
@@ -646,7 +677,9 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.querySelector('button[aria-label="Move task to review"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="Move task to review"]'),
+		).toBeNull();
 	});
 
 	it("hides the move-to-review action on a terminal-agent card outside In Progress (review column)", async () => {
@@ -664,7 +697,9 @@ describe("BoardCard", () => {
 			);
 		});
 
-		expect(container.querySelector('button[aria-label="Move task to review"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="Move task to review"]'),
+		).toBeNull();
 	});
 
 	it("moves review cards to validation from the compact card action", async () => {
@@ -678,7 +713,8 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const validationButton = container.querySelector<HTMLButtonElement>(
+		const validationButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
 			'button[aria-label="Move task to validation"]',
 		);
 		expect(validationButton).toBeInstanceOf(HTMLButtonElement);
@@ -702,9 +738,17 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const doneButton = container.querySelector<HTMLButtonElement>('button[aria-label="结案任务"]');
+		const doneButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="结案任务"]',
+		);
 		expect(doneButton).toBeInstanceOf(HTMLButtonElement);
-		expect(container.querySelector('button[aria-label="Move task to validation"]')).toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(
+				container,
+				'button[aria-label="Move task to validation"]',
+			),
+		).toBeNull();
 
 		await act(async () => {
 			doneButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
@@ -725,7 +769,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const deleteButton = container.querySelector<HTMLButtonElement>('button[aria-label="Delete task permanently"]');
+		const deleteButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="Delete task permanently"]',
+		);
 		expect(deleteButton).toBeInstanceOf(HTMLButtonElement);
 		expect(deleteButton?.className).toContain("text-status-red");
 		expect(deleteButton?.className).toContain("bg-status-red/10");
@@ -754,7 +801,10 @@ describe("BoardCard", () => {
 			);
 		});
 
-		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
+		const viewPromptButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="View original prompt"]',
+		);
 		expect(viewPromptButton).toBeInstanceOf(HTMLButtonElement);
 
 		await act(async () => {
@@ -773,7 +823,10 @@ describe("BoardCard", () => {
 			root.render(<BoardCard card={createCard()} index={0} columnId="backlog" onClick={onCardSelect} />);
 		});
 
-		const viewPromptButton = container.querySelector<HTMLButtonElement>('button[aria-label="View original prompt"]');
+		const viewPromptButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+			container,
+			'button[aria-label="View original prompt"]',
+		);
 		await act(async () => {
 			viewPromptButton?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
 			viewPromptButton?.click();
@@ -806,7 +859,9 @@ describe("BoardCard", () => {
 					/>,
 				);
 			});
-			expect(container.querySelector('button[aria-label="Copy directory path"]')).not.toBeNull();
+			expect(
+				queryTaskCardElementIncludingPortalledActionToolbars(container, 'button[aria-label="Copy directory path"]'),
+			).not.toBeNull();
 			if (columnId === "backlog") {
 				expect(container.querySelector("[data-task-directory]")).toBeNull();
 			}
@@ -851,7 +906,10 @@ describe("BoardCard", () => {
 					/>,
 				),
 			);
-			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const button = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			await act(async () => {
 				isHandlingClick = true;
 				button?.click();
@@ -899,7 +957,10 @@ describe("BoardCard", () => {
 					/>,
 				),
 			);
-			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const button = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			act(() => {
 				isHandlingClick = true;
 				button?.click();
@@ -940,7 +1001,10 @@ describe("BoardCard", () => {
 					/>,
 				),
 			);
-			const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const button = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			act(() => button?.focus());
 			await act(async () => {
 				isHandlingClick = true;
@@ -993,7 +1057,10 @@ describe("BoardCard", () => {
 						/>,
 					),
 				);
-				const button = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+				const button = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+					container,
+					'button[aria-label="Copy directory path"]',
+				);
 				act(() => button?.focus());
 				expect(oldResolver).toHaveBeenCalledOnce();
 				await act(async () =>
@@ -1058,7 +1125,10 @@ describe("BoardCard", () => {
 					/>,
 				);
 			});
-			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const copyButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			expect(copyButton).not.toBeNull();
 			await act(async () => copyButton?.focus());
 			await act(async () => {
@@ -1107,7 +1177,10 @@ describe("BoardCard", () => {
 					/>,
 				);
 			});
-			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const copyButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			await act(async () => copyButton?.click());
 			expect(copyButton?.querySelector("svg.lucide-check")).toBeNull();
 			expect(notifyError).toHaveBeenCalledWith(
@@ -1142,7 +1215,10 @@ describe("BoardCard", () => {
 					/>,
 				);
 			});
-			const copyButton = container.querySelector<HTMLButtonElement>('button[aria-label="Copy directory path"]');
+			const copyButton = queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Copy directory path"]',
+			);
 			await act(async () => copyButton?.focus());
 			await act(async () => copyButton?.click());
 			expect(executeNativeClipboardCopy).toHaveBeenCalledWith("copy");

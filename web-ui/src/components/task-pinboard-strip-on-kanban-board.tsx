@@ -1,9 +1,9 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, Pin } from "lucide-react";
 import type { ReactElement } from "react";
-
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { cn } from "@/components/ui/cn";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
@@ -62,10 +62,8 @@ export function TaskPinboardStripOnKanbanBoard({
 				type="button"
 				onClick={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
 				aria-expanded={!collapsed}
-				className={cn(
-					"flex h-10 w-full cursor-pointer items-center gap-2 border-none bg-transparent px-3 text-left text-text-primary hover:bg-surface-0",
-					compactRowWithExpandableDetails && "min-h-11",
-				)}
+				style={{ height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX }}
+				className="flex w-full cursor-pointer items-center gap-2 border-none bg-transparent px-3 text-left text-text-primary hover:bg-surface-0"
 			>
 				{collapsed ? (
 					<ChevronRight size={16} className="shrink-0 text-text-secondary" />
@@ -79,7 +77,7 @@ export function TaskPinboardStripOnKanbanBoard({
 			{collapsed ? null : (
 				<div
 					className={cn(
-						"flex gap-2 px-3 pb-3 pt-1",
+						"flex gap-2 px-3 pb-3",
 						compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto",
 					)}
 				>
