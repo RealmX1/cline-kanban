@@ -16,7 +16,7 @@ export default defineConfig({
 	use: { ...baseConfig.use, baseURL: webUiBaseUrl, actionTimeout: 5000 },
 	webServer: {
 		// 任务依赖可能指向共享 node_modules，Vite 优化缓存必须留在当前 checkout。
-		command: `node --input-type=module -e 'import { createServer } from "vite"; const server = await createServer({ cacheDir: "../.cache/single-project-mobile-home-playwright-vite", server: { host: "127.0.0.1", port: ${webUiPort}, strictPort: true } }); await server.listen();'`,
+		command: `node --input-type=module -e 'import { createServer } from "vite"; const server = await createServer({ cacheDir: "../.cache/single-project-mobile-home-playwright-vite", server: { host: "127.0.0.1", port: ${webUiPort}, strictPort: true, fs: { deny: [".env", ".env.*", "*.{crt,pem}"] } } }); await server.listen();'`,
 		cwd: dirname(fileURLToPath(import.meta.url)),
 		url: webUiBaseUrl,
 		reuseExistingServer: false,

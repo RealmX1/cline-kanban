@@ -1078,6 +1078,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 							cn(
 								"kb-board-card-surface group/card relative flex flex-col rounded-md bg-surface-2/35 px-2 py-1.5 ring-1 ring-inset ring-border-bright/65",
 								isCrossProjectTaskSwitcherRowCopy && "bg-surface-2 ring-1 ring-inset ring-border-bright/65",
+								compactRowWithExpandableDetails &&
+									"[&_[data-task-card-primary-actions]_button]:min-h-11 [&_[data-task-card-primary-actions]_button]:min-w-11 [&_[data-task-card-primary-actions]_button_svg]:size-4",
 
 								historicalSnapshot && "pr-14 sm:pr-10",
 								isCardInteractive && "cursor-pointer hover:bg-surface-3",
@@ -1229,18 +1231,8 @@ export const TaskCardBody = memo(function TaskCardBody(
 						) : null}
 					</div>
 				</div>
-				<div
-					hidden={isCompactTaskRowCollapsed}
-					className={
-						isCompactTaskRowCollapsed
-							? undefined
-							: cn(
-									"contents",
-									compactRowWithExpandableDetails && "[&_button]:min-h-11 [&_button]:min-w-11 [&_button_svg]:size-4",
-								)
-					}
-				>
 				<TaskCardActionToolbar
+					hidden={isCompactTaskRowCollapsed}
 					sourceCardAnchorElementRef={taskStickers.cardElementRef}
 					isSourceCardInteractionActive={isHoverPresentationShown || taskStickers.open}
 					isCompactTaskRow={isCrossProjectTaskSwitcherRowCopy || isCompactRowInFocusViewLeftColumn}
@@ -1504,7 +1496,6 @@ export const TaskCardBody = memo(function TaskCardBody(
 					) : null}
 					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
 				</TaskCardActionToolbar>
-				</div>
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
 				) : null}

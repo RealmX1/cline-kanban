@@ -76,10 +76,7 @@ export function TaskPinboardStripOnKanbanBoard({
 			</button>
 			{collapsed ? null : (
 				<div
-					className={cn(
-						"flex gap-2 px-3 pb-3",
-						compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto",
-					)}
+					className={cn("flex gap-2 px-3 pb-3", compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto")}
 				>
 					{pinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div

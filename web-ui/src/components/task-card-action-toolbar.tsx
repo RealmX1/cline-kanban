@@ -57,6 +57,7 @@ export function TaskCardActionToolbar({
 	isCompactTaskRow = false,
 	actionToolbarRightInsetPx = 0,
 	usesDocumentFlowActionToolbar = false,
+	hidden = false,
 	children,
 }: {
 	sourceCardAnchorElementRef: RefObject<HTMLElement | null>;
@@ -64,6 +65,7 @@ export function TaskCardActionToolbar({
 	isCompactTaskRow?: boolean;
 	actionToolbarRightInsetPx?: number;
 	usesDocumentFlowActionToolbar?: boolean;
+	hidden?: boolean;
 	children: ReactNode;
 }) {
 	const taskCardActionToolbarDomId = useId();
@@ -203,9 +205,10 @@ export function TaskCardActionToolbar({
 			id={taskCardActionToolbarDomId}
 			ref={forwardTaskCardActionToolbarWheelScrollRef}
 			data-task-card-primary-actions=""
+			hidden={hidden}
 			data-task-card-action-toolbar-disclosure-state={areActionToolbarActionsExpanded ? "expanded" : "collapsed"}
 			data-task-card-action-toolbar-state={
-				usesDocumentFlowActionToolbar || isTaskCardActionToolbarVisible ? "visible" : "hidden"
+				!hidden && (usesDocumentFlowActionToolbar || isTaskCardActionToolbarVisible) ? "visible" : "hidden"
 			}
 			style={usesDocumentFlowActionToolbar ? undefined : { left: 0, top: 0, visibility: "hidden" }}
 			{...{ inert: !usesDocumentFlowActionToolbar && !isTaskCardActionToolbarVisible ? "" : undefined }}
@@ -254,13 +257,19 @@ export function TaskCardActionToolbar({
 				inlineKeyboardEntryPlaceholderElementRef.current?.focus({ preventScroll: true });
 				isReturningFocusToInlineTabOrderRef.current = false;
 			}}
-			className={cn(
-				"kb-task-card-primary-actions",
-				usesDocumentFlowActionToolbar
-					? "order-last mt-2 flex flex-wrap items-center gap-0.5"
-					: "kb-task-card-floating-actions fixed z-40 flex max-w-[calc(100vw-8px)] flex-wrap items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity motion-reduce:transition-none",
-				!usesDocumentFlowActionToolbar && !isTaskCardActionToolbarVisible && "pointer-events-none opacity-0",
-			)}
+			className={
+				hidden
+					? undefined
+					: cn(
+							"kb-task-card-primary-actions",
+							usesDocumentFlowActionToolbar
+								? "order-last mt-2 flex flex-wrap items-center gap-0.5"
+								: "kb-task-card-floating-actions fixed z-40 flex max-w-[calc(100vw-8px)] flex-wrap items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity motion-reduce:transition-none",
+							!usesDocumentFlowActionToolbar &&
+								!isTaskCardActionToolbarVisible &&
+								"pointer-events-none opacity-0",
+						)
+			}
 		>
 			<div
 				id={`${taskCardActionToolbarDomId}-expanded-actions`}
