@@ -1,0 +1,23 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { runInNewContext } from "node:vm";
+
+assert.equal(typeof global.gc, "function", "请用 node --expose-gc 运行等待内存验收");
+const sourcePath = process.argv[2] ?? "src/task-command-execution/task-command-execution-supervisor.ts";
+const sourceFile = await readFile(sourcePath, "utf8");
+const source = sourceFile.split("const supervisorSource = String.raw`")[1]?.split("`;\n")[0] ?? sourceFile;
+const waitStatement = source.split("const observationDelay=")[1]?.split("\n")[1]?.trim();
+assert.ok(waitStatement?.startsWith("await "), "未找到真实监管循环的等待语句");
+let complete;
+const completion = new Promise((resolve) => { complete = resolve; });
+const context = { completion, settled: null, observationDelay: 200, setTimeout: (resolve) => queueMicrotask(resolve) };
+global.gc();
+const before = process.memoryUsage().heapUsed;
+await runInNewContext(`(async()=>{for(let iteration=0;iteration<150000;iteration++){${waitStatement}}})()`, context);
+global.gc();
+const retainedHeapBytes = process.memoryUsage().heapUsed - before;
+complete({ returncode: 0 });
+await new Promise((resolve) => setImmediate(resolve));
+global.gc();
+process.stdout.write(`${JSON.stringify({ sourcePath, iterations: 150_000, retainedHeapBytes, retainedHeapAfterCompletionBytes: process.memoryUsage().heapUsed - before })}\n`);
+assert.ok(retainedHeapBytes <= 2 * 1024 * 1024, "未完成命令的等待机制保留内存超过 2 MiB");

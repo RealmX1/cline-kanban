@@ -29,6 +29,14 @@ beforeEach(() => {
 	for (const key of ["HOME", "USERPROFILE", "CODEX_HOME", "CODEX_SQLITE_HOME"]) vi.stubEnv(key, sandbox.path);
 	vi.spyOn(ownedCommandSupervisor, "readSystemBootIdentity").mockResolvedValue("boot-one");
 	vi.spyOn(ownedCommandSupervisor, "readProcessIdentity").mockResolvedValue(null);
+	vi.spyOn(ownedCommandSupervisor, "observeOwnedProcessGenerations").mockImplementation(async (identities) =>
+		Promise.all(
+			identities.map(async (expected) => ({
+				expected,
+				current: await ownedCommandSupervisor.readProcessIdentity(expected.pid),
+			})),
+		),
+	);
 	vi.spyOn(ownedCommandSupervisor, "inspectOwnedCommandSupervisor").mockResolvedValue("unknown");
 	vi.spyOn(ownedCommandSupervisor, "cancelOwnedCommandProcesses").mockResolvedValue({});
 	vi.spyOn(ownedCommandSupervisor, "launchOwnedCommandSupervisor").mockResolvedValue();
