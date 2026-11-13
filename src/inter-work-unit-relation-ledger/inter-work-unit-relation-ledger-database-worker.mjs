@@ -217,8 +217,67 @@ const insertPendingBatchStatement = database.prepare(`INSERT INTO pending_board_
  pending_board_file_write_batch_id, workspace_id, expected_board_file_sha256_after_write, expected_board_revision_after_write,
  next_workspace_board_snapshot_json, pending_batch_status, created_at) VALUES (?, ?, ?, ?, ?, 'pending', ?)`);
 const resolvePendingBatchStatement = database.prepare(
-	"UPDATE pending_board_file_write_task_mutation_event_batches SET pending_batch_status = ?, resolved_at = ? WHERE pending_board_file_write_batch_id = ? AND pending_batch_status = 'pending'",
+	"UPDATE pending_board_file_write_task_mutation_event_batches SET pending_batch_status = ?, resolved_at = ?, next_workspace_board_snapshot_json = '' WHERE pending_board_file_write_batch_id = ? AND pending_batch_status = 'pending'",
 );
+
+const readTerminalBatchSnapshotSizesStatement = database.prepare(`SELECT rowid AS batch_rowid,
+ octet_length(next_workspace_board_snapshot_json) AS snapshot_bytes
+ FROM pending_board_file_write_task_mutation_event_batches WHERE rowid > ?
+ AND pending_batch_status IN ('committed', 'abandoned') AND resolved_at IS NOT NULL
+ AND octet_length(next_workspace_board_snapshot_json) > 0 ORDER BY rowid LIMIT 32`);
+const clearTerminalBatchSnapshotStatement = database.prepare(`UPDATE pending_board_file_write_task_mutation_event_batches
+ SET next_workspace_board_snapshot_json = '' WHERE rowid = ? AND pending_batch_status IN ('committed', 'abandoned')`);
+const compactTerminalBatchSnapshotChunk = database.transaction((afterBatchRowId) => {
+	const rows = readTerminalBatchSnapshotSizesStatement.all(afterBatchRowId);
+	let compactedBatchCount = 0;
+	let compactedSnapshotBytes = 0;
+	let lastCompactedBatchRowId = afterBatchRowId;
+	for (const row of rows) {
+		// 单条超预算仍须原子处理；其余每次最多 32 条／4 MiB，不把正文搬入 JS 或 IPC。
+		if (compactedBatchCount > 0 && compactedSnapshotBytes + row.snapshot_bytes > 4 * 1024 * 1024) break;
+		clearTerminalBatchSnapshotStatement.run(row.batch_rowid);
+		compactedBatchCount++;
+		compactedSnapshotBytes += row.snapshot_bytes;
+		lastCompactedBatchRowId = row.batch_rowid;
+	}
+	return { compactedBatchCount, compactedSnapshotBytes, lastCompactedBatchRowId };
+});
+let terminalSnapshotCompactionTimer;
+let lastCompactedTerminalBatchRowId = 0;
+let consecutiveTerminalSnapshotCompactionFailures = 0;
+function compactHistoricalTerminalBatchSnapshots() {
+	let nextAttemptDelayMs = 1000;
+	try {
+		// 历史维护不能占着业务 worker 等另一个 runtime 的写锁。
+		database.pragma("busy_timeout = 0");
+		const progress = compactTerminalBatchSnapshotChunk.immediate(lastCompactedTerminalBatchRowId);
+		lastCompactedTerminalBatchRowId = progress.lastCompactedBatchRowId;
+		consecutiveTerminalSnapshotCompactionFailures = 0;
+		parentPort.postMessage({ terminalBoardMutationSnapshotCompaction: {
+			...progress, status: progress.compactedBatchCount ? "in_progress" : "completed",
+		} });
+		if (!progress.compactedBatchCount) {
+			// 旧版本可能在本轮之后才结算低 rowid 的 pending；空轮降为每分钟补扫。
+			lastCompactedTerminalBatchRowId = 0;
+			nextAttemptDelayMs = 60_000;
+		}
+	} catch (error) {
+		consecutiveTerminalSnapshotCompactionFailures++;
+		nextAttemptDelayMs = consecutiveTerminalSnapshotCompactionFailures < 3
+			? 1000 * 2 ** consecutiveTerminalSnapshotCompactionFailures : 60_000;
+		parentPort.postMessage({ terminalBoardMutationSnapshotCompaction: {
+			status: "waiting_retry", lastCompactedBatchRowId: lastCompactedTerminalBatchRowId,
+			consecutiveFailures: consecutiveTerminalSnapshotCompactionFailures,
+			failureCode: typeof error.code === "string" ? error.code : "unknown",
+			automaticRecoveryCondition: "terminal_snapshot_update_or_database_write_availability_recovers",
+			nextAttemptAtEpochMs: Date.now() + nextAttemptDelayMs,
+		} });
+	} finally {
+		database.pragma("busy_timeout = 10000");
+	}
+	terminalSnapshotCompactionTimer = setTimeout(compactHistoricalTerminalBatchSnapshots, nextAttemptDelayMs);
+	terminalSnapshotCompactionTimer.unref();
+}
 const readPendingBatchEventRowIdsStatement = database.prepare(
 	"SELECT event_row_id FROM inter_work_unit_relation_ledger_events WHERE pending_board_file_write_batch_id = ? AND event_commit_status = 'pending_board_file_write' ORDER BY event_row_id",
 );
@@ -707,6 +766,7 @@ const commands = {
 	readRetainedFieldContents,
 	findRetainedTaskCardFieldKeywordMatches,
 	close: () => {
+		clearTimeout(terminalSnapshotCompactionTimer);
 		database.close();
 		return true;
 	},
@@ -721,3 +781,7 @@ parentPort.on("message", ({ requestId, command, input }) => {
 		parentPort.postMessage({ requestId, error: error instanceof Error ? error.message : String(error) });
 	}
 });
+
+// 已清除正文就是持久检查点；重启重新扫描仍只处理未压缩的终态，不触碰 pending 或账本事件。
+terminalSnapshotCompactionTimer = setTimeout(compactHistoricalTerminalBatchSnapshots, 0);
+terminalSnapshotCompactionTimer.unref();

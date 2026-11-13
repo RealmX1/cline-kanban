@@ -2047,8 +2047,18 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 		},
 		refreshTaskTerminal: async (workspaceScope, input, configurationProfileAutomaticAdoptionGuard) => {
+			const receivedAtMs = Date.now();
 			try {
 				const body = parseTaskTerminalRefreshRequest(input);
+				const assertAutomaticResumeNotExplicitlyStopped =
+					body.taskSessionStartOriginDeclaredByClient === "stale_session_client_auto_resume"
+						? async () =>
+								await conversationSessions.assertAutomaticSessionResumeNotExplicitlyStopped(
+									workspaceScope,
+									body.taskId,
+								)
+						: undefined;
+				await assertAutomaticResumeNotExplicitlyStopped?.();
 				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
 				const currentSummary = terminalManager.getSummary(body.taskId);
 				// 这里刻意**不**在解析卡片之前就以「没有活体 summary」或「summary.agentId 为 null」拒绝。
@@ -2191,6 +2201,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						broadcastRuntimeWorkspaceStateUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
 					});
 				const refreshTaskTerminalRequest = {
+					...(assertAutomaticResumeNotExplicitlyStopped
+						? {
+								revalidateExistingMainSessionHandoverTargetBeforeLaunch:
+									assertAutomaticResumeNotExplicitlyStopped,
+							}
+						: {}),
 					configurationProfileAutomaticAdoptionGuard: configurationProfileAutomaticAdoptionGuard
 						? {
 								...configurationProfileAutomaticAdoptionGuard,
@@ -2300,6 +2316,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 								refreshTaskTerminalRequest,
 								refreshTaskSessionStartOrigin,
 							);
+				for (const [phase, elapsedMs] of [
+					["frontend_automatic_resume_visible_dwell", body.automaticResumeFrontendVisibleDwellElapsedMs],
+					["server_refresh_request_to_runtime_started", Date.now() - receivedAtMs],
+				] as const) {
+					if (elapsedMs === undefined) continue;
+					void recordTaskSessionStartDiagnostic({
+						event: "phase_completed",
+						phase,
+						elapsedMs,
+						phaseDurationMs: elapsedMs,
+						workspaceId: workspaceScope.workspaceId,
+						taskId: body.taskId,
+						requestedAgentId: resolved.agentId,
+						effectiveAgentId: summary.agentId,
+						runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? undefined,
+						error: null,
+						session: null,
+					});
+				}
 				// 重启也是一次启动：把 agent 身份重新钉到卡片上，让「靠兜底才救回来的会话」在下一次硬中断时
 				// 不必再靠兜底。
 				//

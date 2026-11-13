@@ -18,7 +18,7 @@ function createDeferredResponse<T>() {
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			getCodexConfigurationSyncActiveState: { query: queries.fetch },
+			getCodexConfigurationSyncOverview: { query: queries.fetch },
 			getCodexConfigurationSourceObservation: { query: queries.source },
 			getCodexConfigurationMutationReceipt: { query: queries.receipt },
 			batchCodexConfigurationAction: { mutate: queries.batch },
@@ -212,7 +212,7 @@ describe("来源回执的有界核验与持久恢复", () => {
 		expect(queries.batch.mock.calls[1]![0]).toEqual({
 			action: frozen.action,
 			items: [frozen.item],
-			stateResponseScope: "active",
+			stateResponseScope: "overview",
 		});
 		expect(controller.getSnapshot().sourceOperations).toEqual({});
 	});
@@ -238,7 +238,7 @@ describe("来源回执的有界核验与持久恢复", () => {
 
 it("活跃列表缺项和回执未知时保留持久操作，不当作已被替代", async () => {
 	queries.batch.mockRejectedValue(new Error("隔离丢失响应"));
-	queries.fetch.mockResolvedValue({ ...state, stateResponseScope: "active", sourceObservations: [] });
+	queries.fetch.mockResolvedValue({ ...state, stateResponseScope: "overview", sourceObservations: [] });
 	const pending = controller.batch("confirm_source", [item]);
 	await vi.runAllTimersAsync();
 	await pending;
@@ -250,9 +250,9 @@ it("活跃列表缺项和回执未知时保留持久操作，不当作已被替�
 });
 it("历史稍后条目不在活跃列表时仍携带原版本提交", async () => {
 	const observation = handledState("deferred").sourceObservations[0]!;
-	controller.acceptState({ ...state, stateResponseScope: "active", sourceObservations: [] });
+	controller.acceptState({ ...state, stateResponseScope: "overview", sourceObservations: [] });
 	queries.batch.mockResolvedValue({
-		state: { ...state, revision: 3, stateResponseScope: "active", sourceObservations: [] },
+		state: { ...state, revision: 3, stateResponseScope: "overview", sourceObservations: [] },
 		results: [{ changeId: "source", status: "applied", message: "已标记已读" }],
 	});
 	await controller.batch("confirm_source", [{ ...item, expectedVersion: observation.version, observation }]);

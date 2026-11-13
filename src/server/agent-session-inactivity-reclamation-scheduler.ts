@@ -9,6 +9,7 @@
 //  3. **陈旧定时器双重防护**：真正动手前重新比对 (incarnationId, turnSequence) 与当前 summary，并复查
 //     该会话此刻是否仍处于计时态。任一不匹配一律置 superseded 并放弃回收——宁可漏回收，绝不误杀一个
 //     已经继续跑起来的会话。
+import { readAgentSessionUserTurnIdleProcessRetentionDurationMinutes } from "../config/runtime-config";
 import type { RuntimeAgentSessionReclamationOutcome, RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	isAgentSessionRuntimeReclamationDue,
@@ -23,6 +24,7 @@ import {
 	isLiveAgentSessionReclamationState,
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAllAgentSessionReclamationDeadlineRecords,
+	refreshAgentSessionUserTurnIdleProcessRetentionDeadline,
 	supersedeAgentSessionRetentionDeadlinesForTask,
 	updateAgentSessionReclamationProgress,
 } from "../state/agent-session-reclamation-deadline-store";
@@ -89,6 +91,8 @@ export interface CreateAgentSessionInactivityReclamationSchedulerOptions {
 	now?: () => number;
 	sweepIntervalMs?: number;
 	readAllDeadlineRecords?: typeof readAllAgentSessionReclamationDeadlineRecords;
+	readUserTurnIdleProcessRetentionDurationMinutes?: typeof readAgentSessionUserTurnIdleProcessRetentionDurationMinutes;
+	refreshUserTurnIdleProcessRetentionDeadline?: typeof refreshAgentSessionUserTurnIdleProcessRetentionDeadline;
 	updateReclamationProgress?: typeof updateAgentSessionReclamationProgress;
 	supersedeRetentionDeadlines?: typeof supersedeAgentSessionRetentionDeadlinesForTask;
 	markPendingUserDecisionsReclaimed?: typeof markAgentRaisedPendingUserDecisionsReclaimed;
@@ -113,6 +117,11 @@ export function createAgentSessionInactivityReclamationScheduler(
 	const now = options.now ?? (() => Date.now());
 	const sweepIntervalMs = options.sweepIntervalMs ?? AGENT_SESSION_RECLAMATION_SWEEP_INTERVAL_MS;
 	const readAllDeadlineRecords = options.readAllDeadlineRecords ?? readAllAgentSessionReclamationDeadlineRecords;
+	const readUserTurnIdleProcessRetentionDurationMinutes =
+		options.readUserTurnIdleProcessRetentionDurationMinutes ??
+		readAgentSessionUserTurnIdleProcessRetentionDurationMinutes;
+	const refreshUserTurnIdleProcessRetentionDeadline =
+		options.refreshUserTurnIdleProcessRetentionDeadline ?? refreshAgentSessionUserTurnIdleProcessRetentionDeadline;
 	const updateReclamationProgress = options.updateReclamationProgress ?? updateAgentSessionReclamationProgress;
 	const supersedeRetentionDeadlines =
 		options.supersedeRetentionDeadlines ?? supersedeAgentSessionRetentionDeadlinesForTask;
@@ -185,6 +194,31 @@ export function createAgentSessionInactivityReclamationScheduler(
 			);
 			return;
 		}
+		// 原生补证或后台工作读取可能跨越一次设置保存，真正回收前再核对，避免仍按旧的短期限终止。
+		if (record.retentionAnchorKind === "agent_response_generation_stopped") {
+			try {
+				const latestDurationMinutes = await readUserTurnIdleProcessRetentionDurationMinutes();
+				if (record.reclamationEligibleAt !== record.retentionAnchorAt + latestDurationMinutes * 60_000) {
+					const refreshed = await refreshUserTurnIdleProcessRetentionDeadline(
+						workspaceId,
+						record.recordId,
+						latestDurationMinutes,
+						now(),
+					);
+					if (!refreshed) return;
+					record = refreshed;
+				}
+				if (!isAgentSessionRuntimeReclamationDue(record.reclamationEligibleAt, now())) {
+					result.skippedNotDueCount++;
+					return;
+				}
+			} catch (error) {
+				logAgentSessionRetentionWarning(
+					`idle-retention-policy-final-recheck-failed workspaceId=${workspaceId} taskId=${record.taskId} recoveryCondition=next_sweep reason=${error instanceof Error ? error.message : String(error)}`,
+				);
+				return;
+			}
+		}
 		const refreshedSummary = options.getTaskSessionSummary(workspaceId, record.taskId);
 		if (
 			!isReclamationDeadlineStillCurrentForSession(record, refreshedSummary) ||
@@ -250,13 +284,44 @@ export function createAgentSessionInactivityReclamationScheduler(
 	const sweep = async (): Promise<AgentSessionReclamationSweepResult> => {
 		const result = createEmptySweepResult();
 		const recordsByWorkspaceId = await readAllDeadlineRecords();
+		let durationMinutes: number | null = null;
+		try {
+			durationMinutes = await readUserTurnIdleProcessRetentionDurationMinutes();
+		} catch (error) {
+			logAgentSessionRetentionWarning(
+				`idle-retention-policy-read-failed recoveryCondition=next_sweep reason=${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 		for (const [workspaceId, records] of Object.entries(recordsByWorkspaceId)) {
-			for (const record of records) {
+			for (const observedRecord of records) {
+				let record = observedRecord;
 				if (!isLiveAgentSessionReclamationState(record.reclamationState)) {
 					continue;
 				}
 				result.inspectedRecordCount += 1;
 				const nowMs = now();
+
+				// 先核实并持久化最新策略，再判到期；延长设置同样必须在旧期限触发之前生效。
+				if (record.retentionAnchorKind === "agent_response_generation_stopped") {
+					if (durationMinutes === null) continue;
+					if (record.reclamationEligibleAt !== record.retentionAnchorAt + durationMinutes * 60_000) {
+						try {
+							const refreshed = await refreshUserTurnIdleProcessRetentionDeadline(
+								workspaceId,
+								record.recordId,
+								durationMinutes,
+								nowMs,
+							);
+							if (!refreshed) continue;
+							record = refreshed;
+						} catch (error) {
+							logAgentSessionRetentionWarning(
+								`idle-retention-deadline-refresh-failed workspaceId=${workspaceId} taskId=${record.taskId} recoveryCondition=next_sweep reason=${error instanceof Error ? error.message : String(error)}`,
+							);
+							continue;
+						}
+					}
+				}
 
 				// 回收失败后的退避窗口内不重试。
 				if (
@@ -268,8 +333,10 @@ export function createAgentSessionInactivityReclamationScheduler(
 					continue;
 				}
 
-				// "reclaiming" = 上次回收执行到一半进程就没了，必须重跑幂等回收（不再看是否到期）。
-				const mustResumeInterruptedReclamation = record.reclamationState === "reclaiming";
+				// 普通待命的中断回收仍受最新期限约束；park 保留原有的幂等恢复策略。
+				const mustResumeInterruptedReclamation =
+					record.reclamationState === "reclaiming" &&
+					record.retentionAnchorKind === "session_parked_awaiting_dispatched_background_work";
 				if (
 					!mustResumeInterruptedReclamation &&
 					!isAgentSessionRuntimeReclamationDue(record.reclamationEligibleAt, nowMs)

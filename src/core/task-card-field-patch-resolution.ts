@@ -97,6 +97,7 @@ export function buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch
 ): RuntimeUpdateTaskInput {
 	const patchTouchesTaskAgentSessionInitialization = patch.taskAgentSessionInitialization !== undefined;
 	return {
+		externalWorkflowRunBinding: patch.externalWorkflowRunBinding,
 		// null / 空白 = 不要显式标题，由 updateTask 按 prompt 派生。
 		title: patch.title === undefined ? currentTaskCard.title : (patch.title ?? undefined),
 		prompt: patch.prompt ?? currentTaskCard.prompt,

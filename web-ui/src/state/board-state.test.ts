@@ -1150,6 +1150,17 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 		updatedAt: 1_650_000_000_000,
 		taskDescriptionLastUpdatedAt: 1_640_000_000_000,
 		taskDescription: "独立简介",
+		externalWorkflowRunBinding: {
+			owningWorkspaceId: "workspace-1",
+			owningTaskId: "task-1",
+			owningTaskIncarnationCreatedAtEpochMs: 1_600_000_000_000,
+			workflowProviderId: "software-factory",
+			workflowKind: "research",
+			workItemId: "item-1",
+			runId: "run-1",
+			workflowDatabasePath: "/persistent/workflows.sqlite",
+			artifactDirectoryPath: "/persistent/artifacts",
+		},
 	};
 
 	it("服务端卡片的每个字段都原样带过归一化", () => {

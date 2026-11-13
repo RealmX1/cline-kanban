@@ -33,7 +33,7 @@ export function resolveCodexTaskReasoningEffortSelection(input: {
 		validationError,
 		recoveryMessage:
 			!awaitingFirstCatalog && (hasRefreshWarning || !canVerify)
-				? "暂时无法核验此模型的推理档位，已保留选择；目录或连接恢复后自动重验。"
+				? "推理档位未能加载，已保留选择和上次目录；目录或连接恢复后自动重验。"
 				: null,
 	};
 }

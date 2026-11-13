@@ -33,7 +33,7 @@ async function openIsolatedSourceObservationFixture(page: Page, initiallyReadCou
 		const name = url.pathname.split("/api/trpc/")[1];
 		expect(request.headers()["x-kanban-workspace-id"]).toBe("isolated-source-workspace");
 		expect(url.searchParams.has("batch")).toBe(false);
-		if (name === "runtime.getCodexConfigurationSyncActiveState") {
+		if (name === "runtime.getCodexConfigurationSyncOverview") {
 			if (readsUnavailable) return route.abort("failed");
 			return route.fulfill({ json: { result: { data: state } } });
 		}
@@ -106,7 +106,8 @@ for (const width of [390, 1280])
 		const source = fixture.settings.getByRole("article", { name: "来源更新 隔离来源 0", exact: true });
 		await source.getByRole("button", { name: "标记已读", exact: true }).click();
 		await expect(fixture.settings.getByRole("heading", { name: "来源更新 · 5", exact: true })).toBeVisible();
-		await expect(page.getByRole("button", { name: "配置提醒，待反馈 0 项 · 来源更新 5 条" })).toBeVisible();
+		await expect(page.getByRole("button", { name: "配置提醒，可选反馈 0 项 · 来源更新 5 条" })).toBeVisible();
+		await fixture.settings.getByRole("tab", { name: "历史", exact: true }).click();
 		const historical = fixture.settings.getByRole("group", { name: "历史记录", exact: true });
 		await expect(historical.getByRole("article")).toHaveCount(1);
 		await expect(historical.getByRole("button")).toHaveCount(0);
@@ -117,7 +118,8 @@ for (const width of [390, 1280])
 
 test("六个来源已有一项已读时，两处首次读取即显示五项", async ({ page }) => {
 	const fixture = await openIsolatedSourceObservationFixture(page, 1);
-	await expect(page.getByRole("button", { name: "配置提醒，待反馈 0 项 · 来源更新 5 条" })).toBeVisible();
+	await expect(page.getByRole("button", { name: "配置提醒，可选反馈 0 项 · 来源更新 5 条" })).toBeVisible();
+	await fixture.settings.getByRole("tab", { name: "历史", exact: true }).click();
 	await expect(fixture.settings.getByRole("group", { name: "历史记录", exact: true }).getByRole("button")).toHaveCount(
 		0,
 	);
@@ -152,6 +154,7 @@ test("原回执挂起但已保存时，十五秒补读结束等待且不重复�
 	await expect.poll(() => fixture.actions.length).toBe(1);
 	await page.clock.fastForward(15_001);
 	await expect(fixture.settings.getByRole("heading", { name: "来源更新 · 5", exact: true })).toBeVisible();
+	await fixture.settings.getByRole("tab", { name: "历史", exact: true }).click();
 	await expect(fixture.settings.getByText("已通过补读核验处理状态。")).toBeVisible();
 	expect(fixture.actions).toHaveLength(1);
 });

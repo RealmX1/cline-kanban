@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { groupCodexConfigurationFeedbackSuggestions } from "@/hooks/codex-configuration-feedback-suggestion-groups";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
-import { WORKSPACE_NOTICE_AUTOMATIC_EXPANSION_DURATION_MS } from "@/hooks/workspace-notice-automatic-expansion-duration";
+import type { CodexConfigurationChange } from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 
 export function useCodexConfigurationSyncNotice({
@@ -12,31 +12,151 @@ export function useCodexConfigurationSyncNotice({
 	isPresentationAvailable?: boolean;
 }) {
 	const controller = useCodexConfigurationSync(workspaceId);
-	const [expansionMode, setExpansionMode] = useState<"collapsed" | "manual" | "automatic">(() => {
-		const saved = readLocalStorageItem(LocalStorageKey.CodexConfigurationChangeNoticeCollapsed);
-		return saved === "true" ? "collapsed" : saved === "false" ? "manual" : "automatic";
-	});
+	const [expansionMode, setExpansionMode] = useState<"collapsed" | "manual" | "automatic">("collapsed");
+	const [displayedChanges, setDisplayedChanges] = useState<CodexConfigurationChange[]>([]);
+	const [presentationEnvironmentAvailable, setPresentationEnvironmentAvailable] = useState(true);
+	const [, recheckTime] = useState(0);
+	const presentationReceipts = useRef<Record<string, number>>({});
+	const receiptStorageKey = LocalStorageKey.CodexConfigurationFeedbackNoticePresentationReceipts;
+	const scopeIdentity = controller.state?.storageIdentity ?? workspaceId;
+	useEffect(() => {
+		try {
+			presentationReceipts.current = JSON.parse(readLocalStorageItem(receiptStorageKey) ?? "{}");
+		} catch {
+			presentationReceipts.current = {};
+		}
+		setExpansionMode("collapsed");
+		setDisplayedChanges([]);
+		recheckTime((value) => value + 1);
+	}, [receiptStorageKey, scopeIdentity]);
 	const summaryButtonRef = useRef<HTMLButtonElement>(null);
-	const panelRef = useRef<HTMLElement>(null);
+	const panelRef = useRef<HTMLDivElement | null>(null);
+	const [mountedPanel, setMountedPanel] = useState<HTMLDivElement | null>(null);
+	const bindPanelRef = useCallback((node: HTMLDivElement | null) => {
+		panelRef.current = node;
+		if (node) setMountedPanel((current) => (current === node ? current : node));
+	}, []);
 	const scrollContainerRef = useRef<HTMLDivElement>(null);
 	const readingPositionRef = useRef(0);
 	const shouldFocusPanelOnExpansionRef = useRef(false);
 	const contentId = useId();
-	const settingsReminders =
-		controller.state?.changes.filter(
+	const candidateIdentity = (change: CodexConfigurationChange) =>
+		JSON.stringify([
+			scopeIdentity,
+			change.changeId,
+			change.completeCandidateValueDigest ?? change.valueSummary,
+			change.observedAt,
+		]);
+	const nowMs = Date.now();
+	const settingsReminders = (controller.state?.changes ?? [])
+		.filter(
 			(change) =>
 				change.recordKind === "settings_proposal" &&
-				change.acknowledgedAt === null &&
-				(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now()),
-		) ?? [];
+				change.approvalStatus === "pending" &&
+				change.settingsIsolationArchivedAtMs === undefined &&
+				(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > nowMs),
+		)
+		.sort((left, right) => right.observedAt - left.observedAt || right.changeId.localeCompare(left.changeId));
+	const latestChanges = useRef(settingsReminders);
+	latestChanges.current = settingsReminders;
 	const pendingApprovalCount = groupCodexConfigurationFeedbackSuggestions(settingsReminders).length;
 	const sourceUpdateCount =
 		controller.state?.sourceObservations.filter((observation) => observation.acknowledgedAt === null).length ?? 0;
-	const hasReminders = settingsReminders.length + sourceUpdateCount > 0;
-	const isVisible = hasReminders && isPresentationAvailable && expansionMode !== "collapsed";
-	const isOperationPending =
-		controller.pendingChangeId !== null ||
-		Object.values(controller.sourceOperations).some((operation) => operation.phase !== "unknown");
+	const hasReminders = Boolean(controller.state || controller.error);
+	const isVisible = isPresentationAvailable && presentationEnvironmentAvailable && expansionMode !== "collapsed";
+	const isOperationPending = controller.pendingChangeId !== null;
+	const batchIdentity = JSON.stringify(settingsReminders.map(candidateIdentity).sort());
+	const displayedBatchIdentity = JSON.stringify(displayedChanges.map(candidateIdentity).sort());
+	const hasNewSuggestions =
+		batchIdentity !== displayedBatchIdentity &&
+		settingsReminders.some(
+			(change) => !displayedChanges.some((shown) => candidateIdentity(shown) === candidateIdentity(change)),
+		);
+	const acknowledgePresentation = useCallback(
+		(changes: CodexConfigurationChange[]) => {
+			const receipts = Object.fromEntries(
+				Object.entries(presentationReceipts.current).filter(
+					([, expiry]) => typeof expiry === "number" && expiry > Date.now(),
+				),
+			);
+			for (const change of changes)
+				receipts[
+					JSON.stringify([
+						scopeIdentity,
+						change.changeId,
+						change.completeCandidateValueDigest ?? change.valueSummary,
+						change.observedAt,
+					])
+				] = change.feedbackExpiresAtMs ?? change.observedAt + 600_000;
+			presentationReceipts.current = receipts;
+			writeLocalStorageItem(receiptStorageKey, JSON.stringify(receipts));
+		},
+		[scopeIdentity, receiptStorageKey],
+	);
+	useEffect(() => {
+		const check = () =>
+			setPresentationEnvironmentAvailable(
+				document.visibilityState === "visible" &&
+					document.querySelector(
+						"[role='dialog']:not([data-codex-configuration-feedback-popover]):not([hidden]):not([data-state='closed']), [role='alertdialog']:not([hidden]):not([data-state='closed']), dialog[open]",
+					) === null,
+			);
+		check();
+		document.addEventListener("visibilitychange", check);
+		const observer = new MutationObserver(check);
+		observer.observe(document.body, {
+			childList: true,
+			subtree: true,
+			attributes: true,
+			attributeFilter: ["hidden", "data-state", "role", "open"],
+		});
+		return () => {
+			document.removeEventListener("visibilitychange", check);
+			observer.disconnect();
+		};
+	}, []);
+	useEffect(() => {
+		const deadlines = latestChanges.current.flatMap((change) =>
+			change.feedbackExpiresAtMs === undefined ? [] : [change.feedbackExpiresAtMs],
+		);
+		if (!deadlines.length) return;
+		const timer = window.setTimeout(
+			() => recheckTime((value) => value + 1),
+			Math.max(1, Math.min(...deadlines) - Date.now() + 1),
+		);
+		return () => window.clearTimeout(timer);
+	}, [batchIdentity]);
+	useEffect(() => {
+		if (expansionMode !== "collapsed" || !isPresentationAvailable || !presentationEnvironmentAvailable) return;
+		const candidates = latestChanges.current.filter(
+			(change) => change.acknowledgedAt === null && !presentationReceipts.current[candidateIdentity(change)],
+		);
+		if (!candidates.length) return;
+		const stableAtMs = Math.max(...latestChanges.current.map((change) => change.observedAt)) + 10_000;
+		const open = () => {
+			const changes = latestChanges.current.filter(
+				(change) => change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > Date.now(),
+			);
+			if (!changes.length) return;
+			setDisplayedChanges(changes);
+			acknowledgePresentation(changes);
+			setExpansionMode("automatic");
+		};
+		if (stableAtMs <= Date.now()) {
+			open();
+			return;
+		}
+		const timer = window.setTimeout(open, stableAtMs - Date.now());
+		return () => window.clearTimeout(timer);
+	}, [
+		batchIdentity,
+		scopeIdentity,
+		expansionMode,
+		isPresentationAvailable,
+		presentationEnvironmentAvailable,
+		acknowledgePresentation,
+		nowMs,
+	]);
 	const recordReadingPosition = useCallback(() => {
 		if (scrollContainerRef.current && !panelRef.current?.hidden)
 			readingPositionRef.current = scrollContainerRef.current.scrollTop;
@@ -46,7 +166,6 @@ export function useCodexConfigurationSyncNotice({
 			recordReadingPosition();
 			shouldFocusPanelOnExpansionRef.current = false;
 			setExpansionMode("collapsed");
-			writeLocalStorageItem(LocalStorageKey.CodexConfigurationChangeNoticeCollapsed, "true");
 			if (restoreSummaryFocus) summaryButtonRef.current?.focus({ preventScroll: true });
 		},
 		[recordReadingPosition],
@@ -57,19 +176,21 @@ export function useCodexConfigurationSyncNotice({
 			return;
 		}
 		shouldFocusPanelOnExpansionRef.current = fromKeyboard;
+		setDisplayedChanges(latestChanges.current);
+		acknowledgePresentation(latestChanges.current);
 		setExpansionMode("manual");
-		writeLocalStorageItem(LocalStorageKey.CodexConfigurationChangeNoticeCollapsed, "false");
 	};
 	useLayoutEffect(() => {
 		if (!isVisible) return;
 		if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = readingPositionRef.current;
-		if (shouldFocusPanelOnExpansionRef.current) {
+		const panel = mountedPanel ?? panelRef.current;
+		if (shouldFocusPanelOnExpansionRef.current && panel) {
 			shouldFocusPanelOnExpansionRef.current = false;
-			panelRef.current?.focus({ preventScroll: true });
+			panel.focus({ preventScroll: true });
 		}
-	}, [isVisible]);
+	}, [isVisible, mountedPanel]);
 	useEffect(() => {
-		const panel = panelRef.current;
+		const panel = mountedPanel ?? panelRef.current;
 		if (!isVisible || expansionMode !== "automatic" || !panel || isOperationPending) return;
 		const interactionListenersAbortController = new window.AbortController();
 		const listenerOptions = { signal: interactionListenersAbortController.signal, passive: true };
@@ -85,7 +206,7 @@ export function useCodexConfigurationSyncNotice({
 				panel.contains(document.activeElement) ||
 				Boolean(selection?.rangeCount && !selection.isCollapsed && selection.getRangeAt(0).intersectsNode(panel)) ||
 				document.querySelector(
-					"[role='dialog']:not([hidden]):not([data-state='closed']), [role='alertdialog']:not([hidden]):not([data-state='closed']), dialog[open]",
+					"[role='dialog']:not([data-codex-configuration-feedback-popover]):not([hidden]):not([data-state='closed']), [role='alertdialog']:not([hidden]):not([data-state='closed']), dialog[open]",
 				) !== null
 			);
 		};
@@ -102,7 +223,7 @@ export function useCodexConfigurationSyncNotice({
 				timer = null;
 				protectedFromCollapse = isProtected();
 				if (!protectedFromCollapse) collapse(false);
-			}, WORKSPACE_NOTICE_AUTOMATIC_EXPANSION_DURATION_MS);
+			}, 30_000);
 		};
 		const refreshProtection = () => {
 			if (isProtected() !== protectedFromCollapse) restartCountdown();
@@ -140,9 +261,15 @@ export function useCodexConfigurationSyncNotice({
 			interactionListenersAbortController.abort();
 			confirmationObserver.disconnect();
 		};
-	}, [isVisible, expansionMode, isOperationPending, collapse]);
+	}, [isVisible, expansionMode, isOperationPending, collapse, mountedPanel]);
 	return {
 		controller,
+		displayedChanges,
+		hasNewSuggestions,
+		showLatestSuggestions: () => {
+			setDisplayedChanges(latestChanges.current);
+			acknowledgePresentation(latestChanges.current);
+		},
 		contentId,
 		hasReminders,
 		pendingApprovalCount,
@@ -151,6 +278,7 @@ export function useCodexConfigurationSyncNotice({
 		isVisible,
 		summaryButtonRef,
 		panelRef,
+		bindPanelRef,
 		scrollContainerRef,
 		recordReadingPosition,
 		toggleExpanded,

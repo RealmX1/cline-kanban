@@ -1,16 +1,14 @@
-import { configurationFieldAddress } from "./codex-configuration-field-projection";
+import { isCodexLocalStateConfigurationField } from "../core/codex-configuration-profile-field-editing";
 import type { CodexConfigurationSyncStore, StoredCodexConfigurationChange } from "./codex-configuration-sync-store";
+export const CODEX_CONFIGURATION_SETTINGS_ISOLATION_PROJECTION_VERSION = 2;
 
-export function isCodexDesktopConfigurationField(fieldKey: string) {
-	const { keyPath } = configurationFieldAddress(fieldKey);
-	return (keyPath[0] === "profiles" ? keyPath[2] : keyPath[0]) === "desktop";
-}
+export { isCodexLocalStateConfigurationField } from "../core/codex-configuration-profile-field-editing";
 
 export function isCodexConfigurationChangeExcludedFromSettingsSynchronization(change: StoredCodexConfigurationChange) {
 	return Boolean(
 		change.settingsIsolationArchivedAtMs !== undefined ||
 			change.sourceWriterId.startsWith("user-source:") ||
-			isCodexDesktopConfigurationField(change.fieldKey),
+			isCodexLocalStateConfigurationField(change.fieldKey),
 	);
 }
 
@@ -20,10 +18,10 @@ export function migrateCodexConfigurationSettingsIsolation(store: CodexConfigura
 		...Object.values(store.profiles).map((profile) => profile.fields),
 		...Object.values(store.writers).flatMap((writer) => [writer.mergeBaselineFields, writer.lastObservedFields]),
 	])
-		for (const key of Object.keys(fields)) if (isCodexDesktopConfigurationField(key)) delete fields[key];
+		for (const key of Object.keys(fields)) if (isCodexLocalStateConfigurationField(key)) delete fields[key];
 	for (const profile of Object.values(store.profiles))
 		for (const key of Object.keys(profile.fieldVersions))
-			if (isCodexDesktopConfigurationField(key)) {
+			if (isCodexLocalStateConfigurationField(key)) {
 				delete profile.fieldVersions[key];
 				profile.version = ++store.revision;
 			}
@@ -43,14 +41,14 @@ export function migrateCodexConfigurationSettingsIsolation(store: CodexConfigura
 			change.acknowledgedAt ??= change.settingsIsolationArchivedAtMs;
 		}
 		for (const target of change.targets) {
-			if (!["accepted", "pending_reload", "pending_next_start"].includes(target.status)) continue;
+			if (!["accepted", "pending_reload", "pending_next_start", "conflict"].includes(target.status)) continue;
 			target.settingsIsolationCancellation = {
 				previousStatus: target.status,
 				previousReason: target.reason,
 				cancelledAtMs: change.settingsIsolationArchivedAtMs,
 			};
 			target.status = "not_applicable";
-			target.reason = "外部配置与 desktop 设置已退出 Kanban 设置同步，原传播记录保留。";
+			target.reason = "外部配置与本地状态已退出 Kanban 设置同步，原传播记录保留。";
 			target.recoveryCondition = null;
 		}
 		change.version = ++store.revision;
@@ -70,4 +68,5 @@ export function migrateCodexConfigurationSettingsIsolation(store: CodexConfigura
 			observation.version = ++store.revision;
 		}
 	}
+	store.settingsIsolationProjectionVersion = CODEX_CONFIGURATION_SETTINGS_ISOLATION_PROJECTION_VERSION;
 }

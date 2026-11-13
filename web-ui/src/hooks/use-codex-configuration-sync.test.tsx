@@ -1,6 +1,11 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	readUnconfirmedCodexConfigurationSettingActions,
+	recordUnconfirmedCodexConfigurationSettingActionAutomaticResend,
+	rememberUnconfirmedCodexConfigurationSettingAction,
+} from "@/hooks/codex-configuration-unconfirmed-setting-actions";
 import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import type {
@@ -10,11 +15,12 @@ import type {
 } from "@/runtime/types";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
-const queries = vi.hoisted(() => ({ fetch: vi.fn(), profile: vi.fn(), batch: vi.fn() }));
+const queries = vi.hoisted(() => ({ fetch: vi.fn(), profile: vi.fn(), batch: vi.fn(), receipt: vi.fn() }));
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		runtime: {
-			getCodexConfigurationSyncActiveState: { query: queries.fetch },
+			getCodexConfigurationSyncOverview: { query: queries.fetch },
+			getCodexConfigurationMutationReceipt: { query: queries.receipt },
 			mutateCodexConfigurationProfile: { mutate: queries.profile },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 		},
@@ -42,6 +48,7 @@ beforeEach(async () => {
 	queries.fetch.mockReset().mockImplementation(async () => state);
 	queries.profile.mockReset();
 	queries.batch.mockReset();
+	queries.receipt.mockReset().mockResolvedValue(null);
 	container = document.createElement("div");
 	document.body.append(container);
 	root = createRoot(container);
@@ -117,16 +124,144 @@ describe("候选采用只重试已展示的等价来源", () => {
 		await act(async () => {
 			await currentSync.adoptCandidate(displayed);
 		});
-		expect(queries.batch).toHaveBeenCalledTimes(1);
 		const identity = queries.batch.mock.calls[0]![0].items[0].idempotencyKey;
 		await act(async () => {
 			await currentSync.adoptCandidate(displayed);
 		});
-		expect(queries.batch.mock.calls[1]![0].items[0].idempotencyKey).toBe(identity);
+		expect(
+			queries.batch.mock.calls.every(
+				([request]) => request.items[0].changeId === "first" && request.items[0].idempotencyKey === identity,
+			),
+		).toBe(true);
 	});
 });
 
 describe("profile 操作的幂等身份生命周期", () => {
+	it("恢复记录按原操作类型校验，保留预算并排除损坏条目", () => {
+		const profileInput = { action: "set_default", profileId: "profile", idempotencyKey: "profile-receipt" };
+		const feedbackInput = {
+			action: "reject",
+			items: [
+				{
+					entryKind: "settings_proposal",
+					changeId: "change",
+					expectedVersion: 1,
+					idempotencyKey: "feedback-receipt",
+				},
+			],
+		};
+		const metadata = { workspaceId: "workspace", storageIdentity: "storage", automaticResendCount: 1 };
+		localStorage.setItem(
+			LocalStorageKey.CodexConfigurationUnconfirmedSettingActions,
+			JSON.stringify([
+				{ ...metadata, identity: "profile", kind: "profile", input: profileInput },
+				{ ...metadata, identity: "feedback", kind: "feedback", input: feedbackInput },
+				{ ...metadata, identity: "wrong-kind", kind: "profile", input: feedbackInput },
+				{ ...metadata, identity: "missing-input", kind: "feedback" },
+				null,
+			]),
+		);
+		expect(readUnconfirmedCodexConfigurationSettingActions()).toEqual([
+			{ ...metadata, identity: "profile", kind: "profile", input: profileInput },
+			{ ...metadata, identity: "feedback", kind: "feedback", input: feedbackInput },
+		]);
+	});
+	it("自动重送预算跨重启保留，回执缺失不换身份或无限重送", async () => {
+		vi.useFakeTimers();
+		try {
+			state = { ...state, storageIdentity: "persisted-resend-budget" };
+			await act(async () => notifyCodexConfigurationSyncUpdated());
+			queries.profile.mockRejectedValue(new Error("接口断线"));
+			await act(async () => {
+				await currentSync.profileAction({
+					action: "set_default",
+					profileId: "profile",
+					idempotencyKey: "bounded-original-operation",
+				});
+			});
+			for (let restart = 0; restart < 2; restart++) {
+				await act(async () => root.render(null));
+				await act(async () => root.render(<HookHarness />));
+				await act(async () => vi.advanceTimersByTimeAsync(60_000));
+			}
+			expect(queries.profile).toHaveBeenCalledTimes(2);
+			expect(
+				queries.profile.mock.calls.every(([input]) => input.idempotencyKey === "bounded-original-operation"),
+			).toBe(true);
+			expect(
+				JSON.parse(localStorage.getItem(LocalStorageKey.CodexConfigurationUnconfirmedSettingActions) ?? "[]")[0]
+					?.automaticResendCount,
+			).toBe(1);
+		} finally {
+			await act(async () => root.render(null));
+			vi.useRealTimers();
+		}
+	});
+	it("同页请求失败后核验原操作回执，不换身份重发", async () => {
+		state = { ...state, storageIdentity: "persistent-settings-storage" };
+		await act(async () => notifyCodexConfigurationSyncUpdated());
+		queries.profile.mockRejectedValueOnce(new Error("提交后连接中断"));
+		queries.receipt.mockResolvedValue({ requestDigest: "verified-by-server", changeId: "profile" });
+		await act(async () => {
+			expect(
+				await currentSync.profileAction({
+					action: "set_default",
+					profileId: "profile",
+					idempotencyKey: "persisted-profile-operation",
+				}),
+			).toBe(false);
+		});
+		expect(queries.receipt).toHaveBeenCalledWith(
+			expect.objectContaining({ idempotencyKey: "persisted-profile-operation" }),
+			expect.anything(),
+		);
+		expect(queries.profile).toHaveBeenCalledTimes(1);
+		expect(
+			JSON.parse(localStorage.getItem(LocalStorageKey.CodexConfigurationUnconfirmedSettingActions) ?? "[]"),
+		).toEqual([]);
+	});
+	it("存储不可写时不发送未持久化的配置操作", async () => {
+		state = { ...state, storageIdentity: "storage-failure" };
+		await act(async () => notifyCodexConfigurationSyncUpdated());
+		const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+			throw new Error("quota");
+		});
+		try {
+			await act(async () => {
+				expect(
+					await currentSync.profileAction({
+						action: "set_default",
+						profileId: "profile",
+						idempotencyKey: "not-persisted",
+					}),
+				).toBe(false);
+			});
+			expect(queries.profile).not.toHaveBeenCalled();
+			expect(currentSync.error).toContain("未能持久保存");
+		} finally {
+			setItem.mockRestore();
+		}
+	});
+	it("自动重送预算写入失败时不增加已持久化次数", () => {
+		const remembered = rememberUnconfirmedCodexConfigurationSettingAction("workspace", "storage", {
+			kind: "profile",
+			input: { action: "set_default", profileId: "profile", idempotencyKey: "budget" },
+		});
+		const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+			throw new Error("quota");
+		});
+		try {
+			expect(() =>
+				recordUnconfirmedCodexConfigurationSettingActionAutomaticResend(remembered.action.identity),
+			).toThrow(/未能持久保存/);
+		} finally {
+			setItem.mockRestore();
+		}
+		expect(
+			JSON.parse(localStorage.getItem(LocalStorageKey.CodexConfigurationUnconfirmedSettingActions) ?? "[]")[0]
+				?.automaticResendCount,
+		).toBe(0);
+	});
 	it.each(["set_default", "bind_session"] as const)("成功的 %s 意图结束后，相同参数的新意图仍执行", async (action) => {
 		const receipts = new Set<string>();
 		let selectedProfileId: string | undefined;

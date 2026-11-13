@@ -4,8 +4,20 @@ import {
 	runCodexConfigurationSyncRequestWithinBudget,
 } from "@/hooks/codex-configuration-source-observation-recovery";
 import {
+	forgetUnconfirmedCodexConfigurationSettingAction,
+	isConfirmedCodexConfigurationProfileMutationRejection,
+	notifyUnconfirmedCodexConfigurationSettingActionsChanged,
+	readUnconfirmedCodexConfigurationSettingActions,
+	recordUnconfirmedCodexConfigurationSettingActionAutomaticResend,
+	rememberUnconfirmedCodexConfigurationSettingAction,
+	subscribeUnconfirmedCodexConfigurationSettingActions,
+	type UnconfirmedCodexConfigurationSettingAction,
+} from "@/hooks/codex-configuration-unconfirmed-setting-actions";
+import {
 	acknowledgeCodexConfigurationChange,
 	batchCodexConfigurationAction,
+	fetchCodexConfigurationChangeDetails,
+	fetchCodexConfigurationMutationReceipt,
 	fetchCodexConfigurationSyncState,
 	mutateCodexConfigurationProfile,
 	notifyCodexConfigurationSyncUpdated,
@@ -26,6 +38,11 @@ import type {
 const subscribeWhenDisabled = () => () => {};
 
 export function useCodexConfigurationSync(workspaceId: string | null, enabled = true) {
+	const [historicalDefaultEditRequest, setHistoricalDefaultEditRequest] = useState<{
+		profileId: string;
+		changeId: string;
+		fields: Array<{ fieldKey: string; value: unknown; delete?: boolean }>;
+	} | null>(null);
 	const recoveryController = useMemo(
 		() => getCodexConfigurationSourceObservationRecoveryController(workspaceId),
 		[workspaceId],
@@ -44,7 +61,6 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			active: true,
 			requestAbortController: new AbortController(),
 			operationIdentities: new Map<string, string>(),
-			unconfirmedProfileMutation: null as { requestIdentity: string; idempotencyKey: string } | null,
 		}),
 		[recoveryController, enabled, runtimeConnectionGeneration],
 	);
@@ -120,35 +136,211 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		);
 		return () => clearTimeout(timer);
 	}, [enabled, feedbackOpportunityNowMs, refresh, state?.changes]);
+	const recoverSettingAction = useCallback(
+		async (action: UnconfirmedCodexConfigurationSettingAction, automatic = false) => {
+			const recoveredResults: CodexConfigurationBatchActionResult["results"] = [];
+			if (action.kind === "profile") {
+				const receipt = await runCodexConfigurationSyncRequestWithinBudget(
+					(signal) =>
+						fetchCodexConfigurationMutationReceipt(
+							workspaceId,
+							{ idempotencyKey: action.input.idempotencyKey, expectedProfileMutation: action.input },
+							signal,
+						),
+					scope.requestAbortController.signal,
+				);
+				if (!receipt) {
+					if (automatic) recordUnconfirmedCodexConfigurationSettingActionAutomaticResend(action.identity);
+					try {
+						acceptState(
+							await runCodexConfigurationSyncRequestWithinBudget(
+								(signal) => mutateCodexConfigurationProfile(workspaceId, action.input, signal),
+								scope.requestAbortController.signal,
+							),
+						);
+					} catch (error) {
+						if (isConfirmedCodexConfigurationProfileMutationRejection(error))
+							forgetUnconfirmedCodexConfigurationSettingAction(action.identity);
+						throw error;
+					}
+				} else await refresh();
+			} else {
+				const remaining: CodexConfigurationBatchActionRequest["items"] = [];
+				for (const item of action.input.items) {
+					const receipt = await runCodexConfigurationSyncRequestWithinBudget(
+						(signal) =>
+							fetchCodexConfigurationMutationReceipt(
+								workspaceId,
+								{
+									idempotencyKey: item.idempotencyKey,
+									expectedAction: action.input.action,
+									expectedEntry: item,
+								},
+								signal,
+							),
+						scope.requestAbortController.signal,
+					);
+					if (!receipt) remaining.push(item);
+					else
+						recoveredResults.push({
+							changeId: item.changeId,
+							status: "replayed",
+							message: "已按原幂等身份核验回执。",
+						});
+				}
+				if (remaining.length) {
+					if (automatic) recordUnconfirmedCodexConfigurationSettingActionAutomaticResend(action.identity);
+					const result = await runCodexConfigurationSyncRequestWithinBudget(
+						(signal) => batchCodexConfigurationAction(workspaceId, { ...action.input, items: remaining }, signal),
+						scope.requestAbortController.signal,
+					);
+					acceptState(result.state);
+					recoveredResults.push(...result.results);
+				} else await refresh();
+				if (isCurrentScope()) setBatchResults(recoveredResults);
+			}
+			forgetUnconfirmedCodexConfigurationSettingAction(action.identity);
+			return recoveredResults;
+		},
+		[workspaceId, scope, acceptState, refresh, isCurrentScope],
+	);
+	useEffect(() => {
+		if (!enabled || !state) return;
+		let active = true;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let attempt = 0;
+		const recover = async () => {
+			if (!active || !isCurrentScope()) return;
+			if (scope.pending) {
+				timer = setTimeout(() => void recover(), 1000);
+				return;
+			}
+			const actions = readUnconfirmedCodexConfigurationSettingActions().filter(
+				(entry) => entry.workspaceId === workspaceId && entry.storageIdentity === (state.storageIdentity ?? null),
+			);
+			if (!actions.length) {
+				setError((current) => (current?.startsWith("原操作回执") ? null : current));
+				return;
+			}
+			scope.pending = true;
+			setPendingChangeId("recovery");
+			try {
+				for (const action of actions) {
+					if (!active || !isCurrentScope()) return;
+					await recoverSettingAction(action, true);
+					notifyCodexConfigurationSyncUpdated();
+				}
+				if (isCurrentScope()) setError(null);
+			} catch {
+				if (isCurrentScope()) setError("原操作回执待核验，保留原幂等身份；连接恢复后自动重验。");
+				if (++attempt < 3 && active) timer = setTimeout(() => void recover(), attempt * 5000);
+			} finally {
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
+			}
+		};
+		const onRecoveryConditionChanged = () => {
+			attempt = 0;
+			clearTimeout(timer);
+			void recover();
+		};
+		void recover();
+		window.addEventListener("online", onRecoveryConditionChanged);
+		const unsubscribe = subscribeUnconfirmedCodexConfigurationSettingActions(onRecoveryConditionChanged);
+		return () => {
+			active = false;
+			clearTimeout(timer);
+			window.removeEventListener("online", onRecoveryConditionChanged);
+			unsubscribe();
+		};
+	}, [enabled, scope, workspaceId, state?.storageIdentity, recoverSettingAction, isCurrentScope]);
 	const profileAction = useCallback(
 		async (input: CodexConfigurationProfileMutationRequest) => {
 			if (scope.pending) return;
 			scope.pending = true;
 			setPendingChangeId("profile");
 			setError(null);
+			let attemptedActionIdentity: string | null = null;
+			let shouldRecoverPersistedAction = false;
 			try {
-				const requestIdentity = JSON.stringify([workspaceId, { ...input, idempotencyKey: undefined }]);
-				const idempotencyKey =
-					scope.unconfirmedProfileMutation?.requestIdentity === requestIdentity
-						? scope.unconfirmedProfileMutation.idempotencyKey
-						: input.idempotencyKey;
-				scope.unconfirmedProfileMutation = { requestIdentity, idempotencyKey };
-				acceptState(await mutateCodexConfigurationProfile(workspaceId, { ...input, idempotencyKey }));
+				for (const previous of readUnconfirmedCodexConfigurationSettingActions()) {
+					if (
+						previous.workspaceId !== workspaceId ||
+						previous.storageIdentity !== (state?.storageIdentity ?? null) ||
+						previous.kind !== "profile" ||
+						previous.input.action !== input.action
+					)
+						continue;
+					const sameSelection =
+						input.action === "set_default" ||
+						(input.action === "update" &&
+							previous.input.action === "update" &&
+							input.profileId === previous.input.profileId) ||
+						(input.action === "bind_session" &&
+							previous.input.action === "bind_session" &&
+							input.workspaceId === previous.input.workspaceId &&
+							input.conversationSessionId === previous.input.conversationSessionId);
+					if (sameSelection) {
+						const identity = JSON.stringify([
+							workspaceId,
+							state?.storageIdentity ?? null,
+							"profile",
+							{ ...input, idempotencyKey: undefined, stateResponseScope: undefined },
+						]);
+						try {
+							await recoverSettingAction(previous);
+						} catch (error) {
+							if (
+								readUnconfirmedCodexConfigurationSettingActions().some(
+									(entry) => entry.identity === previous.identity,
+								)
+							)
+								throw error;
+							continue;
+						}
+						if (previous.identity === identity) {
+							if (!isCurrentScope()) return;
+							notifyCodexConfigurationSyncUpdated();
+							return true;
+						}
+					}
+				}
+				const pending = rememberUnconfirmedCodexConfigurationSettingAction(
+					workspaceId,
+					state?.storageIdentity ?? null,
+					{ kind: "profile", input },
+				);
+				attemptedActionIdentity = pending.action.identity;
+				if (pending.requiresReceiptCheck) await recoverSettingAction(pending.action);
+				else {
+					if (pending.action.kind !== "profile") throw new Error("配置操作身份不符。");
+					const profileInput = pending.action.input;
+					acceptState(
+						await runCodexConfigurationSyncRequestWithinBudget(
+							(signal) => mutateCodexConfigurationProfile(workspaceId, profileInput, signal),
+							scope.requestAbortController.signal,
+						),
+					);
+					forgetUnconfirmedCodexConfigurationSettingAction(pending.action.identity);
+				}
 				if (!isCurrentScope()) return;
-				scope.unconfirmedProfileMutation = null;
 				notifyCodexConfigurationSyncUpdated();
 				return true;
 			} catch (error) {
 				if (!isCurrentScope()) return;
-				setError(error instanceof Error ? error.message : "profile 操作未确认，请刷新后重试。");
+				if (attemptedActionIdentity && isConfirmedCodexConfigurationProfileMutationRejection(error))
+					forgetUnconfirmedCodexConfigurationSettingAction(attemptedActionIdentity);
+				else shouldRecoverPersistedAction = true;
+				setError(error instanceof Error ? error.message : "配置操作未确认，保留原身份并等待自动核验。");
 				void refresh();
 				return false;
 			} finally {
 				scope.pending = false;
 				if (isCurrentScope()) setPendingChangeId(null);
+				if (shouldRecoverPersistedAction) notifyUnconfirmedCodexConfigurationSettingActionsChanged();
 			}
 		},
-		[workspaceId, refresh, scope, acceptState, isCurrentScope],
+		[workspaceId, refresh, scope, acceptState, isCurrentScope, state?.storageIdentity, recoverSettingAction],
 	);
 	const act = useCallback(
 		async (
@@ -247,6 +439,7 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 			setPendingChangeId(entries.length === 1 ? entries[0]!.changeId : "batch");
 			setError(null);
 			const results: CodexConfigurationBatchActionResult["results"] = [];
+			let shouldRecoverPersistedAction = false;
 			try {
 				for (let offset = 0; offset < entries.length; offset += 200) {
 					const items = entries.slice(offset, offset + 200).map((entry) => {
@@ -258,7 +451,20 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 						}
 						return { ...entry, idempotencyKey };
 					});
-					const result = await batchCodexConfigurationAction(workspaceId, { action, items });
+					const pending = rememberUnconfirmedCodexConfigurationSettingAction(
+						workspaceId,
+						state?.storageIdentity ?? null,
+						{ kind: "feedback", input: { action, items } },
+					);
+					if (pending.requiresReceiptCheck) {
+						results.push(...(await recoverSettingAction(pending.action)));
+						continue;
+					}
+					const result = await runCodexConfigurationSyncRequestWithinBudget(
+						(signal) => batchCodexConfigurationAction(workspaceId, { action, items }, signal),
+						scope.requestAbortController.signal,
+					);
+					forgetUnconfirmedCodexConfigurationSettingAction(pending.action.identity);
 					results.push(...result.results);
 					acceptState(result.state);
 					if (!isCurrentScope()) return;
@@ -266,16 +472,31 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 				setBatchResults(results);
 				notifyCodexConfigurationSyncUpdated();
 				return results;
-			} catch {
+			} catch (error) {
 				if (!isCurrentScope()) return;
-				setError("操作回执未确认，已保留操作身份。连接恢复后可重试，已完成项不会重复执行。");
+				shouldRecoverPersistedAction = true;
+				setError(
+					error instanceof Error && error.message.includes("未能持久保存")
+						? error.message
+						: "操作回执未确认，已保留操作身份。连接恢复后可重试，已完成项不会重复执行。",
+				);
 				void refresh();
 			} finally {
 				scope.pending = false;
 				if (isCurrentScope()) setPendingChangeId(null);
+				if (shouldRecoverPersistedAction) notifyUnconfirmedCodexConfigurationSettingActionsChanged();
 			}
 		},
-		[workspaceId, refresh, scope, acceptState, isCurrentScope, recoveryController],
+		[
+			workspaceId,
+			refresh,
+			scope,
+			acceptState,
+			isCurrentScope,
+			recoveryController,
+			state?.storageIdentity,
+			recoverSettingAction,
+		],
 	);
 	const adoptCandidate = useCallback(
 		async (displayedMembers: CodexConfigurationChange[], expectedSharedValueDigest?: string) => {
@@ -311,10 +532,33 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		[batch, refresh, isCurrentScope],
 	);
 	return {
+		historicalDefaultEditRequest,
+		clearHistoricalDefaultEditRequest: () => setHistoricalDefaultEditRequest(null),
+		beginHistoricalDefaultEdit: async (change: CodexConfigurationChange) => {
+			try {
+				const details = await fetchCodexConfigurationChangeDetails(workspaceId, {
+					changeId: change.changeId,
+					expectedVersion: change.version,
+				});
+				await refresh();
+				if (!isCurrentScope() || !change.codexConfigurationProfileId || !details.profileEditFields?.length)
+					throw new Error("此历史字段已退出共享或尚不可核验，只供查看。");
+				setHistoricalDefaultEditRequest({
+					profileId: change.codexConfigurationProfileId,
+					changeId: change.changeId,
+					fields: details.profileEditFields.map((field) => ({ ...field, value: field.value })),
+				});
+			} catch (error) {
+				if (isCurrentScope()) setError(error instanceof Error ? error.message : "历史值暂不可读，请重试。");
+			}
+		},
 		adoptCandidate,
 		workspaceId,
 		state,
 		error,
+		errorIsConfirmed: Boolean(
+			error && ["不支持", "不属于", "必须是", "格式无效", "幂等凭证与"].some((text) => error.includes(text)),
+		),
 		pendingChangeId,
 		sourceOperations,
 		sourceActionMessages,

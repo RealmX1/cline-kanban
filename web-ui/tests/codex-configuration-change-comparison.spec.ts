@@ -85,7 +85,7 @@ async function openConfigurationComparisonFixture(page: Page) {
 				: route.request().postDataJSON();
 		const input = batched ? rawInput["0"] : rawInput;
 		let data: unknown;
-		if (procedure === "runtime.getCodexConfigurationSyncActiveState") data = state;
+		if (procedure === "runtime.getCodexConfigurationSyncOverview") data = state;
 		else if (procedure === "runtime.getCodexConfigurationChangeDetails") {
 			detailRequests.push(input);
 			if (failNextDetails) {

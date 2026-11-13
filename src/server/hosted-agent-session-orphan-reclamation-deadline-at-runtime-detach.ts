@@ -6,12 +6,15 @@
 // 任一不满足就不回收（null）：宁可让一个会话多活一阵，也绝不让 host 杀掉一个正在干活的 agent。
 // 此处仅投影账本期限；TerminalSessionManager 在发布最终记录前复用在线原生执行门禁，再读本函数核对期限仍有效。
 
+import { readAgentSessionUserTurnIdleProcessRetentionDurationMinutes } from "../config/runtime-config";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import { isReclamationDeadlineStillCurrentForSession } from "../core/session-activity";
 import {
 	findLiveAgentSessionReclamationDeadlineRecord,
+	isLiveAgentSessionReclamationState,
 	type PersistedAgentSessionReclamationDeadlineRecord,
 	readAgentSessionReclamationDeadlineRecords,
+	refreshAgentSessionUserTurnIdleProcessRetentionDeadline,
 } from "../state/agent-session-reclamation-deadline-store";
 import { isAgentSessionRetentionDeadlineBearing } from "./agent-session-response-generation-stop-observer";
 
@@ -40,10 +43,52 @@ export async function loadHostedSessionOrphanReclamationEligibleAtReaderForWorks
 		reclamationDeadlineRecords = await readAgentSessionReclamationDeadlineRecords(workspaceId);
 	} catch (error) {
 		warn(
-			`Could not read agent session reclamation deadlines for ${workspaceId}; hosted agent sessions left to the agent session pty host get no orphan reclamation deadline. ${error instanceof Error ? error.message : String(error)}`,
+			`无法核实会话回收期限 workspaceId=${workspaceId}；已暂停独立 PTY host 的孤儿回收，恢复后由扫描器重试。 ${error instanceof Error ? error.message : String(error)}`,
 		);
 		return () => null;
 	}
+	let userTurnIdleProcessRetentionDurationMinutes: number | null = null;
+	if (
+		reclamationDeadlineRecords.some(
+			(record) =>
+				record.retentionAnchorKind === "agent_response_generation_stopped" &&
+				isLiveAgentSessionReclamationState(record.reclamationState),
+		)
+	) {
+		try {
+			userTurnIdleProcessRetentionDurationMinutes =
+				await readAgentSessionUserTurnIdleProcessRetentionDurationMinutes();
+		} catch (error) {
+			warn(
+				`无法核实普通待命配置 workspaceId=${workspaceId}；仅暂停普通待命会话的宿主孤儿回收，恢复后由扫描器重试。 ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+	reclamationDeadlineRecords = (
+		await Promise.all(
+			reclamationDeadlineRecords.map(async (record) => {
+				if (
+					record.retentionAnchorKind !== "agent_response_generation_stopped" ||
+					!isLiveAgentSessionReclamationState(record.reclamationState)
+				)
+					return record;
+				if (userTurnIdleProcessRetentionDurationMinutes === null) return null;
+				try {
+					return await refreshAgentSessionUserTurnIdleProcessRetentionDeadline(
+						workspaceId,
+						record.recordId,
+						userTurnIdleProcessRetentionDurationMinutes,
+						Date.now(),
+					);
+				} catch (error) {
+					warn(
+						`无法核实普通待命期限 workspaceId=${workspaceId} taskId=${record.taskId} recordId=${record.recordId}；仅暂停该会话的宿主孤儿回收，恢复后由扫描器重试。 ${error instanceof Error ? error.message : String(error)}`,
+					);
+					return null;
+				}
+			}),
+		)
+	).filter((record): record is PersistedAgentSessionReclamationDeadlineRecord => record !== null);
 	return (summary) =>
 		resolveHostedSessionOrphanReclamationEligibleAtFromReclamationDeadlineRecords(
 			reclamationDeadlineRecords,

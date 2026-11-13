@@ -7,8 +7,8 @@
 - 持续观测集合包含全部未退休原生 writer，包括没有待办的 writer。
 - 执行集合包含待审批、冲突、当前配置仍适用的传播目标，以及待绑定和插件恢复工作。退休 writer 只有被明确引用或承担恢复工作时才进入快照。
 - 历史展示独立分页，已批准但尚待采用的记录可以同时属于历史与执行集合。终态目标、完整冲突历史、全部来源关联及旧回执按 ID 读取。
-- `getCodexConfigurationSyncActiveState` 用于日常刷新和通知；`listCodexConfigurationSyncHistory` 默认 50 条、最多 100 条，搜索覆盖全部历史。
-- `getCodexConfigurationSyncState` 保持完整语义。变更请求的 `stateResponseScope` 默认 `full`，新版 UI 显式选择 `active`；该字段不进入原业务幂等摘要。
+- `getCodexConfigurationSyncOverview` 用于日常刷新、通知、配置选择与首屏；概览只读当前配置和反馈，不解码传播目标，采用计数直接在 SQLite 聚合。`getCodexConfigurationSyncActiveState` 保留旧活跃语义；`listCodexConfigurationSyncHistory` 默认 50 条、最多 100 条，搜索覆盖全部历史。
+- `getCodexConfigurationSyncState` 保持完整语义。变更请求的 `stateResponseScope` 默认 `full`，新版 UI 显式选择 `overview`，`active` 保持兼容；该字段不进入原业务幂等摘要。
 
 后台目标查询使用当前 profile 字段、版本与值摘要的索引。只有存在活跃目标的变更进入对应 partial index；旧格式兼容目标从目标状态索引读取，避免对每条终态变更探测一次。活跃来源提醒只携带每字段最新引用，服务端主动搜索通过关联索引覆盖全部原始引用。
 
@@ -44,6 +44,12 @@
 
 相关 guarded 测试覆盖精确备份、哨兵与权威文件替换前后中断、提交成功但 worker 回执丢失、跨重启故障预算、数据库物理替换、最新状态回退、插件父目录替换与冻结后直接回退恢复。规模测试分别扩大终态目标、冲突历史、退休 writer 和来源关联，比较解码行数与 V8 序列化载荷；SQL 查询计划另检查活跃索引。
 
-打包验证须隔离 `dist`、`web-ui/dist`，并设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`。Node 22/24 的原生依赖使用独立目录，不能重编共享安装。浏览器验证只使用隔离 HOME；不在真实关系账本或用户配置中制造测试数据。
+打包验证须隔离 `dist`、`web-ui/dist`，并设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`。Node 22/24 的原生依赖使用独立目录，不能重编共享安装。仅复制顶层原生包、其余依赖仍为符号链接时，仓库级 `npm rebuild` 仍可能遍历链接依赖；原生修复应在完整独立 prefix 内执行，或从匹配 ABI 的已核验缓存恢复具体文件。浏览器验证只使用隔离 HOME；不在真实关系账本或用户配置中制造测试数据。
 
-这些测试不等于任意指令位置断电的证明，也不等于生产切换或整页性能验收。源码、部署、真实实例验收分别报告。本次工作没有绑定卡片，用户明确豁免本次验证定义的卡片注册；这不豁免其他任务的验证责任。
+这些测试不等于任意指令位置断电的证明，也不等于生产切换或整页性能验收。源码、部署、真实实例验收分别报告。原 SQLite 切换工作当时未绑定卡片，其注册豁免仅属于该历史交付；后续改动仍须按各自任务注册部署后验证。
+
+## 本地状态投影与当前会话采用
+
+`settingsIsolationProjectionVersion=2` 将 `tui.model_availability_nux.*`、`tui.screen_reader_detection_done` 和既有桌面字段排除在共享及默认编辑之外。旧 JSON 导入复用原迁移入口；已有 SQLite 在持有同一写锁时只执行一次完整归档事务，并在同次提交记录投影版本。事务中断后按版本重新核验；原生文件、初始化副本、原始历史和已应用事实保留，未完成目标记录取消前状态后停止传播。新观测也跳过这些字段，避免本地状态回流。
+
+会话采用查询只接受当前 summary 给出的 workspace／会话／进程代际／writer 归属。writer 主键与持久绑定必须逐项一致；采用事实只读当前 writer 的对应目标及当前字段版本，不能把旧代目标合并到新代。`configuration_targets_by_writer` 支持按当前 writer 查证，计数不反序列化目标 JSON。会话列表返回轻量投影和稳定游标，不返回底层传播记录数。旧 `full`、`active` 读取、按需完整比较及原业务幂等回执保持兼容。

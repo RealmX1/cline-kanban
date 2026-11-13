@@ -32,6 +32,7 @@ import {
 	independentTaskCreationProvenanceSchema,
 	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
+	runtimeExternalWorkflowRunBindingSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
 	runtimeTaskConversationModeSchema,
@@ -264,6 +265,7 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	title: true,
 	taskNameVersion: true,
 	taskDescription: true,
+	externalWorkflowRunBinding: true,
 	prompt: true,
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
@@ -412,6 +414,13 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 			? { taskMainSessionHandover: taskMainSessionHandoverRecordSchema.parse(card.taskMainSessionHandover) }
 			: {}),
 		title,
+		...(runtimeExternalWorkflowRunBindingSchema.safeParse(card.externalWorkflowRunBinding).success
+			? {
+					externalWorkflowRunBinding: runtimeExternalWorkflowRunBindingSchema.parse(
+						card.externalWorkflowRunBinding,
+					),
+				}
+			: {}),
 		...(typeof card.taskDescription === "string" ? { taskDescription: card.taskDescription } : {}),
 		...(typeof card.taskNameVersion === "number" &&
 		Number.isInteger(card.taskNameVersion) &&

@@ -1785,6 +1785,64 @@ describe("taskCardAction.moveTaskCardIntoReviewByHandingTurnToUser", () => {
 });
 
 describe("taskCardAction.updateTaskCardFieldValues", () => {
+	it("外部流程引用在 board 锁内绑定当前代次，重放保留同一 Run，旧代次及更换 Run 不写入", async () => {
+		seedWorkspace(createBoard({ review: [createCard("task-a", { createdAt: 1 })] }));
+		const { api } = createApiForTest();
+		const binding = {
+			owningWorkspaceId: WORKSPACE_SCOPE.workspaceId,
+			owningTaskId: "task-a",
+			owningTaskIncarnationCreatedAtEpochMs: 1,
+			workflowProviderId: "software-factory",
+			workflowKind: "research",
+			workItemId: "item-1",
+			runId: "run-1",
+			workflowDatabasePath: "/persistent/workflows.sqlite",
+			artifactDirectoryPath: "/persistent/artifacts",
+		};
+		const request = {
+			taskId: "task-a",
+			expectedTaskIncarnationCreatedAtEpochMs: 1,
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch" as const,
+				taskCardFieldValuePatch: { externalWorkflowRunBinding: binding },
+			},
+		};
+		const response = await api.updateTaskCardFieldValues(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(response.taskCardSnapshotAfterAction.taskCard.externalWorkflowRunBinding).toEqual(binding);
+		const replay = await api.updateTaskCardFieldValues(
+			WORKSPACE_SCOPE,
+			request,
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		expect(replay.taskCardSnapshotAfterAction.taskCard.externalWorkflowRunBinding).toEqual(binding);
+		const writesBeforeInvalidRequest = harness.callOrder.length;
+		await expect(
+			api.updateTaskCardFieldValues(
+				WORKSPACE_SCOPE,
+				{ ...request, expectedTaskIncarnationCreatedAtEpochMs: 0 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow();
+		await expect(
+			api.updateTaskCardFieldValues(
+				WORKSPACE_SCOPE,
+				{
+					...request,
+					taskCardFieldUpdate: {
+						...request.taskCardFieldUpdate,
+						taskCardFieldValuePatch: { externalWorkflowRunBinding: { ...binding, runId: "replacement-run" } },
+					},
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow();
+		expect(harness.callOrder.length).toBe(writesBeforeInvalidRequest);
+	});
+
 	it("CLI 原始输入：在锁内与最新卡片合并，未传字段保留现值", async () => {
 		seedWorkspace(
 			createBoard({
