@@ -4836,6 +4836,23 @@ export const runtimeTaskTerminalRefreshResponseSchema = z.object({
 });
 export type RuntimeTaskTerminalRefreshResponse = z.infer<typeof runtimeTaskTerminalRefreshResponseSchema>;
 
+export const runtimeExitCodexTaskConversationSessionPlanModeRequestSchema = z.object({
+	taskConversationSessionId: z.string().min(1),
+	expectedRuntimeSessionIncarnationId: z.uuid(),
+	expectedNativeConversationSessionId: z.string().min(1),
+});
+export type RuntimeExitCodexTaskConversationSessionPlanModeRequest = z.infer<
+	typeof runtimeExitCodexTaskConversationSessionPlanModeRequestSchema
+>;
+
+export const runtimeExitCodexTaskConversationSessionPlanModeResponseSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.enum(["exited", "already_default"]) }),
+	z.object({ status: z.enum(["rejected", "unconfirmed"]), error: z.string() }),
+]);
+export type RuntimeExitCodexTaskConversationSessionPlanModeResponse = z.infer<
+	typeof runtimeExitCodexTaskConversationSessionPlanModeResponseSchema
+>;
+
 export const runtimeTaskSessionInputRequestSchema = z.object({
 	taskId: z.string(),
 	text: z.string(),

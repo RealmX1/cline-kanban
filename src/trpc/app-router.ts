@@ -46,6 +46,8 @@ import type {
 	RuntimeDismissAgentRaisedPendingUserDecisionResponse,
 	RuntimeDismissConnectionRetrySessionsRequest,
 	RuntimeDismissConnectionRetrySessionsResponse,
+	RuntimeExitCodexTaskConversationSessionPlanModeRequest,
+	RuntimeExitCodexTaskConversationSessionPlanModeResponse,
 	RuntimeGetExplorationThreadGraphRequest,
 	RuntimeGetExplorationThreadGraphResponse,
 	RuntimeGetExploratoryFindingsRequest,
@@ -270,6 +272,8 @@ import {
 	runtimeDismissAgentRaisedPendingUserDecisionResponseSchema,
 	runtimeDismissConnectionRetrySessionsRequestSchema,
 	runtimeDismissConnectionRetrySessionsResponseSchema,
+	runtimeExitCodexTaskConversationSessionPlanModeRequestSchema,
+	runtimeExitCodexTaskConversationSessionPlanModeResponseSchema,
 	runtimeGetExplorationThreadGraphRequestSchema,
 	runtimeGetExplorationThreadGraphResponseSchema,
 	runtimeGetExploratoryFindingsRequestSchema,
@@ -881,6 +885,10 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionInputRequest,
 		) => Promise<RuntimeTaskSessionInputResponse>;
+		exitCodexTaskConversationSessionPlanMode: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeExitCodexTaskConversationSessionPlanModeRequest,
+		) => Promise<RuntimeExitCodexTaskConversationSessionPlanModeResponse>;
 		getTaskChatMessages: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskChatMessagesRequest,
@@ -2187,6 +2195,12 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.output(runtimeTaskSessionInputResponseSchema)
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.sendTaskSessionInput(ctx.workspaceScope, input);
+		}),
+	exitCodexTaskConversationSessionPlanMode: workspaceProcedure
+		.input(runtimeExitCodexTaskConversationSessionPlanModeRequestSchema)
+		.output(runtimeExitCodexTaskConversationSessionPlanModeResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			return await ctx.runtimeApi.exitCodexTaskConversationSessionPlanMode(ctx.workspaceScope, input);
 		}),
 	getTaskChatMessages: workspaceProcedure
 		.input(runtimeTaskChatMessagesRequestSchema)
