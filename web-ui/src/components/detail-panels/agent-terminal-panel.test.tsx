@@ -8,7 +8,11 @@ import {
 	MobileFocusViewCollapsibleControlsProvider,
 	useMobileFocusViewCollapsibleControls,
 } from "@/hooks/use-mobile-focus-view-collapsible-controls";
-import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
+import type {
+	RuntimeAgentId,
+	RuntimeExitCodexTaskConversationSessionPlanModeResponse,
+	RuntimeTaskSessionSummary,
+} from "@/runtime/types";
 import { beginTaskAgentSessionStartRequestInFlight } from "@/stores/task-agent-session-start-request-in-flight-store";
 import type { StaleAgentTerminalSessionAutomaticResumePhase } from "@/terminal/stale-agent-terminal-session-automatic-resume-scheduler";
 import type { TerminalScrollbackTranscriptLogicalLine } from "@/terminal/terminal-scrollback-transcript-extraction";
@@ -26,6 +30,8 @@ const {
 	mockAutomaticStaleSessionResumePhase,
 	mockFocusTerminalInputAfterShortcutInsertion,
 	mockIsRefreshing,
+	mockExitCodexPlanMode,
+	mockShowAppToast,
 } = vi.hoisted(() => ({
 	mockRefreshTerminal: vi.fn(async () => {}),
 	mockResyncTerminalView: vi.fn(async () => {}),
@@ -36,7 +42,16 @@ const {
 	mockAutomaticStaleSessionResumePhase: vi.fn((): StaleAgentTerminalSessionAutomaticResumePhase | null => null),
 	mockFocusTerminalInputAfterShortcutInsertion: vi.fn(() => true),
 	mockIsRefreshing: vi.fn(() => false),
+	mockExitCodexPlanMode: vi.fn<() => Promise<RuntimeExitCodexTaskConversationSessionPlanModeResponse>>(),
+	mockShowAppToast: vi.fn(),
 }));
+
+vi.mock("@/runtime/trpc-client", () => ({
+	getRuntimeTrpcClient: () => ({
+		runtime: { exitCodexTaskConversationSessionPlanMode: { mutate: mockExitCodexPlanMode } },
+	}),
+}));
+vi.mock("@/components/app-toaster", () => ({ showAppToast: mockShowAppToast }));
 
 vi.mock("@/terminal/use-persistent-terminal-session", () => ({
 	usePersistentTerminalSession: () => {
@@ -134,6 +149,29 @@ function createSummary(agentId: RuntimeAgentId, taskId = "task-1"): RuntimeTaskS
 	};
 }
 
+function createIdleCodexSummary(taskId = "task-1"): RuntimeTaskSessionSummary {
+	const incarnationId = "281fd234-c6df-4563-ae2b-c9b2e33541f1";
+	return {
+		...createSummary("codex", taskId),
+		turnOwner: "user",
+		liveness: "live",
+		userTurnKind: "review",
+		runtimeSessionIncarnationId: incarnationId,
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex",
+			nativeSessionId: `native-${taskId}`,
+			transcriptPath: null,
+			observedAt: 1,
+		},
+		codexNativeSessionControlEndpoint: {
+			socketPath: "/isolated/control.sock",
+			workspaceId: "workspace-1",
+			conversationSessionId: taskId,
+			runtimeSessionIncarnationId: incarnationId,
+		},
+	};
+}
+
 /**
  * 确认弹窗走 Radix Portal，挂在 document.body 上而不是测试容器里 —— 只查 container 会永远查不到它。
  */
@@ -158,6 +196,8 @@ describe("AgentTerminalPanel", () => {
 		mockHasRenderedAnyTerminalContent.mockReturnValue(true);
 		mockAutomaticStaleSessionResumePhase.mockReturnValue(null);
 		mockIsRefreshing.mockReturnValue(false);
+		mockExitCodexPlanMode.mockReset().mockResolvedValue({ status: "exited" });
+		mockShowAppToast.mockClear();
 	});
 
 	afterEach(() => {
@@ -166,6 +206,279 @@ describe("AgentTerminalPanel", () => {
 			root.unmount();
 		});
 		container.remove();
+	});
+
+	it.each(["desktop", "compact", "focus", "mobile_focus"])(
+		"%s 的共享工具提供当前侧会话的退出入口，不需要原生模式提示",
+		async (layout) => {
+			const toolbarHost = document.body.appendChild(document.createElement("div"));
+			mockUseIsMobile.mockReturnValue(layout === "mobile_focus");
+			const summary = createIdleCodexSummary("collaborator-1");
+			try {
+				await act(async () =>
+					root.render(
+						<TooltipProvider>
+							<AgentTerminalPanel
+								taskId="collaborator-1"
+								workspaceId="workspace-1"
+								summary={summary}
+								showSessionToolbar={layout === "desktop"}
+								headerInformationContent={layout.includes("focus") ? <span>侧会话信息</span> : undefined}
+								mobileHeaderToolbarElement={toolbarHost}
+							/>
+						</TooltipProvider>,
+					),
+				);
+				if (layout !== "compact")
+					await act(async () =>
+						document.querySelector<HTMLButtonElement>('[aria-label="终端工具与更多信息"]')!.click(),
+					);
+				await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+				expect(mockExitCodexPlanMode).toHaveBeenCalledWith({
+					taskConversationSessionId: "collaborator-1",
+					expectedRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
+					expectedNativeConversationSessionId: "native-collaborator-1",
+				});
+				expect(mockShowAppToast).toHaveBeenCalledWith(
+					expect.objectContaining({ intent: "success", message: "已退出计划模式" }),
+				);
+				expect(mockTerminalInput).not.toHaveBeenCalled();
+				expect(mockRefreshTerminal).not.toHaveBeenCalled();
+			} finally {
+				toolbarHost.remove();
+			}
+		},
+	);
+
+	it("切换等待期间阻止重复点击，关闭再打开工具菜单仍保留进度", async () => {
+		let finish!: (response: RuntimeExitCodexTaskConversationSessionPlanModeResponse) => void;
+		mockExitCodexPlanMode.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		);
+		await act(async () =>
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel taskId="task-1" workspaceId="workspace-1" summary={createIdleCodexSummary()} />
+				</TooltipProvider>,
+			),
+		);
+		const trigger = container.querySelector<HTMLButtonElement>('[aria-label="终端工具与更多信息"]')!;
+		await act(async () => trigger.click());
+		const button = findPortalButtonByLabel("退出计划模式")!;
+		await act(async () => {
+			button.click();
+			button.click();
+		});
+		expect(mockExitCodexPlanMode).toHaveBeenCalledTimes(1);
+		expect(findPortalButtonByLabel("正在退出计划模式…")?.disabled).toBe(true);
+		await act(async () => trigger.click());
+		await act(async () => trigger.click());
+		expect(findPortalButtonByLabel("正在退出计划模式…")?.disabled).toBe(true);
+		await act(async () => finish({ status: "already_default" }));
+		expect(mockShowAppToast).toHaveBeenCalledWith(expect.objectContaining({ message: "当前已是默认模式" }));
+	});
+
+	it.each(["rejected", "unconfirmed"] as const)("%s 如实显示原因，不冒充成功", async (status) => {
+		mockExitCodexPlanMode.mockResolvedValue({ status, error: "原生状态尚未确认，请重试" });
+		await act(async () =>
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={createIdleCodexSummary()}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			),
+		);
+		await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+		expect(mockShowAppToast).toHaveBeenCalledWith(
+			expect.objectContaining({ intent: "danger", message: "原生状态尚未确认，请重试" }),
+		);
+		expect(findPortalButtonByLabel("退出计划模式")?.disabled).toBe(false);
+	});
+
+	it("请求未完成时切换会话，不把旧会话结果显示为新会话成功", async () => {
+		let finish!: (response: RuntimeExitCodexTaskConversationSessionPlanModeResponse) => void;
+		mockExitCodexPlanMode.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		);
+		const render = (taskId: string) =>
+			act(async () =>
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId={taskId}
+							workspaceId="workspace-1"
+							summary={createIdleCodexSummary(taskId)}
+							showSessionToolbar={false}
+						/>
+					</TooltipProvider>,
+				),
+			);
+		await render("task-1");
+		await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+		await render("collaborator-1");
+		expect(findPortalButtonByLabel("退出计划模式")?.disabled).toBe(false);
+		await act(async () => finish({ status: "exited" }));
+		expect(mockShowAppToast).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["stopped", "exited"],
+		["stopped", "rejected"],
+		["stopped", "request_error"],
+		["missing_process", "exited"],
+		["missing_endpoint", "exited"],
+		["endpoint_restored_after_invalidation", "exited"],
+		["changed_endpoint", "request_error"],
+		["busy", "exited"],
+		["question", "request_error"],
+		["read_only", "exited"],
+	] as const)("同一运行代和原生身份在 %s 后忽略迟到的 %s 回执", async (condition, outcome) => {
+		let resolveModeExitRequest!: (response: RuntimeExitCodexTaskConversationSessionPlanModeResponse) => void;
+		let rejectModeExitRequest!: (error: Error) => void;
+		mockExitCodexPlanMode.mockImplementationOnce(
+			() =>
+				new Promise((resolve, reject) => {
+					resolveModeExitRequest = resolve;
+					rejectModeExitRequest = reject;
+				}),
+		);
+		const render = (summary: RuntimeTaskSessionSummary, isSessionReadOnly = false) =>
+			act(async () =>
+				root.render(
+					<TooltipProvider>
+						<AgentTerminalPanel
+							taskId="task-1"
+							workspaceId="workspace-1"
+							summary={summary}
+							taskColumnId={isSessionReadOnly ? "trash" : "in_progress"}
+							showSessionToolbar={false}
+						/>
+					</TooltipProvider>,
+				),
+			);
+		const initialSummary = createIdleCodexSummary();
+		await render(initialSummary);
+		await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+		expect(mockExitCodexPlanMode).toHaveBeenCalledTimes(1);
+		const invalidatedSummary = { ...initialSummary };
+		if (condition === "stopped") {
+			invalidatedSummary.pid = null;
+			invalidatedSummary.turnOwner = "user";
+			invalidatedSummary.liveness = "interrupted";
+			invalidatedSummary.userTurnKind = "interrupted";
+		}
+		if (condition === "missing_process") invalidatedSummary.pid = null;
+		if (condition === "missing_endpoint" || condition === "endpoint_restored_after_invalidation")
+			invalidatedSummary.codexNativeSessionControlEndpoint = null;
+		if (condition === "changed_endpoint") {
+			invalidatedSummary.codexNativeSessionControlEndpoint = {
+				...initialSummary.codexNativeSessionControlEndpoint!,
+				socketPath: "/isolated/replacement-control.sock",
+			};
+		}
+		if (condition === "busy") {
+			invalidatedSummary.turnOwner = "agent";
+			invalidatedSummary.userTurnKind = null;
+		}
+		if (condition === "question") invalidatedSummary.userTurnKind = "question";
+		await render(invalidatedSummary, condition === "read_only");
+		if (condition === "endpoint_restored_after_invalidation") await render(initialSummary);
+		await act(async () => {
+			if (outcome === "request_error") rejectModeExitRequest(new Error("控制端点已断开"));
+			else if (outcome === "rejected") resolveModeExitRequest({ status: "rejected", error: "会话已经停止" });
+			else resolveModeExitRequest({ status: "exited" });
+		});
+		expect(mockShowAppToast).not.toHaveBeenCalled();
+	});
+
+	it.each(["conversation-a", "conversation-b"] as const)(
+		"A→B→A 保留两个目标等待，%s 完成不会清除另一目标",
+		async (completedConversationSessionId) => {
+			const modeExitRequestResolvers = new Map<
+				string,
+				(response: RuntimeExitCodexTaskConversationSessionPlanModeResponse) => void
+			>();
+			for (const conversationSessionId of ["conversation-a", "conversation-b"]) {
+				mockExitCodexPlanMode.mockImplementationOnce(
+					() =>
+						new Promise((resolve) => {
+							modeExitRequestResolvers.set(conversationSessionId, resolve);
+						}),
+				);
+			}
+			const render = (conversationSessionId: string) =>
+				act(async () =>
+					root.render(
+						<TooltipProvider>
+							<AgentTerminalPanel
+								taskId={conversationSessionId}
+								workspaceId="workspace-1"
+								summary={createIdleCodexSummary(conversationSessionId)}
+								showSessionToolbar={false}
+							/>
+						</TooltipProvider>,
+					),
+				);
+			await render("conversation-a");
+			await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+			await render("conversation-b");
+			await act(async () => findPortalButtonByLabel("退出计划模式")!.click());
+			await render("conversation-a");
+			const pendingConversationAButton = findPortalButtonByLabel("正在退出计划模式…");
+			expect(pendingConversationAButton?.disabled).toBe(true);
+			await act(async () => pendingConversationAButton!.click());
+			expect(mockExitCodexPlanMode).toHaveBeenCalledTimes(2);
+			await render(completedConversationSessionId);
+			await act(async () => modeExitRequestResolvers.get(completedConversationSessionId)!({ status: "exited" }));
+			expect(findPortalButtonByLabel("退出计划模式")?.disabled).toBe(false);
+			const remainingConversationSessionId =
+				completedConversationSessionId === "conversation-a" ? "conversation-b" : "conversation-a";
+			await render(remainingConversationSessionId);
+			const remainingPendingButton = findPortalButtonByLabel("正在退出计划模式…");
+			expect(remainingPendingButton?.disabled).toBe(true);
+			await act(async () => remainingPendingButton!.click());
+			expect(mockExitCodexPlanMode).toHaveBeenCalledTimes(2);
+			await act(async () => modeExitRequestResolvers.get(remainingConversationSessionId)!({ status: "exited" }));
+			expect(findPortalButtonByLabel("退出计划模式")?.disabled).toBe(false);
+		},
+	);
+
+	it.each(["busy", "question", "missing_endpoint", "done", "claude"])("%s 会话不会调用退出接口", async (condition) => {
+		const summary = createIdleCodexSummary();
+		if (condition === "busy") {
+			summary.turnOwner = "agent";
+			summary.userTurnKind = null;
+		}
+		if (condition === "question") summary.userTurnKind = "question";
+		if (condition === "missing_endpoint") summary.codexNativeSessionControlEndpoint = null;
+		if (condition === "claude") summary.agentId = "claude";
+		await act(async () =>
+			root.render(
+				<TooltipProvider>
+					<AgentTerminalPanel
+						taskId="task-1"
+						workspaceId="workspace-1"
+						summary={summary}
+						taskColumnId={condition === "done" ? "trash" : "in_progress"}
+						showSessionToolbar={false}
+					/>
+				</TooltipProvider>,
+			),
+		);
+		const button = findPortalButtonByLabel("退出计划模式");
+		if (condition === "done" || condition === "claude") expect(button).toBeNull();
+		else expect(button?.disabled).toBe(true);
+		expect(mockExitCodexPlanMode).not.toHaveBeenCalled();
 	});
 
 	it("手机导航收起时，取消自动动作默认可用，搜索可见且不联动上方导航", async () => {
