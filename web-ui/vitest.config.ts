@@ -9,6 +9,8 @@ const rootPkg = JSON.parse(readFileSync(resolve(__dirname, "../package.json"), "
 
 export default defineConfig({
 	plugins: [react()],
+	// 私有测试checkout可能位于.git/worktrees内，保留敏感文件屏蔽，允许读取测试源码。
+	server: { fs: { deny: [".env", ".env.*", "*.{crt,pem}"] } },
 	define: {
 		__APP_VERSION__: JSON.stringify(rootPkg.version),
 	},

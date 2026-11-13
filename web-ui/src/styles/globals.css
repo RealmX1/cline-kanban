@@ -359,7 +359,7 @@ body,
 	min-height: 0;
 	overflow-y: auto;
 	scrollbar-gutter: stable;
-	padding: 6px;
+	padding: 0 6px 6px;
 }
 
 
@@ -1198,31 +1198,39 @@ body,
 /* -- Mobile board -- */
 
 @media (max-width: 768px) {
+	.kb-single-project-home-board-scroll-container {
+		overflow-x: hidden;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+
 	.kb-board {
-		overflow-x: auto;
-		overflow-y: hidden;
-		scroll-snap-type: x mandatory;
-		-webkit-overflow-scrolling: touch;
-		padding-left: 4vw;
-		padding-right: 4vw;
+		flex: none;
+		flex-direction: column;
+		overflow: visible;
 	}
 
-	.kb-board > section {
-		flex: 0 0 auto !important;
-		min-width: 280px;
-		width: 92vw;
-		scroll-snap-align: center;
+	.kb-board > section,
+	.kb-board > section > div {
+		flex: none !important;
+		min-width: 0;
+		width: 100%;
 	}
 
-	/* 折叠的 stage 列在移动端也保持窄竖条，不被上面的「一列占 92vw」规则拉宽。 */
-	.kb-board > section[data-kanban-board-column-collapsed="true"] {
-		flex: 0 0 40px !important;
-		min-width: 40px;
-		width: 40px;
+	.kb-board .kb-column-cards {
+		flex: none;
+		min-height: 44px;
+		overflow: visible;
+		scrollbar-gutter: auto;
 	}
 
 	.kb-board > [role="separator"] {
 		display: none;
+	}
+
+	.kb-board [data-kanban-board-stage-section-header] button {
+		min-height: 44px;
+		min-width: 44px;
 	}
 
 	.kb-board-card-shell {
@@ -1374,9 +1382,9 @@ body,
 	--color-project-identity-indigo: #4338CA;
 }
 
-/* 触屏操作留在卡底，附着区不参与桌面卡片布局。 */
+/* 行内工具栏留在卡底；Portal 动作组在触屏上也保持浮动。 */
 @media (hover: none), (pointer: coarse) {
-	.kb-task-card-primary-actions {
+	.kb-task-card-primary-actions:not(.kb-task-card-floating-actions) {
 		position: static;
 		order: 99;
 		margin-top: 0.5rem;
@@ -1396,6 +1404,7 @@ body,
 		pointer-events: auto;
 	}
 	.kb-board-card-surface { min-height: 100px; }
+	[data-task-card-compact-row-details-expanded="false"] .kb-board-card-surface { min-height: 44px; }
 }
 
 .kb-task-card-side-attachments [data-related-tasks-preview-trigger] {

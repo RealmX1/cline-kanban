@@ -209,7 +209,7 @@ describe("useStageHeaderPinLayout", () => {
 				}),
 			);
 		});
-		// 500px 视口扣除五个 38px 标题和 20px padding，卡片可见内容高 290px。
+		// 500px 视口扣除五个 38px 标题和 8px padding，卡片可见内容高 302px。
 		expect(readTop()).toBe("a,b");
 		expect(readBottom()).toBe("d,e");
 		await dispatchScroll();
@@ -223,8 +223,8 @@ describe("useStageHeaderPinLayout", () => {
 		await act(async () => root.render(createElement(CrossProjectJumpNavigationHarness)));
 		await act(async () => container.querySelector("button")!.click());
 		const scrollTop = container.querySelector<HTMLElement>('[data-testid="root"]')!.scrollTop;
-		// 目标上方两个标题 76px + 受限内容 290px + padding 20px，仅计一次 padding。
-		expect(scrollTop).toBe(1000 - (76 + 290 + 20));
+		// 目标上方两个标题 76px + 受限内容 302px + padding 8px，仅计一次 padding。
+		expect(scrollTop).toBe(1000 - (76 + 302 + 8));
 		expect(1000 - scrollTop + 34).toBeLessThan(rootRect.height);
 	});
 
@@ -261,7 +261,7 @@ describe("useStageHeaderPinLayout", () => {
 		});
 		const topIds = readTop().split(",");
 		const includesFocusedCard = container.querySelector('[data-testid="focused-edge"]')?.textContent === "pinTop";
-		const railHeight = topIds.length * 38 - 4 + (includesFocusedCard ? 20 + 80 : 0);
+		const railHeight = topIds.length * 38 - 4 + (includesFocusedCard ? 8 + 80 : 0);
 		expect(targetTop + 34).toBeGreaterThanOrEqual(railHeight);
 	});
 
@@ -336,9 +336,7 @@ describe("useStageHeaderPinLayout", () => {
 	});
 
 	it("adds the focused card height to the top threshold so the boundary header is not swallowed", async () => {
-		// a + focused b pinned top; b's rail entry is header(40)+border(2)+padding(16)+card(80). The first non-pinned
-		// header c must be classified by the TALL rail bottom (~0 + (40+2+8) + (40+2+16+80+8) = 196), not the
-		// card-less bottom (~0 + 50 + 50 = 100).
+		// 顶部 rail 包括两个 38px 标题、8px 底部 padding 与 80px 焦点副本，总高 164px。
 		const scrolledPast: Record<string, Rect> = {
 			a: { top: -100, bottom: -60, height: 40 },
 			b: { top: -50, bottom: 250, height: 300 },
@@ -347,8 +345,8 @@ describe("useStageHeaderPinLayout", () => {
 		};
 		focusedCardRect = { top: -50, bottom: 30, height: 80 };
 
-		// 卡头在 166px，落在包含焦点卡的 rail（0..176）内，必须钉住以免被遮住。
-		sectionRects = { ...scrolledPast, c: { top: 166, bottom: 466, height: 300 } };
+		// 卡头在 154px，落在包含焦点卡的 rail（0..164）内，必须钉住以免被遮住。
+		sectionRects = { ...scrolledPast, c: { top: 154, bottom: 454, height: 300 } };
 		await renderHarness("pinTop");
 		expect(readTop()).toBe("a,b,c");
 

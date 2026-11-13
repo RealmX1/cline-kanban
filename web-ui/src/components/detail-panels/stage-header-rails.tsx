@@ -101,7 +101,7 @@ function StageHeaderRailEntry({
 			{withCard ? (
 				<div
 					data-testid="stage-header-rail-focused-card"
-					className="flex flex-col px-2 pb-2 pt-3"
+					className="flex flex-col px-2 pb-2"
 					onClick={onScrollToFocusedCard}
 				>
 					<TaskCardBody

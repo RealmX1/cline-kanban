@@ -6,6 +6,7 @@ import { BoardCard } from "@/components/board-card";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
 import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
+import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
@@ -18,6 +19,8 @@ import type { BoardCard as BoardCardModel, BoardDisplayGroup as BoardColumnModel
 // 模块级常量，保持引用稳定（避免每次渲染都给 hook 传新函数触发 observer 重建）。
 const getColumnCardsScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
 	sentinel.closest<HTMLElement>(".kb-column-cards");
+const getMobileHomeStageListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
+	sentinel.closest<HTMLElement>("[data-mobile-single-project-home-scroll-container]");
 
 export const BoardColumn = memo(function BoardColumn({
 	column,
@@ -50,6 +53,7 @@ export const BoardColumn = memo(function BoardColumn({
 	defaultAgentId,
 	onCollapseColumn,
 	columnFlexStyle,
+	compactRowWithExpandableDetails = false,
 }: {
 	column: BoardColumnModel;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -87,6 +91,7 @@ export const BoardColumn = memo(function BoardColumn({
 	onCollapseColumn?: (columnId: BoardDisplayGroupId) => void;
 	/** 主看板列宽偏好算出的 flex 样式（自动填充或固定 flex-basis）；缺省为等分填充。 */
 	columnFlexStyle?: { flex: string };
+	compactRowWithExpandableDetails?: boolean;
 }): React.ReactElement {
 	const canCreate = column.id === "backlog" && onCreateTask;
 	const canRequestStartAllReadyBacklogTasks = column.id === "backlog" && onRequestStartAllReadyBacklogTasks;
@@ -101,7 +106,7 @@ export const BoardColumn = memo(function BoardColumn({
 		: -1;
 	const { visibleCount, hasMore, remainingCount, loadMoreSentinelRef, revealMore } = useProgressiveRenderCount({
 		totalCount: column.cards.length,
-		getScrollRoot: getColumnCardsScrollRoot,
+		getScrollRoot: compactRowWithExpandableDetails ? getMobileHomeStageListScrollRoot : getColumnCardsScrollRoot,
 		enabled: activeDragTaskId == null,
 		initialCount: restoredScrollOffset?.revealedCardCount,
 		ensureVisibleIndex: indexOfTaskRequestedToReveal >= 0 ? indexOfTaskRequestedToReveal : undefined,
@@ -113,13 +118,14 @@ export const BoardColumn = memo(function BoardColumn({
 
 	// 布局提交后、绘制之前还原滚动位置，避免先闪一帧列顶再跳。
 	useLayoutEffect(() => {
-		const restored = restoredScrollOffset;
+		if (compactRowWithExpandableDetails) return;
+		const restored = readBoardColumnScrollOffset(workspacePath ?? null, column.id);
 		const container = cardsScrollContainerRef.current;
 		if (!restored || !container || restored.scrollTop <= 0) {
 			return;
 		}
 		container.scrollTop = restored.scrollTop;
-	}, []);
+	}, [compactRowWithExpandableDetails]);
 
 	// 滚动是高频事件，用 rAF 折叠成每帧至多一次写入。
 	const pendingScrollRecordFrameRef = useRef(0);
@@ -149,11 +155,13 @@ export const BoardColumn = memo(function BoardColumn({
 			// 卸载前落一次最终值：用户可能展开了更多卡片却没有再滚动过。
 			const container = cardsScrollContainerRef.current;
 			writeBoardColumnScrollOffset(workspacePath ?? null, column.id, {
-				scrollTop: container?.scrollTop ?? restoredScrollOffset?.scrollTop ?? 0,
+				scrollTop: compactRowWithExpandableDetails
+					? (readBoardColumnScrollOffset(workspacePath ?? null, column.id)?.scrollTop ?? 0)
+					: (container?.scrollTop ?? restoredScrollOffset?.scrollTop ?? 0),
 				revealedCardCount: visibleCountRef.current,
 			});
 		},
-		[column.id, workspacePath],
+		[column.id, workspacePath, compactRowWithExpandableDetails],
 	);
 	const cardDropType = "CARD";
 	const isDropDisabled = isCardDropDisabled(column.id, activeDragSourceColumnId ?? null, {
@@ -171,6 +179,7 @@ export const BoardColumn = memo(function BoardColumn({
 
 	return (
 		<section
+			data-kanban-board-stage-section=""
 			data-column-id={column.id}
 			data-verification-anchor={boardColumnAnchorKey(column.id)}
 			className="flex flex-col min-w-0 min-h-0 bg-surface-1 rounded-lg overflow-hidden border border-border"
@@ -178,9 +187,10 @@ export const BoardColumn = memo(function BoardColumn({
 		>
 			<div className="flex flex-col min-h-0" style={{ flex: "1 1 0" }}>
 				<div
-					className="flex items-center justify-between"
+					data-kanban-board-stage-section-header=""
+					className="flex shrink-0 items-center justify-between"
 					style={{
-						height: 40,
+						height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX,
 						padding: "0 12px",
 					}}
 				>
@@ -220,6 +230,7 @@ export const BoardColumn = memo(function BoardColumn({
 								size="sm"
 								onClick={() => onCollapseColumn(column.id)}
 								aria-expanded
+								className={compactRowWithExpandableDetails ? "min-h-11 min-w-11" : undefined}
 								aria-label={`Collapse ${column.title} column`}
 								title={`Collapse ${column.title} column`}
 							/>
@@ -243,6 +254,7 @@ export const BoardColumn = memo(function BoardColumn({
 									icon={<Plus size={14} />}
 									aria-label="Create task"
 									fill
+									className={compactRowWithExpandableDetails ? "min-h-11" : undefined}
 									onClick={onCreateTask}
 									style={{ marginBottom: 6, flexShrink: 0 }}
 								>
@@ -256,8 +268,9 @@ export const BoardColumn = memo(function BoardColumn({
 								for (const card of column.cards.slice(0, visibleCount)) {
 									items.push(
 										<BoardCard
-											key={card.id}
+											key={`${card.id}:${card.createdAt}`}
 											index={draggableIndex}
+											compactRowWithExpandableDetails={compactRowWithExpandableDetails}
 											{...buildTaskCardBusinessProps({
 												card,
 												columnId: resolveTaskCardOriginalStage(column, card),

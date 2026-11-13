@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 import type { RuntimeTaskCardActionUpdateFieldValuesRequest } from "../src/runtime/types";
 import type { BoardCard, TaskCommentEntry } from "../src/types";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 
 test.setTimeout(60_000);
 test.describe.configure({ mode: "parallel" });
@@ -79,6 +80,9 @@ for (const width of [320, 390, 1440]) {
 			await page.screenshot({ path: test.info().outputPath(`session-toolbar-project-${panel}-${width}.png`) });
 			const terminal = panel === "terminal" ? await page.locator(".xterm-screen").elementHandle() : null;
 			const beforeConnections = connections();
+			// 先关闭前一工具的提示，再独立验证项目入口的点击与会话连续性。
+			await page.keyboard.press("Escape");
+			await expect(page.getByRole("tooltip")).toHaveCount(0);
 			await projectButton.click();
 			await expect(projectButton).toHaveCount(0);
 			expect(
@@ -242,6 +246,8 @@ for (const sessionScenario of ["acp&column=review", "column=trash&auto_review"])
 			const resourcePopover = page.getByRole("dialog", { name: "资源占用", exact: true });
 			await expect(resourcePopover).toContainText("CPU 12%");
 			await expect(resourcePopover).toBeFocused();
+			// 焦点不足以证明 Radix 交互层已就绪；先等浮层稳定且可命中，再验证键盘关闭。
+			await resourcePopover.click({ trial: true });
 			await resourcePopover.press("Escape");
 			await expect(resourcePopover).toHaveCount(0);
 			await expect(resourceDetails).toBeFocused();
@@ -352,7 +358,9 @@ for (const source of ["列表卡片", "吸顶副本"] as const) {
 		await expect(card).toBeVisible();
 		await card.hover();
 		await expect(card.locator(".kb-board-card-surface")).not.toHaveCSS("box-shadow", "none");
-		await card.getByRole("button", { name: "View original prompt", exact: true }).hover();
+		await (await taskCardActionToolbar(card))
+			.getByRole("button", { name: "View original prompt", exact: true })
+			.hover();
 		const menu = page.getByRole("menu", { name: "查看原始 Prompt附加操作" });
 		await menu.hover();
 		const before = await scrollRoot.evaluate((element) => element.scrollTop);
@@ -363,7 +371,7 @@ for (const source of ["列表卡片", "吸顶副本"] as const) {
 	});
 }
 
-test("Stage 与 sticky 标题共享 32px 几何，首卡操作避让标题", async ({ page }) => {
+test("Stage 与 sticky 标题共享 32px 几何，首卡贴顶且浮动操作可覆盖标题", async ({ page }) => {
 	await openWorkbench(page, 1280, 900, "column=review&stage_headers");
 	await page.locator(".kb-stage-header-rail").getByRole("button", { name: "跳转到 Backlog", exact: true }).click();
 	const stage = page.locator('[data-stage-section-id="backlog"]');
@@ -376,9 +384,11 @@ test("Stage 与 sticky 标题共享 32px 几何，首卡操作避让标题", asy
 		expect((await header.boundingBox())!.height).toBe(32);
 	const firstCard = stage.locator('[data-task-id="backlog-sample-0"]');
 	await firstCard.hover();
-	const actions = firstCard.locator('[class~="-top-3"]').first();
+	const actions = await taskCardActionToolbar(firstCard);
 	const headerBox = (await inlineHeader.boundingBox())!;
-	expect((await actions.boundingBox())!.y).toBeGreaterThanOrEqual(headerBox.y + headerBox.height);
+	expect((await firstCard.boundingBox())!.y).toBe(headerBox.y + headerBox.height);
+	await expect(actions).toHaveCSS("visibility", "visible");
+	expect((await actions.boundingBox())!.y).toBeLessThan(headerBox.y + headerBox.height);
 	await stage.getByRole("button", { name: "收起 Backlog", exact: true }).click();
 	await expect(stage.getByRole("button", { name: "展开 Backlog", exact: true })).toHaveAttribute(
 		"aria-expanded",

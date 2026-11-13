@@ -2,7 +2,7 @@ import type {
 	CrossProjectTaskSwitcherEntryInProject,
 	CrossProjectTaskSwitcherPromptCacheWarmthEstimate,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import type { ReactElement, ReactNode } from "react";
+import { type ReactElement, type ReactNode, useCallback, useRef } from "react";
 
 import {
 	type CrossProjectTaskSwitcherFullTaskCardInListExpansionState,
@@ -12,14 +12,10 @@ import { CrossProjectTaskSwitcherRowPromptCacheWarmthPill } from "@/components/d
 import { CrossProjectTaskSwitcherAgentStartupProgressStatusNotice } from "@/components/detail-panels/cross-project-task-switcher-agent-startup-progress-status-notice";
 import { CrossProjectTaskSwitcherRowAgentAndTitle } from "@/components/detail-panels/cross-project-task-switcher-row-agent-and-title";
 import { CrossProjectTaskSwitcherRowSummaryMetadata } from "@/components/detail-panels/cross-project-task-switcher-row-summary-metadata";
-import {
-	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
-	TaskCardBody,
-	type TaskCardBodyCrossProjectTaskSwitcherRowElements,
-} from "@/components/task-card-body";
+import { TaskCardActionToolbar } from "@/components/task-card-action-toolbar";
+import { TaskCardBody, type TaskCardBodyCrossProjectTaskSwitcherRowElements } from "@/components/task-card-body";
 import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-visual-density-context";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
-import { cn } from "@/components/ui/cn";
 import { Spinner } from "@/components/ui/spinner";
 import { useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved } from "@/hooks/use-cross-project-task-switcher-row-in-list-expansion-toggle-keyboard-focus-handoff";
 import type { TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
@@ -117,9 +113,17 @@ function ExpandedTaskCardUnavailableFallback({
 }): ReactElement {
 	const fallbackElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved(true);
+	const fallbackElementRef = useRef<HTMLDivElement | null>(null);
+	const attachFallbackElement = useCallback(
+		(element: HTMLDivElement | null) => {
+			fallbackElementRef.current = element;
+			fallbackElementRefHandingOffToggleKeyboardFocus(element);
+		},
+		[fallbackElementRefHandingOffToggleKeyboardFocus],
+	);
 	return (
 		<div
-			ref={fallbackElementRefHandingOffToggleKeyboardFocus}
+			ref={attachFallbackElement}
 			data-cross-project-task-switcher-full-task-card-unavailable-fallback=""
 			className="group/fallback relative cursor-pointer rounded-md px-2 py-1.5 hover:bg-surface-3"
 			onClick={(event) => {
@@ -159,17 +163,17 @@ function ExpandedTaskCardUnavailableFallback({
 				<CrossProjectTaskSwitcherAgentStartupProgressStatusNotice entryInProject={entryInProject} />
 			</div>
 			<div className="mt-1 flex items-center gap-1.5 text-xs text-text-tertiary">{children}</div>
-			<div
-				className={cn(
-					"absolute right-1 z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm",
-					CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME,
-				)}
+			<TaskCardActionToolbar
+				sourceCardAnchorElementRef={fallbackElementRef}
+				isSourceCardInteractionActive={rowContext.isPresentedAsHoveredFromFirstFrame}
+				isCompactTaskRow
+				actionToolbarRightInsetPx={4}
 			>
 				<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
 					expansionState={rowContext.inListExpansionState}
 					onToggleInListExpansion={rowContext.onToggleInListExpansion}
 				/>
-			</div>
+			</TaskCardActionToolbar>
 		</div>
 	);
 }

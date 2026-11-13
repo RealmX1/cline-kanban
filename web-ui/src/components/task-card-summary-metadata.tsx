@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { ProjectIcon, useProjectNameFromVisualIdentityContext } from "@/components/project-visual-identity";
 import { AheadBehindIndicator } from "@/components/ui/ahead-behind-indicator";
+import { cn } from "@/components/ui/cn";
 import { TaskCommitCoverageInCurrentDeploymentIndicator } from "@/components/ui/task-commit-coverage-in-current-deployment-indicator";
 import { TaskCommitsIntegratedIntoBaseRefIndicator } from "@/components/ui/task-commits-integrated-into-base-ref-indicator";
 import {
@@ -26,6 +27,7 @@ export function TaskCardSummaryMetadata({
 	snapshot,
 	showGitMetadata,
 	timePills,
+	className,
 }: {
 	workspaceId: string | null;
 	projectName?: string | null;
@@ -33,6 +35,7 @@ export function TaskCardSummaryMetadata({
 	snapshot: ReviewTaskWorkspaceSnapshot | null | undefined;
 	showGitMetadata: boolean;
 	timePills: ReactNode;
+	className?: string;
 }) {
 	const projectName = useProjectNameFromVisualIdentityContext(workspaceId) ?? fallbackProjectName;
 	const description = snapshot
@@ -65,7 +68,10 @@ export function TaskCardSummaryMetadata({
 			data-task-card-compact-metadata-row=""
 			data-task-directory={showGitMetadata ? "" : undefined}
 			aria-label={description ?? undefined}
-			className="relative mb-1 grid min-w-0 grid-cols-[minmax(0,1fr)_fit-content(30%)_fit-content(40%)] items-stretch gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary"
+			className={cn(
+				"relative mb-1 grid min-w-0 grid-cols-[minmax(0,1fr)_fit-content(30%)_fit-content(40%)] items-stretch gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary",
+				className,
+			)}
 		>
 			<span
 				role="group"

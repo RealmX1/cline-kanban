@@ -180,7 +180,7 @@ function ColumnSection({
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
 					{(provided) => {
 						return (
-							<div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-col px-2 pb-2 pt-3">
+							<div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-col px-2 pb-2">
 								{isCollapsedFocusedPeek
 									? // 折叠焦点 stage 的 peek：焦点卡渲染为非拖拽的裸 TaskCardBody（不包 <Draggable>、
 										// 不传 index/drag）。此前它经 BoardCard 走 draggableIndex 从 0 起算的循环，得到假的

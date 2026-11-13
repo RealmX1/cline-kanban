@@ -14,6 +14,7 @@ import type {
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import { resetCrossProjectTaskSwitcherPanelViewContinuity } from "@/stores/cross-project-task-switcher-panel-view-continuity-store";
 import { resetCrossProjectTaskWorktreeGitMetadataStore } from "@/stores/cross-project-task-worktree-git-metadata-store";
+import { queryTaskCardElementIncludingPortalledActionToolbars } from "../../tests/task-card-action-toolbar-dom-test-queries";
 
 function BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard(
 	props: ComponentProps<typeof ProductionBoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard>,
@@ -290,7 +291,9 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 	it("Recent 空列表保留阶段筛选和显示更早入口", () => {
 		renderBoard(makeHost({ projects: [makeProject("project-a", [])] }));
 		expect(sectionColumnScrollContainer("remaining").textContent).toContain("No recent tasks match these filters.");
-		expect(container.querySelector('[aria-label="Filter recent tasks by stage"]')).not.toBeNull();
+		expect(
+			queryTaskCardElementIncludingPortalledActionToolbars(container, '[aria-label="Filter recent tasks by stage"]'),
+		).not.toBeNull();
 	});
 	it("同一组分区横排成列，与 Focus View 同序：Pinned | Running | Cache warm · your turn | Recent", () => {
 		renderBoard(makeHost());
@@ -305,12 +308,12 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		expect(rowTaskIds(sectionColumnScrollContainer("pinned"))).toEqual(["recent"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("prompt-cache-warm"))).toEqual(["warm"]);
 		expect(rowTaskIds(sectionColumnScrollContainer("running"))).toEqual(["running"]);
-		// 行是滚动容器（分区内容容器）的直接子节点：行根节点自带的 first:mt-4 才会作用在紧挨列 header 的首行上。
+		// 首行紧贴标题，不为悬浮动作组增加外边距。
 		const firstRunningRow = sectionColumnScrollContainer("running").querySelector<HTMLElement>(
 			"[data-cross-project-task-switcher-task-id]",
 		);
 		expect(firstRunningRow?.parentElement).toBe(sectionColumnScrollContainer("running"));
-		expect(firstRunningRow?.className).toContain("first:mt-4");
+		expect(firstRunningRow?.className).not.toContain("first:mt-4");
 	});
 
 	it("没有置顶时 Pinned 列不渲染", () => {
@@ -386,7 +389,12 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		expect(container.querySelector('[data-testid="board-scope-all-projects-home-page-summary"]')?.textContent).toBe(
 			"2 projects · 1 live · 2 awaiting you",
 		);
-		act(() => container.querySelector<HTMLButtonElement>('button[aria-label="Create task"]')?.click());
+		act(() =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				container,
+				'button[aria-label="Create task"]',
+			)?.click(),
+		);
 		expect(host.onRequestCreateTaskInBoardScope).toHaveBeenCalledTimes(1);
 	});
 
@@ -504,7 +512,10 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			expect(warmRowInPlaceExpansionState()).toBe("expanded_in_place_by_hover");
 
 			await act(async () =>
-				queryWarmRow()?.querySelector<HTMLButtonElement>('[aria-label="View original prompt"]')?.click(),
+				queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+					queryWarmRow(),
+					'[aria-label="View original prompt"]',
+				)?.click(),
 			);
 			const originalPromptDialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
 			expect(originalPromptDialog?.textContent).toContain("Original prompt of the warm task");

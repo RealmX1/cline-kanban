@@ -1,9 +1,10 @@
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
 import { ChevronDown, ChevronRight, Pin } from "lucide-react";
 import type { ReactElement } from "react";
-
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
+import { cn } from "@/components/ui/cn";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import { LocalStorageKey } from "@/storage/local-storage-store";
@@ -14,11 +15,10 @@ import { useBooleanLocalStorageValue } from "@/utils/react-use";
 const TASK_PINBOARD_CARD_WIDTH_PX = 280;
 
 /**
- * 主看板顶部的置顶板横条。
+ * 主看板顶部的置顶板，桌面横排，手机随阶段列表纵向滚动。
  *
  * 🔴 它必须渲染在 `<section className="kb-board">` **之外**：
- * - `globals.css` 的 `.kb-board > section { flex: 0 0 auto !important; width: 92vw }` 会在移动端
- *   把任何直接子 section 当成「一列看板列」处理，横条会被拉成一整列宽；
+ * - `.kb-board > section` 的响应式规则只适用于阶段；
  * - `.kb-board` 同时是 `getPrimaryBoardTaskElement` 的查询根，放在外面才能保证置顶板里的分身不被它扫到。
  *
  * 一张都没置顶时整条不渲染——不给从不使用该功能的用户平白占掉 40px 看板高度。
@@ -32,6 +32,7 @@ export function TaskPinboardStripOnKanbanBoard({
 	onEditTaskPinboardPinReason,
 	workspacePath,
 	defaultAgentId,
+	compactRowWithExpandableDetails = false,
 }: {
 	pinnedTasks: TaskPinnedToTaskPinboard[];
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
@@ -41,6 +42,7 @@ export function TaskPinboardStripOnKanbanBoard({
 	onEditTaskPinboardPinReason?: (taskId: string) => void;
 	workspacePath?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
+	compactRowWithExpandableDetails?: boolean;
 }): ReactElement | null {
 	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(
 		LocalStorageKey.TaskPinboardStripCollapsedOnKanbanBoard,
@@ -60,7 +62,8 @@ export function TaskPinboardStripOnKanbanBoard({
 				type="button"
 				onClick={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
 				aria-expanded={!collapsed}
-				className="flex h-10 w-full cursor-pointer items-center gap-2 border-none bg-transparent px-3 text-left text-text-primary hover:bg-surface-0"
+				style={{ height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX }}
+				className="flex w-full cursor-pointer items-center gap-2 border-none bg-transparent px-3 text-left text-text-primary hover:bg-surface-0"
 			>
 				{collapsed ? (
 					<ChevronRight size={16} className="shrink-0 text-text-secondary" />
@@ -72,10 +75,17 @@ export function TaskPinboardStripOnKanbanBoard({
 				<span className="text-xs text-text-tertiary">{pinnedTasks.length}</span>
 			</button>
 			{collapsed ? null : (
-				<div className="flex gap-2 overflow-x-auto px-3 pb-3 pt-1">
+				<div
+					className={cn("flex gap-2 px-3 pb-3", compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto")}
+				>
 					{pinnedTasks.map(({ card, columnId, columnTitle }) => (
-						<div key={card.id} className="shrink-0" style={{ width: TASK_PINBOARD_CARD_WIDTH_PX }}>
+						<div
+							key={`${card.id}:${card.createdAt}`}
+							className="min-w-0 shrink-0"
+							style={compactRowWithExpandableDetails ? undefined : { width: TASK_PINBOARD_CARD_WIDTH_PX }}
+						>
 							<TaskCardBody
+								compactRowWithExpandableDetails={compactRowWithExpandableDetails}
 								renderRole="pinned_card_copy_in_task_pinboard"
 								stageDisplayNameForTaskPinboardCopy={columnTitle}
 								onNavigateToCanonicalCardInItsStage={onRevealCanonicalCardInItsStage}

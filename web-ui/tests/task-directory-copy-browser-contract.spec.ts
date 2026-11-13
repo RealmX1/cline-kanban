@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 
 // 原生剪贴板使用本机 Chrome 验证，与部署后验证保持同一浏览器入口。
 test.use({ channel: "chrome" });
@@ -34,6 +35,8 @@ for (const hasTouch of [false, true]) {
 				});
 			});
 			const page = await context.newPage();
+			await page.route("**/api/**", (route) => route.abort());
+			await page.routeWebSocket("**/*", () => {});
 			await page.route("**/task-workspace-directory?*", async (route) => {
 				await new Promise((resolve) => setTimeout(resolve, 120));
 				const taskId = new URL(route.request().url()).searchParams.get("taskId");
@@ -59,13 +62,16 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 			}
 			for (let index = 0; index < 4; index += 1) {
 				const card = cards.nth(index);
-				const copyButton = card.getByRole("button", { name: "Copy directory path" });
-				await page.mouse.move(1, 1);
+				const copyButton = (await taskCardActionToolbar(card)).locator('button[aria-label="Copy directory path"]');
+				await page.mouse.move(page.viewportSize()!.width - 5, page.viewportSize()!.height - 5, { steps: 3 });
 				await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-				const copyActions = card.locator("[data-task-directory-copy-actions]");
+				const copyActions = await taskCardActionToolbar(card);
 				if (hasTouch) {
 					await expect(copyActions).toHaveCSS("opacity", "1");
 				} else {
+					await card.hover();
+					await expect(copyActions).toHaveCSS("visibility", "visible");
+					await page.mouse.move(page.viewportSize()!.width - 5, page.viewportSize()!.height - 5, { steps: 3 });
 					await expect(copyActions).toHaveCSS("opacity", "0");
 					const copyButtonBoundsWhenHidden = await copyButton.boundingBox();
 					expect(copyButtonBoundsWhenHidden).not.toBeNull();
@@ -99,8 +105,15 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 							.evaluate((element) => element.removeAttribute("data-unexpected-card-activation"));
 					}
 				}
-				await card.locator("[data-task-card-title]").hover();
-				const editButton = card.getByRole("button", { name: "Edit task title" });
+				if (hasTouch) {
+					await copyActions.getByRole("button", { name: "显示任务操作", exact: true }).tap();
+					await expect(copyActions).toHaveAttribute("data-task-card-action-toolbar-disclosure-state", "expanded");
+				} else {
+					await card.locator("[data-task-card-title]").hover();
+				}
+				const editButton = card
+					.getByRole("button", { name: "Edit task title" })
+					.or(copyActions.getByRole("button", { name: "Edit task title" }));
 				if (index !== 1) {
 					if (index === 0) await editButton.hover();
 					const copyBounds = await copyButton.boundingBox();
@@ -124,6 +137,11 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 					}
 				}
 				await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+				if (hasTouch) {
+					// 显式展开允许临时覆盖卡片；返回正文前通过真实触屏入口收起。
+					await copyActions.getByRole("button", { name: "收起任务操作", exact: true }).tap();
+					await expect(copyActions).toHaveAttribute("data-task-card-action-toolbar-disclosure-state", "collapsed");
+				}
 				const descriptionTimePill = card.locator("[data-backlog-task-description-last-updated-pill]");
 				await descriptionTimePill.hover();
 				expect(
@@ -135,11 +153,14 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 					}),
 				).toBe(true);
 				await expect(page.getByRole("tooltip")).toContainText("Description last updated ·");
-				await page.mouse.move(1, 1);
+				await page.mouse.move(page.viewportSize()!.width - 5, page.viewportSize()!.height - 5, { steps: 3 });
 				await expect(page.getByRole("tooltip")).toHaveCount(0);
 				await card.locator("[data-task-card-title]").hover();
-				await expect(card.locator("[data-task-directory-copy-actions]")).toHaveCSS("opacity", "1");
+				await expect(copyActions).toHaveCSS("opacity", "1");
 				await expect(card.locator("[data-task-directory]")).toHaveCount(0);
+				if (hasTouch) {
+					await copyActions.getByRole("button", { name: "显示任务操作", exact: true }).tap();
+				}
 				await copyButton.hover();
 				await expect(page.getByRole("tooltip")).toHaveText(`complete-task-id-${index}`);
 				await copyButton.click();
@@ -150,9 +171,11 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 				await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-card-activation", "true");
 				await expect(page.locator("body")).not.toHaveAttribute("data-edited-task-id");
 				await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-task-start");
-				await page.mouse.move(1, 1);
+				await page.mouse.move(page.viewportSize()!.width - 5, page.viewportSize()!.height - 5, { steps: 3 });
+				await card.locator("[data-task-card-action-toolbar-placeholder]").focus();
+				await expect(copyActions).toHaveCSS("visibility", "visible");
 				await copyButton.focus();
-				await expect(card.locator("[data-task-directory-copy-actions]")).toHaveCSS("opacity", "1");
+				await expect(copyActions).toHaveCSS("opacity", "1");
 				await expect(page.getByRole("tooltip")).toHaveText(`complete-task-id-${index}`);
 				await page
 					.locator("body")
@@ -165,6 +188,9 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 				await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-card-activation", "true");
 				await expect(page.locator("body")).not.toHaveAttribute("data-edited-task-id");
 				await expect(page.locator("body")).not.toHaveAttribute("data-unexpected-task-start");
+				if (hasTouch) {
+					await copyActions.getByRole("button", { name: "收起任务操作", exact: true }).tap();
+				}
 				await page
 					.locator("body")
 					.evaluate((element) => element.removeAttribute("data-copied-task-directory-path"));
@@ -216,6 +242,8 @@ for (const clipboardTransport of ["deferred_clipboard_item", "http_native_copy",
 			}, clipboardTransport);
 			const page = await context.newPage();
 			let releaseDirectoryResponse: (() => Promise<void>) | undefined;
+			await page.route("**/api/**", (route) => route.abort());
+			await page.routeWebSocket("**/*", () => {});
 			await page.route("**/task-workspace-directory?*", async (route) => {
 				await new Promise<void>((resolve) => {
 					releaseDirectoryResponse = async () => {
@@ -240,7 +268,9 @@ window.__vite_plugin_react_preamble_installed__ = true;`,
 			});
 			await page.addScriptTag({ type: "module", url: "/tests/task-directory-copy-browser-harness.tsx" });
 			const card = page.locator("[data-browser-test-card-role]").first();
-			const button = card.getByRole("button", { name: "Copy directory path" });
+			const button = (await taskCardActionToolbar(card)).locator('button[aria-label="Copy directory path"]');
+			await card.locator("[data-task-card-action-toolbar-placeholder]").focus();
+			await expect(await taskCardActionToolbar(card)).toHaveCSS("visibility", "visible");
 			await button.focus();
 			if (clipboardTransport !== "known_path_write_text") {
 				await expect.poll(() => Boolean(releaseDirectoryResponse)).toBe(true);

@@ -28,6 +28,7 @@ import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail
 import { CrossProjectTaskSwitcherRecentProjectMultiSelectFilter } from "@/components/detail-panels/cross-project-task-switcher-recent-project-multi-select-filter";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
 import { useFocusViewPinnedSectionOwnScrollbarSlot } from "@/components/detail-panels/focus-view-group-header-rails";
+import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
@@ -86,10 +87,6 @@ export interface CrossProjectTaskSwitcherSectionBlockProps {
 	focusedTaskRowToKeepMounted?: { entryKey: string; section: CrossProjectTaskSwitcherTaskRowSection } | null;
 }
 
-// 两种呈现都是「h-9 header + 内容容器，行是内容容器的直接子节点」：行根节点自带的 first:mt-4
-// （task-card-body.tsx 的 CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_…）只有在紧挨 header 的
-// 第一行是 :first-child 时才把首行往下让，让叠在首行上方的 hover 动作组不伸进 header、截走 header 控件的点击。
-// 中间不得再插包装层。
 function CrossProjectTaskSwitcherSectionFrame({
 	header,
 	controls,
@@ -136,10 +133,8 @@ function CrossProjectTaskSwitcherSectionFrame({
 			>
 				{/* 列 header 固定在滚动区之外。 */}
 				<div
-					className={cn(
-						"flex",
-						isSectionColumnCollapsed ? "min-h-0 flex-1" : "h-9 shrink-0 items-center gap-2 px-2",
-					)}
+					style={isSectionColumnCollapsed ? undefined : { height: BOARD_TASK_GROUP_HEADER_HEIGHT_PX }}
+					className={cn("flex", isSectionColumnCollapsed ? "min-h-0 flex-1" : "shrink-0 items-center gap-2 px-2")}
 				>
 					{header}
 				</div>

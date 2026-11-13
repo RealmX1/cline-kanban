@@ -381,7 +381,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(
 			launch.args[appendPromptIndex + 1].split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
 		).toHaveLength(2);
-		expect(launch.args[appendPromptIndex + 1]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js'");
+		expect(launch.args[appendPromptIndex + 1]).toContain('"$KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH"');
 	});
 
 	it("appends Kanban sidebar instructions for home Codex sessions", async () => {
@@ -402,7 +402,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(
 			JSON.parse(developerInstructions[0]).split(renderTaskInitialPromptAuthoringAndStartupSettingsGuidance()),
 		).toHaveLength(2);
-		expect(developerInstructions[0]).toContain("'/usr/local/bin/node' '/Users/example/repo/dist/cli.js'");
+		expect(JSON.parse(developerInstructions[0])).toContain('"$KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH"');
 		expect(getCodexConfigOverrideValues(launch.args, "check_for_update_on_startup")).toEqual(["false"]);
 	});
 

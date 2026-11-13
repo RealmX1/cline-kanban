@@ -85,7 +85,7 @@ export function TaskPinboardSectionInFocusView({
 				<div
 					ref={pinnedScrollbarSlot.ref}
 					style={pinnedScrollbarSlot.style}
-					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2 pt-3"
+					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2"
 				>
 					{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div key={card.id} className="mb-1.5 last:mb-0">
