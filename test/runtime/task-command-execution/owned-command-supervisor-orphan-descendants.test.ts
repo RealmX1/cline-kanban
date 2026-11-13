@@ -49,7 +49,7 @@ it.each([false, true])("根命令变化=%s 时仍追踪所属后代并在撤销�
 				execFileSync: (_command: string, arguments_: string[]) => {
 					if (arguments_[0] === "-axo")
 						return [...processes]
-							.map(([pid, entry]) => `${pid} ${entry.parent} ${entry.startAndCommand}`)
+							.map(([pid, entry]) => `${pid} ${entry.parent} S ${entry.startAndCommand}`)
 							.join("\n");
 					const entry = processes.get(Number(arguments_[1]));
 					if (!entry) throw Object.assign(new Error("已退出"), { status: 1 });

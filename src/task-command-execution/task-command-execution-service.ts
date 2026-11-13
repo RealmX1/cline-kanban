@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	InjectionLedgerTerminalDeliveryReceipt,
 	RuntimeTaskChatSendResponse,
@@ -32,12 +33,14 @@ import {
 import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
+	readTaskCommandExecutionsForObservation,
 	taskCommandExecutionArtifactDirectory,
 } from "./task-command-execution-store";
 import {
 	cancelOwnedCommandProcesses,
 	inspectOwnedCommandSupervisor,
 	launchOwnedCommandSupervisor,
+	readOwnedCommandCancellationEvidenceFingerprint,
 } from "./task-command-execution-supervisor";
 
 export interface TaskCommandExecutionOwner {
@@ -66,6 +69,7 @@ export interface TaskCommandExecutionDependencies {
 		record: TaskCommandExecutionRecord,
 	) => Promise<"native_accepted" | "known_not_submitted" | "unknown">;
 	readDeliveryRecoveryEvidenceSha256?: (record: TaskCommandExecutionRecord) => Promise<string>;
+	readCancellationRecoveryEvidenceSha256?: (record: TaskCommandExecutionRecord) => Promise<string>;
 	listWorkspaceIds: () => Promise<string[]>;
 	warn: (message: string) => void;
 	launch?: (record: TaskCommandExecutionRecord, validate: () => Promise<void>) => Promise<void>;
@@ -173,6 +177,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	let stopped = false;
 	let timer: ReturnType<typeof setTimeout> | null = null;
 	const activeSweeps = new Set<string>();
+	const cancellationPassiveObservationNotBeforeBySweepKey = new Map<string, number>();
 	const activeReadOnlyRecoveryEvidenceObservationControllers = new Map<string, AbortController>();
 	const executionIdsWithInitialDispatchInProgress = new Set<string>();
 	const originatingSessionKeysWithExecutionSweepInProgress = new Set<string>();
@@ -184,18 +189,24 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		mutateTaskCommandExecutions(workspaceId, (records) => {
 			const current = records.find((record) => record.executionId === executionId);
 			if (!current) throw new Error("所属执行记录不存在");
-			const next = { ...change(current), updatedAtEpochMs: Date.now() };
+			const changed = change(current);
+			if (isDeepStrictEqual(current, changed)) return { records: null, result: current };
+			const next = { ...changed, updatedAtEpochMs: Date.now() };
 			return { records: records.map((record) => (record === current ? next : record)), result: next };
 		});
-	const inspect = async (workspaceId: string, identity: TaskCommandExecutionIdentityRequest) => {
-		const record = (await readTaskCommandExecutions(workspaceId)).find(
-			(item) => item.executionId === identity.executionId && item.taskId === identity.taskId,
-		);
+	const inspect = async (
+		workspaceId: string,
+		identity: TaskCommandExecutionIdentityRequest,
+		observationOnly = false,
+	) => {
+		const record = (
+			await (observationOnly ? readTaskCommandExecutionsForObservation : readTaskCommandExecutions)(workspaceId)
+		).find((item) => item.executionId === identity.executionId && item.taskId === identity.taskId);
 		if (!record) throw new Error("所属执行与任务身份不匹配");
 		return record;
 	};
-	const assertOwnership = async (record: TaskCommandExecutionRecord, forDelivery = false) => {
-		const current = await inspect(record.workspaceId, record);
+	const assertOwnership = async (record: TaskCommandExecutionRecord, forDelivery = false, observationOnly = false) => {
+		const current = await inspect(record.workspaceId, record, observationOnly);
 		if ((await readExecutionRevocationIntent(current)) || (await producerExecutionRevocationExists(current)))
 			throw new Error("所属执行已有持久撤销意图");
 		if (
@@ -239,7 +250,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			)
 				throw new Error("其他执行或人工后台等待尚未解除");
 		}
-		const latest = await inspect(record.workspaceId, record);
+		const latest = await inspect(record.workspaceId, record, observationOnly);
 		if (
 			latest.revokedAtEpochMs !== null ||
 			latest.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId() ||
@@ -551,7 +562,12 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		}));
 		const observation = await (deps.cancel ?? cancelOwnedCommandProcesses)(record);
 		await releaseOwnedWait(record);
-		return update(workspaceId, record.executionId, (value) => ({ ...value, cancellationObservation: observation }));
+		return update(workspaceId, record.executionId, (value) =>
+			value.launchNonce !== record.launchNonce ||
+			!isDeepStrictEqual(value.cancellationObservation, record.cancellationObservation)
+				? value
+				: { ...value, cancellationObservation: observation },
+		);
 	};
 	const cancelForTask = async (workspaceId: string, taskId: string, ownerSessionInterrupt = false) => {
 		const records = (await readTaskCommandExecutions(workspaceId)).filter(
@@ -591,7 +607,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		activeSweeps.add(sweepKey);
 		let acquiredOriginatingSessionSweepKey: string | null = null;
 		try {
-			const initialRecord = (await readTaskCommandExecutions(workspaceId)).find(
+			const initialRecord = (await readTaskCommandExecutionsForObservation(workspaceId)).find(
 				(item) => item.executionId === executionId,
 			);
 			if (!initialRecord) return;
@@ -618,20 +634,88 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			}
 			if (record.revokedAtEpochMs !== null) {
 				if (record.parkOwned) record = await releaseOwnedWait(record);
+				const previous = record.cancellationObservation;
+				if (previous && previous.nativeCancellationStatus !== "unknown") {
+					cancellationPassiveObservationNotBeforeBySweepKey.delete(sweepKey);
+					return;
+				}
+				const now = Date.now();
+				const nextActiveProbeAtEpochMs =
+					typeof previous?.nextActiveProbeAtEpochMs === "number" ? previous.nextActiveProbeAtEpochMs : 0;
 				if (
-					record.cancellationObservation?.nativeCancellationStatus === "unknown" &&
-					record.cancellationObservation?.rechecked !== true
-				) {
-					const observation = await (deps.cancel ?? cancelOwnedCommandProcesses)(record);
-					await update(workspaceId, executionId, (value) => ({
+					now <
+					Math.max(nextActiveProbeAtEpochMs, cancellationPassiveObservationNotBeforeBySweepKey.get(sweepKey) ?? 0)
+				)
+					return;
+				cancellationPassiveObservationNotBeforeBySweepKey.set(sweepKey, now + 15_000);
+				const fingerprint = await (
+					deps.readCancellationRecoveryEvidenceSha256 ?? readOwnedCommandCancellationEvidenceFingerprint
+				)(record);
+				const unchangedCount =
+					previous?.evidenceFingerprint === fingerprint && typeof previous.unchangedEvidenceProbeCount === "number"
+						? previous.unchangedEvidenceProbeCount
+						: 0;
+				if (unchangedCount >= 3) return;
+				const budget = {
+					evidenceFingerprint: fingerprint,
+					unchangedEvidenceProbeCount: unchangedCount + 1,
+					nextActiveProbeAtEpochMs: now + 15_000,
+				};
+				let probeReserved = false;
+				let producerCancelCommandDispatchMayBeNeeded = false;
+				const launchNonce = record.launchNonce;
+				// 补查资格先持久化；崩溃不能重置预算，也不能重新派发业务命令。
+				record = await update(workspaceId, executionId, (value) => {
+					const latest = value.cancellationObservation;
+					if (
+						value.launchNonce !== launchNonce ||
+						value.revokedAtEpochMs === null ||
+						(latest && latest.nativeCancellationStatus !== "unknown") ||
+						(typeof latest?.nextActiveProbeAtEpochMs === "number" && latest.nextActiveProbeAtEpochMs > now)
+					)
+						return value;
+					const latestCount =
+						latest?.evidenceFingerprint === fingerprint && typeof latest.unchangedEvidenceProbeCount === "number"
+							? latest.unchangedEvidenceProbeCount
+							: 0;
+					if (latestCount >= 3) return value;
+					budget.unchangedEvidenceProbeCount = latestCount + 1;
+					producerCancelCommandDispatchMayBeNeeded =
+						latest === null || latest.producerCancelCommandDispatchMayBeNeeded === true;
+					probeReserved = true;
+					return {
 						...value,
 						cancellationObservation: {
-							...observation,
-							rechecked: true,
+							...latest,
+							nativeCancellationStatus: "unknown",
+							producerCancelCommandDispatchMayBeNeeded,
+							...budget,
 							recoveryTrigger: "native_cancellation_evidence_changed",
 						},
-					}));
-				}
+					};
+				});
+				if (!probeReserved) return;
+				const observation = deps.cancel
+					? await deps.cancel(record)
+					: await cancelOwnedCommandProcesses(record, {
+							skipProducerCancelCommand: !producerCancelCommandDispatchMayBeNeeded,
+						});
+				await update(workspaceId, executionId, (value) =>
+					value.launchNonce !== launchNonce ||
+					value.cancellationObservation?.evidenceFingerprint !== fingerprint ||
+					value.cancellationObservation?.unchangedEvidenceProbeCount !== budget.unchangedEvidenceProbeCount ||
+					value.cancellationObservation?.nextActiveProbeAtEpochMs !== budget.nextActiveProbeAtEpochMs
+						? value
+						: {
+								...value,
+								cancellationObservation: {
+									...observation,
+									producerCancelCommandDispatchMayBeNeeded: false,
+									...budget,
+									recoveryTrigger: "native_cancellation_evidence_changed",
+								},
+							},
+				);
 				return;
 			}
 			if (record.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId()) {
@@ -655,7 +739,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				);
 			}
 			try {
-				await assertOwnership(record);
+				await assertOwnership(record, false, true);
 			} catch {
 				return;
 			}
@@ -713,15 +797,22 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			const nextNotice = notices.find((notice) => !acceptedNoticeIds.has(notice.noticeId));
 			if (disposition !== "agent_review_ready" && disposition !== "agent_judgment_required") {
 				await (async () => {
-					if (result && disposition === "machine_evidence_pending") {
+					const recoveryReportedByProducer =
+						typeof result?.recovery === "object" && result.recovery !== null
+							? (result.recovery as Record<string, unknown>)
+							: null;
+					if (
+						result &&
+						disposition === "machine_evidence_pending" &&
+						(!isDeepStrictEqual(record.progress, result) ||
+							record.businessDisposition !== disposition ||
+							!isDeepStrictEqual(record.recovery, recoveryReportedByProducer))
+					) {
 						record = await update(workspaceId, executionId, (value) => ({
 							...value,
 							businessDisposition: disposition,
 							progress: result,
-							recovery:
-								typeof result?.recovery === "object" && result.recovery !== null
-									? (result.recovery as Record<string, unknown>)
-									: null,
+							recovery: recoveryReportedByProducer,
 						}));
 					}
 					const worker = await (deps.inspectWorker ?? inspectOwnedCommandSupervisor)(record);
@@ -733,24 +824,36 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 							record.specification.resumeCommandPreservesBusinessSingleFlight &&
 							record.launchAttemptCount > 0 &&
 							attempts < 1;
-						record = await update(workspaceId, executionId, (value) => ({
-							...value,
-							unprovenSupervisorRecoveryObservation: {
-								launchNonce: value.launchNonce,
-								missingEvidence: "supervisor_or_owned_process_exit",
-								equivalentEvidenceSources: [
-									"supervisor_terminal_progress",
-									"native_business_result",
-									"boot_identity",
-									"producer_registered_business_single_flight",
-								],
-								recoveryAction: mayResumeBusinessSingleFlight
-									? "resume_registered_business_single_flight"
-									: "await_process_or_native_evidence",
-								unprovenSingleFlightResumeAttemptCount: attempts,
-								maximumUnprovenSingleFlightResumeAttempts: 1,
-							},
-						}));
+						const unprovenSupervisorRecoveryObservation: NonNullable<
+							TaskCommandExecutionRecord["unprovenSupervisorRecoveryObservation"]
+						> = {
+							launchNonce: record.launchNonce,
+							missingEvidence: "supervisor_or_owned_process_exit",
+							equivalentEvidenceSources: [
+								"supervisor_terminal_progress",
+								"native_business_result",
+								"boot_identity",
+								"producer_registered_business_single_flight",
+							],
+							recoveryAction: mayResumeBusinessSingleFlight
+								? "resume_registered_business_single_flight"
+								: "await_process_or_native_evidence",
+							unprovenSingleFlightResumeAttemptCount: attempts,
+							maximumUnprovenSingleFlightResumeAttempts: 1,
+						};
+						if (
+							!isDeepStrictEqual(
+								record.unprovenSupervisorRecoveryObservation,
+								unprovenSupervisorRecoveryObservation,
+							)
+						)
+							record = await update(workspaceId, executionId, (value) => ({
+								...value,
+								unprovenSupervisorRecoveryObservation: {
+									...unprovenSupervisorRecoveryObservation,
+									launchNonce: value.launchNonce,
+								},
+							}));
 						if (!mayResumeBusinessSingleFlight) return;
 					}
 					const recovery = record.recovery;
@@ -1271,7 +1374,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	};
 	const sweep = async () => {
 		for (const workspaceId of await deps.listWorkspaceIds())
-			for (const record of await readTaskCommandExecutions(workspaceId)) {
+			for (const record of await readTaskCommandExecutionsForObservation(workspaceId)) {
 				try {
 					await sweepExecution(workspaceId, record.executionId);
 				} catch (error) {
@@ -1307,6 +1410,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		stop: () => {
 			stopped = true;
 			if (timer) clearTimeout(timer);
+			cancellationPassiveObservationNotBeforeBySweepKey.clear();
 			for (const controller of activeReadOnlyRecoveryEvidenceObservationControllers.values()) controller.abort();
 		},
 	};
