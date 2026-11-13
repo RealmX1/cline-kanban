@@ -80,7 +80,6 @@ export function TaskCardStickers({ controller }: { controller: TaskCardStickersC
 						}}
 						onCloseAutoFocus={(event) => {
 							event.preventDefault();
-							if (controller.returnFocusOnClose.current) controller.explicitOpenerRef.current?.focus();
 						}}
 						onEscapeKeyDown={(event) => {
 							event.preventDefault();

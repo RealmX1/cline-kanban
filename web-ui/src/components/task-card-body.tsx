@@ -47,6 +47,7 @@ import { PostDeployVerificationEntryNavigationButton } from "@/components/post-d
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
 import { TaskActivityElapsedTimePills } from "@/components/task-activity-elapsed-time-pills";
+import { TaskCardActionToolbar } from "@/components/task-card-action-toolbar";
 import { useTaskCardBodyVisualDensity } from "@/components/task-card-body-visual-density-context";
 import { TaskCardCornerStatusIndicatorsFromRuntimeState } from "@/components/task-card-corner-status-indicators-from-runtime-state";
 import { TaskCardResourceUsagePill } from "@/components/task-card-resource-usage-pill";
@@ -231,33 +232,6 @@ export interface TaskCardBodyCrossProjectTaskSwitcherRowElements {
 	 */
 	isPresentedAsHoveredFromFirstFrame: boolean;
 }
-
-/**
- * All projects 切换面板一行里 hover 动作组的竖直位置：叠在首行**上方**，底边落在首行字形之上——与标准密度卡片把动作组
- * 伸出上边框（-top-[6px]）同一个思路，首行的字不被盖住，也不为它在右侧预留空白（预留会让长标题提前折行、
- * 标题可用宽度变窄）。精简行、卡体（`expanded_card_copy_in_cross_project_task_switcher_row`）、卡体兜底三处共用，
- * 最右一格的展开开关因此三态同一坐标。代价：行间只有 2px，动作组上半截会伸进上一行的右下角，hover 时盖住那里几像素。
- * 分区第一行上方不是上一行而是分区 header（右侧有折叠按钮 / 排序下拉框），不能伸进去：见下方首行上外边距常量。
- * 一般紧凑密度（Focus View 左栏列表）也使用 -top-3，避免动作组遮住摘要。
- */
-export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME =
-	"-top-3";
-// 上面那个类名伸出行顶边的距离（-top-3 = 12px）：悬浮定位时连动作组命中区域一起计入可视区边界。
-export const CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX = 12;
-/**
- * 行根节点是分区内容容器的第一个子节点时（紧挨分区 header 的第一行）上方留出 16px（mt-4）=
- * 动作组伸出行顶边的 12px（`CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX`）
- * + 动作组最右一格展开开关的命中区伪元素再向上扩的 4px（cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button.tsx
- * 的 `IN_LIST_EXPANSION_TOGGLE_HIT_AREA_EXTENDED_UP_AND_RIGHT_BEYOND_BUTTON_BOX_CLASS_NAME` 里的 `after:-top-1`）。
- * 只让出 12px 时动作组盒子顶边落在 header 底边上，但开关命中区仍高出 header 底边 4px，伸进 Pinned / Running 折叠按钮
- *（h-9 header 里居中的 h-8，底边距 header 底边 2px）的底沿约 2px、截走点击。让出 16px 后命中区顶边正好落在 header 底边上，
- * 不盖住 header 里的折叠按钮（Pinned / Running）与排序下拉框（Recent），指针从首行往上移时不截走它们的点击。
- * 改伸出量或命中区向上扩展量中的任何一项，这里都要跟着改（真实浏览器集成测试阶段 6 用 elementFromPoint 在 header 底沿取点守着）。
- * 三态共用行根节点，首行整体下移、三态之间仍同一坐标；非首行不受影响（非首行开关命中区仍是 24×24）。
- * 第一个子节点是别的东西（Recent「Unread + opened」排序下的小标题、空态提示）时不生效：那时首行不紧挨 header，也不多出空白。
- */
-export const CROSS_PROJECT_TASK_SWITCHER_FIRST_ROW_DIRECTLY_BELOW_SECTION_HEADER_TOP_MARGIN_CLEARING_HOVER_ACTION_GROUP_OVERHANG_AND_EXPANSION_TOGGLE_HIT_AREA_UPWARD_EXTENSION_CLASS_NAME =
-	"first:mt-4";
 
 /**
  * 任务卡的纯展示卡体（卡壳 + 内层可视卡 + 全部展示态/交互）。
@@ -1061,14 +1035,16 @@ export const TaskCardBody = memo(function TaskCardBody(
 						? "default"
 						: "pointer",
 			}}
-			onMouseEnter={() => setIsHovered(true)}
-			onMouseLeave={() => setIsHovered(false)}
 			onPointerEnter={(event) => {
 				if (event.pointerType !== "mouse" || !event.currentTarget.contains(event.target as Node)) return;
+				setIsHovered(true);
 				taskStickers.pointerEnter();
 				if (taskStickers.entries.length > 0) taskStickers.activate();
 			}}
-			onPointerLeave={taskStickers.pointerLeave}
+			onPointerLeave={() => {
+				setIsHovered(false);
+				taskStickers.pointerLeave();
+			}}
 		>
 			{/* 各种卡片角色共享完整卡面宽度，附着区独立定位。 */}
 			<div
@@ -1207,26 +1183,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 						) : null}
 					</div>
 				</div>
-				<div
-					data-task-card-primary-actions=""
-					className={cn(
-						"kb-task-card-primary-actions",
-						usesInFlowActionToolbar
-							? "order-last mt-2 flex flex-wrap items-center gap-0.5"
-							: cn(
-									// 主操作沿卡壳右缘排列，维持与缩略行展开开关相同的坐标。
-									"absolute z-30 flex items-center gap-0.5 rounded-md bg-surface-3 px-0.5 shadow-sm transition-opacity",
-									isCrossProjectTaskSwitcherRowCopy ? "right-1" : "right-0",
-									// 紧凑密度动作组放在摘要上方，避免遮住时间药丸。
-									isCrossProjectTaskSwitcherRowCopy
-										? CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_VERTICAL_POSITION_ABOVE_FIRST_LINE_CLASS_NAME
-										: isCompactRowInFocusViewLeftColumn
-											? "-top-3"
-											: "-top-[6px]",
-									"focus-within:opacity-100 focus-within:pointer-events-auto [@media(hover:none)]:opacity-100 [@media(hover:none)]:pointer-events-auto",
-									isHoverPresentationShown ? "opacity-100" : "opacity-0 pointer-events-none",
-								),
-					)}
+				<TaskCardActionToolbar
+					sourceCardAnchorElementRef={taskStickers.cardElementRef}
+					isSourceCardInteractionActive={isHoverPresentationShown || taskStickers.open}
+					isCompactTaskRow={isCrossProjectTaskSwitcherRowCopy || isCompactRowInFocusViewLeftColumn}
+					actionToolbarRightInsetPx={isCrossProjectTaskSwitcherRowCopy ? 4 : 0}
+					usesDocumentFlowActionToolbar={usesInFlowActionToolbar}
 				>
 					{showTitleEditButton &&
 					(isCompactRowInFocusViewLeftColumn || isMobileDetailHeaderCopy || isRelatedTaskPreviewCopy) ? (
@@ -1479,20 +1441,12 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</Tooltip>
 					) : null}
 					{showDirectoryCopyButton ? (
-						<span
-							data-task-directory-copy-actions=""
-							className={cn(
-								"inline-flex group-focus-within/card:opacity-100 group-focus-within/card:pointer-events-auto",
-								isHoverPresentationShown || isMobileDetailHeaderCopy
-									? "opacity-100"
-									: "opacity-0 pointer-events-none",
-							)}
-						>
+						<span data-task-directory-copy-actions="" className="inline-flex">
 							{directoryCopyButton}
 						</span>
 					) : null}
 					{crossProjectTaskSwitcherRowElements?.inListExpansionToggle}
-				</div>
+				</TaskCardActionToolbar>
 				{isPromptViewerOpen ? (
 					<TaskOriginalPromptDialog open card={card} onClose={() => setIsPromptViewerOpen(false)} />
 				) : null}

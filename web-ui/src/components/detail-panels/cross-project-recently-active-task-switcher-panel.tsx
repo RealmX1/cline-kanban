@@ -291,7 +291,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 								focusedCardContent={
 									showsFocusedCard ? (
 										<div
-											className="max-h-[var(--kb-focused-card-rail-maximum-height)] overflow-y-auto overscroll-contain px-2 pb-2 pt-3"
+											className="max-h-[var(--kb-focused-card-rail-maximum-height)] overflow-y-auto overscroll-contain px-2 pb-2"
 											data-cross-project-focused-task-sticky-edge={edge === "pinTop" ? "top" : "bottom"}
 										>
 											{/* 测量自然内容盒；外层限高与 padding 不回灌分类和跳转。 */}

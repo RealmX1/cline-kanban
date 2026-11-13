@@ -1,10 +1,7 @@
 import { autoUpdate } from "@floating-ui/dom";
 import { type CSSProperties, type RefObject, useLayoutEffect, useRef, useState } from "react";
-import { CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX } from "@/components/task-card-body";
 
-// 动作组上伸 12px，展开开关的命中区还向上扩 4px；底部为 ring 留 1px。
-const FLOATING_CARD_TOP_ACTION_HIT_AREA_RESERVE_PX =
-	CROSS_PROJECT_TASK_SWITCHER_ROW_HOVER_ACTION_GROUP_OVERHANG_ABOVE_ROW_TOP_EDGE_PX + 4;
+// 底部为卡体描边保留 1px，按钮独立定位，不计入卡体限高。
 const FLOATING_CARD_BOTTOM_RING_RESERVE_PX = 1;
 
 interface FloatingCardViewportPosition {
@@ -55,16 +52,11 @@ export function useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
 			const maximumHeightPx = Math.max(0, viewportBottomPx - viewportTopPx);
 			const rowTopPx = rowElement.getBoundingClientRect().top;
 			const naturalFloatingCardHeightPx =
-				fullTaskCardContentElement.getBoundingClientRect().height +
-				FLOATING_CARD_TOP_ACTION_HIT_AREA_RESERVE_PX +
-				FLOATING_CARD_BOTTOM_RING_RESERVE_PX;
+				fullTaskCardContentElement.getBoundingClientRect().height + FLOATING_CARD_BOTTOM_RING_RESERVE_PX;
 			const visibleFloatingCardHeightPx = Math.min(naturalFloatingCardHeightPx, maximumHeightPx);
 			const floatingCardTopPx = Math.max(
 				viewportTopPx,
-				Math.min(
-					rowTopPx - FLOATING_CARD_TOP_ACTION_HIT_AREA_RESERVE_PX,
-					viewportBottomPx - visibleFloatingCardHeightPx,
-				),
+				Math.min(rowTopPx, viewportBottomPx - visibleFloatingCardHeightPx),
 			);
 			const nextPosition: FloatingCardViewportPosition = {
 				topOffsetFromRowPx: floatingCardTopPx - rowTopPx,
@@ -115,9 +107,8 @@ export function useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
 
 	const floatingCardViewportStyle: CSSProperties | undefined = isFloatingCardVisible
 		? {
-				top: position?.topOffsetFromRowPx ?? -FLOATING_CARD_TOP_ACTION_HIT_AREA_RESERVE_PX,
+				top: position?.topOffsetFromRowPx ?? 0,
 				maxHeight: position?.maximumHeightPx,
-				paddingTop: FLOATING_CARD_TOP_ACTION_HIT_AREA_RESERVE_PX,
 				paddingBottom: FLOATING_CARD_BOTTOM_RING_RESERVE_PX,
 			}
 		: undefined;

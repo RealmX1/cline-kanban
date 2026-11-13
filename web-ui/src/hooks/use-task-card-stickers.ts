@@ -70,7 +70,6 @@ export function useTaskCardStickers({
 	const overlayElementRef = useRef<HTMLDivElement | null>(null);
 	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 	const explicitOpenerRef = useRef<HTMLElement | null>(null);
-	const returnFocusOnClose = useRef(false);
 	const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 	const readSequence = useRef(0);
 	const lifecycleGeneration = useRef(0);
@@ -90,15 +89,14 @@ export function useTaskCardStickers({
 	controller.current.close = () => {
 		clearCloseTimer();
 		setOpen(false);
-		returnFocusOnClose.current = false;
 		keyboardOpened.current = false;
 		touchOpened.current = false;
 		if (activeTaskStickerOverlay === controller.current) activeTaskStickerOverlay = null;
 	};
 	const close = (restoreOpenerFocus = false) => {
-		const shouldReturnFocus = restoreOpenerFocus && keyboardOpened.current;
+		// 在关闭浮层前交接焦点，避免来源工具栏先变为 inert 而拒绝恢复。
+		if (restoreOpenerFocus && keyboardOpened.current) explicitOpenerRef.current?.focus({ preventScroll: true });
 		controller.current.close();
-		returnFocusOnClose.current = shouldReturnFocus;
 	};
 	useEffect(() => {
 		currentIdentity.current = identityKey;
@@ -284,9 +282,7 @@ export function useTaskCardStickers({
 		cardElementRef,
 		overlayElementRef,
 		textareaRef,
-		explicitOpenerRef,
 		keyboardOpened,
-		returnFocusOnClose,
 		focusEditorWhenMounted,
 		readOnly: readOnly || !workspaceId,
 		close,

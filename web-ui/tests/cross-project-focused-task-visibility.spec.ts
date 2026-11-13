@@ -3,6 +3,7 @@ import {
 	computeFocusedCardRailContentMaximumHeight,
 	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
 } from "../src/components/detail-panels/stage-header-rail-geometry";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 
 const scrollContainerSelector = '[data-testid="cross-project-recently-active-task-switcher-panel"]';
 const anchorSelector = "[data-cross-project-focused-task-scroll-anchor]";
@@ -228,9 +229,13 @@ test("搜索命中的分组外任务固定保留完整卡片与操作，滚动�
 	expect(await fallback.boundingBox()).toEqual(initialBounds);
 	await expect(page.locator(stickySelector)).toHaveCount(0);
 	await fallback.hover();
-	await fallback.getByRole("button", { name: "Move task to validation", exact: true }).click();
+	await (await taskCardActionToolbar(fallback))
+		.getByRole("button", { name: "Move task to validation", exact: true })
+		.click();
 	await expect(page.getByLabel("动作结果")).toHaveText("validation:project-a:outside");
-	await fallback.getByRole("button", { name: "View original prompt", exact: true }).click();
+	await (await taskCardActionToolbar(fallback))
+		.getByRole("button", { name: "View original prompt", exact: true })
+		.click();
 	await expect(page.getByRole("dialog")).toContainText("原始任务需求：分组外目标任务");
 	await page.keyboard.press("Escape");
 	await expect(fallback).toBeVisible();
@@ -302,7 +307,7 @@ test("跨项目同号任务搜索在途只显示目标占位，取消可回原�
 	await expect(target).toContainText("已结案");
 	await expect(target).not.toContainText("分组外目标任务");
 	await target.hover();
-	await target.getByRole("button", { name: "重新打开已结案任务", exact: true }).click();
+	await (await taskCardActionToolbar(target)).getByRole("button", { name: "重新打开已结案任务", exact: true }).click();
 	await expect(page.getByLabel("动作结果")).toHaveText("restore:project-b:outside");
 	await expect(page.locator(anchorSelector)).toHaveCount(1);
 });
@@ -353,7 +358,9 @@ for (const interaction of ["hover_wait", "prompt_action"] as const) {
 				"expanded_in_place_by_hover",
 			);
 		} else {
-			await sticky.getByRole("button", { name: "View original prompt", exact: true }).click();
+			await (await taskCardActionToolbar(sticky))
+				.getByRole("button", { name: "View original prompt", exact: true })
+				.click();
 			const dialog = page.getByRole("dialog");
 			await expect(dialog).toContainText("原始任务需求：列表任务 20：底沿 hover 完整卡片自然换行的长标题");
 			await dialog.click();

@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 import { runtimeTaskCardActionApplyTaskStickerEntryMutationRequestSchema } from "../../src/core/api-contract";
 import { applyTaskStickerEntryMutationToTaskCard } from "../../src/core/task-sticker-entry-mutation";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 import { createTaskStickerBrowserFixtureCard } from "./task-card-stickers-browser-fixture";
 
 async function openStickerCards(page: Page, bottom = false, startsWithoutStickers = false) {
@@ -106,13 +107,36 @@ test("无便签卡片可从动作区添加首张便签，默认展开且不增�
 	await expect(card.locator("[data-task-sticker-stub]")).toHaveCount(0);
 	await card.hover();
 	await expect(page.locator("[data-task-sticker-overlay]")).toHaveCount(0);
-	await card.getByRole("button", { name: "添加便签", exact: true }).click();
+	await (await taskCardActionToolbar(card)).getByRole("button", { name: "添加便签", exact: true }).click();
 	await expect(page.getByRole("textbox", { name: "便签正文" })).toBeFocused();
 	await page.getByRole("textbox", { name: "便签正文" }).fill("首张便签\n默认展开");
 	await page.getByRole("button", { name: "保存便签", exact: true }).click();
 	await expect(card.getByRole("button", { name: "便签 1", exact: true })).toBeVisible();
 	await expect(page.locator("[data-task-sticker-overlay]").getByText("首张便签", { exact: false })).toBeVisible();
 	expect(await card.boundingBox()).toEqual(before);
+});
+
+test("键盘从浮动工具栏添加便签后移开指针，Escape 仍归还可继续操作的原按钮", async ({ page }) => {
+	const fixture = await openStickerCards(page, false, true);
+	const card = page.locator("[data-sticker-host='board'] .kb-board-card-shell");
+	await card.hover();
+	const toolbar = await taskCardActionToolbar(card);
+	const opener = toolbar.getByRole("button", { name: "添加便签", exact: true });
+	await opener.focus();
+	await page.keyboard.press("Enter");
+	const overlay = page.locator("[data-task-sticker-overlay]");
+	await expect(overlay.getByRole("textbox", { name: "便签正文" })).toBeFocused();
+	await page.mouse.move(0, 0);
+	await page.waitForTimeout(250);
+	await expect(toolbar).toHaveAttribute("data-task-card-action-toolbar-state", "visible");
+	await expect(toolbar).not.toHaveAttribute("inert");
+	await page.keyboard.press("Escape");
+	await expect(overlay).toHaveCount(0);
+	await expect(opener).toBeFocused();
+	await expect(toolbar).not.toHaveAttribute("inert");
+	await page.keyboard.press("Enter");
+	await expect(overlay.getByRole("textbox", { name: "便签正文" })).toBeFocused();
+	expect(fixture.pageErrors).toEqual([]);
 });
 
 for (const [host, taskId, modifier] of [
@@ -197,7 +221,7 @@ for (const finishEditing of ["保存便签", "取消编辑"]) {
 		await openStickerCards(page, false, true);
 		const card = page.locator("[data-sticker-host='board'] .kb-board-card-shell");
 		await card.hover();
-		await card.getByRole("button", { name: "添加便签", exact: true }).click();
+		await (await taskCardActionToolbar(card)).getByRole("button", { name: "添加便签", exact: true }).click();
 		const overlay = page.locator("[data-task-sticker-overlay]");
 		await overlay.getByRole("textbox", { name: "便签正文" }).fill("结束编辑后的便签");
 		await page.mouse.move(0, 0);
@@ -372,7 +396,7 @@ for (const presentation of [
 			if (editorAction === "从卡片键盘添加便签") {
 				await overlay.getByRole("button", { name: "关闭便签", exact: true }).click();
 				await expect(overlay).toHaveCount(0);
-				await card
+				await (await taskCardActionToolbar(card))
 					.getByRole("button", { name: "添加便签", exact: true })
 					.evaluate((element) => element.focus({ preventScroll: true }));
 				await page.keyboard.press("Enter");

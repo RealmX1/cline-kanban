@@ -1,4 +1,5 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
 
 async function longPressButton(page: Page, button: Locator) {
 	const bounds = await button.boundingBox();
@@ -56,7 +57,7 @@ test("桌面悬停向下展开、直接完成、评论弹窗及原文复制", as
 	await openIsolatedQuickActionCard(page);
 	const card = page.locator("[data-task-id='quick-actions-card']");
 	await card.hover();
-	const done = card.getByRole("button", { name: "结案任务", exact: true });
+	const done = (await taskCardActionToolbar(card)).getByRole("button", { name: "结案任务", exact: true });
 	await done.hover();
 	const menu = page.getByRole("menu");
 	await expect(menu).toHaveAttribute("data-side", "bottom");
@@ -84,7 +85,7 @@ test("桌面悬停向下展开、直接完成、评论弹窗及原文复制", as
 	await card.hover();
 	await done.click();
 	await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-	await card.getByRole("button", { name: "View original prompt", exact: true }).hover();
+	await (await taskCardActionToolbar(card)).getByRole("button", { name: "View original prompt", exact: true }).hover();
 	await expect(page.getByRole("menu")).toHaveAttribute("data-side", "bottom");
 	await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).click();
 	await expect(page.locator("body")).toHaveAttribute(
@@ -92,12 +93,14 @@ test("桌面悬停向下展开、直接完成、评论弹窗及原文复制", as
 		"原始 Prompt\n  保留缩进与标点 $() `code`\n",
 	);
 	await expect(page.getByRole("dialog")).toHaveCount(0);
-	await card.getByRole("button", { name: "View original prompt", exact: true }).focus();
+	await (await taskCardActionToolbar(card)).getByRole("button", { name: "View original prompt", exact: true }).focus();
 	await page.keyboard.press("ArrowDown");
 	await expect(page.getByRole("menu")).toBeVisible();
 	await page.keyboard.press("Escape");
 	await expect(page.getByRole("menu")).toHaveCount(0);
-	await expect(card.getByRole("button", { name: "View original prompt", exact: true })).toBeFocused();
+	await expect(
+		(await taskCardActionToolbar(card)).getByRole("button", { name: "View original prompt", exact: true }),
+	).toBeFocused();
 	await page.screenshot({ path: test.info().outputPath("desktop-task-card-quick-actions.png") });
 });
 
@@ -205,13 +208,16 @@ test("PDV 默认保持最前时 Done 与 Prompt 菜单接收鼠标和键盘操�
 	);
 	await expect(panel).toHaveCSS("z-index", "70");
 	await panel.locator(".kb-board-card-shell").hover();
-	const done = panel.getByRole("button", { name: "结案任务", exact: true });
+	const done = (await taskCardActionToolbar(panel)).getByRole("button", { name: "结案任务", exact: true });
 	await done.hover();
 	await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 	await page.screenshot({ path: test.info().outputPath("pdv-pinned-done-menu-expanded.png") });
 	await done.click();
 	await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-	const prompt = panel.getByRole("button", { name: "View original prompt", exact: true });
+	const prompt = (await taskCardActionToolbar(panel)).getByRole("button", {
+		name: "View original prompt",
+		exact: true,
+	});
 	await prompt.hover();
 	await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 	await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).click();
@@ -234,9 +240,15 @@ test.describe("PDV 保持最前的触屏快捷菜单", () => {
 		await openIsolatedQuickActionCard(page, true, true, true);
 		const panel = page.locator(".kb-viewport-bottom-verification-floating-panel");
 		await expect(panel).toHaveCSS("z-index", "70");
-		await panel.getByRole("button", { name: "结案任务", exact: true }).tap();
+		const toolbar = await taskCardActionToolbar(panel);
+		await toolbar.getByRole("button", { name: "显示任务操作", exact: true }).tap();
+		await expect(toolbar).toHaveAttribute("data-task-card-action-toolbar-disclosure-state", "expanded");
+		await toolbar.getByRole("button", { name: "结案任务", exact: true }).tap();
 		await expect(page.getByLabel("直接移动次数")).toHaveText("1");
-		await longPressButton(page, panel.getByRole("button", { name: "View original prompt", exact: true }));
+		await longPressButton(
+			page,
+			(await taskCardActionToolbar(panel)).getByRole("button", { name: "View original prompt", exact: true }),
+		);
 		await expectQuickActionMenuReceivesPointerEvents(page.getByRole("menu"));
 		await page.screenshot({ path: test.info().outputPath("pdv-pinned-touch-prompt-menu-expanded.png") });
 		await page.getByRole("menuitem", { name: "复制原始 Prompt", exact: true }).tap();
