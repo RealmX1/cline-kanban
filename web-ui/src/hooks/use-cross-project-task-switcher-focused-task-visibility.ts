@@ -2,7 +2,7 @@ import {
 	buildCrossProjectTaskSwitcherEntryKey,
 	type CrossProjectTaskSwitcherSections,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { type RefObject, useLayoutEffect } from "react";
+import { type RefObject, useLayoutEffect, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { useSelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
@@ -71,11 +71,42 @@ export function useCrossProjectTaskSwitcherFocusedTaskVisibility({
 		focusedTaskScrollAnchorSelector,
 		focusedTaskSourceScrollRootRef,
 	]);
+	const pendingSourceRowKeyboardFocusHandoffRef = useRef<{
+		sourceRowAnchorElement: HTMLElement;
+		originatingKeyboardEntryElement: Element;
+	} | null>(null);
+	useLayoutEffect(() => {
+		const pendingSourceRowKeyboardFocusHandoff = pendingSourceRowKeyboardFocusHandoffRef.current;
+		if (!pendingSourceRowKeyboardFocusHandoff) return;
+		const { sourceRowAnchorElement, originatingKeyboardEntryElement } = pendingSourceRowKeyboardFocusHandoff;
+		if (
+			!sourceRowAnchorElement.isConnected ||
+			!sourceRowAnchorElement.matches(focusedTaskScrollAnchorSelector) ||
+			(document.activeElement !== originatingKeyboardEntryElement && document.activeElement !== document.body)
+		) {
+			pendingSourceRowKeyboardFocusHandoffRef.current = null;
+			return;
+		}
+		// Sticky 存在时 CSS 隐藏源行；等移除副本的提交让源行恢复可见后再接力焦点。
+		if (getComputedStyle(sourceRowAnchorElement).visibility === "hidden") return;
+		pendingSourceRowKeyboardFocusHandoffRef.current = null;
+		sourceRowAnchorElement
+			.querySelector<HTMLElement>(
+				":is([data-cross-project-task-switcher-compact-row-open-task], [data-task-card-title][role='button']):not([inert] *):not([hidden] *)",
+			)
+			?.focus({ preventScroll: true });
+	});
 
 	const revealFocusedTaskScrollAnchor = () => {
-		focusedTaskSourceScrollRootRef.current
-			?.querySelector<HTMLElement>(focusedTaskScrollAnchorSelector)
-			?.scrollIntoView?.({ block: "center", inline: "nearest" });
+		const anchor = focusedTaskSourceScrollRootRef.current?.querySelector<HTMLElement>(
+			focusedTaskScrollAnchorSelector,
+		);
+		if (!anchor) return;
+		const originatingKeyboardEntryElement = document.activeElement;
+		pendingSourceRowKeyboardFocusHandoffRef.current = originatingKeyboardEntryElement?.matches(":focus-visible")
+			? { sourceRowAnchorElement: anchor, originatingKeyboardEntryElement }
+			: null;
+		anchor.scrollIntoView?.({ block: "center", inline: "nearest" });
 	};
 	return {
 		focusedTaskInProject,
