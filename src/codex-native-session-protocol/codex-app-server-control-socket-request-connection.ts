@@ -69,6 +69,9 @@ export interface CodexAppServerControlSocketConnectionInput {
 	signal?: AbortSignal;
 	onDiagnostic?: (diagnostic: CodexNativeControlSocketRequestDiagnostic) => void | Promise<void>;
 	writerBinding?: CodexConfigurationWriterBinding;
+	onNotification?: (method: string, parameters: Record<string, unknown>) => void;
+	onServerRequest?: (method: string, parameters: Record<string, unknown>) => Promise<unknown>;
+	onConnectionClosed?: () => void;
 }
 
 export class CodexAppServerControlSocketRequestError extends Error {
@@ -240,6 +243,34 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 				...frameDetails,
 				responseClassification: "id" in envelope ? "server_request" : "notification",
 			});
+			const parameters =
+				"params" in envelope && typeof envelope.params === "object" && envelope.params !== null
+					? (envelope.params as Record<string, unknown>)
+					: {};
+			if ("id" in envelope && input?.onServerRequest) {
+				const id = envelope.id;
+				if (typeof id !== "string" && typeof id !== "number") return;
+				const method = envelope.method;
+				const handleServerRequest = input.onServerRequest;
+				void Promise.resolve()
+					.then(() => handleServerRequest(method, parameters))
+					.then(
+						(result) => {
+							if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ id, result }));
+						},
+						() => {
+							if (socket.readyState === WebSocket.OPEN)
+								socket.send(JSON.stringify({ id, error: { code: -32603, message: "原生交互未完成。" } }));
+						},
+					);
+			} else if (!("id" in envelope)) {
+				try {
+					input?.onNotification?.(envelope.method, parameters);
+				} catch {
+					failConnection(new CodexAppServerControlSocketRequestError("protocol_error", "原生通知处理失败。"));
+					socket.terminate();
+				}
+			}
 			return;
 		}
 		const id = envelope && "id" in envelope && typeof envelope.id === "number" ? envelope.id : undefined;
@@ -293,6 +324,7 @@ export async function withRunningCodexAppServerControlSocketConnection<T>(
 		failConnection(new CodexAppServerControlSocketRequestError("connection_error", "原生控制面连接失败。"));
 	const acceptClose = () => {
 		failConnection(new CodexAppServerControlSocketRequestError("connection_closed", "原生活动分支控制面已断开。"));
+		input?.onConnectionClosed?.();
 		resolveClosed();
 	};
 	const abortConnection = () => {

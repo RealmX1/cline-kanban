@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
 
@@ -82,7 +84,7 @@ export async function assertCodexNativeConversationLoadedByCurrentHost(
 		if (cursor && seenCursors.has(cursor)) throw new Error("原生已加载会话分页循环。");
 		if (cursor) seenCursors.add(cursor);
 	} while (cursor);
-	if (!loaded) throw new Error("恢复会话并未由当前 TUI 宿主持有。");
+	if (!loaded) throw new Error("恢复会话并未由当前执行宿主持有。");
 }
 
 export async function readCodexConversationTurnHistoryPage(
@@ -151,16 +153,24 @@ export async function forkCodexConversationBeforeBoundaryTurn(
 			cwd: input.workingDirectory,
 		}),
 	).thread;
-	if (forked.id === input.sourceThreadId || resolve(forked.cwd) !== resolve(input.workingDirectory)) {
+	if (forked.id === input.sourceThreadId) {
 		throw new Error("Codex 返回的恢复分支身份或工作目录错误。");
 	}
 	const identity = { nativeSessionId: forked.id, transcriptPath: forked.path };
 	// 副作用先持久化：崩溃重入复验这个分支，不能重新 fork。
 	await onForkCreated?.(identity);
+	const canonicalWorkingDirectory = await realpath(input.workingDirectory).catch(() =>
+		resolve(input.workingDirectory),
+	);
+	const canonicalForkWorkingDirectory = await realpath(forked.cwd).catch(() => resolve(forked.cwd));
+	if (canonicalForkWorkingDirectory !== canonicalWorkingDirectory) {
+		throw new Error("Codex 返回的恢复分支工作目录错误，已保留候选身份，未切换主会话。");
+	}
 	await verifyRestoredCodexConversationPrefix(
 		port,
 		identity.nativeSessionId,
 		prefix.map((turn) => turn.id),
+		computeCodexNativeConversationPrefixContentSha256(prefix),
 	);
 	return identity;
 }
@@ -169,6 +179,7 @@ export async function verifyRestoredCodexConversationPrefix(
 	port: CodexAppServerRequestPort,
 	restoredThreadId: string,
 	expectedTurnIds: readonly string[],
+	expectedPrefixContentSha256?: string,
 ) {
 	const restored = await readCodexConversationTurns(port, restoredThreadId);
 	if (
@@ -177,4 +188,24 @@ export async function verifyRestoredCodexConversationPrefix(
 	) {
 		throw new Error("恢复后的历史没有准确截止于指定边界之前，未切换主会话。");
 	}
+	if (
+		expectedPrefixContentSha256 &&
+		computeCodexNativeConversationPrefixContentSha256(restored) !== expectedPrefixContentSha256
+	) {
+		throw new Error("恢复分支的原生内容与指定历史前缀不同，未切换主会话。");
+	}
+}
+
+export function computeCodexNativeConversationPrefixContentSha256(
+	turns: readonly CodexNativeConversationTurn[],
+): string {
+	const content = turns.map(({ id, status, error, items }) => ({ id, status, error, items }));
+	const serialized = JSON.stringify(content, (_key, value: unknown) =>
+		typeof value === "object" && value !== null && !Array.isArray(value)
+			? Object.fromEntries(
+					Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+				)
+			: value,
+	);
+	return createHash("sha256").update(serialized).digest("hex");
 }

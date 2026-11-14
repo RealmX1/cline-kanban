@@ -10,7 +10,7 @@ import type { Readable, Writable } from "node:stream";
 import treeKill from "tree-kill";
 import type { RuntimeAgentId, RuntimeTaskAgentPermissionMode } from "../core/api-contract";
 import { isBinaryAvailableOnPath } from "../terminal/command-discovery";
-import { requireAcpAgentLaunchDefinition } from "./acp-agent-launch-catalog";
+import { type AcpAgentLaunchDefinition, requireAcpAgentLaunchDefinition } from "./acp-agent-launch-catalog";
 import {
 	ACP_AGENT_METHODS,
 	ACP_PROTOCOL_VERSION,
@@ -120,7 +120,12 @@ export class AcpClientConnectionRuntime {
 	// 就把历史推完），于是 add/delete 这对括号足以覆盖整段重播。
 	private readonly replayingHistoryTaskIds = new Set<string>();
 
-	constructor(private readonly handlers: AcpConnectionRuntimeHandlers) {}
+	constructor(
+		private readonly handlers: AcpConnectionRuntimeHandlers,
+		private readonly resolveLaunchDefinition: (
+			agentId: RuntimeAgentId,
+		) => AcpAgentLaunchDefinition = requireAcpAgentLaunchDefinition,
+	) {}
 
 	getConnection(taskId: string): AcpTaskConnection | null {
 		return this.connectionsByTaskId.get(taskId) ?? null;
@@ -138,7 +143,7 @@ export class AcpClientConnectionRuntime {
 			return existing;
 		}
 
-		const launchDefinition = requireAcpAgentLaunchDefinition(input.agentId);
+		const launchDefinition = this.resolveLaunchDefinition(input.agentId);
 		const spawnCommand = launchDefinition.buildSpawnCommand({ permissionMode: input.permissionMode });
 		if (!isBinaryAvailableOnPath(spawnCommand.binary)) {
 			throw new Error(
