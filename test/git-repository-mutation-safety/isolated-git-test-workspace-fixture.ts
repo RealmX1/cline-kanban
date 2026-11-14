@@ -18,6 +18,7 @@ import { onTestFinished } from "vitest";
 import {
 	bindTestPtyLifetimeToChildEnvironment,
 	createIsolatedTestOwnedPtyHostLifetime,
+	reclaimDetachedFixturePtyHostsBeforeDirectoryDeletion,
 } from "../utilities/isolated-test-owned-pty-host-lifetime";
 
 export interface GitCommandResult {
@@ -413,6 +414,7 @@ export function createIsolatedGitTestWorkspaceFixture(
 			);
 		}
 		assertAllRepositoriesInsideFixture();
+		reclaimDetachedFixturePtyHostsBeforeDirectoryDeletion(fixtureRootDirectoryPath);
 		testOwnedPtyHostLifetime?.closeAndVerifyOwnedHostExit();
 		rmSync(fixtureRootDirectoryPath, { recursive: true, force: false, maxRetries: 15, retryDelay: 100 });
 		if (!existsSync(protectedSiblingSentinelPath))

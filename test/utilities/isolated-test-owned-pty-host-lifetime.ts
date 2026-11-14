@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	appendFileSync,
 	existsSync,
@@ -17,7 +17,7 @@ import {
 import { createRequire } from "node:module";
 import { createConnection, createServer, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -136,6 +136,50 @@ function reaperEnvironment(): NodeJS.ProcessEnv {
 	return { PATH: `${dirname(process.execPath)}:/usr/bin:/bin:/usr/sbin:/sbin` };
 }
 
+// 历史 completed 记录会长期留在寿命根目录。清理某个 fixture 时只打开它自己的索引，
+// 不能把每次普通 Git fixture 清理变成对全部历史 lease 的线性读取。
+const FIXTURE_ROOT_LIFETIME_INDEX_DIRECTORY_NAME = "fixture-root-index";
+
+function isFixtureLifetimeDirectoryName(name: string): boolean {
+	return /^fixture-lifetime-[A-Za-z0-9]+$/.test(name);
+}
+
+function fixtureRootLifetimeIndexDirectory(recordsDirectory: string, fixtureRootDirectoryPath: string): string {
+	return join(
+		recordsDirectory,
+		FIXTURE_ROOT_LIFETIME_INDEX_DIRECTORY_NAME,
+		createHash("sha256").update(fixtureRootDirectoryPath).digest("hex"),
+	);
+}
+
+function rememberFixtureLifetimeIndex(
+	recordsDirectory: string,
+	fixtureRootDirectoryPath: string,
+	lifetimeDirectoryName: string,
+): void {
+	if (!isFixtureLifetimeDirectoryName(lifetimeDirectoryName)) {
+		throw new Error(`测试 PTY 寿命目录名无法索引: ${lifetimeDirectoryName}`);
+	}
+	const indexDirectory = fixtureRootLifetimeIndexDirectory(recordsDirectory, fixtureRootDirectoryPath);
+	mkdirSync(indexDirectory, { recursive: true, mode: 0o700 });
+	const markerPath = join(indexDirectory, lifetimeDirectoryName);
+	if (existsSync(markerPath)) return;
+	writeFileSync(markerPath, "", { flag: "wx", mode: 0o600 });
+}
+
+function forgetFixtureLifetimeIndex(
+	recordsDirectory: string,
+	fixtureRootDirectoryPath: string,
+	lifetimeDirectoryName: string,
+): void {
+	const markerPath = join(
+		fixtureRootLifetimeIndexDirectory(recordsDirectory, fixtureRootDirectoryPath),
+		lifetimeDirectoryName,
+	);
+	if (!existsSync(markerPath)) return;
+	unlinkSync(markerPath);
+}
+
 export function createIsolatedTestOwnedPtyHostLifetime(fixtureRootDirectoryPath: string): {
 	environmentVariables: NodeJS.ProcessEnv;
 	closeAndVerifyOwnedHostExit(): void;
@@ -158,6 +202,8 @@ export function createIsolatedTestOwnedPtyHostLifetime(fixtureRootDirectoryPath:
 		synchronousCleanupInProgress: false,
 	};
 	writeJsonAtomically(leasePath, lease);
+	// 必须先于 owner socket 和 host 启动留下索引，就绪前失败的 fixture 清理才能找到这个 owner。
+	rememberFixtureLifetimeIndex(recordsDirectory, fixtureRootDirectoryPath, basename(lifetimeDirectory));
 	const connections = new Set<Socket>();
 	const ownerServer = createServer((socket) => {
 		connections.add(socket);
@@ -184,20 +230,16 @@ export function createIsolatedTestOwnedPtyHostLifetime(fixtureRootDirectoryPath:
 			for (const socket of connections) socket.destroy();
 			ownerServer.close();
 			if (readdirSync(lifetimeDirectory).some((name) => name.startsWith("host-") && name.endsWith(".json"))) {
-				const result = spawnSync(process.execPath, reaperLaunchArguments(leasePath), {
-					env: reaperEnvironment(),
-					encoding: "utf8",
-					timeout: 40_000,
-				});
-				if (result.status !== 0 || result.error) {
+				try {
+					runOwnedHostReaperSynchronouslyOrThrow(leasePath);
+				} catch (error) {
 					lease.synchronousCleanupInProgress = false;
 					writeJsonAtomically(leasePath, lease);
-					throw new Error(
-						`测试 PTY 退出未确认，保留 fixture 与恢复记录 ${leasePath}: ${result.error?.message ?? result.stderr}`,
-					);
+					throw error;
 				}
 			} else {
 				rmSync(lifetimeDirectory, { recursive: true });
+				forgetFixtureLifetimeIndex(recordsDirectory, fixtureRootDirectoryPath, basename(lifetimeDirectory));
 			}
 			completed = true;
 		},
@@ -214,6 +256,54 @@ export function bindTestPtyLifetimeToChildEnvironment(
 		...lifetime.environmentVariables,
 		NODE_OPTIONS: `${environment.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preloadPath)}`.trim(),
 	};
+}
+
+function runOwnedHostReaperSynchronouslyOrThrow(leasePath: string): void {
+	const result = spawnSync(process.execPath, reaperLaunchArguments(leasePath), {
+		env: reaperEnvironment(),
+		encoding: "utf8",
+		timeout: 40_000,
+	});
+	if (result.status !== 0 || result.error) {
+		throw new Error(
+			`测试 PTY 退出未确认，保留 fixture 与恢复记录 ${leasePath}: ${result.error?.message ?? result.stderr}`,
+		);
+	}
+}
+
+// 删除 fixture 根之前调用。当前进程自己的 lifetime 仍由 closeAndVerify 同步回收；
+// 子 owner 已死或已关闭时，这里先确认它名下的 host、假 Agent 和 socket 退出。存活中的其他 owner 拒绝删除。
+// 定位范围只限该 fixture 根的索引。没有索引表示这个目录从未登记过 PTY owner，不能借机扫完整历史寿命。
+export function reclaimDetachedFixturePtyHostsBeforeDirectoryDeletion(fixtureRootDirectoryPath: string): void {
+	if (process.platform === "win32") return;
+	const recordsDirectory = resolveTestPtyLifetimeRecordsDirectory();
+	const indexDirectory = fixtureRootLifetimeIndexDirectory(recordsDirectory, fixtureRootDirectoryPath);
+	if (!existsSync(indexDirectory)) return;
+	for (const name of readdirSync(indexDirectory)) {
+		if (!isFixtureLifetimeDirectoryName(name)) continue;
+		const leasePath = join(recordsDirectory, name, "fixture-owner-lease.json");
+		if (!existsSync(leasePath)) {
+			unlinkSync(join(indexDirectory, name));
+			continue;
+		}
+		const rawLease = readFileSync(leasePath, "utf8");
+		if (!rawLease.includes(fixtureRootDirectoryPath)) continue;
+		const lease = leaseSchema.parse(JSON.parse(rawLease));
+		if (lease.fixtureRootDirectoryPath !== fixtureRootDirectoryPath) continue;
+		if (lease.owner.pid === process.pid) continue;
+		if (!lease.closed && processGenerationStillExists(lease.owner)) {
+			throw new Error(`测试 fixture 仍有存活的 PTY owner ${lease.owner.pid}，拒绝删除 ${fixtureRootDirectoryPath}`);
+		}
+		const lifetimeDirectory = dirname(leasePath);
+		const hostRecordNames = readdirSync(lifetimeDirectory).filter((entry) => /^host-.*\.json$/.test(entry));
+		if (hostRecordNames.length === 0) continue;
+		const allHostRecordsCompleted = hostRecordNames.every((entry) => {
+			const record = hostRecordSchema.parse(JSON.parse(readFileSync(join(lifetimeDirectory, entry), "utf8")));
+			return record.outcome === "completed";
+		});
+		if (allHostRecordsCompleted) continue;
+		runOwnedHostReaperSynchronouslyOrThrow(leasePath);
+	}
 }
 
 // 仅由测试 preload 在真实 host 入口执行；登记成功之前禁止进入 host 主程序。
@@ -526,7 +616,10 @@ export async function recoverAbandonedTestPtyHostLifetimes(recordsDirectory: str
 			if (records.length === 0) {
 				const lease = leaseSchema.parse(JSON.parse(readFileSync(leasePath, "utf8")));
 				if (!lease.closed && processGenerationStillExists(lease.owner)) continue;
-				if (await reclaimTestOwnedPtyHostLifetime(leasePath)) rmSync(dirname(leasePath), { recursive: true });
+				if (await reclaimTestOwnedPtyHostLifetime(leasePath)) {
+					rmSync(dirname(leasePath), { recursive: true });
+					forgetFixtureLifetimeIndex(recordsDirectory, lease.fixtureRootDirectoryPath, name);
+				}
 				continue;
 			}
 			if (

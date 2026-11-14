@@ -16,6 +16,9 @@ const fixtureDirectory = process.argv[2];
 const socketPath = process.argv[3];
 if (!fixtureDirectory || !socketPath) throw new Error("测试 owner 缺少隔离路径");
 const lifetime = createIsolatedTestOwnedPtyHostLifetime(fixtureDirectory);
+const leasePath = lifetime.environmentVariables[TEST_PTY_LIFETIME_LEASE_PATH_ENVIRONMENT_VARIABLE];
+if (leasePath) process.stdout.write(`${JSON.stringify({ leasePath })}\n`);
+else if (process.platform !== "win32") throw new Error("测试 owner 缺少 lease");
 const requireFromHere = createRequire(import.meta.url);
 const stubExecutable = join(fixtureDirectory, "isolated-stubborn-agent.cjs");
 const stubReadyRecordPath = join(fixtureDirectory, "isolated-stubborn-agent-ready.json");
@@ -85,6 +88,9 @@ async function runFixtureOwner(): Promise<void> {
 		}
 	}
 	if (!ready) throw new Error("假 Agent 启动超时");
+	if (!leasePath) throw new Error("测试 owner 缺少 lease");
+	// 测试只在假 Agent 已起来、就绪行尚未写出时停住，用来核验 fixture 删除不会抢在退出确认之前。
+	if (process.env.CLINE_KANBAN_TEST_PTY_OWNER_HOLD_BEFORE_READY_LINE === "1") await new Promise<void>(() => {});
 	const hostPid = controller.hostHello.hostProcessId;
 	await controller.closeAfterFlushingPendingFrames();
 	process.stdout.write(
@@ -93,7 +99,7 @@ async function runFixtureOwner(): Promise<void> {
 			agentPid: ready.pid,
 			port: ready.port,
 			socketPath,
-			leasePath: lifetime.environmentVariables[TEST_PTY_LIFETIME_LEASE_PATH_ENVIRONMENT_VARIABLE],
+			leasePath,
 		})}\n`,
 	);
 	for (const [signal, exitCode] of [

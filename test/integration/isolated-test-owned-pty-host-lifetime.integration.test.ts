@@ -67,8 +67,7 @@ async function startFixtureOwnerChild(testContext: LoadSensitiveDeadlineAnnotati
 	let stdout = "";
 	owner.stdout?.on("data", (bytes) => {
 		stdout += String(bytes);
-		const firstLine = stdout.split("\n")[0];
-		if (stdout.includes("\n") && firstLine) ready = JSON.parse(firstLine) as ReadyFixtureOwnerResources;
+		ready = readCompletedFixtureOwnerStdout(stdout).ready ?? ready;
 	});
 	await waitForConditionWithinLoadSensitiveTwoTierDeadline(
 		testContext,
@@ -83,8 +82,31 @@ async function startFixtureOwnerChild(testContext: LoadSensitiveDeadlineAnnotati
 		},
 	);
 	if (!ready) throw new Error("fixture owner 无就绪记录");
-	abandonedLifetimeLeasePathsRecoveredAfterEachTest.add(ready.leasePath);
 	return { owner, ready, fixture };
+}
+
+// lease 行在 host 启动前写出。解析到就登记，后续就绪等待失败时 afterEach 仍能回收。
+function readCompletedFixtureOwnerStdout(stdout: string): {
+	leasePath: string | undefined;
+	ready: ReadyFixtureOwnerResources | undefined;
+} {
+	let leasePath: string | undefined;
+	let ready: ReadyFixtureOwnerResources | undefined;
+	for (const line of stdout.split("\n").slice(0, -1)) {
+		if (!line) continue;
+		const message = JSON.parse(line) as Partial<ReadyFixtureOwnerResources>;
+		if (typeof message.leasePath !== "string") continue;
+		leasePath = message.leasePath;
+		abandonedLifetimeLeasePathsRecoveredAfterEachTest.add(message.leasePath);
+		if (
+			typeof message.hostPid === "number" &&
+			typeof message.agentPid === "number" &&
+			typeof message.port === "number" &&
+			typeof message.socketPath === "string"
+		)
+			ready = message as ReadyFixtureOwnerResources;
+	}
+	return { leasePath, ready };
 }
 
 async function expectFixtureResourcesReleased(
@@ -255,6 +277,85 @@ describe.skipIf(process.platform === "win32")("隔离测试拥有的 PTY 宿主�
 			expect(await waitForChildProcessExit(owner, 40_000)).toBe(true);
 			await expectFixtureResourcesReleased(testContext, ready);
 		}
+	});
+
+	it("就绪前 owner 被 SIGKILL 后，删除 fixture 前确认 host、假 Agent 和 socket 已退出", async (testContext) => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const socketPath = resolveAgentSessionPtyHostSocketPath(
+			{ runtimeHomeDirectoryPath: fixture.isolatedHomeDirectoryPath, runtimePort: 41739 },
+			"0123456789abcdef",
+		);
+		const readyRecordPath = join(fixture.fixtureRootDirectoryPath, "isolated-stubborn-agent-ready.json");
+		let stdout = "";
+		let stderr = "";
+		const owner = ownerChildren.register(
+			spawn(
+				process.execPath,
+				[
+					"--import",
+					requireFromHere.resolve("tsx"),
+					resolve("test/integration/fixtures/isolated-test-owned-pty-host-lifetime-owner.ts"),
+					fixture.fixtureRootDirectoryPath,
+					socketPath,
+				],
+				{
+					env: fixture.createIsolatedChildProcessEnvironment({
+						CLINE_KANBAN_TEST_PTY_OWNER_HOLD_BEFORE_READY_LINE: "1",
+					}),
+					stdio: ["ignore", "pipe", "pipe", "ipc"],
+				},
+			),
+		);
+		owner.stderr?.on("data", (bytes) => {
+			stderr += String(bytes);
+		});
+		owner.stdout?.on("data", (bytes) => {
+			stdout += String(bytes);
+		});
+		await waitForConditionWithinLoadSensitiveTwoTierDeadline(
+			testContext,
+			{
+				waitedForDescription: "就绪行写出前的 lease、host 记录和假 Agent",
+				softDeadlineMsExpectedOnUncontendedHost: 5_000,
+				hardDeadlineMsOnlyExplainedByRealHangOrRegression: 30_000,
+			},
+			() => {
+				if (hasChildProcessExited(owner)) throw new Error(`fixture owner 提前退出: ${stderr}`);
+				const leasePath = readCompletedFixtureOwnerStdout(stdout).leasePath;
+				if (!leasePath || !existsSync(readyRecordPath)) return false;
+				return readdirSync(dirname(leasePath)).some((name) => /^host-.*\.json$/.test(name));
+			},
+		);
+		const leasePath = readCompletedFixtureOwnerStdout(stdout).leasePath;
+		if (!leasePath) throw new Error("fixture owner 未在就绪前公布 lease");
+		expect(abandonedLifetimeLeasePathsRecoveredAfterEachTest.has(leasePath)).toBe(true);
+		const agent = JSON.parse(readFileSync(readyRecordPath, "utf8")) as { pid: number; port: number };
+		const hostRecordName = readdirSync(dirname(leasePath)).find((name) => /^host-.*\.json$/.test(name));
+		if (!hostRecordName) throw new Error("host 记录不存在");
+		const hostRecord = JSON.parse(readFileSync(join(dirname(leasePath), hostRecordName), "utf8")) as {
+			process: { pid: number };
+			socketPath: string;
+		};
+		expect(hostRecord.socketPath).toBe(socketPath);
+		expect(readTestOwnedProcessGeneration(hostRecord.process.pid)).not.toBeNull();
+		expect(readTestOwnedProcessGeneration(agent.pid)).not.toBeNull();
+		expect(existsSync(socketPath)).toBe(true);
+		expect(existsSync(fixture.fixtureRootDirectoryPath)).toBe(true);
+		owner.kill("SIGKILL");
+		expect(await waitForChildProcessExit(owner, 5_000)).toBe(true);
+		// 不在用例里提前回收，专门让 fixture.cleanup 在删除目录前完成退出确认。
+		abandonedLifetimeLeasePathsRecoveredAfterEachTest.delete(leasePath);
+		fixture.cleanup();
+		expect(existsSync(fixture.fixtureRootDirectoryPath)).toBe(false);
+		expect(readTestOwnedProcessGeneration(hostRecord.process.pid)).toBeNull();
+		expect(readTestOwnedProcessGeneration(agent.pid)).toBeNull();
+		expect(existsSync(socketPath)).toBe(false);
+		const listener = createServer();
+		await new Promise<void>((resolveListen, reject) => {
+			listener.once("error", reject);
+			listener.listen(agent.port, "127.0.0.1", resolveListen);
+		});
+		await new Promise<void>((resolveClose) => listener.close(() => resolveClose()));
 	});
 
 	it("fixture 已结束时拒绝晚到的宿主启动，不遗留 socket", async () => {

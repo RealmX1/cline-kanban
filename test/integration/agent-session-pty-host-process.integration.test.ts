@@ -74,16 +74,24 @@ const BYTE_LENGTH_OF_EACH_LINE_PRODUCED_WHILE_RUNTIME_ABSENT =
 const hostProcessesConfirmedExitedAfterEachTest: ChildProcess[] = [];
 const testOwnedHostLifetimesClosedAfterEachTest: ReturnType<typeof createIsolatedTestOwnedPtyHostLifetime>[] = [];
 const controllerConnectionsClosedAfterEachTest = new Set<AgentSessionPtyHostControllerConnection>();
+// facade 自己的 controller 不在上面的集合里。先断开，回收端才能发出无 controller 全停。
+const runtimeFacadesClosedAfterEachTest: AgentSessionPtyHostRuntimeFacade[] = [];
+const shellPidsThatMustExitAfterFacadeControllerRelease: number[] = [];
 const temporaryDirectoriesRemovedAfterEachTest: string[] = [];
 
 afterEach(async () => {
 	vi.restoreAllMocks();
+	for (const facade of runtimeFacadesClosedAfterEachTest.splice(0))
+		await facade.closeControllerConnectionsAfterFlushingPendingFrames();
 	for (const controller of controllerConnectionsClosedAfterEachTest)
 		await controller.closeAfterFlushingPendingFrames();
 	controllerConnectionsClosedAfterEachTest.clear();
 	for (const lifetime of testOwnedHostLifetimesClosedAfterEachTest.splice(0)) lifetime.closeAndVerifyOwnedHostExit();
 	for (const hostProcess of hostProcessesConfirmedExitedAfterEachTest.splice(0)) {
 		expect(await waitForChildProcessExit(hostProcess, 5_000)).toBe(true);
+	}
+	for (const shellPid of shellPidsThatMustExitAfterFacadeControllerRelease.splice(0)) {
+		expect(isProcessAlive(shellPid)).toBe(false);
 	}
 	for (const temporaryDirectoryPath of temporaryDirectoriesRemovedAfterEachTest.splice(0)) {
 		rmSync(temporaryDirectoryPath, { recursive: true, force: true });
@@ -411,6 +419,7 @@ describe.skipIf(process.platform === "win32")(
 					).closeAfterFlushingPendingFrames();
 				},
 			});
+			runtimeFacadesClosedAfterEachTest.push(facade);
 			const manager = new TerminalSessionManager({
 				hostedTerminalPtyProcessSpawner: facade.createHostedTerminalPtyProcessSpawnerForWorkspace(
 					"replacement-workspace",
@@ -490,6 +499,7 @@ describe.skipIf(process.platform === "win32")(
 					},
 				};
 				const crashedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
+				runtimeFacadesClosedAfterEachTest.push(crashedRuntimeFacade);
 				const originalSpawnRequest = AgentSessionPtyHostControllerConnection.prototype.requestSpawnHostedSession;
 				vi.spyOn(
 					AgentSessionPtyHostControllerConnection.prototype,
@@ -544,6 +554,7 @@ describe.skipIf(process.platform === "win32")(
 					...facadeOptions,
 					newHostedSessionsEnabled,
 				});
+				runtimeFacadesClosedAfterEachTest.push(restartedRuntimeFacade);
 				expect((await restartedRuntimeFacade.queryDiagnostics()).newSessionHostingMode).toBe(
 					newHostedSessionsEnabled ? "independent_host" : "disabled",
 				);
@@ -692,5 +703,50 @@ describe.skipIf(process.platform === "win32")(
 			},
 			AGENT_SESSION_PTY_HOST_INTEGRATION_TEST_TIMEOUT_MS,
 		);
+
+		it("用例体内未关闭的 runtime facade 仍由 afterEach 先释放 controller，再回收仍在运行的 shell", async (testContext) => {
+			const runtimeHomeDirectoryPath = createShortRuntimeHomeDirectory();
+			const runtimeIdentity = { runtimeHomeDirectoryPath, runtimePort: 3997 };
+			const hostBuildIdentity = "facade-aftereach-reclamation";
+			const facade = await AgentSessionPtyHostRuntimeFacade.start({
+				runtimeIdentity,
+				warn: () => {},
+				currentBuildHostDescriptor: {
+					hostBuildIdentity,
+					launchCommand: { executablePath: process.execPath, leadingArguments: [] },
+				},
+				launchHostAndWaitUntilSocketAcceptsConnections: async (request) => {
+					startHostProcessFromSourceWithoutDaemonizing(request.socketPath, request.hostBuildIdentity);
+					await (
+						await connectAsControllerOnceHostAcceptsConnections(testContext, request.socketPath)
+					).closeAfterFlushingPendingFrames();
+				},
+			});
+			runtimeFacadesClosedAfterEachTest.push(facade);
+			const handle = await facade
+				.createHostedTerminalPtyProcessSpawnerForWorkspace(
+					"facade-reclamation-workspace",
+					"/tmp/facade-reclamation",
+				)
+				.spawnHostedTerminalPtyProcess({
+					taskId: "facade-reclamation-shell",
+					hostedSessionKind: "shell_session",
+					binary: "/bin/sh",
+					args: ["-c", "sleep 600"],
+					cwd: "/tmp",
+					env: { PATH: "/usr/bin:/bin", HOME: "/tmp" },
+					cols: 80,
+					rows: 24,
+					onData: () => {},
+					onExit: () => {},
+				});
+			const diagnostics = await queryAgentSessionPtyHostReadOnlyStatus({
+				agentSessionPtyHostSocketPath: resolveAgentSessionPtyHostSocketPath(runtimeIdentity, hostBuildIdentity),
+			});
+			if (!("controllerProcessId" in diagnostics)) throw new Error("未取得 host 只读状态");
+			expect(diagnostics.controllerProcessId).not.toBeNull();
+			expect(isProcessAlive(handle.pid)).toBe(true);
+			shellPidsThatMustExitAfterFacadeControllerRelease.push(handle.pid);
+		});
 	},
 );
