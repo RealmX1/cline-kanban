@@ -45,6 +45,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: 安装隔离重部署测试需要的原生工具
+        shell: bash
+        run: |
+          if ! command -v tmux >/dev/null || ! command -v lsof >/dev/null; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              command -v tmux >/dev/null || brew install tmux
+              command -v lsof >/dev/null || brew install lsof
+            else
+              sudo apt-get update
+              sudo apt-get install -y tmux lsof
+            fi
+          fi
+
       - name: Install web-ui dependencies
         run: npm ci --prefix web-ui
 

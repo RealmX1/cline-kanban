@@ -38,6 +38,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **验证构建前先检查 `dist` 与 `web-ui/dist` 的 realpath**：任务 worktree 可能把它们软链到主仓库共享产物。必须先隔离两处输出，并显式设置 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY`；不能把更新共享产物当成普通验证构建。
 - 安装依赖前同样检查 `node_modules`：`npm ci` 可能沿软链清空共享目标。先显式移除软链并确认目标路径，再在任务目录安装独立依赖。
 - 真实 git 测试只能经 `test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts` 操作仓库（细则见 `test/README.md`）。
+- tmux 测试只经 `test/utilities/isolated-test-owned-tmux-server.ts` 绑定自有 socket，校验归属后按 session 清理；禁止 `kill-server`。仅改 `TMUX_TMPDIR` 不能覆盖继承的 `TMUX`，派生环境也须清除 `TMUX/TMUX_PANE`。见 `test/README.md`。
 - runtime 测试的 `createSpawnedChildProcessRegistrySigkilledAfterEachTest` 只登记句柄，必须显式在 `afterEach` 调用其回收方法；不能让仍在写盘的 runtime 与 fixture 清理并发。
 - 计时 / 资源阈值断言（等子进程退出、性能绊线、RSS 上限）按 `test/README.md`「负载敏感的墙钟 / 资源断言」分类：测试侧等待用两档（软档只告警、硬档才失败），并闭合用例与 hook 超时；**不要**用宿主 CPU 争用信号放过失败（实测不可靠）。
 - pre-commit（husky）顺序：`biome check --staged` → `npm run typecheck` → `npm run test:precommit`。

@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildSync } from "esbuild";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { afterEach, describe, expect, it, onTestFinished } from "vitest";
 import { fingerprintLocalDeploymentDistribution } from "../../src/deployment/local-deployment-distribution-manifest";
 import type { LocalDeploymentExecutionManifest } from "../../src/deployment/local-deployment-execution-contract";
 import { LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER } from "../../src/deployment/local-deployment-execution-contract";
@@ -15,6 +16,7 @@ import {
 
 describe("独立部署执行器真实子进程恢复", { timeout: 100_000 }, () => {
 	const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
+	afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
 
 	it("发布接受后执行器退出，新进程通过真实文件摘要接续，评论失败不重启或重复登记", async (testContext) => {
 		const gitFixture = createIsolatedGitTestWorkspaceFixture();
@@ -32,6 +34,7 @@ describe("独立部署执行器真实子进程恢复", { timeout: 100_000 }, () 
 			platform: "node",
 			format: "esm",
 			target: "node22",
+			external: ["better-sqlite3", "node-pty", "@napi-rs/keyring", "sharp"],
 			logLevel: "silent",
 			banner: {
 				js: 'import { createRequire as createBundledRequire } from "node:module"; const require = createBundledRequire(import.meta.url);',
@@ -112,7 +115,10 @@ if (stage === 'bound-effect-proof') {
 				spawn(process.execPath, [executable, ...arguments_], {
 					cwd: repository.repositoryPath,
 					stdio: ["ignore", "pipe", "pipe"],
-					env: gitFixture.createIsolatedChildProcessEnvironment(),
+					env: gitFixture.createIsolatedChildProcessEnvironment({
+						CODEX_HOME: join(gitFixture.isolatedHomeDirectoryPath, ".codex"),
+						CODEX_SQLITE_HOME: join(gitFixture.isolatedHomeDirectoryPath, ".codex"),
+					}),
 				}),
 			);
 			let stdout = "";
@@ -140,10 +146,14 @@ if (stage === 'bound-effect-proof') {
 			await closed;
 			return { exitCode: child.exitCode, signal: child.signalCode, stdout, stderr };
 		}
-		expect(
-			(await invoke(["initialize", "--execution-directory", executionDirectory, "--manifest-file", manifestPath]))
-				.exitCode,
-		).toBe(0);
+		const initialized = await invoke([
+			"initialize",
+			"--execution-directory",
+			executionDirectory,
+			"--manifest-file",
+			manifestPath,
+		]);
+		expect(initialized.exitCode, JSON.stringify(initialized)).toBe(0);
 		expect((await invoke(["prepare-owned-command", "--execution-directory", executionDirectory])).exitCode).toBe(0);
 		const ownedSpecification = JSON.parse(
 			readFileSync(join(executionDirectory, "owned-command-specification.json"), "utf8"),
@@ -160,14 +170,7 @@ if (stage === 'bound-effect-proof') {
 		]);
 		const first = await invoke(["run", "--execution-directory", executionDirectory]);
 		expect(first.signal).toBe("SIGKILL");
-		// 模拟机器离线时间已超过租约；旧执行器已确认退出，不需让 CI 实际空等 30 秒。
-		const staleTime = new Date(Date.now() - 120_000);
-		utimesSync(
-			join(manifest.runtimeIdentity.runtimeHomeDirectoryPath, ".local-deployment-runtime-39884.lock"),
-			staleTime,
-			staleTime,
-		);
-		utimesSync(join(executionDirectory, ".local-deployment-execution.lock"), staleTime, staleTime);
+		// 旧执行器已经退出，内核锁由操作系统释放；不修改不存在的旧租约目录。
 		const resumed = await invoke(["run", "--execution-directory", executionDirectory]);
 		expect(resumed.stderr).not.toContain("Error");
 		expect(resumed.exitCode).toBe(0);
@@ -221,5 +224,182 @@ if (stage === 'bound-effect-proof') {
 		expect(
 			JSON.parse(readFileSync(join(executionDirectory, "owned-command-business-result.json"), "utf8")),
 		).toMatchObject({ disposition: "agent_review_ready", deploymentExecutionId: manifest.executionId });
+		const recoveredRestartDirectory = join(executionDirectory, "restart-accepted-before-worker-exit");
+		mkdirSync(recoveredRestartDirectory);
+		const recoveredManifest = {
+			...manifest,
+			schemaVersion: 2,
+			runtimeStartingState: "verified_online",
+			runtimeStartingStateEvidenceFilePath: join(recoveredRestartDirectory, "runtime-baseline.json"),
+			redeploymentRequestSha256: "b".repeat(64),
+		};
+		const recoveredManifestPath = join(recoveredRestartDirectory, "manifest.json");
+		writeFileSync(recoveredManifestPath, JSON.stringify(recoveredManifest));
+		mkdirSync(join(repository.repositoryPath, "scripts"));
+		const readinessPath = join(
+			repository.repositoryPath,
+			"scripts/verify-agent-session-pty-host-runtime-readiness.mjs",
+		);
+		const readiness = {
+			ok: true,
+			runtimeIdentity: manifest.runtimeIdentity,
+			runtimeProcessId: 200,
+			runtimeProcessStartTimeText: "已核验后继进程",
+			runtimeLoadedEntrypointSha256: createHash("sha256")
+				.update(readFileSync(join(candidate, "cli.js")))
+				.digest("hex"),
+			validatedHostedSessions: [{ conversationSessionId: "原会话接受证据" }],
+		};
+		writeFileSync(readinessPath, `process.stdout.write(JSON.stringify(${JSON.stringify(readiness)}));`);
+		expect(
+			(
+				await invoke([
+					"initialize",
+					"--execution-directory",
+					recoveredRestartDirectory,
+					"--manifest-file",
+					recoveredManifestPath,
+				])
+			).exitCode,
+		).toBe(0);
+		const verifyRestart = () =>
+			invoke(["verify-runtime-restart", "--execution-directory", recoveredRestartDirectory]);
+		expect((await verifyRestart()).exitCode).toBe(0);
+		const acceptancePath = join(recoveredRestartDirectory, "runtime-restart-acceptance.json");
+		const recoveredAcceptance = readFileSync(acceptancePath, "utf8");
+		expect(JSON.parse(recoveredAcceptance)).toMatchObject({
+			executionId: manifest.executionId,
+			candidateDistributionSha256: manifest.candidateDistributionSha256,
+			runtime: readiness,
+		});
+		// 当前已回收的会话不能覆盖首次补证取得的真实接受快照。
+		writeFileSync(
+			readinessPath,
+			`process.stdout.write(JSON.stringify(${JSON.stringify({ ...readiness, validatedHostedSessions: [] })}));`,
+		);
+		expect((await verifyRestart()).exitCode).toBe(0);
+		expect(readFileSync(acceptancePath, "utf8")).toBe(recoveredAcceptance);
+		const recoveredRecordPath = join(recoveredRestartDirectory, "local-deployment-execution.json");
+		const recoveredRecord = JSON.parse(readFileSync(recoveredRecordPath, "utf8"));
+		const restartIntentAtEpochMs = recoveredRecord.createdAtEpochMs;
+		recoveredRecord.observations.push({
+			sequence: recoveredRecord.observations.length + 1,
+			stage: "runtime_restart",
+			kind: "command_execution_intent_persisted",
+			observedAtEpochMs: restartIntentAtEpochMs,
+			attemptNumber: 1,
+			recoveryEvidenceSha256: "d".repeat(64),
+			exitCode: null,
+			commandOutputDirectory: join(recoveredRestartDirectory, "interrupted-runtime-restart-stage"),
+			detail: "模拟 readiness 已成功而接受快照尚未写入时执行器退出",
+		});
+		writeFileSync(recoveredRecordPath, JSON.stringify(recoveredRecord));
+		writeFileSync(
+			join(recoveredRestartDirectory, "runtime-restart-target-baseline.json"),
+			JSON.stringify({
+				state: "verified_online",
+				runtimeBefore: { processId: 150, processStartTimeText: "实际 交接前 代际" },
+			}),
+		);
+		const readinessIntent = {
+			requestSha256: recoveredManifest.redeploymentRequestSha256,
+			command: [process.execPath, readinessPath, "--candidate-source-commit", manifest.candidateSourceCommit],
+			cwd: manifest.sourceCheckoutPath,
+			startedAtEpochMs: restartIntentAtEpochMs + 10,
+		};
+		const readinessResult = { ...readinessIntent, exitCode: 0, finishedAtEpochMs: restartIntentAtEpochMs + 20 };
+		const immutableReadinessOriginals = new Map<string, string>();
+		const createReadinessOriginal = (
+			name: string,
+			{
+				intentOverrides = {},
+				resultOverrides = {},
+				runtimeOverrides = {},
+			}: {
+				intentOverrides?: Partial<typeof readinessIntent>;
+				resultOverrides?: Partial<typeof readinessResult>;
+				runtimeOverrides?: Partial<typeof readiness>;
+			} = {},
+		) => {
+			const originalDirectory = join(
+				recoveredRestartDirectory,
+				"standard-command-originals",
+				`current-runtime-readiness-${name}`,
+			);
+			mkdirSync(originalDirectory, { recursive: true });
+			for (const [filename, value] of Object.entries({
+				"intent.json": { ...readinessIntent, ...intentOverrides },
+				"result.json": { ...readinessResult, ...resultOverrides },
+				"stdout.txt": { ...readiness, ...runtimeOverrides },
+			})) {
+				const originalPath = join(originalDirectory, filename);
+				const originalBytes = JSON.stringify(value);
+				writeFileSync(originalPath, originalBytes);
+				immutableReadinessOriginals.set(originalPath, originalBytes);
+			}
+			return originalDirectory;
+		};
+		createReadinessOriginal("wrong-intent-request", { intentOverrides: { requestSha256: "e".repeat(64) } });
+		createReadinessOriginal("wrong-result-request", { resultOverrides: { requestSha256: "e".repeat(64) } });
+		const wrongCandidateCommand = [...readinessIntent.command.slice(0, 3), "e".repeat(40)];
+		createReadinessOriginal("wrong-command-candidate", {
+			intentOverrides: { command: wrongCandidateCommand },
+			resultOverrides: { command: wrongCandidateCommand },
+		});
+		createReadinessOriginal("wrong-loaded-candidate", {
+			runtimeOverrides: { runtimeLoadedEntrypointSha256: "e".repeat(64) },
+		});
+		createReadinessOriginal("wrong-node", {
+			intentOverrides: { command: ["/another/node", ...readinessIntent.command.slice(1)] },
+			resultOverrides: { command: ["/another/node", ...readinessIntent.command.slice(1)] },
+		});
+		createReadinessOriginal("wrong-cwd", {
+			intentOverrides: { cwd: recoveredRestartDirectory },
+			resultOverrides: { cwd: recoveredRestartDirectory },
+		});
+		createReadinessOriginal("before-restart-intent", {
+			intentOverrides: { startedAtEpochMs: restartIntentAtEpochMs - 2 },
+			resultOverrides: {
+				startedAtEpochMs: restartIntentAtEpochMs - 2,
+				finishedAtEpochMs: restartIntentAtEpochMs - 1,
+			},
+		});
+		createReadinessOriginal("invalid-finish-time", {
+			resultOverrides: { finishedAtEpochMs: restartIntentAtEpochMs + 5 },
+		});
+		createReadinessOriginal("failed-command", { resultOverrides: { exitCode: 1 } });
+		createReadinessOriginal("candidate-loaded-but-target-runtime-not-restarted", {
+			runtimeOverrides: { runtimeProcessId: 150, runtimeProcessStartTimeText: "  实际   交接前 代际  " },
+		});
+		rmSync(acceptancePath);
+		expect((await verifyRestart()).exitCode).toBe(0);
+		const currentOnlyAcceptance = JSON.parse(readFileSync(acceptancePath, "utf8"));
+		expect(currentOnlyAcceptance.runtime.validatedHostedSessions).toEqual([]);
+		expect(currentOnlyAcceptance.readinessCommandOriginalDirectoryPath).toBeUndefined();
+		// 模拟同一 crash 窗口：尚无接受快照，当前会话已回收，成功原件仍完整保留。
+		const earliestOriginalDirectory = createReadinessOriginal("earliest-valid-success");
+		createReadinessOriginal("later-valid-success", {
+			intentOverrides: { startedAtEpochMs: restartIntentAtEpochMs + 30 },
+			resultOverrides: {
+				startedAtEpochMs: restartIntentAtEpochMs + 30,
+				finishedAtEpochMs: restartIntentAtEpochMs + 40,
+			},
+			runtimeOverrides: { validatedHostedSessions: [] },
+		});
+		rmSync(acceptancePath);
+		expect((await verifyRestart()).exitCode).toBe(0);
+		const recoveredHistoricalAcceptance = readFileSync(acceptancePath, "utf8");
+		expect(JSON.parse(recoveredHistoricalAcceptance)).toMatchObject({
+			readinessCommandOriginalDirectoryPath: earliestOriginalDirectory,
+			observedAtEpochMs: readinessResult.finishedAtEpochMs,
+			runtime: readiness,
+		});
+		expect((await verifyRestart()).exitCode).toBe(0);
+		expect(readFileSync(acceptancePath, "utf8")).toBe(recoveredHistoricalAcceptance);
+		for (const [originalPath, originalBytes] of immutableReadinessOriginals)
+			expect(readFileSync(originalPath, "utf8")).toBe(originalBytes);
+		writeFileSync(acceptancePath, JSON.stringify({ ...JSON.parse(recoveredAcceptance), executionId: "另一执行" }));
+		expect((await verifyRestart()).exitCode).toBe(1);
+		expect(JSON.parse(readFileSync(acceptancePath, "utf8")).executionId).toBe("另一执行");
 	});
 });

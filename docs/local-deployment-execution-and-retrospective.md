@@ -36,6 +36,8 @@
 
 ## 标准调用
 
+新部署使用 [构建前标准入口与离线恢复](local-redeployment-standard-entry-and-offline-recovery.md)，从候选构建前开始托管，并生成 v2 manifest 与标准八阶段动作。以下 v1 调用保留兼容，既有冻结执行不迁移、不重放。
+
 下列 `DEPLOYMENT_NODE`、`CANDIDATE_EXECUTOR`、`EXECUTION_DIRECTORY` 均指本次已核实的绝对路径，不是 `latest` 指针。
 
 ```sh

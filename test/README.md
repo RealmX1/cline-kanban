@@ -22,12 +22,25 @@ fixture 为每个测试创建独立 root、HOME、USERPROFILE、XDG config 和 t
 - Git fixture 和 repository canary 之外不得直接执行 literal `git`；
 - 子进程不得通过 `env: process.env` 或 `{ ...process.env }` 直接继承完整父环境；
 - 真实测试 Git 不得使用 production `createGitProcessEnv`。
+- tmux 调用必须经 `isolated-test-owned-tmux-server.ts`，不得直接启动 literal tmux executable；禁止任何子进程使用 literal `kill-server`，包括动态 executable 与 `promisify(execFile)`。
 
 策略没有注释豁免；需要新的 Git 测试能力时扩展统一 fixture 并补充 fixture 自测。
 
 `npm test`、`npm run test:precommit`、`npm run test:integration` 与 `npm run test:watch` 都通过 invoking-repository mutation canary 启动 Vitest。canary 在测试前后比较 worktree/git-dir/common-dir、symbolic HEAD、HEAD OID、local config、index、porcelain v2 status 与 dirty/untracked 内容 hash。检测到漂移时 fail closed，保存脱敏报告，绝不自动恢复宿主仓库。
 
 tracked 内容证据使用 `git diff --binary --full-index HEAD --` 的完整 OID，避免对象库增长引起的缩写长度变化被误判为内容漂移；tracked / untracked 的真实内容变化仍通过内容 hash 检出。
+
+## tmux 测试的 socket 与清理归属
+
+公共 Git fixture 和 canary 的子环境清除 `TMUX`、`TMUX_PANE`，并将 `TMUX_TMPDIR` 指向各自私有临时目录。fixture 禁止调用方重新覆盖前两项。仅设置 `TMUX_TMPDIR` 不够：继承的 `TMUX` 仍可能指向生产 socket。
+
+需要 tmux 时使用 `createIsolatedTestOwnedTmuxServer(fixture.createIsolatedChildProcessEnvironment())`。它在短路径私有目录创建唯一 server，所有原生命令显式使用 `-S <socket> -f /dev/null`，不加载宿主配置；通过 `runTmuxCommand([...])` 启动和查询。`capture-pane -S -200` 是滚动参数，不能代替位于子命令前的 server socket 参数。
+
+在 `finally` 调用 `server.cleanup()`：它核对目录和 socket 的设备/inode、原始 server PID 与会话 ID，再逐一 `kill-session`。归属变化时拒绝清理并保留现场；成功清理可幂等重入。使用 `kill-server` 或把另一个 `-S/-L` 作为全局参数传入 fixture 都会被拒绝。需要隔离的派生执行器也必须接受并使用该绝对 socket；不能只依赖它继承 `TMUX_TMPDIR`。
+
+`isolated-tmux-cleanup-preserves-parent-server.integration.test.ts` 从自有父 server 注入真实 `TMUX`、pane 和目录，验证正常完成、业务异常、watchdog SIGTERM 后子 server 被清理且父 sentinel/PID 保留；另测 socket 被替换时拒绝操作。CI 显式安装 tmux。Linux/macOS 运行此回归，Windows 跳过；它不接触生产 default server。
+
+AST 策略覆盖直接 import、命名别名、namespace、任意作用域的 `promisify` 绑定、直接 `promisify(execFile)(...)`，以及参数或 shell 字符串中的 literal tmux/`kill-server`。它不是任意动态生成脚本的安全沙箱。事故证据、临时私有 socket 恢复与登录入口衔接见 [tmux 测试隔离与服务恢复](../docs/tmux-test-isolation-and-private-service-login-restoration.md)。
 
 ## 派生真实 runtime / CLI 的 integration 测试必须收口子进程
 

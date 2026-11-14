@@ -28,6 +28,7 @@ import {
 	requestAutomaticTaskNameBackfill,
 } from "../task-name-suggestion/automatic-task-name-backfill";
 import { readCodexDraftStashOperationStatus } from "../terminal/codex-draft-stash-operation";
+import { exitCodexNativeConversationPlanMode } from "../terminal/codex-native-conversation-plan-mode-exit";
 import { readCreationAgentDefaultModel } from "../terminal/creation-agent-default-model";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
@@ -199,6 +200,7 @@ import {
 	mutateWorkspaceState,
 } from "../state/workspace-state";
 import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import { createTaskFileDownloadService } from "../task-file-downloads/task-file-download-service";
 import {
 	readRecordedCreationNameSuggestionResult,
 	suggestTaskNamesFromTaskDescription,
@@ -1037,7 +1039,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return record.terminal_delivery_status === "delivery_failed" ? "failed" : "pending";
 		},
 	});
+	const taskFileDownloads = createTaskFileDownloadService((scope, input) =>
+		runtimeApi.getTaskConversationHistoryPage(scope, input),
+	);
 	const runtimeApi: RuntimeTrpcContext["runtimeApi"] = {
+		listTaskDirectory: taskFileDownloads.listDirectory,
+		getTaskMainSessionPlan: taskFileDownloads.getMainSessionPlan,
+		openTaskFileDownload: taskFileDownloads.openDownload,
 		lookupTaskConversationSessionCreation: (scope, input) => conversationSessions.lookupCreation(scope, input),
 		renameTaskConversationSession: (scope, input) => conversationSessions.rename(scope, input),
 		previewTaskConversationSession: (scope, input, evidence) => conversationSessions.preview(scope, input, evidence),
@@ -3117,6 +3125,44 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return { ok: false, parked: false, label: null, sinceMs: null, error: message };
+			}
+		},
+		exitCodexTaskConversationSessionPlanMode: async (workspaceScope, input) => {
+			let nativeModeExitOperationStarted = false;
+			try {
+				const terminalManager = await deps.getScopedTerminalManager(workspaceScope);
+				const summary = terminalManager.getSummary(input.taskConversationSessionId);
+				if (
+					!summary ||
+					summary.taskId !== input.taskConversationSessionId ||
+					summary.runtimeSessionIncarnationId !== input.expectedRuntimeSessionIncarnationId ||
+					summary.agentNativeConversationSessionIdentity?.nativeSessionId !==
+						input.expectedNativeConversationSessionId
+				)
+					return { status: "rejected", error: "会话已变化，请刷新当前会话后重试。" };
+				const workspaceTaskId = summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId;
+				return await withTaskClosureLifecycleLocks(workspaceScope.workspaceId, [workspaceTaskId], async () => {
+					const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const card = findWorkspaceBoardCard(board, workspaceTaskId);
+					if (!card || !doesConversationSessionBelongToTask(summary, workspaceTaskId))
+						return { status: "rejected", error: "当前工作区中没有该会话所属的任务。" };
+					if (getTaskColumnId(board, workspaceTaskId) === "trash")
+						return { status: "rejected", error: "已结案任务为只读，无法更改会话模式。" };
+					nativeModeExitOperationStarted = true;
+					return await exitCodexNativeConversationPlanMode({
+						workspaceId: workspaceScope.workspaceId,
+						summary,
+						getCurrentLiveSummary: () =>
+							terminalManager.hasLiveTaskSession(input.taskConversationSessionId)
+								? terminalManager.getSummary(input.taskConversationSessionId)
+								: null,
+					});
+				});
+			} catch (error) {
+				return {
+					status: nativeModeExitOperationStarted ? "unconfirmed" : "rejected",
+					error: `${nativeModeExitOperationStarted ? "退出结果尚未确认，可重试" : "无法退出计划模式"}：${error instanceof Error ? error.message : String(error)}`,
+				};
 			}
 		},
 		sendTaskSessionInput: async (workspaceScope, input) => {

@@ -36,9 +36,18 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 
 准备本次执行时读取仓库的 [执行与复盘合同](../../../docs/local-deployment-execution-and-retrospective.md)。候选构建中的 `local-deployment-execution.js` 提供冻结 manifest、阶段原件、补证核验和复盘请求；不要再手写一套发布监督者、恢复循环或 launchd 作业。旧材料仅经 `kanban deployment analyze --execution-directory <精确持久目录>` 只读分析，不重放部署。
 
+新部署按 [标准入口与离线恢复](../../../docs/local-redeployment-standard-entry-and-offline-recovery.md) 使用 `prepare-redeployment`、`start-redeployment`。准备命令冻结请求，不构建或部署；启动命令必须已有本次真实部署授权。实现方案获批不产生新的生产部署授权。
+
+- 标准入口将私有 checkout、依赖、源码验证复用、生产构建、备份与八阶段动作交给既有宿主；日常不再编写阶段 adapter，构建前即可登记所属执行。
+- 在线且有可信来源会话时走 `task command-execution`；离线复用独立 supervisor。runtime 恢复后由已有恢复循环发现待接回材料，校验真实归属、启动材料及原生身份后接回，不重发命令。外部 CLI 无会话绑定时只返回持久结果。
+- 同目录再次启动只接续原执行，最终结果就绪或已取消时不重跑。原生退出或真实 boot 变化后可在持久语义预算内恢复；身份未知时不额外派发。`cancel-redeployment` 与通用 Stop 共用持久撤销门禁。
+- tmux session 活着不证明服务已退出。已证无监听后才调用绑定 canonical runner，在既有 session 新建窗口，保留原 pane 与日志；同一执行已有活启动 pane 时只等待。禁止 `respawn-pane -k`，继续使用服务原有的单实例锁。
+- 接管成功时保存独立历史接受回执，绑定实际载入入口、runtime 代际及 session 代际。后续正常回收不抹掉该事实；自然 I/O 连续性仍按实际自然活动取证。
+- 每次正常成功仅交回一次轻量终审；普通阶段与机器等待只更新持久状态。真实质量失败交回 Agent 修复，保留未知与补证条件。
+
 - 隔离构建和盘点仍可在部署确认前完成；没有确认时不得用虚构授权填写 manifest 或启动部署执行器。取得本次授权后绑定任务、候选完整 SHA、产物清单摘要、实际 Node、原实例 PID/启动身份和原话来源。
 - 保留绑定候选目录；发布时先复制到可删除的暂存副本，再执行移动式 promotion。不能清理掉恢复所需的候选原件。
-- 用 `initialize`、`prepare-owned-command` 生成持久记录与所属命令规格，再经既有 `kanban task command-execution start` 登记。规格固定同一执行的 command/resumeCommand；通用宿主负责重启接管、机器条件恢复、Stop 与结果交回。准备规格不等于已启动，登记受理不等于部署完成。
+- 旧 v1 执行仍使用原始 `initialize`、`prepare-owned-command` 与冻结命令，不迁移、不重放。新标准入口生成 v2 manifest，区别真实在线进程与已证离线起点；未知起点自动补证，不伪造 PID。准备规格不等于已启动，登记受理不等于部署完成。
 - 每个命令意图先落盘。发布、重启、登记结果未知时先核验同一执行、候选与产物效果；后续动作前重新核对当前资格，不覆盖原失败或原接受事实。普通命令在相同补证下有界重试；条件真实变化后自动接续，不把机器缺口交给人补。
 - 部署登记使用 `deployment record --execution-directory <本次目录>`；同一次执行重试返回原回执，相同 commit 的另一次部署仍使用新 executionId。若丢失原统计，只汇报可证明事实与未知项，不用当前 PDV 清单重建历史计数。
 - 清理、评论或复盘材料准备失败分别记录；先核对正式登记与实际效果，不能把附属失败改写为部署失败，也不能因此重复发布或重启。正式 promotion CLI 会处理自己的空暂存目录，调用方不再另做一次 `rmdir`。

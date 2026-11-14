@@ -21,6 +21,7 @@ import {
 	ArrowUp,
 	CaseSensitive,
 	Command,
+	LogOut,
 	Maximize2,
 	MessageSquare,
 	Minimize2,
@@ -55,6 +56,7 @@ import {
 } from "@/components/ui/dialog";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { useCodexConversationPlanModeExit } from "@/hooks/use-codex-conversation-plan-mode-exit";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useSharedMobileFocusViewCollapsibleControls } from "@/hooks/use-mobile-focus-view-collapsible-controls";
 import type { RuntimeTaskAgentSessionInitialization, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -961,8 +963,33 @@ function AgentTerminalPanelLayout({
 		return normalizedCommand.split(/\s+/)[0] ?? null;
 	}, [agentCommand]);
 
+	const codexPlanModeExit = useCodexConversationPlanModeExit({
+		workspaceId,
+		taskConversationSessionId: taskId,
+		summary,
+		isSessionReadOnly: taskColumnId === "trash",
+	});
+	const codexPlanModeExitButton = codexPlanModeExit.isAvailable ? (
+		<Tooltip content={codexPlanModeExit.disabledReason ?? "切换至默认模式，保留草稿；此操作不会发送消息或开始实施。"}>
+			<span>
+				<Button
+					variant="ghost"
+					size="sm"
+					icon={codexPlanModeExit.isExiting ? <Spinner size={12} /> : <LogOut size={12} />}
+					disabled={codexPlanModeExit.isExiting || codexPlanModeExit.disabledReason !== null}
+					onClick={() => {
+						void codexPlanModeExit.exitPlanMode();
+					}}
+					data-verification-anchor={`codex-plan-mode-exit:${taskId}`}
+				>
+					{codexPlanModeExit.isExiting ? "正在退出计划模式…" : "退出计划模式"}
+				</Button>
+			</span>
+		</Tooltip>
+	) : null;
 	const compactTerminalToolsContent = (
 		<div className="flex flex-wrap items-center gap-1 p-1">
+			{codexPlanModeExitButton}
 			<TerminalTranscriptReaderToggleButton
 				isOpen={isTranscriptReaderOpen}
 				onToggle={() => setIsTranscriptReaderOpen((current) => !current)}
@@ -1159,6 +1186,28 @@ function AgentTerminalPanelLayout({
 								) : null}
 							</div>
 							<div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+								{summary?.agentId === "codex" && taskColumnId !== "trash" ? (
+									<Popover.Root key={JSON.stringify([workspaceId, taskId])}>
+										<Popover.Trigger asChild>
+											<Button
+												variant="default"
+												size="sm"
+												icon={<Ellipsis size={16} />}
+												aria-label="终端工具与更多信息"
+											/>
+										</Popover.Trigger>
+										<Popover.Portal>
+											<Popover.Content
+												align="end"
+												sideOffset={4}
+												aria-label="终端工具与更多信息"
+												className="z-50 rounded-md border border-border-bright bg-surface-1 p-1 text-text-primary"
+											>
+												{codexPlanModeExitButton}
+											</Popover.Content>
+										</Popover.Portal>
+									</Popover.Root>
+								) : null}
 								<TerminalTranscriptReaderToggleButton
 									isOpen={isTranscriptReaderOpen}
 									onToggle={() => setIsTranscriptReaderOpen((current) => !current)}

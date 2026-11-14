@@ -45,34 +45,55 @@ export const localDeploymentStageCommandSchema = z.strictObject({
 	stage: z.enum(LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER),
 	command: commandArguments,
 	effectVerificationCommand: commandArguments.optional(),
+	idempotentEffectRecoveryCommand: commandArguments.optional(),
 	readOnlyRecoveryEvidenceObservationCommand: commandArguments.optional(),
 	recoveryEvidenceFilePaths: z.array(absolutePath).optional(),
 });
 
+const localDeploymentExecutionManifestFieldsSchema = z.strictObject({
+	schemaVersion: z.literal(1),
+	executionId: z.uuid(),
+	workspaceId: nonemptyText,
+	taskId: nonemptyText,
+	originatingTaskWorktreePath: absolutePath,
+	sourceCheckoutPath: absolutePath,
+	deploymentNodeBinaryPath: absolutePath,
+	candidateSourceCommit: sourceCommit,
+	previousDeployedSourceCommit: sourceCommit.nullable(),
+	candidateDistributionSha256: sha256,
+	candidateDistributionDirectoryPath: absolutePath,
+	distributionDirectoryPath: absolutePath,
+	runtimeIdentity: z.strictObject({
+		runtimeHomeDirectoryPath: absolutePath,
+		runtimeHost: nonemptyText,
+		runtimePort: z.number().int().min(1).max(65535),
+	}),
+	runtimeBefore: z.strictObject({ processId: z.number().int().positive(), processStartTimeText: nonemptyText }),
+	authorization: z.strictObject({ sourceReference: nonemptyText, userRequestQuote: nonemptyText }),
+	stages: z.array(localDeploymentStageCommandSchema).length(LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER.length),
+});
 export const localDeploymentExecutionManifestSchema = z
-	.strictObject({
-		schemaVersion: z.literal(1),
-		executionId: z.uuid(),
-		workspaceId: nonemptyText,
-		taskId: nonemptyText,
-		originatingTaskWorktreePath: absolutePath,
-		sourceCheckoutPath: absolutePath,
-		deploymentNodeBinaryPath: absolutePath,
-		candidateSourceCommit: sourceCommit,
-		previousDeployedSourceCommit: sourceCommit.nullable(),
-		candidateDistributionSha256: sha256,
-		candidateDistributionDirectoryPath: absolutePath,
-		distributionDirectoryPath: absolutePath,
-		runtimeIdentity: z.strictObject({
-			runtimeHomeDirectoryPath: absolutePath,
-			runtimeHost: nonemptyText,
-			runtimePort: z.number().int().min(1).max(65535),
+	.union([
+		localDeploymentExecutionManifestFieldsSchema,
+		localDeploymentExecutionManifestFieldsSchema.extend({
+			schemaVersion: z.literal(2),
+			runtimeBefore: localDeploymentExecutionManifestFieldsSchema.shape.runtimeBefore.nullable(),
+			runtimeStartingState: z.enum(["verified_online", "verified_offline"]),
+			runtimeStartingStateEvidenceFilePath: absolutePath,
+			redeploymentRequestSha256: sha256,
 		}),
-		runtimeBefore: z.strictObject({ processId: z.number().int().positive(), processStartTimeText: nonemptyText }),
-		authorization: z.strictObject({ sourceReference: nonemptyText, userRequestQuote: nonemptyText }),
-		stages: z.array(localDeploymentStageCommandSchema).length(LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER.length),
-	})
+	])
 	.superRefine((manifest, context) => {
+		if (
+			manifest.schemaVersion === 2 &&
+			(manifest.runtimeStartingState === "verified_online") !== (manifest.runtimeBefore !== null)
+		) {
+			context.addIssue({
+				code: "custom",
+				message: "在线起点必须绑定真实进程，离线起点不能填写虚拟 PID",
+				path: ["runtimeBefore"],
+			});
+		}
 		for (const [index, stage] of manifest.stages.entries()) {
 			if (stage.stage !== LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER[index]) {
 				context.addIssue({ code: "custom", message: "阶段必须按固定顺序完整声明", path: ["stages", index] });
