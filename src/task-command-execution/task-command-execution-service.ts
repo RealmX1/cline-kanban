@@ -11,11 +11,13 @@ import type {
 import { isAgentAwaitingModalUserDecision, resolveSessionFacets } from "../core/session-activity";
 import type { TaskChatDeliveryWriteValidator } from "../core/task-chat-delivery-write-validation";
 import {
+	type TaskCommandExecutionAdoptExistingSupervisorRequest,
 	type TaskCommandExecutionIdentityRequest,
 	type TaskCommandExecutionRecord,
 	type TaskCommandExecutionRecoveryObservationRegistrationRequest,
 	type TaskCommandExecutionSpecification,
 	type TaskCommandExecutionStartRequest,
+	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionStartRequestSchema,
 } from "../core/task-command-execution-contract";
@@ -106,6 +108,11 @@ function canonicalTaskCommandExecutionMaterialJson(specification: TaskCommandExe
 		resumeCommand: specification.resumeCommand,
 		resumeCommandPreservesBusinessSingleFlight: specification.resumeCommandPreservesBusinessSingleFlight,
 	};
+	if (specification.supervisorMaintainsSemanticRecovery !== undefined)
+		material.supervisorMaintainsSemanticRecovery = specification.supervisorMaintainsSemanticRecovery;
+	if (specification.beforeSupervisorRecoveryDispatchValidationCommand !== undefined)
+		material.beforeSupervisorRecoveryDispatchValidationCommand =
+			specification.beforeSupervisorRecoveryDispatchValidationCommand;
 	if (specification.ownerSessionInterruptPolicy !== "cancel_execution")
 		material.ownerSessionInterruptPolicy = specification.ownerSessionInterruptPolicy;
 	if (specification.continuationNoticesFile !== undefined)
@@ -221,14 +228,17 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		if (
 			(await realpath(owner.worktreePath)) !== record.worktreeIdentity.realPath ||
 			metadata.birthtimeMs !== record.worktreeIdentity.createdAtEpochMs ||
-			metadata.ino !== record.worktreeIdentity.inode
+			metadata.ino !== record.worktreeIdentity.inode ||
+			metadata.dev !== record.worktreeIdentity.device
 		)
 			throw new Error("所属工作树实体已变化");
 		if (
-			forDelivery &&
+			(forDelivery || record.requiresOriginatingSessionBinding) &&
 			(!owner.summary ||
 				owner.conversationSessionId !== record.originatingConversationSessionId ||
-				owner.nativeSessionId !== record.originatingNativeSessionId)
+				owner.nativeSessionId !== record.originatingNativeSessionId ||
+				(record.requiresOriginatingSessionBinding &&
+					(owner.summary.runtimeSessionIncarnationId ?? null) !== record.originatingRuntimeSessionIncarnationId))
 		)
 			throw new Error("原主会话身份尚未核实");
 		if (forDelivery && owner.isNativeInputSubmissionBusy)
@@ -422,12 +432,22 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			},
 		);
 	};
-	const start = async (workspaceId: string, raw: TaskCommandExecutionStartRequest) => {
+	const registerAndStartOrAdopt = async (
+		workspaceId: string,
+		raw: TaskCommandExecutionStartRequest,
+		adoption?: TaskCommandExecutionAdoptExistingSupervisorRequest,
+	) => {
 		const input = taskCommandExecutionStartRequestSchema.parse(raw);
 		const owner = await deps.readOwner(workspaceId, input.taskId);
 		if (!owner?.summary || !owner.nativeSessionId) throw new Error("无法取得任务及原主会话身份");
-		const originatingNativeSessionId = owner.nativeSessionId;
-		const originatingRuntimeSessionIncarnationId = owner.summary.runtimeSessionIncarnationId ?? null;
+		const originatingNativeSessionId = input.expectedOwner?.nativeSessionId ?? owner.nativeSessionId;
+		const originatingRuntimeSessionIncarnationId = input.expectedOwner
+			? input.expectedOwner.runtimeSessionIncarnationId
+			: (owner.summary.runtimeSessionIncarnationId ?? null);
+		const originatingConversationSessionId =
+			input.expectedOwner?.conversationSessionId ?? owner.conversationSessionId;
+		const taskIncarnationCreatedAtEpochMs =
+			input.expectedOwner?.taskIncarnationCreatedAtEpochMs ?? owner.taskIncarnationCreatedAtEpochMs;
 		if (
 			!isAbsolute(input.specification.workingDirectory) ||
 			!isAbsolute(input.specification.resultFile) ||
@@ -440,9 +460,56 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			throw new Error("命令工作目录必须是所属任务工作树，结果路径须为绝对路径");
 		const metadata = await stat(owner.worktreePath);
 		const worktreeRealPath = await realpath(owner.worktreePath);
+		let adoptedWorkerState: "running" | "exited" | null = null;
+		const assertExpectedOwner = async () => {
+			const expected = input.expectedOwner;
+			if (!expected) return;
+			const currentOwner = await deps.readOwner(workspaceId, input.taskId);
+			if (!currentOwner?.summary) throw new Error("冻结所属会话身份尚未核实");
+			const currentMetadata = await stat(currentOwner.worktreePath);
+			if (
+				expected.taskIncarnationCreatedAtEpochMs !== currentOwner.taskIncarnationCreatedAtEpochMs ||
+				expected.conversationSessionId !== currentOwner.conversationSessionId ||
+				expected.nativeSessionId !== currentOwner.nativeSessionId ||
+				expected.runtimeSessionIncarnationId !== (currentOwner.summary.runtimeSessionIncarnationId ?? null) ||
+				expected.worktreeIdentity.realPath !== (await realpath(currentOwner.worktreePath)) ||
+				expected.worktreeIdentity.device !== currentMetadata.dev ||
+				expected.worktreeIdentity.inode !== currentMetadata.ino ||
+				expected.worktreeIdentity.createdAtEpochMs !== currentMetadata.birthtimeMs
+			)
+				throw new Error("冻结执行的原任务、会话或工作树实体不匹配");
+		};
+		await assertExpectedOwner();
+		if (adoption) {
+			const directory = taskCommandExecutionArtifactDirectory(workspaceId, adoption.executionId);
+			const materials = await readFile(join(directory, `launch-materials-${adoption.launchNonce}.json`), "utf8");
+			const launch = JSON.parse(materials) as {
+				executionId?: string;
+				launchNonce?: string;
+				command?: string[];
+				workingDirectory?: string;
+				revocationFile?: string;
+			};
+			if (
+				sha256(materials) !== adoption.launchMaterialsSha256 ||
+				launch.executionId !== adoption.executionId ||
+				launch.launchNonce !== adoption.launchNonce ||
+				JSON.stringify(launch.command) !== JSON.stringify(input.specification.command) ||
+				launch.workingDirectory !== input.specification.workingDirectory ||
+				launch.revocationFile !== join(directory, "execution-revocation.json") ||
+				existsSync(launch.revocationFile) ||
+				(input.specification.producerExecutionRevocationFile &&
+					existsSync(input.specification.producerExecutionRevocationFile))
+			)
+				throw new Error("既有监督启动材料、命令或撤销身份不匹配");
+			const state = await inspectOwnedCommandSupervisor({ workspaceId, ...adoption });
+			if (state !== "running" && state !== "exited") throw new Error("既有监督进程原生身份尚未核实，保留待接回");
+			adoptedWorkerState = state;
+		}
 		const canonicalMaterialSha256 = sha256(canonicalTaskCommandExecutionMaterialJson(input.specification));
 		const parsedMaterialSha256 = sha256(JSON.stringify(input.specification));
 		const registered = await mutateTaskCommandExecutions(workspaceId, async (records) => {
+			await assertExpectedOwner();
 			const existing = records.find(
 				(item) => item.taskId === input.taskId && item.idempotencyKey === input.idempotencyKey,
 			);
@@ -451,28 +518,41 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					existing.materialSha256 === canonicalMaterialSha256 || existing.materialSha256 === parsedMaterialSha256;
 				if (
 					!sameMaterial ||
-					existing.taskIncarnationCreatedAtEpochMs !== owner.taskIncarnationCreatedAtEpochMs ||
-					existing.originatingNativeSessionId !== owner.nativeSessionId
+					(adoption &&
+						(existing.executionId !== adoption.executionId ||
+							existing.launchNonce !== adoption.launchNonce ||
+							existing.revokedAtEpochMs !== null)) ||
+					existing.taskIncarnationCreatedAtEpochMs !== taskIncarnationCreatedAtEpochMs ||
+					existing.originatingNativeSessionId !== originatingNativeSessionId ||
+					(input.expectedOwner &&
+						(existing.originatingConversationSessionId !== originatingConversationSessionId ||
+							existing.originatingRuntimeSessionIncarnationId !== originatingRuntimeSessionIncarnationId))
 				)
 					throw new Error("幂等键已用于不同材料或任务 incarnation");
 				return { records, result: { record: existing, newlyRegistered: false } };
 			}
-			const executionId = randomUUID();
+			const executionId = adoption?.executionId ?? randomUUID();
+			if (records.some((record) => record.executionId === executionId))
+				throw new Error("监督执行身份已被其他归属登记");
 			const canonicalResultFilePath = await resolveCanonicalResultFilePath(input.specification.resultFile);
 			const registeredResultFilePaths = await Promise.all(
 				records.map((value) => resolveCanonicalResultFilePath(value.specification.resultFile)),
 			);
-			if (existsSync(canonicalResultFilePath) || registeredResultFilePaths.includes(canonicalResultFilePath))
+			if (
+				(!adoption && existsSync(canonicalResultFilePath)) ||
+				registeredResultFilePaths.includes(canonicalResultFilePath)
+			)
 				throw new Error("新执行必须使用尚未存在且未被其他执行使用的唯一结果路径");
 			const record: TaskCommandExecutionRecord = {
 				executionId,
 				workspaceId,
 				taskId: input.taskId,
-				taskIncarnationCreatedAtEpochMs: owner.taskIncarnationCreatedAtEpochMs,
-				originatingConversationSessionId: owner.conversationSessionId,
+				taskIncarnationCreatedAtEpochMs,
+				originatingConversationSessionId,
 				originatingNativeSessionId,
 				originatingRuntimeSessionIncarnationId,
-				worktreeIdentity: {
+				requiresOriginatingSessionBinding: !!input.expectedOwner,
+				worktreeIdentity: input.expectedOwner?.worktreeIdentity ?? {
 					realPath: worktreeRealPath,
 					device: metadata.dev,
 					inode: metadata.ino,
@@ -484,9 +564,9 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				custodianRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
 				createdAtEpochMs: Date.now(),
 				updatedAtEpochMs: Date.now(),
-				launchState: "registered",
-				launchAttemptCount: 0,
-				launchNonce: randomUUID(),
+				launchState: adoptedWorkerState ?? "registered",
+				launchAttemptCount: adoption ? 1 : 0,
+				launchNonce: adoption?.launchNonce ?? randomUUID(),
 				previousLaunchNonces: [],
 				unprovenSupervisorRecoveryObservation: null,
 				revocationFile: join(
@@ -517,7 +597,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					recursive: true,
 				});
 				await retainOwnedWait(registered.record);
-				await launch(registered.record);
+				if (!adoption) await launch(registered.record);
 			} catch (error) {
 				await update(workspaceId, registered.record.executionId, (record) =>
 					record.revokedAtEpochMs === null ? { ...record, launchState: "unknown" } : record,
@@ -528,6 +608,20 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			}
 		}
 		return inspect(workspaceId, registered.record);
+	};
+	const start = (workspaceId: string, input: TaskCommandExecutionStartRequest) =>
+		registerAndStartOrAdopt(workspaceId, input);
+	const adoptExistingSupervisor = (workspaceId: string, raw: TaskCommandExecutionAdoptExistingSupervisorRequest) => {
+		const input = taskCommandExecutionAdoptExistingSupervisorRequestSchema.parse(raw);
+		return lockedFileSystem.withLock(
+			{
+				path: join(
+					taskCommandExecutionArtifactDirectory(workspaceId, input.executionId),
+					"execution-revocation.json",
+				),
+			},
+			async () => registerAndStartOrAdopt(workspaceId, input, input),
+		);
 	};
 	const cancel = async (
 		workspaceId: string,
@@ -570,6 +664,34 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		);
 	};
 	const cancelForTask = async (workspaceId: string, taskId: string, ownerSessionInterrupt = false) => {
+		const root = dirname(taskCommandExecutionArtifactDirectory(workspaceId, "directory-sentinel"));
+		const pendingDirectories = await readdir(root).catch((error: unknown) => {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
+		});
+		for (const executionId of pendingDirectories) {
+			if (!/^[a-f0-9-]{36}$/u.test(executionId)) continue;
+			try {
+				const pending = taskCommandExecutionAdoptExistingSupervisorRequestSchema.parse(
+					JSON.parse(await readFile(join(root, executionId, "pending-existing-supervisor-adoption.json"), "utf8")),
+				);
+				if (
+					pending.executionId !== executionId ||
+					(pending.taskId !== taskId && pending.expectedOwner.conversationSessionId !== taskId) ||
+					(ownerSessionInterrupt && pending.specification.ownerSessionInterruptPolicy === "preserve_execution")
+				)
+					continue;
+				const revocationFile = join(root, executionId, "execution-revocation.json");
+				await lockedFileSystem.writeJsonFileAtomic(
+					revocationFile,
+					{ executionId, revokedAtEpochMs: Date.now(), source: "explicit_stop_of_pending_independent_supervisor" },
+					{ durable: true },
+				);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+					deps.warn(`待接回监督取消待证 executionId=${executionId} reason=${String(error)}`);
+			}
+		}
 		const records = (await readTaskCommandExecutions(workspaceId)).filter(
 			(record) =>
 				record.revokedAtEpochMs === null &&
@@ -1372,8 +1494,38 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				originatingSessionKeysWithExecutionSweepInProgress.delete(acquiredOriginatingSessionSweepKey);
 		}
 	};
+	let nextIndependentSupervisorDiscoveryAtEpochMs = 0;
+	const discoverIndependentSupervisors = async (workspaceId: string) => {
+		const root = dirname(taskCommandExecutionArtifactDirectory(workspaceId, "directory-sentinel"));
+		let entries: string[];
+		try {
+			entries = await readdir(root);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+			throw error;
+		}
+		const registered = await readTaskCommandExecutions(workspaceId);
+		for (const executionId of entries) {
+			if (!/^[a-f0-9-]{36}$/u.test(executionId) || registered.some((record) => record.executionId === executionId))
+				continue;
+			try {
+				const path = join(root, executionId, "pending-existing-supervisor-adoption.json");
+				const request = taskCommandExecutionAdoptExistingSupervisorRequestSchema.parse(
+					JSON.parse(await readFile(path, "utf8")),
+				);
+				if (request.executionId !== executionId) throw new Error("独立监督待接回目录与执行身份不匹配");
+				await adoptExistingSupervisor(workspaceId, request);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+					deps.warn(`独立监督接回待证 executionId=${executionId} reason=${String(error)}`);
+			}
+		}
+	};
 	const sweep = async () => {
-		for (const workspaceId of await deps.listWorkspaceIds())
+		const discover = Date.now() >= nextIndependentSupervisorDiscoveryAtEpochMs;
+		if (discover) nextIndependentSupervisorDiscoveryAtEpochMs = Date.now() + 30_000;
+		for (const workspaceId of await deps.listWorkspaceIds()) {
+			if (discover) await discoverIndependentSupervisors(workspaceId);
 			for (const record of await readTaskCommandExecutionsForObservation(workspaceId)) {
 				try {
 					await sweepExecution(workspaceId, record.executionId);
@@ -1381,9 +1533,11 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					deps.warn(`所属执行恢复待证 executionId=${record.executionId} reason=${String(error)}`);
 				}
 			}
+		}
 	};
 	return {
 		start,
+		adoptExistingSupervisor,
 		inspect,
 		registerRecoveryEvidenceObservation,
 		cancel,

@@ -75,6 +75,8 @@ const ISOLATION_OWNED_ENVIRONMENT_VARIABLE_NAMES = new Set([
 	"TMPDIR",
 	"TEMP",
 	"TMP",
+	"TMUX",
+	"TMUX_PANE",
 ]);
 const GIT_REPOSITORY_REDIRECTION_ARGUMENT_PREFIXES = [
 	"-C",
@@ -122,13 +124,15 @@ function formatGitCommand(arguments_: readonly string[]): string {
 }
 
 export function createIsolatedGitTestWorkspaceFixture(
-	options: { fixtureRootDirectoryNamePrefix?: string } = {},
+	options: { fixtureRootDirectoryNamePrefix?: string; fixtureRootParentDirectoryPath?: string } = {},
 ): IsolatedGitTestWorkspaceFixture {
 	// 原生 Unix socket 有路径长度上限；只允许缩短目录名，隔离根、Git 所有权和清理校验保持一致。
 	const fixtureRootDirectoryNamePrefix =
 		options.fixtureRootDirectoryNamePrefix ?? "cline-kanban-isolated-git-test-workspace-";
 	assertSimpleDirectoryName(fixtureRootDirectoryNamePrefix, "隔离测试根目录前缀");
-	const fixtureRootDirectoryPath = mkdtempSync(join(realpathSync(tmpdir()), fixtureRootDirectoryNamePrefix));
+	const fixtureRootDirectoryPath = mkdtempSync(
+		join(realpathSync(options.fixtureRootParentDirectoryPath ?? tmpdir()), fixtureRootDirectoryNamePrefix),
+	);
 	const fixtureRootIdentity = captureFilesystemIdentity(fixtureRootDirectoryPath);
 	const protectedSiblingSentinelPath = `${fixtureRootDirectoryPath}.protected-sibling-sentinel`;
 	const protectedSiblingSentinelContents = `protected-sibling:${basename(fixtureRootDirectoryPath)}\n`;
@@ -158,7 +162,9 @@ export function createIsolatedGitTestWorkspaceFixture(
 
 	const isolatedGitEnvironment: NodeJS.ProcessEnv = {};
 	for (const [name, value] of Object.entries(process.env)) {
-		if (!name.toUpperCase().startsWith("GIT_")) isolatedGitEnvironment[name] = value;
+		if (!name.toUpperCase().startsWith("GIT_") && name !== "TMUX" && name !== "TMUX_PANE") {
+			isolatedGitEnvironment[name] = value;
+		}
 	}
 	Object.assign(isolatedGitEnvironment, {
 		HOME: isolatedHomeDirectoryPath,
@@ -167,6 +173,8 @@ export function createIsolatedGitTestWorkspaceFixture(
 		TMPDIR: isolatedTemporaryDirectoryPath,
 		TEMP: isolatedTemporaryDirectoryPath,
 		TMP: isolatedTemporaryDirectoryPath,
+		// 清除身份后，漏写 socket 参数的派生命令也不能退回宿主 default server。
+		TMUX_TMPDIR: isolatedTemporaryDirectoryPath,
 		GIT_AUTHOR_NAME: "Cline Kanban Isolated Git Test Author",
 		GIT_AUTHOR_EMAIL: "isolated-git-test-author@example.invalid",
 		GIT_COMMITTER_NAME: "Cline Kanban Isolated Git Test Committer",

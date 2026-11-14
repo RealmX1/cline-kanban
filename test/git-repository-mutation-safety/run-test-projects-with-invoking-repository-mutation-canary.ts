@@ -262,6 +262,8 @@ function createIsolatedChildTestEnvironment(diagnosticDirectoryPath: string): No
 		mkdirSync(directoryPath, { recursive: true });
 	}
 	const environmentVariables = createGitEnvironmentWithoutInheritedRepositoryLocationVariables();
+	delete environmentVariables.TMUX;
+	delete environmentVariables.TMUX_PANE;
 	return {
 		...environmentVariables,
 		[TEST_PTY_LIFETIME_RECORDS_DIRECTORY_ENVIRONMENT_VARIABLE]: resolveTestPtyLifetimeRecordsDirectory(),
@@ -271,6 +273,7 @@ function createIsolatedChildTestEnvironment(diagnosticDirectoryPath: string): No
 		TMPDIR: isolatedTemporaryDirectoryPath,
 		TEMP: isolatedTemporaryDirectoryPath,
 		TMP: isolatedTemporaryDirectoryPath,
+		TMUX_TMPDIR: isolatedTemporaryDirectoryPath,
 		GIT_CONFIG_GLOBAL: join(isolatedHomeDirectoryPath, ".gitconfig"),
 		// 工作单元间关系账本只追加、写进真实账本后不可逆（dd2db §R3 Y-EVENT-3）。HOME 隔离已经覆盖默认路径；
 		// 这里再显式钉住存储根，防止某条代码路径绕过 HOME 解析。不做「真实账本 mtime 前后不变」的比对：

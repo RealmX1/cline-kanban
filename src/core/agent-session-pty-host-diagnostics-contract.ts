@@ -82,6 +82,7 @@ const agentSessionPtyHostDiagnosticsStructureSchema = z.object({
 	runtimeIdentity: z.object({ runtimeHomeDirectoryPath: z.string(), runtimePort: z.number().int().positive() }),
 	runtimeProcessId: z.number().int().positive().nullable(),
 	runtimeProcessStartTimeText: z.string().nullable(),
+	runtimeLoadedEntrypointSha256: z.string().nullable().optional(),
 	runtimeProcessStatus: z.enum(["running", "offline", "unknown"]),
 	startupDecision: agentSessionPtyHostStartupDecisionSchema.nullable(),
 	configurationReadError: z.string().nullable(),

@@ -1,5 +1,6 @@
-import { FileText, Folder, FolderOpen } from "lucide-react";
+import { Download, FileText, Folder, FolderOpen } from "lucide-react";
 import { useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import type { RuntimeWorkspaceFileChange } from "@/runtime/types";
 import { buildFileTree, type FileTreeNode } from "@/utils/file-tree";
 
@@ -14,12 +15,14 @@ function FileTreeRow({
 	selectedPath,
 	onSelectPath,
 	diffStatsByPath,
+	onDownloadFile,
 }: {
 	node: FileTreeNode;
 	depth: number;
 	selectedPath: string | null;
 	onSelectPath: (path: string) => void;
 	diffStatsByPath: Record<string, FileDiffStats>;
+	onDownloadFile?: (path: string) => void;
 }): React.ReactElement {
 	const isDirectory = node.type === "directory";
 	const isSelected = !isDirectory && node.path === selectedPath;
@@ -30,25 +33,37 @@ function FileTreeRow({
 
 	return (
 		<div>
-			<button
-				type="button"
-				className={rowClassName}
-				style={{ paddingLeft: depth * 12 + 8 }}
-				onClick={() => {
-					if (!isDirectory) {
-						onSelectPath(node.path);
-					}
-				}}
-			>
-				{isDirectory ? <Folder size={14} /> : <FileText size={14} />}
-				<span className="truncate">{node.name}</span>
-				{fileStats ? (
-					<span className="font-mono" style={{ marginLeft: "auto", fontSize: 10, display: "flex", gap: 4 }}>
-						{fileStats.added > 0 ? <span className={addedStatClassName}>+{fileStats.added}</span> : null}
-						{fileStats.removed > 0 ? <span className={removedStatClassName}>-{fileStats.removed}</span> : null}
-					</span>
+			<div className="flex min-w-0 items-center">
+				<button
+					type="button"
+					className={`${rowClassName} min-w-0 flex-1`}
+					style={{ paddingLeft: depth * 12 + 8 }}
+					onClick={() => {
+						if (!isDirectory) {
+							onSelectPath(node.path);
+						}
+					}}
+				>
+					{isDirectory ? <Folder size={14} /> : <FileText size={14} />}
+					<span className="truncate">{node.name}</span>
+					{fileStats ? (
+						<span className="font-mono" style={{ marginLeft: "auto", fontSize: 10, display: "flex", gap: 4 }}>
+							{fileStats.added > 0 ? <span className={addedStatClassName}>+{fileStats.added}</span> : null}
+							{fileStats.removed > 0 ? <span className={removedStatClassName}>-{fileStats.removed}</span> : null}
+						</span>
+					) : null}
+				</button>
+				{!isDirectory && onDownloadFile ? (
+					<Button
+						size="xs"
+						variant="ghost"
+						className="shrink-0"
+						aria-label={`下载文件 ${node.path}`}
+						icon={<Download size={12} />}
+						onClick={() => onDownloadFile(node.path)}
+					/>
 				) : null}
-			</button>
+			</div>
 			{node.children.length > 0 ? (
 				<div>
 					{node.children.map((child) => (
@@ -59,6 +74,7 @@ function FileTreeRow({
 							selectedPath={selectedPath}
 							onSelectPath={onSelectPath}
 							diffStatsByPath={diffStatsByPath}
+							onDownloadFile={onDownloadFile}
 						/>
 					))}
 				</div>
@@ -72,11 +88,13 @@ export function FileTreePanel({
 	selectedPath,
 	onSelectPath,
 	panelFlex,
+	onDownloadFile,
 }: {
 	workspaceFiles: RuntimeWorkspaceFileChange[] | null;
 	selectedPath: string | null;
 	onSelectPath: (path: string) => void;
 	panelFlex?: string;
+	onDownloadFile?: (path: string) => void;
 }): React.ReactElement {
 	const referencedPaths = useMemo(() => {
 		return workspaceFiles?.map((file) => file.path) ?? [];
@@ -121,6 +139,7 @@ export function FileTreePanel({
 								selectedPath={selectedPath}
 								onSelectPath={onSelectPath}
 								diffStatsByPath={diffStatsByPath}
+								onDownloadFile={onDownloadFile}
 							/>
 						))}
 					</div>

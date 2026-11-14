@@ -200,6 +200,7 @@ import {
 	mutateWorkspaceState,
 } from "../state/workspace-state";
 import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import { createTaskFileDownloadService } from "../task-file-downloads/task-file-download-service";
 import {
 	readRecordedCreationNameSuggestionResult,
 	suggestTaskNamesFromTaskDescription,
@@ -1038,7 +1039,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			return record.terminal_delivery_status === "delivery_failed" ? "failed" : "pending";
 		},
 	});
+	const taskFileDownloads = createTaskFileDownloadService((scope, input) =>
+		runtimeApi.getTaskConversationHistoryPage(scope, input),
+	);
 	const runtimeApi: RuntimeTrpcContext["runtimeApi"] = {
+		listTaskDirectory: taskFileDownloads.listDirectory,
+		getTaskMainSessionPlan: taskFileDownloads.getMainSessionPlan,
+		openTaskFileDownload: taskFileDownloads.openDownload,
 		lookupTaskConversationSessionCreation: (scope, input) => conversationSessions.lookupCreation(scope, input),
 		renameTaskConversationSession: (scope, input) => conversationSessions.rename(scope, input),
 		previewTaskConversationSession: (scope, input, evidence) => conversationSessions.preview(scope, input, evidence),

@@ -106,4 +106,31 @@ describe("Codex 原生会话前缀恢复", () => {
 		const port = { request: vi.fn().mockResolvedValue({ data: [], nextCursor: "same-page" }) };
 		await expect(readCodexConversationTurns(port, "source")).rejects.toThrow("分页");
 	});
+	it("相同回合 ID 的正文变化仍拒绝采用，并先保存候选身份", async () => {
+		const original = [turn("implementation", "原始正文"), turn("boundary", "边界")];
+		const saved = vi.fn();
+		const port = {
+			request: vi.fn(async (method: string, parameters: Record<string, unknown>) => {
+				if (method === "thread/fork")
+					return { thread: { id: "restored", path: "/restored.jsonl", cwd: "/worktree" } };
+				return {
+					data: parameters.threadId === "source" ? original : [turn("implementation", "被改变的正文")],
+					nextCursor: null,
+				};
+			}),
+		};
+		await expect(
+			forkCodexConversationBeforeBoundaryTurn(
+				port,
+				{
+					sourceThreadId: "source",
+					boundaryTurnId: "boundary",
+					lastPreBoundaryTurnId: "implementation",
+					workingDirectory: "/worktree",
+				},
+				saved,
+			),
+		).rejects.toThrow("原生内容");
+		expect(saved).toHaveBeenCalledExactlyOnceWith({ nativeSessionId: "restored", transcriptPath: "/restored.jsonl" });
+	});
 });

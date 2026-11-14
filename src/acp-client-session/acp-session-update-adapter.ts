@@ -138,6 +138,7 @@ function applyToolCall(
 			content: content || message.content,
 			meta: {
 				...(message.meta ?? {}),
+				structuredToolCall: readStructuredToolCallFields(update, message.meta?.structuredToolCall),
 				...(update.kind ? { toolKind: update.kind } : {}),
 				...(status ? { toolCallStatus: status } : {}),
 			},
@@ -156,12 +157,42 @@ function applyToolCall(
 			toolName: update.title ?? null,
 			toolKind: update.kind ?? null,
 			toolCallStatus: status,
+			structuredToolCall: readStructuredToolCallFields(update),
 			source: "acp",
 		}),
 	);
 	context.entry.toolMessageIdByToolCallId.set(update.toolCallId, created.id);
 	context.emitMessage(created);
 	emitRunningSummary(context, "tool_activity");
+}
+
+function readStructuredToolCallFields(
+	update: Extract<AcpSessionUpdate, { sessionUpdate: "tool_call" | "tool_call_update" }>,
+	previous?: NonNullable<AcpTaskMessage["meta"]>["structuredToolCall"],
+) {
+	const { terminal_output_delta: terminalDelta, terminal_output: terminalSnapshot, ...metadata } = update._meta ?? {};
+	const delta = readTerminalOutputText(terminalDelta);
+	const snapshot = readTerminalOutputText(terminalSnapshot);
+	return {
+		...previous,
+		protocolMetadata: { ...previous?.protocolMetadata, ...metadata },
+		...(snapshot !== null
+			? { terminalOutputText: snapshot }
+			: delta !== null
+				? { terminalOutputText: `${previous?.terminalOutputText ?? ""}${delta}` }
+				: {}),
+		...(update.rawInput !== undefined ? { rawInput: update.rawInput } : {}),
+		...(update.rawOutput !== undefined ? { rawOutput: update.rawOutput } : {}),
+		...(update.content !== undefined ? { content: update.content } : {}),
+		...(update.locations !== undefined ? { locations: update.locations } : {}),
+	};
+}
+
+function readTerminalOutputText(value: unknown): string | null {
+	if (typeof value === "string") return value;
+	if (typeof value === "object" && value !== null && "data" in value && typeof value.data === "string")
+		return value.data;
+	return null;
 }
 
 function buildToolCallMessageContent(

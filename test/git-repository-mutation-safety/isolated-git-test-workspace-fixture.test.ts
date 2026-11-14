@@ -206,6 +206,9 @@ describe("isolated Git test workspace fixture", () => {
 
 	it("provides a sanitized child-process environment without allowing isolation-directory overrides", () => {
 		vi.stubEnv("GIT_DIR", "/developer-repository-that-must-not-be-inherited/.git");
+		vi.stubEnv("TMUX", "/unowned/production.sock,1,0");
+		vi.stubEnv("TMUX_PANE", "%1");
+		vi.stubEnv("TMUX_TMPDIR", "/unowned/tmux-directory");
 		onTestFinished(() => {
 			vi.unstubAllEnvs();
 		});
@@ -216,6 +219,9 @@ describe("isolated Git test workspace fixture", () => {
 		});
 
 		expect(childProcessEnvironment.GIT_DIR).toBeUndefined();
+		expect(childProcessEnvironment.TMUX).toBeUndefined();
+		expect(childProcessEnvironment.TMUX_PANE).toBeUndefined();
+		expect(childProcessEnvironment.TMUX_TMPDIR).toBe(childProcessEnvironment.TMPDIR);
 		expect(childProcessEnvironment.HOME).toBe(fixture.isolatedHomeDirectoryPath);
 		expect(childProcessEnvironment.USERPROFILE).toBe(fixture.isolatedHomeDirectoryPath);
 		expect(childProcessEnvironment.KANBAN_RUNTIME_PORT).toBe("43210");
@@ -225,6 +231,11 @@ describe("isolated Git test workspace fixture", () => {
 		expect(() => fixture.createIsolatedChildProcessEnvironment({ GIT_WORK_TREE: "/unsafe-worktree" })).toThrow(
 			/isolation-owned environment variable GIT_WORK_TREE/,
 		);
+		for (const name of ["TMUX", "TMUX_PANE"]) {
+			expect(() => fixture.createIsolatedChildProcessEnvironment({ [name]: "unowned" })).toThrow(
+				`isolation-owned environment variable ${name}`,
+			);
+		}
 	});
 
 	it("initializes repositories only at explicitly owned fixture paths", () => {

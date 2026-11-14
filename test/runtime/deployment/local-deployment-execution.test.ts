@@ -69,6 +69,56 @@ function manifest(executionDirectory: string): LocalDeploymentExecutionManifest 
 }
 
 describe("本地部署执行与复盘", () => {
+	it.each(["state_preservation", "runtime_validation"] as const)(
+		"%s 的内层重试预算随机器语义恢复接续，时间和观察 nonce 不重置预算",
+		async (stage) => {
+			const directory = createExecutionDirectory(`local-deployment-${stage}-semantic-recovery-`);
+			const binding = manifest(directory);
+			const stageCommand = binding.stages.find((item) => item.stage === stage);
+			if (!stageCommand) throw new Error("缺少待测阶段");
+			stageCommand.readOnlyRecoveryEvidenceObservationCommand = ["observe-stage-machine-evidence"];
+			const frozenSourceReport = join(directory, "frozen-source-validation-report.json");
+			await writeFile(frozenSourceReport, JSON.stringify({ status: "passed" }));
+			stageCommand.recoveryEvidenceFilePaths = [frozenSourceReport];
+			await initializeLocalDeploymentExecution(directory, binding);
+			let conditionRecovered = false;
+			let now = Date.now();
+			let observationNonce = 0;
+			const commands: string[] = [];
+			const runCommand = async (command: string[]) => {
+				commands.push(command[0]);
+				if (command[0] === "observe-stage-machine-evidence")
+					return {
+						processWasStarted: true,
+						exitCode: 0,
+						stdout: JSON.stringify({
+							evidenceSha256: (conditionRecovered ? "2" : "1").repeat(64),
+							nonce: ++observationNonce,
+						}),
+						stderr: "",
+					};
+				return {
+					processWasStarted: true,
+					exitCode: command[0] === stageCommand.command[0] && !conditionRecovered ? 2 : 0,
+					stdout: verifiedEffectStdout(command),
+					stderr: "",
+				};
+			};
+			const execute = () => executeLocalDeploymentStages(directory, { runCommand, readNowEpochMs: () => now });
+			expect((await execute()).recovery.unfinishedStage).toBe(stage);
+			expect(commands.filter((command) => command === stageCommand.command[0])).toHaveLength(2);
+			now += 60_000;
+			expect((await execute()).recovery.unfinishedStage).toBe(stage);
+			expect(commands.filter((command) => command === stageCommand.command[0])).toHaveLength(2);
+			conditionRecovered = true;
+			expect((await execute()).deploymentOutcome).toBe("succeeded");
+			expect(commands.filter((command) => command === stageCommand.command[0])).toHaveLength(3);
+			for (const irreversible of ["publish", "restart", "record"])
+				expect(commands.filter((command) => command === irreversible)).toHaveLength(1);
+			expect(await readFile(frozenSourceReport, "utf8")).toBe(JSON.stringify({ status: "passed" }));
+		},
+	);
+
 	it("源码质量失败交回 Agent，保留实际失败而非等待机器补证或重复检查", async () => {
 		const directory = createExecutionDirectory("local-deployment-source-quality-failure-");
 		await initializeLocalDeploymentExecution(directory, manifest(directory));
@@ -714,5 +764,127 @@ describe("本地部署执行与复盘", () => {
 				independentExecutionIds: ["032609d8-7508-4bdc-b202-1d7bd7da8a14", "cf2574ad-9e8a-496c-b842-9cab57aa815a"],
 			},
 		]);
+	});
+});
+
+describe("五条代表轨迹的 v2 隔离回归", () => {
+	it.each([
+		{
+			caseId: "D0 离线起点",
+			offline: true,
+			validationFailures: 0,
+			recordFailureAccepted: false,
+			commentFailure: false,
+		},
+		{
+			caseId: "D1 登记已接受而命令失败",
+			offline: false,
+			validationFailures: 0,
+			recordFailureAccepted: true,
+			commentFailure: true,
+		},
+		{
+			caseId: "D2 跨项目 API 超时后补证",
+			offline: false,
+			validationFailures: 4,
+			recordFailureAccepted: false,
+			commentFailure: false,
+		},
+		{
+			caseId: "D3 一次暂时失败后自动恢复",
+			offline: false,
+			validationFailures: 1,
+			recordFailureAccepted: false,
+			commentFailure: false,
+		},
+		{
+			caseId: "D4 历史接管补证后正常回收",
+			offline: false,
+			validationFailures: 3,
+			recordFailureAccepted: false,
+			commentFailure: false,
+		},
+	])("$caseId：恢复后不重复发布、重启或登记", async (scenario) => {
+		const directory = createExecutionDirectory("representative-redeployment-");
+		const evidence = join(directory, "semantic-evidence.json");
+		await writeFile(evidence, JSON.stringify({ source: "initial" }));
+		const original = manifest(directory);
+		const binding: LocalDeploymentExecutionManifest = {
+			...original,
+			schemaVersion: 2,
+			runtimeBefore: scenario.offline ? null : original.runtimeBefore,
+			runtimeStartingState: scenario.offline ? "verified_offline" : "verified_online",
+			runtimeStartingStateEvidenceFilePath: join(directory, "baseline.json"),
+			redeploymentRequestSha256: "d".repeat(64),
+			stages: original.stages.map((stage) => ({ ...stage, recoveryEvidenceFilePaths: [evidence] })),
+		};
+		await initializeLocalDeploymentExecution(directory, binding);
+		const counts = new Map<string, number>();
+		let now = Date.now();
+		const runCommand = async (command: string[]) => {
+			const key = command[0];
+			const count = (counts.get(key) ?? 0) + 1;
+			counts.set(key, count);
+			const failed =
+				(key === "validate" && count <= scenario.validationFailures) ||
+				(key === "record" && scenario.recordFailureAccepted) ||
+				(key === "comment" && scenario.commentFailure && count === 1);
+			return {
+				processWasStarted: true,
+				exitCode: failed ? 1 : 0,
+				stdout: verifiedEffectStdout(command),
+				stderr: failed ? "保留本次原始失败" : "",
+			};
+		};
+		let analysis = await executeLocalDeploymentStages(directory, { runCommand, readNowEpochMs: () => now });
+		for (let recovery = 1; analysis.deploymentOutcome !== "succeeded" && recovery <= 3; recovery++) {
+			await writeFile(evidence, JSON.stringify({ source: `equivalent-evidence-${recovery}` }));
+			now += 31_000;
+			analysis = await executeLocalDeploymentStages(directory, { runCommand, readNowEpochMs: () => now });
+		}
+		expect(analysis.deploymentOutcome).toBe("succeeded");
+		for (const irreversible of ["publish", "restart", "record"]) expect(counts.get(irreversible)).toBe(1);
+	});
+
+	it("部分发布先探测，再仅执行已声明的幂等补齐；v1 不自动获得恢复权限", async () => {
+		const directory = createExecutionDirectory("partial-publication-recovery-");
+		const original = manifest(directory);
+		const binding: LocalDeploymentExecutionManifest = {
+			...original,
+			schemaVersion: 2,
+			runtimeStartingState: "verified_online",
+			runtimeStartingStateEvidenceFilePath: join(directory, "baseline.json"),
+			redeploymentRequestSha256: "d".repeat(64),
+			stages: original.stages.map((stage) =>
+				stage.stage === "build_publication"
+					? { ...stage, idempotentEffectRecoveryCommand: ["complete-bound-publication"] }
+					: stage,
+			),
+		};
+		await initializeLocalDeploymentExecution(directory, binding);
+		const commands: string[] = [];
+		let complete = false;
+		let now = Date.now();
+		const runCommand = async (command: string[]) => {
+			commands.push(command[0]);
+			if (command[0] === "complete-bound-publication") complete = true;
+			const failed = command[0] === "publish" || (command[0] === "verify-publication" && !complete);
+			return {
+				processWasStarted: true,
+				exitCode: failed ? 1 : 0,
+				stdout: failed ? "" : verifiedEffectStdout(command),
+				stderr: "",
+			};
+		};
+		expect(
+			(await executeLocalDeploymentStages(directory, { runCommand, readNowEpochMs: () => now })).deploymentOutcome,
+		).toBe("machine_evidence_pending");
+		now += 31_000;
+		expect(
+			(await executeLocalDeploymentStages(directory, { runCommand, readNowEpochMs: () => now })).deploymentOutcome,
+		).toBe("succeeded");
+		expect(commands.filter((command) => command === "publish")).toHaveLength(1);
+		expect(commands.filter((command) => command === "complete-bound-publication")).toHaveLength(1);
+		expect(commands.indexOf("verify-publication")).toBeLessThan(commands.indexOf("complete-bound-publication"));
 	});
 });

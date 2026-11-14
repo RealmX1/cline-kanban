@@ -130,6 +130,7 @@ const AGENT_SESSION_TRANSPORT_LABELS: Record<RuntimeAgentSessionTransport, strin
 	pty_terminal: "Terminal (TUI)",
 	in_process_cline_sdk: "Cline SDK",
 	acp_stdio_subprocess: "ACP",
+	codex_app_server_subprocess: "Codex App Server（原型）",
 };
 
 export function getAgentSessionTransportLabel(transport: RuntimeAgentSessionTransport): string {
