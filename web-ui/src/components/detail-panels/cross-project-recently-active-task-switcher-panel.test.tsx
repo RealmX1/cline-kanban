@@ -11,6 +11,7 @@ import {
 	collectUnreadHandoffEntryKeysFromNotificationLog,
 	useCrossProjectRecentlyActiveTaskSwitcherSections,
 } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import type { UseStageHeaderPinLayoutOptions } from "@/hooks/use-stage-header-pin-layout";
 import { resetLastLoadedOtherProjectTaskCardSnapshotCache } from "@/hooks/use-task-card-snapshot-of-other-project-for-cross-project-task-switcher-row-expansion";
 import type {
 	RuntimeCrossProjectTaskSwitcherEntry,
@@ -61,6 +62,15 @@ vi.mock("@/runtime/cross-project-recently-active-task-switcher-query", () => ({
 const fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries = vi.hoisted(() => vi.fn());
 vi.mock("@/runtime/cross-project-task-worktree-git-metadata-query", () => ({
 	fetchTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntries,
+}));
+
+const stickyLayout = vi.hoisted(() => ({ edge: "hidden" as "hidden" | "pinTop" | "pinBottom" }));
+vi.mock("@/hooks/use-stage-header-pin-layout", () => ({
+	useStageHeaderPinLayout: ({ focusedColumnId }: UseStageHeaderPinLayoutOptions) => ({
+		focusedCardRailEdge: stickyLayout.edge,
+		topPinnedColumnIds: stickyLayout.edge === "pinTop" ? [focusedColumnId] : [],
+		bottomPinnedColumnIds: stickyLayout.edge === "pinBottom" ? [focusedColumnId] : [],
+	}),
 }));
 
 function makeTaskWorkspaceMetadata(
@@ -179,6 +189,7 @@ beforeEach(() => {
 	(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 	window.localStorage.clear();
 	resetCrossProjectTaskSwitcherPanelViewContinuity();
+	stickyLayout.edge = "hidden";
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockReset();
 	setTaskPinboardPinStateOfTaskCardInWorkspace.mockResolvedValue({ boardWasSaved: true });
 	readTaskCardWithBoardColumnInWorkspace.mockReset();
@@ -642,6 +653,84 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		);
 		return currentProjectTaskCards;
 	}
+
+	it.each(["pinTop", "pinBottom"] as const)("%s 的 sticky 默认精简、无额外标题且定位锚点唯一", (edge) => {
+		stickyLayout.edge = edge;
+		renderFocusedTask("warm", "review");
+		const sticky = container.querySelector<HTMLElement>("[data-cross-project-focused-task-sticky-edge]")!;
+		const row = sticky.querySelector<HTMLElement>("[data-cross-project-task-switcher-row-in-place-expansion-state]");
+		expect(rowInPlaceExpansionState(row)).toBe("compact_row");
+		expect(sticky.textContent).not.toContain("当前聚焦任务");
+		expect(sticky.textContent).toContain("project-a");
+		expect(sticky.querySelector("[data-testid='cross-project-task-switcher-full-task-card']")).toBeNull();
+		expect(
+			sticky.querySelector(
+				"[data-cross-project-focused-task-scroll-anchor], [data-verification-anchor], [data-task-id]",
+			),
+		).toBeNull();
+		expect(
+			container.querySelectorAll('[data-cross-project-focused-task-scroll-anchor="project-a:warm"]'),
+		).toHaveLength(1);
+		expect(
+			container.querySelectorAll(
+				'[data-verification-anchor="cross-project-task-switcher-section-row:project-a:warm"]',
+			),
+		).toHaveLength(1);
+	});
+
+	it("sticky 与源行双向同步手动展开，并跨重新挂载保留", () => {
+		stickyLayout.edge = "pinTop";
+		renderFocusedTask("warm", "review");
+		const source = container.querySelector<HTMLElement>("[data-cross-project-focused-task-scroll-anchor]")!;
+		const stickyRow = () =>
+			container.querySelector<HTMLElement>(
+				"[data-cross-project-focused-task-sticky-edge] [data-cross-project-task-switcher-row-in-place-expansion-state]",
+			)!;
+		const toggle = (row: HTMLElement) =>
+			queryTaskCardElementIncludingPortalledActionToolbars<HTMLButtonElement>(
+				row,
+				IN_LIST_EXPANSION_TOGGLE_SELECTOR,
+			)!;
+		act(() => toggle(source).click());
+		expect(rowInPlaceExpansionState(stickyRow())).toBe("kept_expanded_in_list");
+		act(() => toggle(stickyRow()).click());
+		expect(rowInPlaceExpansionState(source)).toBe("compact_row");
+		act(() => toggle(stickyRow()).click());
+		expect(rowInPlaceExpansionState(source)).toBe("kept_expanded_in_list");
+		act(() => toggle(source).click());
+		expect(rowInPlaceExpansionState(stickyRow())).toBe("compact_row");
+		act(() => toggle(stickyRow()).click());
+		act(() => root.render(null));
+		renderFocusedTask("warm", "review");
+		expect(rowInPlaceExpansionState(stickyRow())).toBe("kept_expanded_in_list");
+	});
+
+	it("sticky 的 hover 仅临时展开副本，不改变源行或固定展开记录", async () => {
+		vi.useFakeTimers();
+		stickyLayout.edge = "pinBottom";
+		renderFocusedTask("warm", "review");
+		const source = container.querySelector<HTMLElement>("[data-cross-project-focused-task-scroll-anchor]")!;
+		const sticky = container.querySelector<HTMLElement>(
+			"[data-cross-project-focused-task-sticky-edge] [data-cross-project-task-switcher-row-in-place-expansion-state]",
+		)!;
+		await hoverRowUntilExpandedInPlace(sticky);
+		expect(rowInPlaceExpansionState(sticky)).toBe("expanded_in_place_by_hover");
+		expect(rowInPlaceExpansionState(source)).toBe("compact_row");
+		expect(
+			sticky
+				.querySelector("[data-cross-project-task-switcher-compact-row-placeholder]")
+				?.getAttribute("aria-hidden"),
+		).toBe("true");
+		act(() => document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+		expect(rowInPlaceExpansionState(sticky)).toBe("compact_row");
+		act(() => root.render(null));
+		renderFocusedTask("warm", "review");
+		expect(
+			rowInPlaceExpansionState(
+				container.querySelector<HTMLElement>("[data-cross-project-focused-task-scroll-anchor]"),
+			),
+		).toBe("compact_row");
+	});
 
 	it("Recent 收起时保留 Backlog 焦点任务的唯一定位行，不另造组外副本", () => {
 		const host = makeHost({

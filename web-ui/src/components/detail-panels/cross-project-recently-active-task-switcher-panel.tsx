@@ -63,11 +63,15 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	});
 	const panelScrollContainerRef = useRef<HTMLDivElement | null>(null);
 	const pinnedScrollContainerRef = useRef<HTMLDivElement | null>(null);
+	const focusedTaskStickyScrollContainerRef = useRef<HTMLDivElement | null>(null);
 	const rowHoverExpansionOfPinnedScrollContainer = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		panelScrollContainerRef: pinnedScrollContainerRef,
 	});
 	const rowHoverExpansionOfPanelScrollContainer = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
 		panelScrollContainerRef,
+	});
+	const rowHoverExpansionOfFocusedTaskStickyScrollContainer = useCrossProjectTaskSwitcherRowHoverExpansionInPlace({
+		panelScrollContainerRef: focusedTaskStickyScrollContainerRef,
 	});
 	const focusedTaskVisibility = useCrossProjectTaskSwitcherFocusedTaskVisibility({
 		host,
@@ -81,14 +85,16 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	const focusedTaskProjectName =
 		host.projects.find((project) => project.id === focusedTaskVisibility.focusedTaskInProject?.workspaceId)?.name ??
 		"";
-	const renderFocusedTaskCard = (onRevealFocusedTask?: () => void) => (
-		<CrossProjectTaskSwitcherFocusedTaskCard
-			selection={focusedTaskSelection}
-			projectName={focusedTaskProjectName}
-			currentProjectTaskCards={currentProjectTaskCards}
-			defaultAgentId={defaultAgentId}
-			onRevealFocusedTask={onRevealFocusedTask}
-		/>
+	const focusedTaskEntryInProject = [
+		...sectionsModel.sections.shelvedEntries,
+		...sectionsModel.sections.automaticRecoveryWaitingEntries,
+		...sectionsModel.sections.runningEntries,
+		...sectionsModel.sections.promptCacheWarmAwaitingUserEntries,
+		...sectionsModel.sections.remainingSection.entries,
+		...sectionsModel.sections.pinnedEntries,
+	].find(
+		({ workspaceId, entry }) =>
+			buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId) === focusedTaskEntryKey,
 	);
 
 	useEffect(() => {
@@ -177,6 +183,11 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 		sectionElementAttributeName: "data-focus-view-group-section-id",
 		focusedCardPinState: focusedTaskPinState,
 	});
+	const { collapseRowExpandedInPlaceByHover: collapseFocusedTaskStickyHoverExpansion } =
+		rowHoverExpansionOfFocusedTaskStickyScrollContainer;
+	useEffect(() => {
+		collapseFocusedTaskStickyHoverExpansion();
+	}, [focusedTaskEntryKey, headerPinLayout.focusedCardRailEdge, collapseFocusedTaskStickyHoverExpansion]);
 	return (
 		<div
 			onPointerEnter={rowHoverExpansionOfPanelScrollContainer.panelPointerHandlers.onPointerEnter}
@@ -246,7 +257,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					data-cross-project-focused-task-outside-sections=""
 					data-cross-project-focused-task-scroll-anchor={focusedTaskEntryKey}
 				>
-					{renderFocusedTaskCard()}
+					<CrossProjectTaskSwitcherFocusedTaskCard
+						selection={focusedTaskSelection}
+						projectName={focusedTaskProjectName}
+						currentProjectTaskCards={currentProjectTaskCards}
+						defaultAgentId={defaultAgentId}
+					/>
 				</div>
 			) : null}
 			<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
@@ -289,14 +305,33 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 										groupNavigation.toggleStageSectionExpandedFromStageHeaderRail(groupId, edge),
 								}}
 								focusedCardContent={
-									showsFocusedCard ? (
+									showsFocusedCard && focusedTaskEntryInProject && focusedTaskSourceSection ? (
 										<div
+											ref={focusedTaskStickyScrollContainerRef}
 											className="max-h-[var(--kb-focused-card-rail-maximum-height)] overflow-y-auto overscroll-contain px-2 pb-2"
 											data-cross-project-focused-task-sticky-edge={edge === "pinTop" ? "top" : "bottom"}
+											onPointerEnter={
+												rowHoverExpansionOfFocusedTaskStickyScrollContainer.panelPointerHandlers
+													.onPointerEnter
+											}
+											onPointerLeave={
+												rowHoverExpansionOfFocusedTaskStickyScrollContainer.panelPointerHandlers
+													.onPointerLeave
+											}
+											onPointerDownCapture={
+												rowHoverExpansionOfFocusedTaskStickyScrollContainer.panelPointerHandlers
+													.onPointerDownCapture
+											}
 										>
 											{/* 测量自然内容盒；外层限高与 padding 不回灌分类和跳转。 */}
 											<div ref={measureFocusedCardClone}>
-												{renderFocusedTaskCard(focusedTaskVisibility.revealFocusedTaskScrollAnchor)}
+												{renderCrossProjectTaskSwitcherSectionRow(
+													focusedTaskEntryInProject,
+													focusedTaskSourceSection,
+													rowHoverExpansionOfFocusedTaskStickyScrollContainer,
+													undefined,
+													focusedTaskVisibility.revealFocusedTaskScrollAnchor,
+												)}
 											</div>
 										</div>
 									) : null

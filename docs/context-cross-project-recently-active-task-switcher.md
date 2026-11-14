@@ -108,7 +108,9 @@ Board Scope 下没有聚焦任务时，首页把本面板的分区横排成列�
 - All projects Focus View 的当前任务不以四组取景为存在条件：Spotlight 可以打开未置顶 Done、时间窗外、或被 Recent 时间窗或阶段筛选排除的任务。这时在创建按钮下方临时显示「当前聚焦任务」完整紧凑卡；任务进入正常分组后移除临时区，不改四组归属、计数或排序。
 - 当前任务以 `(workspaceId, taskId)` 定位，完整卡读已水合的当前项目 board、推流 session 与共享 `buildTaskCardBusinessProps`；跨项目在途只显示目标占位，不复用旧项目同号卡。手机详情顶部卡片继续使用独立的移动端角色。
 - 主分组行优先于 Pinned 副本作为唯一定位源；Running / Cache warm / Recent 收起、仅在 Pinned 的任务被折叠或截断时仍保留这一行，用户的持久化收起偏好不变。分组内沿用精简行 / hover 展开的交互。
-- 复用 `useSelectedCardPinState` 的实时几何判定：完整可见时不显示副本，上下前沿触边即在对应边缘显示完整 Sticky 卡。源行只改 `visibility`、保留几何；副本不带 canonical `data-task-id` 或验证锚点。卡体或「返回当前任务所在位置」按钮只滚回定位源，卡片动作与 Portal 弹窗不触发导航。
+- 复用 `useSelectedCardPinState` 的实时几何判定：完整可见时不显示副本，上下前沿触边即在对应边缘显示 Sticky 行。源行只改 `visibility`、保留几何；副本不带 canonical `data-task-id`、验证锚点或定位锚点。
+- Sticky 与源行复用共享行渲染器和固定展开记录：默认精简，任一处手动展开 / 收起都同步；项目归属沿用行内元数据，不另加「当前聚焦任务 / 项目 / 阶段」标题栏。两处 hover 独立且不写固定展开记录；源行继续悬浮展开，Sticky 在自身限高区域内展开并滚动，离开吸附边沿后清除临时 hover。
+- 「返回当前任务所在位置」入口在行动作区；卡体单击及 Enter / Space 也只返回源位置，卡片动作与 Portal 弹窗不触发导航。键盘返回要等 React 提交使源行从 `visibility:hidden` 恢复可见后再交接焦点；换了任务或用户已移走焦点时取消接力。分组外保底卡、手机顶部卡片保持原展示。
 - 明确切换任务后定位新任务；同一任务跨过渡壳重挂载时恢复原滚动位置。临时区与组内定位源切换时重新绑定测量。没有聚焦任务的 All projects 首页不增加焦点区或 Sticky。
 - 当前聚焦的 Cache warm 任务从 Review 移入 Validation 时，按操作前的同组显示顺序选择下一项，末尾选上一项，单项保留当前焦点；跨项目沿用统一打开入口。普通卡片、Sticky 副本与 Review → Validation 拖拽共用此规则。仅服务端确认移入 Validation 后接续，失败、候选退出分组或用户已切走时不自动导航（`use-cache-warm-task-focus-navigation-after-validation-move.ts`）；其他场景仍按既有 Review 列导航。
 
