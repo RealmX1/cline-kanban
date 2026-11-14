@@ -52,7 +52,7 @@
 - 共享 Context、持久快照/L3、Claude/Codex 执行器、三种分诊处置、原子备注追加、操作回执、后台未核验参照写入、补查与已有编辑器的按需建议已实现于当前工作树；没有提交、推送或部署。
 - 相关验证已通过：56 项根单测、29 项 Web 测试、2 项集成测试、1 项真实浏览器测试，以及根/Web typecheck、Biome 和隔离构建。新增补查用例已红测证明「已由新接口建出的卡再次分诊」，随后实现按卡身份读取完成回执及恢复原操作。
 - 真实 Codex 大样本：1126 张卡、本项目 468 张，约 711 KB 稳定前缀；两次各 192204 input tokens、cache read 均 0。真实完整关系 schema 验收返回一个正确的完全覆盖候选（5935 input / 200 output）。保持 Codex 独立进程缓存未保证的口径。
-- Claude 初次 headless 返回 OAuth session expired；用户随后确认账号封禁，要求标记为暂时无法正式验收。本轮不再请求重新登录或重试真实调用；第二次 cache read 覆盖 L0–L2 的验收不能标成通过。
+- Claude 首次真实 headless 调用未完成认证，正式验收证据仍缺失；第二次 cache read 覆盖 L0–L2 的验收不能标成通过。
 - 持久证据目录：`/Users/bominzhang/.cline/kanban/cross-task-handoff-artifacts/task-a0401-shared-task-indexing-agent/`。真实模型测量、浏览器截图和独立构建均在其中。
 - 已登记 PDV：`f1dae1d2-83f9-4366-81a5-e4a9dd6668b1`（只读 CLI/运行实例契约）、`840fe0e7-cc6f-494e-990e-e1a519b6f939`（真实 UI 按需关系建议）。旧实例 dry-run 正常退出 1，原因是尚无 support 命令，无残留。
 - 在线 dist 软链接未被写入。任务自己的 `web-ui/dist` 已改为独立构建目录，运行时产物通过 `KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY` 写入交接目录。
@@ -62,7 +62,7 @@
 
 最终 22 项索引/处置单测、增强后的真实 runtime 集成测试、根/Web typecheck、38 文件 Biome 均通过；隔离 runtime bundle 和打包 CLI help 也通过。增强用例验证补查恢复已建卡的原始失败操作，不重新建卡或分析。Web/浏览器在前一轮已经通过，之后未修改 Web 生产行为。
 
-本工作树源码冻结为持久交接目录中的 `source.patch` 与 `source-manifest.json`。`shared-kernel-followup-handoff.md` 保存复用接口与承接职责；`verification-and-pdv-report.md` 保存验收/PDV 状态；后续卡更新和启动的实际结果另存交接回执，不把授权计划写成已发生事实。Claude input/cache 正式验收因用户确认的账号封禁暂不可执行，当前不能宣称该项通过。
+本工作树源码冻结为持久交接目录中的 `source.patch` 与 `source-manifest.json`。`shared-kernel-followup-handoff.md` 保存复用接口与承接职责；`verification-and-pdv-report.md` 保存验收/PDV 状态；后续卡更新和启动的实际结果另存交接回执，不把授权计划写成已发生事实。Claude input/cache 尚未取得正式验收证据，当前不能宣称该项通过。
 
 ## RVF 阶段更新
 
