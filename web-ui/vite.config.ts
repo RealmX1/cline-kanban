@@ -68,6 +68,10 @@ export default defineConfig({
 		minify: false,
 		sourcemap: true,
 		rollupOptions: {
+			input: {
+				main: resolve(__dirname, "index.html"),
+				codexProtocolComparison: resolve(__dirname, "codex-conversation-comparison.html"),
+			},
 			output: {
 				manualChunks(id) {
 					if (isXtermModule(id)) {

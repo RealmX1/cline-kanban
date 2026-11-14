@@ -421,6 +421,8 @@ export const runtimeAgentSessionTransportSchema = z.enum([
 	"in_process_cline_sdk",
 	// spawn 一个子进程，用 ACP（JSON-RPC over stdio）通话，状态由 SessionUpdate 驱动。
 	"acp_stdio_subprocess",
+	// 显式隔离原型；不改变 Agent catalog 的生产默认通道。
+	"codex_app_server_subprocess",
 ]);
 export type RuntimeAgentSessionTransport = z.infer<typeof runtimeAgentSessionTransportSchema>;
 
@@ -4938,6 +4940,17 @@ export const runtimeTaskChatMessageSchema = z.object({
 			// 以复用既有的 markdown 渲染器，避免为每种结构再造一套 schema 与渲染分支。
 			toolKind: z.string().nullable().optional(),
 			toolCallStatus: z.string().nullable().optional(),
+			// 原文用于展开和导出，展示摘要不得替代完整协议内容。
+			structuredToolCall: z
+				.object({
+					terminalOutputText: z.string().optional(),
+					protocolMetadata: z.record(z.string(), z.unknown()).optional(),
+					rawInput: z.unknown().optional(),
+					rawOutput: z.unknown().optional(),
+					content: z.array(z.unknown()).nullish(),
+					locations: z.array(z.object({ path: z.string(), line: z.number().nullish() })).nullish(),
+				})
+				.optional(),
 			// 等待用户拍板的决策（ACP 的 session/request_permission 与 form 型 elicitation）。
 			// 挂在消息上而不是另开一条 UI 通道：决策天然属于会话流的一部分，且刷新/重连后
 			// 能随消息历史一起恢复，不会丢。
@@ -4959,6 +4972,36 @@ export const runtimeTaskChatMessagesResponseSchema = z.object({
 	error: z.string().optional(),
 });
 export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMessagesResponseSchema>;
+
+// 显式隔离比较入口复用生产会话投影；它不属于生产任务控制 procedure。
+export const runtimeStructuredConversationExecutionCapabilitiesSchema = z.object({
+	runningTurnInput: z.literal("interrupt_then_send_only"),
+	exactRewind: z.literal("owned_native_app_server_required"),
+	runtimeRestartRecovery: z.literal("resume_history_after_confirmed_exit"),
+	freeTextQuestionForms: z.literal(false),
+});
+export type RuntimeStructuredConversationExecutionCapabilities = z.infer<
+	typeof runtimeStructuredConversationExecutionCapabilitiesSchema
+>;
+export const runtimeCodexProtocolComparisonSnapshotSchema = z.object({
+	modelId: z.string(),
+	workingDirectory: z.string(),
+	sessions: z.record(
+		z.enum(["codex_native", "codex_acp"]),
+		z.object({
+			summary: runtimeTaskSessionSummarySchema.nullable(),
+			capabilities: runtimeStructuredConversationExecutionCapabilitiesSchema.nullish(),
+			messages: z.array(runtimeTaskChatMessageSchema),
+			recovery: z.object({
+				nativeSessionId: z.string().optional(),
+				stoppedByUser: z.boolean(),
+				pendingRewindNativeSessionId: z.string().optional(),
+				lastSummary: z.unknown().optional(),
+			}),
+		}),
+	),
+});
+export type RuntimeCodexProtocolComparisonSnapshot = z.infer<typeof runtimeCodexProtocolComparisonSnapshotSchema>;
 
 export const runtimeTaskFileIdentityRequestSchema = z.object({
 	taskId: z.string().min(1),

@@ -24,7 +24,31 @@ import { Spinner } from "@/components/ui/spinner";
 import type { AgentConversationChatMessage } from "@/hooks/use-agent-conversation-chat-session";
 
 function ToolMessageBlock({ message }: { message: AgentConversationChatMessage }): ReactElement {
-	const parsed = useMemo(() => parseToolMessageContent(message.content), [message.content]);
+	const parsed = useMemo(() => {
+		const structured = message.meta?.structuredToolCall;
+		if (!structured) return parseToolMessageContent(message.content);
+		return {
+			toolName: message.meta?.toolName ?? "工具",
+			input: structured.rawInput === undefined ? null : JSON.stringify(structured.rawInput, null, 2),
+			output: [
+				structured.terminalOutputText,
+				JSON.stringify(
+					{
+						rawOutput: structured.rawOutput,
+						content: structured.content,
+						locations: structured.locations,
+						protocolMetadata: structured.protocolMetadata,
+					},
+					null,
+					2,
+				),
+			]
+				.filter(Boolean)
+				.join("\n\n"),
+			error: message.meta?.toolCallStatus === "failed" ? "工具执行失败" : null,
+			durationMs: null,
+		};
+	}, [message.content, message.meta]);
 	const isRunning = isAgentChatToolMessageStillRunning(message);
 	const hasError = Boolean(parsed.error);
 	const [expanded, setExpanded] = useState(false);

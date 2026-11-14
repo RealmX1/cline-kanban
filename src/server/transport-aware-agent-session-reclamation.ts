@@ -173,6 +173,12 @@ export function createTransportAwareAgentSessionReclamationExecutor(
 				};
 			case "acp_stdio_subprocess":
 				return await reclaimAcpSubprocessSession(request);
+			case "codex_app_server_subprocess":
+				return {
+					...buildBaseOutcome(request, "codex_app_server_subprocess"),
+					completedAt: now(),
+					failureReason: "Codex App Server 比较原型由独立隔离宿主持有，生产回收器未取得其执行所有权。",
+				};
 		}
 	};
 }

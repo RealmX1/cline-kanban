@@ -1,6 +1,11 @@
 // 任务级门面：runtime-api 唯一的 ACP 入口。编排「连接运行时 + 会话账本 + SessionUpdate 适配器」
 // 三者。
 import { randomUUID } from "node:crypto";
+import type {
+	StructuredAgentConversationTaskConnection as AcpTaskConnection,
+	StructuredAgentConversationBackendDefinition,
+	StructuredAgentConversationConnectionRuntime,
+} from "../agent-conversation/structured-agent-conversation-connection-runtime";
 import {
 	describeRefusedAmbiguousExecutionWorkingDirectoryResumeAddressing,
 	resolveAgentConversationSessionResumeAddressing,
@@ -36,7 +41,7 @@ import { buildKanbanTaskAgentSessionWorkUnitIdentityEnvironment } from "../termi
 import {
 	AcpClientConnectionRuntime,
 	type AcpConnectionClosedDetail,
-	type AcpTaskConnection,
+	type AcpConnectionRuntimeHandlers,
 } from "./acp-client-connection-runtime";
 import { AcpPendingUserDecisionBroker, type AcpUserDecisionResolution } from "./acp-pending-user-decision-broker";
 import type {
@@ -152,7 +157,7 @@ export class AcpTaskSessionService {
 		this.userPromptSubmittedListener = listener;
 	}
 	private readonly registry = new AcpTaskSessionRegistry();
-	private readonly connectionRuntime: AcpClientConnectionRuntime;
+	private readonly connectionRuntime: StructuredAgentConversationConnectionRuntime;
 	// 决策以聊天消息承载：presentDecision 落一条带 meta.userDecision 的消息，
 	// settleDecision 回写同一条，使前端把按钮换成「已选 X」。
 	private readonly pendingUserDecisionBroker = new AcpPendingUserDecisionBroker({
@@ -223,9 +228,10 @@ export class AcpTaskSessionService {
 			workspaceId: string;
 			workspaceRepositoryPath: string;
 		} | null = null,
+		private readonly structuredConversationBackend?: StructuredAgentConversationBackendDefinition,
 	) {
 		this.userDecisionBroker = this.pendingUserDecisionBroker;
-		this.connectionRuntime = new AcpClientConnectionRuntime({
+		const handlers = {
 			onSessionUpdate: (taskId, notification) => {
 				const context = this.buildUpdateContext(taskId);
 				if (!context) {
@@ -270,7 +276,10 @@ export class AcpTaskSessionService {
 					}),
 				);
 			},
-		});
+		} satisfies AcpConnectionRuntimeHandlers;
+		this.connectionRuntime = structuredConversationBackend
+			? structuredConversationBackend.createConnectionRuntime(handlers)
+			: new AcpClientConnectionRuntime(handlers);
 	}
 
 	// 测试可以换掉决策通道；生产路径用内建的 pendingUserDecisionBroker。
@@ -300,6 +309,10 @@ export class AcpTaskSessionService {
 
 	getSummary(taskId: string): RuntimeTaskSessionSummary | null {
 		return this.registry.getSummary(taskId);
+	}
+
+	getExecutionBackendCapabilities(): StructuredAgentConversationBackendDefinition["capabilities"] | null {
+		return this.structuredConversationBackend?.capabilities ?? null;
 	}
 
 	hasLiveTaskSession(taskId: string): boolean {
@@ -365,6 +378,7 @@ export class AcpTaskSessionService {
 				// 新活体不继承上一个活体的 park（park 只描述某次回合在等什么）。
 				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				agentId: request.agentId,
+				sessionTransport: this.structuredConversationBackend?.sessionTransport ?? "acp_stdio_subprocess",
 				workspacePath: request.cwd,
 				...(persistedProgressSummary?.taskId === request.taskId
 					? {
@@ -1261,6 +1275,15 @@ export class AcpTaskSessionService {
 	}
 
 	private emitMessage(taskId: string, message: AcpTaskMessage): void {
+		if (this.structuredConversationBackend?.sessionTransport === "codex_app_server_subprocess") {
+			const entry = this.registry.getEntry(taskId);
+			if (entry)
+				message =
+					replaceAcpMessage(entry, message.id, (stored) => ({
+						...stored,
+						meta: { ...stored.meta, source: "codex_app_server" },
+					})) ?? message;
+		}
 		this.registry.emitMessage(taskId, message);
 	}
 }
