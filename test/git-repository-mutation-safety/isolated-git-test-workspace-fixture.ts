@@ -15,6 +15,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { onTestFinished } from "vitest";
+import {
+	bindTestPtyLifetimeToChildEnvironment,
+	createIsolatedTestOwnedPtyHostLifetime,
+} from "../utilities/isolated-test-owned-pty-host-lifetime";
 
 export interface GitCommandResult {
 	exitCode: number;
@@ -177,6 +181,7 @@ export function createIsolatedGitTestWorkspaceFixture(
 
 	const registeredRepositoryPaths = new Set<string>();
 	let cleanupCompleted = false;
+	let testOwnedPtyHostLifetime: ReturnType<typeof createIsolatedTestOwnedPtyHostLifetime> | undefined;
 
 	function assertExistingPathInsideFixture(path: string, description: string): string {
 		const realPath = realpathSync(path);
@@ -408,6 +413,7 @@ export function createIsolatedGitTestWorkspaceFixture(
 			);
 		}
 		assertAllRepositoriesInsideFixture();
+		testOwnedPtyHostLifetime?.closeAndVerifyOwnedHostExit();
 		rmSync(fixtureRootDirectoryPath, { recursive: true, force: false, maxRetries: 15, retryDelay: 100 });
 		if (!existsSync(protectedSiblingSentinelPath))
 			throw new Error("Protected sibling sentinel was removed during cleanup");
@@ -438,7 +444,8 @@ export function createIsolatedGitTestWorkspaceFixture(
 					"Git Trace2 输出文件",
 				);
 			}
-			return environment;
+			testOwnedPtyHostLifetime ??= createIsolatedTestOwnedPtyHostLifetime(fixtureRootDirectoryPath);
+			return bindTestPtyLifetimeToChildEnvironment(environment, testOwnedPtyHostLifetime);
 		},
 		createNonBareRepository(options) {
 			assertSimpleDirectoryName(options.repositoryDirectoryName, "repositoryDirectoryName");

@@ -14,6 +14,11 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+	recoverAbandonedTestPtyHostLifetimes,
+	resolveTestPtyLifetimeRecordsDirectory,
+	TEST_PTY_LIFETIME_RECORDS_DIRECTORY_ENVIRONMENT_VARIABLE,
+} from "../utilities/isolated-test-owned-pty-host-lifetime";
 
 export type InvokingRepositoryMutationCategory =
 	| "worktree-identity"
@@ -259,6 +264,7 @@ function createIsolatedChildTestEnvironment(diagnosticDirectoryPath: string): No
 	const environmentVariables = createGitEnvironmentWithoutInheritedRepositoryLocationVariables();
 	return {
 		...environmentVariables,
+		[TEST_PTY_LIFETIME_RECORDS_DIRECTORY_ENVIRONMENT_VARIABLE]: resolveTestPtyLifetimeRecordsDirectory(),
 		HOME: isolatedHomeDirectoryPath,
 		USERPROFILE: isolatedHomeDirectoryPath,
 		XDG_CONFIG_HOME: isolatedXdgConfigDirectoryPath,
@@ -361,6 +367,7 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 	command: string;
 	arguments?: readonly string[];
 }): Promise<InvokingRepositoryMutationCanaryRunResult> {
+	await recoverAbandonedTestPtyHostLifetimes(resolveTestPtyLifetimeRecordsDirectory());
 	const before = captureInvokingRepositoryEvidenceSnapshot(options.invokingDirectoryPath);
 	const diagnosticDirectoryPath = mkdtempSync(join(tmpdir(), "cline-kanban-invoking-repository-canary-"));
 	let childCompletion: SpawnedCommandCompletion;
@@ -378,6 +385,7 @@ export async function runCommandWithInvokingRepositoryMutationCanary(options: {
 		process.stderr.write(`子测试命令无法启动：${error instanceof Error ? error.message : String(error)}\n`);
 		childCompletion = { exitCode: 1, signal: null };
 	}
+	await recoverAbandonedTestPtyHostLifetimes(resolveTestPtyLifetimeRecordsDirectory());
 	let after: InvokingRepositoryEvidenceSnapshot | null = null;
 	try {
 		after = captureInvokingRepositoryEvidenceSnapshot(before.invokingWorktreePath);

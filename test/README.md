@@ -37,6 +37,22 @@ tracked 内容证据使用 `git diff --binary --full-index HEAD --` 的完整 OI
 - 等启动 banner 用 `waitForRuntimeServerStartupBannerOrSigkillChild`（失败分支先 SIGKILL 并等退出再 reject）；判退出用 `hasChildProcessExited`（被信号结束的进程 `exitCode` 为 null）。启动等待放宽后，用例超时用 `computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts` 按冷启动次数计算，并挂在 `describe(name, { timeout }, fn)` 上——给 `it(title, fn, <标识符>)` 传非数字字面量会让 biome 放弃 test-call 排版、重缩进整个用例体。
 - `test/integration/shutdown-ipc-hook.cjs` 把 IPC 断开（vitest worker 被杀）当作父进程死亡：已装 SIGINT 处理器则发一次 SIGINT 走优雅关停并设兜底退出，仍在启动则立即退出。
 
+独立 PTY host 故意跨 runtime 退出保活，不能用 runtime 的退出确认替代它的清理。统一 Git fixture 的
+`createIsolatedChildProcessEnvironment` 会注入测试专用 preload：host 进入主程序前登记 fixture nonce、
+owner/host 启动世代与 socket，并持有独立的 owner 连接。fixture 清理先关闭测试寿命、等待宿主与假 Agent
+真实退出，再删除 HOME；worker 突退时由 host 自动启动短命回收进程，无需执行原 worker 的 `finally`。
+直接启动 host 的测试使用 `test/utilities/isolated-test-owned-pty-host-lifetime.ts` 的同一寿命 helper。
+
+回收在同一非 controller socket 连接核验 host 实例，再请求原子离线全停；活 controller 不被抢占，沿用
+host 的 SIGTERM 与 5 秒 SIGKILL 进程组升级。每轮回收最多 30 秒，缺证保留 `unknown` 和 fixture，不能把
+调用关闭、删除目录或 ps 失败写成已退出。owner 补证最多重试 6 次，自动回收控制器最多重启 3 次；
+`test:guarded` 启动和结束时自动补证尚未完成的持久记录，fixture 关停写入也会恢复 owner 补证，重复执行幂等。
+记录缺省放在调用者 HOME 的 `.cline/kanban/isolated-test-pty-lifetime-records`；canary 在隔离 HOME 前绑定
+这个持久根，也可用 `CLINE_KANBAN_TEST_PTY_LIFETIME_RECORDS_DIRECTORY` 指定持久证据目录。
+正常回收保留 host 退出记录及只追加的尝试日志（后续补证不抹去失败），无 host 的寿命目录自动删除。此规则仅由测试环境的 `NODE_OPTIONS` 启用，
+生产 PTY 跨 runtime 重启的行为不变。测试侧 owner 重接、回收控制器中断和故障矩阵见
+`isolated-test-owned-pty-host-lifetime.integration.test.ts`。
+
 ## Codex 后台终端等待的真实原生检查
 
 Codex 后台终端等待有独立的真实原生集成用例：模型使用隔离的本地 HTTP fixture，不调用外部模型；分别验证静默后的 `idle_stall` 误判，以及真实 Stop hook 返回继续要求、主工具执行后连续 `write_stdin` 静默等待的误判。两者都核对原回合与缓存保留、派生交棒撤销及无浏览器的持久列恢复；HOME、CODEX_HOME、CODEX_SQLITE_HOME 全部隔离。通过以下入口启用，证据目录保存 Stop payload、原生转录与纠偏前后摘要，必须使用持久路径：
