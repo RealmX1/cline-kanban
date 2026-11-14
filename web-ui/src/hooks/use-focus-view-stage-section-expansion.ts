@@ -1,9 +1,11 @@
 import type { RefObject } from "react";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import {
-	computeFocusedCardRailContentMaximumHeight,
+	computeFocusViewCompactHeaderColumnCount,
 	computeScrollTopAfterCollapsingStageFromTopRail,
 	computeScrollTopForJumpingToStageBelowTopRail,
+	FOCUS_VIEW_COMPACT_GROUP_HEADERS_MEDIA_QUERY,
+	measureFocusViewUncoveredTaskCardHeightPx,
 } from "@/components/detail-panels/stage-header-rail-geometry";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardDisplayGroupId } from "@/types";
@@ -135,6 +137,10 @@ export function useFocusViewGroupSectionNavigation({
 	setStageSectionExpanded: (columnId: string, isExpanded: boolean) => void;
 }) {
 	const pendingScrollAdjustmentRef = useRef<PendingScrollAdjustmentAfterStageSectionToggle | null>(null);
+	const pendingJumpAfterFirstFocusedCloneMeasurementRef = useRef<{
+		columnId: string;
+		scrollTop: number;
+	} | null>(null);
 
 	const measureScrollTopForJumpingToStageBelowTopRail = useCallback(
 		(scrollRoot: HTMLElement, targetColumnId: string): number | null => {
@@ -154,13 +160,29 @@ export function useFocusViewGroupSectionNavigation({
 				// 焦点卡不在 DOM 里（渐进渲染未挂载等）时按「无焦点条目」计，避免凭空预留一段克隆高度。
 				focusedStageIndex: focusedCardRect ? orderedColumnIds.indexOf(focusedColumnId) : -1,
 				focusedCardViewportTop: focusedCardRect?.top ?? 0,
-				focusedCardHeight:
-					focusedCardCloneHeightPx === undefined
-						? naturalFocusedCardHeight
-						: Math.min(
-								naturalFocusedCardHeight,
-								computeFocusedCardRailContentMaximumHeight(scrollRootRect.height, orderedColumnIds.length),
-							),
+				focusedCardHeight: naturalFocusedCardHeight,
+				railLayout: {
+					sections: orderedColumnIds.map((id) => {
+						const rect = scrollRoot
+							.querySelector<HTMLElement>(
+								`[${sectionElementAttributeName}="${escapeCssAttributeSelectorValue(id)}"]`,
+							)
+							?.getBoundingClientRect();
+						return { id, top: rect?.top ?? Number.NaN, bottom: rect?.bottom ?? Number.NaN };
+					}),
+					viewportTop: scrollRootRect.top,
+					viewportHeight: scrollRootRect.height,
+					columnCount: computeFocusViewCompactHeaderColumnCount(scrollRoot.clientWidth || scrollRootRect.width),
+					compactHeadersEnabled:
+						window.matchMedia?.(FOCUS_VIEW_COMPACT_GROUP_HEADERS_MEDIA_QUERY).matches ?? false,
+					focusedColumnId: focusedCardRect ? focusedColumnId : "",
+					focusedCardTop: focusedCardRect?.top ?? 0,
+					focusedCardBottom: focusedCardRect?.bottom ?? 0,
+					focusedCardHeight: naturalFocusedCardHeight,
+					uncoveredTaskCardHeightPx: measureFocusViewUncoveredTaskCardHeightPx(scrollRoot, {
+						targetSection,
+					}),
+				},
 				targetSectionViewportTop: targetSection.getBoundingClientRect().top,
 				scrollRootViewportTop: scrollRootRect.top,
 				currentScrollTop: scrollRoot.scrollTop,
@@ -186,10 +208,40 @@ export function useFocusViewGroupSectionNavigation({
 			const scrollTop = measureScrollTopForJumpingToStageBelowTopRail(scrollRoot, columnId);
 			if (scrollTop !== null) {
 				scrollRoot.scrollTop = scrollTop;
+				pendingJumpAfterFirstFocusedCloneMeasurementRef.current = {
+					columnId,
+					scrollTop: scrollRoot.scrollTop,
+				};
 			}
 		},
-		[scrollRootRef, measureScrollTopForJumpingToStageBelowTopRail],
+		[scrollRootRef, measureScrollTopForJumpingToStageBelowTopRail, orderedColumnIds, focusedColumnId],
 	);
+
+	// 副本测高、或跳转后上方分段又多渲染卡片时，按同一目标重算落点。用户自己滚动后不再改。
+	const reconcilePendingJumpRef = useRef<() => void>(() => {});
+	reconcilePendingJumpRef.current = (): void => {
+		const pendingJump = pendingJumpAfterFirstFocusedCloneMeasurementRef.current;
+		const scrollRoot = scrollRootRef.current;
+		if (!pendingJump || !scrollRoot) return;
+		if (Math.abs(scrollRoot.scrollTop - pendingJump.scrollTop) > 1) {
+			pendingJumpAfterFirstFocusedCloneMeasurementRef.current = null;
+			return;
+		}
+		const scrollTop = measureScrollTopForJumpingToStageBelowTopRail(scrollRoot, pendingJump.columnId);
+		if (scrollTop === null || Math.abs(scrollTop - scrollRoot.scrollTop) <= 1) return;
+		scrollRoot.scrollTop = scrollTop;
+		pendingJump.scrollTop = scrollRoot.scrollTop;
+	};
+	useLayoutEffect(() => {
+		reconcilePendingJumpRef.current();
+	}, [focusedCardCloneHeightPx, scrollRootRef, measureScrollTopForJumpingToStageBelowTopRail]);
+	useLayoutEffect(() => {
+		const scrollRoot = scrollRootRef.current;
+		if (!scrollRoot || typeof MutationObserver === "undefined") return;
+		const observer = new MutationObserver(() => reconcilePendingJumpRef.current());
+		observer.observe(scrollRoot, { childList: true, subtree: true });
+		return () => observer.disconnect();
+	}, [scrollRootRef]);
 
 	const toggleStageSectionExpandedFromInFlowHeader = useCallback(
 		(columnId: string): void => {
@@ -242,10 +294,7 @@ export function useFocusViewGroupSectionNavigation({
 			return;
 		}
 		if (pendingScrollAdjustment.kind === "jump_to_stage_section_after_expanding_it_from_stage_header_rail") {
-			const scrollTop = measureScrollTopForJumpingToStageBelowTopRail(scrollRoot, pendingScrollAdjustment.columnId);
-			if (scrollTop !== null) {
-				scrollRoot.scrollTop = scrollTop;
-			}
+			jumpToStageSectionBelowTopRail(pendingScrollAdjustment.columnId);
 			return;
 		}
 		const stageSectionHeightLostByCollapse = Math.max(

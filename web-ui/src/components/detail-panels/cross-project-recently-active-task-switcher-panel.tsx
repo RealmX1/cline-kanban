@@ -272,8 +272,13 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					scrollRootRef={panelScrollContainerRef}
 					topPinnedGroupIds={headerPinLayout.topPinnedColumnIds}
 					bottomPinnedGroupIds={headerPinLayout.bottomPinnedColumnIds}
-					totalNavigableGroupCount={groupIds.length}
-					renderEntry={(groupId, edge) => {
+					compactGroupIds={headerPinLayout.compactGroupIds}
+					columnCount={headerPinLayout.columnCount}
+					focusedGroupId={
+						headerPinLayout.focusedCardRailEdge !== "hidden" ? (focusedTaskSourceSection ?? undefined) : undefined
+					}
+					focusedCardContentMaximumHeight={headerPinLayout.focusedCardContentMaximumHeight}
+					renderEntry={(groupId, edge, presentation) => {
 						const group = navigableGroups.find(({ id }) => id === groupId);
 						if (!group) return null;
 						const showsFocusedCard =
@@ -282,6 +287,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 							<group.Component
 								key={groupId}
 								{...sectionBlockProps}
+								headerPresentation={presentation}
 								rendersGroupHeaderRailEntry
 								headerNavigation={{
 									onJumpToSection: () => groupNavigation.jumpToStageSectionBelowTopRail(groupId),

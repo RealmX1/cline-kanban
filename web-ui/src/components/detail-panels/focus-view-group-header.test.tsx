@@ -5,7 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { FocusViewGroupHeader } from "./focus-view-group-header";
 import { FocusViewGroupHeaderRails, useFocusViewPinnedSectionOwnScrollbarSlot } from "./focus-view-group-header-rails";
 
-it("折叠箭头与标题跳转独立，没有跳转能力时标题为文本", () => {
+it.each(["standard", "compact"] as const)("%s 标题的折叠箭头与跳转独立，没有跳转能力时标题为文本", (presentation) => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 	const container = document.body.appendChild(document.createElement("div"));
 	const root = createRoot(container);
@@ -17,6 +17,7 @@ it("折叠箭头与标题跳转独立，没有跳转能力时标题为文本", (
 				<TooltipProvider>
 					<FocusViewGroupHeader
 						title="Review"
+						presentation={presentation}
 						count={128}
 						isExpanded
 						onToggleExpanded={toggle}
@@ -46,48 +47,47 @@ it("折叠箭头与标题跳转独立，没有跳转能力时标题为文本", (
 	}
 });
 
-it.each([undefined, 5])("焦点副本扣除标题预算并随视口缩小更新，固定分组数=%s", (totalNavigableGroupCount) => {
+it("共享行模型让紧凑项换行，焦点项独占整行，副本预算由分类器提供", () => {
 	vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-	let notifyResize = () => {};
-	vi.stubGlobal(
-		"ResizeObserver",
-		class {
-			constructor(callback: () => void) {
-				notifyResize = callback;
-			}
-			observe() {}
-			disconnect() {}
-		},
-	);
 	const container = document.body.appendChild(document.createElement("div"));
-	const scrollRoot = container.appendChild(document.createElement("div"));
-	let viewportHeight = 320;
-	Object.defineProperty(scrollRoot, "clientHeight", { get: () => viewportHeight });
-	const root = createRoot(container.appendChild(document.createElement("div")));
+	const root = createRoot(container);
 	try {
-		act(() =>
+		const renderRails = (focusedCardContentMaximumHeight: number) =>
 			root.render(
 				<FocusViewGroupHeaderRails
-					scrollRootRef={{ current: scrollRoot }}
-					topPinnedGroupIds={["a", "b"]}
-					bottomPinnedGroupIds={["c"]}
-					totalNavigableGroupCount={totalNavigableGroupCount}
-					renderEntry={(id) => <div key={id}>{id}</div>}
+					scrollRootRef={{ current: null }}
+					topPinnedGroupIds={["a", "b", "c", "d"]}
+					bottomPinnedGroupIds={["e"]}
+					compactGroupIds={["a", "b", "c", "d", "e"]}
+					columnCount={2}
+					focusedGroupId="c"
+					focusedCardContentMaximumHeight={focusedCardContentMaximumHeight}
+					renderEntry={(id, _edge, presentation) => (
+						<div key={id} data-presentation={presentation}>
+							{id}
+						</div>
+					)}
 				/>,
-			),
-		);
-		const rails = [...container.querySelectorAll<HTMLElement>('[data-testid="stage-header-rail"]')];
-		expect(rails).toHaveLength(2);
-		for (const rail of rails)
-			expect(rail.style.getPropertyValue("--kb-focused-card-rail-maximum-height")).toBe(
-				totalNavigableGroupCount === undefined ? "206px" : "130px",
 			);
-		viewportHeight = 180;
-		act(() => notifyResize());
-		for (const rail of rails)
-			expect(rail.style.getPropertyValue("--kb-focused-card-rail-maximum-height")).toBe(
-				totalNavigableGroupCount === undefined ? "66px" : "20px",
-			);
+		act(() => renderRails(200));
+		expect(
+			[...container.querySelectorAll<HTMLElement>("[data-focus-view-header-rail-row]")].map((entry) => [
+				entry.textContent,
+				entry.style.gridRowStart,
+				entry.style.gridColumn,
+			]),
+		).toEqual([
+			["a", "1", "1"],
+			["b", "1", "2"],
+			["c", "2", "1 / -1"],
+			["d", "3", "1"],
+			["e", "1", "1"],
+		]);
+		expect(container.querySelectorAll('[data-presentation="compact"]')).toHaveLength(5);
+		const rail = container.querySelector<HTMLElement>('[data-testid="stage-header-rail"]')!;
+		expect(rail.style.getPropertyValue("--kb-focused-card-rail-maximum-height")).toBe("208px");
+		act(() => renderRails(60));
+		expect(rail.style.getPropertyValue("--kb-focused-card-rail-maximum-height")).toBe("68px");
 	} finally {
 		act(() => root.unmount());
 		container.remove();

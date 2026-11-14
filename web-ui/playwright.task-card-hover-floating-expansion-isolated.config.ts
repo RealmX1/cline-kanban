@@ -5,7 +5,7 @@ import { defineConfig } from "@playwright/test";
 const browserTestPort = Number(process.env.KANBAN_TASK_CARD_HOVER_BROWSER_TEST_PORT ?? "42983");
 export default defineConfig({
 	testDir: "./tests",
-	testMatch: ["task-card-hover-floating-expansion.spec.ts", "cross-project-focused-task-visibility.spec.ts", "task-card-quick-actions.spec.ts", "task-card-stickers.spec.ts", "task-directory-copy-browser-contract.spec.ts", "task-card-status-corners-and-metadata-layout.spec.ts", "desktop-focus-view-task-workbench.spec.ts"],
+	testMatch: ["focus-view-focused-card-rail-retention.spec.ts", "focus-view-compact-group-headers.spec.ts", "task-card-hover-floating-expansion.spec.ts", "cross-project-focused-task-visibility.spec.ts", "task-card-quick-actions.spec.ts", "task-card-stickers.spec.ts", "task-directory-copy-browser-contract.spec.ts", "task-card-status-corners-and-metadata-layout.spec.ts", "desktop-focus-view-task-workbench.spec.ts"],
 	timeout: 30_000,
 	use: { baseURL: `http://127.0.0.1:${browserTestPort}`, headless: true, screenshot: "only-on-failure", trace: "retain-on-failure" },
 	webServer: {

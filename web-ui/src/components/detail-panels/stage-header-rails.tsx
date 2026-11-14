@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
 import { FocusViewGroupHeaderRails } from "@/components/detail-panels/focus-view-group-header-rails";
 import { FocusViewStageGroupHeaderActions } from "@/components/detail-panels/focus-view-stage-group-header-actions";
+import type { FocusViewGroupHeaderPresentation } from "@/components/detail-panels/stage-header-rail-geometry";
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
@@ -50,12 +51,16 @@ interface StageHeaderRailsProps extends StageRailFocusedCardProps, StageHeaderGr
 	/** rail 条目的标签：跳到该 stage，第一张卡完整露在顶 rail 之下。 */
 	onJumpToStageSectionBelowTopRail: (columnId: BoardDisplayGroupId) => void;
 	scrollRootRef: RefObject<HTMLElement | null>;
+	compactGroupIds: readonly string[];
+	columnCount: number;
+	focusedCardContentMaximumHeight: number;
 }
 
 /** 单条 rail 条目：始终渲染 stage 卡头；`withCard` 时其下挂焦点卡的只读副本（副本不带 data-task-id）。 */
 function StageHeaderRailEntry({
 	column,
 	withCard,
+	presentation,
 	selection,
 	isStageSectionExpanded,
 	onToggleStageSectionExpanded,
@@ -71,6 +76,7 @@ function StageHeaderRailEntry({
 	StageHeaderGroupActionHandlers & {
 		column: BoardDisplayGroup;
 		withCard: boolean;
+		presentation: FocusViewGroupHeaderPresentation;
 		selection: CardSelection;
 		isStageSectionExpanded: boolean;
 		onToggleStageSectionExpanded: () => void;
@@ -81,8 +87,12 @@ function StageHeaderRailEntry({
 	const { card } = selection;
 
 	return (
-		<div className="bg-surface-1 rounded-lg border border-border">
+		<div
+			className="min-w-0 bg-surface-1 rounded-lg border border-border"
+			data-focus-view-group-header-rail-entry={columnId}
+		>
 			<FocusViewGroupHeader
+				presentation={presentation}
 				title={column.title}
 				count={column.cards.length}
 				icon={<ColumnIndicator columnId={columnId} />}
@@ -91,6 +101,7 @@ function StageHeaderRailEntry({
 				onJumpToSection={onScrollToSection}
 				actions={
 					<FocusViewStageGroupHeaderActions
+						presentation={presentation}
 						column={column}
 						onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
 						onClearTrash={onClearTrash}
@@ -101,7 +112,7 @@ function StageHeaderRailEntry({
 			{withCard ? (
 				<div
 					data-testid="stage-header-rail-focused-card"
-					className="flex flex-col px-2 pb-2"
+					className="flex max-h-[var(--kb-focused-card-rail-maximum-height)] flex-col overflow-y-auto overscroll-contain px-2 pb-2"
 					onClick={onScrollToFocusedCard}
 				>
 					<TaskCardBody
@@ -126,7 +137,7 @@ function StageHeaderRailEntry({
 /**
  * Focus View 左侧列表的「全 stage 卡头手风琴」overlay：顶沿 rail（已滚过卡头，顶→下堆叠）+
  * 底沿 rail（未到达卡头）。钉住布局由 `useStageHeaderPinLayout` 以实时几何算出；本组件仅按结果
- * 渲染两条脱流 overlay，条目用 flexbox 自然堆叠（不手算逐条偏移）。焦点 stage 的条目在焦点卡钉在
+ * 渲染两条脱流 overlay，条目按共享行模型排列（不手算像素偏移）。焦点 stage 的条目在焦点卡钉在
  * 同侧时额外挂「stage 卡头 + 完整焦点卡克隆」，即旧 `SelectedTaskPinBar` 的职责——已并入此处，
  * 使焦点卡与普通卡头处于同一堆叠、由同一分类定位，无需再做卡头去重或双 overlay 争边。
  *
@@ -150,6 +161,9 @@ export function StageHeaderRails({
 	scrollRootRef,
 	onRequestStartAllReadyBacklogTasks,
 	onClearTrash,
+	compactGroupIds,
+	columnCount,
+	focusedCardContentMaximumHeight,
 	...focusedCardProps
 }: StageHeaderRailsProps): React.ReactElement | null {
 	const columnById = useMemo(
@@ -166,7 +180,11 @@ export function StageHeaderRails({
 			?.scrollIntoView({ block: "center", inline: "nearest" });
 	};
 
-	const renderEntry = (columnId: string, edge: StageHeaderRailEdge): React.ReactElement | null => {
+	const renderEntry = (
+		columnId: string,
+		edge: StageHeaderRailEdge,
+		presentation: FocusViewGroupHeaderPresentation,
+	): React.ReactElement | null => {
 		const column = columnById.get(columnId);
 		if (!column) {
 			return null;
@@ -176,6 +194,7 @@ export function StageHeaderRails({
 			<StageHeaderRailEntry
 				key={columnId}
 				column={column}
+				presentation={presentation}
 				withCard={withCard}
 				selection={selection}
 				isStageSectionExpanded={isStageSectionExpanded(column.id)}
@@ -194,6 +213,10 @@ export function StageHeaderRails({
 			scrollRootRef={scrollRootRef}
 			topPinnedGroupIds={topPinnedColumnIds}
 			bottomPinnedGroupIds={bottomPinnedColumnIds}
+			compactGroupIds={compactGroupIds}
+			columnCount={columnCount}
+			focusedGroupId={focusedCardPinState !== "hidden" ? focusedDisplayGroupId : undefined}
+			focusedCardContentMaximumHeight={focusedCardContentMaximumHeight}
 			renderEntry={renderEntry}
 		/>
 	);

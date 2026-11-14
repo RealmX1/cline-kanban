@@ -644,7 +644,7 @@ describe("ColumnContextPanel", () => {
  * 必须先给 `getBoundingClientRect` 铺一层受控几何——否则 jsdom 下 `rootRect.bottom <= rootRect.top`
  * 使 `useStageHeaderPinLayout` 返回空布局、rails 根本不渲染，这些断言会全部落空。
  *
- * 版图（滚动口视口 [0, 500]；section 折叠后只剩 32px 卡头 + 2px 外框）：
+ * 版图（滚动口视口 [0, 500]；section 折叠后只剩 28px 卡头 + 2px 外框）：
  *   backlog     [-300, -100]  整段在视口上沿之上 → 钉顶
  *   in_progress [ -80,  150]  横跨视口上沿（卡片仍露在视口里）→ 钉顶
  *   review      [ 200,  400]  随流（焦点卡 [210, 290] 完整可见 → focusedCardPinState = hidden）
@@ -654,7 +654,7 @@ describe("ColumnContextPanel", () => {
  */
 describe("ColumnContextPanel pinned stage header rails", () => {
 	const FOCUSED_TASK_ID = "task-review";
-	const COLLAPSED_STAGE_SECTION_HEIGHT = 34;
+	const COLLAPSED_STAGE_SECTION_HEIGHT = 30;
 	const SCROLL_ROOT_RECT = { top: 0, height: 500 };
 	const FOCUSED_CARD_RECT = { top: 210, height: 80 };
 	const EXPANDED_SECTION_RECTS: Record<string, { top: number; height: number }> = {
@@ -692,6 +692,10 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;
 	let scrollIntoViewMock: ReturnType<typeof vi.fn>;
+	// 受控矩形对应的 scrollTop。展开后跳转会在 DOM 变更时再测一次；矩形必须随滚动移动，
+	// 否则同一次落点会被加上两遍。
+	let geometryScrollTop = 0;
+	let geometryScrollAnchor: number | null = null;
 
 	const railButton = (label: string): HTMLButtonElement | null =>
 		container.querySelector<HTMLButtonElement>(`[data-testid="stage-header-rail"] button[aria-label="${label}"]`);
@@ -704,12 +708,15 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		if (!scrollRoot) {
 			throw new Error("scroll root missing");
 		}
+		geometryScrollAnchor = initialScrollTop;
+		geometryScrollTop = initialScrollTop;
 		let scrollTop = initialScrollTop;
 		Object.defineProperty(scrollRoot, "scrollTop", {
 			configurable: true,
 			get: () => scrollTop,
 			set: (value: number) => {
 				scrollTop = value;
+				geometryScrollTop = value;
 			},
 		});
 		return scrollRoot;
@@ -730,6 +737,8 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 	};
 
 	beforeEach(() => {
+		geometryScrollTop = 0;
+		geometryScrollAnchor = null;
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -747,16 +756,20 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		});
 		vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
 		vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+			const scrollShift = geometryScrollAnchor === null ? 0 : geometryScrollTop - geometryScrollAnchor;
 			const columnId = this.getAttribute("data-stage-section-id");
 			const expandedRect = columnId ? EXPANDED_SECTION_RECTS[columnId] : undefined;
 			if (expandedRect) {
 				// section 的第二个子节点是卡片区包裹层，折叠时整段 display:none。
 				const stageSectionBody = this.children[1] as HTMLElement | undefined;
 				const isCollapsed = stageSectionBody?.style.display === "none";
-				return toDomRect(expandedRect.top, isCollapsed ? COLLAPSED_STAGE_SECTION_HEIGHT : expandedRect.height);
+				return toDomRect(
+					expandedRect.top - scrollShift,
+					isCollapsed ? COLLAPSED_STAGE_SECTION_HEIGHT : expandedRect.height,
+				);
 			}
 			if (this.getAttribute("data-task-id") === FOCUSED_TASK_ID) {
-				return toDomRect(FOCUSED_CARD_RECT.top, FOCUSED_CARD_RECT.height);
+				return toDomRect(FOCUSED_CARD_RECT.top - scrollShift, FOCUSED_CARD_RECT.height);
 			}
 			if (this.classList.contains("kb-detail-task-list-scroll")) {
 				return toDomRect(SCROLL_ROOT_RECT.top, SCROLL_ROOT_RECT.height);
@@ -849,12 +862,13 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 			railButton("收起 In Progress")?.click();
 		});
 
-		// 折叠真的发生了，且与行内卡头是同一份状态……
+		// 折叠真的发生了。落点把该卡头正好放在 backlog 顶轨下沿，它是行内标题，不再重复钉进顶轨。
 		expect(inFlowHeaderButton("in_progress")?.getAttribute("aria-expanded")).toBe("false");
-		expect(railButton("展开 In Progress")?.getAttribute("aria-expanded")).toBe("false");
-		// ……卡头停回它的 rail 槽位（其上只有 backlog 一条：50px）：1000 + (−80 − 0) − 38 = 882，
-		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 196px、视口落进 review 中段。
-		expect(scrollRoot.scrollTop).toBe(882);
+		expect(railButton("展开 In Progress")).toBeNull();
+		expect(railButton("收起 In Progress")).toBeNull();
+		// 卡头停在 backlog 那一条之下（34px）：1000 + (−80 − 0) − 34 = 886。
+		// 下一个 stage 紧随其后。保持 1000 不动会让下方内容整段上移 200px、视口落进 review 中段。
+		expect(scrollRoot.scrollTop).toBe(886);
 	});
 
 	it("collapses a stage that is entirely above the viewport from the top rail without moving the visible content", async () => {
@@ -866,8 +880,8 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		});
 
 		expect(inFlowHeaderButton("backlog")?.getAttribute("aria-expanded")).toBe("false");
-		// backlog 从 200 折到 34，变矮 166：等量补偿，视口里的内容零位移。
-		expect(scrollRoot.scrollTop).toBe(1000 - 166);
+		// backlog 从 200 折到 30，变矮 170：等量补偿，视口里的内容零位移。
+		expect(scrollRoot.scrollTop).toBe(1000 - 170);
 	});
 
 	it("collapses a stage from the bottom rail without scrolling (its cards are all below the viewport)", async () => {
@@ -892,10 +906,10 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 		});
 
 		expect(inFlowHeaderButton("trash")?.getAttribute("aria-expanded")).toBe("true");
-		// 目标 index 4 → 基值 R = 4 × 38 = 152；焦点 stage（review，index 2）在目标之上，且以基值试算时
-		// 焦点卡会落到视口上沿之上（210 − 500 + 152 = −138 ≤ 0）→ 预留克隆 8 + 80。
-		// scrollTop = 1000 + (500 − 0) − (152 + 8 + 80) = 1260。
-		expect(scrollRoot.scrollTop).toBe(1260);
+		// 目标 index 4 → 基值 R = 4 × 34 = 136；焦点 stage（review，index 2）在目标之上，且以基值试算时
+		// 焦点卡会落到视口上沿之上（210 − 500 + 136 = −154 ≤ 0）→ 预留克隆 8 + 80。
+		// scrollTop = 1000 + (500 − 0) − (136 + 8 + 80) = 1276。
+		expect(scrollRoot.scrollTop).toBe(1276);
 	});
 
 	it("parks the jumped-to stage below the top rail instead of under it", async () => {
@@ -906,10 +920,10 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 			railButton("跳转到 In Progress")?.click();
 		});
 
-		// 目标之上只有 backlog 一个条目：R = 32 + 2 + 4 = 38；焦点卡在 review（不在目标之上）→ 无克隆项。
-		// scrollTop = 1000 + (−80 − 0) − 38 = 882。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
+		// 目标之上只有 backlog 一个条目：R = 28 + 2 + 4 = 34；焦点卡在 review（不在目标之上）→ 无克隆项。
+		// scrollTop = 1000 + (−80 − 0) − 34 = 886。旧的裸 scrollIntoView({block:"start"}) 会把 section 顶对齐到
 		// 滚动口顶沿，正好落在不透明 rail 之下。
-		expect(scrollRoot.scrollTop).toBe(882);
+		expect(scrollRoot.scrollTop).toBe(886);
 		expect(scrollIntoViewMock).not.toHaveBeenCalledWith({ block: "start", inline: "nearest" });
 		// 跳转不改折叠状态。
 		expect(railButton("收起 In Progress")?.getAttribute("aria-expanded")).toBe("true");
@@ -923,9 +937,9 @@ describe("ColumnContextPanel pinned stage header rails", () => {
 			railButton("跳转到 Validation")?.click();
 		});
 
-		// 目标 index 3 → 基值 R = 114；焦点 stage（index 2）在目标之上，试算 210 − 420 + 114 = −96 ≤ 0
-		// → 预留 8 + 80。scrollTop = 1000 + 420 − (114 + 8 + 80) = 1218。
-		expect(scrollRoot.scrollTop).toBe(1218);
+		// 目标 index 3 → 基值 R = 102；焦点 stage（index 2）在目标之上，试算 210 − 420 + 102 = −108 ≤ 0
+		// → 预留 8 + 80。scrollTop = 1000 + 420 − (102 + 8 + 80) = 1230。
+		expect(scrollRoot.scrollTop).toBe(1230);
 	});
 });
 

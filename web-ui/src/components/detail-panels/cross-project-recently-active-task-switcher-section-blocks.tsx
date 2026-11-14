@@ -7,6 +7,7 @@ import type {
 import { isCrossProjectTaskSwitcherEntryPreparingAgentStartup } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import {
 	Activity,
+	Archive,
 	ChevronDown,
 	ChevronRight,
 	ChevronUp,
@@ -14,6 +15,7 @@ import {
 	History,
 	Pin,
 	SlidersHorizontal,
+	TimerReset,
 	UnfoldHorizontal,
 } from "lucide-react";
 import type {
@@ -28,6 +30,7 @@ import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail
 import { CrossProjectTaskSwitcherRecentProjectMultiSelectFilter } from "@/components/detail-panels/cross-project-task-switcher-recent-project-multi-select-filter";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
 import { useFocusViewPinnedSectionOwnScrollbarSlot } from "@/components/detail-panels/focus-view-group-header-rails";
+import type { FocusViewGroupHeaderPresentation } from "@/components/detail-panels/stage-header-rail-geometry";
 import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -74,6 +77,7 @@ interface CrossProjectTaskSwitcherSectionHeaderNavigation {
 export interface CrossProjectTaskSwitcherSectionBlockProps {
 	headerNavigation?: CrossProjectTaskSwitcherSectionHeaderNavigation;
 	rendersGroupHeaderRailEntry?: boolean;
+	headerPresentation?: FocusViewGroupHeaderPresentation;
 	focusedCardContent?: ReactNode;
 	sectionBlockPresentation: CrossProjectTaskSwitcherSectionBlockPresentation;
 	sectionsModel: CrossProjectRecentlyActiveTaskSwitcherSectionsModel;
@@ -214,6 +218,7 @@ function CrossProjectTaskSwitcherSectionExpansionButton({
 	isSectionColumnCollapsed,
 	isStackedSection = false,
 	headerNavigation,
+	headerPresentation,
 	icon,
 	actions,
 }: {
@@ -224,12 +229,14 @@ function CrossProjectTaskSwitcherSectionExpansionButton({
 	isSectionColumnCollapsed: boolean;
 	isStackedSection?: boolean;
 	headerNavigation?: CrossProjectTaskSwitcherSectionHeaderNavigation;
+	headerPresentation?: FocusViewGroupHeaderPresentation;
 	icon?: ReactNode;
 	actions?: ReactNode;
 }): ReactElement {
 	if (isStackedSection)
 		return (
 			<FocusViewGroupHeader
+				presentation={headerPresentation}
 				title={title}
 				count={count}
 				icon={icon}
@@ -278,6 +285,7 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
 	const {
 		sections,
@@ -328,6 +336,7 @@ export function CrossProjectTaskSwitcherPinnedSectionBlock({
 			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
 			header={
 				<FocusViewGroupHeader
+					presentation={headerPresentation}
 					title="Pinned"
 					count={sections.pinnedEntries.length}
 					icon={<Pin size={13} className="text-accent" />}
@@ -370,6 +379,7 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const { sections, isRunningSectionExpanded, setIsRunningSectionExpanded } = sectionsModel;
 	const startupCount = sections.runningEntries.filter(({ entry }) =>
@@ -414,6 +424,7 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 			sectionBlockPresentation={sectionBlockPresentation}
 			header={
 				<FocusViewGroupHeader
+					presentation={headerPresentation}
 					title="Running"
 					count={
 						<span title={`${sections.runningEntries.length - startupCount} 运行中，${startupCount} 正在启动`}>
@@ -451,6 +462,7 @@ export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
 	const entries = sectionsModel.sections.automaticRecoveryWaitingEntries;
 	if (entries.length === 0) return null;
@@ -464,7 +476,9 @@ export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
 			header={
 				sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel" ? (
 					<FocusViewGroupHeader
+						presentation={headerPresentation}
 						title="等待自动恢复"
+						icon={<TimerReset size={13} className="text-status-orange" />}
 						count={entries.length}
 						onJumpToSection={headerNavigation?.onJumpToSection}
 					/>
@@ -488,6 +502,7 @@ export function CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock(
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const { sections, isPromptCacheWarmSectionExpanded, setIsPromptCacheWarmSectionExpanded } = sectionsModel;
 	const isSectionColumnCollapsed =
@@ -508,6 +523,7 @@ export function CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock(
 						<Flame size={13} aria-hidden className="shrink-0 text-status-orange" />
 					) : null}
 					<CrossProjectTaskSwitcherSectionExpansionButton
+						headerPresentation={headerPresentation}
 						headerNavigation={headerNavigation}
 						title="Cache warm · your turn"
 						icon={<Flame size={13} className="text-status-orange" />}
@@ -552,6 +568,7 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const {
 		sections,
@@ -678,10 +695,15 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 					<button
 						type="button"
 						aria-label={`Recent 筛选与排序，${activeRecentConditionCount} 项生效`}
-						className="inline-flex h-8 items-center gap-1 rounded-sm px-2 text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent"
+						className={cn(
+							"inline-flex items-center gap-1 rounded-sm text-xs text-text-secondary hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-accent",
+							headerPresentation === "compact" ? "h-5 w-5 justify-center" : "h-6 px-1",
+						)}
 					>
 						<SlidersHorizontal size={14} />
-						<span className="tabular-nums">{activeRecentConditionCount}</span>
+						{headerPresentation !== "compact" ? (
+							<span className="tabular-nums">{activeRecentConditionCount}</span>
+						) : null}
 					</button>
 				</Popover.Trigger>
 			</Tooltip>
@@ -713,6 +735,7 @@ export function CrossProjectTaskSwitcherRemainingRecentSectionBlock({
 						<History size={13} aria-hidden className="shrink-0 text-text-secondary" />
 					) : null}
 					<CrossProjectTaskSwitcherSectionExpansionButton
+						headerPresentation={headerPresentation}
 						headerNavigation={headerNavigation}
 						title="Recent"
 						icon={<History size={13} className="text-text-secondary" />}
@@ -773,6 +796,7 @@ export function CrossProjectTaskSwitcherShelvedSectionBlock({
 	headerNavigation,
 	rendersGroupHeaderRailEntry,
 	focusedCardContent,
+	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement {
 	const { sections, isShelvedSectionExpanded, setIsShelvedSectionExpanded } = sectionsModel;
 	const isSectionColumnCollapsed =
@@ -794,8 +818,10 @@ export function CrossProjectTaskSwitcherShelvedSectionBlock({
 			isSectionColumnCollapsed={isSectionColumnCollapsed}
 			header={
 				<CrossProjectTaskSwitcherSectionExpansionButton
+					headerPresentation={headerPresentation}
 					headerNavigation={headerNavigation}
 					title="Shelved"
+					icon={<Archive size={13} className="text-text-secondary" />}
 					count={sections.shelvedEntries.length}
 					isExpanded={isShelvedSectionExpanded}
 					setIsExpanded={setIsShelvedSectionExpanded}

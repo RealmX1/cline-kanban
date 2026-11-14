@@ -201,6 +201,10 @@ Components in `web-ui/src/components/` are mostly rendering and composition. Goo
 
 卡壳不预留附着区，PDV 与关联导航在桌面经 Portal 脱离列裁切，贴着卡面右侧排列，接近浏览器右沿时翻到左侧；React 归属与 `aria-owns` 保留在原卡。桌面按悬停、键盘聚焦或附加面板打开显示，触屏操作移入卡底并保持至少 44px 命中区。Prompt 与结案主按钮用 `long_press_primary_button` 显式启用附加菜单（500ms、移动超过 8px 取消），终端重启保留独立菜单入口；新触摸手势在捕获阶段清除缩略行上一轮释放点击的抑制状态。
 
+两种 Focus View 的分组标题共用 `FocusViewGroupHeader`：普通标题为 28px / 12px；具备鼠标 hover 的桌面上，视口外分组使用 24px 无名称项，名称与数量通过 Tooltip 和无障碍描述保留。连续紧凑项按至少 96px 宽、4px 间距多列排列，焦点副本独占整行，Pinned 和触屏保留带名称标题。标题是否压缩按分组范围判定，与选择哪张任务无关。
+
+排列、吸顶分类、焦点副本限高和跳转统一使用 `stage-header-rail-geometry.ts` 的行模型。跳转按目标落点预测排列；All projects 首次挂载完整焦点副本后只补齐同一次跳转，用户已自行滚动时取消补偿。修改标题几何时同步验证 `focus-view-compact-group-headers.spec.ts` 的真实组件场景，不能重新引入“分组数 × 单行高度”的假设。
+
 两种 Focus View 的 Pinned 固定区与普通分组共用 `FocusViewGroupHeaderRails` 测得的滚动条避让宽度；Pinned 自身出现占宽滚动条时，把该滚动条伸进这条预留槽，分组外框和其中的卡片都与普通分组对齐。面板的 `data-focus-view-column-scroll-boundary` 同时界定固定区与吸顶区的滚轮归属。内部内容可滚时保留原生滚动，到边界后接续同列主列表；外层 rail 仅在主列表到边界后自行滚动，避免标题的少量溢出吞掉整次滚轮。缩放与横向手势保持原生行为，Portal 弹层不属于此 DOM 边界。
 
 卡片的 Tooltip、快捷菜单、侧边按钮及统计／便签／关联预览通过 `use-task-card-portal-wheel-scroll-forwarding.ts` 在挂载时关联触发控件，嵌套 Portal 沿原入口找到所属卡片和列。浮层自身能滚时保留原生滚动，到边界后复用吸顶栏的滚轮接续；所属列到边界后停住，不滚动页面或相邻列。普通卡片之外的 Tooltip 不转交滚轮。紧凑卡片和跨项目精简行使用同一低对比灰色内描边与浅底色，让摘要和标题归属于同一卡面，内描边不改变测量尺寸。
