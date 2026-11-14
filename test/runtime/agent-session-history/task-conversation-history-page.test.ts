@@ -9,6 +9,7 @@ import {
 	prepareManagedCodexConversationStorageHome,
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { findLatestCompleteTaskPlan } from "../../../src/task-file-downloads/task-main-session-plan";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -70,6 +71,22 @@ function claudeMessage(uuid: string, parentUuid: string | null, role: "user" | "
 		message: { role, content },
 	};
 }
+
+it("保留 Claude 原生计划回执的完整正文和精确文件来源", async () => {
+	const assistant = claudeMessage("a", null, "assistant", [
+		{ type: "tool_use", id: "plan", name: "ExitPlanMode", input: {} },
+	]);
+	const result = {
+		...claudeMessage("b", "a", "user", [{ type: "tool_result", tool_use_id: "plan", content: "计划已确认" }]),
+		toolUseResult: { plan: "# 已落盘计划", filePath: "/home/.claude/plans/明确计划.md" },
+	};
+	const f = await fixture("claude", [assistant, result]);
+	const history = await loadTaskConversationHistoryPage(f.input);
+	expect(history.availability).toBe("available");
+	const plan = findLatestCompleteTaskPlan(history.messages, "/task");
+	expect(plan?.markdown).toBe("# 已落盘计划");
+	expect(plan?.filePaths).toEqual(["/home/.claude/plans/明确计划.md"]);
+});
 
 describe("文档阅读的稳定转录快照", () => {
 	const messageRecord = (text: string) => ({

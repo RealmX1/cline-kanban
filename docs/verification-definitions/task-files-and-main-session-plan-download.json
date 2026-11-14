@@ -1,0 +1,18 @@
+{
+	"verificationId": "634ace95-a199-4678-ae8f-3580e0d40540",
+	"kind": "guided_manual",
+	"label": "真实远端浏览器可下载任务原文件及当前主会话 Plan",
+	"guidance": {
+		"steps": [
+			"在部署后的桌面浏览器或 Browser Cap 中打开 Kanban，进入有文件和完整主会话 Plan 的任务详情。",
+			"在右侧工作台的格位选择「任务文件」，进入一个子目录，再用面包屑返回；下载一个中文名文件并确认浏览器保存。",
+			"在改动文件列表点击文件旁的下载按钮，应取得完整原文件。",
+			"切到该任务的协作会话，点击任务工具区「下载主会话 Plan」；仍应取得当前主会话的计划，多文件候选时选择对应文件。"
+		],
+		"expectedObservation": "任务文件目录与面包屑可见，文件旁有下载按钮；浏览器下载管理器收到完整文件，中文文件名可读；Plan 与当前主会话内容一致。",
+		"failureSignature": "实际代理或 Browser Cap 阻断下载、下载到错误任务或协作会话的 Plan、文件内容被截断、中文文件名乱码，或入口不可见。",
+		"anchor": { "view": "task_detail", "anchorKey": "task-detail:081e9" }
+	},
+	"script": null,
+	"cleanup": { "mode": "automatic", "assetsDir": null, "manualSteps": [] }
+}

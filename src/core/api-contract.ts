@@ -4959,6 +4959,42 @@ export const runtimeTaskChatMessagesResponseSchema = z.object({
 });
 export type RuntimeTaskChatMessagesResponse = z.infer<typeof runtimeTaskChatMessagesResponseSchema>;
 
+export const runtimeTaskFileIdentityRequestSchema = z.object({
+	taskId: z.string().min(1),
+	expectedTaskIncarnationCreatedAtEpochMs: z.number(),
+});
+export type RuntimeTaskFileIdentityRequest = z.infer<typeof runtimeTaskFileIdentityRequestSchema>;
+export const runtimeTaskDirectoryRequestSchema = runtimeTaskFileIdentityRequestSchema.extend({
+	path: z.string().max(8192).default(""),
+});
+export type RuntimeTaskDirectoryRequest = z.infer<typeof runtimeTaskDirectoryRequestSchema>;
+export const runtimeTaskDirectoryResponseSchema = z.object({
+	path: z.string(),
+	entries: z.array(
+		z.object({ name: z.string(), path: z.string(), kind: z.enum(["directory", "file", "symlink", "unsupported"]) }),
+	),
+});
+export type RuntimeTaskDirectoryResponse = z.infer<typeof runtimeTaskDirectoryResponseSchema>;
+export const runtimeTaskMainSessionPlanResponseSchema = z.object({
+	availability: z.enum(["available", "none", "unknown"]),
+	candidates: z.array(
+		z.object({
+			candidateId: z.string(),
+			fileName: z.string(),
+			sourceKind: z.enum(["file", "markdown"]),
+			sourceReference: z.string(),
+		}),
+	),
+	notice: z.string().nullable(),
+});
+export type RuntimeTaskMainSessionPlanResponse = z.infer<typeof runtimeTaskMainSessionPlanResponseSchema>;
+export const runtimeTaskFileDownloadRequestSchema = runtimeTaskFileIdentityRequestSchema.extend({
+	source: z.enum(["task_file", "main_session_plan"]),
+	path: z.string().max(8192).optional(),
+	candidateId: z.string().max(128).optional(),
+});
+export type RuntimeTaskFileDownloadRequest = z.infer<typeof runtimeTaskFileDownloadRequestSchema>;
+
 // 任务工作台的只读历史，与会启动或恢复 agent 的聊天操作分开。
 export const runtimeTaskConversationHistoryPageRequestSchema = z.object({
 	workspaceTaskId: z.string().min(1),
