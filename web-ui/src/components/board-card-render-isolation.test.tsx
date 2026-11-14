@@ -47,6 +47,9 @@ vi.mock("@hello-pangea/dnd", () => ({
 vi.mock("@/hooks/use-selected-card-pin-state", () => ({ useSelectedCardPinState: () => "pinTop" }));
 vi.mock("@/hooks/use-stage-header-pin-layout", () => ({
 	useStageHeaderPinLayout: () => ({
+		compactGroupIds: [],
+		columnCount: 1,
+		focusedCardContentMaximumHeight: 0,
 		topPinnedColumnIds: ["review"],
 		bottomPinnedColumnIds: [],
 		focusedCardRailEdge: "pinTop",

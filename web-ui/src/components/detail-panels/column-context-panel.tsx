@@ -556,6 +556,9 @@ export function ColumnContextPanel({
 							onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
 							onClearTrash={onClearTrash}
 							selection={selection}
+							compactGroupIds={stageHeaderPinLayout.compactGroupIds}
+							columnCount={stageHeaderPinLayout.columnCount}
+							focusedCardContentMaximumHeight={stageHeaderPinLayout.focusedCardContentMaximumHeight}
 							displayGroups={displayGroups}
 							focusedDisplayGroupId={focusedDisplayGroupId}
 							topPinnedColumnIds={stageHeaderPinLayout.topPinnedColumnIds}

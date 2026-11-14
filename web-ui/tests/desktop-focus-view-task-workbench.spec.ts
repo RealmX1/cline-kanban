@@ -371,7 +371,7 @@ for (const source of ["列表卡片", "吸顶副本"] as const) {
 	});
 }
 
-test("Stage 与 sticky 标题共享 32px 几何，首卡贴顶且浮动操作可覆盖标题", async ({ page }) => {
+test("Stage 与 sticky 标题共享 28px 几何，首卡贴顶且浮动操作可覆盖标题", async ({ page }) => {
 	await openWorkbench(page, 1280, 900, "column=review&stage_headers");
 	await page.locator(".kb-stage-header-rail").getByRole("button", { name: "跳转到 Backlog", exact: true }).click();
 	const stage = page.locator('[data-stage-section-id="backlog"]');
@@ -380,8 +380,10 @@ test("Stage 与 sticky 标题共享 32px 几何，首卡贴顶且浮动操作可
 		"aria-expanded",
 		"true",
 	);
-	for (const header of await page.locator("[data-focus-view-group-header]:visible").all())
-		expect((await header.boundingBox())!.height).toBe(32);
+	for (const header of await page
+		.locator('[data-focus-view-group-header][data-presentation="standard"]:visible')
+		.all())
+		expect((await header.boundingBox())!.height).toBe(28);
 	const firstCard = stage.locator('[data-task-id="backlog-sample-0"]');
 	await firstCard.hover();
 	const actions = await taskCardActionToolbar(firstCard);

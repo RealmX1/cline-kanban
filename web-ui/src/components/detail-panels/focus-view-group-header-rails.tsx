@@ -8,7 +8,8 @@ import {
 	useState,
 } from "react";
 import {
-	computeFocusedCardRailContentMaximumHeight,
+	computeFocusViewGroupHeaderRailRows,
+	type FocusViewGroupHeaderPresentation,
 	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
 } from "@/components/detail-panels/stage-header-rail-geometry";
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
@@ -54,19 +55,27 @@ export function FocusViewGroupHeaderRails({
 	scrollRootRef,
 	topPinnedGroupIds,
 	bottomPinnedGroupIds,
-	totalNavigableGroupCount,
+	compactGroupIds = [],
+	columnCount = 1,
+	focusedGroupId,
+	focusedCardContentMaximumHeight = 0,
 	renderEntry,
 }: {
 	scrollRootRef: RefObject<HTMLElement | null>;
 	topPinnedGroupIds: readonly string[];
 	bottomPinnedGroupIds: readonly string[];
-	/** 完整副本使用固定标题预算，与共享分类和跳转几何一致。 */
-	totalNavigableGroupCount?: number;
-	renderEntry: (groupId: string, edge: StageHeaderRailEdge) => ReactElement | null;
+	compactGroupIds?: readonly string[];
+	columnCount?: number;
+	focusedGroupId?: string;
+	focusedCardContentMaximumHeight?: number;
+	renderEntry: (
+		groupId: string,
+		edge: StageHeaderRailEdge,
+		presentation: FocusViewGroupHeaderPresentation,
+	) => ReactElement | null;
 }) {
 	// 让出滚动条宽度，使纵向滚动条仍可见可点（macOS overlay 滚动条则为 0）。与旧钉住条一致。
 	const [scrollbarWidth, setScrollbarWidth] = useState(0);
-	const [scrollViewportHeight, setScrollViewportHeight] = useState(0);
 	useEffect(() => {
 		const root = scrollRootRef.current;
 		if (!root) {
@@ -77,7 +86,6 @@ export function FocusViewGroupHeaderRails({
 			const scrollbarWidth = root.offsetWidth - root.clientWidth;
 			setScrollbarWidth(scrollbarWidth);
 			scrollBoundary?.style.setProperty("--kb-focus-view-column-scrollbar-width", `${scrollbarWidth}px`);
-			setScrollViewportHeight(root.clientHeight);
 		};
 		measure();
 		const forwardWheelToColumn = (event: WheelEvent): void => {
@@ -92,13 +100,31 @@ export function FocusViewGroupHeaderRails({
 			scrollBoundary?.style.removeProperty("--kb-focus-view-column-scrollbar-width");
 		};
 	}, [scrollRootRef]);
-	const focusedCardContentMaximumHeight = computeFocusedCardRailContentMaximumHeight(
-		scrollViewportHeight,
-		totalNavigableGroupCount ?? topPinnedGroupIds.length + bottomPinnedGroupIds.length,
-	);
+	const renderRows = (groupIds: readonly string[], edge: StageHeaderRailEdge) =>
+		computeFocusViewGroupHeaderRailRows({ groupIds, compactGroupIds, columnCount, focusedGroupId }).flatMap(
+			(row, rowIndex) =>
+				row.groupIds.map((groupId, columnIndex) => (
+					<div
+						key={groupId}
+						className="min-w-0"
+						data-focus-view-header-rail-row={rowIndex}
+						style={{
+							gridRowStart: rowIndex + 1,
+							gridColumn:
+								row.groupIds.includes(focusedGroupId ?? "") || row.presentation === "standard"
+									? "1 / -1"
+									: columnIndex + 1,
+						}}
+					>
+						{renderEntry(groupId, edge, row.presentation)}
+					</div>
+				)),
+		);
+
 	// 为两侧所有标题保留空间；Pinned 改变剩余视口时由同一个 ResizeObserver 更新。
 	const railViewportStyle = {
 		right: scrollbarWidth,
+		gridTemplateColumns: `repeat(${columnCount}, minmax(0, 1fr))`,
 		"--kb-focused-card-rail-maximum-height": `${focusedCardContentMaximumHeight + STAGE_RAIL_FOCUSED_CARD_PADDING_PX}px`,
 	} as CSSProperties;
 
@@ -108,20 +134,22 @@ export function FocusViewGroupHeaderRails({
 				<div
 					className="kb-stage-header-rail max-h-full overflow-y-auto overscroll-contain"
 					data-testid="stage-header-rail"
+					data-verification-anchor="focus-view-group-header-rails"
 					data-edge="top"
 					style={railViewportStyle}
 				>
-					{topPinnedGroupIds.map((groupId) => renderEntry(groupId, "pinTop"))}
+					{renderRows(topPinnedGroupIds, "pinTop")}
 				</div>
 			) : null}
 			{bottomPinnedGroupIds.length > 0 ? (
 				<div
 					className="kb-stage-header-rail max-h-full overflow-y-auto overscroll-contain"
 					data-testid="stage-header-rail"
+					data-verification-anchor="focus-view-group-header-rails"
 					data-edge="bottom"
 					style={railViewportStyle}
 				>
-					{bottomPinnedGroupIds.map((groupId) => renderEntry(groupId, "pinBottom"))}
+					{renderRows(bottomPinnedGroupIds, "pinBottom")}
 				</div>
 			) : null}
 		</>

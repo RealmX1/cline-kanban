@@ -1,6 +1,8 @@
+import { Archive } from "lucide-react";
 import { columnIndicatorColors } from "@/data/column-colors";
 
 export function ColumnIndicator({ columnId, size = 14 }: { columnId: string; size?: number }): React.ReactElement {
+	if (columnId === "shelved") return <Archive size={size} className="text-text-secondary" aria-hidden />;
 	const color = columnIndicatorColors[columnId] ?? "var(--color-text-tertiary)";
 	const r = size * 0.4;
 	const cx = size / 2;

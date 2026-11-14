@@ -1,6 +1,7 @@
 import { expect, type Page, test } from "@playwright/test";
 import {
-	computeFocusedCardRailContentMaximumHeight,
+	computeFocusViewCompactHeaderColumnCount,
+	computeStageHeaderPinLayoutGeometry,
 	STAGE_RAIL_FOCUSED_CARD_PADDING_PX,
 } from "../src/components/detail-panels/stage-header-rail-geometry";
 import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locators";
@@ -182,10 +183,10 @@ test("Pinned 固定在列表上方且内部限高滚动，重复任务只有真�
 		await content.evaluate((element) => element.clientHeight),
 	);
 	await pinned.getByRole("button", { name: "收起 Pinned", exact: true }).click();
-	expect((await pinned.boundingBox())!.height).toBe(34);
+	expect((await pinned.boundingBox())!.height).toBe(30);
 	await expect(pinned.locator(":scope > div")).toHaveCount(1);
 	const running = page.getByTestId("cross-project-task-switcher-section-running");
-	expect((await running.boundingBox())!.height).toBe(34);
+	expect((await running.boundingBox())!.height).toBe(30);
 	await expect(running.locator(":scope > div")).toHaveCount(1);
 });
 
@@ -519,11 +520,27 @@ for (const edge of ["top", "bottom"] as const) {
 		);
 		await expect(naturalCard).toBeVisible();
 		const scrollRoot = page.locator(scrollContainerSelector);
+		const measured = await scrollRoot.evaluate((element) => ({
+			viewportTop: element.getBoundingClientRect().top,
+			viewportHeight: element.clientHeight,
+			width: element.clientWidth,
+			sections: [...element.querySelectorAll<HTMLElement>("[data-focus-view-group-section-id]")].map((section) => ({
+				id: section.dataset.focusViewGroupSectionId!,
+				top: section.getBoundingClientRect().top,
+				bottom: section.getBoundingClientRect().bottom,
+			})),
+		}));
 		const expectedStickyMaximumHeight =
-			computeFocusedCardRailContentMaximumHeight(
-				await scrollRoot.evaluate((element) => element.clientHeight),
-				await scrollRoot.locator("[data-focus-view-group-section-id]").count(),
-			) + STAGE_RAIL_FOCUSED_CARD_PADDING_PX;
+			computeStageHeaderPinLayoutGeometry({
+				...measured,
+				columnCount: computeFocusViewCompactHeaderColumnCount(measured.width),
+				compactHeadersEnabled: true,
+				focusedColumnId: "remaining",
+				focusedCardTop: 0,
+				focusedCardBottom: 0,
+				focusedCardHeight: 0,
+				focusedCardPinState: "hidden",
+			}).focusedCardContentMaximumHeight + STAGE_RAIL_FOCUSED_CARD_PADDING_PX;
 		// 面板刚缩小时副本已可见，但 ResizeObserver 的新预算尚未提交。
 		await expect(sticky).toHaveCSS("max-height", `${expectedStickyMaximumHeight}px`);
 		const rootBox = await page.locator(scrollContainerSelector).boundingBox();
