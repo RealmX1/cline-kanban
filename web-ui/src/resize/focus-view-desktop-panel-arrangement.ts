@@ -4,6 +4,7 @@ export type FocusViewDesktopPanelArrangement = "agent_left_workbench_right" | "a
 export type FocusViewDesktopPanelArrangementPreference = "automatic" | FocusViewDesktopPanelArrangement;
 export type TaskWorkbenchModule =
 	| "task_sessions"
+	| "task_files"
 	| "cross_task_relations"
 	| "exploration_map"
 	| "prompt_tools"
@@ -11,6 +12,7 @@ export type TaskWorkbenchModule =
 export type TaskWorkbenchModuleSlots = readonly [TaskWorkbenchModule, TaskWorkbenchModule];
 export const TASK_WORKBENCH_MODULE_LABELS: Record<TaskWorkbenchModule, string> = {
 	task_sessions: "Sessions",
+	task_files: "任务文件",
 	cross_task_relations: "Relations",
 	exploration_map: "探索地图",
 	prompt_tools: "Prompts",
