@@ -75,6 +75,9 @@ export interface CachedTaskWorkspaceMetadata {
 	// 最近一次观察到 worktree 有 git 层面变化的时刻（与上次缓存相比廉价 token 或 stateToken 变了）；首轮探测没有
 	// 比较基准，不算变化，记 null。决定兜底刷新是否仍在热档。
 	lastObservedTaskWorktreeGitChangeAtMs: number | null;
+	// 本次结果可以复用的 provenance 条目版本。未设置表示探针没有读/写该文件，结果只属于请求开始时的版本键。
+	// null 表示结果属于「这个任务没有条目」。值由探针在读取或写入当时确定，不能事后再读盘改绑。
+	boundTaskCommitIntegrationProvenanceVersion?: string | null;
 }
 
 // FNV-1a 32 位：同一个 taskId 每次得到同一个抖动，到期时刻在进程内稳定散开。
@@ -217,6 +220,14 @@ export function createBaseRefTipResolver(workspacePath: string): (baseRef: strin
 	};
 }
 
+function attachBoundTaskCommitIntegrationProvenanceVersion(
+	metadata: CachedTaskWorkspaceMetadata,
+	version: string | null | undefined,
+): CachedTaskWorkspaceMetadata {
+	if (version === undefined) return metadata;
+	return { ...metadata, boundTaskCommitIntegrationProvenanceVersion: version };
+}
+
 export async function loadTaskWorkspaceMetadata(
 	workspaceId: string,
 	workspacePath: string,
@@ -233,6 +244,10 @@ export async function loadTaskWorkspaceMetadata(
 	let retainedLineChangeSummary = createUnavailableTaskRetainedCommittedLineChangeHistory(
 		"task_commit_history_unavailable",
 	).summary;
+	let boundTaskCommitIntegrationProvenanceVersion: string | null | undefined;
+	const onEstablishedTaskCommitIntegrationProvenanceVersion = (version: string | null) => {
+		boundTaskCommitIntegrationProvenanceVersion = version;
+	};
 
 	if (!pathInfo.exists) {
 		const now = Date.now();
@@ -240,6 +255,7 @@ export async function loadTaskWorkspaceMetadata(
 		if (
 			current &&
 			current.data.exists === false &&
+			current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
 			current.baseRefTipCommit === baseRefTipCommit &&
@@ -269,32 +285,36 @@ export async function loadTaskWorkspaceMetadata(
 			onTaskRetainedCommittedLineChangeSummary: (summary) => {
 				retainedLineChangeSummary = summary;
 			},
+			onEstablishedTaskCommitIntegrationProvenanceVersion,
 		});
-		return {
-			data: {
-				taskId: task.taskId,
-				path: pathInfo.path,
-				exists: false,
-				baseRef: pathInfo.baseRef,
-				baseCommit: null,
-				commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
-				commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
-				workspaceGitStatus,
-				taskRetainedCommittedLineChangeSummary: retainedLineChangeSummary,
-				branch: null,
-				isDetached: false,
-				headCommit: null,
-				changedFiles: null,
-				additions: null,
-				deletions: null,
-				stateVersion: Date.now(),
+		return attachBoundTaskCommitIntegrationProvenanceVersion(
+			{
+				data: {
+					taskId: task.taskId,
+					path: pathInfo.path,
+					exists: false,
+					baseRef: pathInfo.baseRef,
+					baseCommit: null,
+					commitsAheadOfBaseRef: workspaceGitStatus.commitsAheadOfBaseRef,
+					commitsBehindBaseRef: workspaceGitStatus.commitsBehindBaseRef,
+					workspaceGitStatus,
+					taskRetainedCommittedLineChangeSummary: retainedLineChangeSummary,
+					branch: null,
+					isDetached: false,
+					headCommit: null,
+					changedFiles: null,
+					additions: null,
+					deletions: null,
+					stateVersion: Date.now(),
+				},
+				stateToken: null,
+				cheapChangeToken: null,
+				baseRefTipCommit,
+				lastFullRefreshAtMs: now,
+				lastObservedTaskWorktreeGitChangeAtMs: null,
 			},
-			stateToken: null,
-			cheapChangeToken: null,
-			baseRefTipCommit,
-			lastFullRefreshAtMs: now,
-			lastObservedTaskWorktreeGitChangeAtMs: null,
-		};
+			boundTaskCommitIntegrationProvenanceVersion,
+		);
 	}
 
 	try {
@@ -311,6 +331,7 @@ export async function loadTaskWorkspaceMetadata(
 		});
 		if (
 			current &&
+			current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 			current.cheapChangeToken !== null &&
 			current.cheapChangeToken === cheapTokenBeforeProbe &&
 			current.baseRefTipCommit === baseRefTipCommit &&
@@ -336,6 +357,7 @@ export async function loadTaskWorkspaceMetadata(
 						: current.lastObservedTaskWorktreeGitChangeAtMs;
 			if (
 				current &&
+				current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 				current.stateToken === probe.stateToken &&
 				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
@@ -395,42 +417,43 @@ export async function loadTaskWorkspaceMetadata(
 				onTaskRetainedCommittedLineChangeSummary: (summary) => {
 					retainedLineChangeSummary = summary;
 				},
+				onEstablishedTaskCommitIntegrationProvenanceVersion,
 			});
-			return {
-				data: {
-					taskId: task.taskId,
-					path: pathInfo.path,
-					exists: true,
-					baseRef: pathInfo.baseRef,
-					baseCommit,
-					commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
-					commitsBehindBaseRef: divergence.commitsBehindBaseRef,
-					workspaceGitStatus,
-					taskRetainedCommittedLineChangeSummary:
-						workspaceGitStatus.taskCommitIntegrationTrackingStatus === "complete"
-							? retainedLineChangeSummary
-							: createUnavailableTaskRetainedCommittedLineChangeHistory(
-									workspaceGitStatus.taskCommitIntegrationTrackingStatus,
-								).summary,
-					branch: probe.currentBranch,
-					isDetached: probe.headCommit !== null && probe.currentBranch === null,
-					headCommit: probe.headCommit,
-					changedFiles: summary.changedFiles,
-					additions: summary.additions,
-					deletions: summary.deletions,
-					stateVersion: Date.now(),
+			return attachBoundTaskCommitIntegrationProvenanceVersion(
+				{
+					data: {
+						taskId: task.taskId,
+						path: pathInfo.path,
+						exists: true,
+						baseRef: pathInfo.baseRef,
+						baseCommit,
+						commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
+						commitsBehindBaseRef: divergence.commitsBehindBaseRef,
+						workspaceGitStatus,
+						taskRetainedCommittedLineChangeSummary:
+							workspaceGitStatus.taskCommitIntegrationTrackingStatus === "complete"
+								? retainedLineChangeSummary
+								: createUnavailableTaskRetainedCommittedLineChangeHistory(
+										workspaceGitStatus.taskCommitIntegrationTrackingStatus,
+									).summary,
+						branch: probe.currentBranch,
+						isDetached: probe.headCommit !== null && probe.currentBranch === null,
+						headCommit: probe.headCommit,
+						changedFiles: summary.changedFiles,
+						additions: summary.additions,
+						deletions: summary.deletions,
+						stateVersion: Date.now(),
+					},
+					stateToken: probe.stateToken,
+					cheapChangeToken: cheapTokenAfterProbe,
+					baseRefTipCommit,
+					lastFullRefreshAtMs: now,
+					lastObservedTaskWorktreeGitChangeAtMs,
 				},
-				stateToken: probe.stateToken,
-				cheapChangeToken: cheapTokenAfterProbe,
-				baseRefTipCommit,
-				lastFullRefreshAtMs: now,
-				lastObservedTaskWorktreeGitChangeAtMs,
-			};
+				boundTaskCommitIntegrationProvenanceVersion,
+			);
 		});
 	} catch {
-		if (current) {
-			return current;
-		}
 		return {
 			data: {
 				taskId: task.taskId,
