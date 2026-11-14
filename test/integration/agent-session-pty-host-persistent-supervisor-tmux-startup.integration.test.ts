@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { describe, expect, it } from "vitest";
 import { AgentSessionPtyHostControllerConnection } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
@@ -12,9 +10,8 @@ import { quoteShellArg } from "../../src/core/shell";
 import { readPosixProcessResourceTable } from "../../src/diagnostics/posix-process-table-with-resource-columns-reader";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { createIsolatedTestOwnedTmuxServer } from "../utilities/isolated-test-owned-tmux-server";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
-
-const execFileAsync = promisify(execFile);
 
 describe.skipIf(
 	!process.env.KANBAN_PTY_HOST_PREFERENCE_PACKAGED_RUNTIME_CLI_PATH ||
@@ -56,7 +53,6 @@ describe.skipIf(
 		const environment = fixture.createIsolatedChildProcessEnvironment({
 			PATH: `${dirname(process.execPath)}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`,
 			SHELL: "/bin/sh",
-			TMUX: undefined,
 			CODEX_HOME: join(fixture.fixtureRootDirectoryPath, "codex-home"),
 			CODEX_SQLITE_HOME: join(fixture.fixtureRootDirectoryPath, "codex-sqlite-home"),
 			KANBAN_AGENT_SESSION_PTY_HOST_MODE: undefined,
@@ -89,7 +85,7 @@ describe.skipIf(
 				condition,
 			);
 		const reports: AgentSessionPtyHostDiagnostics[] = [];
-		const sockets = [0, 1].map((generation) => `kanban-c258b-isolated-${process.pid}-${runtimePort}-${generation}`);
+		const tmuxServers: ReturnType<typeof createIsolatedTestOwnedTmuxServer>[] = [];
 		let lastRuntimePid: number | null = null;
 		let lastRuntimeProcessStartTimeText: string | null = null;
 		const stopOwnedRuntimeIfStillRunning = async () => {
@@ -103,24 +99,18 @@ describe.skipIf(
 				process.kill(lastRuntimePid, "SIGTERM");
 		};
 		try {
-			for (const socketName of sockets) {
-				await execFileAsync(
-					tmuxExecutable,
-					[
-						"-L",
-						socketName,
-						"-f",
-						"/dev/null",
-						"new-session",
-						"-d",
-						"-s",
-						"isolated-kanban-supervisor",
-						"-c",
-						repository.repositoryPath,
-						`exec /bin/sh ${quoteShellArg(launcherPath)}`,
-					],
-					{ env: environment },
-				);
+			for (const _generation of [0, 1]) {
+				const tmuxServer = createIsolatedTestOwnedTmuxServer(environment, tmuxExecutable);
+				tmuxServers.push(tmuxServer);
+				tmuxServer.runTmuxCommand([
+					"new-session",
+					"-d",
+					"-s",
+					"isolated-kanban-supervisor",
+					"-c",
+					repository.repositoryPath,
+					`exec /usr/bin/env -u TMUX -u TMUX_PANE /bin/sh ${quoteShellArg(launcherPath)}`,
+				]);
 				await wait(async () => {
 					try {
 						return (
@@ -145,11 +135,14 @@ describe.skipIf(
 				lastRuntimeProcessStartTimeText = report.runtimeProcessStartTimeText;
 				reports.push(report);
 				await wait(async () => {
-					const { stdout } = await execFileAsync(
-						tmuxExecutable,
-						["-L", socketName, "capture-pane", "-p", "-S", "-200", "-t", "isolated-kanban-supervisor:0.0"],
-						{ env: environment },
-					);
+					const { stdout } = tmuxServer.runTmuxCommand([
+						"capture-pane",
+						"-p",
+						"-S",
+						"-200",
+						"-t",
+						"isolated-kanban-supervisor:0.0",
+					]);
 					return stdout.includes("HTTP 与实际会话托管状态均已核验");
 				});
 				if (!lastRuntimePid) throw new Error("隔离 runtime 缺少 PID");
@@ -162,9 +155,7 @@ describe.skipIf(
 						return true;
 					}
 				});
-				await execFileAsync(tmuxExecutable, ["-L", socketName, "kill-server"], { env: environment }).catch(
-					() => {},
-				);
+				tmuxServer.cleanup();
 			}
 			expect(JSON.parse(await readFile(configPath, "utf8")).agentSessionPtyHostEnablementPreference).toBe(
 				"disabled",
@@ -175,18 +166,35 @@ describe.skipIf(
 				await writeFile(
 					join(evidenceDirectory, "independent-tmux-supervisor-startup-evidence.json"),
 					JSON.stringify(
-						{ reports, isolatedTmuxSockets: sockets, temporaryEnablementVariableAbsent: true },
+						{
+							reports,
+							isolatedTmuxSockets: tmuxServers.map((server) => server.socketPath),
+							temporaryEnablementVariableAbsent: true,
+						},
 						null,
 						2,
 					),
 				);
 			}
+		} catch (error) {
+			const paneEvidence = tmuxServers.map((server) => {
+				try {
+					return server.runTmuxCommand([
+						"capture-pane",
+						"-p",
+						"-S",
+						"-200",
+						"-t",
+						"isolated-kanban-supervisor:0.0",
+					]).stdout;
+				} catch (captureError) {
+					return String(captureError);
+				}
+			});
+			throw new Error(`隔离 supervisor 验收失败，清理前 pane 输出：\n${paneEvidence.join("\n")}`, { cause: error });
 		} finally {
 			await stopOwnedRuntimeIfStillRunning();
-			for (const socketName of sockets)
-				await execFileAsync(tmuxExecutable, ["-L", socketName, "kill-server"], { env: environment }).catch(
-					() => {},
-				);
+			for (const tmuxServer of tmuxServers) tmuxServer.cleanup();
 			for (const socketPath of listAgentSessionPtyHostGenerationSocketPaths(runtimeIdentity)) {
 				const connection = await AgentSessionPtyHostControllerConnection.connectAsController(socketPath).catch(
 					() => null,

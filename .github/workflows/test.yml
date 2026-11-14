@@ -45,6 +45,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: 安装隔离回归使用的 tmux
+        run: |
+          if ! command -v tmux >/dev/null 2>&1; then
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              brew install tmux
+            else
+              sudo apt-get update
+              sudo apt-get install -y tmux
+            fi
+          fi
+
       - name: Install web-ui dependencies
         run: npm ci --prefix web-ui
 
