@@ -24,6 +24,7 @@ import {
 	buildAutomaticAgentFailureContinuationPrompt,
 	deliverAutomaticAgentFailureContinuationNativePrompt,
 } from "./automatic-agent-failure-continuation-native-delivery";
+import { persistHostedSessionRuntimeAdoptionAcceptanceReceipt } from "./hosted-session-runtime-adoption-acceptance-receipt";
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
 // for command-driven agents such as Claude Code, Codex, Gemini, and shell sessions.
@@ -5205,6 +5206,26 @@ export class TerminalSessionManager implements TerminalSessionService {
 		this.ensureStallScanRunning();
 		this.emitSummary(entry.summary);
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(taskId);
+		try {
+			const workspaceId = this.terminalSessionManagerOptions.automaticFailureContinuationWorkspaceId;
+			if (workspaceId)
+				await persistHostedSessionRuntimeAdoptionAcceptanceReceipt({
+					workspaceId,
+					conversationSessionId: taskId,
+					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId ?? null,
+					nativeConversationSessionId:
+						entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+					hostSocketPath: active.session.agentSessionPtyHostBinding?.socketPath ?? "",
+					hostedSessionKey: active.session.agentSessionPtyHostBinding?.hostedSessionKey ?? "",
+					sessionProcessId: adoptionCandidate.pid,
+					sessionProcessStartedAtEpochMs: adoptionCandidate.spawnedAtEpochMs,
+					summarySource: summaryChoice.summarySource,
+				});
+		} catch (error) {
+			logTuiFreezeWarning(
+				`[hosted-session-adoption] acceptance_receipt_pending taskId=${taskId} reason=${String(error)}`,
+			);
+		}
 		logTuiFreezeWarning(
 			`[hosted-session-adoption] adopted taskId=${taskId} pid=${adoptionCandidate.pid} kind=${adoptionCandidate.hostedSessionKind} summarySource=${summaryChoice.summarySource} adoptionRecord=${parsedAdoptionRecord.kind} screenRestoredFrom=${plannedHandoverTerminalMirrorCheckpoint !== null ? "planned_handover_checkpoint" : "output_ring_buffer_replay"} terminalModesRestoredFrom=${terminalModeRestoreSource}`,
 		);

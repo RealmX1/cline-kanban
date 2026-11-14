@@ -554,6 +554,7 @@ import {
 	taskClosureRecordSchema,
 } from "../core/task-closure-contract";
 import {
+	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionIdentityRequestSchema,
 	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionResponseSchema,
@@ -1515,6 +1516,17 @@ export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEdi
 const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
 
 const runtimeApplicationTaskCommandExecutionProcedureRouter = t.router({
+	adoptExistingSupervisor: workspaceProcedure
+		.input(taskCommandExecutionAdoptExistingSupervisorRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.adoptExistingSupervisor(ctx.workspaceScope.workspaceId, input),
+			};
+		}),
 	registerRecoveryEvidenceObservation: workspaceProcedure
 		.input(taskCommandExecutionRecoveryObservationRegistrationRequestSchema)
 		.output(taskCommandExecutionResponseSchema)

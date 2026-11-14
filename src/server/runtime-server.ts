@@ -143,6 +143,7 @@ import {
 import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
 import { observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
 import { createTaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
+import { createTaskConversationSessionOperationStore } from "../task-conversation-sessions/task-conversation-session-operation-store";
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
 import { handleTaskFileDownloadHttpRequest } from "../task-file-downloads/task-file-download-http-handler";
@@ -1308,6 +1309,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			)
 				return null;
 			const conversationSessionId = resolveMainTaskConversationSessionId(card);
+			if (
+				(
+					await createTaskConversationSessionOperationStore().read({ workspaceId, workspacePath })
+				).explicitlyStoppedSessionIds.includes(conversationSessionId)
+			)
+				return null;
 			const summary =
 				findRuntimeSessionSummary(workspaceId, conversationSessionId) ?? state.sessions[conversationSessionId];
 			const nativeSessionId = summary?.agentNativeConversationSessionIdentity?.nativeSessionId ?? null;
