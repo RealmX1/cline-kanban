@@ -240,6 +240,7 @@ export async function loadTaskWorkspaceMetadata(
 		if (
 			current &&
 			current.data.exists === false &&
+			current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 			current.data.path === pathInfo.path &&
 			current.data.baseRef === pathInfo.baseRef &&
 			current.baseRefTipCommit === baseRefTipCommit &&
@@ -311,6 +312,7 @@ export async function loadTaskWorkspaceMetadata(
 		});
 		if (
 			current &&
+			current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 			current.cheapChangeToken !== null &&
 			current.cheapChangeToken === cheapTokenBeforeProbe &&
 			current.baseRefTipCommit === baseRefTipCommit &&
@@ -336,6 +338,7 @@ export async function loadTaskWorkspaceMetadata(
 						: current.lastObservedTaskWorktreeGitChangeAtMs;
 			if (
 				current &&
+				current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
 				current.stateToken === probe.stateToken &&
 				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
@@ -428,9 +431,6 @@ export async function loadTaskWorkspaceMetadata(
 			};
 		});
 	} catch {
-		if (current) {
-			return current;
-		}
 		return {
 			data: {
 				taskId: task.taskId,

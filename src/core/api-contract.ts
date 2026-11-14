@@ -2584,6 +2584,11 @@ export const runtimeTaskWorkspaceGitStatusSchema = z.object({
 });
 export type RuntimeTaskWorkspaceGitStatus = z.infer<typeof runtimeTaskWorkspaceGitStatusSchema>;
 
+export const runtimeTaskWorkspaceGitStatusesRequestSchema = z.object({
+	taskIds: z.array(z.string().trim().min(1)),
+});
+export type RuntimeTaskWorkspaceGitStatusesRequest = z.infer<typeof runtimeTaskWorkspaceGitStatusesRequestSchema>;
+
 export const runtimeTaskWorkspaceGitStatusesResponseSchema = z.object({
 	taskWorkspaceGitStatuses: z.record(z.string(), runtimeTaskWorkspaceGitStatusSchema),
 });

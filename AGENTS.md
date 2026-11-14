@@ -124,6 +124,7 @@ web-ui：
 | `DEVELOPMENT.md` | dev/dogfood 工作流、tmux 长驻约定、hook 事件→状态迁移映射 |
 | `test/README.md` | 测试执行形态与 git 安全契约 |
 | `docs/cli-environment.md` | CLI/hook 环境变量 |
+| `docs/task-list-git-query-scope-caching-and-resource-verification.md` | 列表 Git 查询范围、身份与归属失效、失败恢复及资源对照 |
 | `docs/codex-conversation-storage-isolation.md` | Codex 独立存储、旧目录绑定、整族停写门禁、历史迁移与回退及 App Recents 待验边界 |
 | `docs/codex-configuration-writers-and-sync.md` | Codex 持久配置 writer、历史桥接、增量合并、选择性同步、原所有者重载及阶段闭包 |
 | `docs/codex-source-shared-plugin-installation-and-native-update-coordination.md` | Codex 同源 plugins／marketplace 双根、原生安装单写者、跨 profile 中断恢复及能力边界 |

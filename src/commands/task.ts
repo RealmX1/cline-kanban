@@ -465,12 +465,9 @@ async function listTasks(input: {
 		autoCreateIfMissing: false,
 	});
 	const runtimeClient = createRuntimeTrpcClient(workspace.workspaceId);
-	const [state, taskWorkspaceGitStatusesResponse] = await Promise.all([
-		runtimeClient.workspace.getState.query(),
-		runtimeClient.workspace.getTaskWorkspaceGitStatuses.query(),
-	]);
+	const state = await runtimeClient.workspace.getState.query();
 
-	const tasks = state.board.columns.flatMap((boardColumn) => {
+	const selectedTasks = state.board.columns.flatMap((boardColumn) => {
 		if (!input.column && !input.closureOutcome && boardColumn.id === "trash") {
 			return [];
 		}
@@ -485,15 +482,19 @@ async function listTasks(input: {
 						resolveTaskClosureOutcomeForBoardColumn(boardColumn.id, task.taskClosureSummary) ===
 							input.closureOutcome),
 			)
-			.map((task) =>
-				formatTaskRecord(
-					state,
-					task,
-					boardColumn.id,
-					taskWorkspaceGitStatusesResponse.taskWorkspaceGitStatuses[task.id] ?? null,
-				),
-			);
+			.map((task) => ({ task, columnId: boardColumn.id }));
 	});
+	const taskWorkspaceGitStatusesResponse = await runtimeClient.workspace.getTaskWorkspaceGitStatuses.query({
+		taskIds: selectedTasks.map(({ task }) => task.id),
+	});
+	const tasks = selectedTasks.map(({ task, columnId }) =>
+		formatTaskRecord(
+			state,
+			task,
+			columnId,
+			taskWorkspaceGitStatusesResponse.taskWorkspaceGitStatuses[task.id] ?? null,
+		),
+	);
 
 	return {
 		ok: true,

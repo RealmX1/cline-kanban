@@ -1,5 +1,4 @@
 import { TRPCError } from "@trpc/server";
-import pLimit from "p-limit";
 import type { RuntimeConfigState } from "../config/runtime-config";
 import type {
 	RuntimeBoardData,
@@ -9,8 +8,6 @@ import type {
 	RuntimeGitSyncAction,
 	RuntimeGitSyncResponse,
 	RuntimeTaskSessionSummary,
-	RuntimeTaskWorkspaceGitStatus,
-	RuntimeTaskWorkspaceGitStatusesResponse,
 	RuntimeTaskWorktreeMode,
 	RuntimeWorkspaceChangesMode,
 	RuntimeWorkspaceFileSearchResponse,
@@ -33,6 +30,7 @@ import {
 import type { KanbanActorResolutionLookups } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-from-request-origin-evidence";
 import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
 import { recordFactObservedByActiveKanbanRuntimeWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
+import { createTaskWorkspaceGitStatusQueryCache } from "../server/task-workspace-git-status-query-cache";
 import {
 	collectTaskIdsRemovedFromBoard,
 	discardTaskEditDraftsForTasksRemovedFromBoard,
@@ -62,7 +60,6 @@ import {
 	getGitRefs,
 } from "../workspace/git-history";
 import { discardGitChanges, getGitSyncSummary, runGitCheckoutAction, runGitSyncAction } from "../workspace/git-sync";
-import { runGit } from "../workspace/git-utils";
 import { searchWorkspaceFiles } from "../workspace/search-workspace-files";
 import {
 	probeAndRefreshTaskCommitIntegrationProvenance,
@@ -82,20 +79,9 @@ import type { RuntimeTrpcContext } from "./app-router";
 import { applyKanbanCliTaskBoardMutation } from "./kanban-cli-task-board-mutation-api";
 import { persistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStart } from "./web-ui-new-backlog-task-card-persistence-before-agent-session-start-api";
 
-const TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT = 4;
-const taskWorkspaceGitStatusBatchConcurrencyLimiter = pLimit(TASK_WORKSPACE_GIT_STATUS_BATCH_CONCURRENCY_LIMIT);
-
-function createGitProbeUnavailableTaskWorkspaceStatus(baseRef: string): RuntimeTaskWorkspaceGitStatus {
-	return {
-		baseRef,
-		commitsAheadOfBaseRef: null,
-		commitsBehindBaseRef: null,
-		taskCommitsIntegratedIntoBaseRef: null,
-		taskCommitIntegrationTrackingStatus: "git_probe_unavailable",
-		observationSource: "unavailable",
-		observedAt: null,
-	};
-}
+const readTaskWorkspaceGitStatusesThroughSharedQueryCache = createTaskWorkspaceGitStatusQueryCache({
+	loadWorkspaceBoardById,
+});
 
 // 「写之前的 board」与随后的差集清理是一条**纯兜底**的旁路：它存在的意义是让 CLI / 未来的服务端写入
 // 路径也别留下孤儿草稿。所以这两步的任何失败都必须就地咽掉——一次草稿清理绝不该有能力让用户的看板
@@ -563,52 +549,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 			});
 		},
 
-		loadTaskWorkspaceGitStatuses: async (workspaceScope): Promise<RuntimeTaskWorkspaceGitStatusesResponse> => {
-			const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-			const cards = board.columns.flatMap((column) => column.cards);
-			const baseRefTipCommitPromises = new Map<string, Promise<string | null>>();
-			const resolveBaseRefTipCommit = (baseRef: string): Promise<string | null> => {
-				const existing = baseRefTipCommitPromises.get(baseRef);
-				if (existing) {
-					return existing;
-				}
-				const pending = runGit(workspaceScope.workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]).then(
-					(result) => (result.ok && result.stdout ? result.stdout : null),
-				);
-				baseRefTipCommitPromises.set(baseRef, pending);
-				return pending;
-			};
-			const statusEntries = await Promise.all(
-				cards.map(
-					async (card) =>
-						await taskWorkspaceGitStatusBatchConcurrencyLimiter(async () => {
-							try {
-								const knownBaseRefTipCommit = await resolveBaseRefTipCommit(card.baseRef);
-								const pathInfo = await getTaskWorkspacePathInfo({
-									cwd: workspaceScope.workspacePath,
-									taskId: card.id,
-									baseRef: card.baseRef,
-									...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
-								});
-								const status = await probeAndRefreshTaskCommitIntegrationProvenance({
-									workspaceId: workspaceScope.workspaceId,
-									taskId: card.id,
-									repoPath: workspaceScope.workspacePath,
-									worktreePath: pathInfo.path,
-									baseRef: card.baseRef,
-									...(card.worktreeMode ? { worktreeMode: card.worktreeMode } : {}),
-									worktreeExists: pathInfo.exists,
-									knownBaseRefTipCommit,
-								});
-								return [card.id, status] as const;
-							} catch {
-								return [card.id, createGitProbeUnavailableTaskWorkspaceStatus(card.baseRef)] as const;
-							}
-						}),
-				),
-			);
-			return { taskWorkspaceGitStatuses: Object.fromEntries(statusEntries) };
-		},
+		loadTaskWorkspaceGitStatuses: readTaskWorkspaceGitStatusesThroughSharedQueryCache,
 		loadTaskContext: async (workspaceScope, input) => {
 			const normalizedInput = normalizeRequiredTaskWorkspaceScopeInput(input);
 			return await getTaskWorkspaceInfo({

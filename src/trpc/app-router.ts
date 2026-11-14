@@ -185,6 +185,7 @@ import type {
 	RuntimeTaskTerminalRefreshResponse,
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskUnparkAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskWorkspaceGitStatusesRequest,
 	RuntimeTaskWorkspaceGitStatusesResponse,
 	RuntimeTaskWorkspaceInfoRequest,
 	RuntimeTaskWorkspaceInfoResponse,
@@ -437,6 +438,7 @@ import {
 	runtimeTaskTerminalRefreshResponseSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskUnparkAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskWorkspaceGitStatusesRequestSchema,
 	runtimeTaskWorkspaceGitStatusesResponseSchema,
 	runtimeTaskWorkspaceInfoRequestSchema,
 	runtimeTaskWorkspaceInfoResponseSchema,
@@ -1033,6 +1035,7 @@ export interface RuntimeTrpcContext {
 		) => Promise<RuntimeWorktreeDeleteResponse>;
 		loadTaskWorkspaceGitStatuses: (
 			scope: RuntimeTrpcWorkspaceScope,
+			input?: RuntimeTaskWorkspaceGitStatusesRequest,
 		) => Promise<RuntimeTaskWorkspaceGitStatusesResponse>;
 		loadTaskContext: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -2494,9 +2497,10 @@ const runtimeApplicationWorkspaceProcedureRouter = t.router({
 			return await ctx.workspaceApi.deleteWorktree(ctx.workspaceScope, input);
 		}),
 	getTaskWorkspaceGitStatuses: workspaceProcedure
+		.input(runtimeTaskWorkspaceGitStatusesRequestSchema.optional())
 		.output(runtimeTaskWorkspaceGitStatusesResponseSchema)
-		.query(async ({ ctx }) => {
-			return await ctx.workspaceApi.loadTaskWorkspaceGitStatuses(ctx.workspaceScope);
+		.query(async ({ ctx, input }) => {
+			return await ctx.workspaceApi.loadTaskWorkspaceGitStatuses(ctx.workspaceScope, input);
 		}),
 	getTaskContext: workspaceProcedure
 		.input(runtimeTaskWorkspaceInfoRequestSchema)

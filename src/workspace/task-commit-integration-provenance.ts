@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import pLimit from "p-limit";
@@ -1047,6 +1048,20 @@ export async function readObservedTaskCommitsAcrossIncarnationsByTaskId(
 	return new Map(
 		Object.values(file.tasks).map((entry) => [entry.taskId, deduplicateObservedTaskCommits(entry.incarnations)]),
 	);
+}
+
+// 列表查询缓存也必须跟随持久归属修复、删除及历史恢复；Git HEAD 不变不能证明这些输入没变。
+export async function readTaskCommitIntegrationProvenanceVersionsByTaskId(
+	workspaceId: string,
+	requestedTaskIds: readonly string[],
+): Promise<Map<string, string>> {
+	const file = await readProvenanceFile(workspaceId);
+	const versions = new Map<string, string>();
+	for (const taskId of requestedTaskIds) {
+		const entry = file.tasks[taskId];
+		if (entry) versions.set(taskId, createHash("sha256").update(JSON.stringify(entry)).digest("hex"));
+	}
+	return versions;
 }
 
 export interface RetainedTaskCommitCoverageInput {
