@@ -113,6 +113,7 @@ it("区域选择进入内容标题行，布局变化保留模块和 iframe 身�
 				exploration_map: null,
 				prompt_tools: null,
 				task_visualizations: () => null,
+				task_files: null,
 			}}
 		/>
 	);

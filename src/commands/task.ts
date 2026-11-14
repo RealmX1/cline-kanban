@@ -58,6 +58,7 @@ import {
 	taskClosureRequestSchema,
 } from "../core/task-closure-contract";
 import {
+	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionSpecificationSchema,
 } from "../core/task-command-execution-contract";
@@ -2001,6 +2002,22 @@ export function registerTaskCommand(program: Command): void {
 				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.registerRecoveryEvidenceObservation.mutate(
 					taskCommandExecutionRecoveryObservationRegistrationRequestSchema.parse(
 						JSON.parse(await readFile(options.registrationFile, "utf8")),
+					),
+				);
+			});
+		});
+	commandExecution
+		.command("adopt-existing-supervisor")
+		.requiredOption("--adoption-file <path>", "绑定既有监督进程及原始归属的 JSON。")
+		.option("--project-path <path>", "项目主仓库路径。")
+		.action(async (options: { adoptionFile: string; projectPath?: string }) => {
+			await runTaskCommand(async () => {
+				const workspaceId = await ensureRuntimeWorkspace(
+					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
+				);
+				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.adoptExistingSupervisor.mutate(
+					taskCommandExecutionAdoptExistingSupervisorRequestSchema.parse(
+						JSON.parse(await readFile(options.adoptionFile, "utf8")),
 					),
 				);
 			});

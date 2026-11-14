@@ -82,7 +82,7 @@ export function assessAgentSessionPtyHostDeploymentEvidence({ report, processSta
 		const current = report.generations.find((entry) => entry.socketPath === report.currentGenerationSocketPath);
 		if (current?.readiness !== "ready" || current.hostStatus?.controllerProcessId !== report.runtimeProcessId || current.hostStatus?.hostLifecycleState !== "serving" || !processStartTimeByPid.has(current.hostStatus.hostProcessId)) failures.push("当前 generation 没有以所属 runtime 为 controller 的活 host 响应");
 	}
-	return { ok: failures.length === 0, checkedAtEpochMs: Date.now(), runtimeIdentity: report.runtimeIdentity, runtimeProcessId: report.runtimeProcessId, runtimeProcessStartTimeText: report.runtimeProcessStartTimeText, configuredPersistentPreference: report.configuredPersistentPreference, startupDecision: report.startupDecision, newSessionHostingMode: report.newSessionHostingMode, failures, blockingSessions, validatedHostedSessions };
+	return { runtimeLoadedEntrypointSha256: report.runtimeLoadedEntrypointSha256 ?? null, ok: failures.length === 0, checkedAtEpochMs: Date.now(), runtimeIdentity: report.runtimeIdentity, runtimeProcessId: report.runtimeProcessId, runtimeProcessStartTimeText: report.runtimeProcessStartTimeText, configuredPersistentPreference: report.configuredPersistentPreference, startupDecision: report.startupDecision, newSessionHostingMode: report.newSessionHostingMode, failures, blockingSessions, validatedHostedSessions };
 }
 
 export function compareHostedSessionContinuityAcrossRuntimeRestart(before, after) {

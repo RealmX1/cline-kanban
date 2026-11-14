@@ -134,6 +134,7 @@ try {
 		buildBundleIntoStagingDirectory({
 			...shared,
 			entryPoints: ["src/deployment/local-deployment-execution-command-line.ts"],
+			target: "node22",
 			outfile: join(distributionDirectoryPath, "local-deployment-execution.js"),
 		}),
 		// Library export

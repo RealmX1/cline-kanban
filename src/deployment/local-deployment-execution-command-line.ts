@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
@@ -22,6 +23,7 @@ import {
 	restrictLocalDeploymentExecution,
 } from "./local-deployment-execution";
 import {
+	LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER,
 	localDeploymentExecutionManifestSchema,
 	localDeploymentExecutionRestrictionSchema,
 	localDeploymentIndependentFindingsSchema,
@@ -29,6 +31,27 @@ import {
 import { runLocalDeploymentCommandPreservingOriginalOutput } from "./local-deployment-execution-process";
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
 import { verifyLocalDeploymentRegistrationEffectFromPersistedEvidence } from "./local-deployment-registration-effect-evidence";
+import { cancelPreparedLocalRedeployment, startPreparedLocalRedeployment } from "./local-redeployment-owned-execution";
+import {
+	clearLocalRedeploymentFilesystemEvidenceRequests,
+	recordLocalRedeploymentFilesystemEvidenceRequest,
+} from "./local-redeployment-persistent-checks";
+import {
+	assertLocalRedeploymentOwnerStillEligible,
+	LocalRedeploymentIdentityMismatch,
+	prepareLocalRedeployment,
+	readFrozenLocalRedeploymentRequest,
+	readLocalRedeploymentJson,
+	writeLocalRedeploymentJson,
+} from "./local-redeployment-preparation";
+import { preserveLocalRedeploymentRuntimeRestartAcceptance } from "./local-redeployment-runtime-restart-acceptance";
+import {
+	executeStandardLocalRedeploymentStage,
+	initializeStandardLocalRedeployment,
+	LocalRedeploymentQualityFailure,
+	observeStandardLocalRedeploymentRecoveryEvidence,
+	observeStandardLocalRedeploymentStageRecoveryEvidence,
+} from "./local-redeployment-standard-execution";
 
 const executeDeploymentEffectVerificationOrRecoveryCommand = promisify(execFile);
 
@@ -61,10 +84,198 @@ function printResult(value: unknown): void {
 	process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+async function runLocalDeploymentExecutionAndWriteBusinessResult(directory: string): Promise<void> {
+	const result = await executeLocalDeploymentStages(await assertPersistentExecutionDirectory(directory), {
+		runCommand: runLocalDeploymentCommandPreservingOriginalOutput,
+	});
+	printResult(result);
+	const execution = await readLocalDeploymentExecution(directory);
+	const needsMachineEvidence = result.deploymentOutcome === "machine_evidence_pending";
+	const revoked = result.deploymentOutcome === "permission_revoked";
+	const disposition = revoked
+		? "cancelled"
+		: needsMachineEvidence
+			? "machine_evidence_pending"
+			: result.deploymentOutcome === "human_decision_required"
+				? "agent_judgment_required"
+				: "agent_review_ready";
+	await lockedFileSystem.writeJsonFileAtomic(
+		join(resolve(directory), "owned-command-business-result.json"),
+		{
+			disposition,
+			deploymentExecutionId: result.executionId,
+			analysis: result,
+			retrospectiveAnalysisRequestFilePath:
+				result.retrospective.status === "pending" && result.retrospective.analysisFingerprint
+					? join(
+							resolve(directory),
+							"retrospective-analysis-requests",
+							`${result.retrospective.analysisFingerprint}.json`,
+						)
+					: null,
+			nextAction: needsMachineEvidence
+				? "按已登记的机器条件自动接续，不请求人工提供机器可取得的信息"
+				: result.deploymentOutcome === "quality_validation_failed"
+					? "本次核验真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
+					: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
+			recovery: needsMachineEvidence
+				? {
+						action: "resume_same_run",
+						trigger: result.recovery.condition,
+						retry_not_before_epoch_ms: result.recovery.nextCheckAtEpochMs,
+						maximum_unchanged_retries: 1,
+						evidence_paths: execution.manifest.stages.flatMap((stage) => stage.recoveryEvidenceFilePaths ?? []),
+						equivalent_evidence_sources: [
+							"bound_stage_effect_probe",
+							"immutable_command_original",
+							"runtime_native_process_identity",
+						],
+					}
+				: null,
+		},
+		{ durable: true, fileMode: 0o600 },
+	);
+	if (result.deploymentOutcome !== "succeeded") process.exitCode = 2;
+}
+
 export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 	const program = new Command()
 		.name("local-deployment-execution")
 		.description("绑定授权与候选，持久执行本地部署步骤并准备独立复盘；不新增部署授权");
+	program
+		.command("prepare-redeployment")
+		.requiredOption("--execution-directory <path>")
+		.requiredOption("--request-file <path>")
+		.action(async (options: { executionDirectory: string; requestFile: string }) => {
+			printResult(
+				await prepareLocalRedeployment(
+					await assertPersistentExecutionDirectory(options.executionDirectory),
+					JSON.parse(await readFile(options.requestFile, "utf8")),
+					process.argv[1],
+				),
+			);
+		});
+	for (const operation of ["start-redeployment", "cancel-redeployment", "observe-redeployment"] as const) {
+		program
+			.command(operation)
+			.requiredOption("--execution-directory <path>")
+			.action(async (options: { executionDirectory: string }) => {
+				const directory = await assertPersistentExecutionDirectory(options.executionDirectory);
+				if (operation === "start-redeployment") printResult(await startPreparedLocalRedeployment(directory));
+				if (operation === "cancel-redeployment") {
+					await cancelPreparedLocalRedeployment(directory);
+					printResult({ ok: true, cancelled: true });
+				}
+				if (operation === "observe-redeployment")
+					printResult(await observeStandardLocalRedeploymentRecoveryEvidence(directory));
+			});
+	}
+	program
+		.command("run-redeployment")
+		.requiredOption("--execution-directory <path>")
+		.action(async (options: { executionDirectory: string }) => {
+			const directory = await assertPersistentExecutionDirectory(options.executionDirectory);
+			let executionId: string | undefined;
+			let requestSha256: string | undefined;
+			try {
+				const frozen = await readFrozenLocalRedeploymentRequest(directory);
+				executionId = frozen.request.executionId;
+				requestSha256 = frozen.requestSha256;
+				if (!existsSync(join(directory, "local-deployment-execution.json"))) {
+					const evidence = await observeStandardLocalRedeploymentRecoveryEvidence(directory);
+					const budgetPath = join(directory, "candidate-preparation-attempt-budgets.json");
+					const budgets = ((await readLocalRedeploymentJson(budgetPath)) ?? {}) as Record<string, number>;
+					if ((budgets[evidence.evidenceSha256] ?? 0) >= 2)
+						throw new Error("相同候选准备证据的预算已用尽，等待语义条件变化");
+					budgets[evidence.evidenceSha256] = (budgets[evidence.evidenceSha256] ?? 0) + 1;
+					await writeLocalRedeploymentJson(budgetPath, budgets);
+					await initializeStandardLocalRedeployment(directory);
+				}
+				await runLocalDeploymentExecutionAndWriteBusinessResult(directory);
+			} catch (error) {
+				await recordLocalRedeploymentFilesystemEvidenceRequest(directory, error);
+				const revoked =
+					existsSync(join(directory, "redeployment-revocation.json")) ||
+					existsSync(join(directory, "local-deployment-execution-restriction.json"));
+				const disposition = revoked
+					? "cancelled"
+					: error instanceof LocalRedeploymentIdentityMismatch
+						? "agent_judgment_required"
+						: error instanceof LocalRedeploymentQualityFailure
+							? "agent_review_ready"
+							: "machine_evidence_pending";
+				const result = {
+					disposition,
+					deploymentExecutionId: executionId,
+					requestSha256,
+					error: String(error),
+					recovery:
+						disposition === "machine_evidence_pending"
+							? {
+									action: "resume_same_run",
+									trigger: "绑定实例、源码验证或依赖的语义证据变化",
+									retry_not_before_epoch_ms: Date.now() + 30_000,
+									maximum_unchanged_retries: 1,
+									evidence_paths: [],
+									equivalent_evidence_sources: [
+										"consistent_workspace_snapshot",
+										"bound_candidate_validation",
+										"native_listener_and_boot_identity",
+									],
+								}
+							: null,
+				};
+				await writeLocalRedeploymentJson(join(directory, "owned-command-business-result.json"), result);
+				printResult(result);
+				process.exitCode = 2;
+			}
+		});
+	program
+		.command("redeployment-stage")
+		.requiredOption("--execution-directory <path>")
+		.requiredOption("--stage <name>")
+		.action(async (options: { executionDirectory: string; stage: string }) => {
+			const stage = LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER.find((stage) => stage === options.stage);
+			if (!stage) throw new Error("未知部署阶段");
+			try {
+				await executeStandardLocalRedeploymentStage(
+					await assertPersistentExecutionDirectory(options.executionDirectory),
+					stage,
+				);
+				await clearLocalRedeploymentFilesystemEvidenceRequests(options.executionDirectory, options.stage);
+				printResult({ ok: true });
+			} catch (error) {
+				await recordLocalRedeploymentFilesystemEvidenceRequest(options.executionDirectory, error, options.stage);
+				printResult({
+					ok: false,
+					status:
+						error instanceof LocalRedeploymentQualityFailure || error instanceof LocalRedeploymentIdentityMismatch
+							? "quality_validation_failed"
+							: "machine_evidence_pending",
+					error: String(error),
+				});
+				process.exitCode = 2;
+			}
+		});
+	program
+		.command("validate-redeployment-owner")
+		.requiredOption("--execution-directory <path>")
+		.action(async (options: { executionDirectory: string }) => {
+			await assertLocalRedeploymentOwnerStillEligible(
+				options.executionDirectory,
+				await readFrozenLocalRedeploymentRequest(options.executionDirectory),
+			);
+			printResult({ ok: true });
+		});
+	program
+		.command("observe-redeployment-stage")
+		.requiredOption("--execution-directory <path>")
+		.requiredOption("--stage <name>")
+		.action(async (options: { executionDirectory: string; stage: string }) => {
+			const stage = LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER.find((stage) => stage === options.stage);
+			if (!stage) throw new Error("未知部署阶段");
+			printResult(await observeStandardLocalRedeploymentStageRecoveryEvidence(options.executionDirectory, stage));
+		});
 	program
 		.command("observe-recovery-evidence")
 		.requiredOption("--execution-directory <path>")
@@ -98,62 +309,7 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 		.command("run")
 		.requiredOption("--execution-directory <path>")
 		.action(async (options: { executionDirectory: string }) => {
-			const result = await executeLocalDeploymentStages(
-				await assertPersistentExecutionDirectory(options.executionDirectory),
-				{
-					runCommand: runLocalDeploymentCommandPreservingOriginalOutput,
-				},
-			);
-			printResult(result);
-			const execution = await readLocalDeploymentExecution(options.executionDirectory);
-			const needsMachineEvidence = result.deploymentOutcome === "machine_evidence_pending";
-			const revoked = result.deploymentOutcome === "permission_revoked";
-			const disposition = revoked
-				? "cancelled"
-				: needsMachineEvidence
-					? "machine_evidence_pending"
-					: result.deploymentOutcome === "human_decision_required"
-						? "agent_judgment_required"
-						: "agent_review_ready";
-			await lockedFileSystem.writeJsonFileAtomic(
-				join(resolve(options.executionDirectory), "owned-command-business-result.json"),
-				{
-					disposition,
-					deploymentExecutionId: result.executionId,
-					analysis: result,
-					retrospectiveAnalysisRequestFilePath:
-						result.retrospective.status === "pending" && result.retrospective.analysisFingerprint
-							? join(
-									resolve(options.executionDirectory),
-									"retrospective-analysis-requests",
-									`${result.retrospective.analysisFingerprint}.json`,
-								)
-							: null,
-					nextAction: needsMachineEvidence
-						? "按已登记的机器条件自动接续，不请求人工提供机器可取得的信息"
-						: result.deploymentOutcome === "quality_validation_failed"
-							? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
-							: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
-					recovery: needsMachineEvidence
-						? {
-								action: "resume_same_run",
-								trigger: result.recovery.condition,
-								retry_not_before_epoch_ms: result.recovery.nextCheckAtEpochMs,
-								maximum_unchanged_retries: 1,
-								evidence_paths: execution.manifest.stages.flatMap(
-									(stage) => stage.recoveryEvidenceFilePaths ?? [],
-								),
-								equivalent_evidence_sources: [
-									"bound_stage_effect_probe",
-									"immutable_command_original",
-									"runtime_native_process_identity",
-								],
-							}
-						: null,
-				},
-				{ durable: true, fileMode: 0o600 },
-			);
-			if (result.deploymentOutcome !== "succeeded") process.exitCode = 2;
+			await runLocalDeploymentExecutionAndWriteBusinessResult(options.executionDirectory);
 		});
 	program
 		.command("prepare-owned-command")
@@ -335,7 +491,18 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 			.action(async (options: { executionDirectory: string }) => {
 				const { manifest } = await readLocalDeploymentExecution(options.executionDirectory);
 				let ok = false;
-				if (operation === "verify-publication") ok = await verifyLocalDeploymentPublishedFiles(manifest);
+				if (operation === "verify-publication") {
+					ok = await verifyLocalDeploymentPublishedFiles(manifest);
+					if (ok && manifest.schemaVersion === 2) {
+						try {
+							ok =
+								(await realpath(join(dirname(manifest.deploymentNodeBinaryPath), "kanban"))) ===
+								(await realpath(join(manifest.distributionDirectoryPath, "cli.js")));
+						} catch {
+							ok = false;
+						}
+					}
+				}
 				if (operation === "verify-runtime-restart" && (await verifyLocalDeploymentPublishedFiles(manifest))) {
 					const result = await executeDeploymentEffectVerificationOrRecoveryCommand(
 						process.execPath,
@@ -353,13 +520,25 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 					const evidence = JSON.parse(result.stdout);
 					ok =
 						evidence.ok === true &&
+						(manifest.schemaVersion === 1 ||
+							evidence.runtimeLoadedEntrypointSha256 ===
+								createHash("sha256")
+									.update(await readFile(join(manifest.candidateDistributionDirectoryPath, "cli.js")))
+									.digest("hex")) &&
 						evidence.runtimeIdentity?.runtimeHomeDirectoryPath ===
 							manifest.runtimeIdentity.runtimeHomeDirectoryPath &&
 						evidence.runtimeIdentity?.runtimePort === manifest.runtimeIdentity.runtimePort &&
 						Number.isInteger(evidence.runtimeProcessId) &&
 						typeof evidence.runtimeProcessStartTimeText === "string" &&
-						(evidence.runtimeProcessId !== manifest.runtimeBefore.processId ||
+						(manifest.runtimeBefore === null ||
+							evidence.runtimeProcessId !== manifest.runtimeBefore.processId ||
 							evidence.runtimeProcessStartTimeText !== manifest.runtimeBefore.processStartTimeText);
+					if (ok && manifest.schemaVersion === 2)
+						await preserveLocalRedeploymentRuntimeRestartAcceptance(
+							options.executionDirectory,
+							manifest,
+							evidence,
+						);
 				}
 				if (operation === "recover-deployment-record") {
 					await executeDeploymentEffectVerificationOrRecoveryCommand(

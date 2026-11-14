@@ -4,6 +4,6 @@
     "noEmit": true,
     "types": ["node", "vitest/globals"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts"],
+  "include": ["src/**/*.ts", "test/**/*.ts", "vitest.config.ts", "scripts/codex-conversation-protocol-comparison.ts", "scripts/codex-acp-owned-app-server-bridge.ts"],
   "exclude": ["dist", "node_modules"]
 }

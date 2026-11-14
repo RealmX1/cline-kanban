@@ -1,11 +1,25 @@
 import { z } from "zod";
 
 const commandArgumentsSchema = z.array(z.string().refine((value) => !value.includes("\0"))).nonempty();
+export const taskCommandExecutionExpectedOwnerSchema = z.strictObject({
+	taskIncarnationCreatedAtEpochMs: z.number(),
+	conversationSessionId: z.string().min(1),
+	nativeSessionId: z.string().min(1),
+	runtimeSessionIncarnationId: z.string().nullable(),
+	worktreeIdentity: z.strictObject({
+		realPath: z.string().min(1),
+		device: z.number(),
+		inode: z.number(),
+		createdAtEpochMs: z.number(),
+	}),
+});
 export const taskCommandExecutionSpecificationSchema = z
 	.object({
 		command: commandArgumentsSchema,
 		resumeCommand: commandArgumentsSchema,
 		resumeCommandPreservesBusinessSingleFlight: z.boolean().default(false),
+		supervisorMaintainsSemanticRecovery: z.boolean().optional(),
+		beforeSupervisorRecoveryDispatchValidationCommand: commandArgumentsSchema.optional(),
 		ownerSessionInterruptPolicy: z.enum(["cancel_execution", "preserve_execution"]).default("cancel_execution"),
 		continuationNoticesFile: z.string().min(1).optional(),
 		producerExecutionRevocationFile: z.string().min(1).optional(),
@@ -21,18 +35,38 @@ export const taskCommandExecutionSpecificationSchema = z
 	.strict()
 	.refine((value) => !value.recoveryEvidenceObservationMode || !!value.readOnlyRecoveryEvidenceObservationCommand, {
 		message: "语义观察优先模式必须登记只读观察命令",
-	});
+	})
+	.refine(
+		(value) =>
+			!value.supervisorMaintainsSemanticRecovery ||
+			(value.resumeCommandPreservesBusinessSingleFlight &&
+				value.recoveryEvidenceObservationMode === "semantic_observation_only" &&
+				!!value.beforeSupervisorRecoveryDispatchValidationCommand),
+		{
+			message: "独立监督恢复必须绑定业务单飞、语义观察与派发前资格核验",
+		},
+	);
 export type TaskCommandExecutionSpecification = z.infer<typeof taskCommandExecutionSpecificationSchema>;
 export const taskCommandExecutionStartRequestSchema = z.object({
 	taskId: z.string().min(1),
 	idempotencyKey: z.string().min(1),
 	specification: taskCommandExecutionSpecificationSchema,
+	expectedOwner: taskCommandExecutionExpectedOwnerSchema.optional(),
 });
 export const taskCommandExecutionIdentityRequestSchema = z.object({
 	taskId: z.string().min(1),
 	executionId: z.string().uuid(),
 });
 export type TaskCommandExecutionStartRequest = z.input<typeof taskCommandExecutionStartRequestSchema>;
+export const taskCommandExecutionAdoptExistingSupervisorRequestSchema = taskCommandExecutionStartRequestSchema.extend({
+	executionId: z.uuid(),
+	launchNonce: z.uuid(),
+	launchMaterialsSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+	expectedOwner: taskCommandExecutionExpectedOwnerSchema,
+});
+export type TaskCommandExecutionAdoptExistingSupervisorRequest = z.input<
+	typeof taskCommandExecutionAdoptExistingSupervisorRequestSchema
+>;
 export type TaskCommandExecutionIdentityRequest = z.infer<typeof taskCommandExecutionIdentityRequestSchema>;
 export const taskCommandExecutionRecoveryObservationRegistrationRequestSchema =
 	taskCommandExecutionIdentityRequestSchema
@@ -83,6 +117,7 @@ export const taskCommandExecutionRecordSchema = z.object({
 	originatingConversationSessionId: z.string(),
 	originatingNativeSessionId: z.string(),
 	originatingRuntimeSessionIncarnationId: z.string().nullable(),
+	requiresOriginatingSessionBinding: z.boolean().optional(),
 	worktreeIdentity: z.object({
 		realPath: z.string(),
 		device: z.number(),

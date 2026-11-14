@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import type * as FileSystemPromises from "node:fs/promises";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -16,6 +16,7 @@ import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
 } from "../../../src/task-command-execution/task-command-execution-store";
+import * as supervisor from "../../../src/task-command-execution/task-command-execution-supervisor";
 
 const isolatedHome = vi.hoisted(() => ({ path: "" }));
 const ledgerIo = vi.hoisted(() => ({ reads: 0, writes: 0 }));
@@ -340,6 +341,80 @@ it.each(["unknown", "confirmed"] as const)(
 		}
 	},
 );
+describe("在线启动的冻结 owner 门禁", () => {
+	async function freezeExpectedOwner(f: ReturnType<typeof fixture>) {
+		const metadata = await stat(directory);
+		return {
+			taskIncarnationCreatedAtEpochMs: f.owner.taskIncarnationCreatedAtEpochMs,
+			conversationSessionId: f.owner.conversationSessionId,
+			nativeSessionId: f.owner.nativeSessionId,
+			runtimeSessionIncarnationId: f.summary.runtimeSessionIncarnationId ?? null,
+			worktreeIdentity: {
+				realPath: await realpath(directory),
+				device: metadata.dev,
+				inode: metadata.ino,
+				createdAtEpochMs: metadata.birthtimeMs,
+			},
+		};
+	}
+
+	it.each(["conversationSessionId", "nativeSessionId", "runtimeSessionIncarnationId"] as const)(
+		"%s 在准备后变化时拒绝在线登记",
+		async (field) => {
+			const f = fixture();
+			const expectedOwner = await freezeExpectedOwner(f);
+			if (field === "runtimeSessionIncarnationId") f.summary.runtimeSessionIncarnationId = "replacement";
+			else f.owner[field] = "replacement";
+			await expect(f.service.start("workspace", { ...f.request, expectedOwner })).rejects.toThrow("冻结执行");
+			expect(await readTaskCommandExecutions("workspace")).toEqual([]);
+			expect(f.launch).not.toHaveBeenCalled();
+		},
+	);
+
+	it("原子登记后、最终派发前换代也不能执行旧请求", async () => {
+		const f = fixture();
+		const expectedOwner = await freezeExpectedOwner(f);
+		let actualDispatchCount = 0;
+		f.launch.mockImplementation(async (_record, validate) => {
+			f.summary.runtimeSessionIncarnationId = "replacement";
+			await validate();
+			actualDispatchCount++;
+		});
+		await expect(f.service.start("workspace", { ...f.request, expectedOwner })).rejects.toThrow("原主会话");
+		expect(actualDispatchCount).toBe(0);
+	});
+
+	it("初次读取与锁内复核不同，登记仍逐字绑定冻结 owner", async () => {
+		const f = fixture();
+		const expectedOwner = await freezeExpectedOwner(f);
+		f.readOwner.mockResolvedValueOnce({
+			...f.owner,
+			conversationSessionId: "stale-initial-session",
+			nativeSessionId: "stale-initial-native",
+			summary: { ...f.summary, runtimeSessionIncarnationId: "stale-initial-generation" },
+		});
+		const record = await f.service.start("workspace", { ...f.request, expectedOwner });
+		expect(record).toMatchObject({
+			originatingConversationSessionId: expectedOwner.conversationSessionId,
+			originatingNativeSessionId: expectedOwner.nativeSessionId,
+			originatingRuntimeSessionIncarnationId: expectedOwner.runtimeSessionIncarnationId,
+			worktreeIdentity: expectedOwner.worktreeIdentity,
+		});
+	});
+
+	it.each(["conversationSessionId", "runtimeSessionIncarnationId"] as const)(
+		"已有幂等键不能重新绑定变化的 %s",
+		async (field) => {
+			const f = fixture();
+			await f.service.start("workspace", { ...f.request, expectedOwner: await freezeExpectedOwner(f) });
+			if (field === "runtimeSessionIncarnationId") f.summary.runtimeSessionIncarnationId = "replacement";
+			else f.owner.conversationSessionId = "replacement";
+			await expect(
+				f.service.start("workspace", { ...f.request, expectedOwner: await freezeExpectedOwner(f) }),
+			).rejects.toThrow("幂等键");
+		},
+	);
+});
 
 it("生产方先持久撤销后崩溃，旧业务结果和通知清单也不能恢复交回", async () => {
 	const f = fixture();
@@ -1971,5 +2046,63 @@ describe("所属执行与一次逻辑交回", () => {
 				specification: { ...specification, ownerSessionInterruptPolicy: "preserve_execution" },
 			}),
 		).rejects.toThrow("幂等键已用于不同材料或任务 incarnation");
+	});
+});
+
+describe("离线既有监督进程接回", () => {
+	it.each(["running", "exited"] as const)("接回 %s 原件不再派发，重复接回仍只有一个最终结果", async (workerState) => {
+		const f = fixture();
+		const original = await f.service.start("workspace", f.request);
+		await mutateTaskCommandExecutions("workspace", () => ({ records: [], result: undefined }));
+		f.launch.mockClear();
+		const artifactDirectory = join(directory, "workspace", "task-command-executions", original.executionId);
+		await mkdir(artifactDirectory, { recursive: true });
+		const launchMaterials = JSON.stringify({
+			executionId: original.executionId,
+			launchNonce: original.launchNonce,
+			command: original.specification.command,
+			workingDirectory: directory,
+			revocationFile: original.revocationFile,
+		});
+		await writeFile(join(artifactDirectory, `launch-materials-${original.launchNonce}.json`), launchMaterials);
+		const inspection = vi.spyOn(supervisor, "inspectOwnedCommandSupervisor").mockResolvedValue(workerState);
+		try {
+			const input = {
+				...f.request,
+				executionId: original.executionId,
+				launchNonce: original.launchNonce,
+				launchMaterialsSha256: createHash("sha256").update(launchMaterials).digest("hex"),
+				expectedOwner: {
+					taskIncarnationCreatedAtEpochMs: original.taskIncarnationCreatedAtEpochMs,
+					conversationSessionId: original.originatingConversationSessionId,
+					nativeSessionId: original.originatingNativeSessionId,
+					runtimeSessionIncarnationId: original.originatingRuntimeSessionIncarnationId,
+					worktreeIdentity: original.worktreeIdentity,
+				},
+			};
+			const adopted = await f.service.adoptExistingSupervisor("workspace", input);
+			expect(adopted.executionId).toBe(original.executionId);
+			expect(adopted.launchState).toBe(workerState);
+			await f.service.adoptExistingSupervisor("workspace", input);
+			expect(f.launch).not.toHaveBeenCalled();
+			await writeFile(f.request.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+			f.inspectWorker.mockResolvedValue("exited");
+			await f.service.sweepExecution("workspace", adopted.executionId);
+			await f.service.sweepExecution("workspace", adopted.executionId);
+			expect(f.deliver).toHaveBeenCalledTimes(1);
+			await expect(
+				f.service.adoptExistingSupervisor("workspace", { ...input, launchMaterialsSha256: "0".repeat(64) }),
+			).rejects.toThrow();
+			await expect(
+				f.service.adoptExistingSupervisor("workspace", {
+					...input,
+					expectedOwner: { ...input.expectedOwner, taskIncarnationCreatedAtEpochMs: 999 },
+				}),
+			).rejects.toThrow();
+			await f.service.cancel("workspace", adopted);
+			await expect(f.service.adoptExistingSupervisor("workspace", input)).rejects.toThrow();
+		} finally {
+			inspection.mockRestore();
+		}
 	});
 });

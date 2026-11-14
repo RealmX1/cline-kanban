@@ -80,6 +80,9 @@ describe.sequential("invoking repository mutation canary", () => {
 		const invoking = createCommittedCanaryRepository("poisoned-environment-invoking-repository");
 		const sacrificial = createCommittedCanaryRepository("poisoned-environment-sacrificial-repository");
 		const poisonedGitEnvironmentVariables = {
+			TMUX: "/unowned/production.sock,1,0",
+			TMUX_PANE: "%1",
+			TMUX_TMPDIR: "/unowned/tmux-directory",
 			GIT_DIR: join(sacrificial.repository.repositoryPath, ".git"),
 			GIT_WORK_TREE: sacrificial.repository.repositoryPath,
 			GIT_COMMON_DIR: join(sacrificial.repository.repositoryPath, ".git"),
@@ -102,6 +105,8 @@ describe.sequential("invoking repository mutation canary", () => {
 				'const { realpathSync } = require("node:fs");',
 				`if (realpathSync(process.cwd()) !== ${JSON.stringify(invoking.repository.repositoryPath)}) process.exit(12);`,
 				'for (const name of ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"]) if (process.env[name] !== undefined) process.exit(13);',
+				"if (process.env.TMUX !== undefined || process.env.TMUX_PANE !== undefined || process.env.TMUX_TMPDIR !== process.env.TMPDIR) process.exit(14);",
+				'const { spawnSync } = require("node:child_process"); const grandchild = spawnSync(process.execPath, ["-e", "if (process.env.TMUX || process.env.TMUX_PANE || process.env.TMUX_TMPDIR !== process.env.TMPDIR) process.exit(15)"]); if (grandchild.status !== 0) process.exit(16);',
 			].join("\n");
 			const result = await runCommandWithInvokingRepositoryMutationCanary({
 				invokingDirectoryPath: invoking.repository.repositoryPath,

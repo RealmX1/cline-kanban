@@ -45,6 +45,8 @@ import { QueuedTaskPromptDeliveryQueuePanel } from "@/components/detail-panels/q
 import { ReadOnlyTaskConversationHistoryPanel } from "@/components/detail-panels/read-only-task-conversation-history-panel";
 import { TaskConversationSessionsPanel } from "@/components/detail-panels/task-conversation-sessions-panel";
 import { TaskEditorCreationProgressNotice } from "@/components/detail-panels/task-editor-creation-progress-notice";
+import { TaskFilesPanel } from "@/components/detail-panels/task-files-panel";
+import { TaskMainSessionPlanDownloadButton } from "@/components/detail-panels/task-main-session-plan-download-button";
 import { TaskResourceUsageDetailPanel } from "@/components/detail-panels/task-resource-usage-detail-panel";
 import { TaskSessionInformationActions } from "@/components/detail-panels/task-session-information-actions";
 import { TaskVisualizationArtifactsPanel } from "@/components/detail-panels/task-visualization-artifacts-panel";
@@ -95,6 +97,7 @@ import {
 	type QueuedTaskPromptDeliveryCountIndicator,
 	summarizeQueuedTaskPromptDeliveryCountIndicator,
 } from "@/runtime/queued-task-prompt-delivery-status-wording";
+import { startTaskFileDownload } from "@/runtime/task-file-download-query";
 import type {
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
@@ -1700,8 +1703,28 @@ export function CardDetailView({
 		taskChatMessagesByTaskId?.[selectedTaskConversationSessionId] ??
 		(isMainTaskConversationSessionSelected ? streamedAgentConversationChatMessages : null);
 
+	const handleDownloadTaskFile = async (path: string) => {
+		if (!currentProjectId) return;
+		try {
+			await startTaskFileDownload(currentProjectId, {
+				taskId: selection.card.id,
+				expectedTaskIncarnationCreatedAtEpochMs: selection.card.createdAt,
+				source: "task_file",
+				path,
+			});
+		} catch (error) {
+			showAppToast({ intent: "danger", message: error instanceof Error ? error.message : "文件下载失败，请重试。" });
+		}
+	};
 	const sessionInformationActions = (
 		<>
+			{!isMobile ? (
+				<TaskMainSessionPlanDownloadButton
+					workspaceId={currentProjectId}
+					taskId={selection.card.id}
+					taskCreatedAtEpochMs={selection.card.createdAt}
+				/>
+			) : null}
 			{boardScopeFocusedTaskProject && onNarrowToFocusedTaskProject ? (
 				<AgentSessionToolbarFocusedTaskProjectNarrowingButton
 					project={boardScopeFocusedTaskProject}
@@ -2383,6 +2406,7 @@ export function CardDetailView({
 																				workspaceFiles={runtimeFiles}
 																				selectedPath={selectedPath}
 																				onSelectPath={handleExplicitSelectPath}
+																				onDownloadFile={(path) => void handleDownloadTaskFile(path)}
 																				panelFlex="1 1 0"
 																			/>
 																		</div>
@@ -2453,6 +2477,20 @@ export function CardDetailView({
 													) : undefined
 												}
 												modules={{
+													task_files: (headerNavigationContent, headerEndActions) => (
+														<TaskFilesPanel
+															key={JSON.stringify([
+																currentProjectId,
+																selection.card.id,
+																selection.card.createdAt,
+															])}
+															workspaceId={currentProjectId}
+															taskId={selection.card.id}
+															taskCreatedAtEpochMs={selection.card.createdAt}
+															headerNavigationContent={headerNavigationContent}
+															headerEndActions={headerEndActions}
+														/>
+													),
 													task_sessions: taskConversationSessionsPanel,
 													cross_task_relations: workUnitRelationNeighborhoodPanel,
 													exploration_map: (headerNavigationContent, headerEndActions) => (

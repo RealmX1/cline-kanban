@@ -346,7 +346,7 @@ export function summarizeLocalDeploymentExecution(
 				: hasQualityValidationFailure
 					? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
 					: unfinishedStage
-						? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件摘要变化后取得新重试预算"
+						? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件或阶段只读语义证据变化后取得新重试预算"
 						: null,
 		},
 		metrics: {
@@ -457,7 +457,10 @@ async function requestRetrospective(
 	if (await materializeRetrospectiveRequest(directory, record)) await persistRecord(directory, record, assertLockHeld);
 }
 
-async function recoveryEvidenceSha256(stage: LocalDeploymentStageCommand): Promise<string> {
+async function recoveryEvidenceSha256(
+	stage: LocalDeploymentStageCommand,
+	readOnlyRecoveryEvidenceSha256: string | null,
+): Promise<string> {
 	const evidence = await Promise.all(
 		(stage.recoveryEvidenceFilePaths ?? []).map(async (path) => {
 			try {
@@ -472,7 +475,11 @@ async function recoveryEvidenceSha256(stage: LocalDeploymentStageCommand): Promi
 			}
 		}),
 	);
-	return sha256(JSON.stringify(evidence));
+	return sha256(
+		JSON.stringify(
+			readOnlyRecoveryEvidenceSha256 === null ? evidence : [...evidence, readOnlyRecoveryEvidenceSha256],
+		),
+	);
 }
 
 function effectMatchesExecution(stdout: string, manifest: LocalDeploymentExecutionManifest): boolean {
@@ -503,7 +510,6 @@ async function executeOneStage(
 	const hasUnfinishedCriticalStage = summarizeLocalDeploymentExecution(record).recovery.unfinishedStage !== null;
 	if (previouslySucceeded && (!LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage) || !hasUnfinishedCriticalStage))
 		return true;
-	const recoveryFingerprint = await recoveryEvidenceSha256(stage);
 	let previousAttempts = record.observations.filter(
 		(item) => item.stage === stage.stage && item.kind === "command_execution_intent_persisted",
 	);
@@ -521,6 +527,41 @@ async function executeOneStage(
 		const runtimeLockError = deps.readRuntimeLockCompromise();
 		if (runtimeLockError && LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) throw runtimeLockError;
 	}
+	if (await readLocalDeploymentExecutionRestriction(directory)) return false;
+	let readOnlyRecoveryEvidenceSha256: string | null = null;
+	if (stage.readOnlyRecoveryEvidenceObservationCommand) {
+		readOnlyRecoveryEvidenceSha256 = "unavailable";
+		const outputDirectory = join(
+			resolve(directory),
+			"stage-command-originals",
+			stage.stage,
+			`recovery-evidence-observation-${randomUUID()}`,
+		);
+		await mkdir(outputDirectory, { recursive: true });
+		try {
+			const result = await deps.runCommand(stage.readOnlyRecoveryEvidenceObservationCommand, {
+				cwd: record.manifest.sourceCheckoutPath,
+				commandOutputDirectory: outputDirectory,
+				executionId: record.manifest.executionId,
+				stage: stage.stage,
+				attemptNumber: previousAttempts.length,
+				assertCommandMayStart,
+			});
+			const observation: unknown = JSON.parse(result.stdout);
+			if (
+				result.exitCode === 0 &&
+				observation !== null &&
+				typeof observation === "object" &&
+				"evidenceSha256" in observation &&
+				typeof observation.evidenceSha256 === "string" &&
+				/^[a-f0-9]{64}$/u.test(observation.evidenceSha256)
+			)
+				readOnlyRecoveryEvidenceSha256 = observation.evidenceSha256;
+		} catch {
+			// 不可读取保持同一未知指纹；原始输出与异常不会制造新的动作预算。
+		}
+	}
+	const recoveryFingerprint = await recoveryEvidenceSha256(stage, readOnlyRecoveryEvidenceSha256);
 	async function observe(
 		kind: LocalDeploymentObservation["kind"],
 		attempt: number,
@@ -545,7 +586,7 @@ async function executeOneStage(
 		await persistRecord(directory, record, assertLockHeld);
 		return observation;
 	}
-	async function verifyPreviousEffect(): Promise<boolean> {
+	async function verifyPreviousEffect(afterEffectAction = false): Promise<boolean> {
 		if (!stage.effectVerificationCommand) return false;
 		if (await readLocalDeploymentExecutionRestriction(directory)) return false;
 		const previousProbe = record.observations
@@ -556,6 +597,7 @@ async function executeOneStage(
 			)
 			.at(-1);
 		if (
+			!afterEffectAction &&
 			previousProbe?.kind === "effect_verification_failed" &&
 			previousProbe.recoveryEvidenceSha256 === recoveryFingerprint &&
 			deps.readNowEpochMs() < previousProbe.observedAtEpochMs + READ_ONLY_RECOVERY_CHECK_INTERVAL_MS
@@ -635,8 +677,10 @@ async function executeOneStage(
 					item.kind === "command_not_started",
 			),
 	);
-	if (hasPossiblySubmittedAttempt && LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage))
-		return await verifyPreviousEffect();
+	if (hasPossiblySubmittedAttempt && LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) {
+		if (await verifyPreviousEffect()) return true;
+		if (record.manifest.schemaVersion !== 2 || !stage.idempotentEffectRecoveryCommand) return false;
+	}
 	while (
 		previousAttempts.filter((item) => item.recoveryEvidenceSha256 === recoveryFingerprint).length <
 		MAXIMUM_COMMAND_ATTEMPTS_PER_RECOVERY_EVIDENCE
@@ -672,14 +716,19 @@ async function executeOneStage(
 		assertLockHeld();
 		let result: LocalDeploymentCommandResult;
 		try {
-			result = await deps.runCommand(stage.command, {
-				cwd: record.manifest.sourceCheckoutPath,
-				commandOutputDirectory: outputDirectory,
-				executionId: record.manifest.executionId,
-				stage: stage.stage,
-				attemptNumber: attempt,
-				assertCommandMayStart,
-			});
+			result = await deps.runCommand(
+				hasPossiblySubmittedAttempt && stage.idempotentEffectRecoveryCommand
+					? stage.idempotentEffectRecoveryCommand
+					: stage.command,
+				{
+					cwd: record.manifest.sourceCheckoutPath,
+					commandOutputDirectory: outputDirectory,
+					executionId: record.manifest.executionId,
+					stage: stage.stage,
+					attemptNumber: attempt,
+					assertCommandMayStart,
+				},
+			);
 		} catch (error) {
 			const provenNotStarted = await commandOriginalProvesProcessWasNotStarted(directory, record, stage, intent);
 			result = {
@@ -722,7 +771,7 @@ async function executeOneStage(
 		);
 		if (result.processWasStarted === false) continue;
 		if (qualityValidationFailed) return false;
-		if (LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return await verifyPreviousEffect();
+		if (LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return await verifyPreviousEffect(true);
 		if (commandSucceeded) return true;
 	}
 	return false;

@@ -158,11 +158,16 @@ import type {
 	RuntimeTaskChatSendResponse,
 	RuntimeTaskConversationHistoryPageRequest,
 	RuntimeTaskConversationHistoryPageResponse,
+	RuntimeTaskDirectoryRequest,
+	RuntimeTaskDirectoryResponse,
 	RuntimeTaskEditDraftsMutateRequest,
 	RuntimeTaskEditDraftsReadRequest,
 	RuntimeTaskEditDraftsResponse,
+	RuntimeTaskFileDownloadRequest,
+	RuntimeTaskFileIdentityRequest,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequest,
 	RuntimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponse,
+	RuntimeTaskMainSessionPlanResponse,
 	RuntimeTaskNameSuggestionRequest,
 	RuntimeTaskNameSuggestionResponse,
 	RuntimeTaskParkAwaitingDispatchedBackgroundWorkRequest,
@@ -411,12 +416,16 @@ import {
 	runtimeTaskConversationSessionReportResponseSchema,
 	runtimeTaskConversationSessionResumeRequestSchema,
 	runtimeTaskConversationSessionResumeResponseSchema,
+	runtimeTaskDirectoryRequestSchema,
+	runtimeTaskDirectoryResponseSchema,
 	runtimeTaskEditDraftsMutateRequestSchema,
 	runtimeTaskEditDraftsReadRequestSchema,
 	runtimeTaskEditDraftsResponseSchema,
+	runtimeTaskFileIdentityRequestSchema,
 	runtimeTaskImageSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkRequestSchema,
 	runtimeTaskIsParkedAwaitingDispatchedBackgroundWorkResponseSchema,
+	runtimeTaskMainSessionPlanResponseSchema,
 	runtimeTaskNameSuggestionRequestSchema,
 	runtimeTaskNameSuggestionResponseSchema,
 	runtimeTaskParkAwaitingDispatchedBackgroundWorkRequestSchema,
@@ -547,6 +556,7 @@ import {
 	taskClosureRecordSchema,
 } from "../core/task-closure-contract";
 import {
+	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionIdentityRequestSchema,
 	taskCommandExecutionRecoveryObservationRegistrationRequestSchema,
 	taskCommandExecutionResponseSchema,
@@ -685,6 +695,7 @@ import {
 import { allocateTaskIdForNewTaskCardThroughRegisteredCaptureWhenAvailable } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
 import type { TaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
+import type { TaskFileDownloadContents } from "../task-file-downloads/task-file-download-service";
 import type { TaskIndexingSupportRuntimeService } from "../task-indexing-support/task-indexing-support-runtime-service";
 import type { TaskLookupConversationService } from "../task-indexing-support/task-lookup-conversation-service";
 import type { TaskVisualizationArtifactService } from "../task-visualization-artifacts/task-visualization-artifact-service";
@@ -741,6 +752,18 @@ export interface RuntimeTrpcContext {
 	// 请求发起方的行动者证据（dd2db 1a）：CLI 调用环境声明头；1a.3 起再加页面加载 nonce。
 	kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence;
 	runtimeApi: {
+		listTaskDirectory: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskDirectoryRequest,
+		) => Promise<RuntimeTaskDirectoryResponse>;
+		getTaskMainSessionPlan: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskFileIdentityRequest,
+		) => Promise<RuntimeTaskMainSessionPlanResponse>;
+		openTaskFileDownload: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeTaskFileDownloadRequest,
+		) => Promise<TaskFileDownloadContents>;
 		operateCodexConversationStorage: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeCodexConversationStorageOperationRequest,
@@ -1496,6 +1519,17 @@ export interface TaskEditorCreationRouter extends ReturnType<typeof buildTaskEdi
 const taskEditorCreationRouter: TaskEditorCreationRouter = buildTaskEditorCreationRouter();
 
 const runtimeApplicationTaskCommandExecutionProcedureRouter = t.router({
+	adoptExistingSupervisor: workspaceProcedure
+		.input(taskCommandExecutionAdoptExistingSupervisorRequestSchema)
+		.output(taskCommandExecutionResponseSchema)
+		.mutation(async ({ ctx, input }) => {
+			if (!ctx.taskCommandExecutionApi)
+				throw new TRPCError({ code: "SERVICE_UNAVAILABLE", message: "所属命令执行服务尚未就绪" });
+			return {
+				ok: true as const,
+				execution: await ctx.taskCommandExecutionApi.adoptExistingSupervisor(ctx.workspaceScope.workspaceId, input),
+			};
+		}),
 	registerRecoveryEvidenceObservation: workspaceProcedure
 		.input(taskCommandExecutionRecoveryObservationRegistrationRequestSchema)
 		.output(taskCommandExecutionResponseSchema)
@@ -2217,6 +2251,14 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.query(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.getTaskConversationHistoryPage(ctx.workspaceScope, input);
 		}),
+	listTaskDirectory: workspaceProcedure
+		.input(runtimeTaskDirectoryRequestSchema)
+		.output(runtimeTaskDirectoryResponseSchema)
+		.query(({ ctx, input }) => ctx.runtimeApi.listTaskDirectory(ctx.workspaceScope, input)),
+	getTaskMainSessionPlan: workspaceProcedure
+		.input(runtimeTaskFileIdentityRequestSchema)
+		.output(runtimeTaskMainSessionPlanResponseSchema)
+		.query(({ ctx, input }) => ctx.runtimeApi.getTaskMainSessionPlan(ctx.workspaceScope, input)),
 	sendTaskChatMessage: workspaceProcedure
 		.input(runtimeTaskChatSendRequestSchema)
 		.output(runtimeTaskChatSendResponseSchema)

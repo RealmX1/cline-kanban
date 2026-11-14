@@ -7,6 +7,8 @@ import ts from "typescript";
 export type TestGitRepositoryMutationSafetyPolicyViolationCode =
 	| "direct-git-binary-execution"
 	| "raw-parent-environment-spread"
+	| "direct-tmux-execution-outside-owned-fixture"
+	| "tmux-server-wide-cleanup"
 	| "production-git-environment-used-by-test";
 
 export interface TestGitRepositoryMutationSafetyPolicyViolation {
@@ -23,6 +25,7 @@ const PRODUCTION_GIT_PROCESS_ENVIRONMENT_MODULE_SUFFIX = "/src/core/git-process-
 const GIT_FIXTURE_PATH_SUFFIX = "test/git-repository-mutation-safety/isolated-git-test-workspace-fixture.ts";
 const REPOSITORY_CANARY_PATH_SUFFIX =
 	"test/git-repository-mutation-safety/run-test-projects-with-invoking-repository-mutation-canary.ts";
+const TMUX_FIXTURE_PATH_SUFFIX = "test/utilities/isolated-test-owned-tmux-server.ts";
 
 function normalizePolicyPath(path: string): string {
 	return path.split(sep).join("/");
@@ -65,7 +68,42 @@ function collectImportedChildProcessBindings(sourceFile: ts.SourceFile): {
 			}
 		}
 	}
-	return { directFunctionNames, namespaceNames, productionGitEnvironmentFactoryNames };
+	// promisify 绑定可能写在 describe/it 或函数内部；收集完再查调用，避免先用后声明漏掉。
+	const bindings = { directFunctionNames, namespaceNames, productionGitEnvironmentFactoryNames };
+	const collectPromisifiedAliases = (node: ts.Node): void => {
+		if (
+			ts.isVariableDeclaration(node) &&
+			ts.isIdentifier(node.name) &&
+			node.initializer &&
+			isPromisifyCallOfImportedChildProcess(node.initializer, bindings)
+		) {
+			directFunctionNames.add(node.name.text);
+		}
+		ts.forEachChild(node, collectPromisifiedAliases);
+	};
+	let seenBindingCount = -1;
+	while (seenBindingCount !== directFunctionNames.size) {
+		seenBindingCount = directFunctionNames.size;
+		collectPromisifiedAliases(sourceFile);
+	}
+	return bindings;
+}
+
+function isPromisifyCallOfImportedChildProcess(
+	expression: ts.Expression,
+	bindings: ReturnType<typeof collectImportedChildProcessBindings>,
+): boolean {
+	if (!ts.isCallExpression(expression) || !ts.isIdentifier(expression.expression)) return false;
+	if (expression.expression.text !== "promisify") return false;
+	const target = expression.arguments[0];
+	if (!target) return false;
+	if (ts.isIdentifier(target)) return bindings.directFunctionNames.has(target.text);
+	return (
+		ts.isPropertyAccessExpression(target) &&
+		ts.isIdentifier(target.expression) &&
+		bindings.namespaceNames.has(target.expression.text) &&
+		CHILD_PROCESS_FUNCTION_NAMES.has(target.name.text)
+	);
 }
 
 function isImportedChildProcessCall(
@@ -79,6 +117,27 @@ function isImportedChildProcessCall(
 		bindings.namespaceNames.has(node.expression.expression.text) &&
 		CHILD_PROCESS_FUNCTION_NAMES.has(node.expression.name.text)
 	);
+}
+
+function isDirectPromisifyChildProcessInvocation(
+	node: ts.CallExpression,
+	bindings: ReturnType<typeof collectImportedChildProcessBindings>,
+): boolean {
+	return isPromisifyCallOfImportedChildProcess(node.expression, bindings);
+}
+
+function literalCommandFragments(expression: ts.Expression): readonly string[] {
+	if (ts.isStringLiteralLike(expression)) return [expression.text];
+	if (!ts.isArrayLiteralExpression(expression)) return [];
+	return expression.elements.flatMap((element) => (ts.isStringLiteralLike(element) ? [element.text] : []));
+}
+
+function textInvokesLiteralTmux(text: string): boolean {
+	return /(?:^|\/)tmux(?:\s|$)/u.test(text) || /(?:^|[;&|`\n]|&&|\|\|)\s*(?:[\w.+-]+\/)*tmux(?:\s|$)/u.test(text);
+}
+
+function textCleansUpEntireTmuxServer(text: string): boolean {
+	return /\bkill-server\b/u.test(text);
 }
 
 function isWholeProcessEnvironment(node: ts.Node): boolean {
@@ -157,8 +216,45 @@ export function analyzeTestSourceGitRepositoryMutationSafetyPolicy(options: {
 	const violations: TestGitRepositoryMutationSafetyPolicyViolation[] = [];
 
 	function visit(node: ts.Node): void {
-		if (ts.isCallExpression(node) && isImportedChildProcessCall(node, childProcessBindings)) {
-			if (!trustedGitImplementation && childProcessCallPassesWholeParentEnvironment(node)) {
+		if (ts.isCallExpression(node)) {
+			const recognizedChildProcessCall = isImportedChildProcessCall(node, childProcessBindings);
+			// 直接 promisify(execFile)(...) 没有具名绑定。只把它纳入 tmux 规则，避免把仓库里已有的
+			// 非 tmux 调用重新判成环境继承违规。
+			const tmuxRelevantCall =
+				recognizedChildProcessCall || isDirectPromisifyChildProcessInvocation(node, childProcessBindings);
+			if (tmuxRelevantCall) {
+				const commandFragments = node.arguments.flatMap((argument) => literalCommandFragments(argument));
+				if (
+					!normalizedFilePath.endsWith(TMUX_FIXTURE_PATH_SUFFIX) &&
+					commandFragments.some((text) => textInvokesLiteralTmux(text))
+				) {
+					violations.push(
+						createViolation(
+							sourceFile,
+							options.filePath,
+							node,
+							"direct-tmux-execution-outside-owned-fixture",
+							"测试必须经 isolated-test-owned-tmux-server 显式绑定私有 socket 并校验清理归属。",
+						),
+					);
+				}
+				if (commandFragments.some((text) => textCleansUpEntireTmuxServer(text))) {
+					violations.push(
+						createViolation(
+							sourceFile,
+							options.filePath,
+							node,
+							"tmux-server-wide-cleanup",
+							"测试禁止 kill-server；仅清理已核验归属的自有 session。",
+						),
+					);
+				}
+			}
+			if (
+				recognizedChildProcessCall &&
+				!trustedGitImplementation &&
+				childProcessCallPassesWholeParentEnvironment(node)
+			) {
 				violations.push(
 					createViolation(
 						sourceFile,
@@ -170,6 +266,7 @@ export function analyzeTestSourceGitRepositoryMutationSafetyPolicy(options: {
 				);
 			}
 			if (
+				recognizedChildProcessCall &&
 				!trustedGitImplementation &&
 				ts.isStringLiteralLike(node.arguments[0]) &&
 				node.arguments[0].text === "git"

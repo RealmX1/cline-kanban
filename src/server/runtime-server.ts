@@ -143,8 +143,10 @@ import {
 import { createTaskClosureRecoveryMonitor } from "../task-closure/task-closure-recovery-monitor";
 import { observeOwnerSessionInterruptBeforeOwnedCommandExecutionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
 import { createTaskCommandExecutionService } from "../task-command-execution/task-command-execution-service";
+import { createTaskConversationSessionOperationStore } from "../task-conversation-sessions/task-conversation-session-operation-store";
 import { createTaskEditorCreationSubmissionService } from "../task-editor-creation/task-editor-creation-submission-service";
 import { recordTaskEditorCreationExplicitStop } from "../task-editor-creation/task-editor-creation-submission-store";
+import { handleTaskFileDownloadHttpRequest } from "../task-file-downloads/task-file-download-http-handler";
 import { collectTaskIndexingMaterials } from "../task-indexing-support/collect-task-indexing-materials";
 import { readTaskSessionIntentMaterial } from "../task-indexing-support/read-task-session-intent-material";
 import { executeTaskAnalysisApi } from "../task-indexing-support/task-analysis-api-executor";
@@ -1307,6 +1309,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			)
 				return null;
 			const conversationSessionId = resolveMainTaskConversationSessionId(card);
+			if (
+				(
+					await createTaskConversationSessionOperationStore().read({ workspaceId, workspacePath })
+				).explicitlyStoppedSessionIds.includes(conversationSessionId)
+			)
+				return null;
 			const summary =
 				findRuntimeSessionSummary(workspaceId, conversationSessionId) ?? state.sessions[conversationSessionId];
 			const nativeSessionId = summary?.agentNativeConversationSessionIdentity?.nativeSessionId ?? null;
@@ -2210,6 +2218,18 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					// PasscodeGateProvider in main.tsx will render the gate before any
 					// authenticated API calls are made.
 				}
+			}
+			if (pathname === "/api/task-file-download") {
+				const { workspaceScope } = await resolveWorkspaceScopeFromRequest(req, requestUrl);
+				if (!workspaceScope) {
+					res.writeHead(404, { "Content-Type": "application/json; charset=utf-8" });
+					res.end(JSON.stringify({ error: "指定项目不存在。" }));
+					return;
+				}
+				await handleTaskFileDownloadHttpRequest(req, res, (input) =>
+					runtimeApi.openTaskFileDownload(workspaceScope, input),
+				);
+				return;
 			}
 			if (pathname.startsWith("/api/trpc")) {
 				await trpcHttpHandler(req, res);
