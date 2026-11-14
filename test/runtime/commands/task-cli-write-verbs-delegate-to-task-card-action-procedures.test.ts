@@ -32,6 +32,7 @@ const harness = vi.hoisted(() => {
 	});
 	return {
 		taskCardActionRequests,
+		gitStatusRequests: [] as unknown[],
 		deletedInProgressTaskCard,
 		responsesByProcedureName,
 		recordTaskCardActionMutation,
@@ -46,6 +47,12 @@ vi.mock("@trpc/client", () => ({
 		},
 		workspace: {
 			getState: { query: async () => harness.boardStateForColumnSelection },
+			getTaskWorkspaceGitStatuses: {
+				query: async (input: unknown) => {
+					harness.gitStatusRequests.push(input);
+					return { taskWorkspaceGitStatuses: {} };
+				},
+			},
 		},
 		runtime: {
 			recordCurrentTaskProgress: harness.recordTaskCardActionMutation("recordCurrentTaskProgress"),
@@ -135,9 +142,25 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 	beforeEach(() => {
 		process.exitCode = undefined;
 		harness.taskCardActionRequests.length = 0;
+		harness.gitStatusRequests.length = 0;
 		for (const procedureName of Object.keys(harness.responsesByProcedureName)) {
 			delete harness.responsesByProcedureName[procedureName];
 		}
+	});
+	it.each([
+		{ args: ["--column", "review"], taskIds: ["task-review"] },
+		{ args: ["--column", "trash"], taskIds: ["task-trash"] },
+		{ args: [], taskIds: ["task-review", "task-in_progress"] },
+		{ args: ["--column", "backlog"], taskIds: [] },
+	])("task list $args 只为最终返回的卡片请求Git状态", async ({ args, taskIds }) => {
+		harness.boardStateForColumnSelection.board.columns = ["review", "in_progress", "trash", "backlog"].map((id) => ({
+			id,
+			cards: id === "backlog" ? [] : [{ ...harness.deletedInProgressTaskCard, id: `task-${id}` }],
+		}));
+		const result = await runKanbanTaskCommand(["list", ...args]);
+		expect(result.exitCode).toBeUndefined();
+		expect(harness.gitStatusRequests).toEqual([{ taskIds }]);
+		expect(result.output).toMatchObject({ count: taskIds.length });
 	});
 
 	afterEach(() => {

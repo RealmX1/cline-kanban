@@ -1,35 +1,24 @@
-import { CornerUpLeft } from "lucide-react";
-import type { MouseEvent } from "react";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { TaskCardBody } from "@/components/task-card-body";
 import { TaskCardBodyVisualDensityProvider } from "@/components/task-card-body-visual-density-context";
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
-import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
-import { Tooltip } from "@/components/ui/tooltip";
 import { resolveBoardColumnTitle } from "@/data/board-data";
 import type { RuntimeAgentId } from "@/runtime/types";
 import type { CardSelection } from "@/types";
 
-/** 分组外保底卡和 Sticky 用同一份实时卡体；只在 Sticky 时接管卡体点击，卡片动作与 Portal 仍独立。 */
+/** 分组外保底卡使用实时完整卡体；组内 Sticky 复用列表行。 */
 export function CrossProjectTaskSwitcherFocusedTaskCard({
 	selection,
 	projectName,
 	currentProjectTaskCards,
 	defaultAgentId,
-	onRevealFocusedTask,
 }: {
 	selection: CardSelection | null;
 	projectName: string;
 	currentProjectTaskCards: CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion | null;
 	defaultAgentId: RuntimeAgentId | null;
-	onRevealFocusedTask?: () => void;
 }) {
-	const revealFromCardBody = (event: MouseEvent<HTMLDivElement>) => {
-		if (!event.currentTarget.contains(event.target as Node)) return;
-		if ((event.target as HTMLElement).closest("button, input, textarea, a, [role='button']")) return;
-		onRevealFocusedTask?.();
-	};
 	return (
 		<section
 			className="flex min-w-0 shrink-0 flex-col rounded-lg border border-border bg-surface-1"
@@ -46,19 +35,8 @@ export function CrossProjectTaskSwitcherFocusedTaskCard({
 						{resolveBoardColumnTitle(selection.column.id)}
 					</span>
 				) : null}
-				{onRevealFocusedTask ? (
-					<Tooltip content="返回当前任务所在位置" side="top">
-						<Button
-							size="xs"
-							variant="ghost"
-							icon={<CornerUpLeft size={13} />}
-							aria-label="返回当前任务所在位置"
-							onClick={onRevealFocusedTask}
-						/>
-					</Tooltip>
-				) : null}
 			</div>
-			<div className="min-w-0 px-1 pb-1.5" onClick={onRevealFocusedTask ? revealFromCardBody : undefined}>
+			<div className="min-w-0 px-1 pb-1.5">
 				{selection && currentProjectTaskCards ? (
 					<TaskCardBodyVisualDensityProvider value="compact_row_in_focus_view_left_column">
 						<TaskCardBody

@@ -69,6 +69,8 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	inPlaceExpansionState,
 	fullTaskCard,
 	focusedTaskScrollAnchorKey,
+	isFocusedTaskStickyCopy = false,
+	focusedTaskSourcePositionReturnAction,
 	onKeepExpandedInListAsFullTaskCard,
 	rowHoverExpansionTriggerProps,
 	hoverExpansionScrollContainerRef,
@@ -89,6 +91,8 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 	// 展开时显示；精简行在 hover 意图计时期间也给出，隐藏挂载，借此在展开前就读好其他项目的卡（展开时是同一个实例）。
 	fullTaskCard?: ReactNode;
 	focusedTaskScrollAnchorKey?: string;
+	isFocusedTaskStickyCopy?: boolean;
+	focusedTaskSourcePositionReturnAction?: ReactNode;
 	onKeepExpandedInListAsFullTaskCard?: () => void;
 	rowHoverExpansionTriggerProps?: CrossProjectTaskSwitcherRowHoverExpansionTriggerProps;
 	hoverExpansionScrollContainerRef?: RefObject<HTMLElement | null>;
@@ -105,15 +109,19 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 		"data-cross-project-task-switcher-section": section,
 		"data-cross-project-task-switcher-workspace-id": workspaceId,
 		"data-cross-project-task-switcher-task-id": entry.taskId,
-		"data-cross-project-focused-task-scroll-anchor": focusedTaskScrollAnchorKey,
+		"data-cross-project-focused-task-scroll-anchor": isFocusedTaskStickyCopy ? undefined : focusedTaskScrollAnchorKey,
 		"data-cross-project-task-switcher-row-in-place-expansion-state": inPlaceExpansionState,
 		// Pinned 行不挂锚点：Pinned 点击后要跳到的正是下方区里的这一行。
 		"data-verification-anchor":
-			section === "pinned" ? undefined : crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId, entry.taskId),
+			section === "pinned" || isFocusedTaskStickyCopy
+				? undefined
+				: crossProjectTaskSwitcherSectionRowAnchorKey(workspaceId, entry.taskId),
 	};
 
 	const showsFullTaskCard = inPlaceExpansionState !== "compact_row" && fullTaskCard !== undefined;
-	const isHoverFloatingCardVisible = showsFullTaskCard && inPlaceExpansionState === "expanded_in_place_by_hover";
+	const isHoverExpandedCardVisible = showsFullTaskCard && inPlaceExpansionState === "expanded_in_place_by_hover";
+	// Sticky 自身已有视口限高，hover 直接展开内容，避免浮层越过 rail 的裁切边界。
+	const isHoverFloatingCardVisible = isHoverExpandedCardVisible && !isFocusedTaskStickyCopy;
 	const { rowElementRef, fullTaskCardContentElementRef, floatingCardViewportStyle, requiresInternalScrolling } =
 		useCrossProjectTaskSwitcherHoverFloatingCardViewportPosition({
 			isFloatingCardVisible: isHoverFloatingCardVisible,
@@ -121,7 +129,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 		});
 	const compactRowPlaceholderRef = useRef<HTMLDivElement | null>(null);
 	useLayoutEffect(() => {
-		if (!isHoverFloatingCardVisible) return;
+		if (!isHoverExpandedCardVisible) return;
 		const activeElement = document.activeElement;
 		if (
 			activeElement instanceof HTMLElement &&
@@ -139,7 +147,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			const fullCard = fullTaskCardContentElementRef.current;
 			if (fullCard) focusTaskCardKeyboardEntryIncludingPortalledActionToolbars(fullCard, targetSelector);
 		}
-	}, [isHoverFloatingCardVisible, fullTaskCardContentElementRef]);
+	}, [isHoverExpandedCardVisible, fullTaskCardContentElementRef]);
 	// 键盘按展开开关切换形态时，旧形态（连同它的开关）整块卸载：把焦点交给新形态下同一坐标的开关，不落到 body。
 	const compactRowElementRefHandingOffToggleKeyboardFocus =
 		useCallbackRefHandingOffInListExpansionToggleKeyboardFocusWhenElementIsRemoved();
@@ -158,7 +166,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 			ref={rowElementRef}
 			className={cn(
 				"relative flex min-w-0 shrink-0 flex-col",
-				inPlaceExpansionState === "kept_expanded_in_list"
+				inPlaceExpansionState === "kept_expanded_in_list" || (isFocusedTaskStickyCopy && showsFullTaskCard)
 					? CROSS_PROJECT_TASK_SWITCHER_FULL_TASK_CARD_FRAME_GEOMETRY_CLASS_NAME
 					: "rounded-md",
 				isHoverFloatingCardVisible && "z-20",
@@ -179,11 +187,12 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 				<div
 					ref={attachCompactRowPlaceholder}
 					data-cross-project-task-switcher-compact-row-placeholder=""
-					aria-hidden={isHoverFloatingCardVisible || undefined}
-					{...{ inert: isHoverFloatingCardVisible ? "" : undefined }}
+					aria-hidden={isHoverExpandedCardVisible || undefined}
+					{...{ inert: isHoverExpandedCardVisible ? "" : undefined }}
 					className={cn(
 						"group relative flex min-w-0 rounded-md bg-surface-2/35 ring-1 ring-inset ring-border-bright/65 hover:bg-surface-3",
-						isHoverFloatingCardVisible && "invisible pointer-events-none",
+						isHoverExpandedCardVisible && "invisible pointer-events-none",
+						isFocusedTaskStickyCopy && isHoverExpandedCardVisible && "absolute inset-x-0 top-0",
 					)}
 				>
 					<div
@@ -197,7 +206,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 							data-cross-project-task-switcher-compact-row-open-task=""
 							aria-current={isFocused ? "true" : undefined}
 							className="absolute inset-0 cursor-pointer rounded-md focus-visible:outline-2 focus-visible:outline-accent"
-							aria-label={`打开任务：${entry.title}`}
+							aria-label={`${isFocusedTaskStickyCopy ? "返回当前任务所在位置" : "打开任务"}：${entry.title}`}
 						/>
 						<div className="pointer-events-none relative">
 							<CrossProjectTaskSwitcherRowSummaryMetadata
@@ -252,6 +261,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 						isCompactTaskRow
 						actionToolbarRightInsetPx={4}
 					>
+						{focusedTaskSourcePositionReturnAction}
 						{section === "pinned" && onEditTaskPinboardPinReason ? (
 							<Button
 								variant="ghost"

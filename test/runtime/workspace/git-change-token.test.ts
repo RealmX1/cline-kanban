@@ -31,6 +31,35 @@ async function createRegularRepo(dir: string): Promise<void> {
 }
 
 describe("computeWorktreeGitChangeToken", () => {
+	it("首次缺失后创建仓库立即失效；同路径替换gitdir不能沿用旧解析", async () => {
+		expect(await computeWorktreeGitChangeToken(root)).toBe("no-gitdir");
+		await createRegularRepo(root);
+		const original = await computeWorktreeGitChangeToken(root);
+		expect(original).not.toBe("no-gitdir");
+		const replacement = join(root, "replacement-git-dir");
+		await mkdir(replacement);
+		await writeFile(join(replacement, "HEAD"), "replacement-head\n");
+		await rm(join(root, ".git"), { recursive: true });
+		await writeFile(join(root, ".git"), `gitdir: ${replacement}\n`);
+		const replaced = await computeWorktreeGitChangeToken(root);
+		expect(replaced).not.toBe(original);
+		await writeFile(join(replacement, "HEAD"), "another-head\n");
+		expect(await computeWorktreeGitChangeToken(root)).not.toBe(replaced);
+	});
+
+	it("symbolic HEAD的共享ref与packed-refs变化立即失效，即使HEAD及其reflog没写入", async () => {
+		await createRegularRepo(root);
+		const gitDir = join(root, ".git");
+		await mkdir(join(gitDir, "refs", "heads"), { recursive: true });
+		await writeFile(join(gitDir, "refs", "heads", "main"), "a".repeat(40));
+		const before = await computeWorktreeGitChangeToken(root);
+		await writeFile(join(gitDir, "refs", "heads", "main"), "b".repeat(40));
+		const afterRef = await computeWorktreeGitChangeToken(root);
+		expect(afterRef).not.toBe(before);
+		await writeFile(join(gitDir, "packed-refs"), `${"c".repeat(40)} refs/heads/main\n`);
+		expect(await computeWorktreeGitChangeToken(root)).not.toBe(afterRef);
+	});
+
 	it("同一状态两次调用得到相同 token（幂等）", async () => {
 		await createRegularRepo(root);
 		const first = await computeWorktreeGitChangeToken(root);

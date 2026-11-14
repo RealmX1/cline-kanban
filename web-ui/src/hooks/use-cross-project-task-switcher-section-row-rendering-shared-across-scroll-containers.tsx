@@ -2,6 +2,7 @@ import {
 	buildCrossProjectTaskSwitcherEntryKey,
 	type CrossProjectTaskSwitcherEntryInProject,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
+import { CornerUpLeft } from "lucide-react";
 import { type ReactElement, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { notifyError } from "@/components/app-toaster";
 import type { CrossProjectTaskSwitcherFullTaskCardInListExpansionState } from "@/components/detail-panels/cross-project-recently-active-task-switcher-full-task-card-in-list-expansion-toggle-button";
@@ -20,6 +21,8 @@ import {
 	TaskPinboardPinReasonDialog,
 	type TaskPinboardPinReasonDialogRequest,
 } from "@/components/task-pinboard-pin-reason-dialog";
+import { Button } from "@/components/ui/button";
+import { Tooltip } from "@/components/ui/tooltip";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import {
 	isSameCrossProjectTaskSwitcherRow,
@@ -54,6 +57,7 @@ export interface CrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScrollCo
 		section: CrossProjectTaskSwitcherTaskRowSection,
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
 		focusedTaskScrollAnchorKey?: string,
+		onRevealFocusedTaskScrollAnchor?: () => void,
 	) => ReactElement;
 	pinReasonDialogAndOtherProjectConfirmationDialogs: ReactNode;
 }
@@ -380,6 +384,8 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		inListExpansionState: CrossProjectTaskSwitcherFullTaskCardInListExpansionState,
 		isPresentedAsHoveredFromFirstFrame: boolean,
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
+		onRevealFocusedTaskScrollAnchor?: () => void,
+		focusedTaskSourcePositionReturnAction?: ReactNode,
 	): ReactElement => {
 		const entryKey = buildCrossProjectTaskSwitcherEntryKey(entryInProject.workspaceId, entryInProject.entry.taskId);
 		return (
@@ -402,7 +408,10 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 						inListExpansionState === "kept_expanded_in_list"
 							? collapseEntryBackToCompactRow(entryKey, rowHoverExpansionOfHostingScrollContainer)
 							: keepEntryExpandedInListAsFullTaskCard(entryKey, rowHoverExpansionOfHostingScrollContainer),
-					onActivateRow: () => activateRow(entryInProject, section, rowHoverExpansionOfHostingScrollContainer),
+					onActivateRow:
+						onRevealFocusedTaskScrollAnchor ??
+						(() => activateRow(entryInProject, section, rowHoverExpansionOfHostingScrollContainer)),
+					focusedTaskSourcePositionReturnAction,
 					isPresentedAsHoveredFromFirstFrame,
 				}}
 			/>
@@ -413,6 +422,7 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		section: CrossProjectTaskSwitcherTaskRowSection,
 		rowHoverExpansionOfHostingScrollContainer: CrossProjectTaskSwitcherRowHoverExpansionOfHostingScrollContainer,
 		focusedTaskScrollAnchorKey?: string,
+		onRevealFocusedTaskScrollAnchor?: () => void,
 	): ReactElement => {
 		const { rowExpandedInPlaceByHover, rowWithPendingHoverIntent, buildRowHoverExpansionTriggerProps } =
 			rowHoverExpansionOfHostingScrollContainer;
@@ -426,12 +436,28 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		const hasPendingHoverIntent =
 			!isKeptExpandedInListAsFullTaskCardByUser &&
 			isSameCrossProjectTaskSwitcherRow(rowWithPendingHoverIntent, rowIdentity);
+		const focusedTaskSourcePositionReturnAction = onRevealFocusedTaskScrollAnchor ? (
+			<Tooltip content="返回当前任务所在位置" side="top">
+				<Button
+					size="xs"
+					variant="ghost"
+					icon={<CornerUpLeft size={12} />}
+					aria-label="返回当前任务所在位置"
+					onClick={(event) => {
+						event.stopPropagation();
+						onRevealFocusedTaskScrollAnchor();
+					}}
+				/>
+			</Tooltip>
+		) : undefined;
 		return (
 			<CrossProjectRecentlyActiveTaskSwitcherTaskRow
 				key={`${section}:${entryKey}`}
 				entryInProject={entryInProject}
 				section={section}
 				focusedTaskScrollAnchorKey={focusedTaskScrollAnchorKey}
+				isFocusedTaskStickyCopy={onRevealFocusedTaskScrollAnchor !== undefined}
+				focusedTaskSourcePositionReturnAction={focusedTaskSourcePositionReturnAction}
 				isFocused={
 					host.focusedTaskInProject?.workspaceId === workspaceId &&
 					host.focusedTaskInProject.taskId === entry.taskId
@@ -456,6 +482,8 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 								isKeptExpandedInListAsFullTaskCardByUser ? "kept_expanded_in_list" : "collapsed_to_compact_row",
 								isExpandedInPlaceByHover && rowExpandedInPlaceByHover?.isPointerOverRow === true,
 								rowHoverExpansionOfHostingScrollContainer,
+								onRevealFocusedTaskScrollAnchor,
+								focusedTaskSourcePositionReturnAction,
 							)
 						: undefined
 				}
@@ -467,7 +495,10 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 					isKeptExpandedInListAsFullTaskCardByUser ? "kept_expanded_in_list" : "compact_row",
 				)}
 				hoverExpansionScrollContainerRef={rowHoverExpansionOfHostingScrollContainer.panelScrollContainerRef}
-				onOpen={() => activateRow(entryInProject, section, rowHoverExpansionOfHostingScrollContainer)}
+				onOpen={
+					onRevealFocusedTaskScrollAnchor ??
+					(() => activateRow(entryInProject, section, rowHoverExpansionOfHostingScrollContainer))
+				}
 				onTogglePinnedToTaskPinboard={() => togglePinnedToTaskPinboard(entryInProject)}
 				onEditTaskPinboardPinReason={
 					section === "pinned" ? () => editTaskPinboardPinReason(entryInProject) : undefined

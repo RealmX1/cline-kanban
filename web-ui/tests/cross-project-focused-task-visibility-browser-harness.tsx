@@ -62,6 +62,7 @@ function Harness() {
 	const [showsPinnedTasks, setShowsPinnedTasks] = useState(false);
 	const [panelMountSequence, setPanelMountSequence] = useState(0);
 	const [actionResult, setActionResult] = useState("");
+	const [taskOpenRequestCount, setTaskOpenRequestCount] = useState(0);
 	const board = hydratedProjectId === "project-a" ? projectABoard : projectBBoard;
 	const handleSelectProject = useCallback((id: string) => setCurrentProjectId(id), []);
 	const taskOpening = useCrossProjectTaskOpenInProject({
@@ -80,7 +81,10 @@ function Harness() {
 		crossProjectTaskSwitcherSectionsModel: sectionsModel,
 		projects, notificationLogByWorkspaceId: {}, currentProjectId, isBoardScopeAllProjectsSelected: true,
 		selectedCardTaskId: selectedTaskId, pendingCrossProjectTaskOpen: taskOpening.pendingCrossProjectTaskOpen,
-		onOpenTaskInProject: taskOpening.handleOpenTaskInProject, onOpenBacklogTaskEditorInProject: () => {},
+		onOpenTaskInProject: (workspaceId, taskId) => {
+			setTaskOpenRequestCount((count) => count + 1);
+			taskOpening.handleOpenTaskInProject(workspaceId, taskId);
+		}, onOpenBacklogTaskEditorInProject: () => {},
 		onRequestCreateTaskInBoardScope: () => {}, onRequestPinCurrentProjectTaskToTaskPinboard: () => {},
 		onUnpinCurrentProjectTaskFromTaskPinboard: () => {}, onEditCurrentProjectTaskPinboardPinReason: () => {},
 	});
@@ -117,6 +121,7 @@ function Harness() {
 				</div>
 				<div className="flex-1" aria-label="当前打开任务">{hydratedProjectId}:{selectedTaskId ?? "none"}
 					<output aria-label="动作结果">{actionResult}</output>
+					<output aria-label="任务打开请求次数">{taskOpenRequestCount}</output>
 				</div>
 			</div>
 			<TaskSpotlightSearchDialog controller={search} />

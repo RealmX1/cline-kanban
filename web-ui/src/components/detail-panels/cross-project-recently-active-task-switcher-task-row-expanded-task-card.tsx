@@ -56,6 +56,7 @@ export interface CrossProjectTaskSwitcherFullTaskCardRowContext {
 	isPresentedAsHoveredFromFirstFrame: boolean;
 	// 与点这一行的精简行同一个函数：卡体任何非按钮位置的单击都调它，不走卡体自己的列级单击语义。
 	onActivateRow: () => void;
+	focusedTaskSourcePositionReturnAction?: ReactNode;
 }
 
 function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
@@ -86,10 +87,13 @@ function buildTaskCardBodyCrossProjectTaskSwitcherRowElements(
 			/>
 		) : null,
 		inListExpansionToggle: (
-			<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
-				expansionState={rowContext.inListExpansionState}
-				onToggleInListExpansion={rowContext.onToggleInListExpansion}
-			/>
+			<>
+				{rowContext.focusedTaskSourcePositionReturnAction}
+				<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
+					expansionState={rowContext.inListExpansionState}
+					onToggleInListExpansion={rowContext.onToggleInListExpansion}
+				/>
+			</>
 		),
 		isPresentedAsHoveredFromFirstFrame: rowContext.isPresentedAsHoveredFromFirstFrame,
 	};
@@ -169,6 +173,7 @@ function ExpandedTaskCardUnavailableFallback({
 				isCompactTaskRow
 				actionToolbarRightInsetPx={4}
 			>
+				{rowContext.focusedTaskSourcePositionReturnAction}
 				<CrossProjectTaskSwitcherFullTaskCardInListExpansionToggleButton
 					expansionState={rowContext.inListExpansionState}
 					onToggleInListExpansion={rowContext.onToggleInListExpansion}

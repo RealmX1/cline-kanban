@@ -8,7 +8,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSessionPtyHostControllerConnection } from "../../src/agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
@@ -20,10 +20,14 @@ import {
 } from "../../src/agent-session-pty-host/runtime-client/hosted-session-cli-client-requests-to-agent-session-pty-host";
 import type { TerminalPtyProcessExitEvent } from "../../src/terminal/terminal-pty-process-handle";
 import {
+	bindTestPtyLifetimeToChildEnvironment,
+	createIsolatedTestOwnedPtyHostLifetime,
+} from "../utilities/isolated-test-owned-pty-host-lifetime";
+import {
 	type LoadSensitiveWallClockTwoTierDeadline,
 	waitForConditionWithinLoadSensitiveTwoTierDeadline,
 } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
-import { hasChildProcessExited } from "./runtime-integration-test-spawned-child-process-lifecycle";
+import { waitForChildProcessExit } from "./runtime-integration-test-spawned-child-process-lifecycle";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -53,15 +57,21 @@ const AGENT_SESSION_PTY_HOST_HOOK_SPOOL_INTEGRATION_TEST_TIMEOUT_MS =
 	HOSTED_SHELL_EXITS_WHILE_RUNTIME_ABSENT_TWO_TIER_DEADLINE.hardDeadlineMsOnlyExplainedByRealHangOrRegression +
 	SPOOL_DRAINED_AND_EXIT_DELIVERED_TWO_TIER_DEADLINE.hardDeadlineMsOnlyExplainedByRealHangOrRegression;
 
-const hostProcessesSigkilledAfterEachTest: ChildProcess[] = [];
+const hostProcessesConfirmedExitedAfterEachTest: ChildProcess[] = [];
+const testOwnedHostLifetimesClosedAfterEachTest: ReturnType<typeof createIsolatedTestOwnedPtyHostLifetime>[] = [];
+const controllerConnectionsClosedAfterEachTest = new Set<AgentSessionPtyHostControllerConnection>();
+const runtimeFacadesClosedAfterEachTest: AgentSessionPtyHostRuntimeFacade[] = [];
 const temporaryDirectoriesRemovedAfterEachTest: string[] = [];
 
-afterEach(() => {
-	// host 忽略 SIGTERM，只能 SIGKILL；只杀本用例启动时记下的子进程。
-	for (const hostProcess of hostProcessesSigkilledAfterEachTest.splice(0)) {
-		if (!hasChildProcessExited(hostProcess)) {
-			hostProcess.kill("SIGKILL");
-		}
+afterEach(async () => {
+	for (const facade of runtimeFacadesClosedAfterEachTest.splice(0))
+		await facade.closeControllerConnectionsAfterFlushingPendingFrames();
+	for (const controller of controllerConnectionsClosedAfterEachTest)
+		await controller.closeAfterFlushingPendingFrames();
+	controllerConnectionsClosedAfterEachTest.clear();
+	for (const lifetime of testOwnedHostLifetimesClosedAfterEachTest.splice(0)) lifetime.closeAndVerifyOwnedHostExit();
+	for (const hostProcess of hostProcessesConfirmedExitedAfterEachTest.splice(0)) {
+		expect(await waitForChildProcessExit(hostProcess, 5_000)).toBe(true);
 	}
 	for (const temporaryDirectoryPath of temporaryDirectoriesRemovedAfterEachTest.splice(0)) {
 		rmSync(temporaryDirectoryPath, { recursive: true, force: true });
@@ -69,6 +79,8 @@ afterEach(() => {
 });
 
 function startHostProcessFromSourceWithoutDaemonizing(socketPath: string, hostBuildIdentity: string): ChildProcess {
+	const lifetime = createIsolatedTestOwnedPtyHostLifetime(dirname(socketPath));
+	testOwnedHostLifetimesClosedAfterEachTest.push(lifetime);
 	const hostProcess = spawn(
 		process.execPath,
 		[
@@ -82,12 +94,18 @@ function startHostProcessFromSourceWithoutDaemonizing(socketPath: string, hostBu
 		],
 		{
 			cwd: process.cwd(),
-			env: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: "/tmp" },
+			env: bindTestPtyLifetimeToChildEnvironment({ PATH: "/usr/bin:/bin:/usr/sbin:/sbin", HOME: "/tmp" }, lifetime),
 			stdio: ["ignore", "pipe", "pipe"],
 		},
 	);
-	hostProcessesSigkilledAfterEachTest.push(hostProcess);
+	hostProcessesConfirmedExitedAfterEachTest.push(hostProcess);
 	return hostProcess;
+}
+
+async function connectTrackedController(socketPath: string): Promise<AgentSessionPtyHostControllerConnection> {
+	const controller = await AgentSessionPtyHostControllerConnection.connectAsController(socketPath);
+	controllerConnectionsClosedAfterEachTest.add(controller);
+	return controller;
 }
 
 const HOSTED_SESSION_BINDING_OUTPUT_PATTERN = /binding:([^|\r\n]+)\|([^\r\n]+)\r?\n/;
@@ -117,7 +135,7 @@ describe.skipIf(process.platform === "win32")("agent session pty host hook spool
 						async () => {
 							try {
 								await (
-									await AgentSessionPtyHostControllerConnection.connectAsController(launchRequest.socketPath)
+									await connectTrackedController(launchRequest.socketPath)
 								).closeAfterFlushingPendingFrames();
 								return true;
 							} catch {
@@ -130,6 +148,7 @@ describe.skipIf(process.platform === "win32")("agent session pty host hook spool
 			};
 
 			const crashedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
+			runtimeFacadesClosedAfterEachTest.push(crashedRuntimeFacade);
 			const outputSeenByCrashedRuntime: string[] = [];
 			await crashedRuntimeFacade
 				.createHostedTerminalPtyProcessSpawnerForWorkspace("workspace-1", "/tmp/workspace-1-repository")
@@ -188,7 +207,7 @@ describe.skipIf(process.platform === "win32")("agent session pty host hook spool
 				testContext,
 				HOSTED_SHELL_EXITS_WHILE_RUNTIME_ABSENT_TWO_TIER_DEADLINE,
 				async () => {
-					const listingController = await AgentSessionPtyHostControllerConnection.connectAsController(
+					const listingController = await connectTrackedController(
 						hostedSessionBinding.agentSessionPtyHostSocketPath,
 					);
 					const [listing] = await listingController.requestListHostedSessions();
@@ -200,6 +219,7 @@ describe.skipIf(process.platform === "win32")("agent session pty host hook spool
 			expect((await spool({ event: "to_review", n: "final-stop" }, false)).kind).toBe("spooled");
 
 			const restartedRuntimeFacade = await AgentSessionPtyHostRuntimeFacade.start(facadeOptions);
+			runtimeFacadesClosedAfterEachTest.push(restartedRuntimeFacade);
 			const [adoptionCandidate] =
 				restartedRuntimeFacade.takeHostedTerminalPtySessionAdoptionCandidatesForWorkspace("workspace-1");
 			if (!adoptionCandidate) {
@@ -235,9 +255,7 @@ describe.skipIf(process.platform === "win32")("agent session pty host hook spool
 
 			// 退出已确认：host 里不再有这条会话（spool 随之丢弃），runtime 也不再在它身上排空。
 			await restartedRuntimeFacade.closeControllerConnectionsAfterFlushingPendingFrames();
-			const verifyingController = await AgentSessionPtyHostControllerConnection.connectAsController(
-				hostedSessionBinding.agentSessionPtyHostSocketPath,
-			);
+			const verifyingController = await connectTrackedController(hostedSessionBinding.agentSessionPtyHostSocketPath);
 			expect(await verifyingController.requestListHostedSessions()).toEqual([]);
 			await verifyingController.closeAfterFlushingPendingFrames();
 		},

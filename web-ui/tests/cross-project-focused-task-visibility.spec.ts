@@ -9,6 +9,7 @@ import { taskCardActionToolbar } from "./task-card-action-toolbar-browser-locato
 const scrollContainerSelector = '[data-testid="cross-project-recently-active-task-switcher-panel"]';
 const anchorSelector = "[data-cross-project-focused-task-scroll-anchor]";
 const stickySelector = "[data-cross-project-focused-task-sticky-edge]";
+const rowSelector = "[data-cross-project-task-switcher-row-in-place-expansion-state]";
 let pageErrors: string[];
 
 test.beforeEach(async ({ page }) => {
@@ -253,7 +254,10 @@ test("组内任务上下触边、大幅滚动跳转与回到视口，始终只�
 	await page.screenshot({ path: test.info().outputPath("grouped-task-sticky-bottom.png") });
 	await setPanelScroll(page, "end");
 	await expect(page.locator(stickySelector)).toHaveAttribute("data-cross-project-focused-task-sticky-edge", "top");
-	await page.locator(stickySelector).getByRole("button", { name: "返回当前任务所在位置", exact: true }).click();
+	await page.locator(stickySelector).hover();
+	await (await taskCardActionToolbar(page.locator(stickySelector)))
+		.getByRole("button", { name: "返回当前任务所在位置", exact: true })
+		.click();
 	await expect(page.locator(stickySelector)).toHaveCount(0);
 	await expect(page.locator(anchorSelector)).toBeVisible();
 	await page.locator(scrollContainerSelector).evaluate((root) => {
@@ -265,6 +269,129 @@ test("组内任务上下触边、大幅滚动跳转与回到视口，始终只�
 	await expect(page.locator(anchorSelector)).toHaveCount(1);
 	await expect(page.locator(stickySelector)).toHaveCount(1);
 });
+
+for (const edge of ["top", "bottom"] as const) {
+	test(`${edge} sticky 默认精简，hover 临时展开，手动展开同步且动作不误触回跳`, async ({ page }) => {
+		await page.mouse.move(1000, 700);
+		await setPanelScroll(page, edge === "top" ? "end" : 0);
+		const sticky = page.locator(stickySelector);
+		const stickyRow = sticky.locator(rowSelector);
+		const source = page.locator(anchorSelector);
+		await expect(sticky).toHaveAttribute("data-cross-project-focused-task-sticky-edge", edge);
+		await expect(stickyRow).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"compact_row",
+		);
+		await expect(sticky).not.toContainText("当前聚焦任务");
+		await expect(sticky).toContainText("project-a");
+		await expect(sticky.locator("[data-verification-anchor], [data-task-id]")).toHaveCount(0);
+		await expect(
+			page.locator('[data-verification-anchor="cross-project-task-switcher-section-row:project-a:recent-20"]'),
+		).toHaveCount(1);
+		await sticky.hover();
+		await expect(stickyRow).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"expanded_in_place_by_hover",
+		);
+		await expect(source).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"compact_row",
+		);
+		await page.mouse.move(1000, 700);
+		await expect(stickyRow).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"compact_row",
+		);
+		await sticky.hover();
+		await (await taskCardActionToolbar(sticky))
+			.getByRole("button", { name: "Keep expanded in list", exact: true })
+			.focus();
+		await page.keyboard.press("Enter");
+		await expect(stickyRow).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"kept_expanded_in_list",
+		);
+		await expect(source).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"kept_expanded_in_list",
+		);
+		await expect(
+			(await taskCardActionToolbar(sticky)).getByRole("button", { name: "Collapse to compact row", exact: true }),
+		).toBeFocused();
+		await page.screenshot({ path: test.info().outputPath(`sticky-${edge}-kept-expanded.png`) });
+		await page.keyboard.press("Space");
+		await expect(source).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"compact_row",
+		);
+		await expect(
+			(await taskCardActionToolbar(sticky)).getByRole("button", { name: "Keep expanded in list", exact: true }),
+		).toBeFocused();
+		await page.keyboard.press("Enter");
+		await (await taskCardActionToolbar(sticky))
+			.getByRole("button", { name: "Move task to validation", exact: true })
+			.click();
+		await expect(page.getByLabel("动作结果")).toHaveText("validation:project-a:recent-20");
+		await expect(sticky).toBeVisible();
+		await (await taskCardActionToolbar(sticky))
+			.getByRole("button", { name: "View original prompt", exact: true })
+			.click();
+		const dialog = page.getByRole("dialog");
+		await expect(dialog).toContainText("原始任务需求：列表任务 20");
+		await dialog.click();
+		await expect(sticky).toBeVisible();
+		await page.keyboard.press("Escape");
+		await expect(dialog).toHaveCount(0);
+		await expect(sticky).toBeVisible();
+		await sticky.locator("[data-task-card-title][role='button']").focus();
+		await page.keyboard.press("Enter");
+		await expect(sticky).toHaveCount(0);
+		await expect(source.locator("[data-task-card-title][role='button']")).toBeFocused();
+		await expect(page.getByLabel("任务打开请求次数")).toHaveText("0");
+		await expect(page.locator(anchorSelector)).toHaveCount(1);
+	});
+
+	test(`${edge} sticky 的 hover 接力精简行键盘焦点，离开焦点后自动收起`, async ({ page }) => {
+		await page.keyboard.press("Tab");
+		await page.mouse.move(1000, 700);
+		await setPanelScroll(page, edge === "top" ? "end" : 0);
+		const sticky = page.locator(stickySelector);
+		await sticky.locator("[data-cross-project-task-switcher-compact-row-open-task]").focus();
+		await sticky.hover();
+		const fullTaskCardTitle = sticky.locator("[data-task-card-title][role='button']");
+		await expect(fullTaskCardTitle).toBeFocused();
+		await page.mouse.move(1000, 700);
+		await expect(fullTaskCardTitle).toBeVisible();
+		await page.getByRole("button", { name: "Search tasks", exact: true }).focus();
+		await expect(sticky.locator(rowSelector)).toHaveAttribute(
+			"data-cross-project-task-switcher-row-in-place-expansion-state",
+			"compact_row",
+		);
+	});
+}
+
+for (const activation of ["pointer", "Enter", "Space"] as const) {
+	test(`精简 sticky 的卡体通过 ${activation} 仅返回源行`, async ({ page }) => {
+		await page.mouse.move(1000, 700);
+		await setPanelScroll(page, 0);
+		const sticky = page.locator(stickySelector);
+		const entry = sticky.locator("[data-cross-project-task-switcher-compact-row-open-task]");
+		if (activation === "pointer")
+			await sticky.locator("[data-cross-project-task-switcher-compact-row-placeholder]").click();
+		else {
+			await entry.focus();
+			await page.keyboard.press(activation);
+		}
+		await expect(sticky).toHaveCount(0);
+		await expect(page.locator(anchorSelector)).toBeVisible();
+		if (activation !== "pointer") {
+			await expect(
+				page.locator(anchorSelector).locator("[data-cross-project-task-switcher-compact-row-open-task]"),
+			).toBeFocused();
+		}
+		await expect(page.getByLabel("任务打开请求次数")).toHaveText("0");
+	});
+}
 
 test("动态归组移除独立区、重新挂载保留滚动与焦点副本，收起组仍保留定位行", async ({ page }) => {
 	await searchAndOpen(page, "分组外目标任务");
@@ -384,6 +511,14 @@ for (const edge of ["top", "bottom"] as const) {
 		await setPanelScroll(page, edge === "top" ? "end" : 0);
 		const sticky = page.locator(`${stickySelector}[data-cross-project-focused-task-sticky-edge="${edge}"]`);
 		await expect(sticky).toBeVisible();
+		await sticky.hover();
+		await (await taskCardActionToolbar(sticky))
+			.getByRole("button", { name: "Keep expanded in list", exact: true })
+			.click();
+		const naturalCard = sticky.locator(
+			'[data-cross-project-task-switcher-row-in-place-expansion-state="kept_expanded_in_list"]',
+		);
+		await expect(naturalCard).toBeVisible();
 		const scrollRoot = page.locator(scrollContainerSelector);
 		const measured = await scrollRoot.evaluate((element) => ({
 			viewportTop: element.getBoundingClientRect().top,
@@ -414,7 +549,6 @@ for (const edge of ["top", "bottom"] as const) {
 		expect(stickyBox!.y + stickyBox!.height).toBeLessThanOrEqual(rootBox!.y + rootBox!.height + 1);
 		expect(await sticky.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
 		expect(await sticky.evaluate((element) => element.scrollHeight - element.clientHeight)).toBeGreaterThan(0);
-		const naturalCard = sticky.getByRole("region", { name: "当前聚焦任务", exact: true });
 		const naturalCardHeight = (await naturalCard.boundingBox())!.height;
 		expect(naturalCardHeight).toBeGreaterThan(stickyBox!.height);
 		const columnScrollTop = await scrollRoot.evaluate((element) => element.scrollTop);

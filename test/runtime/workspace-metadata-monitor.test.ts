@@ -70,6 +70,7 @@ import {
 import {
 	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_HOME_REPOSITORY_AND_ACTIVE_TASK_WORKTREE_MS,
 	GIT_METADATA_FULL_REFRESH_INTERVAL_FOR_IDLE_TASK_WORKTREE_MS,
+	loadTaskWorkspaceMetadata,
 	resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs,
 	TASK_WORKTREE_GIT_ACTIVITY_RECENCY_WINDOW_AFTER_LAST_OBSERVED_CHANGE_MS,
 	type TaskWorktreeGitMetadataProbeTarget,
@@ -245,6 +246,28 @@ describe("createWorkspaceMetadataMonitor", () => {
 
 	afterEach(() => {
 		monitor.close();
+	});
+
+	it("变更后探针失败不冒充旧成功，超时/取消错误后的下次读取立即重试", async () => {
+		const target: TaskWorktreeGitMetadataProbeTarget = {
+			taskId: "task-inplace",
+			baseRef: "main",
+			worktreeMode: "inplace",
+			taskCardBoardColumnId: "in_progress",
+			taskCardAutoReviewEnabled: false,
+		};
+		const resolveTip = async () => BASE_REF_TIP_COMMIT;
+		const first = await loadTaskWorkspaceMetadata("workspace-1", WORKSPACE_PATH, target, null, resolveTip);
+		expect(first?.data.headCommit).not.toBeNull();
+		gitChangeTokenMocks.computeWorktreeGitChangeToken.mockResolvedValue("changed-token");
+		gitSyncMocks.probeGitWorkspaceState.mockRejectedValueOnce(new Error("Git探针超时或取消"));
+		const failed = await loadTaskWorkspaceMetadata("workspace-1", WORKSPACE_PATH, target, first, resolveTip);
+		expect(failed?.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus).toBe("git_probe_unavailable");
+		const recovered = await loadTaskWorkspaceMetadata("workspace-1", WORKSPACE_PATH, target, failed, resolveTip);
+		expect(recovered?.data.headCommit).toBe(first?.data.headCommit);
+		expect(recovered?.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus).toBe(
+			"inplace_task_commit_ownership_unavailable",
+		);
 	});
 
 	it("只有部署变化也广播新覆盖，worktree 与 base 的缓存命中不冻结覆盖", async () => {
