@@ -178,6 +178,142 @@ describe("任务列表 Git 查询缓存", () => {
 		expect(await read(scope, { taskIds: [card.id] })).toEqual({ taskWorkspaceGitStatuses: {} });
 	});
 
+	it("探针回写后的状态不留在预镜像版本键上，文件回到旧字节时重新核验", async () => {
+		let version = "preimage";
+		const produced: CachedTaskWorkspaceMetadata[] = [];
+		probes.provenanceVersions.mockImplementation(async () => new Map([["task-2", version]]));
+		probes.load.mockImplementation(async () => {
+			version = "post-write";
+			const value = metadata();
+			value.boundTaskCommitIntegrationProvenanceVersion = "post-write";
+			value.data.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef = produced.length === 0 ? 4 : 0;
+			value.data.workspaceGitStatus.observedAt = produced.length === 0 ? 40 : 1;
+			produced.push(value);
+			return value;
+		});
+		const read = createTaskWorkspaceGitStatusQueryCache({ loadWorkspaceBoardById: async () => boardWithTasks() });
+		await read(scope, { taskIds: ["task-2"] });
+		await read(scope, { taskIds: ["task-2"] });
+		expect(probes.load.mock.calls[0]?.[3]).toBeNull();
+		expect(probes.load.mock.calls[1]?.[3]).toBe(produced[0]);
+		version = "preimage";
+		await read(scope, { taskIds: ["task-2"] });
+		expect(probes.load.mock.calls[2]?.[3]).toBeNull();
+	});
+
+	it("可复用状态只绑定探针声明的版本，探针返回后的外部历史会重新核验", async () => {
+		let version = "before-probe";
+		const produced = metadata();
+		produced.boundTaskCommitIntegrationProvenanceVersion = "probe-owned-write";
+		produced.data.workspaceGitStatus.taskCommitsIntegratedIntoBaseRef = 4;
+		produced.data.workspaceGitStatus.observedAt = 40;
+		const restored = metadata();
+		probes.provenanceVersions.mockImplementation(async () => new Map([["task-2", version]]));
+		let probesStarted = 0;
+		probes.load.mockImplementation(async (_workspaceId, _workspacePath, _target, current) => {
+			if (current !== null) return current;
+			probesStarted += 1;
+			if (probesStarted === 1) {
+				version = "external-history-restoration";
+				return produced;
+			}
+			return restored;
+		});
+		const read = createTaskWorkspaceGitStatusQueryCache({ loadWorkspaceBoardById: async () => boardWithTasks() });
+		expect(
+			(await read(scope, { taskIds: ["task-2"] })).taskWorkspaceGitStatuses["task-2"]
+				?.taskCommitsIntegratedIntoBaseRef,
+		).toBe(4);
+		const next = await read(scope, { taskIds: ["task-2"] });
+		expect(probes.load.mock.calls[1]?.[3]).toBeNull();
+		expect(next.taskWorkspaceGitStatuses["task-2"]?.taskCommitsIntegratedIntoBaseRef).toBe(0);
+		expect(next.taskWorkspaceGitStatuses["task-2"]?.observedAt).toBe(1);
+		version = "probe-owned-write";
+		const replay = await read(scope, { taskIds: ["task-2"] });
+		expect(probes.load.mock.calls[2]?.[3]).toBe(produced);
+		expect(replay.taskWorkspaceGitStatuses["task-2"]?.taskCommitsIntegratedIntoBaseRef).toBe(4);
+	});
+
+	it("provenance版本读失败不拒绝整批查询，失效本工作区成功缓存，其他工作区仍可复用", async () => {
+		const board = boardWithTasks();
+		board.columns[2].cards[0].worktreeMode = "inplace";
+		const cached = metadata();
+		probes.load.mockResolvedValue(cached);
+		probes.provenanceVersions.mockResolvedValue(new Map([["task-2", "known-version"]]));
+		const read = createTaskWorkspaceGitStatusQueryCache({ loadWorkspaceBoardById: async () => board });
+		const other = { workspaceId: "other-project", workspacePath: "/repos/other-project" };
+		await read(other, { taskIds: ["task-2"] });
+		await read(scope, { taskIds: ["task-2"] });
+		probes.provenanceVersions.mockRejectedValueOnce(
+			Object.assign(new Error("provenance unreadable"), { code: "EACCES" }),
+		);
+		const result = await read(scope, { taskIds: ["task-2"] });
+		expect(result.taskWorkspaceGitStatuses["task-2"]?.taskCommitIntegrationTrackingStatus).toBe("complete");
+		expect(probes.load.mock.calls[2]?.[3]).toBeNull();
+		expect(probes.load.mock.calls[2]?.[2]).toMatchObject({ taskId: "task-2", worktreeMode: "inplace" });
+		await read(other, { taskIds: ["task-2"] });
+		expect(probes.load.mock.calls[3]?.[3]).toBe(cached);
+	});
+
+	it("超过容量的重叠查询保留活动单飞，同一键只探测一次，同时执行的探针不超过容量", async () => {
+		for (const taskCount of [2_048, 2_049]) {
+			const board: RuntimeBoardData = {
+				columns: [
+					{
+						id: "review",
+						title: "review",
+						cards: Array.from({ length: taskCount }, (_, index) => ({
+							id: `task-${index}`,
+							title: `task-${index}`,
+							prompt: "",
+							baseRef: "main",
+							startInPlanMode: false,
+							createdAt: 1,
+							updatedAt: 1,
+						})),
+					},
+				],
+			};
+			const pending: Array<() => void> = [];
+			probes.load.mockImplementation(
+				() =>
+					new Promise<null>((resolve) => {
+						pending.push(() => resolve(null));
+					}),
+			);
+			let openings = 0;
+			const openers: Array<() => void> = [];
+			const read = createTaskWorkspaceGitStatusQueryCache({
+				loadWorkspaceBoardById: () => {
+					openings += 1;
+					if (openings <= 2) return new Promise((resolve) => openers.push(() => resolve(board)));
+					return Promise.resolve(board);
+				},
+			});
+			const first = read(scope);
+			const second = read(scope);
+			await vi.waitFor(() => expect(openers).toHaveLength(2));
+			openers[0]?.();
+			openers[1]?.();
+			const admittedProbeCount = Math.min(taskCount, 2_048);
+			await vi.waitFor(() => expect(probes.load.mock.calls).toHaveLength(admittedProbeCount));
+			expect(new Set(probes.load.mock.calls.map((call) => call[2].taskId)).size).toBe(admittedProbeCount);
+			if (taskCount > admittedProbeCount) {
+				pending[0]?.();
+				await vi.waitFor(() => expect(probes.load.mock.calls).toHaveLength(taskCount));
+			}
+			expect(new Set(probes.load.mock.calls.map((call) => call[2].taskId)).size).toBe(probes.load.mock.calls.length);
+			for (let guard = 0; pending.length > 0 && guard < taskCount + 2; guard += 1) {
+				for (const resolve of pending.splice(0, pending.length)) resolve();
+				await Promise.resolve();
+			}
+			await Promise.all([first, second]);
+			expect(probes.load.mock.calls).toHaveLength(taskCount);
+			expect(new Set(probes.load.mock.calls.map((call) => call[2].taskId)).size).toBe(taskCount);
+			probes.load.mockReset();
+		}
+	});
+
 	it("五分钟无人请求及缓存容量上限均淘汰，重建服务冷启动不恢复旧单飞", async () => {
 		vi.useFakeTimers();
 		const board = boardWithTasks();

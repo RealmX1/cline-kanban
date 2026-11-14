@@ -21,6 +21,7 @@ import {
 	type TaskCommitIntegrationIntoBaseRefMatchKind,
 } from "./shared-task-commit-landing-criterion-against-local-base";
 import {
+	getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink,
 	type LastKnownTaskHeadObservationSourceForSharedLandingCriterion,
 	reportSharedTaskCommitLandingCriterionSatisfiedObservation,
 } from "./shared-task-commit-landing-criterion-satisfied-observation-port";
@@ -38,6 +39,50 @@ const TASK_COMMIT_IDENTITY_CACHE_MAX_ENTRIES = 10_000;
 const BASE_REF_COMMIT_IDENTITY_RANGE_CACHE_MAX_ENTRIES = 128;
 
 const taskCommitIntegrationGitConcurrencyLimiter = pLimit(TASK_COMMIT_INTEGRATION_GIT_CONCURRENCY_LIMIT);
+
+// 只记录「这一代 live 捕获已经求过落地判据」的任务。激活补发据此跳过重复 Git。
+// 登记必须晚于持久写成功和求值函数返回。写盘或求值抛错时旧快照仍须补发，不能把准备动作当成完成。
+// observedAt 是墙钟，不能当本代身份：与激活同一毫秒的历史快照，以及时钟回退后更大的 observedAt，仍须补发。
+// 这张表只服务启动补发那一次扫描。补发完成、失败或停用收尾后释放并停止新增，避免长寿命进程按累计任务数保留。
+// 释放只作用于仍是当前代的登记。上一代在途收尾不得清空新代。
+let taskCommitLandingCriterionLiveCaptureActivationGeneration = 0;
+let taskCommitLandingCriterionLiveCaptureActivationGenerationAcceptsEvaluations = false;
+const taskCommitLandingCriterionEvaluatedGenerationByTaskKey = new Map<string, number>();
+
+export function beginTaskCommitLandingCriterionLiveCaptureActivationGeneration(): number {
+	taskCommitLandingCriterionLiveCaptureActivationGeneration += 1;
+	taskCommitLandingCriterionLiveCaptureActivationGenerationAcceptsEvaluations = true;
+	taskCommitLandingCriterionEvaluatedGenerationByTaskKey.clear();
+	return taskCommitLandingCriterionLiveCaptureActivationGeneration;
+}
+
+export function releaseTaskCommitLandingCriterionLiveCaptureActivationGeneration(generation: number): void {
+	if (generation !== taskCommitLandingCriterionLiveCaptureActivationGeneration) return;
+	taskCommitLandingCriterionLiveCaptureActivationGenerationAcceptsEvaluations = false;
+	taskCommitLandingCriterionEvaluatedGenerationByTaskKey.clear();
+}
+
+function recordTaskCommitLandingCriterionEvaluationForLiveCaptureActivation(input: {
+	workspaceId: string;
+	taskId: string;
+	liveCaptureActivationGenerationAtEvaluationStart: number;
+}): void {
+	const generation = input.liveCaptureActivationGenerationAtEvaluationStart;
+	if (generation === 0 || generation !== taskCommitLandingCriterionLiveCaptureActivationGeneration) return;
+	if (!taskCommitLandingCriterionLiveCaptureActivationGenerationAcceptsEvaluations) return;
+	if (getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink() === null) return;
+	taskCommitLandingCriterionEvaluatedGenerationByTaskKey.set(`${input.workspaceId}\0${input.taskId}`, generation);
+}
+
+function taskCommitLandingCriterionWasEvaluatedByCurrentLiveCaptureActivation(
+	workspaceId: string,
+	taskId: string,
+): boolean {
+	return (
+		taskCommitLandingCriterionEvaluatedGenerationByTaskKey.get(`${workspaceId}\0${taskId}`) ===
+		taskCommitLandingCriterionLiveCaptureActivationGeneration
+	);
+}
 
 const observedTaskCommitSchema = z.object({
 	commitSha: z.string(),
@@ -536,6 +581,8 @@ export interface RefreshTaskCommitIntegrationProvenanceInput {
 	observedAt?: number;
 	// 探针复用本次已读/已写的统计，避免为卡片摘要再读一遍整个 provenance 文件。
 	onTaskRetainedCommittedLineChangeSummary?: (summary: RuntimeTaskRetainedCommittedLineChangeSummary) => void;
+	// 列表缓存只能把本次结果复用到这个版本。它是计算所依据的条目，或写入锁内实际写出的条目；不是返回之后的再次读盘。
+	onEstablishedTaskCommitIntegrationProvenanceVersion?: (version: string | null) => void;
 }
 
 /**
@@ -546,6 +593,23 @@ export async function refreshTaskCommitIntegrationProvenance(
 	input: RefreshTaskCommitIntegrationProvenanceInput,
 ): Promise<RuntimeTaskWorkspaceGitStatus> {
 	const liveObservationTimestamp = input.observedAt ?? Date.now();
+	const liveCaptureActivationGenerationAtEvaluationStart = taskCommitLandingCriterionLiveCaptureActivationGeneration;
+	let establishedTaskCommitIntegrationProvenanceVersion = false;
+	const establishTaskCommitIntegrationProvenanceVersion = (
+		entryForVersion: TaskCommitIntegrationProvenanceEntry | null | undefined,
+	) => {
+		establishedTaskCommitIntegrationProvenanceVersion = true;
+		input.onEstablishedTaskCommitIntegrationProvenanceVersion?.(
+			taskCommitIntegrationProvenanceEntryVersion(entryForVersion),
+		);
+	};
+	const establishTaskCommitIntegrationProvenanceVersionIfUnset = (
+		entryForVersion: TaskCommitIntegrationProvenanceEntry | null | undefined,
+	) => {
+		if (!establishedTaskCommitIntegrationProvenanceVersion) {
+			establishTaskCommitIntegrationProvenanceVersion(entryForVersion);
+		}
+	};
 	if (input.worktreeMode === "inplace") {
 		return {
 			baseRef: input.baseRef,
@@ -569,9 +633,11 @@ export async function refreshTaskCommitIntegrationProvenance(
 	if (entry !== null && entry.baseRef !== input.baseRef) {
 		await removeTaskCommitIntegrationProvenance(input.workspaceId, input.taskId);
 		entry = null;
+		establishTaskCommitIntegrationProvenanceVersion(null);
 	}
 	if (!input.worktreeExists) {
 		if (entry?.lastWorkspaceGitSnapshot === null || entry === null) {
+			establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable");
 		}
 		let snapshot = entry.lastWorkspaceGitSnapshot;
@@ -660,6 +726,9 @@ export async function refreshTaskCommitIntegrationProvenance(
 								nextEntry.lastWorkspaceGitSnapshot?.taskCommitsIntegratedIntoBaseRef ?? 0,
 							),
 						};
+						establishTaskCommitIntegrationProvenanceVersion(nextEntry);
+					} else {
+						establishTaskCommitIntegrationProvenanceVersion(entry);
 					}
 				});
 				// 没有该字段的快照来自 1a 之前的探测，S 无从得知：不求值（激活补发扫描也不覆盖它们，留给 2b 回填）。
@@ -676,6 +745,11 @@ export async function refreshTaskCommitIntegrationProvenance(
 						lastKnownTaskHeadObservationSource: "persisted_last_task_worktree_snapshot_after_worktree_removal",
 						taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 					});
+					recordTaskCommitLandingCriterionEvaluationForLiveCaptureActivation({
+						workspaceId: input.workspaceId,
+						taskId: input.taskId,
+						liveCaptureActivationGenerationAtEvaluationStart,
+					});
 				}
 			}
 		}
@@ -685,6 +759,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 				createUnavailableTaskRetainedCommittedLineChangeHistory("task_commit_history_unavailable")
 			).summary,
 		);
+		establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
 		return {
 			baseRef: input.baseRef,
 			commitsAheadOfBaseRef: snapshot.commitsAheadOfBaseRef,
@@ -707,6 +782,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 
 	if (entry === null) {
 		if (input.commitsAheadOfBaseRef === 0) {
+			establishTaskCommitIntegrationProvenanceVersionIfUnset(null);
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "legacy_history_unavailable", {
 				commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
 				commitsBehindBaseRef: input.commitsBehindBaseRef,
@@ -738,11 +814,13 @@ export async function refreshTaskCommitIntegrationProvenance(
 		};
 		await mutateProvenanceFile(input.workspaceId, (nextFile) => {
 			nextFile.tasks[input.taskId] = entry as TaskCommitIntegrationProvenanceEntry;
+			establishTaskCommitIntegrationProvenanceVersion(nextFile.tasks[input.taskId]);
 		});
 	}
 
 	const activeIncarnation = entry.incarnations.at(-1);
 	if (!activeIncarnation) {
+		establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete");
 	}
 
@@ -775,6 +853,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 				headCommit: input.headCommit,
 			}));
 		if (!worktreeHeadMovedOnlyByFastForwardSinceCreation) {
+			establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete", {
 				commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
 				commitsBehindBaseRef: input.commitsBehindBaseRef,
@@ -803,6 +882,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 	const provenanceFloorCommit =
 		firstIncarnation?.baseRefCommitHistoryProbeFloorCommit ?? firstIncarnation?.initialBaseCommit;
 	if (!provenanceFloorCommit) {
+		establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete");
 	}
 	const baseRefCommits = await loadBaseRefCommitIdentities({
@@ -904,6 +984,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 			: Math.max(candidateObservedAt, existingSnapshot?.observedAt ?? candidateObservedAt);
 		nextEntry.lastWorkspaceGitSnapshot = { ...mergedSnapshotFacts, observedAt: mergedObservedAt };
 		nextFile.tasks[input.taskId] = nextEntry;
+		establishTaskCommitIntegrationProvenanceVersion(nextEntry);
 		input.onTaskRetainedCommittedLineChangeSummary?.(
 			(candidateIsOlderThanPersistedSnapshot
 				? (nextEntry.retainedCommittedLineChangeHistory ?? retainedLineStatistics.history)
@@ -924,6 +1005,11 @@ export async function refreshTaskCommitIntegrationProvenance(
 		lastTaskWorktreeGitSnapshotObservedAt: liveObservationTimestamp,
 		lastKnownTaskHeadObservationSource: "live_task_worktree_probe",
 		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+	});
+	recordTaskCommitLandingCriterionEvaluationForLiveCaptureActivation({
+		workspaceId: input.workspaceId,
+		taskId: input.taskId,
+		liveCaptureActivationGenerationAtEvaluationStart,
 	});
 
 	return {
@@ -1050,6 +1136,15 @@ export async function readObservedTaskCommitsAcrossIncarnationsByTaskId(
 	);
 }
 
+function taskCommitIntegrationProvenanceEntryVersion(
+	entry: TaskCommitIntegrationProvenanceEntry | null | undefined,
+): string | null {
+	if (!entry) return null;
+	// 与读盘后的 zod 结果使用同一规范化对象，避免键序或可选字段让写出时的哈希对不上下一次列表读取。
+	const canonical = taskCommitIntegrationProvenanceEntrySchema.parse(JSON.parse(JSON.stringify(entry)));
+	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
 // 列表查询缓存也必须跟随持久归属修复、删除及历史恢复；Git HEAD 不变不能证明这些输入没变。
 export async function readTaskCommitIntegrationProvenanceVersionsByTaskId(
 	workspaceId: string,
@@ -1058,8 +1153,8 @@ export async function readTaskCommitIntegrationProvenanceVersionsByTaskId(
 	const file = await readProvenanceFile(workspaceId);
 	const versions = new Map<string, string>();
 	for (const taskId of requestedTaskIds) {
-		const entry = file.tasks[taskId];
-		if (entry) versions.set(taskId, createHash("sha256").update(JSON.stringify(entry)).digest("hex"));
+		const version = taskCommitIntegrationProvenanceEntryVersion(file.tasks[taskId]);
+		if (version !== null) versions.set(taskId, version);
 	}
 	return versions;
 }
@@ -1119,15 +1214,17 @@ export async function readTaskRetainedCommittedLineChangeHistory(
 
 // 激活补发扫描的范围（§R3 Y-PHASE-3「对 1a–1c 期间的快照补发」）：快照带自有提交集合字段的条目，即 1a 起被探测过的 task，
 // 含已删卡（provenance 不再随删卡、删 worktree 删除）。更早的条目没有 S，交给 2b 回填。
+// 本代 live 捕获已经求过值的任务不在此列，避免和随后的列表查询重复派生 Git。没有本代求值记录的历史快照一律保留。
 export async function listTaskCommitIntegrationProvenanceEntriesProbedSinceLandingDataPreservation(
 	workspaceId: string,
 ): Promise<Array<{ taskId: string; baseRef: string }>> {
 	const file = await readProvenanceFile(workspaceId);
 	return Object.values(file.tasks)
-		.filter(
-			(entry) =>
-				entry.lastWorkspaceGitSnapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead !== undefined,
-		)
+		.filter((entry) => {
+			const snapshot = entry.lastWorkspaceGitSnapshot;
+			if (snapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead === undefined) return false;
+			return !taskCommitLandingCriterionWasEvaluatedByCurrentLiveCaptureActivation(workspaceId, entry.taskId);
+		})
 		.map((entry) => ({ taskId: entry.taskId, baseRef: entry.baseRef }));
 }
 
