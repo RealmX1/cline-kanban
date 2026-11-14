@@ -12,14 +12,14 @@ import { isAbsolute, join, resolve } from "node:path";
  * **完全不 spawn 任何 git 进程**。调用方以此做第一层门控：token 未变且未超兜底窗口就复用缓存、跳过真探针。
  *
  * 有意的取舍：就地未暂存编辑（改动已跟踪文件、不 `git add`）不改这些 stat 目标的 mtime，本 token 捕获不到；
- * 由调用方的「兜底全量刷新窗口」在数秒内补上。看板级 git 元数据可以接受这点延迟。
+ * 由调用方既有的热 / 冷兜底全量刷新窗口补上，不以此 token 代替工作树内容探测。
  */
 
 const NO_GIT_DIR_SENTINEL = "no-gitdir";
 
-// worktree root → 真实 gitdir 的解析结果缓存。gitdir 位置对一个 worktree 稳定不变（不随提交移动），
-// 因此解析一次即可长期复用，避免每 poll 都读 `.git` 文件。
-const resolvedGitDirCache = new Map<string, string | null>();
+// 同路径重建或替换 .git 后必须重新解析；缺失结果不缓存，避免首次创建后永久沿用 no-gitdir。
+const resolvedGitDirCache = new Map<string, { dotGitIdentity: string; gitDir: string }>();
+const MAX_CACHED_WORKTREE_GIT_DIRECTORY_RESOLUTIONS = 2_048;
 
 async function resolveWorktreeGitDirUncached(worktreeRoot: string): Promise<string | null> {
 	const dotGitPath = join(worktreeRoot, ".git");
@@ -45,18 +45,33 @@ async function resolveWorktreeGitDirUncached(worktreeRoot: string): Promise<stri
 }
 
 async function resolveWorktreeGitDir(worktreeRoot: string): Promise<string | null> {
+	const dotGitInfo = await lstat(join(worktreeRoot, ".git")).catch(() => null);
+	if (!dotGitInfo) {
+		resolvedGitDirCache.delete(worktreeRoot);
+		return null;
+	}
+	const dotGitIdentity = `${dotGitInfo.dev}:${dotGitInfo.ino}:${dotGitInfo.isFile() ? `${dotGitInfo.size}:${dotGitInfo.mtimeMs}:${dotGitInfo.ctimeMs}` : "directory"}`;
 	const cached = resolvedGitDirCache.get(worktreeRoot);
-	if (cached !== undefined) {
-		return cached;
+	if (cached?.dotGitIdentity === dotGitIdentity) {
+		return cached.gitDir;
 	}
 	const resolved = await resolveWorktreeGitDirUncached(worktreeRoot);
-	resolvedGitDirCache.set(worktreeRoot, resolved);
+	if (resolved !== null) {
+		resolvedGitDirCache.delete(worktreeRoot);
+		resolvedGitDirCache.set(worktreeRoot, { dotGitIdentity, gitDir: resolved });
+		while (resolvedGitDirCache.size > MAX_CACHED_WORKTREE_GIT_DIRECTORY_RESOLUTIONS) {
+			const oldest = resolvedGitDirCache.keys().next().value;
+			if (oldest !== undefined) resolvedGitDirCache.delete(oldest);
+		}
+	} else {
+		resolvedGitDirCache.delete(worktreeRoot);
+	}
 	return resolved;
 }
 
 async function statSignature(targetPath: string): Promise<string> {
 	const info = await stat(targetPath).catch(() => null);
-	return info ? `${info.mtimeMs}:${info.size}` : "∅";
+	return info ? `${info.dev}:${info.ino}:${info.mtimeMs}:${info.ctimeMs}:${info.size}` : "∅";
 }
 
 /**
@@ -74,13 +89,28 @@ export async function computeWorktreeGitChangeToken(worktreeRoot: string): Promi
 	if (!gitDir) {
 		return NO_GIT_DIR_SENTINEL;
 	}
-	const [headSignature, indexSignature, reflogSignature, worktreeRootSignature] = await Promise.all([
+	const [head, commonDirectory] = await Promise.all([
+		readFile(join(gitDir, "HEAD"), "utf8").catch(() => ""),
+		readFile(join(gitDir, "commondir"), "utf8").catch(() => ""),
+	]);
+	const commonGitDir = commonDirectory.trim() ? resolve(gitDir, commonDirectory.trim()) : gitDir;
+	const symbolicHeadRef = head.match(/^ref:\s*(refs\/\S+)/)?.[1];
+	const [
+		headSignature,
+		indexSignature,
+		reflogSignature,
+		worktreeRootSignature,
+		headRefSignature,
+		packedRefsSignature,
+	] = await Promise.all([
 		statSignature(join(gitDir, "HEAD")),
 		statSignature(join(gitDir, "index")),
 		statSignature(join(gitDir, "logs", "HEAD")),
 		statSignature(worktreeRoot),
+		symbolicHeadRef ? statSignature(join(commonGitDir, symbolicHeadRef)) : Promise.resolve("detached"),
+		statSignature(join(commonGitDir, "packed-refs")),
 	]);
-	return `${headSignature}|${indexSignature}|${reflogSignature}|${worktreeRootSignature}`;
+	return `${gitDir}|${commonGitDir}|${head}|${headSignature}|${indexSignature}|${reflogSignature}|${worktreeRootSignature}|${headRefSignature}|${packedRefsSignature}`;
 }
 
 /** 仅供测试：清空 gitdir 解析缓存。 */

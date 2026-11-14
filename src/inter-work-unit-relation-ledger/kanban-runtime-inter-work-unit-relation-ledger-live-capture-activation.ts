@@ -23,6 +23,10 @@ import {
 	getRegisteredSharedTaskCommitLandingCriterionSatisfiedObservationSink,
 	registerSharedTaskCommitLandingCriterionSatisfiedObservationSink,
 } from "../workspace/shared-task-commit-landing-criterion-satisfied-observation-port";
+import {
+	beginTaskCommitLandingCriterionLiveCaptureActivationGeneration,
+	releaseTaskCommitLandingCriterionLiveCaptureActivationGeneration,
+} from "../workspace/task-commit-integration-provenance";
 import { collectTaskIdReservationSeedingResultFromExistingLocalTraces } from "./global-task-identity-registry-task-id-reservation-seeding-from-existing-local-traces";
 import {
 	InterWorkUnitRelationLedgerDatabaseWorkerClient,
@@ -716,6 +720,9 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 	registerSharedTaskCommitLandingCriterionSatisfiedObservationSink(
 		sharedTaskCommitLandingCriterionSatisfiedObservationSinkOfThisActivation,
 	);
+	// 本代从这里起算。此后、启动补发结束前，完成求值的 live 探测会登记，补发不再重探它们。
+	// 登记之前的历史快照不受墙钟影响。补发完成、失败或停用收尾后释放本代登记；上一代收尾不能清掉新代。
+	const liveCaptureActivationGeneration = beginTaskCommitLandingCriterionLiveCaptureActivationGeneration();
 	recordFactObservedByKanbanRuntimeWithoutBlocking(state, {
 		observedFactKind: "runtime_instance_live_capture_capabilities_activated",
 		observingKanbanRuntimeSystemComponentName:
@@ -749,6 +756,9 @@ export function activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture(): A
 				logInterWorkUnitRelationLedgerDiagnosticWarning(
 					`shared task commit landing criterion backfill sweep failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
+			})
+			.finally(() => {
+				releaseTaskCommitLandingCriterionLiveCaptureActivationGeneration(liveCaptureActivationGeneration);
 			});
 	return {
 		ledgerClient,
