@@ -1169,6 +1169,7 @@ export type RuntimeTaskTerminalDeliveryContention = z.infer<typeof runtimeTaskTe
 export {
 	type TaskCommandExecutionRecord,
 	type TaskCommandExecutionSpecification,
+	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionIdentityRequestSchema,
 	taskCommandExecutionRecordSchema,
 	taskCommandExecutionResponseSchema,

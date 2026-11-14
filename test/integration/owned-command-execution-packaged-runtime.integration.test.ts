@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -143,6 +144,31 @@ it.skipIf(!cli)(
 				(entry) => entry.path === project.repositoryPath,
 			)?.id;
 			if (!taskId || !workspaceId) throw new Error("隔离任务或工作区未登记");
+			const diagnostics = await client().runtime.getAgentSessionPtyHostDiagnostics.query();
+			expect(diagnostics.runtimeLoadedEntrypointSha256).toBe(
+				createHash("sha256").update(readFileSync(cli)).digest("hex"),
+			);
+			const invalidAdoption = await fetch(
+				`http://127.0.0.1:${port}/api/trpc/taskCommandExecution.adoptExistingSupervisor`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json", "x-kanban-workspace-id": workspaceId },
+					body: "{}",
+				},
+			);
+			expect(invalidAdoption.status).toBe(400);
+			const invalidAdoptionEnvelope = (await invalidAdoption.json()) as { error: { data: { code: string } } };
+			expect(invalidAdoptionEnvelope.error.data.code).toBe("BAD_REQUEST");
+			expect(
+				existsSync(
+					join(
+						fixture.isolatedHomeDirectoryPath,
+						".cline/kanban/workspaces",
+						workspaceId,
+						"task-command-executions.json",
+					),
+				),
+			).toBe(false);
 			const scoped = client(workspaceId);
 			const state = await scoped.workspace.getState.query();
 			state.sessions[taskId] = runtimeTaskSessionSummarySchema.parse({

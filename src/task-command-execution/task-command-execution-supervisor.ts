@@ -217,7 +217,7 @@ function hasSameProcessGeneration(current,expected) {
  const processStartIdentity=entry=>entry.startAndCommand.match(/^\S+\s+\S+\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4}(?=\s|$)/)?.[0];
  const currentStart=processStartIdentity(current);return currentStart!==undefined && currentStart===processStartIdentity(expected);
 }
-async function revoked() { try { await readFile(materials.revocationFile); return true; } catch(error) { if(error.code==='ENOENT')return false; throw error; } }
+async function revoked() { for(const path of [materials.revocationFile,materials.producerExecutionRevocationFile].filter(Boolean)){try { await readFile(path); return true; } catch(error) { if(error.code!=='ENOENT')throw error; }}return false; }
 await mkdir(directory,{recursive:true});
 const claimPath=join(directory,'supervisor-claim-'+nonce+'.json');
 try { const claim=await open(claimPath,'wx',0o600); await claim.writeFile(JSON.stringify(identity(process.pid))); await claim.sync(); await claim.close(); }
@@ -378,6 +378,41 @@ if(owner.pid===process.pid) {
   for(const observed of [...lastProcessSnapshot.values()].reverse()) { const entry=owned.get(observed.pid);if(!hasSameProcessGeneration(observed,entry))continue;try{const current=identity(entry.pid);if(!current || (current.nativeProcessGenerationIdentity && !hasSameProcessGeneration(current,entry)))lastProcessSnapshot.delete(entry.pid);if(hasSameProcessGeneration(current,entry)) { try { process.kill(entry.pid,signal); }catch{} }}catch{nativeOwnershipUnproven=true;} }
  }
  process.on('SIGTERM',terminate); process.on('SIGINT',terminate);
+ async function waitForSemanticBusinessRecovery(permitResumeWithoutBusinessResult=false) {
+  if(!materials.semanticRecovery)return false;
+  let result;try{result=JSON.parse(await readFile(materials.semanticRecovery.resultFile,'utf8'));}catch(error){return permitResumeWithoutBusinessResult&&error.code==='ENOENT';}
+  if(result.disposition!=='machine_evidence_pending'||result.recovery?.action!=='resume_same_run')return false;
+  const interval=materials.semanticRecoveryObservationIntervalMs??30000;
+  const budgetName='semantic-business-recovery-attempt-budgets.json';
+  let persisted;try{persisted=JSON.parse(await readFile(join(directory,budgetName),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+  if(persisted&&persisted.materialSha256!==materials.semanticRecovery.materialSha256)throw new Error('恢复预算与冻结命令材料不匹配');
+  const budgets=persisted?.budgets??{};let baselineEvidence=persisted?.baselineEvidence??null;let semanticRecoveryObservationCount=0;
+  while(!cancelled&&!timedOut&&!await revoked()) {
+   semanticRecoveryObservationCount++;
+   const observed=spawnSync(materials.semanticRecovery.observationCommand[0],materials.semanticRecovery.observationCommand.slice(1),{cwd:materials.workingDirectory,encoding:'utf8',timeout:15000,maxBuffer:1048576,stdio:['ignore','pipe','ignore']});
+   let fingerprint;try{if(observed.status===0){const observation=JSON.parse(observed.stdout);if(/^[a-f0-9]{64}$/.test(observation.evidenceSha256))fingerprint=observation.evidenceSha256;}}catch{}
+   const maximumUnchangedRetries=typeof result.recovery.maximum_unchanged_retries==='number'?Math.max(0,Math.min(3,Math.floor(result.recovery.maximum_unchanged_retries))):1;
+   if(fingerprint&&!budgets[fingerprint])budgets[fingerprint]={resumeAttemptsUsed:0,includesEvidenceTransitionLaunch:baselineEvidence!==null&&baselineEvidence!==fingerprint};
+   if(fingerprint&&baselineEvidence===null)baselineEvidence=fingerprint;
+   const budget=fingerprint?budgets[fingerprint]:null;
+   const maximumResumeAttempts=budget?Math.min(3,maximumUnchangedRetries+(budget.includesEvidenceTransitionLaunch?1:0)):0;
+   await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
+   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'machine_evidence_pending',ownedProcesses:[],semanticRecoveryObservationCount,semanticRecoveryEvidenceSha256:fingerprint??null,semanticRecoveryBudget:budget,maximumResumeAttempts,updatedAtEpochMs:Date.now()});
+   if(cancelled||await revoked()){cancelled=true;return false;}
+   if(materials.deadlineAtEpochMs&&Date.now()>=materials.deadlineAtEpochMs){timedOut=true;return false;}
+   if(budget&&budget.resumeAttemptsUsed<maximumResumeAttempts&&Date.now()>=(result.recovery.retry_not_before_epoch_ms??0)) {
+    const validation=spawnSync(materials.semanticRecovery.validationCommand[0],materials.semanticRecovery.validationCommand.slice(1),{cwd:materials.workingDirectory,timeout:15000,maxBuffer:1048576,stdio:'ignore'});
+    if(validation.status===0&&!cancelled&&!await revoked()) {
+     budget.resumeAttemptsUsed++;
+     await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
+     materials.command=materials.semanticRecovery.resumeCommand;
+     return true;
+    }
+   }
+   await new Promise(resolve=>setTimeout(resolve,interval));
+  }
+  cancelled=cancelled||await revoked();return false;
+ }
  if(materials.superviseProcessGroup) {
   let ownIdentity=identity(process.pid);
   while(!ownIdentity?.nativeProcessGenerationIdentity && !await revoked() && Date.now()<materials.deadlineAtEpochMs) {
@@ -386,6 +421,9 @@ if(owner.pid===process.pid) {
   }
   if(ownIdentity?.nativeProcessGenerationIdentity){await save('supervisor-identity-'+nonce+'.json',{...ownIdentity,launchNonce:nonce});await save('dispatch-before-process-ancestry-'+nonce+'.json',captureBeforeDispatchBaseline());}
  }
+ const initialBusinessDispatchPermitted=!materials.semanticRecovery||!materials.isRecoveryLaunch||await waitForSemanticBusinessRecovery(true);
+ let dispatchAgain=initialBusinessDispatchPermitted;
+ while(dispatchAgain) {
  if(materials.deadlineAtEpochMs && Date.now()>=materials.deadlineAtEpochMs)timedOut=true;
  if(!timedOut && !cancelled && !await revoked()) {
   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'dispatch_committed',ownedProcesses:[],dispatchCommittedAtEpochMs:Date.now(),updatedAtEpochMs:Date.now()});
@@ -443,6 +481,14 @@ if(owner.pid===process.pid) {
   if(cancelled)terminate();
   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:cancelled?'cancelled':'exited',timedOut,...settled,kernelChildExitObservation,linuxKernelContainmentVerified,linuxKernelContainmentContinuityLost,nativeOwnershipUnproven,ownedProcesses:ownedProcessHistory(),updatedAtEpochMs:Date.now()});
  } else await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'cancelled',timedOut,error:containmentPreparationError??undefined,ownedProcesses:[],updatedAtEpochMs:Date.now()});
+ dispatchAgain=await waitForSemanticBusinessRecovery();
+ }
+ if(!initialBusinessDispatchPermitted&&!cancelled&&!await revoked())await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'exited',timedOut,ownedProcesses:[],updatedAtEpochMs:Date.now()});
+ if(cancelled||await revoked()) {
+  let previousSupervisorProgress={};
+  try{previousSupervisorProgress=JSON.parse(await readFile(join(directory,'supervisor-progress-'+nonce+'.json'),'utf8'));}catch(error){if(error.code!=='ENOENT')throw error;}
+  await save('supervisor-progress-'+nonce+'.json',{ownedProcesses:[],...previousSupervisorProgress,launchNonce:nonce,status:'cancelled',timedOut,updatedAtEpochMs:Date.now()});
+ }
 }
 `;
 
@@ -454,6 +500,7 @@ export interface IndependentOwnedCommandSupervisorOptions {
 	preventRedispatch?: boolean;
 	skipProducerCancelCommand?: boolean;
 	superviseProcessGroup?: boolean;
+	semanticRecoveryObservationIntervalMs?: number;
 }
 
 type OwnedCommandSupervisorReference = Pick<TaskCommandExecutionRecord, "workspaceId" | "executionId" | "launchNonce">;
@@ -552,7 +599,8 @@ export async function launchOwnedCommandSupervisor(
 			specification: Pick<
 				TaskCommandExecutionRecord["specification"],
 				"workingDirectory" | "command" | "resumeCommand"
-			>;
+			> &
+				Partial<TaskCommandExecutionRecord["specification"]>;
 		},
 	validate: () => Promise<void>,
 	options: IndependentOwnedCommandSupervisorOptions = {},
@@ -585,6 +633,17 @@ export async function launchOwnedCommandSupervisor(
 					workingDirectory: record.specification.workingDirectory,
 					command:
 						record.launchAttemptCount > 1 ? record.specification.resumeCommand : record.specification.command,
+					isRecoveryLaunch: record.launchAttemptCount > 1,
+					producerExecutionRevocationFile: record.specification.producerExecutionRevocationFile,
+					semanticRecovery: record.specification.supervisorMaintainsSemanticRecovery
+						? {
+								resultFile: record.specification.resultFile,
+								materialSha256: record.specification.materialSha256,
+								observationCommand: record.specification.readOnlyRecoveryEvidenceObservationCommand,
+								validationCommand: record.specification.beforeSupervisorRecoveryDispatchValidationCommand,
+								resumeCommand: record.specification.resumeCommand,
+							}
+						: null,
 					systemBootIdentity: await readSystemBootIdentity(),
 					linuxKernelChildSubreaperContainmentRequired:
 						options.superviseProcessGroup === true && process.platform === "linux",

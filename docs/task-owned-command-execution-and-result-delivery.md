@@ -1,5 +1,9 @@
 # 所属命令执行与一次结果交回
 
+独立 supervisor 先启动、runtime 后恢复时，可经 `task command-execution adopt-existing-supervisor --adoption-file <持久JSON> --project-path <主仓库>` 接回。请求绑定原 task incarnation、conversation/native/runtime-session 身份、工作树实体、精确 executionId/launchNonce、完整规格与启动材料摘要。原生状态必须已证 running 或 exited；未知、材料变化及持久 Stop 均不放行。接回只登记与恢复观察，不调用 launch。
+
+生产方在同一通用执行 artifact 目录写 `pending-existing-supervisor-adoption.json`，既有恢复循环每三十秒发现一次；取消覆盖尚未接回的材料。离线不直接写所属执行索引。没有可信原会话时，生产方仅保留原调用者结果，不生成任务会话归属。部署侧用法见 [标准重部署](local-redeployment-standard-entry-and-offline-recovery.md)。
+
 `kanban task command-execution start|inspect|cancel` 是通用命令托管能力。业务工具冻结自己的工作材料、恢复/取消 argv 与结果路径，Kanban 负责所属执行、park、跨重启接管、取消及统一 transport 投递。RVF 的评审、修复、验证和提交资格由 RVF 决定。
 
 启动示例：`kanban task command-execution start --task-id <ID> --project-path <主仓库路径> --idempotency-key <稳定工作键> --spec-file <持久 JSON>`。查询和取消都必须指定原 task ID 与精确 `--execution-id`。同 key、同材料与同 incarnation 复用；材料或原主会话不同报冲突。

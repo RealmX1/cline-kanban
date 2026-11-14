@@ -9,6 +9,7 @@ import {
 } from "../../core/agent-session-pty-host-diagnostics-contract";
 import { readPosixProcessResourceTable } from "../../diagnostics/posix-process-table-with-resource-columns-reader";
 import { lockedFileSystem } from "../../fs/locked-file-system";
+import { RUNTIME_LOADED_ENTRYPOINT_SHA256 } from "../../state/runtime-loaded-entrypoint-identity";
 import type { AgentSessionPtyHostModeEnablementDecision } from "./agent-session-pty-host-mode-enablement";
 import {
 	type AgentSessionPtyHostRuntimeIdentity,
@@ -127,6 +128,7 @@ export function createAgentSessionPtyHostDiagnosticsReport(input: {
 		runtimeIdentity: input.runtimeIdentity,
 		runtimeProcessId: process.pid,
 		runtimeProcessStartTimeText: input.runtimeProcessStartTimeText ?? null,
+		runtimeLoadedEntrypointSha256: RUNTIME_LOADED_ENTRYPOINT_SHA256,
 		runtimeProcessStatus: "running",
 		startupDecision: input.startupDecision,
 		configurationReadError: input.configurationReadError ?? null,
