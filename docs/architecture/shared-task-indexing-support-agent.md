@@ -103,7 +103,7 @@ Claude 使用 safe mode、替换系统指令、空工具、严格空 MCP、禁 s
 
 真实样本：1126 张卡，本项目 468 张；约 711 KB 的稳定前缀。Codex 两次独立调用均成功，input 各 192204 tokens、output 各 15 tokens、cache read 均为 0，前缀 hash 相同。因此不宣称 Codex 无状态调用具备热缓存复用。
 
-Claude 初次请求返回 OAuth session expired；用户随后确认 Claude Account 被封禁，并要求相关工作标记为「暂时无法正式验收」。本轮不再请求重新登录或重试真实 Claude 调用，尚未取得 Claude input/cache 验收证据。持久测量入口为 `.plan/scripts/measure-shared-task-indexing-headless-context.mts`，证据目录位于本任务 cross-task handoff artifacts。实现、测试、合入、部署与真实可用分别记录，以上不代表已部署。
+首次真实 Claude 请求未完成认证，相关工作仍为「暂时无法正式验收」。尚未取得 Claude input/cache 验收证据，不能标记通过。持久测量入口为 `.plan/scripts/measure-shared-task-indexing-headless-context.mts`，证据目录位于本任务 cross-task handoff artifacts。实现、测试、合入、部署与真实可用分别记录，以上不代表已部署。
 
 ## 本轮 RVF 修复
 
