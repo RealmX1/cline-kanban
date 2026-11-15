@@ -321,7 +321,7 @@ export async function backupLocalRedeploymentRuntimeState(
 	const currentEntryBackups: Array<{
 		source: string;
 		destination: string;
-		sourceFingerprint: string;
+		sourceFingerprint: string | null;
 		preservedFingerprint: string;
 	}> = [];
 	function isRuntimeWorkspaceCommandExecutionArtifactDirectory(path: string): boolean {
@@ -390,7 +390,7 @@ export async function backupLocalRedeploymentRuntimeState(
 		}
 		if (metadata.isDirectory()) {
 			await mkdir(destination, { recursive: true });
-			for (const name of await readdir(source))
+			for (const name of (await readdir(source)).sort())
 				await copyRuntimeStateEntry(join(source, name), join(destination, name));
 			await chmod(destination, metadata.mode & 0o7777);
 		} else if (metadata.isFile() && /\.(?:sqlite|sqlite3|db)$/u.test(source)) {
@@ -436,6 +436,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			skipped.push(source);
 			continue;
 		}
+		const sourceMetadataBeforeCapture = await lstat(source);
 		const receiptPath = join(directory, "runtime-backup-checkpoints", `${localRedeploymentSha256(name)}.json`);
 		const previous = (await readLocalRedeploymentJson(receiptPath)) as {
 			destination?: string;
@@ -471,7 +472,13 @@ export async function backupLocalRedeploymentRuntimeState(
 		await mkdir(captureDirectory, { recursive: true });
 		await copyRuntimeStateEntry(source, capturedEntry);
 		const preservedFingerprint = await fingerprintRuntimeStateEntry(capturedEntry);
-		if (preservedFingerprint === null || (await fingerprintRuntimeStateEntry(source)) !== sourceFingerprint)
+		const sourceFingerprintAfterCapture = await fingerprintRuntimeStateEntry(source);
+		const concurrentSourceChangesObserved = sourceFingerprintAfterCapture !== sourceFingerprint;
+		// 活目录采用逐文件核验与 SQLite 在线快照；之后的新活动不使已保全副本作废。
+		const supportsConcurrentSourceChanges =
+			sourceMetadataBeforeCapture.isDirectory() ||
+			(sourceMetadataBeforeCapture.isFile() && /\.(?:sqlite|sqlite3|db)$/u.test(source));
+		if (preservedFingerprint === null || (concurrentSourceChangesObserved && !supportsConcurrentSourceChanges))
 			throw Object.assign(new Error("运行时状态在保全期间变化，等待逐项重验"), {
 				code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
 				path: source,
@@ -490,13 +497,16 @@ export async function backupLocalRedeploymentRuntimeState(
 		const receipt = {
 			source,
 			destination,
-			sourceFingerprint,
+			sourceFingerprint: concurrentSourceChangesObserved ? null : sourceFingerprint,
+			sourceFingerprintBeforeCapture: sourceFingerprint,
+			sourceFingerprintAfterCapture,
+			concurrentSourceChangesObserved,
 			preservedFingerprint,
 			copiedAtEpochMs: Date.now(),
 		};
 		await writeLocalRedeploymentJson(join(captureDirectory, "verified-entry-backup.json"), receipt);
 		await writeLocalRedeploymentJson(receiptPath, receipt);
-		currentEntryBackups.push({ source, destination, sourceFingerprint, preservedFingerprint });
+		currentEntryBackups.push(receipt);
 	}
 	const previousBuild = join(directory, "preserved-previous-distribution");
 	if (!(await readLocalRedeploymentJson(join(directory, "previous-distribution-backup.json")))) {
@@ -505,6 +515,7 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	await writeLocalRedeploymentJson(join(directory, "runtime-state-backup-receipt.json"), {
 		backupRoot,
+		captureConsistency: "individually_verified_files_and_online_sqlite_snapshots",
 		currentEntryBackups,
 		preservedInPlaceOrTransientEndpoints: skipped,
 	});

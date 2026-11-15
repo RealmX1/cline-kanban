@@ -167,6 +167,79 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		expect(await readCheckpoint("settings")).toEqual(currentSettings);
 		expect(await readCheckpoint("state.sqlite")).toEqual(currentDatabase);
 	});
+	it("已核验文件与在线数据库在随后继续更新时保留一致副本，不要求整个活动目录静止", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const activeDirectory = join(runtimeHomeDirectoryPath, "active-native-session-state");
+		await mkdir(activeDirectory);
+		const cachePath = join(activeDirectory, "models_cache.json");
+		const copiedLastPath = join(activeDirectory, "remaining-file.json");
+		await writeFile(cachePath, '{"fetched_at":1,"models":[]}');
+		await writeFile(copiedLastPath, "另一个需要保全的文件");
+		const database = new Database(join(activeDirectory, "conversation.sqlite"));
+		onTestFinished(() => {
+			database.close();
+		});
+		database.pragma("journal_mode = WAL");
+		database.exec("CREATE TABLE messages(value TEXT); INSERT INTO messages VALUES('已保全消息')");
+		const originalFilesystemEntryCopy = vi.mocked(filesystem.cp).getMockImplementation();
+		if (!originalFilesystemEntryCopy) throw new Error("缺少真实文件复制函数");
+		onTestFinished(() => {
+			vi.mocked(filesystem.cp).mockImplementation(originalFilesystemEntryCopy);
+		});
+		vi.mocked(filesystem.cp).mockImplementation(async (...arguments_) => {
+			await originalFilesystemEntryCopy(...arguments_);
+			if (String(arguments_[0]) === copiedLastPath) {
+				await writeFile(cachePath, '{"fetched_at":2,"models":[]}');
+				database.exec("INSERT INTO messages VALUES('备份后新消息')");
+			}
+		});
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		const checkpoint = JSON.parse(
+			await readFile(
+				join(
+					directory,
+					"runtime-backup-checkpoints",
+					`${localRedeploymentSha256("active-native-session-state")}.json`,
+				),
+				"utf8",
+			),
+		);
+		expect(checkpoint.sourceFingerprint).toBeNull();
+		expect(checkpoint.concurrentSourceChangesObserved).toBe(true);
+		expect(checkpoint.sourceFingerprintBeforeCapture).not.toBe(checkpoint.sourceFingerprintAfterCapture);
+		expect(await readFile(join(checkpoint.destination, "models_cache.json"), "utf8")).toBe(
+			'{"fetched_at":1,"models":[]}',
+		);
+		const preservedDatabase = new Database(join(checkpoint.destination, "conversation.sqlite"), { readonly: true });
+		try {
+			expect(preservedDatabase.pragma("quick_check", { simple: true })).toBe("ok");
+			expect(preservedDatabase.prepare("SELECT value FROM messages").pluck().all()).toEqual(["已保全消息"]);
+		} finally {
+			preservedDatabase.close();
+		}
+		expect(database.prepare("SELECT count(*) FROM messages").pluck().get()).toBe(2);
+	});
+	it("普通文件在复制期间被改写仍拒绝不一致副本，不生成通过回执", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const source = join(runtimeHomeDirectoryPath, "config.json");
+		await writeFile(source, '{"version":1}');
+		const originalFilesystemEntryCopy = vi.mocked(filesystem.cp).getMockImplementation();
+		if (!originalFilesystemEntryCopy) throw new Error("缺少真实文件复制函数");
+		onTestFinished(() => {
+			vi.mocked(filesystem.cp).mockImplementation(originalFilesystemEntryCopy);
+		});
+		vi.mocked(filesystem.cp).mockImplementation(async (...arguments_) => {
+			await originalFilesystemEntryCopy(...arguments_);
+			if (String(arguments_[0]) === source) await writeFile(source, '{"version":2}');
+		});
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toMatchObject({
+			code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
+			path: source,
+		});
+		await expect(readFile(join(directory, "runtime-state-backup-receipt.json"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
 	it("恢复旧版名称检查点时保留旧原件，副本内容损坏后重新保全当前状态", async () => {
 		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
 		await writeFile(join(runtimeHomeDirectoryPath, "config.json"), "当前配置");
