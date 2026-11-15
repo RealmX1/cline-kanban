@@ -7,6 +7,7 @@ import { RUNTIME_AGENT_CATALOG } from "../../../src/core/agent-catalog";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { resolveCreationStartupSettings } from "../../../src/core/creation-startup-settings";
 import { renderTaskInitialPromptAuthoringAndStartupSettingsGuidance } from "../../../src/core/task-initial-prompt-authoring-and-startup-settings-guidance";
+import type * as TaskSessionStartDiagnosticsModule from "../../../src/diagnostics/task-session-start-diagnostics-logger";
 import {
 	KANBAN_CLAUDE_CODE_TERMINAL_RENDERING_MODE_ENV_VAR,
 	prepareAgentLaunch,
@@ -22,6 +23,12 @@ import type {
 // 既让测试不去 spawn `cursor-agent`，又能证明 argv 里的 `--model` 确实来自探测结果而非某个写死的常量：
 // 上游发布新代次时无需改代码就会跟上。
 const CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL = "cursor-grok-9.9-high";
+// 适配器夹具隔离启动诊断，避免后台 mkdir 与 HOME 回收并发；诊断模块另有独立测试。
+vi.mock("../../../src/diagnostics/task-session-start-diagnostics-logger", async (importOriginal) => ({
+	...(await importOriginal<typeof TaskSessionStartDiagnosticsModule>()),
+	recordTaskSessionStartDiagnostic: vi.fn(async () => {}),
+	measureTaskSessionStartupPhase: vi.fn(async <T>(_context: unknown, run: () => Promise<T>) => await run()),
+}));
 vi.mock("../../../src/terminal/terminal-agent-model-selection", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../../../src/terminal/terminal-agent-model-selection")>()),
 	resolveCursorLaunchDefaultModelId: vi.fn(async () => CURSOR_LAUNCH_DEFAULT_MODEL_ID_PROBE_SENTINEL),

@@ -101,7 +101,7 @@ export async function loadRefreshedKimiManagedModelCatalog(
 		}
 		if (error instanceof KimiManagedModelSelectionError) throw error;
 		throw new KimiManagedModelSelectionError(
-			abortController.signal.aborted
+			abortController.signal.aborted || (error instanceof Error && "code" in error && error.code === "ELOCKED")
 				? "Kimi 模型目录刷新超时。"
 				: "Kimi 模型目录读取失败，请检查 Kimi CLI 与登录状态。",
 		);
