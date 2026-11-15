@@ -1,5 +1,5 @@
 import * as filesystem from "node:fs/promises";
-import { mkdir, readdir, readFile, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, readlink, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -264,6 +264,38 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		expect(await readFile(recoveredCurrent.destination, "utf8")).toBe("当前配置");
 		expect(await readFile(firstCurrent.destination, "utf8")).toBe("副本损坏");
 	});
+	it.each(["runtime_home_state_backup", "previous_runtime_distribution_backup"] as const)(
+		"%s 保留相对及悬空链接的原始目标文本，源文件移除后副本仍可独立读取",
+		async (backupKind) => {
+			const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+			const sourceDirectoryContainingRelativeSymbolicLinks =
+				backupKind === "runtime_home_state_backup" ? runtimeHomeDirectoryPath : request.distributionDirectoryPath;
+			const preservedDirectoryContainingRelativeSymbolicLinks = join(
+				directory,
+				backupKind === "runtime_home_state_backup" ? "preserved-runtime-state" : "preserved-previous-distribution",
+			);
+			const targetFilename = backupKind === "runtime_home_state_backup" ? "config.json" : "cli.js";
+			const sourceTargetFile = join(sourceDirectoryContainingRelativeSymbolicLinks, targetFilename);
+			if (backupKind === "runtime_home_state_backup") await writeFile(sourceTargetFile, "原始运行配置");
+			const expectedContents = await readFile(sourceTargetFile, "utf8");
+			await symlink(targetFilename, join(sourceDirectoryContainingRelativeSymbolicLinks, "relative-existing-link"));
+			await symlink(
+				"missing-content",
+				join(sourceDirectoryContainingRelativeSymbolicLinks, "relative-missing-link"),
+			);
+			await backupLocalRedeploymentRuntimeState(request, directory);
+			expect(await readlink(join(preservedDirectoryContainingRelativeSymbolicLinks, "relative-existing-link"))).toBe(
+				targetFilename,
+			);
+			expect(await readlink(join(preservedDirectoryContainingRelativeSymbolicLinks, "relative-missing-link"))).toBe(
+				"missing-content",
+			);
+			await unlink(sourceTargetFile);
+			expect(
+				await readFile(join(preservedDirectoryContainingRelativeSymbolicLinks, "relative-existing-link"), "utf8"),
+			).toBe(expectedContents);
+		},
+	);
 	it("只补失败项目，跨执行器重启复用成功原件；只使已变化项目失效", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		onTestFinished(fixture.cleanup);

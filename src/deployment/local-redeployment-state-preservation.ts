@@ -410,7 +410,7 @@ export async function backupLocalRedeploymentRuntimeState(
 				preservedDatabase.close();
 			}
 		} else {
-			await cp(source, destination, { dereference: false });
+			await cp(source, destination, { dereference: false, verbatimSymlinks: true });
 			if ((await fingerprintRuntimeStateEntry(source)) !== (await fingerprintRuntimeStateEntry(destination)))
 				throw Object.assign(new Error("运行时文件副本与源内容不一致，等待逐项重验"), {
 					code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
@@ -510,7 +510,11 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	const previousBuild = join(directory, "preserved-previous-distribution");
 	if (!(await readLocalRedeploymentJson(join(directory, "previous-distribution-backup.json")))) {
-		await cp(request.distributionDirectoryPath, previousBuild, { recursive: true, dereference: false });
+		await cp(request.distributionDirectoryPath, previousBuild, {
+			recursive: true,
+			dereference: false,
+			verbatimSymlinks: true,
+		});
 		await writeLocalRedeploymentJson(join(directory, "previous-distribution-backup.json"), { previousBuild });
 	}
 	await writeLocalRedeploymentJson(join(directory, "runtime-state-backup-receipt.json"), {
