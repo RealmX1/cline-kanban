@@ -337,7 +337,7 @@ if(owner.pid===process.pid) {
     }
    } catch { unprovenOwnershipPids.add(-1); }
   }
-  const groupMembers=new Set(); const zombies=new Set(entries.filter(entry=>entry.processIsZombie).map(entry=>entry.pid));
+  const groupMembers=new Set(); const lateNativeSnapshotPids=new Set(); const zombies=new Set(entries.filter(entry=>entry.processIsZombie).map(entry=>entry.pid));
   if(materials.superviseProcessGroup) {
    // Linux 已从同一份 /proc stat 读取代际与 PGID，保留双快照核验而不再派生第三次 ps。
    if(process.platform==='linux'){for(const entry of entries)if(entry.observedProcessGroupPid===process.pid && entry.pid!==process.pid && !entry.processIsZombie)groupMembers.add(entry.pid);}
@@ -352,6 +352,7 @@ if(owner.pid===process.pid) {
     const lateNativeObservations=lateProcessRows.length?await readNativeProcessExecutionEnvironmentOwnership(lateProcessRows.map(entry=>entry.pid),nonce):new Map();
     let unrelatedAdded=true;while(unrelatedAdded){unrelatedAdded=false;for(const native of lateNativeObservations.values())if(native.processUniqueIdentity&&native.hasExecutionOwnershipToken!==true&&unrelatedOriginalParentVersions.has(native.originalParentProcessIdVersion)&&!unrelatedOriginalParentVersions.has(native.processIdVersion)){unrelatedOriginalParentVersions.add(native.processIdVersion);unrelatedAdded=true;}}
     for(const row of lateProcessRows){
+     lateNativeSnapshotPids.add(row.pid);
      const native=lateNativeObservations.get(row.pid);
      const entry={...row,...native,parent:native?.parentProcessPid??-1,startAndCommand:native?.processStartIdentity??'unavailable',...(native?.processUniqueIdentity?{nativeProcessGenerationIdentity:'darwin_unique_process_id:'+native.processUniqueIdentity}:{})};
      entries.push(entry);
@@ -360,11 +361,12 @@ if(owner.pid===process.pid) {
      if(native?.hasExecutionOwnershipToken===true&&entry.nativeProcessGenerationIdentity)rememberOwned(entry);
      else if(!native?.outsideCurrentUser&&!hasSameProcessGeneration(entry,beforeDispatchProcesses.get(row.pid))&&!(entry.nativeProcessGenerationIdentity&&unrelatedOriginalParentVersions.has(native?.originalParentProcessIdVersion))){unprovenOwnershipPids.add(row.pid);unprovenOwnershipReasons.set(row.pid,'current_process_missing_from_native_snapshot');}
     }
-    for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid)groupMembers.add(entry.pid);
+    // 迟到行的原生代际晚于 ps；旧组/父关系不授予新代际归属，nonce 或后续完整快照仍可补证。
+    for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid&&!lateNativeSnapshotPids.has(entry.pid))groupMembers.add(entry.pid);
    }
   }
   const parents=new Set(entries.filter(entry=>!zombies.has(entry.pid)&&(groupMembers.has(entry.pid)||hasSameProcessGeneration(entry,owned.get(entry.pid)))).map(entry=>entry.pid)); if(linuxKernelContainmentVerified&&!linuxKernelContainmentContinuityLost)parents.add(process.pid); let changed=true;
-  while(changed){changed=false;for(const entry of entries)if(entry.pid!==process.pid && parents.has(entry.parent)&&!parents.has(entry.pid)){const parent=entries.find(candidate=>candidate.pid===entry.parent);const current=currentParentGeneration(entry);const currentParent=currentParentGeneration(parent);if(!materials.superviseProcessGroup || (current?.generation===entry.nativeProcessGenerationIdentity && current?.parent===entry.parent && currentParent?.generation===parent?.nativeProcessGenerationIdentity && entry.nativeProcessGenerationIdentity && parent?.nativeProcessGenerationIdentity)){parents.add(entry.pid);changed=true;}}}
+  while(changed){changed=false;for(const entry of entries)if(entry.pid!==process.pid && !lateNativeSnapshotPids.has(entry.pid) && parents.has(entry.parent)&&!parents.has(entry.pid)){const parent=entries.find(candidate=>candidate.pid===entry.parent);const current=currentParentGeneration(entry);const currentParent=currentParentGeneration(parent);if(!materials.superviseProcessGroup || (current?.generation===entry.nativeProcessGenerationIdentity && current?.parent===entry.parent && currentParent?.generation===parent?.nativeProcessGenerationIdentity && entry.nativeProcessGenerationIdentity && parent?.nativeProcessGenerationIdentity)){parents.add(entry.pid);changed=true;}}}
   for(const entry of entries)if(entry.pid!==process.pid&&parents.has(entry.pid)&&(!materials.superviseProcessGroup||entry.nativeProcessGenerationIdentity))rememberOwned({pid:entry.pid,startAndCommand:entry.startAndCommand,...(entry.nativeProcessGenerationIdentity?{nativeProcessGenerationIdentity:entry.nativeProcessGenerationIdentity}:{})});
   for(const entry of entries)if(materials.superviseProcessGroup && parents.has(entry.pid)&&!entry.nativeProcessGenerationIdentity){unprovenOwnershipPids.add(entry.pid);unprovenOwnershipReasons.set(entry.pid,'precise_native_process_generation_unavailable');}
   if(linuxKernelContainmentVerified&&!linuxKernelContainmentContinuityLost)for(const pid of [...unprovenOwnershipPids])if(!parents.has(pid)&&!hasSameProcessGeneration(entries.find(entry=>entry.pid===pid),owned.get(pid)))unprovenOwnershipPids.delete(pid);

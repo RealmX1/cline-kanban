@@ -18,11 +18,12 @@ import {
 	backupLocalRedeploymentRuntimeState,
 	preserveLocalRedeploymentWorktree,
 } from "../../../src/deployment/local-redeployment-state-preservation";
+import { isFilesystemKernelAtomicWriteTemporaryFilePath, lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof filesystem>();
-	return { ...actual, cp: vi.fn(actual.cp) };
+	return { ...actual, cp: vi.fn(actual.cp), rename: vi.fn(actual.rename) };
 });
 
 describe("重部署局部补证与真实 WIP 保全", () => {
@@ -114,6 +115,75 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		expect(receipt.preservedInPlaceOrTransientEndpoints).toContain(
 			join(workspaceDirectory, "task-command-executions"),
 		);
+	});
+	it("临时文件识别与真实内核原子写的命名一致", async () => {
+		const { runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const destination = join(runtimeHomeDirectoryPath, "native-state.json");
+		const originalRename = vi.mocked(filesystem.rename).getMockImplementation();
+		if (!originalRename) throw new Error("缺少真实原子发布函数");
+		onTestFinished(() => {
+			vi.mocked(filesystem.rename).mockImplementation(originalRename);
+		});
+		const observedTemporaryPaths: string[] = [];
+		vi.mocked(filesystem.rename).mockImplementation(async (source, target) => {
+			if (String(target) === destination) observedTemporaryPaths.push(String(source));
+			await originalRename(source, target);
+		});
+		await lockedFileSystem.writeJsonFileAtomic(destination, { committed: true }, { lock: null });
+		expect(observedTemporaryPaths).toHaveLength(1);
+		expect(isFilesystemKernelAtomicWriteTemporaryFilePath(observedTemporaryPaths[0])).toBe(true);
+		expect(isFilesystemKernelAtomicWriteTemporaryFilePath(destination)).toBe(false);
+	});
+	it.each(["workspace", "pty_host", "runtime_root"] as const)(
+		"%s 的内核原子写临时文件在复制前消失时仍保全正式文件",
+		async (scope) => {
+			const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+			const nativeStateDirectory =
+				scope === "workspace"
+					? join(runtimeHomeDirectoryPath, "workspaces", request.workspaceId)
+					: scope === "pty_host"
+						? join(runtimeHomeDirectoryPath, "agent-session-pty-host")
+						: runtimeHomeDirectoryPath;
+			await mkdir(nativeStateDirectory, { recursive: true });
+			const committedFile = join(nativeStateDirectory, "a-state.json");
+			const unpublishedTemporaryFile = join(
+				nativeStateDirectory,
+				"z-state.json.tmp.15993.1794745938802.b477d266-e8cc-4bf9-9f83-78d88042ee94",
+			);
+			await writeFile(committedFile, '{"committed":true}');
+			await writeFile(unpublishedTemporaryFile, '{"pending":true}');
+			const originalCopy = vi.mocked(filesystem.cp).getMockImplementation();
+			if (!originalCopy) throw new Error("缺少真实复制函数");
+			onTestFinished(() => {
+				vi.mocked(filesystem.cp).mockImplementation(originalCopy);
+			});
+			vi.mocked(filesystem.cp).mockImplementation(async (...arguments_) => {
+				await originalCopy(...arguments_);
+				if (String(arguments_[0]) === committedFile) await unlink(unpublishedTemporaryFile);
+			});
+			await backupLocalRedeploymentRuntimeState(request, directory);
+			const relativeCommittedFile = committedFile.slice(runtimeHomeDirectoryPath.length + 1);
+			expect(await readFile(join(directory, "preserved-runtime-state", relativeCommittedFile), "utf8")).toBe(
+				'{"committed":true}',
+			);
+			const receipt = JSON.parse(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8"));
+			expect(receipt.preservedInPlaceOrTransientEndpoints).toContain(unpublishedTemporaryFile);
+		},
+	);
+	it("临时文件识别保留普通 tmp 文件及用户资料中的同形文件", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const sourcePaths = [
+			"workspaces/isolated-workspace/user-notes.tmp.txt",
+			"workspaces/isolated-workspace/state.json.tmp.15993.1794745938802.not-a-uuid",
+			"retained-user-artifacts/state.json.tmp.15993.1794745938802.b477d266-e8cc-4bf9-9f83-78d88042ee94",
+		];
+		for (const path of sourcePaths) {
+			await mkdir(join(runtimeHomeDirectoryPath, path, ".."), { recursive: true });
+			await writeFile(join(runtimeHomeDirectoryPath, path), "必须保全的用户资料");
+		}
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		for (const path of sourcePaths)
+			expect(await readFile(join(directory, "preserved-runtime-state", path), "utf8")).toBe("必须保全的用户资料");
 	});
 	it("等待期间配置与 WAL 数据库变化时另存当前版本，保留首版并复用未变项目", async () => {
 		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");

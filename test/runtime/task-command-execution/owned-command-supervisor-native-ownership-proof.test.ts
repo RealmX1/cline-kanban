@@ -36,6 +36,7 @@ it.each([
 	"darwin_repeated_late_unrelated_processes",
 	"darwin_repeated_late_owned_process",
 	"darwin_repeated_late_unproven_processes",
+	"darwin_late_group_pid_reused_by_unrelated_process",
 	"unproven_orphan",
 	"darwin_missing_precision_after_dispatch",
 	"darwin_missing_precision_before_dispatch",
@@ -139,7 +140,10 @@ it.each([
 					hasNonce: false,
 					startAndCommand: "Wed Oct 28 11:00:00 2026 unrelated-baseline-process",
 				});
-		if (scenario.startsWith("darwin_repeated_late_"))
+		if (
+			scenario.startsWith("darwin_repeated_late_") ||
+			scenario === "darwin_late_group_pid_reused_by_unrelated_process"
+		)
 			processes.set(401, {
 				parent: 1,
 				group: 401,
@@ -156,6 +160,8 @@ it.each([
 		let dispatchCount = 0;
 		let nativeProbeCallCount = 0;
 		let processGroupSnapshotQueryCount = 0;
+		let lateGroupPidAwaitingNativeReuse = false;
+		let lateGroupPidAlreadyReused = false;
 		const regularQueryCountsByCycle = new Map<number, { ps: number; native: number }>();
 		let unchangedProgressWriteCount = 0;
 		const fullProcessSnapshotCycles: number[] = [];
@@ -182,6 +188,21 @@ it.each([
 			].join(String.fromCharCode(0));
 		};
 		function simulatedProcessGroupSnapshot(): string {
+			if (
+				scenario === "darwin_late_group_pid_reused_by_unrelated_process" &&
+				cycle === 1 &&
+				!lateGroupPidAlreadyReused
+			) {
+				processes.set(301, {
+					parent: 1,
+					group: 900,
+					version: 1301,
+					originalParentVersion: 1201,
+					hasNonce: inheritedNonce,
+					startAndCommand: "Wed Oct 28 12:00:02 2026 late-owned-process-before-pid-reuse",
+				});
+				lateGroupPidAwaitingNativeReuse = true;
+			}
 			if (scenario.startsWith("darwin_repeated_late_") && cycle >= 1 && now < 12_000) {
 				const pid = scenario.endsWith("owned_process") ? 301 : 4000 + processGroupSnapshotQueryCount;
 				processes.set(pid, {
@@ -311,6 +332,18 @@ it.each([
 						regularQueryCountsByCycle.set(cycle, counts);
 					}
 					if (command === "native-probe") {
+						if (lateGroupPidAwaitingNativeReuse && args[0] === "nonce" && args.includes("301")) {
+							processes.set(301, {
+								parent: 401,
+								group: 301,
+								version: 3301,
+								originalParentVersion: 1401,
+								hasNonce: false,
+								startAndCommand: "Wed Oct 28 12:00:03 2026 unrelated-process-reusing-late-pid",
+							});
+							lateGroupPidAlreadyReused = true;
+							lateGroupPidAwaitingNativeReuse = false;
+						}
 						nativeProbeCallCount++;
 						if (
 							scenario === "native_snapshot_failure_budget_recovers" &&
@@ -525,6 +558,13 @@ it.each([
 			expect(progress.nativeOwnershipUnproven).toBe(false);
 			expect(cycle).toBe(1);
 			expect(signals).toEqual([]);
+		}
+		if (scenario === "darwin_late_group_pid_reused_by_unrelated_process") {
+			expect(signals).not.toContain(301);
+			expect(progress.status).toBe("exited");
+			expect(progress.returncode).toBe(0);
+			expect(processes.get(301)?.version).toBe(3301);
+			expect(progress.ownedProcesses.map((entry: { pid: number }) => entry.pid)).not.toContain(301);
 		}
 		if (scenario === "darwin_repeated_late_unproven_processes") {
 			expect(progress.status).not.toBe("exited");

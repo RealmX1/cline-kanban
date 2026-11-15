@@ -73,6 +73,10 @@ export interface AtomicTextWriteOptions {
 	fileMode?: number;
 }
 
+export function isFilesystemKernelAtomicWriteTemporaryFilePath(path: string): boolean {
+	return /\.tmp\.[1-9]\d*\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(path);
+}
+
 function safeLockErrorMessage(error: unknown): string {
 	if (error instanceof Error) {
 		const code = (error as NodeJS.ErrnoException).code;

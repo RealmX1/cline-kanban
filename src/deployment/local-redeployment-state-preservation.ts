@@ -16,6 +16,7 @@ import {
 import { dirname, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { getRuntimeFetch } from "../core/runtime-endpoint";
+import { isFilesystemKernelAtomicWriteTemporaryFilePath } from "../fs/locked-file-system";
 import {
 	getWorkspaceStateSnapshotReadFingerprintById,
 	listWorkspaceIndexEntries,
@@ -334,6 +335,14 @@ export async function backupLocalRedeploymentRuntimeState(
 			runtimeHomeRelativePathSegments[2] === "task-command-executions"
 		);
 	}
+	function isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(path: string): boolean {
+		// 原生状态区的发布前临时文件可消失；用户资产与历史实验中的同形文件仍完整复制。
+		const segments = relative(request.runtimeIdentity.runtimeHomeDirectoryPath, path).split(sep);
+		return (
+			(segments.length === 1 || segments[0] === "workspaces" || segments[0] === "agent-session-pty-host") &&
+			isFilesystemKernelAtomicWriteTemporaryFilePath(path)
+		);
+	}
 	async function hashRuntimeStateFileContents(path: string): Promise<string> {
 		const hash = createHash("sha256");
 		for await (const chunk of createReadStream(path)) hash.update(chunk);
@@ -341,8 +350,11 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function fingerprintRuntimeStateEntry(path: string, recordSkipped = false): Promise<string | null> {
 		assertLocalRedeploymentNotRevoked(directory);
-		// 活跃监督者持续改写这些持久原件；原地保留，不能要求部署自己的进度静止。
-		if (isRuntimeWorkspaceCommandExecutionArtifactDirectory(path)) {
+		// 活跃监督原件原地保留；内核发布前临时文件可随 rename 消失，不作为正式状态。
+		if (
+			isRuntimeWorkspaceCommandExecutionArtifactDirectory(path) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(path)
+		) {
 			if (recordSkipped) skipped.push(path);
 			return null;
 		}
@@ -379,7 +391,10 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function copyRuntimeStateEntry(source: string, destination: string): Promise<void> {
 		assertLocalRedeploymentNotRevoked(directory);
-		if (isRuntimeWorkspaceCommandExecutionArtifactDirectory(source)) {
+		if (
+			isRuntimeWorkspaceCommandExecutionArtifactDirectory(source) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(source)
+		) {
 			skipped.push(source);
 			return;
 		}
@@ -430,6 +445,7 @@ export async function backupLocalRedeploymentRuntimeState(
 		const source = join(request.runtimeIdentity.runtimeHomeDirectoryPath, name);
 		if (
 			preservedInPlace.has(name) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(source) ||
 			resolve(directory) === resolve(source) ||
 			resolve(directory).startsWith(`${resolve(source)}/`)
 		) {
