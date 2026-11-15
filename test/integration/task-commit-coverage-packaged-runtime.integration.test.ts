@@ -43,6 +43,7 @@ it("隔离打包实例经真实 API 更新部署覆盖，raw worktree 缓存命�
 	await writeFile(join(packagedDirectory, "web-ui/index.html"), "<!doctype html><title>隔离部署覆盖验证</title>");
 	await symlink(resolve("node_modules"), join(packagedDirectory, "node_modules"), "dir");
 	for (const worker of [
+		"codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
 		"notifications/notification-lifecycle-database-worker.mjs",
 		"inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 	]) {
@@ -50,8 +51,13 @@ it("隔离打包实例经真实 API 更新部署覆盖，raw worktree 缓存命�
 	}
 	const cli = join(packagedDirectory, "cli.js");
 	await build({
-		entryPoints: [resolve("src/cli.ts")],
-		outfile: cli,
+		entryPoints: {
+			cli: resolve("src/cli.ts"),
+			"agent-session-pty-host": resolve(
+				"src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts",
+			),
+		},
+		outdir: packagedDirectory,
 		bundle: true,
 		platform: "node",
 		format: "esm",
@@ -92,28 +98,36 @@ it("隔离打包实例经真实 API 更新部署覆盖，raw worktree 缓存命�
 		const workspaceDirectory = join(runtimeHome, "workspaces", workspaceId);
 		mkdirSync(workspaceDirectory, { recursive: true });
 		const taskId = "c0ffe";
-		writeFileSync(
-			join(workspaceDirectory, "board.json"),
-			JSON.stringify({
-				columns: [
-					{
-						id: "in_progress",
-						title: "进行中",
-						cards: [
+		const boardCreationResponse = await fetch(
+			new URL("/api/trpc/workspace.saveState", `http://127.0.0.1:${address.port}`),
+			{
+				method: "POST",
+				headers: { "content-type": "application/json", "x-kanban-workspace-id": workspaceId },
+				body: JSON.stringify({
+					board: {
+						columns: [
 							{
-								id: taskId,
-								title: "仍在进行的任务",
-								prompt: "部署部分提交",
-								baseRef: "main",
-								startInPlanMode: false,
-								createdAt: 1,
-								updatedAt: 1,
+								id: "in_progress",
+								title: "进行中",
+								cards: [
+									{
+										id: taskId,
+										title: "仍在进行的任务",
+										prompt: "部署部分提交",
+										baseRef: "main",
+										startInPlanMode: false,
+										createdAt: 1,
+										updatedAt: 1,
+									},
+								],
 							},
 						],
 					},
-				],
-			}),
+					sessions: {},
+				}),
+			},
 		);
+		expect(boardCreationResponse.status).toBe(200);
 		writeFileSync(
 			join(workspaceDirectory, "task-commit-integration-provenance.json"),
 			JSON.stringify({

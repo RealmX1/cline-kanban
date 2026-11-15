@@ -7,6 +7,7 @@ import {
 	type PostDeployVerificationControllerProps,
 } from "@/components/post-deploy-verification/post-deploy-verification-controller";
 import { createPostDeployVerificationTaskReadModelTestFixture } from "@/components/post-deploy-verification/post-deploy-verification-task-read-model-test-fixtures";
+import { getTaskCardDomRootsIncludingPortalledActionToolbars } from "@/components/task-card-action-toolbar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { createInitialBoardData } from "@/data/board-data";
 import type { UsePostDeployVerificationResult } from "@/hooks/use-post-deploy-verification";
@@ -136,8 +137,18 @@ async function renderUnhydratedWorkspacePostDeployVerificationCard(hasUncheckedC
 	return { verification, completePostDeployVerificationMoveToDone, board, card, task, rerender };
 }
 
+function findTaskCardCompletionButton() {
+	const taskCardElement = document.querySelector<HTMLElement>(".kb-board-card-shell");
+	if (!taskCardElement) return null;
+	return (
+		getTaskCardDomRootsIncludingPortalledActionToolbars(taskCardElement)
+			.map((root) => root.querySelector<HTMLButtonElement>('[aria-label="结案任务"]'))
+			.find((button) => button !== null) ?? null
+	);
+}
+
 async function selectCommentBeforeCompletion() {
-	const trigger = document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="结案任务"]');
+	const trigger = findTaskCardCompletionButton();
 	expect(trigger).not.toBeNull();
 	await act(async () => trigger!.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })));
 	const option = document.querySelector<HTMLButtonElement>('[role="menuitem"][aria-label="添加评论并结案…"]');
@@ -266,9 +277,7 @@ it("有未勾项时评论先经过核对再填写原因：取消保留草稿，�
 it("未水合宿主的直接完成保留原行为，不打开评论弹窗", async () => {
 	const { verification, completePostDeployVerificationMoveToDone } =
 		await renderUnhydratedWorkspacePostDeployVerificationCard();
-	await act(async () =>
-		document.querySelector<HTMLButtonElement>('.kb-board-card-shell [aria-label="结案任务"]')!.click(),
-	);
+	await act(async () => findTaskCardCompletionButton()!.click());
 	expect(document.querySelector('[aria-label="任务评论"]')).toBeNull();
 	expect(completePostDeployVerificationMoveToDone).toHaveBeenCalledWith("task-1", "validation", undefined, undefined);
 	expect(verification.confirmComplete).toHaveBeenCalledOnce();

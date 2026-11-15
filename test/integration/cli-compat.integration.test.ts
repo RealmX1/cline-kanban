@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
+import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const requireFromHere = createRequire(import.meta.url);
 
@@ -13,6 +14,7 @@ function resolveTsxLoaderImportSpecifier(): string {
 
 describe("cli compatibility flags", () => {
 	it("accepts the deprecated --agent flag as a no-op", () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const result = spawnSync(
 			process.execPath,
 			[
@@ -25,6 +27,7 @@ describe("cli compatibility flags", () => {
 			],
 			{
 				encoding: "utf8",
+				env: fixture.createIsolatedChildProcessEnvironment({ NO_COLOR: undefined, FORCE_COLOR: undefined }),
 			},
 		);
 

@@ -12,7 +12,27 @@ let entered = Promise.resolve();
 let released = Promise.resolve();
 const service = createTaskLookupConversationService({
 	storageDirectoryPath,
-	collectMaterials: async () => ({ materials: [], missingContextParts: [] }),
+	collectMaterials: async () => ({
+		materials: [
+			{
+				taskReference: {
+					workUnitType: "kanban_board_card",
+					workspaceId: "isolated",
+					taskId: "abc12",
+					taskIncarnationCreatedAtEpochMs: 1,
+				},
+				projectName: "隔离项目",
+				title: "触发模型召回的隔离任务",
+				prompt: "验证执行归属与崩溃恢复",
+				columnId: "backlog",
+				latestNotificationSummaryText: null,
+				latestHookFinalMessage: null,
+				claudeAwaySummary: null,
+				missingContextParts: [],
+			},
+		],
+		missingContextParts: [],
+	}),
 	getExecutorSettings: async () => ({ agentId: "codex", modelId: null }),
 	getContext: async () => ({
 		schemaVersion: 1,
@@ -31,7 +51,7 @@ const service = createTaskLookupConversationService({
 		return {
 			value: request.outputSchema.parse(
 				JSON.parse(request.queryText).phase === "recall"
-					? { candidateTaskReferences: [] }
+					? { candidateTaskReferenceKeys: [] }
 					: { answerText: "隔离桩结果", candidates: [] },
 			),
 			usage: { resolvedModelId: null },

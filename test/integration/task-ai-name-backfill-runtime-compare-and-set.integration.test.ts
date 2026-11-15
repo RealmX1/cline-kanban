@@ -83,7 +83,7 @@ async function seedCard(scope: RuntimeTrpcWorkspaceScope, card: RuntimeBoardCard
 				cards: column.id === "backlog" && card ? [card] : [],
 			})),
 		},
-		sessions: card ? { [card.id]: createStartedSessionSummary() } : {},
+		sessions: card ? { [card.id]: { ...createStartedSessionSummary(), taskId: card.id } } : {},
 	});
 }
 

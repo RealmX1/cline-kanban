@@ -152,6 +152,7 @@ describe.skipIf(process.platform === "win32")("离线全停的原子所有权与
 		});
 		await atomicRequestReceived;
 		await vi.advanceTimersByTimeAsync(2_000);
+		await vi.runOnlyPendingTimersAsync();
 
 		expect((await termination)[0]?.outcome).toBe("failed_to_reach_agent_session_pty_host");
 		expect(receivedMessageTypes).toEqual([

@@ -27,6 +27,7 @@ import {
 	getWorkspacesRootPath,
 	loadWorkspaceContext,
 	loadWorkspaceState,
+	mutateWorkspaceState,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -381,10 +382,11 @@ describe("global task identity registry: runtime task id allocation and reservat
 				board: createBacklogBoard([createCard("a0001", 1_000)]),
 				sessions: {},
 			});
-			await saveWorkspaceState(firstWorkspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+			// 整板快照保留旧卡；用服务端写入漏斗建立已删除的测试前置。
+			await mutateWorkspaceState(firstWorkspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
 				board: createBacklogBoard([]),
-				sessions: {},
-			});
+				value: undefined,
+			}));
 
 			await expect(
 				saveWorkspaceState(firstWorkspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {

@@ -270,6 +270,7 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 				{
 					name: "runtime-tests",
 					argv: [request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "test"],
+					timeoutMs: 3_600_000,
 				},
 				{
 					name: "web-tests",

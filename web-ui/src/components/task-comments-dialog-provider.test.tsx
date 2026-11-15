@@ -1,6 +1,7 @@
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, expect, it, vi } from "vitest";
+import { getTaskCardDomRootsIncludingPortalledActionToolbars } from "@/components/task-card-action-toolbar";
 import { TaskCardBody, type TaskCardBodyRenderRole } from "@/components/task-card-body";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse } from "@/runtime/types";
@@ -141,7 +142,11 @@ it.each<TaskCardBodyRenderRole>([
 				</TooltipProvider>,
 			),
 		);
-		await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="任务评论"]')!.click());
+		const commentButton = getTaskCardDomRootsIncludingPortalledActionToolbars(container)
+			.map((root) => root.querySelector<HTMLButtonElement>('[aria-label="任务评论"]'))
+			.find((button) => button !== null);
+		expect(commentButton).toBeDefined();
+		await act(async () => commentButton!.click());
 		expect(readCard).toHaveBeenCalledWith(isOtherProject ? "other-project" : "current-project", "shared-id", 41);
 	} finally {
 		act(() => root.unmount());

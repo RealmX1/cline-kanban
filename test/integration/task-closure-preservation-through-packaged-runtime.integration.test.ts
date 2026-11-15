@@ -56,7 +56,7 @@ describe(
 								id,
 								title: id,
 								prompt: "隔离结案",
-								agentId: "codex",
+								agentId: "claude",
 								startInPlanMode: false,
 								baseRef: "main",
 								createdAt: 100,
@@ -107,14 +107,20 @@ describe(
 			await writeFile(join(packagedDirectory, "package.json"), '{"type":"module"}');
 			await symlink(resolve("node_modules"), join(packagedDirectory, "node_modules"), "dir");
 			for (const worker of [
+				"codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
 				"notifications/notification-lifecycle-database-worker.mjs",
 				"inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 			])
 				await copyFile(resolve("src", worker), join(packagedDirectory, worker.split("/").at(-1) ?? ""));
 			const packagedCliPath = join(packagedDirectory, "cli.js");
 			await build({
-				entryPoints: [resolve("src/cli.ts")],
-				outfile: packagedCliPath,
+				entryPoints: {
+					cli: resolve("src/cli.ts"),
+					"agent-session-pty-host": resolve(
+						"src/agent-session-pty-host/host-process/agent-session-pty-host-process-entry.ts",
+					),
+				},
+				outdir: packagedDirectory,
 				bundle: true,
 				platform: "node",
 				format: "esm",
@@ -128,14 +134,15 @@ describe(
 			const fakeAgentDirectory = join(fixture.fixtureRootDirectoryPath, "isolated-fake-native-agent");
 			await mkdir(fakeAgentDirectory);
 			await writeFile(
-				join(fakeAgentDirectory, "codex"),
-				`#!${process.execPath}\nif(process.argv.includes('--version')){process.stdout.write('codex-cli 0.164.0\\n')}else{process.stdout.write('隔离 Agent 已就绪\\n');process.stdin.resume();setInterval(()=>{},1000)}\n`,
+				join(fakeAgentDirectory, "claude"),
+				`#!${process.execPath}\nif(process.argv.includes('--version')){process.stdout.write('2.1.20 (Claude Code)\\n')}else{process.stdout.write('隔离 Agent 已就绪\\n');process.stdin.resume();setInterval(()=>{},1000)}\n`,
 			);
-			await chmod(join(fakeAgentDirectory, "codex"), 0o755);
+			await chmod(join(fakeAgentDirectory, "claude"), 0o755);
 			const isolatedEnvironment = fixture.createIsolatedChildProcessEnvironment({
 				PATH: `${fakeAgentDirectory}:${dirname(process.execPath)}:/usr/bin:/bin`,
 				CODEX_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-home"),
 				CODEX_SQLITE_HOME: join(fixture.isolatedHomeDirectoryPath, "isolated-codex-sqlite"),
+				CLAUDE_CONFIG_DIR: join(fixture.isolatedHomeDirectoryPath, "isolated-claude-home"),
 				KANBAN_RUNTIME_PORT: undefined,
 				DO_NOT_TRACK: "1",
 			});
@@ -334,7 +341,10 @@ describe(
 					await runtime.client.taskCardAction.restoreTaskCardFromDoneIntoReviewResumingAgentSession.mutate({
 						taskId,
 					});
-				expect(reopened.taskCardRestoreFromDoneOutcome).toBe("agent_session_resumed_and_task_card_kept_in_review");
+				expect(
+					reopened.taskCardRestoreFromDoneOutcome,
+					reopened.taskCardRestoreFromDoneFailureMessage ?? undefined,
+				).toBe("agent_session_resumed_and_task_card_kept_in_review");
 				const path = await runtime.client.workspace.ensureWorktree.mutate({ taskId, baseRef: "main" });
 				if (!path.path) throw new Error("重开测试工作树缺失");
 				reopenedPaths[taskId] = path.path;

@@ -69,7 +69,10 @@ it.each(
 			const transcriptPath = join(fixture.isolatedHomeDirectoryPath, `${nativeSessionId}.jsonl`);
 			await writeFile(
 				transcriptPath,
-				`${[timestamp, timestamp + 60_000]
+				`${JSON.stringify({ type: "session_meta", payload: { id: nativeSessionId } })}\n${[
+					timestamp,
+					timestamp + 60_000,
+				]
 					.map((submittedAt) =>
 						JSON.stringify({
 							type: "event_msg",

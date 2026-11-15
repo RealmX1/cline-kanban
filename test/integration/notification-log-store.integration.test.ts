@@ -20,7 +20,7 @@ import {
 	readAllNotificationLogs,
 	readNotificationLog,
 } from "../../src/state/notification-log-store";
-import { getWorkspacesRootPath, loadWorkspaceState, saveWorkspaceState } from "../../src/state/workspace-state";
+import { getWorkspacesRootPath, mutateWorkspaceState } from "../../src/state/workspace-state";
 import {
 	type LoadSensitiveWallClockTwoTierDeadline,
 	waitForConditionWithinLoadSensitiveTwoTierDeadline,
@@ -255,15 +255,14 @@ describe.sequential("notification-log-store integration", () => {
 	it("feed-builder 派生 isDone / taskTitle / repoName，缺失 task 回退", async () => {
 		await withIsolatedNotificationLogWorkspaces(async (registerIsolatedWorkspace) => {
 			const { workspaceId, path: workspacePath } = await registerIsolatedWorkspace("project-a");
-			const initial = await loadWorkspaceState(workspacePath);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
 				board: boardWith([
 					{ columnId: "review", id: "task-active", title: "Active task title" },
 					{ columnId: "trash", id: "task-done", title: "Done task title" },
 				]),
 				sessions: {},
-				expectedRevision: initial.revision,
-			});
+				value: undefined,
+			}));
 
 			await appendNotificationLogEntry(workspaceId, {
 				taskId: "task-active",

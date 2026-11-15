@@ -124,7 +124,7 @@ describe("完整关联卡片的 Git 元数据身份隔离", () => {
 		readGitMetadata.mockResolvedValue({ tasks: [gitMetadata(2_000)] });
 		await renderPreview();
 		expect(aheadCountText()).not.toContain("97");
-		expect(container.querySelector("[data-task-card-line-change-statistics-group]")).toBeNull();
+		expect(container.querySelector("[data-task-card-line-change-statistics-group]")?.textContent).toBe("");
 	});
 
 	it("仅显示绑定当前完整身份的结果，并且不写入切换器共享快照", async () => {

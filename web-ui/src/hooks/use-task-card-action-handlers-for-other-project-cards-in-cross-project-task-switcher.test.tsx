@@ -22,10 +22,38 @@ const mocks = vi.hoisted(() => ({
 		}>
 	>(async () => ({ deploymentGroups: [], activeDeploymentId: null })),
 }));
+const verificationGroupDetailsByDeploymentId = new Map<string, RuntimePostDeployVerificationDeploymentGroup>();
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
 		deployment: {
 			getPostDeployVerificationState: { query: mocks.verificationState },
+			getPostDeployVerificationWorkspaceOverview: {
+				query: async () => {
+					const response = await mocks.verificationState();
+					verificationGroupDetailsByDeploymentId.clear();
+					const deploymentGroups = response.deploymentGroups.map((group) => {
+						verificationGroupDetailsByDeploymentId.set(group.deploymentId, group);
+						const { tasks, ...overview } = group;
+						return {
+							...overview,
+							contentVersion: JSON.stringify(group),
+							pendingVerificationTaskCount: tasks.length,
+							closedTaskCount: 0,
+							taskCountRequiringVerification: tasks.length,
+							carriedForwardTaskCount: 0,
+						};
+					});
+					return { ...response, deploymentGroups, pendingVerificationTaskCount: 0 };
+				},
+			},
+			getPostDeployVerificationDeploymentGroup: {
+				query: async ({ deploymentId }: { deploymentId: string }) => {
+					const group = verificationGroupDetailsByDeploymentId.get(deploymentId);
+					return group
+						? { status: "changed", deploymentId, contentVersion: JSON.stringify(group), deploymentGroup: group }
+						: { status: "not_found", deploymentId };
+				},
+			},
 			updateVerificationChecklist: { mutate: mocks.verificationMutation },
 		},
 	}),

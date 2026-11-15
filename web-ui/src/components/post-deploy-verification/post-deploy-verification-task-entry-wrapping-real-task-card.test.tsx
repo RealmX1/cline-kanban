@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
+import { getTaskCardDomRootsIncludingPortalledActionToolbars } from "@/components/task-card-action-toolbar";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { createInitialBoardData } from "@/data/board-data";
 import type { RuntimePostDeployVerificationTask, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -132,11 +132,17 @@ function runtimeBoardSnapshotRenderingInputsFor(
 }
 
 function findMoveToDoneButtonOnCardCopy(): HTMLButtonElement | null {
-	return container.querySelector<HTMLButtonElement>('.kb-board-card-shell button[aria-label="结案任务"]');
+	return findButtonOnCardCopyByAriaLabel("结案任务");
 }
 
 function findButtonOnCardCopyByAriaLabel(ariaLabel: string): HTMLButtonElement | null {
-	return container.querySelector<HTMLButtonElement>(`.kb-board-card-shell button[aria-label="${ariaLabel}"]`);
+	const taskCardElement = container.querySelector<HTMLElement>(".kb-board-card-shell");
+	if (!taskCardElement) return null;
+	return (
+		getTaskCardDomRootsIncludingPortalledActionToolbars(taskCardElement)
+			.map((root) => root.querySelector<HTMLButtonElement>(`button[aria-label="${ariaLabel}"]`))
+			.find((button) => button !== null) ?? null
+	);
 }
 
 // 终端 agent（claude）在跑的会话：In Progress 卡体据此画出「Move task to review」。
@@ -392,9 +398,10 @@ describe("PostDeployVerificationTaskEntryWrappingRealTaskCard", () => {
 			),
 			onRequestComplete,
 		});
-		const taskCardActionButtonAriaLabels = Array.from(
-			container.querySelectorAll<HTMLButtonElement>(".kb-board-card-shell button[aria-label]"),
-		)
+		const taskCardElement = container.querySelector<HTMLElement>(".kb-board-card-shell");
+		expect(taskCardElement).not.toBeNull();
+		const taskCardActionButtonAriaLabels = getTaskCardDomRootsIncludingPortalledActionToolbars(taskCardElement!)
+			.flatMap((root) => [...root.querySelectorAll<HTMLButtonElement>("button[aria-label]")])
 			// 两种提交指标打开本地浮层，不路由卡片动作；下面分别验证浮层确实打开。
 			.filter(
 				(button) =>

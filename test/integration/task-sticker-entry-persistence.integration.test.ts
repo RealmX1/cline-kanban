@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { expect, it } from "vitest";
 import type { RuntimeBoardCard, RuntimeBoardData } from "../../src/core/api-contract";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../../src/core/kanban-cli-invocation-environment-actor-claims";
-import { loadWorkspaceBoardById, loadWorkspaceContext, saveWorkspaceState } from "../../src/state/workspace-state";
+import {
+	loadWorkspaceBoardById,
+	loadWorkspaceContext,
+	mutateWorkspaceState,
+	saveWorkspaceState,
+} from "../../src/state/workspace-state";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
 import { createTaskCardActionApi } from "../../src/trpc/task-card-action-api";
 import { createTaskCardActionPerTaskCommandSerializer } from "../../src/trpc/task-card-action-per-task-command-serializer";
@@ -110,10 +115,11 @@ it("便签经真实路由、文件锁和持久化跨 API 重建恢复，移列�
 			(await loadWorkspaceBoardById(context.workspaceId)).columns.flatMap((column) => column.cards)[0]
 				?.taskStickerEntries,
 		).toHaveLength(1);
-		await saveWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+		await mutateWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
 			board: { columns: [{ id: "backlog", title: "Backlog", cards: [{ ...original, createdAt: 100 }] }] },
 			sessions: {},
-		});
+			value: undefined,
+		}));
 		await expect(
 			restartedCaller.taskCardAction.applyTaskStickerEntryMutation({
 				...base,

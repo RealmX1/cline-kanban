@@ -7,6 +7,7 @@ import {
 	loadWorkspaceBoardById,
 	loadWorkspaceContext,
 	loadWorkspaceState,
+	mutateWorkspaceState,
 	saveWorkspaceState,
 } from "../../src/state/workspace-state";
 import { type RuntimeTrpcContext, runtimeAppRouter } from "../../src/trpc/app-router";
@@ -55,7 +56,11 @@ async function createShelvingRuntimeFixture(repositoryPath: string) {
 			],
 		})),
 	};
-	await saveWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, { board, sessions: {} });
+	await mutateWorkspaceState(repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, () => ({
+		board,
+		sessions: {},
+		value: undefined,
+	}));
 	const startTaskSession = vi.fn<CreateTaskCardActionApiDependencies["runtimeApi"]["startTaskSession"]>(async () => ({
 		ok: false,
 		summary: null,
@@ -281,14 +286,23 @@ describe("搁置的服务端持久化与执行边界", () => {
 		});
 	});
 	it("并发启动与搁置按同一任务串行，保留最终搁置意图", async () => {
-		await withShelvingRuntimeFixture(async ({ caller, context }) => {
-			await Promise.all([
-				caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: "backlog" }),
-				caller.taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects({
-					taskId: "backlog",
-					isShelved: true,
-				}),
-			]);
+		await withShelvingRuntimeFixture(async ({ caller, context, startTaskSession }) => {
+			let allowTaskSessionStartupToFinish = () => {};
+			const taskSessionStartupMayFinish = new Promise<void>((resolve) => {
+				allowTaskSessionStartupToFinish = resolve;
+			});
+			startTaskSession.mockImplementationOnce(async () => {
+				await taskSessionStartupMayFinish;
+				return { ok: false, summary: null, error: "隔离启动失败" };
+			});
+			const starting = caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: "backlog" });
+			await vi.waitFor(() => expect(startTaskSession).toHaveBeenCalledOnce());
+			const shelving = caller.taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects({
+				taskId: "backlog",
+				isShelved: true,
+			});
+			allowTaskSessionStartupToFinish();
+			await Promise.all([starting, shelving]);
 			const board = await loadWorkspaceBoardById(context.workspaceId);
 			expect(
 				board.columns.find((column) => column.id === "in_progress")?.cards.find((card) => card.id === "backlog")

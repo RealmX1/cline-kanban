@@ -139,6 +139,8 @@ beforeEach(async () => {
 	fixture = createTempDir("kanban-codex-storage-migration-");
 	vi.stubEnv("HOME", fixture.path);
 	sourceHome = join(fixture.path, ".codex");
+	vi.stubEnv("CODEX_HOME", sourceHome);
+	vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
 	await mkdir(join(sourceHome, "sessions"), { recursive: true });
 	binary = join(fixture.path, "synthetic-codex-version");
 	await writeFile(binary, '#!/usr/bin/env node\nprocess.stdout.write("codex-cli 0.164.0\\n");\n', { mode: 0o700 });
