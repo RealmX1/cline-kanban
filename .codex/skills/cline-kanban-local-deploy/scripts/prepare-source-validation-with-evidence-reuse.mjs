@@ -61,6 +61,9 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 function sha256(value) {
 	return createHash("sha256").update(value).digest("hex");
 }
+function isSourceValidationInterruptedExitCode(exitCode) {
+	return [130, -2].includes(exitCode);
+}
 function isPathInsideDirectory(root, path) {
 	const suffix = relative(root, path);
 	return suffix === "" || (!suffix.startsWith("..") && !isAbsolute(suffix));
@@ -623,7 +626,7 @@ async function discoverReusableSourceValidationChecks(
 							evidenceSha256: reference.sha256,
 							proofFiles,
 							environmentCompatible: await isStandardRecordEnvironmentCompatible(record, state, currentEnvironment),
-							status: [130, -2].includes(record.exitCode)
+							status: isSourceValidationInterruptedExitCode(record.exitCode)
 								? "interrupted"
 								: record.status === "passed" && record.exitCode === 0
 									? "passed"
@@ -738,7 +741,11 @@ async function discoverReusableSourceValidationChecks(
 							evidenceSha256: proof.recordSha256,
 							proofFiles,
 							environmentCompatible: Boolean(environmentCompatible),
-							status: record.status === "passed" && record.exitCode === 0 ? "passed" : "failed",
+							status: isSourceValidationInterruptedExitCode(record.exitCode)
+								? "interrupted"
+								: record.status === "passed" && record.exitCode === 0
+									? "passed"
+									: "failed",
 							sourceFormat: "final-complete-tree-verification-evidence",
 							startedAt: record.startedAt,
 							concludedAt: record.finishedAt,
@@ -776,7 +783,11 @@ async function discoverReusableSourceValidationChecks(
 						evidenceSha256: await computeEvidenceFileSha256Once(bundlePath),
 						proofFiles: [log],
 						environmentCompatible: precommitEnvironmentCompatible,
-						status: precommit.status === "passed" && precommit.exitCode === 0 ? "passed" : "failed",
+						status: isSourceValidationInterruptedExitCode(precommit.exitCode)
+							? "interrupted"
+							: precommit.status === "passed" && precommit.exitCode === 0
+								? "passed"
+								: "failed",
 						sourceFormat: "final-committed-full-tree-precommit-validation",
 					});
 				}
@@ -1059,7 +1070,12 @@ async function finalizeSourceValidationAttempt(
 		childProcessStartIdentity: result.childProcessStartIdentity ?? attempt.childProcessStartIdentity ?? null,
 		status: !sourceRemainedUnchanged
 			? "source_changed_during_validation"
-			: attempt.spawnError || result.spawnError || result.exitCode === null || result.interrupted || stopped
+			: attempt.spawnError ||
+					result.spawnError ||
+					result.exitCode === null ||
+					isSourceValidationInterruptedExitCode(result.exitCode) ||
+					result.interrupted ||
+					stopped
 				? "interrupted"
 				: result.exitCode === 0
 					? "passed"
@@ -1375,7 +1391,7 @@ async function superviseSourceValidationCheck() {
 	clearTimeout(timeout);
 	Object.assign(record, result, {
 		status: "completed",
-		interrupted: stopped,
+		interrupted: stopped || result.exitCode === null || isSourceValidationInterruptedExitCode(result.exitCode),
 		concludedAt: new Date().toISOString(),
 	});
 	await writeJsonFileDurablyWhenChanged(values.record, record);

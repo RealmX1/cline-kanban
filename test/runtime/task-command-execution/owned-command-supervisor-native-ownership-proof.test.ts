@@ -33,6 +33,9 @@ it.each([
 	"detached_descendant",
 	"darwin_descendant_appears_after_native_process_snapshot",
 	"darwin_unrelated_process_appears_after_native_process_snapshot",
+	"darwin_repeated_late_unrelated_processes",
+	"darwin_repeated_late_owned_process",
+	"darwin_repeated_late_unproven_processes",
 	"unproven_orphan",
 	"darwin_missing_precision_after_dispatch",
 	"darwin_missing_precision_before_dispatch",
@@ -136,6 +139,15 @@ it.each([
 					hasNonce: false,
 					startAndCommand: "Wed Oct 28 11:00:00 2026 unrelated-baseline-process",
 				});
+		if (scenario.startsWith("darwin_repeated_late_"))
+			processes.set(401, {
+				parent: 1,
+				group: 401,
+				version: 1401,
+				originalParentVersion: 1,
+				hasNonce: false,
+				startAndCommand: "Wed Oct 28 11:00:00 2026 unrelated-baseline-parent",
+			});
 		const child = Object.assign(new EventEmitter(), { pid: spawnFailureWithoutPid ? undefined : 201 });
 		const signals: number[] = [];
 		let cycle = 0;
@@ -170,6 +182,18 @@ it.each([
 			].join(String.fromCharCode(0));
 		};
 		function simulatedProcessGroupSnapshot(): string {
+			if (scenario.startsWith("darwin_repeated_late_") && cycle >= 1 && now < 12_000) {
+				const pid = scenario.endsWith("owned_process") ? 301 : 4000 + processGroupSnapshotQueryCount;
+				processes.set(pid, {
+					parent: scenario.endsWith("owned_process") ? 1 : 401,
+					group: pid,
+					version: pid + 1000,
+					originalParentVersion: scenario.endsWith("owned_process") ? 99999 : 1401,
+					hasNonce: scenario.endsWith("owned_process") && inheritedNonce,
+					preciseIdentityUnavailable: scenario.endsWith("unproven_processes"),
+					startAndCommand: "Wed Oct 28 12:00:02 2026 process-born-after-native-snapshot",
+				});
+			}
 			if (
 				[
 					"darwin_descendant_appears_after_native_process_snapshot",
@@ -465,6 +489,7 @@ it.each([
 				"darwin_incomplete_process_group_snapshot",
 				"unchanged_unproven_process_budget",
 				"unproven_process_changes_after_budget",
+				"darwin_repeated_late_unproven_processes",
 			].includes(scenario)
 		)
 			await expect(evaluation).rejects.toThrow("退出归属仍未知");
@@ -491,6 +516,19 @@ it.each([
 			expect(progress.nativeOwnershipUnproven).toBe(true);
 			expect(progress.unprovenOwnershipProcesses.map((entry: { pid: number }) => entry.pid)).toContain(401);
 			expect(progress.status).not.toBe("exited");
+			expect(signals).toEqual([]);
+		}
+		if (scenario === "darwin_repeated_late_unrelated_processes") {
+			expect(progress.status).toBe("exited");
+			expect(progress.returncode).toBe(0);
+			expect(progress.timedOut).toBe(false);
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(cycle).toBe(1);
+			expect(signals).toEqual([]);
+		}
+		if (scenario === "darwin_repeated_late_unproven_processes") {
+			expect(progress.status).not.toBe("exited");
+			expect(progress.nativeOwnershipUnproven).toBe(true);
 			expect(signals).toEqual([]);
 		}
 		if (["darwin_malformed_process_group_snapshot", "darwin_incomplete_process_group_snapshot"].includes(scenario)) {
@@ -542,6 +580,7 @@ it.each([
 			[
 				"detached_descendant",
 				"darwin_descendant_appears_after_native_process_snapshot",
+				"darwin_repeated_late_owned_process",
 				"linux_nonce_detached_descendant",
 				"linux_kernel_detached_without_environment",
 			].includes(scenario)

@@ -301,7 +301,7 @@ if(owner.pid===process.pid) {
   }
   catch(error){throw Object.assign(error,{processSnapshotQuery:'process_group_snapshot'});}
  }
- async function collect(refreshNewNativeProcessRows=true) {
+ async function collect() {
   nativeQueryFailureObservations=[];
   let entries=processEntries();
   if(!child?.pid){lastProcessSnapshot=new Map(entries.filter(entry=>entry.pid===process.pid && !entry.processIsZombie).map(entry=>[entry.pid,entry]));nativeOwnershipUnproven=false;unprovenOwnershipProcesses=[];return [];}
@@ -346,12 +346,19 @@ if(owner.pid===process.pid) {
     // 原生枚举后已退出的 PID 由随后完整 ps 进程表补证；表内缺精度进程继续保持未知。
     entries=entries.filter(entry=>currentProcessGroupSnapshotPids.has(entry.pid));
     for(const pid of unprovenOwnershipPids)if(pid>0&&!currentProcessGroupSnapshotPids.has(pid))unprovenOwnershipPids.delete(pid);
-    // 两次枚举之间新出现的 PID 尚无原生归属，补证前不能把空历史快照当作退出证明。
+    // 对固定的一批迟到 PID 补查原生身份，避免整机持续新建进程让整表刷新永远追不上。
     const nativeSnapshotPids=new Set(entries.map(entry=>entry.pid));
-    if(refreshNewNativeProcessRows&&processGroupSnapshot.some(entry=>!entry.processIsZombie&&!nativeSnapshotPids.has(entry.pid)))return collect(false);
-    for(const entry of processGroupSnapshot)if(!entry.processIsZombie&&!nativeSnapshotPids.has(entry.pid)){
-     entries.push({...entry,parent:-1,startAndCommand:'unavailable'});
-     unprovenOwnershipPids.add(entry.pid);unprovenOwnershipReasons.set(entry.pid,'current_process_missing_from_native_snapshot');
+    const lateProcessRows=processGroupSnapshot.filter(entry=>!entry.processIsZombie&&!nativeSnapshotPids.has(entry.pid));
+    const lateNativeObservations=lateProcessRows.length?await readNativeProcessExecutionEnvironmentOwnership(lateProcessRows.map(entry=>entry.pid),nonce):new Map();
+    let unrelatedAdded=true;while(unrelatedAdded){unrelatedAdded=false;for(const native of lateNativeObservations.values())if(native.processUniqueIdentity&&native.hasExecutionOwnershipToken!==true&&unrelatedOriginalParentVersions.has(native.originalParentProcessIdVersion)&&!unrelatedOriginalParentVersions.has(native.processIdVersion)){unrelatedOriginalParentVersions.add(native.processIdVersion);unrelatedAdded=true;}}
+    for(const row of lateProcessRows){
+     const native=lateNativeObservations.get(row.pid);
+     const entry={...row,...native,parent:native?.parentProcessPid??-1,startAndCommand:native?.processStartIdentity??'unavailable',...(native?.processUniqueIdentity?{nativeProcessGenerationIdentity:'darwin_unique_process_id:'+native.processUniqueIdentity}:{})};
+     entries.push(entry);
+     if(native?.processIsZombie)zombies.add(row.pid);
+     if(native){currentDarwinParentGenerations.set(row.pid,native);originalParentGenerationByPid.set(row.pid,native.originalParentProcessIdVersion);}
+     if(native?.hasExecutionOwnershipToken===true&&entry.nativeProcessGenerationIdentity)rememberOwned(entry);
+     else if(!native?.outsideCurrentUser&&!hasSameProcessGeneration(entry,beforeDispatchProcesses.get(row.pid))&&!(entry.nativeProcessGenerationIdentity&&unrelatedOriginalParentVersions.has(native?.originalParentProcessIdVersion))){unprovenOwnershipPids.add(row.pid);unprovenOwnershipReasons.set(row.pid,'current_process_missing_from_native_snapshot');}
     }
     for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid)groupMembers.add(entry.pid);
    }
