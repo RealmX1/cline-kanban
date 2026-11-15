@@ -31,6 +31,8 @@ it.each([
 	"unchanged_unproven_process_budget",
 	"unproven_process_changes_after_budget",
 	"detached_descendant",
+	"darwin_descendant_appears_after_native_process_snapshot",
+	"darwin_unrelated_process_appears_after_native_process_snapshot",
 	"unproven_orphan",
 	"darwin_missing_precision_after_dispatch",
 	"darwin_missing_precision_before_dispatch",
@@ -167,6 +169,33 @@ it.each([
 				"VALUE=KANBAN_OWNED_COMMAND_EXECUTION_NONCE=nonce",
 			].join(String.fromCharCode(0));
 		};
+		function simulatedProcessGroupSnapshot(): string {
+			if (
+				[
+					"darwin_descendant_appears_after_native_process_snapshot",
+					"darwin_unrelated_process_appears_after_native_process_snapshot",
+				].includes(scenario) &&
+				cycle === 1
+			)
+				processes.set(301, {
+					parent: 1,
+					group: 301,
+					version: 1301,
+					originalParentVersion: 99999,
+					hasNonce: scenario === "darwin_descendant_appears_after_native_process_snapshot" && inheritedNonce,
+					outsideCurrentUser: scenario === "darwin_unrelated_process_appears_after_native_process_snapshot",
+					startAndCommand: "Wed Oct 28 12:00:02 2026 descendant-born-after-native-snapshot",
+				});
+			processGroupSnapshotQueryCount++;
+			if (scenario === "darwin_malformed_process_group_snapshot" && cycle >= 1) return "unreadable row";
+			if (scenario === "darwin_incomplete_process_group_snapshot" && cycle >= 1) return "1 1 S\n";
+			if (processGroupSnapshotFailure && cycle <= 4)
+				throw Object.assign(new Error("故障注入：进程组快照暂时不可读"), { status: 1 });
+			return [...processes]
+				.map(([pid, entry]) => `${pid} ${entry.group} ${entry.zombie ? "Z" : "S"}`)
+				.concat("9999 900 S")
+				.join("\n");
+		}
 		const evaluation = runInNewContext(
 			`(async()=>{${source.replace(/^import .*;\n/gm, "")} })()`,
 			{
@@ -231,12 +260,14 @@ it.each([
 							});
 					return child;
 				},
-				spawnSync: () => {
+				spawnSync: (_command: string, args: string[]) => {
 					if (cycle >= 1 && cycle < 8) {
 						const counts = regularQueryCountsByCycle.get(cycle) ?? { ps: 0, native: 0 };
 						counts.ps++;
 						regularQueryCountsByCycle.set(cycle, counts);
 					}
+					if (args[0] === "-axo" && args[1] === "pid=,pgid=,stat=")
+						return { status: 0, pid: 9999, stdout: simulatedProcessGroupSnapshot() };
 					fullProcessSnapshotCycles.push(cycle);
 					return {
 						status: 0,
@@ -312,11 +343,7 @@ it.each([
 						return JSON.stringify(rows);
 					}
 					if (args[0] === "-axo" && args[1] === "pid=,pgid=,stat=") {
-						processGroupSnapshotQueryCount++;
-						if (scenario === "darwin_malformed_process_group_snapshot" && cycle >= 1) return "unreadable row";
-						if (scenario === "darwin_incomplete_process_group_snapshot" && cycle >= 1) return "1 1 S\n";
-						if (processGroupSnapshotFailure && cycle <= 4)
-							throw Object.assign(new Error("故障注入：进程组快照暂时不可读"), { status: 1 });
+						return simulatedProcessGroupSnapshot();
 					}
 					if (args[0] === "-axo")
 						return [...processes]
@@ -501,9 +528,12 @@ it.each([
 			}
 		}
 		if (
-			["complete", "bulk_parent_fences_avoid_per_pid_helpers", "linux_kernel_unrelated_late_child"].includes(
-				scenario,
-			)
+			[
+				"complete",
+				"bulk_parent_fences_avoid_per_pid_helpers",
+				"linux_kernel_unrelated_late_child",
+				"darwin_unrelated_process_appears_after_native_process_snapshot",
+			].includes(scenario)
 		) {
 			expect(progress.status).toBe("exited");
 			expect(progress.returncode).toBe(0);
@@ -511,6 +541,7 @@ it.each([
 		if (
 			[
 				"detached_descendant",
+				"darwin_descendant_appears_after_native_process_snapshot",
 				"linux_nonce_detached_descendant",
 				"linux_kernel_detached_without_environment",
 			].includes(scenario)

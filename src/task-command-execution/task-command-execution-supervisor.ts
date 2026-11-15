@@ -293,13 +293,15 @@ if(owner.pid===process.pid) {
  }
  function readProcessGroupSnapshot() {
   try {
-   const processGroupSnapshotMatches=execFileSync('ps',['-axo','pid=,pgid=,stat='],{encoding:'utf8',timeout:5000,maxBuffer:32*1024*1024}).split('\n').filter(line=>line.trim()).map(line=>line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/));
+   const query=spawnSync('ps',['-axo','pid=,pgid=,stat='],{encoding:'utf8',timeout:5000,maxBuffer:32*1024*1024});
+   if(query.status!==0)throw Object.assign(new Error('原生进程组表暂不可读'),{status:query.status,code:query.error?.code});
+   const processGroupSnapshotMatches=query.stdout.split('\n').filter(line=>line.trim()).map(line=>line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s*$/));
    if(processGroupSnapshotMatches.some(match=>!match)||!processGroupSnapshotMatches.some(match=>Number(match?.[1])===process.pid))throw new Error('完整进程组表缺少可核验的监管器身份或包含不可解析的行');
-   return processGroupSnapshotMatches.map(match=>({pid:Number(match[1]),processGroupPid:Number(match[2]),processIsZombie:/^[ZX]/.test(match[3])}));
+   return processGroupSnapshotMatches.map(match=>({pid:Number(match[1]),processGroupPid:Number(match[2]),processIsZombie:/^[ZX]/.test(match[3])})).filter(entry=>entry.pid!==query.pid);
   }
   catch(error){throw Object.assign(error,{processSnapshotQuery:'process_group_snapshot'});}
  }
- async function collect() {
+ async function collect(refreshNewNativeProcessRows=true) {
   nativeQueryFailureObservations=[];
   let entries=processEntries();
   if(!child?.pid){lastProcessSnapshot=new Map(entries.filter(entry=>entry.pid===process.pid && !entry.processIsZombie).map(entry=>[entry.pid,entry]));nativeOwnershipUnproven=false;unprovenOwnershipProcesses=[];return [];}
@@ -344,6 +346,13 @@ if(owner.pid===process.pid) {
     // 原生枚举后已退出的 PID 由随后完整 ps 进程表补证；表内缺精度进程继续保持未知。
     entries=entries.filter(entry=>currentProcessGroupSnapshotPids.has(entry.pid));
     for(const pid of unprovenOwnershipPids)if(pid>0&&!currentProcessGroupSnapshotPids.has(pid))unprovenOwnershipPids.delete(pid);
+    // 两次枚举之间新出现的 PID 尚无原生归属，补证前不能把空历史快照当作退出证明。
+    const nativeSnapshotPids=new Set(entries.map(entry=>entry.pid));
+    if(refreshNewNativeProcessRows&&processGroupSnapshot.some(entry=>!entry.processIsZombie&&!nativeSnapshotPids.has(entry.pid)))return collect(false);
+    for(const entry of processGroupSnapshot)if(!entry.processIsZombie&&!nativeSnapshotPids.has(entry.pid)){
+     entries.push({...entry,parent:-1,startAndCommand:'unavailable'});
+     unprovenOwnershipPids.add(entry.pid);unprovenOwnershipReasons.set(entry.pid,'current_process_missing_from_native_snapshot');
+    }
     for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid)groupMembers.add(entry.pid);
    }
   }
