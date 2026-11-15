@@ -60,27 +60,25 @@ export async function readLocalRedeploymentWorkspaceState(
 	workspaceId: string,
 ): Promise<PersistedWorkspaceStateById> {
 	const fingerprint = await getWorkspaceStateSnapshotReadFingerprintById(workspaceId);
+	const validateWorkspaceState = (value: unknown): value is PersistedWorkspaceStateById =>
+		!!value &&
+		typeof value === "object" &&
+		"workspaceId" in value &&
+		value.workspaceId === workspaceId &&
+		"board" in value &&
+		!!value.board &&
+		typeof value.board === "object" &&
+		"columns" in value.board &&
+		Array.isArray(value.board.columns);
 	return reuseLocalRedeploymentCheck({
 		directory,
 		checkKey: `workspace-state:${workspaceId}`,
 		inputFingerprint: fingerprint,
-		validate: (value): value is PersistedWorkspaceStateById =>
-			!!value &&
-			typeof value === "object" &&
-			"workspaceId" in value &&
-			value.workspaceId === workspaceId &&
-			"board" in value &&
-			!!value.board &&
-			typeof value.board === "object" &&
-			"columns" in value.board &&
-			Array.isArray(value.board.columns),
+		validate: validateWorkspaceState,
 		read: async () => {
 			try {
-				const value = (await queryLocalRedeploymentRuntime(
-					request,
-					"workspace.getState",
-					workspaceId,
-				)) as PersistedWorkspaceStateById;
+				const value = await queryLocalRedeploymentRuntime(request, "workspace.getState", workspaceId);
+				if (!validateWorkspaceState(value)) throw new Error(`workspace.getState 身份或结构缺证：${workspaceId}`);
 				return { value, evidenceSource: "runtime_workspace_getState" };
 			} catch (error) {
 				const value = await loadPersistedWorkspaceStateById(workspaceId);

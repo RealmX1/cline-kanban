@@ -56,6 +56,39 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		};
 		return { request, directory, runtimeHomeDirectoryPath };
 	}
+	it.each(["unchanged", "source_changed", "preserved_copy_corrupted"] as const)(
+		"另一执行导入原生备份检查点后仍重验源和副本：%s",
+		async (change) => {
+			const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("nested_child");
+			const source = join(runtimeHomeDirectoryPath, "config.json");
+			await writeFile(source, "原配置");
+			await backupLocalRedeploymentRuntimeState(request, directory);
+			const previous = JSON.parse(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8"));
+			const preserved = previous.currentEntryBackups.find(
+				(entry: { source: string }) => entry.source === source,
+			).destination;
+			const nextDirectory = join(runtimeHomeDirectoryPath, "persistent-executions", "next-redeployment-execution");
+			await filesystem.cp(
+				join(directory, "runtime-backup-checkpoints"),
+				join(nextDirectory, "runtime-backup-checkpoints"),
+				{ recursive: true },
+			);
+			if (change === "source_changed") await writeFile(source, "新配置");
+			if (change === "preserved_copy_corrupted") await writeFile(preserved, "损坏副本");
+			vi.mocked(filesystem.cp).mockClear();
+			await backupLocalRedeploymentRuntimeState(
+				{ ...request, executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14", candidateSourceCommit: "b".repeat(40) },
+				nextDirectory,
+			);
+			const receipt = JSON.parse(await readFile(join(nextDirectory, "runtime-state-backup-receipt.json"), "utf8"));
+			const accepted = receipt.currentEntryBackups.find((entry: { source: string }) => entry.source === source);
+			expect(await readFile(accepted.destination, "utf8")).toBe(change === "source_changed" ? "新配置" : "原配置");
+			expect(vi.mocked(filesystem.cp).mock.calls.some(([copiedSource]) => copiedSource === source)).toBe(
+				change !== "unchanged",
+			);
+			expect(accepted.destination === preserved).toBe(change === "unchanged");
+		},
+	);
 	it.each(["direct_child", "nested_child"] as const)(
 		"执行目录为 runtime home 的 %s 时排除自身及其祖先，不递归复制备份输出",
 		async (nesting) => {
