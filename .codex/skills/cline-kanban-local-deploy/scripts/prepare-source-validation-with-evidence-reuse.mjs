@@ -444,8 +444,9 @@ function sourceValidationConclusionTime(check) {
 }
 
 function selectLatestSourceValidationConclusion(matches) {
-	let latest = matches[0];
-	for (const candidate of matches.slice(1)) {
+	const conclusions = matches.filter((candidate) => ["passed", "failed"].includes(candidate.status));
+	let latest = conclusions[0];
+	for (const candidate of conclusions.slice(1)) {
 		const candidateTime = sourceValidationConclusionTime(candidate);
 		const latestTime = sourceValidationConclusionTime(latest);
 		if (candidateTime !== null && latestTime !== null && candidateTime !== latestTime) {
@@ -558,7 +559,6 @@ async function discoverReusableSourceValidationChecks(
 			try {
 				const state = await readOptionalJsonEvidenceFile(statePath);
 				if (!state || resolve(state.gitCommonDirectory || "/") !== gitCommonDirectory) continue;
-				const latest = new Map();
 				for (const reference of state.validationRecords || []) {
 					try {
 						assert(
@@ -614,7 +614,7 @@ async function discoverReusableSourceValidationChecks(
 						if (commandRecord)
 							assert(JSON.stringify(commandRecord.argv) === JSON.stringify(record.argv), "验证与执行原件命令不一致");
 						const key = createSourceValidationCommandIdentityKey(record.argv, record.worktree);
-						latest.set(key, {
+						sourceValidationCheckResults.push({
 							commandKeys: [key],
 							argv: record.argv,
 							coverage: record.coverage,
@@ -623,7 +623,11 @@ async function discoverReusableSourceValidationChecks(
 							evidenceSha256: reference.sha256,
 							proofFiles,
 							environmentCompatible: await isStandardRecordEnvironmentCompatible(record, state, currentEnvironment),
-							status: record.status === "passed" && record.exitCode === 0 ? "passed" : "failed",
+							status: [130, -2].includes(record.exitCode)
+								? "interrupted"
+								: record.status === "passed" && record.exitCode === 0
+									? "passed"
+									: "failed",
 							sourceFormat: record.kind,
 							startedAt: record.startedAtUtc || record.startedAt || commandRecord?.startedAtUtc,
 							concludedAt: record.finishedAtUtc || record.completedAtUtc || commandRecord?.finishedAtUtc,
@@ -632,7 +636,6 @@ async function discoverReusableSourceValidationChecks(
 						addIssue(reference.path, error);
 					}
 				}
-				sourceValidationCheckResults.push(...latest.values());
 			} catch (error) {
 				addIssue(statePath, error);
 			}

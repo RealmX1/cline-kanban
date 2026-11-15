@@ -169,6 +169,7 @@ function createValidationFixture() {
 	function addStandardRecord(
 		options: {
 			failed?: boolean;
+			interruptedExitCode?: 130 | -2;
 			nodeVersion?: string;
 			wrongRepository?: boolean;
 			wrongContentManifest?: boolean;
@@ -184,7 +185,15 @@ function createValidationFixture() {
 			"base-branch-sync/durable-operations",
 			options.operationName ?? "isolated-handback",
 		);
-		const recordDirectory = join(operationDirectory, "commands", options.failed ? "failed-check" : "passed-check");
+		const recordDirectory = join(
+			operationDirectory,
+			"commands",
+			options.interruptedExitCode !== undefined
+				? "interrupted-check"
+				: options.failed
+					? "failed-check"
+					: "passed-check",
+		);
 		mkdirSync(recordDirectory, { recursive: true });
 		const stdoutPath = join(recordDirectory, "stdout");
 		const stderrPath = join(recordDirectory, "stderr");
@@ -264,8 +273,8 @@ function createValidationFixture() {
 			context: "task-tree",
 			argv: command.argv,
 			coverage: command.coverage,
-			status: options.failed ? "failed" : "passed",
-			exitCode: options.failed ? 1 : 0,
+			status: options.interruptedExitCode !== undefined ? "rejected" : options.failed ? "failed" : "passed",
+			exitCode: options.interruptedExitCode ?? (options.failed ? 1 : 0),
 			startedAtUtc: options.startedAt,
 			finishedAtUtc: options.concludedAt,
 			stdoutPath,
@@ -718,6 +727,33 @@ describe("local deploy 自动复用源码验证证据", () => {
 		fixture.addStandardRecord({ failed: true });
 		const result = fixture.run();
 		expect(result.status).toBe(1);
+		expect(result.report().sourceValidationCheckResults[0].decision).toBe("quality_validation_failed");
+		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
+	});
+
+	it.each([130, -2] as const)("SIGINT 中止记录 %s 保留为未完成，当前计划仍须实际检查", (interruptedExitCode) => {
+		const fixture = createValidationFixture();
+		fixture.addStandardRecord({ interruptedExitCode });
+		const inspected = fixture.run({ inspectOnly: true });
+		expect(inspected.report().availableSourceValidationChecks[0].status).toBe("interrupted");
+		expect(inspected.report().sourceValidationCheckResults[0].decision).toBe("missing_check");
+		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
+		const executed = fixture.run();
+		expect(executed.status).toBe(0);
+		expect(executed.report().sourceValidationCheckResults[0].decision).toBe("executed_missing_check");
+		expect(readFileSync(fixture.executedSourceValidationCounterPath, "utf8")).toBe("检查\n");
+	});
+
+	it("同一 operation 较晚中止不会覆盖此前真实失败", () => {
+		const fixture = createValidationFixture();
+		fixture.addStandardRecord({ failed: true, concludedAt: "2026-11-04T00:01:00Z" });
+		fixture.addStandardRecord({ interruptedExitCode: 130, concludedAt: "2026-11-04T01:01:00Z" });
+		const result = fixture.run();
+		expect(result.status).toBe(1);
+		expect(result.report().availableSourceValidationChecks.map((check) => check.status)).toEqual([
+			"failed",
+			"interrupted",
+		]);
 		expect(result.report().sourceValidationCheckResults[0].decision).toBe("quality_validation_failed");
 		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
 	});
