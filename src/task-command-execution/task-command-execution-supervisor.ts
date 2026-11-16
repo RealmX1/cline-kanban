@@ -356,6 +356,8 @@ if(owner.pid===process.pid) {
     for(const row of lateProcessRows){
      lateNativeSnapshotPids.add(row.pid);
      const native=lateNativeObservations.get(row.pid);
+     // 只有原生身份、BSD 信息及再次身份查询均为 ESRCH，才排除采样间已消失的 PID。
+     if(native?.nativeProcessNoLongerExists===true){zombies.add(row.pid);continue;}
      const entry={...row,...native,parent:native?.parentProcessPid??-1,startAndCommand:native?.processStartIdentity??'unavailable',...(native?.processUniqueIdentity?{nativeProcessGenerationIdentity:'darwin_unique_process_id:'+native.processUniqueIdentity}:{})};
      entries.push(entry);
      if(native?.processIsZombie)zombies.add(row.pid);

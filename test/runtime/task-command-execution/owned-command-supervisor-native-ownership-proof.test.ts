@@ -36,6 +36,9 @@ it.each([
 	"darwin_repeated_late_unrelated_processes",
 	"darwin_repeated_late_owned_process",
 	"darwin_repeated_late_unproven_processes",
+	"darwin_repeated_late_processes_exit_before_native_probe",
+	"darwin_repeated_late_processes_native_lookup_permission_denied",
+	"darwin_repeated_late_processes_native_generation_changed_during_probe",
 	"darwin_late_group_pid_reused_by_unrelated_process",
 	"unproven_orphan",
 	"darwin_missing_precision_after_dispatch",
@@ -211,7 +214,10 @@ it.each([
 					version: pid + 1000,
 					originalParentVersion: scenario.endsWith("owned_process") ? 99999 : 1401,
 					hasNonce: scenario.endsWith("owned_process") && inheritedNonce,
-					preciseIdentityUnavailable: scenario.endsWith("unproven_processes"),
+					preciseIdentityUnavailable:
+						scenario.endsWith("unproven_processes") ||
+						scenario.endsWith("permission_denied") ||
+						scenario.endsWith("generation_changed_during_probe"),
 					startAndCommand: "Wed Oct 28 12:00:02 2026 process-born-after-native-snapshot",
 				});
 			}
@@ -357,27 +363,43 @@ it.each([
 								).toBe(true);
 							throw Object.assign(new Error("故障注入：完整快照暂时不可读"), { code: "EACCES" });
 						}
-						const rows = (args[1] === "--snapshot" ? [...processes.keys()] : args.slice(1).map(Number)).flatMap(
-							(pid) => {
-								const entry = processes.get(pid);
-								return entry
-									? [
-											{
-												pid,
-												processUniqueIdentity: entry.preciseIdentityUnavailable
-													? undefined
-													: String(entry.version),
-												parentProcessPid: entry.parent,
-												processIdVersion: entry.version,
-												originalParentProcessIdVersion: entry.originalParentVersion,
-												outsideCurrentUser: entry.outsideCurrentUser === true,
-												processIsZombie: entry.zombie === true,
-												hasExecutionOwnershipToken: entry.hasNonce,
-											},
-										]
-									: [];
-							},
-						);
+						const rows = (args[1] === "--snapshot" ? [...processes.keys()] : args.slice(1).map(Number)).flatMap<
+							Record<string, unknown>
+						>((pid) => {
+							if (args[0] === "nonce" && pid >= 4000 && scenario.startsWith("darwin_repeated_late_processes_")) {
+								const absent = scenario.endsWith("exit_before_native_probe");
+								if (absent) processes.delete(pid);
+								return [
+									{
+										pid,
+										parentProcessPid: -1,
+										outsideCurrentUser: false,
+										hasExecutionOwnershipToken: null,
+										processIsZombie: false,
+										nativeProcessSnapshotUnproven: true,
+										nativeProcessLookupErrno: scenario.endsWith("permission_denied") ? 13 : 3,
+										nativeProcessNoLongerExists: absent,
+									},
+								];
+							}
+							const entry = processes.get(pid);
+							return entry
+								? [
+										{
+											pid,
+											processUniqueIdentity: entry.preciseIdentityUnavailable
+												? undefined
+												: String(entry.version),
+											parentProcessPid: entry.parent,
+											processIdVersion: entry.version,
+											originalParentProcessIdVersion: entry.originalParentVersion,
+											outsideCurrentUser: entry.outsideCurrentUser === true,
+											processIsZombie: entry.zombie === true,
+											hasExecutionOwnershipToken: entry.hasNonce,
+										},
+									]
+								: [];
+						});
 						if (args[1] === "--snapshot") {
 							if (scenario.startsWith("darwin_expired_native_snapshot_rows") && cycle >= 1)
 								rows.push({
@@ -523,6 +545,8 @@ it.each([
 				"unchanged_unproven_process_budget",
 				"unproven_process_changes_after_budget",
 				"darwin_repeated_late_unproven_processes",
+				"darwin_repeated_late_processes_native_lookup_permission_denied",
+				"darwin_repeated_late_processes_native_generation_changed_during_probe",
 			].includes(scenario)
 		)
 			await expect(evaluation).rejects.toThrow("退出归属仍未知");
@@ -559,6 +583,12 @@ it.each([
 			expect(cycle).toBe(1);
 			expect(signals).toEqual([]);
 		}
+		if (scenario === "darwin_repeated_late_processes_exit_before_native_probe") {
+			expect(progress.status).toBe("exited");
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(cycle).toBe(1);
+			expect(signals).toEqual([]);
+		}
 		if (scenario === "darwin_late_group_pid_reused_by_unrelated_process") {
 			expect(signals).not.toContain(301);
 			expect(progress.status).toBe("exited");
@@ -566,7 +596,13 @@ it.each([
 			expect(processes.get(301)?.version).toBe(3301);
 			expect(progress.ownedProcesses.map((entry: { pid: number }) => entry.pid)).not.toContain(301);
 		}
-		if (scenario === "darwin_repeated_late_unproven_processes") {
+		if (
+			[
+				"darwin_repeated_late_unproven_processes",
+				"darwin_repeated_late_processes_native_lookup_permission_denied",
+				"darwin_repeated_late_processes_native_generation_changed_during_probe",
+			].includes(scenario)
+		) {
 			expect(progress.status).not.toBe("exited");
 			expect(progress.nativeOwnershipUnproven).toBe(true);
 			expect(signals).toEqual([]);
