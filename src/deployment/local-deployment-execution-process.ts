@@ -37,6 +37,12 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 				context.assertCommandMayStart();
 				child = spawn(command[0], command.slice(1), {
 					cwd: context.cwd,
+					env: {
+						...process.env,
+						KANBAN_LOCAL_DEPLOYMENT_EXECUTION_ID: context.executionId,
+						KANBAN_LOCAL_DEPLOYMENT_STAGE: context.stage,
+						KANBAN_LOCAL_DEPLOYMENT_STAGE_ATTEMPT_NUMBER: String(context.attemptNumber),
+					},
 					stdio: ["ignore", stdout?.fd, stderr?.fd ?? "ignore"],
 				});
 			} catch (error) {

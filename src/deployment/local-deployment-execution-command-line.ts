@@ -31,6 +31,20 @@ import {
 import { runLocalDeploymentCommandPreservingOriginalOutput } from "./local-deployment-execution-process";
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
 import { verifyLocalDeploymentRegistrationEffectFromPersistedEvidence } from "./local-deployment-registration-effect-evidence";
+import {
+	completeLocalDeploymentTargetStageAttempt,
+	readLocalDeploymentTargetStageRecoveryBudget,
+	recordLocalDeploymentTargetStageFailure,
+	reserveLocalDeploymentTargetStageAttempt,
+} from "./local-deployment-target-stage-recovery-budget";
+import {
+	cleanupLocalRedeploymentFailedAttemptArtifacts,
+	setLocalRedeploymentAutomaticFailedAttemptCleanup,
+} from "./local-redeployment-failed-attempt-artifact-cleanup";
+import {
+	classifyLocalRedeploymentStageFailure,
+	validateFrozenLocalRedeploymentBackupCopyIdentity,
+} from "./local-redeployment-failure-recovery-evidence";
 import { cancelPreparedLocalRedeployment, startPreparedLocalRedeployment } from "./local-redeployment-owned-execution";
 import {
 	clearLocalRedeploymentFilesystemEvidenceRequests,
@@ -41,7 +55,6 @@ import {
 	LocalRedeploymentIdentityMismatch,
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
-	readLocalRedeploymentJson,
 	writeLocalRedeploymentJson,
 } from "./local-redeployment-preparation";
 import { preserveLocalRedeploymentRuntimeRestartAcceptance } from "./local-redeployment-runtime-restart-acceptance";
@@ -123,7 +136,7 @@ async function runLocalDeploymentExecutionAndWriteBusinessResult(directory: stri
 						action: "resume_same_run",
 						trigger: result.recovery.condition,
 						retry_not_before_epoch_ms: result.recovery.nextCheckAtEpochMs,
-						maximum_unchanged_retries: 1,
+						maximum_unchanged_retries: 0,
 						evidence_paths: execution.manifest.stages.flatMap((stage) => stage.recoveryEvidenceFilePaths ?? []),
 						equivalent_evidence_sources: [
 							"bound_stage_effect_probe",
@@ -142,6 +155,32 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 	const program = new Command()
 		.name("local-deployment-execution")
 		.description("绑定授权与候选，持久执行本地部署步骤并准备独立复盘；不新增部署授权");
+	program
+		.command("set-redeployment-cleanup")
+		.requiredOption("--execution-directory <path>")
+		.requiredOption("--automatic-cleanup <enabled-or-disabled>")
+		.option("--inspection-reason <text>")
+		.action(async (options: { executionDirectory: string; automaticCleanup: string; inspectionReason?: string }) => {
+			if (!["enabled", "disabled"].includes(options.automaticCleanup))
+				throw new Error("automatic-cleanup 必须为 enabled 或 disabled");
+			const directory = await assertPersistentExecutionDirectory(options.executionDirectory);
+			await setLocalRedeploymentAutomaticFailedAttemptCleanup(
+				directory,
+				options.automaticCleanup === "enabled",
+				options.inspectionReason,
+			);
+			printResult(await cleanupLocalRedeploymentFailedAttemptArtifacts(directory));
+		});
+	program
+		.command("cleanup-redeployment-failed-attempts")
+		.requiredOption("--execution-directory <path>")
+		.action(async (options: { executionDirectory: string }) => {
+			const result = await cleanupLocalRedeploymentFailedAttemptArtifacts(
+				await assertPersistentExecutionDirectory(options.executionDirectory),
+			);
+			printResult(result);
+			if (result.status === "pending") process.exitCode = 2;
+		});
 	program
 		.command("prepare-redeployment")
 		.requiredOption("--execution-directory <path>")
@@ -182,15 +221,50 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 				executionId = frozen.request.executionId;
 				requestSha256 = frozen.requestSha256;
 				if (!existsSync(join(directory, "local-deployment-execution.json"))) {
+					const targetBudget = await readLocalDeploymentTargetStageRecoveryBudget(
+						frozen.request,
+						"candidate_bootstrap",
+					);
+					if (targetBudget?.blockingFailure?.sourcePath)
+						await validateFrozenLocalRedeploymentBackupCopyIdentity(directory);
 					const evidence = await observeStandardLocalRedeploymentRecoveryEvidence(directory);
-					const budgetPath = join(directory, "candidate-preparation-attempt-budgets.json");
-					const budgets = ((await readLocalRedeploymentJson(budgetPath)) ?? {}) as Record<string, number>;
-					if ((budgets[evidence.evidenceSha256] ?? 0) >= 2)
-						throw new Error("相同候选准备证据的预算已用尽，等待语义条件变化");
-					budgets[evidence.evidenceSha256] = (budgets[evidence.evidenceSha256] ?? 0) + 1;
-					await writeLocalRedeploymentJson(budgetPath, budgets);
-					await initializeStandardLocalRedeployment(directory);
+					const attemptNumber = (targetBudget?.attempts.length ?? 0) + 1;
+					if (
+						!(await reserveLocalDeploymentTargetStageAttempt({
+							binding: frozen.request,
+							stage: "candidate_bootstrap",
+							executionDirectory: directory,
+							attemptNumber,
+							recoveryEvidenceSha256: evidence.evidenceSha256,
+							recoveryEvidenceReady: evidence.recoveryEvidenceReady === true,
+						}))
+					)
+						throw new Error("目标准备预算已消费，等待相关恢复条件");
+					try {
+						await initializeStandardLocalRedeployment(directory);
+					} catch (error) {
+						await recordLocalDeploymentTargetStageFailure({
+							binding: frozen.request,
+							stage: "candidate_bootstrap",
+							executionDirectory: directory,
+							attemptNumber,
+							failure: await classifyLocalRedeploymentStageFailure(directory, error, "candidate_bootstrap"),
+						});
+						throw error;
+					}
+					await completeLocalDeploymentTargetStageAttempt(frozen.request, "candidate_bootstrap");
 				}
+				const activeBudget = await readLocalDeploymentTargetStageRecoveryBudget(
+					frozen.request,
+					"state_preservation",
+				);
+				if (
+					activeBudget?.blockingFailure?.sourcePath &&
+					["copy_identity_mismatch", "source_contention", "unclassified_failure"].includes(
+						activeBudget.blockingFailure.classification,
+					)
+				)
+					await validateFrozenLocalRedeploymentBackupCopyIdentity(directory);
 				await runLocalDeploymentExecutionAndWriteBusinessResult(directory);
 			} catch (error) {
 				await recordLocalRedeploymentFilesystemEvidenceRequest(directory, error);
@@ -215,7 +289,7 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 									action: "resume_same_run",
 									trigger: "绑定实例、源码验证或依赖的语义证据变化",
 									retry_not_before_epoch_ms: Date.now() + 30_000,
-									maximum_unchanged_retries: 1,
+									maximum_unchanged_retries: 0,
 									evidence_paths: [],
 									equivalent_evidence_sources: [
 										"consistent_workspace_snapshot",
@@ -246,8 +320,14 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 				printResult({ ok: true });
 			} catch (error) {
 				await recordLocalRedeploymentFilesystemEvidenceRequest(options.executionDirectory, error, options.stage);
+				const blockingFailure = await classifyLocalRedeploymentStageFailure(
+					options.executionDirectory,
+					error,
+					stage,
+				);
 				printResult({
 					ok: false,
+					blockingFailure,
 					status:
 						error instanceof LocalRedeploymentQualityFailure || error instanceof LocalRedeploymentIdentityMismatch
 							? "quality_validation_failed"

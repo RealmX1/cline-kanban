@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { lstat, mkdir, readFile, realpath } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
@@ -21,6 +21,13 @@ import {
 	localDeploymentIndependentFindingsSchema,
 } from "./local-deployment-execution-contract";
 import { analyzeLegacyLocalDeploymentExecution } from "./local-deployment-legacy-execution-analysis";
+import {
+	completeLocalDeploymentTargetStageAttempt,
+	localDeploymentBlockingFailureSchema,
+	readLocalDeploymentTargetStageRecoveryBudget,
+	recordLocalDeploymentTargetStageFailure,
+	reserveLocalDeploymentTargetStageAttempt,
+} from "./local-deployment-target-stage-recovery-budget";
 
 export const LOCAL_DEPLOYMENT_EXECUTION_RECORD_FILENAME = "local-deployment-execution.json";
 const MAXIMUM_COMMAND_ATTEMPTS_PER_RECOVERY_EVIDENCE = 2;
@@ -252,6 +259,16 @@ export interface LocalDeploymentExecutionAnalysis {
 		nextCheckAtEpochMs: number | null;
 		condition: string | null;
 	};
+	operationalProgress?: {
+		targetStageBudget: {
+			stage: string;
+			attemptsUsed: number;
+			recoveryEvidenceConsumed: number;
+			blockingFailure: unknown;
+		} | null;
+		verifiedCheckpointFilePaths: string[];
+		failedAttemptCleanup: unknown;
+	};
 	metrics: {
 		commandAttempts: number | null;
 		failedCommandAttempts: number | null;
@@ -395,6 +412,42 @@ export function summarizeLocalDeploymentExecution(
 	};
 }
 
+async function readLocalDeploymentOperationalProgress(
+	directory: string,
+	record: LocalDeploymentExecutionRecord,
+): Promise<NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>> {
+	try {
+		const stage = summarizeLocalDeploymentExecution(record).recovery.unfinishedStage;
+		const budget = stage ? await readLocalDeploymentTargetStageRecoveryBudget(record.manifest, stage) : null;
+		const verifiedCheckpointFilePaths: string[] = [];
+		for (const root of ["verification-checkpoints", "runtime-backup-checkpoints"]) {
+			for (const name of await readdir(join(directory, root)).catch((error: unknown) => {
+				if (isMissingFile(error)) return [];
+				throw error;
+			}))
+				if (name.endsWith(".json")) verifiedCheckpointFilePaths.push(join(directory, root, name));
+		}
+		return {
+			targetStageBudget: budget
+				? {
+						stage: budget.stage,
+						attemptsUsed: budget.attempts.length,
+						recoveryEvidenceConsumed: budget.consumedRecoveryEvidence.length,
+						blockingFailure: budget.blockingFailure,
+					}
+				: null,
+			verifiedCheckpointFilePaths,
+			failedAttemptCleanup: await readJsonIfPresent(join(directory, "failed-attempt-artifact-cleanup.json")),
+		};
+	} catch (error) {
+		return {
+			targetStageBudget: null,
+			verifiedCheckpointFilePaths: [],
+			failedAttemptCleanup: { status: "unknown", reason: String(error) },
+		};
+	}
+}
+
 async function materializeRetrospectiveRequest(
 	directory: string,
 	record: LocalDeploymentExecutionRecord,
@@ -462,7 +515,10 @@ async function recoveryEvidenceSha256(
 	readOnlyRecoveryEvidenceSha256: string | null,
 ): Promise<string> {
 	const evidence = await Promise.all(
-		(stage.recoveryEvidenceFilePaths ?? []).map(async (path) => {
+		(stage.recoveryEvidenceObservationMode === "semantic_observation_only"
+			? []
+			: (stage.recoveryEvidenceFilePaths ?? [])
+		).map(async (path) => {
 			try {
 				return [
 					path,
@@ -529,6 +585,7 @@ async function executeOneStage(
 	}
 	if (await readLocalDeploymentExecutionRestriction(directory)) return false;
 	let readOnlyRecoveryEvidenceSha256: string | null = null;
+	let recoveryEvidenceReady = false;
 	if (stage.readOnlyRecoveryEvidenceObservationCommand) {
 		readOnlyRecoveryEvidenceSha256 = "unavailable";
 		const outputDirectory = join(
@@ -555,8 +612,11 @@ async function executeOneStage(
 				"evidenceSha256" in observation &&
 				typeof observation.evidenceSha256 === "string" &&
 				/^[a-f0-9]{64}$/u.test(observation.evidenceSha256)
-			)
+			) {
 				readOnlyRecoveryEvidenceSha256 = observation.evidenceSha256;
+				recoveryEvidenceReady =
+					"recoveryEvidenceReady" in observation && observation.recoveryEvidenceReady === true;
+			}
 		} catch {
 			// 不可读取保持同一未知指纹；原始输出与异常不会制造新的动作预算。
 		}
@@ -568,7 +628,7 @@ async function executeOneStage(
 		commandOutputDirectory: string,
 		exitCode: number | null,
 		detail: string,
-		commandFailureKind?: "quality_validation_failed",
+		commandFailureKind?: LocalDeploymentObservation["commandFailureKind"],
 	): Promise<LocalDeploymentObservation> {
 		const observation: LocalDeploymentObservation = {
 			sequence: record.observations.length + 1,
@@ -631,6 +691,8 @@ async function executeOneStage(
 						"已核对同一执行、候选及产物摘要，历史接受与当前执行资格分开核验",
 					);
 				}
+				if (stage.recoveryEvidenceObservationMode === "semantic_observation_only")
+					await completeLocalDeploymentTargetStageAttempt(record.manifest, stage.stage);
 				return true;
 			}
 			await observe(
@@ -681,6 +743,15 @@ async function executeOneStage(
 		if (await verifyPreviousEffect()) return true;
 		if (record.manifest.schemaVersion !== 2 || !stage.idempotentEffectRecoveryCommand) return false;
 	}
+	if (
+		record.observations.some(
+			(item) =>
+				item.stage === stage.stage &&
+				item.commandFailureKind === "machine_evidence_pending" &&
+				item.recoveryEvidenceSha256 === recoveryFingerprint,
+		)
+	)
+		return false;
 	while (
 		previousAttempts.filter((item) => item.recoveryEvidenceSha256 === recoveryFingerprint).length <
 		MAXIMUM_COMMAND_ATTEMPTS_PER_RECOVERY_EVIDENCE
@@ -688,6 +759,19 @@ async function executeOneStage(
 		if (await readLocalDeploymentExecutionRestriction(directory)) return false;
 		if (deps.readRuntimeLockCompromise() && LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return false;
 		const attempt = previousAttempts.length + 1;
+		if (
+			stage.recoveryEvidenceObservationMode === "semantic_observation_only" &&
+			!(await reserveLocalDeploymentTargetStageAttempt({
+				binding: record.manifest,
+				stage: stage.stage,
+				executionDirectory: directory,
+				attemptNumber: attempt,
+				recoveryEvidenceSha256:
+					readOnlyRecoveryEvidenceSha256 === "unavailable" ? null : readOnlyRecoveryEvidenceSha256,
+				recoveryEvidenceReady,
+			}))
+		)
+			return false;
 		const outputDirectory = join(resolve(directory), "stage-command-originals", stage.stage, `attempt-${attempt}`);
 		await mkdir(outputDirectory, { recursive: true });
 		// 意图先于子进程落盘；即使正好重启，下一次也会先核验效果。
@@ -740,10 +824,15 @@ async function executeOneStage(
 		}
 		let reportedFailure = false;
 		let qualityValidationFailed = false;
+		let machineEvidencePending = false;
+		let blockingFailure: unknown;
 		try {
 			const reported: unknown = JSON.parse(result.stdout);
 			if (reported !== null && typeof reported === "object") {
 				reportedFailure = "ok" in reported && reported.ok === false;
+				machineEvidencePending =
+					reportedFailure && "status" in reported && reported.status === "machine_evidence_pending";
+				if ("blockingFailure" in reported) blockingFailure = reported.blockingFailure;
 				qualityValidationFailed =
 					result.processWasStarted === true &&
 					reportedFailure &&
@@ -764,14 +853,41 @@ async function executeOneStage(
 			outputDirectory,
 			result.exitCode,
 			result.stderr.slice(-2_000),
-			qualityValidationFailed ? "quality_validation_failed" : undefined,
+			qualityValidationFailed
+				? "quality_validation_failed"
+				: machineEvidencePending
+					? "machine_evidence_pending"
+					: undefined,
 		);
 		previousAttempts = record.observations.filter(
 			(item) => item.stage === stage.stage && item.kind === "command_execution_intent_persisted",
 		);
+		if (stage.recoveryEvidenceObservationMode === "semantic_observation_only") {
+			if (commandSucceeded && !LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage))
+				await completeLocalDeploymentTargetStageAttempt(record.manifest, stage.stage);
+			else {
+				const classified = localDeploymentBlockingFailureSchema.safeParse(blockingFailure);
+				await recordLocalDeploymentTargetStageFailure({
+					binding: record.manifest,
+					stage: stage.stage,
+					executionDirectory: directory,
+					attemptNumber: attempt,
+					failure: classified.success
+						? classified.data
+						: {
+								classification: "unclassified_failure",
+								logicalResource: stage.stage,
+								recoveryCondition: "等待绑定命令原件及相关隔离验证，错误码本身不证明源竞争",
+								originalErrorReference: outputDirectory,
+							},
+				});
+			}
+		}
 		if (result.processWasStarted === false) continue;
 		if (qualityValidationFailed) return false;
 		if (LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return await verifyPreviousEffect(true);
+		if (machineEvidencePending) return false;
+		if (stage.recoveryEvidenceObservationMode === "semantic_observation_only" && !commandSucceeded) return false;
 		if (commandSucceeded) return true;
 	}
 	return false;
@@ -833,6 +949,7 @@ export async function executeLocalDeploymentStages(
 				const summary = summarizeLocalDeploymentExecution(record, restriction);
 				return {
 					...summary,
+					operationalProgress: await readLocalDeploymentOperationalProgress(directory, record),
 					executionDirectory: resolve(directory),
 				};
 			}),
@@ -953,7 +1070,14 @@ export async function analyzeLocalDeploymentExecutions(directories: string[]) {
 				localDeploymentExecutionRecordSchema.parse(original),
 				await readLocalDeploymentExecutionRestriction(directory),
 			);
-			return { ...summary, executionDirectory: directory };
+			return {
+				...summary,
+				executionDirectory: directory,
+				operationalProgress: await readLocalDeploymentOperationalProgress(
+					directory,
+					localDeploymentExecutionRecordSchema.parse(original),
+				),
+			};
 		}),
 	);
 	const executions: LocalDeploymentExecutionAnalysis[] = [];

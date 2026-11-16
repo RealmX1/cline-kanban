@@ -231,6 +231,13 @@ export function createLocalRedeploymentOwnedCommandSpecification(
 		],
 		workingDirectory: frozen.request.originatingTaskWorktreePath,
 		producerExecutionRevocationFile: join(directory, "redeployment-revocation.json"),
+		postProcessExitCleanupCommand: [
+			frozen.request.deploymentNodeBinaryPath,
+			join(directory, "frozen-local-redeployment-executor.mjs"),
+			"cleanup-redeployment-failed-attempts",
+			"--execution-directory",
+			resolve(directory),
+		],
 		cancelCommand: [
 			frozen.request.deploymentNodeBinaryPath,
 			join(directory, "frozen-local-redeployment-executor.mjs"),
