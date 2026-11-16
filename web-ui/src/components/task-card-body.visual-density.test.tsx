@@ -228,6 +228,31 @@ describe("TaskCardBody 的视觉密度", () => {
 		expect(host.querySelector('[data-task-card-summary-cell="committed_diff"]')?.textContent).toBe("已提交 —");
 	});
 
+	it.each(["standard_bordered_task_card", "compact_row_in_focus_view_left_column"] as const)(
+		"%s：dirty 与已提交行数各自按量级使用 K 缩写",
+		(visualDensity) => {
+			workspaceSnapshotMock.mockReturnValue({
+				path: "/isolated/task-1",
+				changedFiles: 3,
+				additions: 12_345,
+				deletions: 1_234,
+				taskRetainedCommittedLineChangeSummary: {
+					status: "complete",
+					commitCount: 2,
+					additions: 1_000,
+					deletions: 10_000,
+					historyVersion: "retained",
+					unavailableReason: null,
+				},
+			});
+			const host = renderWithDensity(visualDensity);
+			expect(host.querySelector('[data-task-card-summary-cell="dirty"]')?.textContent).toBe("(3 files +12K -1.2K)");
+			expect(host.querySelector('[data-task-card-summary-cell="committed_diff"]')?.textContent).toBe(
+				"已提交 +1.0K −10K",
+			);
+		},
+	);
+
 	it("干净工作区和 Done 卡保留历史累计，dirty 零值仍隐藏", () => {
 		workspaceSnapshotMock.mockReturnValue({
 			path: "/isolated/task-1",
