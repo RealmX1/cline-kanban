@@ -5,6 +5,7 @@ import { memo } from "react";
 import { boardColumnAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
 import type { BoardDisplayGroup as BoardColumnModel, BoardDisplayGroupId } from "@/types";
 
@@ -40,8 +41,8 @@ export const BoardColumnCollapsedSection = memo(function BoardColumnCollapsedSec
 			data-column-id={column.id}
 			data-verification-anchor={boardColumnAnchorKey(column.id)}
 			data-kanban-board-column-collapsed="true"
-			className="flex flex-col min-h-0 bg-surface-1 rounded-lg overflow-hidden border border-border"
-			style={{ flex: "0 0 40px" }}
+			className="kb-task-group flex flex-col min-h-0 overflow-hidden"
+			style={{ ...getTaskGroupSemanticColorStyle(column.id), flex: "0 0 40px" }}
 		>
 			<Droppable droppableId={column.id} type="CARD" isDropDisabled={isDropDisabled}>
 				{(cardProvided, cardSnapshot) => (
@@ -60,7 +61,7 @@ export const BoardColumnCollapsedSection = memo(function BoardColumnCollapsedSec
 							aria-expanded={false}
 							aria-label={expandLabel}
 							title={expandLabel}
-							className="flex flex-1 min-h-0 flex-col items-center gap-2 py-3 cursor-pointer text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent [@media(max-width:768px)]:h-11 [@media(max-width:768px)]:min-h-11 [@media(max-width:768px)]:flex-row [@media(max-width:768px)]:px-3 [@media(max-width:768px)]:py-0"
+							className="kb-task-group-header flex flex-1 min-h-0 flex-col items-center gap-2 py-3 cursor-pointer text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent [@media(max-width:768px)]:h-11 [@media(max-width:768px)]:min-h-11 [@media(max-width:768px)]:flex-row [@media(max-width:768px)]:px-3 [@media(max-width:768px)]:py-0"
 						>
 							<UnfoldHorizontal size={14} aria-hidden className="[@media(max-width:768px)]:hidden" />
 							<ChevronRight size={14} aria-hidden className="hidden [@media(max-width:768px)]:block" />

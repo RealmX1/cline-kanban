@@ -9,6 +9,7 @@ import { buildTaskCardBusinessProps } from "@/components/task-card-business-prop
 import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { Button } from "@/components/ui/button";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import { isCardDropDisabled, type ProgrammaticCardMoveInFlight } from "@/state/drag-rules";
@@ -182,16 +183,15 @@ export const BoardColumn = memo(function BoardColumn({
 			data-kanban-board-stage-section=""
 			data-column-id={column.id}
 			data-verification-anchor={boardColumnAnchorKey(column.id)}
-			className="flex flex-col min-w-0 min-h-0 bg-surface-1 rounded-lg overflow-hidden border border-border"
-			style={columnFlexStyle ?? { flex: "1 1 0" }}
+			className="kb-task-group flex flex-col min-w-0 min-h-0 overflow-hidden"
+			style={{ ...getTaskGroupSemanticColorStyle(column.id), ...(columnFlexStyle ?? { flex: "1 1 0" }) }}
 		>
 			<div className="flex flex-col min-h-0" style={{ flex: "1 1 0" }}>
 				<div
 					data-kanban-board-stage-section-header=""
-					className="flex shrink-0 items-center justify-between"
+					className="kb-task-group-header flex shrink-0 items-center justify-between px-3"
 					style={{
 						height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX,
-						padding: "0 12px",
 					}}
 				>
 					<div className="flex items-center gap-2 min-w-0">

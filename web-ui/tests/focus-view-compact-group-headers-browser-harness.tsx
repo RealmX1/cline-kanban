@@ -1,7 +1,9 @@
 import { useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard } from "../src/components/board-scope-all-projects-home-page-cross-project-task-switcher-section-columns-board";
 import { ColumnContextPanel } from "../src/components/detail-panels/column-context-panel";
 import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "../src/components/detail-panels/cross-project-recently-active-task-switcher-panel";
+import { KanbanBoard } from "../src/components/kanban-board";
 import { TooltipProvider } from "../src/components/ui/tooltip";
 import { createInitialBoardData } from "../src/data/board-data";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "../src/hooks/use-cross-project-recently-active-task-switcher-sections";
@@ -10,6 +12,8 @@ import type { BoardCard } from "../src/types";
 import "../src/styles/globals.css";
 
 const observedAt = Date.now();
+const browserHarnessQueryParameters = new URLSearchParams(location.search);
+const usesGroupBoundaryFixtures = browserHarnessQueryParameters.has("group-boundary-fixtures");
 const board = createInitialBoardData();
 for (const column of board.columns) {
 	column.cards = Array.from(
@@ -35,6 +39,12 @@ const shelvedCard: BoardCard = {
 board.columns[0]!.cards.push(shelvedCard);
 const waitingCard: BoardCard = { ...board.columns[1]!.cards[0]!, id: "waiting-task", title: "等待自动恢复验证任务" };
 board.columns[1]!.cards.push(waitingCard);
+if (usesGroupBoundaryFixtures) {
+	board.columns.find((column) => column.id === "validation")!.cards = [];
+	board.columns[0]!.cards[0]!.title = "超长任务标题用于验证窄屏分组边界和选中轮廓的完整性".repeat(3);
+	board.columns[0]!.cards[0]!.pinnedToTaskPinboardAt = observedAt;
+	board.columns[0]!.title = "待办分组的超长中文标题用于验证截断".repeat(3);
+}
 const entries: RuntimeCrossProjectTaskSwitcherEntry[] = board.columns.flatMap((column) =>
 	column.cards.map((card) => ({
 		taskId: card.id,
@@ -57,7 +67,7 @@ const entries: RuntimeCrossProjectTaskSwitcherEntry[] = board.columns.flatMap((c
 		isParkedAwaitingDispatchedBackgroundWork: false,
 		taskDescriptionLastUpdatedAt: observedAt,
 		lastOpenedByUserAt: null,
-		pinnedToTaskPinboardAt: null,
+		pinnedToTaskPinboardAt: card.pinnedToTaskPinboardAt ?? null,
 		taskPinboardPinReason: null,
 		taskShelvingState: card.taskShelvingState,
 	})),
@@ -96,7 +106,7 @@ function Harness() {
 		notificationLogByWorkspaceId: {},
 		currentProjectId: project.id,
 	});
-	const scope = new URLSearchParams(location.search).get("scope") ?? "current";
+	const scope = browserHarnessQueryParameters.get("scope") ?? "current";
 	const selectedColumn = board.columns.find((column) => column.id === "in_progress")!;
 	const selectedCard = selectedColumn.cards[0]!;
 	const currentProjectTaskCards = {
@@ -105,10 +115,22 @@ function Harness() {
 		currentProjectWorkspacePath: project.path,
 		currentProjectTaskCardActionHandlers: {},
 	};
+	const crossProjectHost = {
+		crossProjectTaskSwitcherSectionsModel: sectionsModel,
+		projects,
+		notificationLogByWorkspaceId: {},
+		currentProjectId: project.id,
+		isBoardScopeAllProjectsSelected: true,
+		focusedTaskInProject: { workspaceId: project.id, taskId: selectedCard.id },
+		onOpenTaskInProject: (_workspaceId: string, taskId: string) => setActionResult(`打开:${taskId}`),
+		onRequestPinCurrentProjectTaskToTaskPinboard: () => {},
+		onUnpinCurrentProjectTaskFromTaskPinboard: () => {},
+		onEditCurrentProjectTaskPinboardPinReason: () => {},
+	};
 	return (
 		<TooltipProvider>
 			<div className="flex h-screen flex-col gap-2 overflow-hidden bg-surface-0 p-3 text-text-primary">
-				<div className="flex shrink-0 items-center gap-4 text-xs">
+				<div className="flex shrink-0 flex-wrap items-center gap-4 text-xs">
 					<label>
 						左栏宽度{" "}
 						<input
@@ -124,26 +146,31 @@ function Harness() {
 					</button>
 					<output aria-label="动作结果">{actionResult}</output>
 				</div>
+				{browserHarnessQueryParameters.get("view") === "board" ? (
+					scope === "all" ? (
+						<BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoard
+							host={crossProjectHost}
+							currentProjectTaskCards={currentProjectTaskCards}
+						/>
+					) : (
+						<KanbanBoard
+							data={board}
+							taskSessions={{}}
+							onCardSelect={(taskId) => setActionResult(`打开:${taskId}`)}
+							onCreateTask={() => setActionResult("创建任务")}
+							onDragEnd={(result) => setActionResult(`移动:${result.draggableId}:${result.destination?.droppableId}`)}
+						/>
+					)
+				) : (
 				<div className="flex min-h-0 flex-1 gap-4">
 					<div
 						className="flex min-h-0 shrink-0 flex-col [&>div]:flex-1"
-						style={{ width: panelWidth }}
+						style={{ width: panelWidth, maxWidth: "100%" }}
 						data-isolated-compact-header-panel=""
 					>
 						{scope === "all" ? (
 							<CrossProjectRecentlyActiveTaskSwitcherPanel
-								host={{
-									crossProjectTaskSwitcherSectionsModel: sectionsModel,
-									projects,
-									notificationLogByWorkspaceId: {},
-									currentProjectId: project.id,
-									isBoardScopeAllProjectsSelected: true,
-									focusedTaskInProject: { workspaceId: project.id, taskId: selectedCard.id },
-									onOpenTaskInProject: (_workspaceId, taskId) => setActionResult(`打开:${taskId}`),
-									onRequestPinCurrentProjectTaskToTaskPinboard: () => {},
-									onUnpinCurrentProjectTaskFromTaskPinboard: () => {},
-									onEditCurrentProjectTaskPinboardPinReason: () => {},
-								}}
+								host={crossProjectHost}
 								currentProjectTaskCards={currentProjectTaskCards}
 							/>
 						) : (
@@ -159,10 +186,11 @@ function Harness() {
 							/>
 						)}
 					</div>
-					<div className="min-w-0 flex-1 rounded-md border border-border p-4 text-sm text-text-secondary">
+					<div className="min-w-0 flex-1 rounded-md border border-border p-4 text-sm text-text-secondary [@media(max-width:768px)]:hidden">
 						任务工作台 · {scope === "all" ? "All projects" : "当前项目"}
 					</div>
 				</div>
+				)}
 			</div>
 		</TooltipProvider>
 	);

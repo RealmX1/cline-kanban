@@ -16,8 +16,8 @@ export const STAGE_HEADER_HEIGHT_PX = FOCUS_VIEW_TASK_GROUP_HEADER_HEIGHT_PX;
 /** rail 条目间距（复刻 scrollport 的 `gap-1` = 4px）；计入阈值时略作高估以偏向「不吞卡」的安全侧。 */
 export const STAGE_RAIL_GAP_PX = 4;
 /**
- * 每个 rail 条目外框 `border border-border` 的上下边框之和（1px 上 + 1px 下）。渲染侧 `StageHeaderRailEntry`
- * 的外层 `<div className="bg-surface-1 rounded-lg border border-border">` 使条目真实高度比卡头槽高多这 2px；
+ * 每个 rail 条目外框的上下边框之和（1px 上 + 1px 下）。渲染侧 `StageHeaderRailEntry`
+ * 的外层 `kb-task-group` 使条目真实高度比卡头槽高多这 2px；
  * 阈值须逐条计入，否则多条堆叠后累计误差会让「首个未钉卡头」落进不透明 rail 之后被遮住（RVF-002 遮挡类 bug）。
  */
 export const STAGE_SECTION_BORDER_PX = 2;
@@ -49,12 +49,12 @@ export interface FocusViewGroupHeaderRailRow {
 	height: number;
 }
 
-/** 两侧各 8px，与 scrollport 和 rail 的横向 padding 一致。 */
+/** 两侧各 2px，与 scrollport 和 rail 的横向 padding 一致。 */
 export function computeFocusViewCompactHeaderColumnCount(scrollRootClientWidth: number): number {
 	return Math.max(
 		1,
 		Math.floor(
-			(scrollRootClientWidth - 16 + STAGE_RAIL_GAP_PX) /
+			(scrollRootClientWidth - 4 + STAGE_RAIL_GAP_PX) /
 				(FOCUS_VIEW_COMPACT_GROUP_HEADER_MINIMUM_WIDTH_PX + STAGE_RAIL_GAP_PX),
 		),
 	);

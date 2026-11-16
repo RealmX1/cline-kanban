@@ -54,7 +54,7 @@ export function FocusViewGroupHeader({
 		<div
 			data-focus-view-group-header=""
 			data-presentation={presentation}
-			className="flex min-w-0 shrink-0 items-center gap-1 pr-1 text-[12px] text-text-primary"
+			className="kb-task-group-header flex min-w-0 shrink-0 items-center gap-1 pr-1 text-[13px] text-text-primary"
 			style={{ height: isCompact ? FOCUS_VIEW_COMPACT_GROUP_HEADER_HEIGHT_PX : STAGE_HEADER_HEIGHT_PX }}
 		>
 			{onToggleExpanded ? (

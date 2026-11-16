@@ -99,7 +99,7 @@ function BoardScopeAllProjectsHomePageSectionColumns({
 		>
 			<BoardScopeAllProjectsHomePageHeader host={host} showsCreateTaskButton />
 			{/* 列不够宽时整排横向滚动，列本身不压到 260px 以下。 */}
-			<div className="flex flex-1 min-h-0 min-w-0 gap-2 overflow-x-auto px-3 pb-3">
+			<div className="flex flex-1 min-h-0 min-w-0 gap-1 overflow-x-auto px-0.5 pb-3">
 				{renderedSectionColumnsInOrder.map((section) => (
 					<CrossProjectTaskSwitcherSectionColumnScrollContainerWithOwnRowHoverExpansion
 						key={section}
@@ -130,7 +130,7 @@ export function BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColu
 	if (isMobile) {
 		return (
 			<div
-				className="flex flex-1 min-h-0 min-w-0 flex-col bg-surface-0"
+				className="flex flex-1 min-h-0 min-w-0 flex-col bg-surface-0 [&_[data-focus-view-group-header]]:text-sm"
 				data-testid="board-scope-all-projects-home-page-stacked-panel-on-mobile"
 			>
 				{/* 面板顶部自带 Create task，页头不再重复。 */}

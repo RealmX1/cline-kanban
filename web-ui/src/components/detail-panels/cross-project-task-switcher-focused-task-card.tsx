@@ -36,7 +36,7 @@ export function CrossProjectTaskSwitcherFocusedTaskCard({
 					</span>
 				) : null}
 			</div>
-			<div className="min-w-0 px-1 pb-1.5">
+			<div className="min-w-0 px-0.5 pb-1.5">
 				{selection && currentProjectTaskCards ? (
 					<TaskCardBodyVisualDensityProvider value="compact_row_in_focus_view_left_column">
 						<TaskCardBody

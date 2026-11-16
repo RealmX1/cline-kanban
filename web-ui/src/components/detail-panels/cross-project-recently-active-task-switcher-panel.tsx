@@ -253,7 +253,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			/>
 			{focusedTaskEntryKey && focusedTaskSourceSection === null ? (
 				<div
-					className="mx-2 mt-1 shrink-0"
+					className="mx-0.5 mt-1 shrink-0"
 					data-cross-project-focused-task-outside-sections=""
 					data-cross-project-focused-task-scroll-anchor={focusedTaskEntryKey}
 				>
@@ -265,14 +265,14 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					/>
 				</div>
 			) : null}
-			<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
+			<div className="relative mt-1 flex min-h-0 flex-1 flex-col overflow-clip">
 				<div
 					ref={panelScrollContainerRef}
 					data-task-card-column-scroll-container=""
 					onScroll={(event) =>
 						writeCrossProjectTaskSwitcherPanelViewContinuity({ panelScrollTopPx: event.currentTarget.scrollTop })
 					}
-					className="isolate flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain p-2 [overflow-anchor:none]"
+					className="isolate flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto overscroll-contain px-0.5 pb-2 [overflow-anchor:none]"
 					data-testid="cross-project-recently-active-task-switcher-panel"
 					data-cross-project-focused-task-pin-state={headerPinLayout.focusedCardRailEdge}
 				>
@@ -314,7 +314,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 									showsFocusedCard && focusedTaskEntryInProject && focusedTaskSourceSection ? (
 										<div
 											ref={focusedTaskStickyScrollContainerRef}
-											className="max-h-[var(--kb-focused-card-rail-maximum-height)] overflow-y-auto overscroll-contain px-2 pb-2"
+											className="max-h-[var(--kb-focused-card-rail-maximum-height)] overflow-y-auto overscroll-contain px-0.5 pb-2"
 											data-cross-project-focused-task-sticky-edge={edge === "pinTop" ? "top" : "bottom"}
 											onPointerEnter={
 												rowHoverExpansionOfFocusedTaskStickyScrollContainer.panelPointerHandlers

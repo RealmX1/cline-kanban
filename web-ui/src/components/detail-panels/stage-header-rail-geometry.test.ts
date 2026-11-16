@@ -17,6 +17,15 @@ import {
 } from "@/components/detail-panels/stage-header-rail-geometry";
 
 describe("紧凑分组标题的共享几何", () => {
+	it.each([
+		[199, 1],
+		[200, 2],
+		[299, 2],
+		[300, 3],
+	])("%spx 滚动口扣除两侧 2px 后容纳 %s 列", (width, expectedColumns) => {
+		expect(computeFocusViewCompactHeaderColumnCount(width)).toBe(expectedColumns);
+	});
+
 	it("连续紧凑项按列换行，普通标题和焦点副本各占整行", () => {
 		const rows = computeFocusViewGroupHeaderRailRows({
 			groupIds: ["a", "b", "c", "d", "e", "f"],

@@ -528,15 +528,14 @@ export const KanbanBoard = memo(function KanbanBoard({
 									defaultAgentId={defaultAgentId}
 									onCardClick={activateCardUnlessDragged}
 								/>
-								{/* 列宽 handle 是 `.kb-board` 的直接子元素：负 margin 吃掉它额外引入的那一份 flex gap
-		    (8 - 4 + 1 - 5 + 8 = 8px)，列间距保持不变；移动端由 CSS 隐藏。 */}
+								{/* 负 margin 抵消手柄额外引入的 flex gap：4 - 2 + 1 - 3 + 4 = 4px；命中区仍由 ResizeHandle 保留。 */}
 								<ResizeHandle
 									orientation="vertical"
 									ariaLabel={`Resize ${column.title} column`}
 									title={KANBAN_BOARD_COLUMN_WIDTH_RESIZE_HANDLE_TITLE}
 									showBaseLine={false}
 									className="rounded-full transition-colors hover:bg-accent focus-visible:outline-none focus-visible:bg-accent focus-visible:shadow-[0_0_0_2px_var(--color-accent)]"
-									style={{ marginLeft: -4, marginRight: -5 }}
+									style={{ marginLeft: -2, marginRight: -3 }}
 									tabIndex={0}
 									ariaValueNow={columnCollapseAndWidthPreferences.getColumnCustomWidthPx(column.id)}
 									ariaValueMin={KANBAN_BOARD_COLUMN_MIN_CUSTOM_WIDTH_PX}
