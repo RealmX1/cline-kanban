@@ -59,6 +59,8 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 
 ## 铁律（每条都踩出过事故；细节见指针，此处只放承重规则）
 
+- **任务命令和普通启动不得隐式登记项目**：仅解析已有归属；Agent 显式新增须有路径预览、用户授权原话及来源。重复项目先保全迁移任务与会话，再注销索引，禁止用永久删除代替合并。见 `docs/duplicate-project-registration-and-task-preserving-consolidation.md`。
+
 - **独立 PTY host 的偏好与实际归属分开**：关闭新托管仍须接回存量；只读诊断不能抢 controller，Codex 控制宿主不等于 PTY 独立保活。部署前逐会话核验，非托管活会话默认等自然结束。见 `docs/agent-session-pty-host-persistent-enablement-and-deployment-continuity.md`。
 - **Codex 插件共享安装按实际能力默认启用**：版本只作诊断，不能把已测版本写成白名单。隔离核验的暂时缺证须持久重试；确证不兼容才用完整独立目录，禁止共享插件与私有安装记录混用。见 `docs/codex-source-shared-plugin-installation-and-native-update-coordination.md`。
 - **facet 模型**：`turnOwner` / `liveness` / `userTurnKind` 三 facet 是写时主真相，legacy `state` 是纯派生投影。① 绝不手写 `state:` 进 summary patch（一切写入走终端与 ACP 的 `updateSummary` 漏斗）；② 每次 facet 写入必须是完整三元组（残缺的会在广播/持久化边界的 Zod superRefine 炸开）；③ 消费者经 `resolveSessionFacets` 读 facet，决策**绝不**读 `summary.state`。全文：`docs/session-facet-model.md`。
@@ -75,7 +77,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **Shelved 独立于 Stage**：`taskShelvingState` 由服务端卡片动作维护；展示用 `BoardDisplayGroupId`，持久看板仍只有五个真实 Stage。搁置卡禁止自动移列，解除后不重放旧活动；边界与验收见 `docs/task-shelving-state-and-display-groups.md`。
 - **BoardCard 有两条平行宿主链**（主看板 `board-column.tsx` + Focus View `column-context-panel.tsx`）：新增/改 per-card action 必须两边 gating 同步，否则按钮渲染了却什么都不做（已发 bug）。卡片上的关系**徽标与横幅**（dd2db 阶段 2 起）同此规则。细节：`docs/architecture.md` 的 BoardCard 小节。
 - **Done 卡复用完整工作台但禁止执行**：会话中断保留原列，浏览器与项目计数都不得将其推断为结案；历史 query 不启动 agent 或创建工作树；Findings 与 Prompts 的会话归属不能依赖实时聊天投影或仅按卡片 ID 判断。执行入口及历史来源见 `docs/done-task-read-only-workbench.md`。
-- **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 只用 HOME 隔离的实例（`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
+- **工作单元间关系账本只追加、不可撤销**（dd2db，`src/inter-work-unit-relation-ledger/`，库在 `~/.cline/kanban/inter-work-unit-relation-ledger/`）：验证关系相关的 UI / CLI 须同时隔离 HOME 与 `KANBAN_INTER_WORK_UNIT_RELATION_LEDGER_STORAGE_ROOT`（后者优先于 HOME；`dev:full` 默认已隔离账本），绝不对真实 HOME 的 runtime 造数据——写进去的事件删不掉，只能追加补偿。记录型关系是读时从事件推出的投影，改投影规则要升 `RECORDED_INTER_WORK_UNIT_RELATION_PROJECTION_TABLE_VERSION`。
 - **查卡恢复必须按执行归属判断**：其他实例启动不等于本轮查询经历重启；只收口归属已退出的轮次，心跳不可读时保留未知态。持久图片与文本协议适配见 `docs/architecture/task-lookup-query-execution-ownership-and-persistent-prompt-images.md`。
 - **手机 Focus View 的三处展开必须独立**：上方导航与工具、Task Card 详情、下方按键栏只共享单一闲置收起通知，手动展开互不联动；滚轮按钮经 xterm 滚轮入口驱动当前会话，阅读模式滚当前文档。所有权、Chrome 合成事件兼容与验证见 `docs/mobile-focus-view-collapsible-controls-and-mouse-wheel-scrolling.md`。
 - **后台启动终端的估算尺寸须匹配响应式布局**：手机终端使用整页宽度，不能扣掉桌面并排 diff 的宽度；否则 Codex 可能以 1–3 列启动，首条提示词一直等到打开详情后才投递。证据与验收见 `docs/post-mortems/codex-mobile-background-startup-terminal-width-2026-10-19.md`。

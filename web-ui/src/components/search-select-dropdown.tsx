@@ -15,6 +15,7 @@ import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-eve
 export interface SearchSelectOption {
 	value: string;
 	label: string;
+	description?: string;
 	icon?: ReactNode;
 }
 
@@ -129,7 +130,7 @@ export function SearchSelectDropdown({
 			return [] as ReturnType<Fzf<SearchSelectOption[]>["find"]>;
 		}
 		const finder = new Fzf(orderedOptions, {
-			selector: (option) => option.label,
+			selector: (option) => [option.label, option.description].filter(Boolean).join(" "),
 		});
 		return finder.find(query);
 	}, [orderedOptions, query]);
@@ -310,10 +311,13 @@ export function SearchSelectDropdown({
 				}}
 			>
 				{isCustomValue ? <Plus size={14} className="shrink-0" /> : (option.icon ?? null)}
-				<span className="flex-1 break-all">
+				<span className="min-w-0 flex-1 break-all">
 					{isCustomValue
 						? option.label
 						: renderFuzzyHighlightedText(option.label, match?.positions, FUZZY_MATCHED_TEXT_STYLE)}
+					{option.description ? (
+						<span className="block text-xs font-normal text-text-tertiary">{option.description}</span>
+					) : null}
 				</span>
 				{isSelected ? <Check size={14} className="shrink-0 text-text-secondary" /> : null}
 			</button>
@@ -334,7 +338,14 @@ export function SearchSelectDropdown({
 					className={cn(fill && "justify-between text-left", buttonClassName)}
 					style={buttonStyle}
 				>
-					<span className="flex-1 truncate text-left">{resolvedButtonText}</span>
+					<span className="min-w-0 flex-1 text-left" title={selectedOption?.description}>
+						<span className="block truncate">{resolvedButtonText}</span>
+						{selectedOption?.description ? (
+							<span className="block truncate text-xs font-normal text-text-tertiary">
+								{selectedOption.description}
+							</span>
+						) : null}
+					</span>
 				</Button>
 			</RadixPopover.Trigger>
 			<RadixPopover.Portal>

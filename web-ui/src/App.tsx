@@ -866,6 +866,7 @@ export default function App(): ReactElement {
 				.map((project) => ({
 					workspaceId: project.id,
 					projectName: project.name,
+					repositoryPath: project.path,
 					visualIdentity: project.visualIdentity,
 				})),
 			selectedTargetWorkspaceId: editingTaskId ? editTaskTargetWorkspaceId : taskCreationTargetWorkspaceId,

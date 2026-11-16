@@ -82,6 +82,7 @@ import {
 	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { resolveProjectInputPath } from "../projects/project-path";
+import { resolveRegisteredWorkspaceInvocationContext } from "../state/registered-workspace-invocation-context";
 import {
 	detectGitRepositoryInfo,
 	getTaskWorktreesHomePath,
@@ -295,11 +296,8 @@ async function resolveRuntimeWorkspace(
 	cwd: string,
 	options: { autoCreateIfMissing?: boolean } = {},
 ) {
-	const normalizedProjectPath = (projectPath ?? "").trim();
-	const resolvedPath = normalizedProjectPath ? resolveProjectInputPath(normalizedProjectPath, cwd) : cwd;
-	return await loadWorkspaceContext(resolvedPath, {
-		autoCreateIfMissing: options.autoCreateIfMissing ?? true,
-	});
+	void options;
+	return resolveRegisteredWorkspaceInvocationContext(projectPath, cwd);
 }
 
 async function resolveWorkspaceRepoPath(
@@ -311,15 +309,8 @@ async function resolveWorkspaceRepoPath(
 	return workspace.repoPath;
 }
 
-async function ensureRuntimeWorkspace(workspaceRepoPath: string): Promise<string> {
-	const runtimeClient = createRuntimeTrpcClient(null);
-	const added = await runtimeClient.projects.add.mutate({
-		path: workspaceRepoPath,
-	});
-	if (!added.ok || !added.project) {
-		throw new Error(added.error ?? `Could not register project ${workspaceRepoPath} in Kanban runtime.`);
-	}
-	return added.project.id;
+async function resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath: string): Promise<string> {
+	return (await loadWorkspaceContext(workspaceRepoPath, { autoCreateIfMissing: false })).workspaceId;
 }
 
 type RuntimeKanbanCliTaskBoardMutationResponseOfKind<
@@ -703,7 +694,7 @@ function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreat
 /**
  * `--preview`：把「这条命令真跑起来会建出什么」算出来，**不建卡、不注册项目**。
  *
- * 只读到什么程度：不调用 `ensureRuntimeWorkspace`（那是 tRPC `projects.add`，一次写入），也不走
+ * 预览只解析已有归属，不调用项目新增入口，也不走
  * `loadWorkspaceContext` 的 autoCreateIfMissing 路径（它会写工作区索引）。项目还没注册进 Kanban 时
  * 不报错，改成一条告警继续预览——那恰恰是最需要先看一眼的场景。它也不需要运行时服务器在跑。
  *
@@ -782,8 +773,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 		requested: toTaskCreateRequestedSettings(input),
 	});
 
-	// 指纹校验刻意排在 ensureRuntimeWorkspace（tRPC `projects.add`，一次写入）**之前**：一次 fail closed
-	// 的建卡应当什么都没改，而不是「卡没建成、项目却已经被登记进看板」。
+	// 指纹校验排在运行时建卡调用之前，失败时不产生业务写入。
 	const expectedFingerprint = (input.expectResolvedSettingsFingerprint ?? "").trim();
 	if (expectedFingerprint && expectedFingerprint !== effectiveSettings.resolvedSettingsFingerprint) {
 		// fail closed 必须同时体现在 JSON 与退出码上：调用方通常先看退出码再解析输出，只返回
@@ -803,7 +793,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 		};
 	}
 
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 
 	const resolvedBaseRef = effectiveSettings.resolvedSettings.baseRef.value;
@@ -924,7 +914,7 @@ async function updateTaskCommand(input: {
 	}
 
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	// 只传原始输入：与卡片现值的合并在 runtime 的 board 锁内对最新卡片进行，CLI 这边不做读-改-写，
 	// 否则两次读写之间别人的更新会被这次整卡回写抹掉。
@@ -965,7 +955,7 @@ async function updateTaskCommand(input: {
 
 async function startTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	// runtime 一次做完：只收 backlog / in_progress 的卡 → 先移列到 in_progress → ensure worktree → 起会话
 	// （会话已在 agent 回合就不重复起）。卡不存在 / 所在列不允许时 runtime 抛错，原文案与迁移前 CLI 本地报错一致。
@@ -1233,7 +1223,7 @@ async function trashTask(input: {
 }): Promise<JsonRecord> {
 	const target = resolveTaskCommandTarget(input, "task done");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	const closure = await resolveTaskClosureCliRequest(input.closureOptions, workspaceId);
 	if (input.closureOptions?.correctExisting) {
@@ -1344,7 +1334,7 @@ async function deleteTaskCommand(input: {
 }): Promise<JsonRecord> {
 	const target = resolveTaskCommandTarget(input, "task delete");
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
-	const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	// 整条收尾链（board 删卡 → 清编辑草稿 → 清排队 prompt → 停会话 → 删 worktree → 最后批删 turn checkpoint ref）
 	// 都在 runtime 的 taskCardAction.permanentlyDeleteTaskCardsWithFullResourceCleanup 里按这个顺序执行。
@@ -1964,7 +1954,9 @@ function parseOptionalBooleanOption(value: unknown, flagName: string): boolean |
 
 async function runTaskCommand(handler: () => Promise<JsonRecord>): Promise<void> {
 	try {
-		printJson(await handler());
+		const result = await handler();
+		printJson(result);
+		if (result.ok === false) process.exitCode = 1;
 	} catch (error) {
 		printJson({
 			ok: false,
@@ -1979,13 +1971,13 @@ export function registerTaskCommand(program: Command): void {
 	registerTaskVisualizationCommand(task);
 	registerTaskExternalWorkflowCommands(task, {
 		resolveWorkspace: async (projectPath) =>
-			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
+			resolveRegisteredRuntimeWorkspaceId(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
 		createClient: createRuntimeTrpcClient,
 		run: runTaskCommand,
 	});
 	registerTaskConversationSessionCommands(task, {
 		resolveWorkspace: async (projectPath) =>
-			ensureRuntimeWorkspace(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
+			resolveRegisteredRuntimeWorkspaceId(await resolveWorkspaceRepoPath(projectPath, process.cwd())),
 		createClient: createRuntimeTrpcClient,
 		run: runTaskCommand,
 	});
@@ -1996,7 +1988,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "项目主仓库路径。")
 		.action(async (options: { registrationFile: string; projectPath?: string }) => {
 			await runTaskCommand(async () => {
-				const workspaceId = await ensureRuntimeWorkspace(
+				const workspaceId = await resolveRegisteredRuntimeWorkspaceId(
 					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
 				);
 				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.registerRecoveryEvidenceObservation.mutate(
@@ -2012,7 +2004,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "项目主仓库路径。")
 		.action(async (options: { adoptionFile: string; projectPath?: string }) => {
 			await runTaskCommand(async () => {
-				const workspaceId = await ensureRuntimeWorkspace(
+				const workspaceId = await resolveRegisteredRuntimeWorkspaceId(
 					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
 				);
 				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.adoptExistingSupervisor.mutate(
@@ -2030,7 +2022,7 @@ export function registerTaskCommand(program: Command): void {
 		.option("--project-path <path>", "项目主仓库路径。")
 		.action(async (options: { taskId: string; idempotencyKey: string; specFile: string; projectPath?: string }) => {
 			await runTaskCommand(async () => {
-				const workspaceId = await ensureRuntimeWorkspace(
+				const workspaceId = await resolveRegisteredRuntimeWorkspaceId(
 					await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
 				);
 				return createRuntimeTrpcClient(workspaceId).taskCommandExecution.start.mutate({
@@ -2050,7 +2042,7 @@ export function registerTaskCommand(program: Command): void {
 			.option("--project-path <path>", "项目主仓库路径。")
 			.action(async (options: { taskId: string; executionId: string; projectPath?: string }) => {
 				await runTaskCommand(async () => {
-					const workspaceId = await ensureRuntimeWorkspace(
+					const workspaceId = await resolveRegisteredRuntimeWorkspaceId(
 						await resolveWorkspaceRepoPath(options.projectPath, process.cwd()),
 					);
 					const client = createRuntimeTrpcClient(workspaceId).taskCommandExecution;
@@ -2116,7 +2108,7 @@ export function registerTaskCommand(program: Command): void {
 			.action(async (options: { taskId: string; projectPath?: string }) => {
 				await runTaskCommand(async () => {
 					const workspaceRepoPath = await resolveWorkspaceRepoPath(options.projectPath, process.cwd());
-					const workspaceId = await ensureRuntimeWorkspace(workspaceRepoPath);
+					const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 					const result = await createRuntimeTrpcClient(
 						workspaceId,
 					).taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects.mutate({
@@ -2209,7 +2201,7 @@ export function registerTaskCommand(program: Command): void {
 					const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
 					if (!projectPath || !process.env.KANBAN_TASK_ID?.trim())
 						throw new Error("当前调用环境缺少 Task 身份；不会从 cwd 推测。");
-					const workspaceId = await ensureRuntimeWorkspace(projectPath);
+					const workspaceId = await resolveRegisteredRuntimeWorkspaceId(projectPath);
 					return await createRuntimeTrpcClient(workspaceId).runtime.recordCurrentTaskProgress.mutate({
 						progressEntryId: options.progressEntryId ?? randomUUID(),
 						progressText: options.text,
@@ -2242,7 +2234,7 @@ export function registerTaskCommand(program: Command): void {
 				const projectPath = process.env.KANBAN_PROJECT_PATH?.trim();
 				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim())
 					throw new Error("当前调用环境缺少 Task 身份；不会从 cwd 推测。");
-				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				const workspaceId = await resolveRegisteredRuntimeWorkspaceId(projectPath);
 				return await createRuntimeTrpcClient(workspaceId).runtime.setCurrentWorkPhaseGoal.mutate({
 					goal: commandName === "clear-current-work-phase-goal" ? null : (options.goal ?? ""),
 				});
@@ -2261,7 +2253,7 @@ export function registerTaskCommand(program: Command): void {
 				if (!projectPath || !process.env.KANBAN_TASK_ID?.trim()) {
 					throw new Error("当前调用环境缺少 KANBAN_TASK_ID 或 KANBAN_PROJECT_PATH；不会从 cwd 推测。 ");
 				}
-				const workspaceId = await ensureRuntimeWorkspace(projectPath);
+				const workspaceId = await resolveRegisteredRuntimeWorkspaceId(projectPath);
 				const renamed = await createRuntimeTrpcClient(workspaceId).taskCardAction.renameCurrentTask.mutate(options);
 				return { ok: true, task: renamed.taskCardSnapshotAfterAction.taskCard };
 			});

@@ -46,6 +46,11 @@ import {
 	assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot,
 	hasBoardSnapshotRemovedTaskTransferredIntoWorkspace,
 } from "./backlog-task-project-transfer";
+import {
+	findConsolidatedRepositoryPath,
+	readDuplicateProjectConsolidationStatus,
+	resolveConsolidatedWorkspaceId,
+} from "./duplicate-project-consolidation-status";
 import { createParsedPersistedJsonFileReadCache } from "./parsed-persisted-json-file-read-cache";
 
 import { getRuntimeHomePath } from "./runtime-home-path";
@@ -876,6 +881,13 @@ export async function loadWorkspaceContext(
 	options: LoadWorkspaceContextOptions = {},
 ): Promise<RuntimeWorkspaceContext> {
 	const repoPath = await resolveWorkspacePath(cwd);
+	const retiredRepository = await findConsolidatedRepositoryPath(repoPath);
+	if (retiredRepository) {
+		if (retiredRepository.status !== "completed") throw new Error("来源项目正在合并，写入已冻结。");
+		const target = await loadWorkspaceContextById(retiredRepository.targetWorkspaceId);
+		if (!target) throw new Error("合并目标尚不可用，请等待恢复。");
+		return target;
+	}
 	const autoCreateIfMissing = options.autoCreateIfMissing ?? true;
 	const registeredEntry = findWorkspaceEntry(await readWorkspaceIndex(), repoPath);
 	if (registeredEntry || !autoCreateIfMissing) {
@@ -924,7 +936,7 @@ export async function resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(
 	workspaceId: string,
 ): Promise<RuntimeWorkspaceIndexEntry | null> {
 	const index = await registeredWorkspaceIndexReadCache.read(getWorkspaceIndexPath(), readWorkspaceIndex);
-	const entry = index.entries[workspaceId];
+	const entry = index.entries[await resolveConsolidatedWorkspaceId(workspaceId)];
 	if (!entry) return null;
 	try {
 		const directory = await stat(entry.repoPath);
@@ -937,6 +949,7 @@ export async function resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(
 }
 
 export async function loadWorkspaceContextById(workspaceId: string): Promise<RuntimeWorkspaceContext | null> {
+	workspaceId = await resolveConsolidatedWorkspaceId(workspaceId);
 	const index = await readWorkspaceIndex();
 	const entry = index.entries[workspaceId];
 	if (!entry) {
@@ -1037,6 +1050,8 @@ export async function savePersistedWorkspaceSessionsById(
 		throw new Error(`Invalid workspace sessions payload. ${formatSchemaIssues(parsedSessions.error)}`);
 	}
 	return await lockedFileSystem.withLock(getWorkspaceDirectoryLockRequest(workspaceId), async () => {
+		const consolidation = await readDuplicateProjectConsolidationStatus(workspaceId);
+		if (consolidation && consolidation.status !== "quiescing") throw new Error("来源项目的会话写入已冻结。");
 		const { board, meta } = await prepareWorkspaceStateSnapshotForWriteWithinLock(workspaceId);
 		if (meta.revision !== expectedRevision) throw new WorkspaceStateConflictError(expectedRevision, meta.revision);
 		const nextRevision = meta.revision + 1;
@@ -1492,6 +1507,12 @@ export async function writeWorkspaceStateFilesWithinBoardLockCapturingTaskMutati
 	taskMutationIntentWithResolvedActor: TaskMutationIntentWithResolvedActor;
 }): Promise<void> {
 	const { context } = input;
+	const consolidation = await readDuplicateProjectConsolidationStatus(context.workspaceId);
+	if (
+		consolidation &&
+		input.taskMutationIntentWithResolvedActor.taskMutationIntentKind !== "duplicate_project_task_transferred"
+	)
+		throw new Error("来源项目已冻结，不能写入旧项目快照。");
 	await recoverWorkspaceStateSnapshotProjectionWithinLock(context.workspaceId);
 	if (!input.taskMutationIntentWithResolvedActor.backlogTaskProjectTransfer)
 		await assertNoTransferredTaskIsReintroducedByStaleBoardSnapshot(

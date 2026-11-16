@@ -30,13 +30,13 @@ import {
 } from "../state/agent-session-reclamation-deadline-store";
 import { createParsedPersistedJsonFileReadCache } from "../state/parsed-persisted-json-file-read-cache";
 import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
+import { resolveRegisteredWorkspaceInvocationContext } from "../state/registered-workspace-invocation-context";
 import { readTaskLastOpenedByUserAtByTaskId } from "../state/task-last-opened-by-user-record-store";
 import {
 	getPersistedWorkspaceBoardFilePathById,
 	getWorkspaceStateSnapshotReadFingerprintById,
 	listWorkspaceIndexEntries,
 	loadWorkspaceBoardById,
-	loadWorkspaceContext,
 	loadWorkspaceState,
 	persistRuntimeAgentNativeConversationSessionIdentityByWorkspaceId,
 	type RuntimeWorkspaceIndexEntry,
@@ -359,7 +359,9 @@ function toProjectSummary(project: {
 
 export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDependencies): Promise<WorkspaceRegistry> {
 	const launchedFromGitRepo = deps.hasGitRepository(deps.cwd);
-	const initialWorkspace = launchedFromGitRepo ? await loadWorkspaceContext(deps.cwd) : null;
+	const initialWorkspace = launchedFromGitRepo
+		? await resolveRegisteredWorkspaceInvocationContext(undefined, deps.cwd).catch(() => null)
+		: null;
 	let indexedWorkspace: RuntimeWorkspaceIndexEntry | null = null;
 	if (!initialWorkspace) {
 		const indexedWorkspaces = await listWorkspaceIndexEntries();

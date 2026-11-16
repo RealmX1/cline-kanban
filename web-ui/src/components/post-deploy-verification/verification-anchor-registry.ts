@@ -62,6 +62,11 @@ export function verificationPanelTaskAnchorKey(taskId: string): string {
 	return `verification-panel-task:${taskId}`;
 }
 
+// 创建与 Backlog 共用的所属项目选择器，显示仓库路径用于同名项目辨识。
+export function taskEditorTargetProjectRepositoryPathSelectorAnchorKey(): string {
+	return "task-editor-target-project-repository-path-selector";
+}
+
 // 创建与 Backlog 共用编辑器的全局归属分析偏好，供真实实例重启后的持久化核验定位。
 export function taskEditorProjectAssignmentAutomaticAnalysisSwitchAnchorKey(): string {
 	return "task-editor-project-assignment-automatic-analysis-switch";

@@ -20,6 +20,7 @@ import {
 	runtimeAgentSessionTransportSchema,
 } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "./duplicate-project-consolidation-status";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath, listWorkspaceIndexEntries } from "./workspace-state";
 
 const AGENT_SESSION_RECLAMATION_DEADLINE_FILENAME = "agent-session-reclamation-deadlines.json";
@@ -139,7 +140,10 @@ function getAgentSessionReclamationDeadlinePath(workspaceId: string): string {
 	return join(workspaceDirectory, AGENT_SESSION_RECLAMATION_DEADLINE_FILENAME);
 }
 
-async function readRawRecords(workspaceId: string): Promise<PersistedAgentSessionReclamationDeadlineRecord[]> {
+async function readRawRecords(
+	workspaceId: string,
+	requireCompleteRead = false,
+): Promise<PersistedAgentSessionReclamationDeadlineRecord[]> {
 	const path = getAgentSessionReclamationDeadlinePath(workspaceId);
 	let raw: string;
 	try {
@@ -153,11 +157,13 @@ async function readRawRecords(workspaceId: string): Promise<PersistedAgentSessio
 	let parsedJson: unknown;
 	try {
 		parsedJson = JSON.parse(raw) as unknown;
-	} catch {
+	} catch (error) {
+		if (requireCompleteRead) throw error;
 		// fail-open：期限账本损坏时按「无待回收记录」处理，宁可少回收也不阻断启动、更不误杀。
 		return [];
 	}
 	const parsed = persistedAgentSessionReclamationDeadlineFileSchema.safeParse(parsedJson);
+	if (requireCompleteRead && !parsed.success) throw parsed.error;
 	return parsed.success ? parsed.data : [];
 }
 
@@ -175,7 +181,11 @@ const writeQueueByWorkspaceId = new Map<string, Promise<unknown>>();
 
 function enqueueWrite<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
 	const previous = writeQueueByWorkspaceId.get(workspaceId) ?? Promise.resolve();
-	const next = previous.then(operation, operation);
+	const guardedOperation = async () => {
+		await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
+		return operation();
+	};
+	const next = previous.then(guardedOperation, guardedOperation);
 	writeQueueByWorkspaceId.set(
 		workspaceId,
 		next.catch(() => undefined),
@@ -190,6 +200,29 @@ function capRecords(
 		return records;
 	}
 	return records.slice(records.length - MAX_RECORDS_PER_WORKSPACE);
+}
+
+// 迁入只裁终态历史。目标上尚未结算的期限留下；终态按创建时间丢最旧，同一快照重放不会换成另一批记录。
+function capMergedReclamationHistory(
+	records: PersistedAgentSessionReclamationDeadlineRecord[],
+): PersistedAgentSessionReclamationDeadlineRecord[] {
+	if (records.length <= MAX_RECORDS_PER_WORKSPACE) return records;
+	const unsettledIds = new Set(
+		records
+			.filter((record) => isLiveAgentSessionReclamationState(record.reclamationState))
+			.map((record) => record.recordId),
+	);
+	const terminalBudget = Math.max(0, MAX_RECORDS_PER_WORKSPACE - unsettledIds.size);
+	const retainedTerminalIds = new Set(
+		terminalBudget === 0
+			? []
+			: records
+					.filter((record) => !unsettledIds.has(record.recordId))
+					.sort((left, right) => left.createdAt - right.createdAt || left.recordId.localeCompare(right.recordId))
+					.slice(-terminalBudget)
+					.map((record) => record.recordId),
+	);
+	return records.filter((record) => unsettledIds.has(record.recordId) || retainedTerminalIds.has(record.recordId));
 }
 
 export async function readAgentSessionReclamationDeadlineRecords(
@@ -376,5 +409,46 @@ export async function updateAgentSessionReclamationProgress(
 export async function clearAgentSessionReclamationDeadlineRecords(workspaceId: string): Promise<void> {
 	await enqueueWrite(workspaceId, async () => {
 		await writeRecords(workspaceId, []);
+	});
+}
+
+export function withAgentSessionReclamationDeadlineWritesPaused<T>(
+	workspaceIds: string[],
+	action: () => Promise<T>,
+): Promise<T> {
+	const [first, ...rest] = workspaceIds;
+	if (!first) return action();
+	const previous = writeQueueByWorkspaceId.get(first) ?? Promise.resolve();
+	const next = previous.then(
+		() => withAgentSessionReclamationDeadlineWritesPaused(rest, action),
+		() => withAgentSessionReclamationDeadlineWritesPaused(rest, action),
+	);
+	writeQueueByWorkspaceId.set(
+		first,
+		next.catch(() => undefined),
+	);
+	return next;
+}
+
+export async function mergeTransferredAgentSessionReclamationHistoryWithinPausedWrites(
+	workspaceId: string,
+	sourceSnapshotText: string,
+): Promise<void> {
+	const incoming = persistedAgentSessionReclamationDeadlineFileSchema.parse(JSON.parse(sourceSnapshotText));
+	if (incoming.some((record) => record.reclamationState !== "reclaimed" && record.reclamationState !== "superseded"))
+		throw new Error("来源会话的回收期限尚未结算。");
+	const path = getAgentSessionReclamationDeadlinePath(workspaceId);
+	await lockedFileSystem.withLock({ path, type: "file" }, async () => {
+		const merged = await readRawRecords(workspaceId, true);
+		for (const record of incoming) {
+			const previous = merged.find((entry) => entry.recordId === record.recordId);
+			if (previous && JSON.stringify(previous) !== JSON.stringify(record)) throw new Error("会话回收历史发生冲突。");
+			if (!previous) merged.push(record);
+		}
+		await lockedFileSystem.writeJsonFileAtomic(path, capMergedReclamationHistory(merged), {
+			lock: null,
+			durable: true,
+			fileMode: 0o600,
+		});
 	});
 }

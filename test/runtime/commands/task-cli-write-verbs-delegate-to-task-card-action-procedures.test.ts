@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import { registerTaskCommand } from "../../../src/commands/task";
+import { loadWorkspaceContext } from "../../../src/state/workspace-state";
 
 // `kanban task start / done / delete / update` 收编进 runtime 的 taskCardAction.* 之后，CLI 只做参数解析与输出
 // 格式化：每个动词恰好调一次对应 procedure，CLI 进程里不再有停会话 / 删 worktree / 清草稿 / 清 checkpoint ref 的
@@ -43,7 +43,11 @@ const harness = vi.hoisted(() => {
 vi.mock("@trpc/client", () => ({
 	createTRPCProxyClient: () => ({
 		projects: {
-			add: { mutate: async () => ({ ok: true, project: { id: "workspace-1" } }) },
+			add: {
+				mutate: async () => {
+					throw new Error("任务命令不能调用 projects.add");
+				},
+			},
 		},
 		workspace: {
 			getState: { query: async () => harness.boardStateForColumnSelection },
@@ -56,6 +60,7 @@ vi.mock("@trpc/client", () => ({
 		},
 		runtime: {
 			recordCurrentTaskProgress: harness.recordTaskCardActionMutation("recordCurrentTaskProgress"),
+			reportTaskConversationSession: harness.recordTaskCardActionMutation("reportTaskConversationSession"),
 		},
 		taskCardAction: {
 			startTaskCardAgentSessionMovingItIntoInProgress: harness.recordTaskCardActionMutation(
@@ -147,6 +152,22 @@ describe("kanban task 写动词只调 taskCardAction.* 一次", () => {
 			delete harness.responsesByProcedureName[procedureName];
 		}
 	});
+	it("汇报返回 ok:false 时退出码非零，并且不会注册项目", async () => {
+		harness.responsesByProcedureName.reportTaskConversationSession = { ok: false, error: "任务不存在。" };
+		const result = await runKanbanTaskCommand([
+			"conversation-session",
+			"report",
+			"--task-id",
+			"task-1",
+			"--message",
+			"部署材料已准备",
+			"--idempotency-key",
+			"report-regression",
+		]);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toEqual({ ok: false, error: "任务不存在。" });
+	});
+
 	it.each([
 		{ args: ["--column", "review"], taskIds: ["task-review"] },
 		{ args: ["--column", "trash"], taskIds: ["task-trash"] },
@@ -436,3 +457,8 @@ describe("Cline 专属命令参数退役", () => {
 		).rejects.toMatchObject({ code: "commander.unknownOption" });
 	});
 });
+
+vi.mock("../../../src/state/registered-workspace-invocation-context", () => ({
+	resolveRegisteredWorkspaceInvocationContext: (path: string | undefined, cwd: string) =>
+		loadWorkspaceContext(path ?? cwd, { autoCreateIfMissing: false }),
+}));

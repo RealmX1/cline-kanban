@@ -18,6 +18,7 @@ import {
 	clearAgentSessionReclamationDeadlineRecords,
 	findLiveAgentSessionReclamationDeadlineRecord,
 	isLiveAgentSessionReclamationState,
+	mergeTransferredAgentSessionReclamationHistoryWithinPausedWrites,
 	type RecordAgentSessionRetentionDeadlineInput,
 	readAgentSessionReclamationDeadlineRecords,
 	readAllAgentSessionReclamationDeadlineRecords,
@@ -25,6 +26,7 @@ import {
 	refreshAgentSessionUserTurnIdleProcessRetentionDeadline,
 	supersedeAgentSessionRetentionDeadlinesForTask,
 	updateAgentSessionReclamationProgress,
+	withAgentSessionReclamationDeadlineWritesPaused,
 } from "../../src/state/agent-session-reclamation-deadline-store";
 import { getWorkspaceDirectoryPath } from "../../src/state/workspace-state";
 import { withIsolatedWorkspaceHome } from "./isolated-workspace-home-fixture";
@@ -398,6 +400,98 @@ describe.sequential("agent-session-reclamation-deadline-store integration", () =
 
 			await clearAgentSessionReclamationDeadlineRecords(first.workspaceId);
 			expect(await readAgentSessionReclamationDeadlineRecords(first.workspaceId)).toEqual([]);
+		});
+	});
+
+	it("迁入终态回收历史保持 200 条上限，同一快照重放不增加", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("reclamation-cap");
+			await recordAgentSessionRetentionDeadline(workspaceId, stopAnchorInput());
+			const [template] = await readAgentSessionReclamationDeadlineRecords(workspaceId);
+			if (!template) throw new Error("缺少回收期限模板");
+			const terminalRecord = (prefix: string, index: number, createdAt: number): typeof template => ({
+				...template,
+				recordId: `${prefix}-${index}`,
+				taskId: `${prefix}-${index}`,
+				reclamationState: "superseded",
+				createdAt,
+				updatedAt: createdAt,
+			});
+			const targetRecords = Array.from({ length: 200 }, (_, index) => terminalRecord("target", index, index + 1));
+			const sourceRecords = Array.from({ length: 200 }, (_, index) =>
+				terminalRecord("source", index, 10_000 + index),
+			);
+			await writeFile(
+				join(getWorkspaceDirectoryPath(workspaceId), "agent-session-reclamation-deadlines.json"),
+				JSON.stringify(targetRecords),
+			);
+			const sourceText = JSON.stringify(sourceRecords);
+			const merge = () =>
+				withAgentSessionReclamationDeadlineWritesPaused([workspaceId], () =>
+					mergeTransferredAgentSessionReclamationHistoryWithinPausedWrites(workspaceId, sourceText),
+				);
+			await merge();
+			const merged = await readAgentSessionReclamationDeadlineRecords(workspaceId);
+			expect(merged).toHaveLength(200);
+			expect(merged.some((record) => record.recordId.startsWith("target-"))).toBe(false);
+			expect(merged.map((record) => record.recordId).sort()).toEqual(
+				sourceRecords.map((record) => record.recordId).sort(),
+			);
+			await merge();
+			const replayed = await readAgentSessionReclamationDeadlineRecords(workspaceId);
+			expect(replayed.map((record) => record.recordId).sort()).toEqual(
+				merged.map((record) => record.recordId).sort(),
+			);
+		});
+	});
+
+	it("迁入回收历史时保留目标尚未结算的期限", async () => {
+		await withIsolatedWorkspaceHome(async (registerIsolatedWorkspace) => {
+			const { workspaceId } = await registerIsolatedWorkspace("reclamation-live-cap");
+			await recordAgentSessionRetentionDeadline(workspaceId, stopAnchorInput());
+			const [template] = await readAgentSessionReclamationDeadlineRecords(workspaceId);
+			if (!template) throw new Error("缺少回收期限模板");
+			const live = {
+				...template,
+				recordId: "live-target",
+				taskId: "live-target",
+				reclamationState: "grace_running" as const,
+				createdAt: 1,
+				updatedAt: 1,
+			};
+			const targetRecords = [
+				live,
+				...Array.from({ length: 200 }, (_, index) => ({
+					...template,
+					recordId: `target-${index}`,
+					taskId: `target-${index}`,
+					reclamationState: "superseded" as const,
+					createdAt: index + 2,
+					updatedAt: index + 2,
+				})),
+			];
+			const sourceRecords = Array.from({ length: 200 }, (_, index) => ({
+				...template,
+				recordId: `source-${index}`,
+				taskId: `source-${index}`,
+				reclamationState: "superseded" as const,
+				createdAt: 5_000 + index,
+				updatedAt: 5_000 + index,
+			}));
+			await writeFile(
+				join(getWorkspaceDirectoryPath(workspaceId), "agent-session-reclamation-deadlines.json"),
+				JSON.stringify(targetRecords),
+			);
+			const sourceText = JSON.stringify(sourceRecords);
+			await withAgentSessionReclamationDeadlineWritesPaused([workspaceId], () =>
+				mergeTransferredAgentSessionReclamationHistoryWithinPausedWrites(workspaceId, sourceText),
+			);
+			const merged = await readAgentSessionReclamationDeadlineRecords(workspaceId);
+			expect(merged).toHaveLength(200);
+			expect(merged.some((record) => record.recordId === "live-target")).toBe(true);
+			expect(merged.some((record) => record.recordId === "source-0")).toBe(false);
+			expect(merged.some((record) => record.recordId === "source-199")).toBe(true);
+			expect(merged.some((record) => record.recordId.startsWith("target-"))).toBe(false);
 		});
 	});
 });

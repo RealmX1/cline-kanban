@@ -1,3 +1,5 @@
+import { z } from "zod";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "./duplicate-project-consolidation-status";
 // 排队 Prompt 投递的 durable 真相源。
 //
 // 整套特性的语义（状态机、三条触发源、门控、失败路由、重启跨越）的单一出处是
@@ -718,6 +720,7 @@ export async function updateWorkspaceQueuedTaskPromptDeliveriesUnderLock<TResult
 ): Promise<{ snapshot: WorkspaceQueuedTaskPromptDeliverySnapshot; result: TResult }> {
 	const queuePath = getWorkspaceQueuedTaskPromptDeliveriesPath(workspaceId);
 	const { before, after, result } = await lockedFileSystem.withLock({ path: queuePath, type: "file" }, async () => {
+		await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
 		const currentRead = await readWorkspaceQueuedTaskPromptDeliveryFile(workspaceId);
 		const { next, result } = transform(currentRead.snapshot);
 		if (next === currentRead.snapshot) return { before: currentRead.snapshot, after: currentRead.snapshot, result };
@@ -1418,4 +1421,29 @@ export async function discardQueuedTaskPromptDeliveriesForTasks(input: {
 		"discard-for-removed-tasks",
 	);
 	return snapshot;
+}
+
+export async function mergeTransferredSettledQueuedTaskPromptDeliveries(
+	workspaceId: string,
+	sourceSnapshotText: string,
+): Promise<void> {
+	const schema = z.object({ entriesByTaskId: z.record(z.string(), z.array(queuedTaskPromptDeliveryEntrySchema)) });
+	const incoming = schema.parse(JSON.parse(sourceSnapshotText));
+	for (const entries of Object.values(incoming.entriesByTaskId))
+		if (entries.some((entry) => isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState)))
+			throw new Error("来源项目仍有未结算的消息投递。");
+	const path = getWorkspaceQueuedTaskPromptDeliveriesPath(workspaceId);
+	await lockedFileSystem.withLock({ path, type: "file" }, async () => {
+		const read = await readQueuedTaskPromptDeliveryFileDistinguishingAbsentFromUnreadable(path);
+		if (read.status === "present_but_unreadable") throw new Error("目标消息历史不可读，未覆盖。");
+		const current = schema.parse(read.status === "parsed" ? read.parsedContent : { entriesByTaskId: {} });
+		for (const [taskId, entries] of Object.entries(incoming.entriesByTaskId)) {
+			const previous = current.entriesByTaskId[taskId];
+			if (previous && JSON.stringify(previous) !== JSON.stringify(entries))
+				throw new Error("投递历史发生冲突，未重新发送或覆盖。");
+			current.entriesByTaskId[taskId] = entries;
+		}
+		// 历史迁入不产生新的投递或结算镜像。
+		await lockedFileSystem.writeJsonFileAtomic(path, current, { lock: null, durable: true, fileMode: 0o600 });
+	});
 }

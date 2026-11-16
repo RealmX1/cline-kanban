@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import pLimit from "p-limit";
 import { z } from "zod";
-
 import type {
 	RuntimeTaskCommitIntegrationTrackingStatus,
 	RuntimeTaskRetainedCommittedLineChangeHistory,
@@ -13,6 +12,7 @@ import type {
 } from "../core/api-contract";
 import { runtimeTaskRetainedCommittedLineChangeHistorySchema } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "../state/duplicate-project-consolidation-status";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "../state/workspace-state";
 import { computeStablePatchId, readGitHeadInfo, runGit } from "./git-utils";
 import {
@@ -202,7 +202,10 @@ function getTaskCommitIntegrationProvenancePath(workspaceId: string): string {
 	return join(workspaceDirectory, TASK_COMMIT_INTEGRATION_PROVENANCE_FILENAME);
 }
 
-async function readProvenanceFile(workspaceId: string): Promise<TaskCommitIntegrationProvenanceFile> {
+async function readProvenanceFile(
+	workspaceId: string,
+	requireCompleteRead = false,
+): Promise<TaskCommitIntegrationProvenanceFile> {
 	let raw: string;
 	try {
 		raw = await readFile(getTaskCommitIntegrationProvenancePath(workspaceId), "utf8");
@@ -214,8 +217,10 @@ async function readProvenanceFile(workspaceId: string): Promise<TaskCommitIntegr
 	}
 	try {
 		const parsed = taskCommitIntegrationProvenanceFileSchema.safeParse(JSON.parse(raw) as unknown);
+		if (requireCompleteRead && !parsed.success) throw parsed.error;
 		return parsed.success ? parsed.data : createEmptyProvenanceFile();
-	} catch {
+	} catch (error) {
+		if (requireCompleteRead) throw error;
 		// provenance 损坏时保守降级 unknown；绝不能把不可证明的历史解释成 0。
 		return createEmptyProvenanceFile();
 	}
@@ -240,6 +245,7 @@ async function mutateProvenanceFile<T>(
 	return await enqueueProvenanceMutation(workspaceId, async () => {
 		const provenancePath = getTaskCommitIntegrationProvenancePath(workspaceId);
 		return await lockedFileSystem.withLock({ path: provenancePath }, async () => {
+			await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
 			const file = await readProvenanceFile(workspaceId);
 			const result = mutator(file);
 			await lockedFileSystem.writeJsonFileAtomic(provenancePath, file, { lock: null });
@@ -1235,5 +1241,25 @@ export async function removeTaskCommitIntegrationProvenance(workspaceId: string,
 		}
 		delete file.tasks[taskId];
 		return true;
+	});
+}
+
+export async function mergeTransferredTaskCommitIntegrationProvenance(
+	workspaceId: string,
+	sourceSnapshotText: string,
+): Promise<void> {
+	const incoming = taskCommitIntegrationProvenanceFileSchema.parse(JSON.parse(sourceSnapshotText));
+	await enqueueProvenanceMutation(workspaceId, async () => {
+		const path = getTaskCommitIntegrationProvenancePath(workspaceId);
+		await lockedFileSystem.withLock({ path }, async () => {
+			const current = await readProvenanceFile(workspaceId, true);
+			for (const [taskId, record] of Object.entries(incoming.tasks)) {
+				const previous = current.tasks[taskId];
+				if (previous && JSON.stringify(previous) !== JSON.stringify(record))
+					throw new Error("提交归属历史发生冲突，未覆盖原历史。");
+				current.tasks[taskId] ??= record;
+			}
+			await lockedFileSystem.writeJsonFileAtomic(path, current, { lock: null, durable: true, fileMode: 0o600 });
+		});
 	});
 }

@@ -3966,11 +3966,29 @@ export type RuntimeTaskCardActionSetTaskPinboardPinStateResponse = z.infer<
 	typeof runtimeTaskCardActionSetTaskPinboardPinStateResponseSchema
 >;
 
+export const runtimeProjectAddPreviewRequestSchema = z.object({ path: z.string().trim().min(1) });
+export const runtimeProjectAddPreviewResponseSchema = z.object({
+	path: z.string(),
+	gitCommonDirectory: z.string(),
+	registeredWorkspaceId: z.string().nullable(),
+	sameRepositoryWorkspaceIds: z.array(z.string()),
+	previewFingerprint: z.string(),
+});
+export type RuntimeProjectAddPreviewRequest = z.infer<typeof runtimeProjectAddPreviewRequestSchema>;
+export type RuntimeProjectAddPreviewResponse = z.infer<typeof runtimeProjectAddPreviewResponseSchema>;
+
 export const runtimeProjectAddRequestSchema = z
 	.object({
 		path: z.string().optional(),
 		gitUrl: z.string().optional(),
 		initializeGit: z.boolean().optional(),
+		authorization: z
+			.object({
+				userQuote: z.string().trim().min(1),
+				sourceReference: z.string().trim().min(1),
+			})
+			.optional(),
+		previewFingerprint: z.string().min(1).optional(),
 	})
 	.refine((data) => data.path || data.gitUrl, { message: "Either path or gitUrl is required" });
 export type RuntimeProjectAddRequest = z.infer<typeof runtimeProjectAddRequestSchema>;

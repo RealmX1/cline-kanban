@@ -20,6 +20,7 @@ import {
 import { findTaskMessageInjectionRecord, readTaskMessageInjectionLedger } from "../core/task-message-injection-ledger";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
+import { assertTaskSessionIsNotPendingProjectConsolidation } from "../state/duplicate-project-consolidation-status";
 import { requestSessionOwnedBackgroundAgentExecutionCancellation } from "../state/session-owned-background-agent-executions";
 import { computeAssistantMessageProvenanceSha256 } from "../task-conversation-sessions/explicit-session-report";
 import { createTaskConversationSessionService } from "../task-conversation-sessions/task-conversation-session-service";
@@ -1328,6 +1329,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			};
 			try {
 				let body = parseTaskSessionStartRequest(input);
+				await assertTaskSessionIsNotPendingProjectConsolidation(
+					workspaceScope.workspaceId,
+					body.workspaceTaskId ?? body.taskId,
+				);
 				requestedTerminalColumnsForDiagnostics = body.cols ?? null;
 				requestedTerminalRowsForDiagnostics = body.rows ?? null;
 				const startBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
@@ -2058,6 +2063,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			const receivedAtMs = Date.now();
 			try {
 				const body = parseTaskTerminalRefreshRequest(input);
+				await assertTaskSessionIsNotPendingProjectConsolidation(workspaceScope.workspaceId, body.taskId);
 				const assertAutomaticResumeNotExplicitlyStopped =
 					body.taskSessionStartOriginDeclaredByClient === "stale_session_client_auto_resume"
 						? async () =>

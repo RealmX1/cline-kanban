@@ -91,6 +91,8 @@ import type {
 	RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionStartRequest,
 	RuntimePlannedHandoverRestartRequest,
 	RuntimePlannedHandoverRestartResponse,
+	RuntimeProjectAddPreviewRequest,
+	RuntimeProjectAddPreviewResponse,
 	RuntimeProjectAddRequest,
 	RuntimeProjectAddResponse,
 	RuntimeProjectDirectoryPickerResponse,
@@ -326,6 +328,8 @@ import {
 	runtimePlannedHandoverRestartRequestSchema,
 	runtimePlannedHandoverRestartResponseSchema,
 	runtimePostDeployVerificationWorkspaceOverviewSchema,
+	runtimeProjectAddPreviewRequestSchema,
+	runtimeProjectAddPreviewResponseSchema,
 	runtimeProjectAddRequestSchema,
 	runtimeProjectAddResponseSchema,
 	runtimeProjectDirectoryPickerResponseSchema,
@@ -501,6 +505,12 @@ import {
 	runtimeCodexConversationStorageOperationRequestSchema,
 	runtimeCodexConversationStorageOperationResponseSchema,
 } from "../core/codex-conversation-storage-api-contract";
+import {
+	duplicateProjectConsolidationPreviewRequestSchema,
+	duplicateProjectConsolidationPreviewSchema,
+	duplicateProjectConsolidationRequestSchema,
+	duplicateProjectConsolidationResultSchema,
+} from "../core/duplicate-project-consolidation-contract";
 import {
 	independentTaskCreationDraftEditSchema,
 	independentTaskCreationDraftRequestSchema,
@@ -687,6 +697,7 @@ import {
 } from "../notifications/notification-speech-synthesis";
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
+import { assertWorkspaceHasNotBeenConsolidated } from "../state/duplicate-project-consolidation-status";
 import { savePersistentAgentPromptFileAttachment } from "../state/persistent-agent-prompt-file-attachments";
 import {
 	readPersistentAgentPromptImageAttachments,
@@ -1211,9 +1222,18 @@ export interface RuntimeTrpcContext {
 			imageAssetId: string;
 		}) => Promise<{ mediaType: "image/png"; base64Content: string }>;
 		listProjects: (preferredWorkspaceId: string | null) => Promise<RuntimeProjectsResponse>;
+		previewDuplicateProjectConsolidation: (
+			input: z.infer<typeof duplicateProjectConsolidationPreviewRequestSchema>,
+		) => Promise<z.infer<typeof duplicateProjectConsolidationPreviewSchema>>;
+		consolidateDuplicateProject: (
+			input: z.infer<typeof duplicateProjectConsolidationRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof duplicateProjectConsolidationResultSchema>>;
+		previewProjectAdd: (input: RuntimeProjectAddPreviewRequest) => Promise<RuntimeProjectAddPreviewResponse>;
 		addProject: (
 			preferredWorkspaceId: string | null,
 			input: RuntimeProjectAddRequest,
+			evidence: KanbanRequestOriginActorEvidence,
 		) => Promise<RuntimeProjectAddResponse>;
 		getPermanentDeletionPreview: (
 			preferredWorkspaceId: string | null,
@@ -1424,12 +1444,18 @@ const t = initTRPC.context<RuntimeTrpcContext>().create({
 
 // 带了 runtime 不认识的页面加载 nonce 的请求一律拒绝（可重试，Y-EVENT-9）：继续执行就会把一个页面请求记成
 // 裸 tRPC 调用方，而 live 事件写入后不能改写。签发 nonce 的 procedure 本身不过这道闸（它就是重取的入口）。
-const procedureRejectingUnknownWebUiPageLoadRequestOriginNonce = t.procedure.use(({ ctx, next }) => {
+const procedureRejectingUnknownWebUiPageLoadRequestOriginNonce = t.procedure.use(async ({ ctx, next, type }) => {
 	if (ctx.kanbanRequestOriginActorEvidence.webUiPageLoadRequestOriginNonceVerificationStatus === "unknown") {
 		throw new TRPCError({
 			code: "PRECONDITION_FAILED",
 			message: KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_UNKNOWN_REACQUIRE_AND_RETRY_ERROR_MESSAGE,
 		});
+	}
+	if (ctx.requestedWorkspaceId) {
+		if (ctx.workspaceScope && ctx.workspaceScope.workspaceId !== ctx.requestedWorkspaceId && type === "mutation")
+			throw new TRPCError({ code: "PRECONDITION_FAILED", message: "项目归属已变化，请刷新后在目标项目执行。" });
+		if (ctx.workspaceScope?.workspaceId === ctx.requestedWorkspaceId)
+			await assertWorkspaceHasNotBeenConsolidated(ctx.requestedWorkspaceId);
 	}
 	return next();
 });
@@ -2820,6 +2846,16 @@ const runtimeApplicationTaskCardActionProcedureRouter = t.router({
 });
 
 const runtimeApplicationProjectsProcedureRouter = t.router({
+	previewDuplicateConsolidation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(duplicateProjectConsolidationPreviewRequestSchema)
+		.output(duplicateProjectConsolidationPreviewSchema)
+		.query(({ ctx, input }) => ctx.projectsApi.previewDuplicateProjectConsolidation(input)),
+	consolidateDuplicate: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(duplicateProjectConsolidationRequestSchema)
+		.output(duplicateProjectConsolidationResultSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.projectsApi.consolidateDuplicateProject(input, ctx.kanbanRequestOriginActorEvidence),
+		),
 	setProjectVisualIdentity: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(setProjectVisualIdentityRequestSchema)
 		.output(projectVisualIdentitySchema)
@@ -2841,11 +2877,15 @@ const runtimeApplicationProjectsProcedureRouter = t.router({
 		.input(runtimeAllProjectsTaskGroupQueryRequestSchema)
 		.output(runtimeAllProjectsTaskGroupQuerySnapshotSchema)
 		.query(({ ctx, input }) => ctx.projectsApi.getAllProjectsTaskGroupQuerySnapshot(input)),
+	previewAdd: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(runtimeProjectAddPreviewRequestSchema)
+		.output(runtimeProjectAddPreviewResponseSchema)
+		.query(({ ctx, input }) => ctx.projectsApi.previewProjectAdd(input)),
 	add: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeProjectAddRequestSchema)
 		.output(runtimeProjectAddResponseSchema)
 		.mutation(async ({ ctx, input }) => {
-			return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input);
+			return await ctx.projectsApi.addProject(ctx.requestedWorkspaceId, input, ctx.kanbanRequestOriginActorEvidence);
 		}),
 	getPermanentDeletionPreview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeProjectPermanentDeletionPreviewRequestSchema)
