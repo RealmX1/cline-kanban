@@ -687,6 +687,8 @@ describe("任务会话的原生身份补证恢复", () => {
 				taskConversationSessionContextForkSourceNativeSessionId: undefined,
 				automaticFailureContinuationEpisodeId: episode.episodeId,
 			});
+			// 先收口尚无身份的首轮观察，再用迟到身份触发被测准备阶段，避免等待后台扫描时钟。
+			await advanceRecovery(manager);
 			const sessionsDirectory = join(isolatedHome, ".codex", "sessions");
 			await mkdir(sessionsDirectory, { recursive: true });
 			const transcriptPath = join(sessionsDirectory, `rollout-${childId}.jsonl`);

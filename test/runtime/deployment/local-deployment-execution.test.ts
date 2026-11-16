@@ -1,4 +1,4 @@
-import { mkdir, readdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
@@ -8,12 +8,16 @@ import {
 	finishLocalDeploymentExecution,
 	freezeLocalDeploymentIndependentFindings,
 	initializeLocalDeploymentExecution,
+	type LocalDeploymentCommandRunner,
 	readLocalDeploymentExecution,
 	restrictLocalDeploymentExecution,
 } from "../../../src/deployment/local-deployment-execution";
 import type { LocalDeploymentExecutionManifest } from "../../../src/deployment/local-deployment-execution-contract";
 import { observeLocalDeploymentRecoveryEvidence } from "../../../src/deployment/local-deployment-recovery-evidence";
 import { verifyLocalDeploymentRegistrationEffectFromPersistedEvidence } from "../../../src/deployment/local-deployment-registration-effect-evidence";
+import { readLocalDeploymentTargetStageRecoveryBudget } from "../../../src/deployment/local-deployment-target-stage-recovery-budget";
+import { observeLocalRedeploymentBlockingFailureRecovery } from "../../../src/deployment/local-redeployment-failure-recovery-evidence";
+import { localRedeploymentSha256 } from "../../../src/deployment/local-redeployment-preparation";
 import { lockedFileSystem } from "../../../src/fs/locked-file-system";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -69,6 +73,94 @@ function manifest(executionDirectory: string): LocalDeploymentExecutionManifest 
 }
 
 describe("本地部署执行与复盘", () => {
+	it("标准阶段跨新候选共用目标预算，报告重写和未知观察不增加备份，相关恢复只解锁一次", async () => {
+		const directory = createExecutionDirectory("local-deployment-target-semantic-qualification-");
+		const binding = manifest(directory);
+		const report = join(directory, "diagnostic-report.json");
+		await writeFile(report, "初始报告");
+		const preservation = binding.stages[1];
+		preservation.recoveryEvidenceObservationMode = "semantic_observation_only";
+		preservation.recoveryEvidenceFilePaths = [report];
+		preservation.readOnlyRecoveryEvidenceObservationCommand = ["observe-relevant-condition"];
+		await initializeLocalDeploymentExecution(directory, binding);
+		let fingerprint = "1".repeat(64);
+		let ready = false;
+		let backupCount = 0;
+		const runCommand: LocalDeploymentCommandRunner = async (command) => {
+			if (command[0] === "observe-relevant-condition")
+				return {
+					exitCode: 0,
+					stdout: JSON.stringify({ evidenceSha256: fingerprint, recoveryEvidenceReady: ready, nonce: Date.now() }),
+					stderr: "",
+				};
+			if (command[0] === "preserve") {
+				backupCount++;
+				return {
+					processWasStarted: true,
+					exitCode: 2,
+					stdout: JSON.stringify({
+						ok: false,
+						status: "machine_evidence_pending",
+						blockingFailure: {
+							classification: "copy_identity_mismatch",
+							logicalResource: "bound-runtime-resource",
+							recoveryCondition: "绑定复制回归通过",
+							originalErrorReference: report,
+						},
+					}),
+					stderr: "",
+				};
+			}
+			return { processWasStarted: true, exitCode: 0, stdout: verifiedEffectStdout(command), stderr: "" };
+		};
+		await executeLocalDeploymentStages(directory, { runCommand });
+		await writeFile(report, "无关报告重写和新时间戳");
+		await executeLocalDeploymentStages(directory, { runCommand });
+		const newDirectory = join(directory, "new-candidate-execution");
+		await initializeLocalDeploymentExecution(newDirectory, {
+			...binding,
+			executionId: "042609d8-7508-4bdc-b202-1d7bd7da8a14",
+			candidateSourceCommit: "d".repeat(40),
+		});
+		await executeLocalDeploymentStages(newDirectory, { runCommand });
+		expect(backupCount).toBe(1);
+		fingerprint = "2".repeat(64);
+		ready = true;
+		await executeLocalDeploymentStages(newDirectory, { runCommand });
+		await executeLocalDeploymentStages(newDirectory, { runCommand });
+		expect(backupCount).toBe(2);
+		fingerprint = "unavailable";
+		ready = false;
+		await executeLocalDeploymentStages(newDirectory, { runCommand });
+		fingerprint = "2".repeat(64);
+		ready = true;
+		await executeLocalDeploymentStages(newDirectory, { runCommand });
+		expect(backupCount).toBe(2);
+	});
+
+	it("阶段明确返回机器待证后立即结束，重启也不使用同一证据再次复制", async () => {
+		const directory = createExecutionDirectory("local-deployment-explicit-machine-wait-");
+		await initializeLocalDeploymentExecution(directory, manifest(directory));
+		const commands: string[] = [];
+		const runCommand: LocalDeploymentCommandRunner = async (command) => {
+			commands.push(command[0]);
+			return command[0] === "preserve"
+				? {
+						processWasStarted: true,
+						exitCode: 2,
+						stdout: JSON.stringify({ ok: false, status: "machine_evidence_pending" }),
+						stderr: "等待复制身份补证",
+					}
+				: { processWasStarted: true, exitCode: 0, stdout: verifiedEffectStdout(command), stderr: "" };
+		};
+		expect((await executeLocalDeploymentStages(directory, { runCommand })).deploymentOutcome).toBe(
+			"machine_evidence_pending",
+		);
+		expect(commands.filter((command) => command === "preserve")).toHaveLength(1);
+		await executeLocalDeploymentStages(directory, { runCommand });
+		expect(commands.filter((command) => command === "preserve")).toHaveLength(1);
+	});
+
 	it.each(["state_preservation", "runtime_validation"] as const)(
 		"%s 的内层重试预算随机器语义恢复接续，时间和观察 nonce 不重置预算",
 		async (stage) => {
@@ -886,5 +978,108 @@ describe("五条代表轨迹的 v2 隔离回归", () => {
 		expect(commands.filter((command) => command === "publish")).toHaveLength(1);
 		expect(commands.filter((command) => command === "complete-bound-publication")).toHaveLength(1);
 		expect(commands.indexOf("verify-publication")).toBeLessThan(commands.indexOf("complete-bound-publication"));
+	});
+
+	async function writeFrozenRedeploymentRequest(directory: string, binding: LocalDeploymentExecutionManifest) {
+		const executor = "// 隔离未启动恢复\n";
+		const request = {
+			schemaVersion: 1 as const,
+			executionId: binding.executionId,
+			workspaceId: binding.workspaceId,
+			taskId: binding.taskId,
+			originatingTaskWorktreePath: binding.originatingTaskWorktreePath,
+			sourceCheckoutPath: binding.sourceCheckoutPath,
+			candidateSourceCommit: binding.candidateSourceCommit,
+			deploymentNodeBinaryPath: binding.deploymentNodeBinaryPath,
+			distributionDirectoryPath: binding.distributionDirectoryPath,
+			runtimeIdentity: binding.runtimeIdentity,
+			serviceLaunch: { command: [process.execPath] },
+			authorization: binding.authorization,
+		};
+		await writeFile(join(directory, "frozen-local-redeployment-executor.mjs"), executor);
+		await writeFile(
+			join(directory, "frozen-redeployment-request.json"),
+			JSON.stringify({
+				request,
+				requestSha256: localRedeploymentSha256(JSON.stringify(request)),
+				executorSha256: localRedeploymentSha256(executor),
+				npmCliEntrypointPath: process.execPath,
+				serviceExecutableSha256: "d".repeat(64),
+				owner: null,
+			}),
+		);
+	}
+
+	it("确证未启动后只再放行一次，限制未解除或进程已启动时不解锁", async () => {
+		const directory = createExecutionDirectory("proven-not-started-recovery-");
+		await mkdir(join(directory, "isolated-runtime-home"));
+		const binding = manifest(directory);
+		binding.stages[1].recoveryEvidenceObservationMode = "semantic_observation_only";
+		binding.stages[1].readOnlyRecoveryEvidenceObservationCommand = ["observe-stage"];
+		await initializeLocalDeploymentExecution(directory, binding);
+		await writeFrozenRedeploymentRequest(directory, binding);
+		let attemptedSpawnCount = 0;
+		const runCommand: LocalDeploymentCommandRunner = async (command) => {
+			if (command[0] === "observe-stage") {
+				const budget = await readLocalDeploymentTargetStageRecoveryBudget(binding, "state_preservation");
+				const observation = budget?.blockingFailure
+					? await observeLocalRedeploymentBlockingFailureRecovery(directory, budget.blockingFailure)
+					: { evidenceSha256: "1".repeat(64), recoveryEvidenceReady: false };
+				return { exitCode: 0, processWasStarted: true, stdout: JSON.stringify(observation), stderr: "" };
+			}
+			if (command[0] === "preserve") {
+				attemptedSpawnCount += 1;
+				return { processWasStarted: false, exitCode: null, stdout: "", stderr: "启动瞬时失败" };
+			}
+			return { processWasStarted: true, exitCode: 0, stdout: verifiedEffectStdout(command), stderr: "" };
+		};
+		await executeLocalDeploymentStages(directory, { runCommand });
+		expect(attemptedSpawnCount).toBe(1);
+		const blocked = await readLocalDeploymentTargetStageRecoveryBudget(binding, "state_preservation");
+		expect(blocked?.blockingFailure?.classification).toBe("unclassified_failure");
+		expect(blocked?.blockingFailure?.sourcePath).toBeUndefined();
+		const failure = blocked?.blockingFailure;
+		if (!failure) throw new Error("缺少未启动失败原件");
+		await writeFile(
+			join(directory, "local-deployment-execution-restriction.json"),
+			JSON.stringify({ kind: "permission_revoked", reason: "隔离停止", sourceReference: "test:not-started" }),
+		);
+		expect((await observeLocalRedeploymentBlockingFailureRecovery(directory, failure)).recoveryEvidenceReady).toBe(
+			false,
+		);
+		await rm(join(directory, "local-deployment-execution-restriction.json"));
+		const released = await observeLocalRedeploymentBlockingFailureRecovery(directory, failure);
+		expect(released.recoveryEvidenceReady).toBe(true);
+		expect(await observeLocalRedeploymentBlockingFailureRecovery(directory, failure)).toEqual(released);
+		await executeLocalDeploymentStages(directory, { runCommand });
+		expect(attemptedSpawnCount).toBe(2);
+		await executeLocalDeploymentStages(directory, { runCommand });
+		expect(attemptedSpawnCount).toBe(2);
+
+		const failedDirectory = createExecutionDirectory("started-unclassified-failure-");
+		await mkdir(join(failedDirectory, "isolated-runtime-home"));
+		const failedBinding = manifest(failedDirectory);
+		failedBinding.stages[1].recoveryEvidenceObservationMode = "semantic_observation_only";
+		failedBinding.stages[1].readOnlyRecoveryEvidenceObservationCommand = ["observe-stage"];
+		await initializeLocalDeploymentExecution(failedDirectory, failedBinding);
+		await writeFrozenRedeploymentRequest(failedDirectory, failedBinding);
+		let failedStarts = 0;
+		const failingCommand: LocalDeploymentCommandRunner = async (command) => {
+			if (command[0] === "observe-stage") {
+				const budget = await readLocalDeploymentTargetStageRecoveryBudget(failedBinding, "state_preservation");
+				const observation = budget?.blockingFailure
+					? await observeLocalRedeploymentBlockingFailureRecovery(failedDirectory, budget.blockingFailure)
+					: { evidenceSha256: "2".repeat(64), recoveryEvidenceReady: false };
+				return { exitCode: 0, processWasStarted: true, stdout: JSON.stringify(observation), stderr: "" };
+			}
+			if (command[0] === "preserve") {
+				failedStarts += 1;
+				return { processWasStarted: true, exitCode: 1, stdout: "普通失败", stderr: "进程已创建" };
+			}
+			return { processWasStarted: true, exitCode: 0, stdout: verifiedEffectStdout(command), stderr: "" };
+		};
+		await executeLocalDeploymentStages(failedDirectory, { runCommand: failingCommand });
+		await executeLocalDeploymentStages(failedDirectory, { runCommand: failingCommand });
+		expect(failedStarts).toBe(1);
 	});
 });

@@ -5,6 +5,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import {
+	cancelOwnedCommandProcesses,
+	inspectOwnedCommandSupervisor,
+} from "../../src/task-command-execution/task-command-execution-supervisor";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { createIsolatedTestOwnedTmuxServer } from "../utilities/isolated-test-owned-tmux-server";
 import {
@@ -25,6 +29,8 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 		});
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "source" });
 		const executionDirectory = join(fixture.fixtureRootDirectoryPath, "persistent-redeployment-artifacts");
+		let cleanupSupervisorReference: { workspaceId: string; executionId: string; launchNonce: string } | null = null;
+		let cleanupSupervisorArtifactDirectory: string | null = null;
 		await mkdir(executionDirectory);
 		const socketDirectory = await mkdtemp("/tmp/kanban-redeployment-test-sockets-");
 		const binaryDirectory = join(fixture.fixtureRootDirectoryPath, "bin");
@@ -289,6 +295,19 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			const reference = JSON.parse(
 				await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
 			);
+			cleanupSupervisorReference = {
+				workspaceId,
+				executionId: reference.executionId,
+				launchNonce: reference.launchNonce,
+			};
+			cleanupSupervisorArtifactDirectory = join(
+				runtimeHome,
+				`workspaces/${workspaceId}/task-command-executions`,
+				reference.executionId,
+				"post-process-exit-cleanup",
+				reference.launchNonce,
+				"dispatch-1",
+			);
 			await vi.waitFor(
 				async () =>
 					expect(
@@ -309,6 +328,17 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			const repeated = await invoke("start-redeployment");
 			expect(repeated.code, repeated.stdout + repeated.stderr).toBe(0);
 			expect(await readFile(join(executionDirectory, "registration-invocations.txt"), "utf8")).toBe("once");
+			const awaitedCleanupSupervisorReference = cleanupSupervisorReference;
+			const awaitedCleanupSupervisorArtifactDirectory = cleanupSupervisorArtifactDirectory;
+			await vi.waitFor(
+				async () =>
+					expect(
+						await inspectOwnedCommandSupervisor(awaitedCleanupSupervisorReference, {
+							artifactDirectory: awaitedCleanupSupervisorArtifactDirectory,
+						}),
+					).toBe("exited"),
+				{ timeout: 15_000 },
+			);
 			const receiptPath = join(executionDirectory, "deployment-record-receipt.json");
 			const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
 			expect(receipt.workspaceId).toBe(workspaceId);
@@ -365,6 +395,26 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 		} finally {
 			isolatedTestOwnedTmuxServer.cleanup();
 			await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+			if (cleanupSupervisorReference && cleanupSupervisorArtifactDirectory) {
+				const reference = cleanupSupervisorReference;
+				const artifactDirectory = cleanupSupervisorArtifactDirectory;
+				await cancelOwnedCommandProcesses(
+					{
+						...reference,
+						previousLaunchNonces: [],
+						revocationFile: join(artifactDirectory, "cleanup-revocation.json"),
+						specification: { workingDirectory: executionDirectory, cancelCommand: undefined },
+					},
+					{ artifactDirectory, skipProducerCancelCommand: true },
+				);
+				await vi.waitFor(
+					async () =>
+						expect(["exited", "not_started"]).toContain(
+							await inspectOwnedCommandSupervisor(reference, { artifactDirectory }),
+						),
+					{ timeout: 15_000 },
+				);
+			}
 			await rm(executionDirectory, { recursive: true, force: true });
 			fixture.cleanup();
 			await rm(socketDirectory, { recursive: true, force: true });

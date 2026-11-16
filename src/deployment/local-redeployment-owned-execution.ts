@@ -15,6 +15,7 @@ import {
 } from "../core/task-command-execution-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { readRuntimeProcessInstanceLiveness } from "../state/runtime-process-instance-heartbeat-registry";
+import { recoverOwnedCommandPostProcessExitCleanup } from "../task-command-execution/task-command-execution-post-process-exit-cleanup";
 import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
@@ -48,7 +49,6 @@ import {
 export async function startPreparedLocalRedeployment(directory: string) {
 	const frozen = await readFrozenLocalRedeploymentRequest(directory);
 	const { request } = frozen;
-	await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
 	const specification = taskCommandExecutionSpecificationSchema.parse(
 		await readLocalRedeploymentJson(join(directory, "owned-command-specification.json")),
 	);
@@ -57,6 +57,33 @@ export async function startPreparedLocalRedeployment(directory: string) {
 		JSON.stringify(createLocalRedeploymentOwnedCommandSpecification(directory, frozen))
 	)
 		throw new LocalRedeploymentIdentityMismatch("所属命令规格与冻结请求不匹配");
+	const cleanupReference = (await readLocalRedeploymentJson(
+		join(directory, "independent-redeployment-supervisor-reference.json"),
+	)) as {
+		workspaceId?: string;
+		executionId?: string;
+		launchNonce?: string;
+		revocationFile?: string;
+		launchAttemptCount?: number;
+	} | null;
+	if (
+		specification.postProcessExitCleanupCommand &&
+		cleanupReference?.workspaceId === request.workspaceId &&
+		cleanupReference.executionId &&
+		cleanupReference.launchNonce &&
+		cleanupReference.revocationFile &&
+		cleanupReference.launchAttemptCount
+	) {
+		await recoverOwnedCommandPostProcessExitCleanup({
+			workspaceId: request.workspaceId,
+			executionId: cleanupReference.executionId,
+			launchNonce: cleanupReference.launchNonce,
+			revocationFile: cleanupReference.revocationFile,
+			launchAttemptCount: cleanupReference.launchAttemptCount,
+			specification,
+		});
+	}
+	await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
 	const idempotencyKey = `local-redeployment:${request.executionId}`;
 	return lockedFileSystem.withLock({ path: join(directory, "redeployment-start-single-flight") }, async () => {
 		const readExistingRegistration = async () => {

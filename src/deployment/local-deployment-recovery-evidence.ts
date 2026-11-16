@@ -123,7 +123,9 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 					restriction,
 					effectObservation,
 					stageRecoveryEvidenceSha256,
-					runtimeProcessIdentity,
+					...(stage?.recoveryEvidenceObservationMode === "semantic_observation_only"
+						? {}
+						: { runtimeProcessIdentity }),
 					pendingCommandOriginals,
 				}),
 			)

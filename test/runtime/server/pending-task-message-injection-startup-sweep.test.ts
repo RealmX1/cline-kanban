@@ -87,16 +87,18 @@ async function flushRealInputOutput() {
 // 真实账本清扫外面包一层计数：定时器是假的，账本 IO 是真的，推进假时钟之后要等真 IO 落地。
 function createObservedRealLedgerSweep() {
 	let completedSweepCount = 0;
+	const sweepCompletionWaiters = new Map<number, () => void>();
 	return {
 		sweepAllWorkspacesOnce: async () => {
 			const result = await sweepStalePendingTaskMessageInjectionsForAllWorkspaces();
 			completedSweepCount += 1;
+			sweepCompletionWaiters.get(completedSweepCount)?.();
+			sweepCompletionWaiters.delete(completedSweepCount);
 			return result;
 		},
 		waitForCompletedSweepCount: async (expectedCount: number) => {
-			for (let spin = 0; spin < 2_000 && completedSweepCount < expectedCount; spin += 1) {
-				await flushRealInputOutput();
-			}
+			if (completedSweepCount < expectedCount)
+				await new Promise<void>((resolve) => sweepCompletionWaiters.set(expectedCount, resolve));
 			expect(completedSweepCount).toBe(expectedCount);
 			// 让「扫完 → 续排下一趟」那一步也落地。
 			await flushRealInputOutput();

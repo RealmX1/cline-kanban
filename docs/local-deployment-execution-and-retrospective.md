@@ -65,7 +65,8 @@ kanban task command-execution start --task-id "$DEPLOYMENT_TASK_ID" \
 
 - 执行意图先于命令落盘。原始 stdout、stderr 和进程退出事实放在独立尝试目录；原子写使用文件与目录同步。
 - 同一 runtime home 与端口的发布串行；同一执行目录另有单飞锁。已完成阶段不再次执行。
-- 普通命令在同一补证摘要下最多执行两次；证据文件真实变化后取得新预算。不可重复动作结果未知时先核验效果，不重发动作。
+- 阶段明确返回 `machine_evidence_pending` 后立即等待，通用监督合同使用 `maximum_unchanged_retries: 0`。标准阶段采用 `semantic_observation_only`，报告重写、无关会话、时间、nonce 与清理结果不刷新预算。旧 v1 普通文本命令保留原有有界重试兼容。
+- 新标准阶段的预算保存在目标 runtime home，绑定 home、端口、发布目录、阶段和逻辑原因。在线、离线及新候选共用；更换 commit、executionId 或执行目录不清零。只有相关条件恢复或实际冻结执行器的对应隔离回归通过才提供一次资格，每份证据只消费一次；观察失败保持未知。
 - 子进程原生记录确证未创建进程时，单列 `command_not_started`，可按有界预算恢复；启动意图本身不证明命令已执行。
 - 恢复只接受规范尝试目录中、命令与 cwd 相同的未启动原件；新版原件另绑定执行、阶段和尝试编号。每次重试和意图持久化后再次检查 Stop 与锁归属。
 - 效果核验必须返回 `ok: true`，并同时匹配 `executionId`、`candidateSourceCommit`、`candidateDistributionSha256`。HTTP 200 或退出码 0 单独不足以放行。
@@ -81,6 +82,25 @@ kanban task command-execution start --task-id "$DEPLOYMENT_TASK_ID" \
 所属规格的可选 `readOnlyRecoveryEvidenceObservationCommand` 是无 shell 的只读 argv，仍由通用恢复循环单飞采样，不另设调度器。观察命令在 15 秒内返回 `{ "evidenceSha256": "<64 位小写 SHA-256>" }`；失败、超时或坏输出归为同一稳定未知态。部署侧只摘要当前进程身份、绑定效果状态与未决命令原件，不把采样时间或 nonce 当作新证据。无变化预算耗尽后仍每 30 秒只读补证，只有真实语义变化才重新派发冻结执行器；Stop 中止在途采样并禁止后续观察。
 
 需要由生产方完整解释恢复输入时，显式选择 `recoveryEvidenceObservationMode: "semantic_observation_only"`，排除诊断文件重写对指纹的影响。未知观察保留原有预算；已消费证据的预算跨重启、跨不同证据往返保存。当前重试上限每次决策重读，不沿用首次见到该证据时的快照。旧所属执行的追加登记契约见 [通用命令托管](task-owned-command-execution-and-result-delivery.md)。
+
+## 失败尝试清理与现场检查
+
+新标准执行默认自动清理本次已登记的未完成备份复制容器、无回滚引用的失败旧构建副本及废弃发布暂存。容器在复制前登记执行、尝试、进程和目录实体，子路径继承容器归属；已有但未登记的历史目录不自动认领。候选源码与构建、已核验检查点、必要备份、全部输出和冻结原件继续保留。
+
+清理通过通用所属规格的可选 `postProcessExitCleanupCommand` 运行，复用原生监督器。只有原命令及所属子进程已确认退出、stdout/stderr 已同步、证据已可靠保存，并且路径实体和恢复引用再次核验后才删除；不跟随软链接越界。取消和重启后可只恢复清理，不能由此重新派发部署。清理失败独立记录 pending；同一相关条件保留原尝试加两次重试，随后只观察条件是否改善。
+
+执行级检查开关独立于冻结请求和重试预算，跨重启保存。关闭必须给出检查原因，重新开启后幂等处理尚未删除的合格产物：
+
+```sh
+"$DEPLOYMENT_NODE" "$FROZEN_EXECUTOR" set-redeployment-cleanup \
+  --execution-directory "$EXECUTION_DIRECTORY" --automatic-cleanup disabled \
+  --inspection-reason "检查复制身份不一致现场"
+
+"$DEPLOYMENT_NODE" "$FROZEN_EXECUTOR" set-redeployment-cleanup \
+  --execution-directory "$EXECUTION_DIRECTORY" --automatic-cleanup enabled
+```
+
+`failed-attempt-artifact-cleanup.json` 保存开关、归属、删除意图、错误及结果；`failed-attempt-cleanup-evidence/` 保存删除前证据，`stage-failure-originals/` 保存失败分类及源／副本身份。`analyze` 的 `operationalProgress` 展示目标预算、当前阻塞、恢复条件、检查点和清理记录，命令耗时继续由阶段原件计算。附属材料暂不可读时保留 unknown，不改变部署主结果。完整边界与验收见 [重试资格与清理合同](local-deployment-retry-qualification-and-failed-attempt-cleanup.md)。
 
 ## 自动复盘与反馈材料
 
