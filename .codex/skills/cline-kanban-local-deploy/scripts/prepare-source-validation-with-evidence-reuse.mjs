@@ -893,6 +893,12 @@ async function discoverReusableSourceValidationChecks(
 					Boolean(actualNode) &&
 					(await realpath(actualNode)) === currentEnvironment.nodeExecutable &&
 					isRvfNativeRecordEnvironmentCompatible(validation);
+				const validationToolUnavailable =
+					execution.returncode === 127 &&
+					supervision.returncode === 127 &&
+					/^sh: (?:\d+: )?(?:tsc|tsx|vitest|biome): (?:command )?not found\s*$/.test(
+						await readFile(join(directory, "stderr.txt"), "utf8"),
+					);
 				sourceValidationCheckResults.push({
 					commandKeys: [createSourceValidationCommandIdentityKey(execution.argv, execution.cwd)],
 					argv: execution.argv,
@@ -903,14 +909,20 @@ async function discoverReusableSourceValidationChecks(
 					proofFiles,
 					environmentCompatible: Boolean(environmentCompatible),
 					status:
-						execution.status === "passed" && execution.returncode === 0 && supervision.returncode === 0
-							? "passed"
-							: "failed",
+						validationToolUnavailable
+							? "validation_environment_unavailable"
+							: execution.status === "passed" && execution.returncode === 0 && supervision.returncode === 0
+								? "passed"
+								: "failed",
 					sourceFormat: "rvf-task-snapshot-original-validation",
 					originalRunId: run.run_id,
 					startedAt: execution.started_at || supervision.started_at,
 					concludedAt: execution.finished_at || supervision.finished_at,
-					...(externalWrapper ? { ineligibleReason: "原记录未冻结仓库外包装脚本，不能假定其内容始终不变" } : {}),
+					...(validationToolUnavailable
+						? { ineligibleReason: "历史 shell 缺少验证工具，未形成源码质量结论；保留原件并补验缺项" }
+						: externalWrapper
+							? { ineligibleReason: "原记录未冻结仓库外包装脚本，不能假定其内容始终不变" }
+							: {}),
 				});
 			}
 		} catch (error) {
