@@ -97,6 +97,34 @@ describe("已提交累计指标", () => {
 		expect(trigger().textContent).toBe("已提交 —");
 	});
 
+	it("摘要使用 K 缩写，无障碍标签与展开明细保留准确行数", async () => {
+		const largeHistory: RuntimeTaskRetainedCommittedLineChangeHistory = {
+			summary: { ...history.summary, additions: 12_345, deletions: 1_234 },
+			commits: [{ ...history.commits[0]!, additions: 12_345, deletions: 1_234 }],
+		};
+		fetchHistory.mockResolvedValue(largeHistory);
+		act(() => root.render(createCommittedLineChangeIndicatorForTest("task-large-counts", largeHistory.summary)));
+		expect(trigger().textContent).toBe("已提交 +12K −1.2K");
+		expect(trigger().getAttribute("aria-label")).toBe("已提交 +12345 −1234");
+		await act(async () => trigger().click());
+		const details = document.querySelector('[role="dialog"]');
+		expect(details?.textContent).toContain("1 次提交 · +12345 −1234");
+		expect(details?.querySelector("li")?.textContent).toContain("+12345 −1234");
+	});
+
+	it.each(["additions", "deletions"] as const)("%s 未知时不格式化为零", (unknownCountField) => {
+		act(() =>
+			root.render(
+				createCommittedLineChangeIndicatorForTest("task-unknown-count", {
+					...history.summary,
+					[unknownCountField]: null,
+				}),
+			),
+		);
+		expect(trigger().textContent).toBe("已提交 —");
+		expect(trigger().getAttribute("aria-label")).toBe("已提交 —");
+	});
+
 	it("支持触屏点击，加载失败可重试", async () => {
 		fetchHistory.mockRejectedValueOnce(new Error("离线"));
 		act(() => root.render(createCommittedLineChangeIndicatorForTest("task-retry")));

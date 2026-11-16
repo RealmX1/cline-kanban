@@ -121,6 +121,7 @@ export function useRuntimeWorkspaceChanges(
 			: JSON.stringify([workspaceId, taskId, baseRef, worktreeMode, mode]),
 		refreshIntervalMs: pollIntervalMs ?? undefined,
 		workspaceId: workspaceId ?? undefined,
+		pauseWhileDocumentHidden: true,
 	});
 	const refresh = changesQuery.refresh;
 	const previousStateVersionRef = useRef(stateVersion);

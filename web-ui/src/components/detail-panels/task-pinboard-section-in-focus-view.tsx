@@ -6,6 +6,7 @@ import { useFocusViewPinnedSectionOwnScrollbarSlot } from "@/components/detail-p
 
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import { LocalStorageKey } from "@/storage/local-storage-store";
@@ -70,9 +71,9 @@ export function TaskPinboardSectionInFocusView({
 	return (
 		<div
 			data-task-pinboard-container="focus-view-section"
-			className="ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 flex min-h-0 min-w-0 flex-col rounded-lg border border-border bg-surface-1"
+			className="kb-task-group ml-0.5 mr-[calc(2px+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 flex min-h-0 min-w-0 flex-col"
 			// EXPERIMENT_NODE: Pinned 固定区的高度上限比例（50% 面板高），决定展开全部后给 stage 列表留多少空间。
-			style={{ maxHeight: "50%" }}
+			style={{ ...getTaskGroupSemanticColorStyle("pinned"), maxHeight: "50%" }}
 		>
 			<FocusViewGroupHeader
 				title="Pinned"
@@ -85,7 +86,7 @@ export function TaskPinboardSectionInFocusView({
 				<div
 					ref={pinnedScrollbarSlot.ref}
 					style={pinnedScrollbarSlot.style}
-					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-2 pb-2"
+					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-0.5 pb-2"
 				>
 					{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div key={card.id} className="mb-1.5 last:mb-0">

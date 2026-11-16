@@ -10,6 +10,8 @@
 
 启动 specification 包含 `command`、`resumeCommand`、可选 `cancelCommand`、`workingDirectory`、`resultFile`、`materialSha256`、`label` 与可选 `recoveryEvidencePaths`。命令为 argv 数组，不经 shell 拼装。工作目录必须是该任务的真实工作树；持久记录保存目录实体、task incarnation、原主会话与原生身份、材料摘要、监督进程 nonce、恢复动作及结果 ID。
 
+可选 `postProcessExitCleanupCommand` 同样是冻结 argv，并参与材料身份。监督器确认原命令及所属子进程全部退出、原始 stdout/stderr 已同步后，持久保存绑定执行、nonce、材料与命令的退出确认，再复用同一原生监督实现运行清理。清理拥有独立原件和进程范围，不覆盖业务结果；通用恢复循环也可单独接续它，包括原执行已取消的情况。生产方负责删除资格、证据、引用、幂等及有界重试，通用监督器不解释部署阶段。未声明该字段的执行行为不变。
+
 生产方可冻结 `readOnlyRecoveryEvidenceObservationCommand` 并选择 `recoveryEvidenceObservationMode: "semantic_observation_only"`。此模式只消费观察命令返回的 `evidenceSha256`，诊断文件全文散列不参与恢复资格；观察不可用时持久保存 unknown、原预算和下次轻量观察时间。按每份证据保存已用预算，进程重启或 A→B→A 均不重新领取 A 的机会。每次决策重读当前 `maximum_unchanged_retries`：上限下降会停掉尚未发生的恢复，上升只补剩余次数，已用次数不清零，同一证据仍最多三次。异步观察后仍检查撤销、任务/目录身份与托管归属。派发前重新核对观察器登记；已经读到旧记录的扫描发现登记变化后，不得再按诊断内容派发。
 
 旧执行可用 `task command-execution register-recovery-evidence-observation --registration-file <持久JSON>` 追加观察器。JSON 包含 `taskId`、`executionId`、`expectedMaterialSha256`、`command` 和 `mode: "semantic_observation_only"`；材料摘要取原执行的 inspect 回执。登记保留原 specification、执行身份、撤销及预算，同一登记幂等，拒绝替换不同观察器或恢复已撤销执行。登记前已经消费的同一 `continuation_request_id`，首次语义观察只继承剩余次数，不重新发放。该入口不替换业务命令，也不授予新业务执行权限。

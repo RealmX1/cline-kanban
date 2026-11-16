@@ -4,6 +4,7 @@ import { cn } from "@/components/ui/cn";
 import { useTaskCardPortalWheelScrollForwarding } from "@/hooks/use-task-card-portal-wheel-scroll-forwarding";
 import { useTaskRetainedCommittedLineChangeHistory } from "@/hooks/use-task-retained-committed-line-change-history";
 import type { RuntimeTaskRetainedCommittedLineChangeSummary } from "@/runtime/types";
+import { formatLineChangeCountWithThousandsSuffix } from "@/utils/format-line-change-count-with-thousands-suffix";
 
 export function shouldDisplayTaskRetainedCommittedLineChangeSummary(
 	summary?: RuntimeTaskRetainedCommittedLineChangeSummary,
@@ -54,8 +55,11 @@ export function TaskRetainedCommittedLineChangeIndicator({
 		clearCloseTimer();
 		if (!isPinnedOpenRef.current) closeTimerRef.current = setTimeout(() => setIsOpen(false), 200);
 	};
-	const isComplete = summary?.status === "complete";
-	const visibleSummary = isComplete ? `已提交 +${summary.additions} −${summary.deletions}` : "已提交 —";
+	const committedAddedLineCount = summary?.additions;
+	const committedDeletedLineCount = summary?.deletions;
+	const isComplete =
+		summary?.status === "complete" && committedAddedLineCount != null && committedDeletedLineCount != null;
+	const visibleSummary = isComplete ? `已提交 +${committedAddedLineCount} −${committedDeletedLineCount}` : "已提交 —";
 	const additionsTextColorClassName = showCommittedChangeBackground
 		? "text-[color-mix(in_oklab,var(--color-status-green)_30%,var(--color-text-primary))]"
 		: "text-status-green";
@@ -117,8 +121,12 @@ export function TaskRetainedCommittedLineChangeIndicator({
 				<span>已提交</span>{" "}
 				{isComplete ? (
 					<>
-						<span className={additionsTextColorClassName}>+{summary.additions}</span>{" "}
-						<span className={deletionsTextColorClassName}>−{summary.deletions}</span>
+						<span className={additionsTextColorClassName}>
+							+{formatLineChangeCountWithThousandsSuffix(committedAddedLineCount)}
+						</span>{" "}
+						<span className={deletionsTextColorClassName}>
+							−{formatLineChangeCountWithThousandsSuffix(committedDeletedLineCount)}
+						</span>
 					</>
 				) : (
 					<span>—</span>

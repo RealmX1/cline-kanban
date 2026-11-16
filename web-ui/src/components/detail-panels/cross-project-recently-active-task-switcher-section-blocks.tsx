@@ -36,6 +36,7 @@ import { cn } from "@/components/ui/cn";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Spinner } from "@/components/ui/spinner";
 import { Tooltip } from "@/components/ui/tooltip";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
 import { collectVisibleCrossProjectTaskSwitcherSectionEntries } from "@/state/cross-project-task-switcher-focus-view-visible-task-rows";
 
@@ -113,12 +114,14 @@ function CrossProjectTaskSwitcherSectionFrame({
 	focusedCardContent?: ReactNode;
 }): ReactElement {
 	const pinnedScrollbarSlot = useFocusViewPinnedSectionOwnScrollbarSlot();
+	const taskGroupSemanticColorStyle = getTaskGroupSemanticColorStyle(testIdSuffix.replaceAll("-", "_"));
 	const reservesPinnedScrollbarSlot =
 		testIdSuffix === "pinned" && sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel";
 	if (rendersGroupHeaderRailEntry)
 		return (
 			<section
-				className="rounded-lg border border-border bg-surface-1"
+				className="kb-task-group min-w-0"
+				style={taskGroupSemanticColorStyle}
 				data-focus-view-group-header-rail-entry={testIdSuffix.replaceAll("-", "_")}
 			>
 				{header}
@@ -129,16 +132,20 @@ function CrossProjectTaskSwitcherSectionFrame({
 		return (
 			<section
 				className={cn(
-					"flex min-h-0 flex-col rounded-lg border border-border bg-surface-1",
+					"kb-task-group flex min-h-0 flex-col",
 					isSectionColumnCollapsed ? "w-10 shrink-0" : "min-w-[260px] flex-1 basis-0",
 				)}
+				style={taskGroupSemanticColorStyle}
 				data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
 				data-verification-anchor={`cross-project-task-switcher-section:${testIdSuffix}`}
 			>
 				{/* 列 header 固定在滚动区之外。 */}
 				<div
 					style={isSectionColumnCollapsed ? undefined : { height: BOARD_TASK_GROUP_HEADER_HEIGHT_PX }}
-					className={cn("flex", isSectionColumnCollapsed ? "min-h-0 flex-1" : "shrink-0 items-center gap-2 px-2")}
+					className={cn(
+						"kb-task-group-header flex",
+						isSectionColumnCollapsed ? "min-h-0 flex-1" : "shrink-0 items-center gap-2 px-2",
+					)}
 				>
 					{header}
 				</div>
@@ -152,7 +159,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 					// overflow-anchor: none —— 与 Focus View 左栏同理，异步快照不触发浏览器滚动锚定补偿。
 					// 这个容器的可视区也是悬浮卡片定位、向上避让与内部滚动的边界。
 					className={cn(
-						"flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-1 pb-1.5 [overflow-anchor:none]",
+						"flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto overscroll-contain px-0.5 pb-1.5 [overflow-anchor:none]",
 						isSectionColumnCollapsed && "hidden",
 					)}
 					data-testid={`cross-project-task-switcher-section-column-scroll-container-${testIdSuffix}`}
@@ -165,11 +172,12 @@ function CrossProjectTaskSwitcherSectionFrame({
 	return (
 		<section
 			className={cn(
-				"flex flex-col rounded-lg border border-border bg-surface-1",
+				"kb-task-group flex min-w-0 flex-col",
 				testIdSuffix === "pinned"
-					? "ml-2 mr-[calc(0.5rem+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 min-h-0 min-w-0 max-h-[50%]"
+					? "ml-0.5 mr-[calc(2px+var(--kb-focus-view-column-scrollbar-width,0px))] mt-1 min-h-0 max-h-[50%]"
 					: "shrink-0",
 			)}
+			style={taskGroupSemanticColorStyle}
 			data-focus-view-group-section-id={testIdSuffix.replaceAll("-", "_")}
 			data-testid={`cross-project-task-switcher-section-${testIdSuffix}`}
 			data-verification-anchor={`cross-project-task-switcher-section:${testIdSuffix}`}
@@ -189,7 +197,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 					onPointerLeave={sectionColumnScrollContainerBinding?.onSectionColumnPointerLeave}
 					onPointerDownCapture={sectionColumnScrollContainerBinding?.onSectionColumnPointerDownCapture}
 					className={cn(
-						"flex flex-col gap-0.5 px-1 pb-1.5 empty:hidden",
+						"flex flex-col gap-0.5 px-0.5 pb-1.5 empty:hidden",
 						testIdSuffix === "pinned" && "min-h-0 overflow-y-auto overscroll-contain",
 					)}
 				>
@@ -203,7 +211,7 @@ function CrossProjectTaskSwitcherSectionFrame({
 function CrossProjectTaskSwitcherSectionTitle({ title, count }: { title: string; count: ReactNode }): ReactElement {
 	return (
 		<>
-			<span className="truncate text-[13px] font-semibold text-text-primary">{title}</span>
+			<span className="truncate text-sm font-semibold text-text-primary">{title}</span>
 			<span className="text-xs text-text-tertiary">{count}</span>
 		</>
 	);

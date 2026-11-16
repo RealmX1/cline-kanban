@@ -428,6 +428,91 @@ const TEST_TIMEOUT_MS_COVERING_NINE_SERIAL_ARRIVAL_WAITS =
 	9 * TERMINAL_WEBSOCKET_EVENTUAL_ARRIVAL_WAIT_TIMEOUT_MS + 5_000;
 
 describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NINE_SERIAL_ARRIVAL_WAITS }, () => {
+	it("双通道协商无损压缩，ACK 仍按解压后的输出字节结清", async () => {
+		const io = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=compression`,
+		);
+		const control = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=compression`,
+		);
+		expect(io.socket.extensions).toContain("permessage-deflate");
+		expect(control.socket.extensions).toContain("permessage-deflate");
+		await waitForControlMessage(control, (message) => message.type === "restore");
+		control.socket.send(JSON.stringify({ type: "restore_complete" }));
+		const output = "中文输出\x1b[32m重复重绘\x1b[0m\r\n".repeat(30_000);
+		terminalManager.emitOutput(TASK_ID, output);
+		const received = await collectIoFramesTotalingBytesWithPerFrameAcks(io, control, Buffer.byteLength(output));
+		expect(received.combined.toString("utf8")).toBe(output);
+		await waitForAssertion(() =>
+			expect(terminalManager.pauseOutput.mock.calls.length).toBe(terminalManager.resumeOutput.mock.calls.length),
+		);
+	});
+	it("新端协商 64KiB UTF-8 分片，完整身份确认前不放出实时输出", async () => {
+		const snapshot = "中文😀\x1b[32m重绘\x1b[0m\r\n".repeat(12_000);
+		terminalManager.getRestoreSnapshot.mockResolvedValue({ snapshot, cols: 80, rows: 24 });
+		const io = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=chunked`,
+		);
+		const control = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=chunked&restoreProtocolVersion=2`,
+		);
+		await waitForControlMessage(control, (message) => String(message.type) === "restore_end");
+		const messages = control.queue.map(
+			(raw) => JSON.parse(rawDataToBuffer(raw).toString("utf8")) as Record<string, unknown>,
+		);
+		const begin = messages.find((message) => message.type === "restore_begin");
+		expect(begin).toMatchObject({ snapshotByteLength: Buffer.byteLength(snapshot) });
+		const chunks = messages.filter((message) => message.type === "restore_chunk");
+		expect(chunks.length).toBeGreaterThan(1);
+		expect(chunks.map((chunk) => chunk.snapshotPart).join("")).toBe(snapshot);
+		for (const [index, chunk] of chunks.entries()) {
+			expect(chunk.chunkSequenceNumber).toBe(index);
+			expect(Buffer.byteLength(String(chunk.snapshotPart))).toBeLessThanOrEqual(64 * 1024);
+		}
+		terminalManager.emitOutput(TASK_ID, "恢复后的输出");
+		control.socket.send(
+			JSON.stringify({
+				type: "restore_complete",
+				restoreRequestSequenceNumber: begin?.restoreRequestSequenceNumber,
+			}),
+		);
+		const barrier = once(control.socket, "pong");
+		control.socket.ping();
+		await barrier;
+		expect(io.queue).toHaveLength(0);
+		control.socket.send(
+			JSON.stringify({
+				type: "restore_complete",
+				restoreRequestSequenceNumber: begin?.restoreRequestSequenceNumber,
+				outputVersion: begin?.outputVersion,
+				streamGenerationId: begin?.streamGenerationId,
+			}),
+		);
+		await expect(waitForIoMessage(io)).resolves.toEqual(Buffer.from("恢复后的输出"));
+		terminalManager.emitOutput(TASK_ID, "x".repeat(520_000));
+		await waitForAssertion(() => expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1));
+		const processedStaleAck = once(control.socket, "pong");
+		control.socket.send(
+			JSON.stringify({
+				type: "output_ack",
+				bytes: 520_000,
+				streamGenerationId: begin?.streamGenerationId,
+				restoreRequestSequenceNumber: 0,
+			}),
+		);
+		control.socket.ping();
+		await processedStaleAck;
+		expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
+		control.socket.send(
+			JSON.stringify({
+				type: "output_ack",
+				bytes: 520_000,
+				streamGenerationId: begin?.streamGenerationId,
+				restoreRequestSequenceNumber: begin?.restoreRequestSequenceNumber,
+			}),
+		);
+		await waitForAssertion(() => expect(terminalManager.resumeOutput.mock.calls.length).toBeGreaterThan(0));
+	});
 	let server: Server;
 	let bridge: TerminalWebSocketBridge;
 	let terminalManager: FakeTerminalManager;
@@ -570,7 +655,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			(message) => message.type === "output_demand_state" && message.demand === "continuous_output",
 		);
 		expect(terminalManager.getRestoreSnapshot).toHaveBeenCalledTimes(1);
-		terminalManager.emitOutput(TASK_ID, "z".repeat(120000));
+		terminalManager.emitOutput(TASK_ID, "z".repeat(520000));
 		await waitForAssertion(() => expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1));
 		control.socket.send(JSON.stringify({ type: "declare_output_demand", demand: "paused_output" }));
 		await waitForControlMessage(
@@ -578,6 +663,72 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			(message) => message.type === "output_demand_state" && message.demand === "paused_output",
 		);
 		expect(terminalManager.resumeOutput).toHaveBeenCalledTimes(1);
+		await closeSocket(io.socket);
+		await closeSocket(control.socket);
+	});
+
+	it("免快照重显公布暂停后的恢复序号，旧序号确认不能解除共享背压", async () => {
+		const io = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=snapshot-free-resume`,
+		);
+		const control = await openQueuedWebSocket(
+			`${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=snapshot-free-resume&restoreProtocolVersion=2`,
+		);
+		const restoreEnd = await waitForControlMessage(control, (message) => message.type === "restore_end");
+		if (restoreEnd.type !== "restore_end") throw new Error("缺少分片恢复结束帧");
+		control.socket.send(
+			JSON.stringify({
+				type: "restore_complete",
+				restoreRequestSequenceNumber: restoreEnd.restoreRequestSequenceNumber,
+				outputVersion: restoreEnd.outputVersion,
+				streamGenerationId: restoreEnd.streamGenerationId,
+			}),
+		);
+		control.socket.send(JSON.stringify({ type: "declare_output_demand", demand: "paused_output" }));
+		const paused = await waitForControlMessage(
+			control,
+			(message) => message.type === "output_demand_state" && message.demand === "paused_output",
+		);
+		if (paused.type !== "output_demand_state") throw new Error("缺少暂停状态");
+		expect(paused.restoreRequestSequenceNumber).toBe(restoreEnd.restoreRequestSequenceNumber + 1);
+		control.socket.send(
+			JSON.stringify({
+				type: "declare_output_demand",
+				demand: "continuous_output",
+				knownOutputVersion: restoreEnd.outputVersion,
+				knownStreamGenerationId: restoreEnd.streamGenerationId,
+			}),
+		);
+		const resumed = await waitForControlMessage(
+			control,
+			(message) => message.type === "output_demand_state" && message.demand === "continuous_output",
+		);
+		if (resumed.type !== "output_demand_state") throw new Error("缺少连续输出状态");
+		expect(resumed.restoreRequestSequenceNumber).toBe(paused.restoreRequestSequenceNumber);
+		expect(terminalManager.getRestoreSnapshot).toHaveBeenCalledTimes(1);
+		terminalManager.emitOutput(TASK_ID, "z".repeat(520_000));
+		await waitForAssertion(() => expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1));
+		const processedStaleAck = once(control.socket, "pong");
+		control.socket.send(
+			JSON.stringify({
+				type: "output_ack",
+				bytes: 520_000,
+				streamGenerationId: restoreEnd.streamGenerationId,
+				restoreRequestSequenceNumber: restoreEnd.restoreRequestSequenceNumber,
+			}),
+		);
+		control.socket.ping();
+		await processedStaleAck;
+		expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
+		control.socket.send(
+			JSON.stringify({
+				type: "output_ack",
+				bytes: 520_000,
+				streamGenerationId: restoreEnd.streamGenerationId,
+				restoreRequestSequenceNumber: resumed.restoreRequestSequenceNumber,
+			}),
+		);
+		await waitForAssertion(() => expect(terminalManager.resumeOutput).toHaveBeenCalledTimes(1));
 		await closeSocket(io.socket);
 		await closeSocket(control.socket);
 	});
@@ -716,11 +867,11 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			await restoreProcessed;
 		}
 
-		const output = "x".repeat(120_000);
+		const output = "x".repeat(520_000);
 		const outputTotalBytes = Buffer.byteLength(output);
 		terminalManager.emitOutput(TASK_ID, output);
 
-		// viewer A 逐帧 ack(模拟正常渲染的客户端),按帧上限分片收全 120KB。
+		// viewer A 逐帧 ack(模拟正常渲染的客户端),按帧上限分片收全 520KB。
 		// viewer B 一个 ack 都不发:发送侧跨过背压水位后必须停发余帧,B 收不全。
 		const outputA = await collectIoFramesTotalingBytesWithPerFrameAcks(ioSocketA, controlSocketA, outputTotalBytes);
 		expect(outputA.combined.byteLength).toBe(outputTotalBytes);
@@ -768,7 +919,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		}
 		expect(collected.combined.toString("utf8")).toBe(output);
 
-		// 逐帧 ack 后 PTY 恢复(40KB 未过 100KB ack 高水位,但可能触发 socket buffered 暂停——
+		// 逐帧 ack 后 PTY 恢复(40KB 未过 400KB ACK 高水位,但可能触发 socket buffered 暂停——
 		// 全量 ack + 排空后必须回到未暂停状态,pause/resume 配平)。
 		await waitForAssertion(() => {
 			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(terminalManager.resumeOutput.mock.calls.length);
@@ -778,7 +929,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		await closeSocket(controlSocket.socket);
 	});
 
-	it("stops mid-batch sending once the ack high water mark is crossed and resumes the remainder only after acks", async () => {
+	it("批次触及 ACK 或 socket 高水位即停发，精确确认后有序续传", async () => {
 		const ioUrl = `${runtimeUrl}/api/terminal/io?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
 		const controlUrl = `${runtimeUrl}/api/terminal/control?taskId=${TASK_ID}&workspaceId=${WORKSPACE_ID}&clientId=client-a`;
 
@@ -789,10 +940,10 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
 
 		const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
-		const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
-		// 单批 300KB,远超 100KB ack 高水位:发送必须在跨过高水位的那一帧停住。
-		// (修复前的缺陷:整批 300KB 在一个 flush 循环里全部发出,且仅暂停前的帧计入记账。)
-		const output = Array.from({ length: 300_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
+		const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 400_000;
+		// 单批 900KB，超过 400KB ACK 高水位:发送必须在跨过高水位的那一帧停住。
+		// (修复前的缺陷:整批输出 在一个 flush 循环里全部发出,且仅暂停前的帧计入记账。)
+		const output = Array.from({ length: 900_000 }, (_, index) => String.fromCharCode(97 + (index % 26))).join("");
 		const outputTotalBytes = Buffer.byteLength(output);
 		terminalManager.emitOutput(TASK_ID, output);
 
@@ -801,7 +952,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		// 负载下帧还在路上就断言,会因「收到 0 字节」误报。
 		await waitForAssertion(() => {
 			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
-			expect(sumQueuedIoBytes(ioSocket)).toBeGreaterThan(OUTPUT_ACK_HIGH_WATER_MARK_BYTES);
+			expect(sumQueuedIoBytes(ioSocket)).toBeGreaterThan(0);
 		});
 		// 反向观察(「没有过量发送」):暂停之后再留一小段窗口,看有没有越过暂停点继续发出的帧。
 		// 这是「等一段时间后断言没发生」的弱观察,负载下只会漏报、不会误报,窗口沿用原值。
@@ -839,16 +990,19 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 		await waitForControlMessage(controlSocket, (message) => message.type === "restore");
 		controlSocket.socket.send(JSON.stringify({ type: "restore_complete" }));
 
-		// 恰好 7 帧 = 114688 字节:第 7 帧跨过 100KB ack 高水位,批在暂停点上正好耗尽
+		// 恰好 16 帧触发 socket 高水位，批在暂停点上正好耗尽。
 		// (pendingOutputChunks 为空但 outputPaused 已置位)——这是低延迟直发路径最容易
 		// 漏记账的形态:后续小 chunk 若直发,checkBackpressureAfterSend 在 paused 时直返、不计字节。
 		const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
-		const pauseExhaustedBatchByteLength = OUTPUT_FRAME_MAX_BYTES * 7;
+		const pauseExhaustedBatchByteLength = OUTPUT_FRAME_MAX_BYTES * 16;
 		const bigOutput = Array.from({ length: pauseExhaustedBatchByteLength }, (_, index) =>
 			String.fromCharCode(97 + (index % 26)),
 		).join("");
 		terminalManager.emitOutput(TASK_ID, bigOutput);
-		await new Promise((resolve) => setTimeout(resolve, 30));
+		await waitForAssertion(() => {
+			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
+			expect(sumQueuedIoBytes(ioSocket)).toBe(pauseExhaustedBatchByteLength);
+		});
 
 		// 暂停期间到达的小 chunk 必须排队等 resume,不得走低延迟路径直发。
 		const tailMarker = "tail-marker";
@@ -922,7 +1076,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			vi.useRealTimers();
 		});
 
-		it("客户端永远不回 restore_complete 时，服务端到点强开闸门把扣住的输出放出去", async () => {
+		it("客户端不确认恢复时淘汰观看连接，不在未知屏幕上续写", async () => {
 			// 握手超时是在 control 连上的那一刻武装的，所以假定时器要赶在开 socket 之前装上。
 			vi.useFakeTimers();
 			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-stuck-handshake"));
@@ -931,30 +1085,35 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 
 			// 故意不回 restore_complete。旧实现里这条 viewer 从此一个字节都收不到，而且因为一个字节
 			// 都没发出去，连背压都不会触发——PTY 照跑、lastOutputAt 照刷、卡片照跳。
+			const ioClosed = once(ioSocket.socket, "close");
+			const controlClosed = once(controlSocket.socket, "close");
 			terminalManager.emitOutput(TASK_ID, "held behind the gate");
 			await vi.advanceTimersByTimeAsync(10_100);
 			vi.useRealTimers();
 
-			await expect(waitForIoMessage(ioSocket)).resolves.toEqual(Buffer.from("held behind the gate", "utf8"));
+			await Promise.all([ioClosed, controlClosed]);
+			expect(ioSocket.queue).toHaveLength(0);
 
 			await closeSocket(ioSocket.socket);
 			await closeSocket(controlSocket.socket);
 		});
 
-		it("握手期间扣住的输出超过上限就强开闸门，不让服务端内存无上限增长", async () => {
+		it("握手缓冲溢出时淘汰观看连接并释放缓冲", async () => {
 			const ioSocket = await openQueuedWebSocket(buildIoUrl("client-overflow"));
 			const controlSocket = await openQueuedWebSocket(buildControlUrl("client-overflow"));
 			await waitForControlMessage(controlSocket, (message) => message.type === "restore");
 
 			// 同样不回 restore_complete，但这次靠输出量本身把缓冲顶穿（上限 4MB）。
+			const ioClosed = once(ioSocket.socket, "close");
+			const controlClosed = once(controlSocket.socket, "close");
 			const oneMegabyteOfOutput = "y".repeat(1024 * 1024);
 			for (let emitIndex = 0; emitIndex < 5; emitIndex += 1) {
 				terminalManager.emitOutput(TASK_ID, oneMegabyteOfOutput);
 			}
 
-			// 闸门被溢出强开 ⇒ 扣住的输出开始上线。旧实现里这里永远收不到任何东西。
-			const firstFrame = await waitForIoMessage(ioSocket);
-			expect(firstFrame.byteLength).toBeGreaterThan(0);
+			// 缓冲溢出只关闭观看连接，不能把未知屏幕当作恢复完成。
+			await Promise.all([ioClosed, controlClosed]);
+			expect(ioSocket.queue).toHaveLength(0);
 
 			await closeSocket(ioSocket.socket);
 			await closeSocket(controlSocket.socket);
@@ -973,7 +1132,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			// 逐出定时器是在「进入背压暂停」的那一刻武装的，所以假定时器装在这一步之前即可。
 			vi.useFakeTimers();
 			// 一个 ack 都不发：跨过高水位后 PTY 被这一个 viewer 单独按住。
-			terminalManager.emitOutput(TASK_ID, "z".repeat(120_000));
+			terminalManager.emitOutput(TASK_ID, "z".repeat(520_000));
 			await vi.advanceTimersByTimeAsync(20);
 			expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
 			expect(terminalManager.resumeOutput).not.toHaveBeenCalled();
@@ -996,7 +1155,7 @@ describe("createTerminalWebSocketBridge", { timeout: TEST_TIMEOUT_MS_COVERING_NI
 			await waitForControlMessage(controlSocketBeforeReconnect, (message) => message.type === "restore");
 			controlSocketBeforeReconnect.socket.send(JSON.stringify({ type: "restore_complete" }));
 
-			terminalManager.emitOutput(TASK_ID, "z".repeat(120_000));
+			terminalManager.emitOutput(TASK_ID, "z".repeat(520_000));
 			await waitForAssertion(() => {
 				expect(terminalManager.pauseOutput).toHaveBeenCalledTimes(1);
 			});

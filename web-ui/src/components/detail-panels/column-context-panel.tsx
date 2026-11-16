@@ -18,6 +18,7 @@ import { cn } from "@/components/ui/cn";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
 import { DeletedTaskHistoryIcon } from "@/components/ui/deleted-task-history-icon";
 import { Tooltip } from "@/components/ui/tooltip";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import { useFocusViewStageSectionExpansion } from "@/hooks/use-focus-view-stage-section-expansion";
 import { useProgressiveRenderCount } from "@/hooks/use-progressive-render-count";
 import { useRevealCanonicalTaskCard } from "@/hooks/use-reveal-canonical-task-card";
@@ -159,7 +160,11 @@ function ColumnSection({
 		});
 
 	return (
-		<div className="bg-surface-1 rounded-lg shrink-0 border border-border" data-stage-section-id={column.id}>
+		<div
+			className="kb-task-group shrink-0"
+			style={getTaskGroupSemanticColorStyle(column.id)}
+			data-stage-section-id={column.id}
+		>
 			<FocusViewGroupHeader
 				title={column.title}
 				count={column.cards.length}
@@ -180,7 +185,7 @@ function ColumnSection({
 				<Droppable droppableId={column.id} type={cardDropType} isDropDisabled={isDropDisabled}>
 					{(provided) => {
 						return (
-							<div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-col px-2 pb-2">
+							<div ref={provided.innerRef} {...provided.droppableProps} className="flex flex-col px-0.5 pb-2">
 								{isCollapsedFocusedPeek
 									? // 折叠焦点 stage 的 peek：焦点卡渲染为非拖拽的裸 TaskCardBody（不包 <Draggable>、
 										// 不传 index/drag）。此前它经 BoardCard 走 draggableIndex 从 0 起算的循环，得到假的
@@ -489,12 +494,12 @@ export function ColumnContextPanel({
 			    它同时必须是 rail 的裁剪边界：底沿 rail 自 bottom:0 向上堆叠，本区矮于 rail 时会越过本区上沿，
 			    以 z-index:5 的不透明底盖住上方的置顶板分段（外层面板的 overflow:hidden 只裁面板边界）。
 			    用 clip 而非 hidden：不创建滚动容器，scrollIntoView 不会把本区自身滚动错位。 */}
-					<div className="relative flex min-h-0 flex-1 flex-col overflow-clip">
+					<div className="relative mt-1 flex min-h-0 flex-1 flex-col overflow-clip">
 						<DragDropContext onBeforeCapture={handleBeforeCapture} onDragEnd={handleDragEnd}>
 							<div
 								ref={scrollContainerRef}
 								data-task-card-column-scroll-container=""
-								className="kb-detail-task-list-scroll flex flex-col gap-1 p-2"
+								className="kb-detail-task-list-scroll flex flex-col gap-1 px-0.5 pb-2"
 								data-selected-pinned={
 									stageHeaderPinLayout.focusedCardRailEdge !== "hidden" ? "true" : undefined
 								}

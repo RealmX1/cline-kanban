@@ -16,7 +16,11 @@ import {
 	createDeploymentGroup,
 	getPostDeployVerificationStatePath,
 } from "../../../src/deployment/post-deploy-verification-state";
-import { loadWorkspaceContext } from "../../../src/state/workspace-state";
+import {
+	listWorkspaceIndexEntries,
+	loadWorkspaceContext,
+	removeWorkspaceIndexEntry,
+} from "../../../src/state/workspace-state";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("绑定执行的真实部署登记", () => {
@@ -34,6 +38,10 @@ describe("绑定执行的真实部署登记", () => {
 			authorAndCommitterIsoDate: "2026-10-31T12:00:00Z",
 		});
 		const workspace = await loadWorkspaceContext(repository.repositoryPath);
+		const privateCandidate = repository.createLinkedWorktree({
+			worktreeDirectoryName: "unregistered-private-deployment-candidate",
+			branchName: "private-deployment-candidate",
+		});
 		const executionDirectory = join(fixture.fixtureRootDirectoryPath, "bound-local-deployment");
 		const manifest: LocalDeploymentExecutionManifest = {
 			schemaVersion: 1,
@@ -41,7 +49,7 @@ describe("绑定执行的真实部署登记", () => {
 			workspaceId: workspace.workspaceId,
 			taskId: "isolated-deployment",
 			originatingTaskWorktreePath: repository.repositoryPath,
-			sourceCheckoutPath: repository.repositoryPath,
+			sourceCheckoutPath: privateCandidate.worktreePath,
 			deploymentNodeBinaryPath: process.execPath,
 			candidateSourceCommit: candidate,
 			previousDeployedSourceCommit: null,
@@ -90,14 +98,18 @@ describe("绑定执行的真实部署登记", () => {
 			}
 		};
 		const input = {
-			cwd: repository.repositoryPath,
-			projectPath: repository.repositoryPath,
+			cwd: fixture.fixtureRootDirectoryPath,
 			executionDirectory,
 			readPostDeployVerificationStateReadOnly: readState,
 		};
+		const workspaceIndexBeforeRegistration = await listWorkspaceIndexEntries();
 		const first = await recordDeploymentWithTaskDeploymentAttribution(input);
 		expect(first.deploymentId).toBe(manifest.executionId);
+		expect(first.workspaceId).toBe(workspace.workspaceId);
+		expect(first.workspacePath).toBe(repository.repositoryPath);
+		expect(first.sourceCheckoutPath).toBe(privateCandidate.worktreePath);
 		expect(first.totalVerificationTaskCount).toBe(0);
+		expect(await listWorkspaceIndexEntries()).toEqual(workspaceIndexBeforeRegistration);
 		await createDeploymentGroup(
 			{
 				deploymentId: "cf2574ad-9e8a-496c-b842-9cab57aa815a",
@@ -117,5 +129,30 @@ describe("绑定执行的真实部署登记", () => {
 		await expect(
 			recordDeploymentWithTaskDeploymentAttribution({ ...input, newCommit: "b".repeat(40) }),
 		).rejects.toThrow("绑定");
+		await expect(
+			recordDeploymentWithTaskDeploymentAttribution({ ...input, sourceCheckoutPath: repository.repositoryPath }),
+		).rejects.toThrow("绑定");
+		const unrelatedProject = fixture.createNonBareRepository({ repositoryDirectoryName: "unrelated-project" });
+		await loadWorkspaceContext(unrelatedProject.repositoryPath);
+		await expect(
+			recordDeploymentWithTaskDeploymentAttribution({ ...input, projectPath: unrelatedProject.repositoryPath }),
+		).rejects.toThrow("绑定");
+		const receiptPath = join(executionDirectory, "deployment-record-receipt.json");
+		for (const mismatchedReceipt of [
+			{ ...first, deploymentId: "11cba507-c2ae-4d1c-8912-80aaf5ad66ad" },
+			{ ...first, workspaceId: "unrelated-project" },
+			{ ...first, deployedSourceCommit: "b".repeat(40) },
+		]) {
+			await writeFile(receiptPath, JSON.stringify(mismatchedReceipt));
+			await expect(recordDeploymentWithTaskDeploymentAttribution(input)).rejects.toThrow("绑定");
+		}
+		await writeFile(receiptPath, JSON.stringify(first));
+		await removeWorkspaceIndexEntry(workspace.workspaceId);
+		await expect(recordDeploymentWithTaskDeploymentAttribution(input)).rejects.toThrow("绑定");
+		expect((await listWorkspaceIndexEntries()).map((entry) => entry.repoPath)).toEqual([
+			unrelatedProject.repositoryPath,
+		]);
+		expect(await readFile(getDeployMarkerPath(), "utf8")).toBe(laterMarker);
+		expect((await readState()).deploymentGroups).toHaveLength(2);
 	});
 });

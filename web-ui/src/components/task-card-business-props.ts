@@ -5,6 +5,29 @@ import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types"
 import type { BoardCard, BoardColumnId } from "@/types";
 import type { TaskCardMoveIntoDoneRequestHandler } from "@/types/task-card-move-into-done-request";
 
+const conversationSessionsGroupedByOwningTask = new WeakMap<
+	Record<string, RuntimeTaskSessionSummary>,
+	Map<string, RuntimeTaskSessionSummary[]>
+>();
+
+function getConversationSessionsOwnedByTask(
+	taskSessions: Record<string, RuntimeTaskSessionSummary>,
+	taskId: string,
+): RuntimeTaskSessionSummary[] {
+	let grouped = conversationSessionsGroupedByOwningTask.get(taskSessions);
+	if (!grouped) {
+		grouped = new Map();
+		for (const summary of Object.values(taskSessions)) {
+			const owner = summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId;
+			const ownedSessions = grouped.get(owner) ?? [];
+			ownedSessions.push(summary);
+			grouped.set(owner, ownedSessions);
+		}
+		conversationSessionsGroupedByOwningTask.set(taskSessions, grouped);
+	}
+	return grouped.get(taskId) ?? [];
+}
+
 /**
  * 「一张任务卡在某个 stage 里有哪些动作可用」的**唯一判定点**。
  *
@@ -82,7 +105,11 @@ export function buildTaskCardBusinessProps({
 			taskConversationSessionActivityObservations ??
 			collectStableTaskConversationSessionActivityPresentationObservations(
 				card,
-				taskSessions ? Object.values(taskSessions) : sessionSummary ? [sessionSummary] : [],
+				taskSessions
+					? getConversationSessionsOwnedByTask(taskSessions, card.id)
+					: sessionSummary
+						? [sessionSummary]
+						: [],
 			),
 		selected,
 		// backlog 与 in_progress 两列可启动；「in_progress 且已有活会话时不显示启动按钮」由卡体自己再判一层。

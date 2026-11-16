@@ -1,10 +1,14 @@
 import { spawn } from "node:child_process";
-import { copyFile, cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import {
+	cancelOwnedCommandProcesses,
+	inspectOwnedCommandSupervisor,
+} from "../../src/task-command-execution/task-command-execution-supervisor";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { createIsolatedTestOwnedTmuxServer } from "../utilities/isolated-test-owned-tmux-server";
 import {
@@ -25,6 +29,8 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 		});
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "source" });
 		const executionDirectory = join(fixture.fixtureRootDirectoryPath, "persistent-redeployment-artifacts");
+		let cleanupSupervisorReference: { workspaceId: string; executionId: string; launchNonce: string } | null = null;
+		let cleanupSupervisorArtifactDirectory: string | null = null;
 		await mkdir(executionDirectory);
 		const socketDirectory = await mkdtemp("/tmp/kanban-redeployment-test-sockets-");
 		const binaryDirectory = join(fixture.fixtureRootDirectoryPath, "bin");
@@ -37,6 +43,31 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 		await build({
 			entryPoints: [join(repositoryRoot, "src/deployment/local-deployment-execution-command-line.ts")],
 			outfile: executable,
+			bundle: true,
+			platform: "node",
+			format: "esm",
+			target: "node22",
+			external: ["better-sqlite3", "node-pty", "@napi-rs/keyring", "sharp"],
+			banner: {
+				js: 'import { createRequire as bundledRequire } from "node:module"; const require = bundledRequire(import.meta.url);',
+			},
+			logLevel: "silent",
+		});
+		const deploymentCli = join(repository.repositoryPath, "deployment-cli-for-fixture.mjs");
+		await build({
+			stdin: {
+				contents: `import { Command } from 'commander';
+import { registerDeploymentCommand } from './src/commands/deployment';
+import { loadWorkspaceContext } from './src/state/workspace-state';
+if (process.argv[2] === 'register-isolated-project') {
+process.stdout.write(JSON.stringify(await loadWorkspaceContext(process.argv[3])));
+} else {
+const program = new Command(); registerDeploymentCommand(program); await program.parseAsync(process.argv);
+}`,
+				resolveDir: repositoryRoot,
+				loader: "ts",
+			},
+			outfile: deploymentCli,
 			bundle: true,
 			platform: "node",
 			format: "esm",
@@ -111,7 +142,7 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 		);
 		await writeFile(
 			join(repository.repositoryPath, "fixture-build.mjs"),
-			`import {mkdir,copyFile,writeFile} from 'node:fs/promises'; const destination=process.env.KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY; if(!destination)throw new Error('缺少隔离构建输出'); await mkdir(destination,{recursive:true}); await copyFile('fixture-cli.mjs',destination+'/cli.js'); await copyFile('executor-for-fixture.mjs',destination+'/local-deployment-execution.js'); await mkdir(destination+'/web-ui',{recursive:true}); await writeFile(destination+'/web-ui/index.html','<html>隔离候选</html>');`,
+			`import {mkdir,copyFile,writeFile} from 'node:fs/promises'; const destination=process.env.KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY; if(!destination)throw new Error('缺少隔离构建输出'); await mkdir(destination,{recursive:true}); await copyFile('fixture-cli.mjs',destination+'/cli.js'); await copyFile('deployment-cli-for-fixture.mjs',destination+'/deployment-cli-for-fixture.mjs'); await copyFile('executor-for-fixture.mjs',destination+'/local-deployment-execution.js'); await mkdir(destination+'/web-ui',{recursive:true}); await writeFile(destination+'/web-ui/index.html','<html>隔离候选</html>');`,
 		);
 		await writeFile(
 			join(repository.repositoryPath, "scripts/verify-notification-archive-native-runtime.mjs"),
@@ -124,13 +155,13 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 		await writeFile(
 			join(repository.repositoryPath, "fixture-cli.mjs"),
 			`#!/usr/bin/env node
-import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,writeFileSync,mkdirSync,appendFileSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os';
+import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,appendFileSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os';
 const runtimeHome=join(homedir(),'.cline/kanban'); const args=process.argv.slice(2);
 if(args[0]==='serve') { const loaded=createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'); const start=execFileSync('ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8',env:{...process.env,LC_ALL:'C'}}).trim();
 createServer((request,response)=>{response.setHeader('content-type','application/json'); const procedure=request.url.split('?')[0].split('/').pop(); let data;
 if(procedure==='runtime.getAgentSessionPtyHostDiagnostics') data={runtimeIdentity:{runtimeHomeDirectoryPath:runtimeHome,runtimePort:Number(process.env.KANBAN_RUNTIME_PORT)},runtimeProcessId:process.pid,runtimeProcessStartTimeText:start,runtimeLoadedEntrypointSha256:loaded};
 else if(procedure==='notificationIntelligence.listArchive') data={entries:[],totalCount:0,nextBeforeSequence:null}; else if(procedure==='runtime.getConfig')data={detectedCommands:['node']}; else {response.setHeader('content-type','text/html');response.end('<html>隔离服务</html>');return;}response.end(JSON.stringify({result:{data}}));}).listen(Number(process.env.KANBAN_RUNTIME_PORT),'127.0.0.1');
-} else if(args[0]==='deployment'&&args[1]==='record') {const directory=args[args.indexOf('--execution-directory')+1];const manifest=JSON.parse(readFileSync(join(directory,'local-deployment-execution.json'))).manifest;const marker={deploymentId:manifest.executionId,deployedSourceCommit:manifest.candidateSourceCommit,deployedAtIso:new Date().toISOString()};mkdirSync(runtimeHome,{recursive:true});writeFileSync(join(runtimeHome,'last-deployed-source-commit.json'),JSON.stringify(marker));writeFileSync(join(runtimeHome,'post-deploy-verification-state.json'),JSON.stringify({deploymentGroups:[{...marker,workspaceId:manifest.workspaceId,previousDeployedSourceCommit:manifest.previousDeployedSourceCommit,foldedAtIso:null}]}));appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(JSON.stringify({ok:true,...marker}));}
+} else if(args[0]==='deployment'&&args[1]==='record') {const directory=args[args.indexOf('--execution-directory')+1];const receipt=execFileSync(process.execPath,[join(import.meta.dirname,'deployment-cli-for-fixture.mjs'),...args],{encoding:'utf8',env:process.env});appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(receipt);}
 `,
 		);
 		const commit = repository.commitAllRepositoryFilesAtDate({
@@ -179,9 +210,9 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 		await mkdir(defaultTmuxSocketDirectory, { mode: 0o700 });
 		// 生产入口的默认 socket 只指向 fixture 已核验归属的私有 server。
 		await symlink(isolatedTestOwnedTmuxServer.socketPath, join(defaultTmuxSocketDirectory, "default"));
-		async function invoke(command: string, additionalArguments: string[] = []) {
+		async function invokePackagedCommand(entrypoint: string, commandArguments: string[]) {
 			const child = children.register(
-				spawn(node, [executable, command, "--execution-directory", executionDirectory, ...additionalArguments], {
+				spawn(node, [entrypoint, ...commandArguments], {
 					cwd: repository.repositoryPath,
 					env: environment,
 					stdio: ["ignore", "pipe", "pipe"],
@@ -202,14 +233,28 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			});
 			return { code: child.exitCode, stdout, stderr };
 		}
+		async function invoke(command: string, additionalArguments: string[] = []) {
+			return invokePackagedCommand(executable, [
+				command,
+				"--execution-directory",
+				executionDirectory,
+				...additionalArguments,
+			]);
+		}
 		try {
+			const registered = await invokePackagedCommand(deploymentCli, [
+				"register-isolated-project",
+				repository.repositoryPath,
+			]);
+			expect(registered.code, registered.stdout + registered.stderr).toBe(0);
+			const workspaceId = (JSON.parse(registered.stdout) as { workspaceId: string }).workspaceId;
 			const requestFile = join(executionDirectory, "request.json");
 			await writeFile(
 				requestFile,
 				JSON.stringify({
 					schemaVersion: 1,
 					executionId: "032609d8-7508-4bdc-b202-1d7bd7da8a14",
-					workspaceId: "isolated",
+					workspaceId,
 					taskId: "external-caller",
 					originatingTaskWorktreePath: repository.repositoryPath,
 					sourceCheckoutPath: repository.repositoryPath,
@@ -250,6 +295,19 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			const reference = JSON.parse(
 				await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
 			);
+			cleanupSupervisorReference = {
+				workspaceId,
+				executionId: reference.executionId,
+				launchNonce: reference.launchNonce,
+			};
+			cleanupSupervisorArtifactDirectory = join(
+				runtimeHome,
+				`workspaces/${workspaceId}/task-command-executions`,
+				reference.executionId,
+				"post-process-exit-cleanup",
+				reference.launchNonce,
+				"dispatch-1",
+			);
 			await vi.waitFor(
 				async () =>
 					expect(
@@ -257,7 +315,7 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 							await readFile(
 								join(
 									runtimeHome,
-									"workspaces/isolated/task-command-executions",
+									`workspaces/${workspaceId}/task-command-executions`,
 									reference.executionId,
 									`supervisor-progress-${reference.launchNonce}.json`,
 								),
@@ -270,6 +328,48 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			const repeated = await invoke("start-redeployment");
 			expect(repeated.code, repeated.stdout + repeated.stderr).toBe(0);
 			expect(await readFile(join(executionDirectory, "registration-invocations.txt"), "utf8")).toBe("once");
+			const awaitedCleanupSupervisorReference = cleanupSupervisorReference;
+			const awaitedCleanupSupervisorArtifactDirectory = cleanupSupervisorArtifactDirectory;
+			await vi.waitFor(
+				async () =>
+					expect(
+						await inspectOwnedCommandSupervisor(awaitedCleanupSupervisorReference, {
+							artifactDirectory: awaitedCleanupSupervisorArtifactDirectory,
+						}),
+					).toBe("exited"),
+				{ timeout: 15_000 },
+			);
+			const receiptPath = join(executionDirectory, "deployment-record-receipt.json");
+			const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+			expect(receipt.workspaceId).toBe(workspaceId);
+			expect(receipt.workspacePath).toBe(repository.repositoryPath);
+			expect(receipt.sourceCheckoutPath).toBe(join(executionDirectory, "candidate-source-checkout"));
+			const markerPath = join(runtimeHome, "last-deployed-source-commit.json");
+			const marker = await readFile(markerPath, "utf8");
+			const verificationStatePath = join(runtimeHome, "post-deploy-verification-state.json");
+			const verificationState = await readFile(verificationStatePath, "utf8");
+			const recovered = await invoke("recover-deployment-record");
+			expect(recovered.code, recovered.stdout + recovered.stderr).toBe(0);
+			expect(JSON.parse(await readFile(receiptPath, "utf8"))).toEqual(receipt);
+			// 模拟正式建组已接受、回执原件尚未落盘的中断；恢复不能重算历史统计或另建组。
+			await rm(receiptPath);
+			const recoveredWithoutReceipt = await invoke("recover-deployment-record");
+			expect(recoveredWithoutReceipt.code, recoveredWithoutReceipt.stdout + recoveredWithoutReceipt.stderr).toBe(0);
+			expect(JSON.parse(await readFile(receiptPath, "utf8"))).toMatchObject({
+				deploymentId: receipt.deploymentId,
+				workspaceId,
+				deployedSourceCommit: commit,
+				registrationReceiptRecoveredFromPersistedGroup: true,
+				originalRegistrationStatistics: null,
+			});
+			expect(await readFile(markerPath, "utf8")).toBe(marker);
+			expect(await readFile(verificationStatePath, "utf8")).toBe(verificationState);
+			expect(JSON.parse(verificationState).deploymentGroups).toHaveLength(1);
+			const standardCommandOriginals = await readdir(join(executionDirectory, "standard-command-originals"));
+			expect(standardCommandOriginals.filter((name) => name.startsWith("promote-bound-candidate-"))).toHaveLength(1);
+			expect(
+				standardCommandOriginals.filter((name) => name.startsWith("start-bound-service-in-new-tmux-window-")),
+			).toHaveLength(1);
 			expect(
 				JSON.parse(await readFile(join(executionDirectory, "owned-command-business-result.json"), "utf8"))
 					.disposition,
@@ -295,6 +395,26 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 		} finally {
 			isolatedTestOwnedTmuxServer.cleanup();
 			await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+			if (cleanupSupervisorReference && cleanupSupervisorArtifactDirectory) {
+				const reference = cleanupSupervisorReference;
+				const artifactDirectory = cleanupSupervisorArtifactDirectory;
+				await cancelOwnedCommandProcesses(
+					{
+						...reference,
+						previousLaunchNonces: [],
+						revocationFile: join(artifactDirectory, "cleanup-revocation.json"),
+						specification: { workingDirectory: executionDirectory, cancelCommand: undefined },
+					},
+					{ artifactDirectory, skipProducerCancelCommand: true },
+				);
+				await vi.waitFor(
+					async () =>
+						expect(["exited", "not_started"]).toContain(
+							await inspectOwnedCommandSupervisor(reference, { artifactDirectory }),
+						),
+					{ timeout: 15_000 },
+				);
+			}
 			await rm(executionDirectory, { recursive: true, force: true });
 			fixture.cleanup();
 			await rm(socketDirectory, { recursive: true, force: true });

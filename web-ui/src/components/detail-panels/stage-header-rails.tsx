@@ -8,6 +8,7 @@ import type { FocusViewGroupHeaderPresentation } from "@/components/detail-panel
 import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { ColumnIndicator } from "@/components/ui/column-indicator";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import type { StageHeaderRailEdge } from "@/hooks/use-focus-view-stage-section-expansion";
 import type { SelectedCardPinState } from "@/hooks/use-selected-card-pin-state";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
@@ -88,7 +89,8 @@ function StageHeaderRailEntry({
 
 	return (
 		<div
-			className="min-w-0 bg-surface-1 rounded-lg border border-border"
+			className="kb-task-group min-w-0"
+			style={getTaskGroupSemanticColorStyle(columnId)}
 			data-focus-view-group-header-rail-entry={columnId}
 		>
 			<FocusViewGroupHeader
@@ -112,7 +114,7 @@ function StageHeaderRailEntry({
 			{withCard ? (
 				<div
 					data-testid="stage-header-rail-focused-card"
-					className="flex max-h-[var(--kb-focused-card-rail-maximum-height)] flex-col overflow-y-auto overscroll-contain px-2 pb-2"
+					className="flex max-h-[var(--kb-focused-card-rail-maximum-height)] flex-col overflow-y-auto overscroll-contain px-0.5 pb-2"
 					onClick={onScrollToFocusedCard}
 				>
 					<TaskCardBody

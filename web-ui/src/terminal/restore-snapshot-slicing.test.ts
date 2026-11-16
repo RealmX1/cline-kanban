@@ -1,11 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
-	RESTORE_SNAPSHOT_WRITE_SLICE_CHARS,
+	RESTORE_SNAPSHOT_WRITE_SLICE_MAXIMUM_UTF8_BYTES,
 	sliceRestoreSnapshotForIncrementalWrite,
 } from "@/terminal/restore-snapshot-slicing";
 
 describe("sliceRestoreSnapshotForIncrementalWrite", () => {
+	it.each([0, 3, Number.NaN])("拒绝不能容纳完整 UTF-8 字符的上限 %s", (maximumBytes) => {
+		expect(() => sliceRestoreSnapshotForIncrementalWrite("😀", maximumBytes)).toThrow(RangeError);
+	});
 	it("空快照 → 空数组(不产生空 write)", () => {
 		expect(sliceRestoreSnapshotForIncrementalWrite("")).toEqual([]);
 	});
@@ -28,15 +31,21 @@ describe("sliceRestoreSnapshotForIncrementalWrite", () => {
 	});
 
 	it("默认上限:数 MB 级快照被切成多片且总量不变", () => {
-		const snapshot = "x".repeat(RESTORE_SNAPSHOT_WRITE_SLICE_CHARS * 2 + 123);
+		const snapshot = "x".repeat(RESTORE_SNAPSHOT_WRITE_SLICE_MAXIMUM_UTF8_BYTES * 2 + 123);
 		const slices = sliceRestoreSnapshotForIncrementalWrite(snapshot);
 		expect(slices.length).toBe(3);
 		expect(slices.join("").length).toBe(snapshot.length);
 	});
+	it("中文、emoji 和 ANSI 的每片 UTF-8 字节不超过 64KiB", () => {
+		const snapshot = "中文😀\x1b[31m彩色\x1b[0m".repeat(20_000);
+		const slices = sliceRestoreSnapshotForIncrementalWrite(snapshot);
+		expect(slices.join("")).toBe(snapshot);
+		for (const slice of slices) expect(new TextEncoder().encode(slice).byteLength).toBeLessThanOrEqual(64 * 1024);
+	});
 
 	it("切点落在代理对中间也不丢字符(xterm 跨 write 保持 interim 状态,拼接等于原文即安全)", () => {
 		const emojiRun = "🎉".repeat(10); // 每个 emoji 2 个 UTF-16 code unit,奇数切点必然劈开代理对。
-		const slices = sliceRestoreSnapshotForIncrementalWrite(emojiRun, 3);
+		const slices = sliceRestoreSnapshotForIncrementalWrite(emojiRun, 4);
 		expect(slices.join("")).toBe(emojiRun);
 	});
 });

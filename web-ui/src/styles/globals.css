@@ -334,6 +334,25 @@ body,
 
 /* -- Shared layout -- */
 
+@layer components {
+	.kb-task-group {
+		border: 1px solid color-mix(in srgb, var(--kb-task-group-color) 60%, var(--color-border));
+		border-radius: var(--radius-sm);
+		background: var(--color-surface-1);
+	}
+
+	.kb-task-group-header {
+		border-bottom: 1px solid color-mix(in srgb, var(--kb-task-group-color) 30%, var(--color-border));
+		border-radius: calc(var(--radius-sm) - 1px) calc(var(--radius-sm) - 1px) 0 0;
+		background: color-mix(in srgb, var(--kb-task-group-color) 10%, var(--color-surface-1));
+	}
+}
+
+/* 着色标题里的计数包含继承色的折叠项，统一提高对比度而不改变图标语义色。 */
+.kb-task-group-header :is(span.text-text-secondary, span.text-text-tertiary, span.text-xs, span.tabular-nums) {
+	color: color-mix(in srgb, var(--color-text-primary) 80%, var(--color-surface-1));
+}
+
 .kb-board {
 	display: flex;
 	flex: 1 1 0;
@@ -341,8 +360,8 @@ body,
 	/* 用户把列宽拖到总和超过视口时横向滚动；未自定义列宽时各列 flex 填充，不会溢出。 */
 	overflow-x: auto;
 	overflow-y: hidden;
-	gap: 8px;
-	padding: 8px;
+	gap: 4px;
+	padding: 4px 2px 8px;
 }
 
 .kb-home-layout {
@@ -359,7 +378,7 @@ body,
 	min-height: 0;
 	overflow-y: auto;
 	scrollbar-gutter: stable;
-	padding: 0 6px 6px;
+	padding: 0 2px 6px;
 }
 
 
@@ -439,7 +458,7 @@ body,
  * 脱离文档流的 overlay，不挤动布局；条目按共享行模型放进 Grid（不手算像素偏移）。焦点 stage 的条目在
  * 焦点卡钉在同侧时额外挂「stage 卡头 + 完整焦点卡克隆」。
  * - 不透明 surface-0 底：遮住被钉卡头覆盖的滚动内容，避免条目间隙透出内容（与列表 section 间的 surface-0 一致）。
- * - `left:0` + 内联 `right`（让出滚动条宽度）；横向 padding 复刻 scrollport 的 p-2(8px) 使条目与列表卡左右对齐。
+ * - `left:0` + 内联 `right`（让出滚动条宽度）；横向 padding 与 scrollport 同为 2px，使条目与列表卡左右对齐。
  * - `pointer-events:none` 让 rail 底与条目间隙透传滚轮/点击到下层列表；条目自身恢复 auto 以可点击。
  * - z-index:5 高于卡壳（1/2）与随内容滚动的 section 卡头。
  */
@@ -447,7 +466,7 @@ body,
 	position: absolute;
 	left: 0;
 	z-index: 5;
-	padding: 0 8px;
+	padding: 0 2px;
 	display: grid;
 	gap: 4px;
 	pointer-events: none;

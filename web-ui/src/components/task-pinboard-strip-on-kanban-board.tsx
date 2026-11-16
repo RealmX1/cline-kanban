@@ -5,6 +5,7 @@ import { TaskCardBody } from "@/components/task-card-body";
 import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/components/task-card-business-props";
 import { BOARD_TASK_GROUP_HEADER_HEIGHT_PX } from "@/components/task-group-header-geometry";
 import { cn } from "@/components/ui/cn";
+import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import { LocalStorageKey } from "@/storage/local-storage-store";
@@ -56,14 +57,15 @@ export function TaskPinboardStripOnKanbanBoard({
 	return (
 		<div
 			data-task-pinboard-container="kanban-board-strip"
-			className="mx-2 mt-2 shrink-0 rounded-lg border border-border bg-surface-1"
+			className="kb-task-group mx-0.5 mt-2 shrink-0"
+			style={getTaskGroupSemanticColorStyle("pinned")}
 		>
 			<button
 				type="button"
 				onClick={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
 				aria-expanded={!collapsed}
 				style={{ height: compactRowWithExpandableDetails ? 44 : BOARD_TASK_GROUP_HEADER_HEIGHT_PX }}
-				className="flex w-full cursor-pointer items-center gap-2 border-none bg-transparent px-3 text-left text-text-primary hover:bg-surface-0"
+				className="kb-task-group-header flex w-full cursor-pointer items-center gap-2 px-3 text-left text-text-primary hover:bg-surface-0 focus-visible:outline-2 focus-visible:outline-accent"
 			>
 				{collapsed ? (
 					<ChevronRight size={16} className="shrink-0 text-text-secondary" />
@@ -76,7 +78,10 @@ export function TaskPinboardStripOnKanbanBoard({
 			</button>
 			{collapsed ? null : (
 				<div
-					className={cn("flex gap-2 px-3 pb-3", compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto")}
+					className={cn(
+						"flex gap-2 px-0.5 pb-3",
+						compactRowWithExpandableDetails ? "flex-col" : "overflow-x-auto",
+					)}
 				>
 					{pinnedTasks.map(({ card, columnId, columnTitle }) => (
 						<div

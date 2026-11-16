@@ -474,6 +474,9 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 		loadGlobalRuntimeConfig,
 		loadRuntimeConfig,
 		hasGitRepository,
+		onProjectAvailabilityUpdated: () => {
+			void runtimeStateHub?.broadcastRuntimeProjectsUpdated(null);
+		},
 		onTerminalManagerReady: (workspaceId, manager) => {
 			runtimeStateHub?.trackTerminalManager(workspaceId, manager);
 			const processIdentityBySessionId = new Map<string, string>();

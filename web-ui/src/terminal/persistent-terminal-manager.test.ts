@@ -381,6 +381,137 @@ async function completeTerminalRestoreHandshake(): Promise<void> {
 }
 
 describe("persistent-terminal-manager", () => {
+	it("分片恢复中隐藏页面会取消恢复等待，后台不反复重连，重显后重新握手", async () => {
+		vi.useFakeTimers();
+		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		const control = findNewestTerminalSocket("control");
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore_begin",
+				streamGenerationId: "00000000-0000-4000-8000-000000000001",
+				outputVersion: 0,
+				restoreRequestSequenceNumber: 1,
+				outputDemandProtocolVersion: 1,
+				snapshotByteLength: 100,
+				cols: 80,
+				rows: 24,
+			}),
+		);
+		setDocumentHidden(true);
+		expect(parseControlMessages(control)).toContainEqual({ type: "declare_output_demand", demand: "paused_output" });
+		const socketCount = webSocketInstances.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(webSocketInstances).toHaveLength(socketCount);
+		setDocumentHidden(false);
+		expect(parseControlMessages(control).at(-1)).toMatchObject({
+			type: "declare_output_demand",
+			demand: "continuous_output",
+		});
+		await completeTerminalRestoreHandshake();
+	});
+	it("有效分片进展续期，但恢复总时限不能被持续小片绕过", async () => {
+		vi.useFakeTimers();
+		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const io = findNewestTerminalSocket("io");
+		const control = findNewestTerminalSocket("control");
+		const identity = {
+			streamGenerationId: "00000000-0000-4000-8000-000000000001",
+			outputVersion: 0,
+			restoreRequestSequenceNumber: 1,
+		};
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore_begin",
+				...identity,
+				outputDemandProtocolVersion: 1,
+				snapshotByteLength: 100,
+				cols: 80,
+				rows: 24,
+			}),
+		);
+		for (let index = 0; index < 14; index += 1) {
+			await vi.advanceTimersByTimeAsync(4000);
+			dispatchSocketMessage(
+				control,
+				JSON.stringify({ type: "restore_chunk", ...identity, chunkSequenceNumber: index, snapshotPart: "a" }),
+			);
+		}
+		expect(findNewestTerminalSocket("io")).toBe(io);
+		await vi.advanceTimersByTimeAsync(4250);
+		expect(findNewestTerminalSocket("io")).not.toBe(io);
+		expect(parseControlMessages(control).some((message) => message.type === "restore_complete")).toBe(false);
+	});
+	it("分片快照按身份和连续序号接收，完整解析前不确认，缺片三次后等待恢复信号", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		const identity = {
+			streamGenerationId: "00000000-0000-4000-8000-000000000001",
+			outputVersion: 7,
+			restoreRequestSequenceNumber: 1,
+		};
+		const send = (message: object) =>
+			dispatchSocketMessage(findNewestTerminalSocket("control"), JSON.stringify({ ...identity, ...message }));
+		const control = findNewestTerminalSocket("control");
+		send({ type: "restore_begin", snapshotByteLength: 6, cols: 80, rows: 24, outputDemandProtocolVersion: 1 });
+		send({ type: "restore_chunk", chunkSequenceNumber: 0, snapshotPart: "中文" });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(parseControlMessages(control).some((message) => message.type === "restore_complete")).toBe(false);
+		send({ type: "restore_end", chunkCount: 1 });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(parseControlMessages(control)).toContainEqual({ type: "restore_complete", ...identity });
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			send({
+				type: "restore_begin",
+				snapshotByteLength: 6,
+				cols: 80,
+				rows: 24,
+				outputDemandProtocolVersion: 1,
+				restoreRequestSequenceNumber: attempt + 2,
+			});
+			send({
+				type: "restore_chunk",
+				chunkSequenceNumber: 1,
+				snapshotPart: "中文",
+				restoreRequestSequenceNumber: attempt + 2,
+			});
+			await vi.advanceTimersByTimeAsync(1000);
+		}
+		const socketCount = webSocketInstances.length;
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(webSocketInstances).toHaveLength(socketCount);
+		window.dispatchEvent(new Event("online"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(webSocketInstances.length).toBeGreaterThan(socketCount);
+		terminal.dispose();
+	});
+	it("解析后的 ACK 累计 32KiB 或等待 8ms，连接淘汰时取消旧批次", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
+		await completeTerminalRestoreHandshake();
+		const io = findNewestTerminalSocket("io");
+		const control = findNewestTerminalSocket("control");
+		dispatchSocketMessage(io, new Uint8Array(16 * 1024).buffer);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toEqual([]);
+		dispatchSocketMessage(io, new Uint8Array(16 * 1024).buffer);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toEqual([
+			{ type: "output_ack", bytes: 32 * 1024 },
+		]);
+		dispatchSocketMessage(io, new Uint8Array(7).buffer);
+		await vi.advanceTimersByTimeAsync(7);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(parseControlMessages(control).at(-1)).toEqual({ type: "output_ack", bytes: 7 });
+		dispatchSocketMessage(io, new Uint8Array(3).buffer);
+		await vi.advanceTimersByTimeAsync(0);
+		terminal.dispose();
+		await vi.advanceTimersByTimeAsync(8);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toHaveLength(2);
+	});
 	beforeEach(() => {
 		fitAddonProposeDimensionsMock.mockReset();
 		fitAddonProposeDimensionsMock.mockReturnValue({ cols: 80, rows: 30 });
@@ -700,7 +831,7 @@ describe("persistent-terminal-manager", () => {
 
 		const ioSockets = webSocketInstances.filter((socket) => socket.url.includes("/api/terminal/io"));
 		expect(ioSockets).toHaveLength(2);
-		expect(lastErrors.at(-1)).toBe("Terminal stream closed. Reconnecting...");
+		expect(lastErrors.at(-1)).toBe("终端恢复连接中断，正在重新握手。");
 	});
 
 	it.each(["io", "control"] as const)("仅 %s 通道断线也成对更换 viewer，快照落屏前不报告就绪", async (role) => {
@@ -825,7 +956,7 @@ describe("persistent-terminal-manager", () => {
 		const supersededIoSocket = findNewestTerminalSocket("io");
 		findNewestTerminalSocket("control").close();
 		supersededIoSocket.onopen?.(new Event("open"));
-		expect(onLastError.mock.lastCall?.[0]).toContain("Reconnecting");
+		expect(onLastError.mock.lastCall?.[0]).toContain("重新握手");
 		expect(onConnectionReady).not.toHaveBeenCalled();
 		const previousSocketCount = webSocketInstances.length;
 		terminal.mount(createContainer(), appearance, { isVisible: true });
@@ -982,6 +1113,107 @@ describe("persistent-terminal-manager", () => {
 		).toHaveLength(2);
 	});
 
+	it("空闲隐藏再重显后，免快照连续输出改用服务端公布的恢复序号确认", async () => {
+		vi.useFakeTimers();
+		const terminal = ensurePersistentTerminal({ ...appearance, taskId: "task-demand", workspaceId: "workspace-1" });
+		terminal.mount(createContainer(), appearance, { isVisible: true });
+		const control = findNewestTerminalSocket("control");
+		const io = findNewestTerminalSocket("io");
+		const streamGenerationId = "00000000-0000-4000-8000-000000000001";
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore",
+				snapshot: "稳定画面",
+				cols: 80,
+				rows: 24,
+				outputDemandProtocolVersion: 1,
+				outputVersion: 4,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 1,
+			}),
+		);
+		await vi.advanceTimersByTimeAsync(20);
+		setDocumentHidden(true);
+		expect(parseControlMessages(control)).toContainEqual({ type: "declare_output_demand", demand: "paused_output" });
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "output_demand_state",
+				demand: "paused_output",
+				outputVersion: 4,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 2,
+			}),
+		);
+		setDocumentHidden(false);
+		expect(parseControlMessages(control).at(-1)).toMatchObject({
+			type: "declare_output_demand",
+			demand: "continuous_output",
+			knownOutputVersion: 4,
+			knownStreamGenerationId: streamGenerationId,
+		});
+		expect(parseControlMessages(control).some((message) => message.type === "request_restore")).toBe(false);
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "output_demand_state",
+				demand: "continuous_output",
+				outputVersion: 4,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 2,
+			}),
+		);
+		dispatchSocketMessage(io, "后续输出");
+		await vi.advanceTimersByTimeAsync(8);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toEqual([
+			{
+				type: "output_ack",
+				bytes: new TextEncoder().encode("后续输出").byteLength,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 2,
+			},
+		]);
+	});
+
+	it("暂停期间的旧批次和迟到帧不会改用新恢复序号确认", async () => {
+		vi.useFakeTimers();
+		ensurePersistentTerminal({ ...appearance, taskId: "task-demand-ack", workspaceId: "workspace-1" });
+		const control = findNewestTerminalSocket("control");
+		const io = findNewestTerminalSocket("io");
+		const streamGenerationId = "00000000-0000-4000-8000-000000000001";
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "restore",
+				snapshot: "稳定画面",
+				cols: 80,
+				rows: 24,
+				outputDemandProtocolVersion: 1,
+				outputVersion: 4,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 1,
+			}),
+		);
+		await vi.advanceTimersByTimeAsync(20);
+		dispatchSocketMessage(io, "暂停前输出");
+		await vi.advanceTimersByTimeAsync(0);
+		setDocumentHidden(true);
+		dispatchSocketMessage(
+			control,
+			JSON.stringify({
+				type: "output_demand_state",
+				demand: "paused_output",
+				outputVersion: 4,
+				streamGenerationId,
+				restoreRequestSequenceNumber: 2,
+			}),
+		);
+		dispatchSocketMessage(io, "暂停期间迟到帧");
+		await vi.advanceTimersByTimeAsync(8);
+		expect(parseControlMessages(control).filter((message) => message.type === "output_ack")).toEqual([]);
+	});
+
 	it("切换任务实验保留五秒连续接收，快速切回取消暂停", async () => {
 		vi.useFakeTimers();
 		window.history.replaceState(null, "", "?terminalOutputDemandExperiment=inactive_terminal");
@@ -1013,7 +1245,7 @@ describe("persistent-terminal-manager", () => {
 		expect(parseControlMessages(control)).toContainEqual({ type: "declare_output_demand", demand: "paused_output" });
 	});
 
-	it("suspends rendering while hidden and snaps to a fresh snapshot on return", () => {
+	it("suspends rendering while hidden and snaps to a fresh snapshot on return", async () => {
 		const terminal = ensurePersistentTerminal({
 			...appearance,
 			taskId: "task-a",
@@ -1041,8 +1273,9 @@ describe("persistent-terminal-manager", () => {
 		// Nothing was written to the terminal while hidden...
 		expect(writes.length).toBe(writesAfterRestore);
 		// ...but the bytes were acked so the server keeps the agent's PTY running.
-		const acks = parseControlMessages(controlSocket).filter((message) => message.type === "output_ack");
-		expect(acks.length).toBeGreaterThan(0);
+		await vi.waitFor(() =>
+			expect(parseControlMessages(controlSocket).some((message) => message.type === "output_ack")).toBe(true),
+		);
 		// No snapshot was requested yet — only on return.
 		expect(parseControlMessages(controlSocket).some((message) => message.type === "request_restore")).toBe(false);
 
@@ -1266,6 +1499,7 @@ describe("persistent-terminal-manager", () => {
 
 		it("旧写队列解冻后不补写陈旧字节，旧 IO 的 ACK 不能记到替换后的 IO 上", async () => {
 			const terminal = mountedTerminal("task-resync-discarded-write-queue-generation");
+			await completeTerminalRestoreHandshake();
 			const ioSocket = webSocketInstances.filter((entry) => entry.url.includes("/api/terminal/io")).at(-1);
 			if (!ioSocket) {
 				throw new Error("terminal io socket not found");
@@ -1310,10 +1544,11 @@ describe("persistent-terminal-manager", () => {
 			expect(acknowledgedOutputBytes).toBe(0);
 			const currentIo = findNewestTerminalSocket("io");
 			dispatchSocketMessage(currentIo, "新 IO 输出");
-			await new Promise((resolveTick) => setTimeout(resolveTick, 0));
-			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toEqual([
-				{ type: "output_ack", bytes: new TextEncoder().encode("新 IO 输出").byteLength },
-			]);
+			await vi.waitFor(() =>
+				expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toEqual([
+					{ type: "output_ack", bytes: new TextEncoder().encode("新 IO 输出").byteLength },
+				]),
+			);
 		});
 
 		it.each([false, true])(
@@ -1392,8 +1627,12 @@ describe("persistent-terminal-manager", () => {
 		it("同一连接连续收到两份快照，只应用最新一份并完成一次握手", async () => {
 			vi.useFakeTimers();
 			const terminal = mountedTerminal("task-consecutive-snapshots");
+			await completeTerminalRestoreHandshake();
+			terminalResetMock.mockClear();
+			findNewestTerminalSocket("control").sentMessages.length = 0;
 			const onConnectionReady = vi.fn();
 			terminal.subscribe({ onConnectionReady });
+			onConnectionReady.mockClear();
 			const writtenChunks: Array<string | Uint8Array> = [];
 			terminalWriteSideEffect.current = (data) => writtenChunks.push(data);
 			terminalWriteCallbackControl.suspended = true;
@@ -2151,6 +2390,7 @@ describe("persistent-terminal-manager", () => {
 		});
 		const container = createContainer();
 		terminal.mount(container, appearance, { isVisible: true });
+		await completeTerminalRestoreHandshake();
 		terminalScrollToBottomMock.mockClear();
 		terminalBuffer.baseY = 20;
 		terminalBuffer.viewportY = 20;
@@ -2214,7 +2454,7 @@ describe("persistent-terminal-manager", () => {
 		expect(terminalScrollToBottomMock).not.toHaveBeenCalled();
 	});
 
-	it("连续输出在同一帧只尾随滚动一次，每段输出仍独立确认", async () => {
+	it("连续输出在同一帧只尾随滚动一次，聚合确认仍结清全部字节", async () => {
 		ensurePersistentTerminal({ ...appearance, taskId: "task-a", workspaceId: "workspace-1" });
 		await completeTerminalRestoreHandshake();
 		terminalScrollToBottomMock.mockClear();
@@ -2227,7 +2467,9 @@ describe("persistent-terminal-manager", () => {
 		const controlSocket = findNewestTerminalSocket("control");
 		for (const output of ["第一段", "第二段", "第三段"]) dispatchSocketMessage(ioSocket, output);
 		await vi.waitFor(() =>
-			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toHaveLength(3),
+			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toEqual([
+				{ type: "output_ack", bytes: 27 },
+			]),
 		);
 
 		expect(scheduledAnimationFrameCallbacks).toHaveLength(1);
@@ -2237,7 +2479,7 @@ describe("persistent-terminal-manager", () => {
 
 		dispatchSocketMessage(ioSocket, "下一帧");
 		await vi.waitFor(() =>
-			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toHaveLength(4),
+			expect(parseControlMessages(controlSocket).filter((message) => message.type === "output_ack")).toHaveLength(2),
 		);
 		expect(scheduledAnimationFrameCallbacks).toHaveLength(1);
 		scheduledAnimationFrameCallbacks.shift()?.(0);

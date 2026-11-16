@@ -8,6 +8,53 @@ const HARNESS_PAGE_HTML = `<!doctype html>
 <style>html,body { margin: 0; width: 100%; height: 100%; background: black; }</style>
 </head><body><script type="module" src="/tests/persistent-terminal-restore-browser-harness.ts"></script></body></html>`;
 
+test("分片恢复保留两万行历史、alternate screen 与鼠标模式，完整解析后才确认", async ({ page }) => {
+	const viewer = await openTerminalViewer(page);
+	const identity = {
+		streamGenerationId: "00000000-0000-4000-8000-000000000001",
+		outputVersion: 1,
+		restoreRequestSequenceNumber: 1,
+	};
+	const history = Array.from({ length: 20_000 }, (_, index) => `历史 ${index} 中文😀\r\n`).join("");
+	const snapshot = `${history}\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[H恢复后的全屏`;
+	const bytes = Buffer.from(snapshot);
+	const control = viewer.newestSocket("control");
+	control.socket.send(
+		JSON.stringify({
+			type: "restore_begin",
+			...identity,
+			outputDemandProtocolVersion: 1,
+			snapshotByteLength: bytes.length,
+			cols: 80,
+			rows: 24,
+		}),
+	);
+	let chunkCount = 0;
+	for (let offset = 0; offset < bytes.length; ) {
+		let end = Math.min(offset + 64 * 1024, bytes.length);
+		while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+		control.socket.send(
+			JSON.stringify({
+				type: "restore_chunk",
+				...identity,
+				chunkSequenceNumber: chunkCount++,
+				snapshotPart: bytes.subarray(offset, end).toString("utf8"),
+			}),
+		);
+		offset = end;
+	}
+	expect(countClientMessages(control, "restore_complete")).toBe(0);
+	control.socket.send(JSON.stringify({ type: "restore_end", ...identity, chunkCount }));
+	await expect.poll(() => countClientMessages(control, "restore_complete")).toBe(1);
+	const state = await readTerminalState(page);
+	expect(state.bufferType).toBe("alternate");
+	expect(state.mouseTrackingMode).toBe("vt200");
+	expect(state.refreshAttemptCount).toBe(0);
+	control.socket.send(JSON.stringify({ type: "restore", snapshot: `${history}历史恢复完成`, cols: 80, rows: 24 }));
+	await expect.poll(async () => (await readTerminalState(page)).connectionReadyCount).toBe(2);
+	expect((await readTerminalState(page)).baseY).toBeGreaterThanOrEqual(19_900);
+});
+
 interface TerminalSocketPeer {
 	role: string;
 	clientId: string | null;

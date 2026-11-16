@@ -25,7 +25,7 @@ async function expectRowsMatchRenderedGeometry(page: Page) {
 				const expectedHeight = header.dataset.presentation === "compact" ? 24 : 28;
 				if (header.dataset.presentation === "compact" && header.parentElement!.getBoundingClientRect().width < 96)
 					errors.push("紧凑项宽度小于 96px");
-				if (getComputedStyle(header).fontSize !== "12px") errors.push("标题字号不符");
+				if (getComputedStyle(header).fontSize !== "13px") errors.push("标题字号不符");
 				if (header.getBoundingClientRect().height !== expectedHeight) errors.push("标题高度不符");
 			}
 			for (const [index, row] of rows.entries()) {
@@ -135,7 +135,7 @@ for (const scope of ["current", "all"] as const) {
 		await expect(focusedCopy).toHaveCount(1);
 		const copyRow = focusedCopy.locator("xpath=ancestor::*[@data-focus-view-header-rail-row]");
 		expect(
-			Math.abs((await copyRow.boundingBox())!.width - (await scrollRoot.evaluate((root) => root.clientWidth)) + 16),
+			Math.abs((await copyRow.boundingBox())!.width - (await scrollRoot.evaluate((root) => root.clientWidth)) + 4),
 		).toBeLessThan(1);
 		const beforeCollapse = await scrollRoot.evaluate((root) => root.scrollTop);
 		const topRail = page.locator(`${railSelector}[data-edge="top"]`);

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, open, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readdir, readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as waitForRuntimeReadiness } from "node:timers/promises";
 import { getRuntimeFetch } from "../core/runtime-endpoint";
@@ -18,6 +18,7 @@ import {
 	hostedSessionRuntimeAdoptionAcceptanceReceiptDirectory,
 	hostedSessionRuntimeAdoptionAcceptanceReceiptSchema,
 } from "../terminal/hosted-session-runtime-adoption-acceptance-receipt";
+import { inspectFilesystemLockProtocolTransitionPreflight } from "./filesystem-lock-protocol-transition-preflight";
 import {
 	fingerprintLocalDeploymentDistribution,
 	verifyLocalDeploymentPublishedFiles,
@@ -30,9 +31,11 @@ import {
 	localDeploymentExecutionManifestSchema,
 } from "./local-deployment-execution-contract";
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
+import { readLocalDeploymentTargetStageRecoveryBudget } from "./local-deployment-target-stage-recovery-budget";
+import { registerLocalRedeploymentRebuildableArtifact } from "./local-redeployment-failed-attempt-artifact-cleanup";
+import { observeLocalRedeploymentBlockingFailureRecovery } from "./local-redeployment-failure-recovery-evidence";
 import {
 	clearLocalRedeploymentFilesystemEvidenceRequests,
-	observeLocalRedeploymentDiskAvailability,
 	observeLocalRedeploymentFilesystemEvidence,
 	readLocalRedeploymentMachineEvidenceRequests,
 	reuseLocalRedeploymentCheck,
@@ -349,7 +352,9 @@ export async function initializeStandardLocalRedeployment(directory: string): Pr
 	}
 	await preparePrivateCandidate(directory, frozen);
 	if (!baseline.success || baseline.data.state === "unknown")
-		throw new Error("实例起点身份仍未知，候选已保留，等待原生监听证据恢复");
+		throw Object.assign(new Error("实例起点身份仍未知，候选已保留，等待原生监听证据恢复"), {
+			verificationCheckKey: "native_listener_and_boot_identity",
+		});
 	const marker = (await readLocalRedeploymentJson(
 		join(frozen.request.runtimeIdentity.runtimeHomeDirectoryPath, "last-deployed-source-commit.json"),
 	)) as { deployedSourceCommit?: string } | null;
@@ -403,6 +408,7 @@ export async function initializeStandardLocalRedeployment(directory: string): Pr
 					}
 				: {}),
 			recoveryEvidenceFilePaths: [join(directory, "source-validation/source-validation-evidence-reuse-report.json")],
+			recoveryEvidenceObservationMode: "semantic_observation_only",
 			readOnlyRecoveryEvidenceObservationCommand: [
 				frozen.request.deploymentNodeBinaryPath,
 				frozenExecutor(directory),
@@ -429,7 +435,10 @@ async function verifyBoundFilesystemLockProtocolBeforePublication(
 	if (originalUsesKernelLocks === candidateUsesKernelLocks) return;
 	const inventoryPath = join(directory, "filesystem-lock-protocol-retiring-writer-inventory.json");
 	if (!existsSync(inventoryPath))
-		throw new Error("锁协议切换等待既有迁移 producer 的真实退休写入者清单；不凭 HTTP 健康捏造 admission closed");
+		throw Object.assign(
+			new Error("锁协议切换等待既有迁移 producer 的真实退休写入者清单；不凭 HTTP 健康捏造 admission closed"),
+			{ verificationCheckKey: "filesystem-lock-protocol-transition" },
+		);
 	await runLocalRedeploymentStandardCommand(
 		directory,
 		frozen,
@@ -454,7 +463,10 @@ async function verifyBoundFilesystemLockProtocolBeforePublication(
 	const evidence = (await readLocalRedeploymentJson(
 		join(directory, "filesystem-lock-protocol-preflight-readiness.json"),
 	)) as { status?: string } | null;
-	if (evidence?.status !== "ready_for_protocol_switch") throw new Error("锁协议切换仍待原生补证，禁止发布");
+	if (evidence?.status !== "ready_for_protocol_switch")
+		throw Object.assign(new Error("锁协议切换仍待原生补证，禁止发布"), {
+			verificationCheckKey: "filesystem-lock-protocol-transition",
+		});
 }
 
 async function verifyReadiness(
@@ -475,9 +487,16 @@ async function verifyReadiness(
 		before ? "before-runtime-restart-readiness" : "current-runtime-readiness",
 		arguments_,
 		candidateCheckout(directory),
-	);
+	).catch((error: unknown) => {
+		throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+			verificationCheckKey: "session-readiness",
+		});
+	});
 	const evidence = JSON.parse(output) as Record<string, unknown>;
-	if (evidence.ok !== true) throw new Error("会话连续性门禁未通过，等待自然结束或等价补证");
+	if (evidence.ok !== true)
+		throw Object.assign(new Error("会话连续性门禁未通过，等待自然结束或等价补证"), {
+			verificationCheckKey: "session-readiness",
+		});
 	if (
 		!before &&
 		evidence.runtimeLoadedEntrypointSha256 !==
@@ -686,6 +705,21 @@ export async function executeStandardLocalRedeploymentStage(
 			throw new Error("候选产物变化");
 	}
 	if (stage === "state_preservation") {
+		const attemptNumber = Number(process.env.KANBAN_LOCAL_DEPLOYMENT_STAGE_ATTEMPT_NUMBER ?? "1");
+		if (!Number.isSafeInteger(attemptNumber) || attemptNumber < 1) throw new Error("复制产物缺少合法尝试身份");
+		await registerLocalRedeploymentRebuildableArtifact(directory, {
+			kind: "runtime_state_backup_capture_collection",
+			stage,
+			attemptNumber,
+			path: join(directory, "runtime-state-backup-capture-attempts"),
+		});
+		if (!existsSync(join(directory, "previous-distribution-backup.json")))
+			await registerLocalRedeploymentRebuildableArtifact(directory, {
+				kind: "previous_distribution_copy",
+				stage,
+				attemptNumber,
+				path: join(directory, "preserved-previous-distribution"),
+			});
 		await backupLocalRedeploymentRuntimeState(request, directory);
 		if ((await observeLocalRedeploymentRuntimeBaseline(frozen)).state === "verified_online")
 			await writeLocalRedeploymentJson(
@@ -727,6 +761,12 @@ export async function executeStandardLocalRedeploymentStage(
 		await verifyBoundFilesystemLockProtocolBeforePublication(directory, frozen);
 		if (!(await verifyLocalDeploymentPublishedFiles(manifest))) {
 			const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
+			await registerLocalRedeploymentRebuildableArtifact(directory, {
+				kind: "publication_staging_copy",
+				stage,
+				attemptNumber: Number(process.env.KANBAN_LOCAL_DEPLOYMENT_STAGE_ATTEMPT_NUMBER ?? "1"),
+				path: staging,
+			});
 			await mkdir(staging, { recursive: true });
 			const fingerprint = await fingerprintLocalDeploymentDistribution(manifest.candidateDistributionDirectoryPath);
 			for (const file of fingerprint.files) {
@@ -934,11 +974,7 @@ export async function executeStandardLocalRedeploymentStage(
 			[node, cli, "deployment", "record", "--execution-directory", directory],
 			request.sourceCheckoutPath,
 		);
-	if (stage === "staging_cleanup") {
-		const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
-		if (existsSync(staging) && (await lstat(staging)).isSymbolicLink()) throw new Error("拒绝清理非本次真实暂存目录");
-		await rm(staging, { recursive: true, force: true });
-	}
+	// 清理意图已在复制前登记；实际删除由通用退出后 argv 核验全部子进程退出后接续。
 	if (stage === "task_comment") {
 		await lockedFileSystem.writeTextFileAtomic(
 			join(directory, "deployment-result-task-comment.txt"),
@@ -967,9 +1003,53 @@ export async function executeStandardLocalRedeploymentStage(
 	}
 }
 
+async function observeBoundFilesystemLockProtocol(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+): Promise<{ inventorySha256: string | null; status: string }> {
+	const inventoryPath = join(directory, "filesystem-lock-protocol-retiring-writer-inventory.json");
+	let inventoryText: string | null = null;
+	try {
+		inventoryText = await readFile(inventoryPath, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+			return { inventorySha256: null, status: "evidence_unavailable" };
+	}
+	const inventorySha256 = inventoryText === null ? null : localRedeploymentSha256(inventoryText);
+	let direction: "activate_kernel_write_locks" | "rollback_to_legacy_locks" | "unchanged" | null = null;
+	try {
+		const originalCli = await readFile(join(directory, "preserved-previous-distribution/cli.js"), "utf8");
+		const candidateCli = await readFile(join(candidateCheckout(directory), "dist/cli.js"), "utf8");
+		const originalUsesKernelLocks = originalCli.includes("filesystem-kernel-write-locks");
+		const candidateUsesKernelLocks = candidateCli.includes("filesystem-kernel-write-locks");
+		direction =
+			originalUsesKernelLocks === candidateUsesKernelLocks
+				? "unchanged"
+				: candidateUsesKernelLocks
+					? "activate_kernel_write_locks"
+					: "rollback_to_legacy_locks";
+	} catch {
+		direction = null;
+	}
+	if (direction === "unchanged") return { inventorySha256: null, status: "protocol_unchanged" };
+	if (inventoryText === null) return { inventorySha256: null, status: "missing" };
+	if (!direction) return { inventorySha256, status: "evidence_unavailable" };
+	try {
+		const assessment = await inspectFilesystemLockProtocolTransitionPreflight({
+			inventory: JSON.parse(inventoryText),
+			expectedCandidateSourceCommit: frozen.request.candidateSourceCommit,
+			expectedRuntimeHomeDirectoryPath: frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
+			direction,
+		});
+		return { inventorySha256, status: assessment.status };
+	} catch {
+		return { inventorySha256, status: "evidence_unavailable" };
+	}
+}
+
 export async function observeStandardLocalRedeploymentRecoveryEvidence(
 	directory: string,
-): Promise<{ evidenceSha256: string }> {
+): Promise<{ evidenceSha256: string; recoveryEvidenceReady?: boolean }> {
 	if (existsSync(join(directory, "local-deployment-execution.json")))
 		return await observeLocalDeploymentRecoveryEvidence(directory);
 	return await observeStandardLocalRedeploymentStageRecoveryEvidence(directory, "candidate_bootstrap");
@@ -978,19 +1058,48 @@ export async function observeStandardLocalRedeploymentRecoveryEvidence(
 export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 	directory: string,
 	activeStage: LocalDeploymentStage | "candidate_bootstrap",
-): Promise<{ evidenceSha256: string }> {
+): Promise<{ evidenceSha256: string; recoveryEvidenceReady: boolean }> {
 	const frozen = await readFrozenLocalRedeploymentRequest(directory);
 	const revoked =
 		existsSync(join(directory, "redeployment-revocation.json")) ||
 		existsSync(join(directory, "local-deployment-execution-restriction.json"));
-	if (revoked) return { evidenceSha256: localRedeploymentSha256("persistently_revoked") };
+	if (revoked)
+		return { evidenceSha256: localRedeploymentSha256("persistently_revoked"), recoveryEvidenceReady: false };
+	const targetBudget = await readLocalDeploymentTargetStageRecoveryBudget(frozen.request, activeStage);
+	const failure = targetBudget?.blockingFailure;
+	if (failure && failure.classification !== "verification_evidence_pending")
+		return observeLocalRedeploymentBlockingFailureRecovery(directory, failure);
+	if (failure?.logicalResource === "filesystem-lock-protocol-transition") {
+		const protocol = await observeBoundFilesystemLockProtocol(directory, frozen);
+		const ready = protocol.status === "protocol_unchanged" || protocol.status === "ready_for_protocol_switch";
+		return {
+			evidenceSha256: localRedeploymentSha256(
+				JSON.stringify({
+					logicalResource: failure.logicalResource,
+					inventorySha256: protocol.status === "protocol_unchanged" ? null : protocol.inventorySha256,
+					status: protocol.status,
+				}),
+			),
+			recoveryEvidenceReady: ready,
+		};
+	}
 	const baseline = await observeLocalRedeploymentRuntimeBaseline(frozen);
-	const requests = (await readLocalRedeploymentMachineEvidenceRequests(directory)).filter((request) =>
-		request.kind === "filesystem_path"
-			? request.stage === activeStage
-			: activeStage === "state_preservation"
-				? request.scope === "before-publication"
-				: activeStage === "runtime_validation" && request.scope !== "before-publication",
+	const originalDirectory = failure?.originalErrorReference.includes(
+		`${join("stage-failure-originals", activeStage)}/`,
+	)
+		? dirname(dirname(dirname(failure.originalErrorReference)))
+		: directory;
+	const originalRequests =
+		originalDirectory === directory ? [] : await readLocalRedeploymentMachineEvidenceRequests(originalDirectory);
+	const requests = [...(await readLocalRedeploymentMachineEvidenceRequests(directory)), ...originalRequests].filter(
+		(request) =>
+			request.kind === "filesystem_path"
+				? request.stage === activeStage
+				: request.stage
+					? request.stage === activeStage
+					: activeStage === "state_preservation"
+						? request.scope === "before-publication"
+						: activeStage === "runtime_validation" && request.scope !== "before-publication",
 	);
 	const machineEvidence = await Promise.all(
 		requests.map(async (request) => {
@@ -1049,14 +1158,8 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 	const semantic = {
 		activeStage,
 		machineEvidence,
-		diskAvailability: await observeLocalRedeploymentDiskAvailability(directory),
-		baseline: baseline.state === "unknown" ? { state: "unknown" } : baseline,
+		baseline: { state: baseline.state },
 		sourceValidation: "unknown",
-		lockProtocolInventory: localRedeploymentSha256(
-			JSON.stringify(
-				await readLocalRedeploymentJson(join(directory, "filesystem-lock-protocol-retiring-writer-inventory.json")),
-			),
-		),
 		sessionReadiness: "not_applicable",
 	};
 	const candidate = candidateCheckout(directory);
@@ -1088,34 +1191,12 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		}
 		try {
 			const readiness = JSON.parse(output) as Record<string, unknown>;
-			const sessionIdentity = (value: unknown) => {
-				if (!Array.isArray(value)) return "unknown";
-				return value.map((session: Record<string, unknown>) =>
-					Object.fromEntries(
-						[
-							"workspaceId",
-							"conversationSessionId",
-							"runtimeSessionIncarnationId",
-							"nativeConversationSessionId",
-							"hostedSessionKey",
-							"processId",
-							"processStartedAtEpochMs",
-							"hostProcessId",
-						].map((field) => [field, session[field] ?? null]),
-					),
-				);
-			};
-			semantic.sessionReadiness = JSON.stringify({
-				ok: readiness.ok === true,
-				runtimeLoadedEntrypointSha256: readiness.runtimeLoadedEntrypointSha256 ?? null,
-				blockingSessions: sessionIdentity(readiness.blockingSessions),
-				validatedHostedSessions: sessionIdentity(readiness.validatedHostedSessions),
-			});
+			semantic.sessionReadiness = readiness.ok === true ? "ready" : "blocked";
 		} catch {
 			semantic.sessionReadiness = "unavailable";
 		}
 	}
-	if (existsSync(join(candidate, ".git"))) {
+	if (["candidate_bootstrap", "candidate_preparation"].includes(activeStage) && existsSync(join(candidate, ".git"))) {
 		try {
 			const response = await executeLocalRedeploymentFile(
 				frozen.request.deploymentNodeBinaryPath,
@@ -1142,5 +1223,11 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			/* 观察失败是稳定未知，不用采样时间重置预算。 */
 		}
 	}
-	return { evidenceSha256: localRedeploymentSha256(JSON.stringify(semantic)) };
+	return {
+		evidenceSha256: localRedeploymentSha256(JSON.stringify(semantic)),
+		recoveryEvidenceReady:
+			baseline.state !== "unknown" &&
+			!["unavailable", "blocked"].includes(semantic.sessionReadiness) &&
+			machineEvidence.every((entry) => "status" in entry && entry.status !== "unknown"),
+	};
 }

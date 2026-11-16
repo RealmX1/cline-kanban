@@ -36,6 +36,11 @@ it.each([
 	"darwin_repeated_late_unrelated_processes",
 	"darwin_repeated_late_owned_process",
 	"darwin_repeated_late_unproven_processes",
+	"darwin_repeated_late_processes_exit_before_native_probe",
+	"darwin_late_parent_exits_with_live_process_group_descendant",
+	"darwin_late_parent_exits_with_live_detached_descendant",
+	"darwin_repeated_late_processes_native_lookup_permission_denied",
+	"darwin_repeated_late_processes_native_generation_changed_during_probe",
 	"darwin_late_group_pid_reused_by_unrelated_process",
 	"unproven_orphan",
 	"darwin_missing_precision_after_dispatch",
@@ -59,6 +64,7 @@ it.each([
 		const kernelContainmentRequired = scenario.startsWith("linux_kernel_");
 		const processGroupSnapshotFailure = scenario.startsWith("process_group_snapshot_failure");
 		const spawnFailureWithoutPid = scenario.includes("spawn_failure_without_pid");
+		const lateParentLeavesLiveDescendant = scenario.startsWith("darwin_late_parent_exits_with_live_");
 		const materialsFile = join(sandbox.path, "materials.json");
 		await writeFile(
 			materialsFile,
@@ -71,6 +77,7 @@ it.each([
 				workingDirectory: sandbox.path,
 				superviseProcessGroup: !legacy,
 				preventRedispatch: true,
+				postProcessExitCleanupCommand: lateParentLeavesLiveDescendant ? ["isolated-cleanup-command"] : undefined,
 				deadlineAtEpochMs: scenario.endsWith("after_timeout")
 					? 12_000
 					: retiredOwnedCount !== null ||
@@ -162,6 +169,8 @@ it.each([
 		let processGroupSnapshotQueryCount = 0;
 		let lateGroupPidAwaitingNativeReuse = false;
 		let lateGroupPidAlreadyReused = false;
+		let lateParentSpawned = false;
+		let cleanupDispatchCount = 0;
 		const regularQueryCountsByCycle = new Map<number, { ps: number; native: number }>();
 		let unchangedProgressWriteCount = 0;
 		const fullProcessSnapshotCycles: number[] = [];
@@ -188,6 +197,17 @@ it.each([
 			].join(String.fromCharCode(0));
 		};
 		function simulatedProcessGroupSnapshot(): string {
+			if (lateParentLeavesLiveDescendant && cycle === 1 && !lateParentSpawned) {
+				lateParentSpawned = true;
+				processes.set(4001, {
+					parent: 1,
+					group: 900,
+					version: 5001,
+					originalParentVersion: 1201,
+					hasNonce: inheritedNonce,
+					startAndCommand: "Wed Oct 28 12:00:02 2026 late-owned-parent",
+				});
+			}
 			if (
 				scenario === "darwin_late_group_pid_reused_by_unrelated_process" &&
 				cycle === 1 &&
@@ -211,7 +231,10 @@ it.each([
 					version: pid + 1000,
 					originalParentVersion: scenario.endsWith("owned_process") ? 99999 : 1401,
 					hasNonce: scenario.endsWith("owned_process") && inheritedNonce,
-					preciseIdentityUnavailable: scenario.endsWith("unproven_processes"),
+					preciseIdentityUnavailable:
+						scenario.endsWith("unproven_processes") ||
+						scenario.endsWith("permission_denied") ||
+						scenario.endsWith("generation_changed_during_probe"),
 					startAndCommand: "Wed Oct 28 12:00:02 2026 process-born-after-native-snapshot",
 				});
 			}
@@ -265,6 +288,11 @@ it.each([
 				join,
 				Date: { now: () => now },
 				spawn: (_command: string, _arguments: string[], options: { env: Record<string, string> }) => {
+					if (_arguments.at(-1)?.includes("post-process-exit-cleanup")) {
+						expect(processes.has(6001)).toBe(false);
+						cleanupDispatchCount++;
+						return { unref: () => undefined };
+					}
 					dispatchCount++;
 					inheritedNonce = options.env.KANBAN_OWNED_COMMAND_EXECUTION_NONCE === "nonce";
 					if (spawnFailureWithoutPid) {
@@ -357,27 +385,55 @@ it.each([
 								).toBe(true);
 							throw Object.assign(new Error("故障注入：完整快照暂时不可读"), { code: "EACCES" });
 						}
-						const rows = (args[1] === "--snapshot" ? [...processes.keys()] : args.slice(1).map(Number)).flatMap(
-							(pid) => {
-								const entry = processes.get(pid);
-								return entry
-									? [
-											{
-												pid,
-												processUniqueIdentity: entry.preciseIdentityUnavailable
-													? undefined
-													: String(entry.version),
-												parentProcessPid: entry.parent,
-												processIdVersion: entry.version,
-												originalParentProcessIdVersion: entry.originalParentVersion,
-												outsideCurrentUser: entry.outsideCurrentUser === true,
-												processIsZombie: entry.zombie === true,
-												hasExecutionOwnershipToken: entry.hasNonce,
-											},
-										]
-									: [];
-							},
-						);
+						const rows = (args[1] === "--snapshot" ? [...processes.keys()] : args.slice(1).map(Number)).flatMap<
+							Record<string, unknown>
+						>((pid) => {
+							if (lateParentLeavesLiveDescendant && args[0] === "nonce" && pid === 4001) {
+								processes.set(6001, {
+									parent: 1,
+									group: scenario.endsWith("detached_descendant") ? 6001 : 900,
+									version: 7001,
+									originalParentVersion: 5001,
+									hasNonce: inheritedNonce,
+									startAndCommand: "Wed Oct 28 12:00:03 2026 still-running-owned-descendant",
+								});
+								processes.delete(pid);
+								return [{ pid, nativeProcessSnapshotUnproven: true, nativeProcessNoLongerExists: true }];
+							}
+							if (args[0] === "nonce" && pid >= 4000 && scenario.startsWith("darwin_repeated_late_processes_")) {
+								const absent = scenario.endsWith("exit_before_native_probe");
+								if (absent) processes.delete(pid);
+								return [
+									{
+										pid,
+										parentProcessPid: -1,
+										outsideCurrentUser: false,
+										hasExecutionOwnershipToken: null,
+										processIsZombie: false,
+										nativeProcessSnapshotUnproven: true,
+										nativeProcessLookupErrno: scenario.endsWith("permission_denied") ? 13 : 3,
+										nativeProcessNoLongerExists: absent,
+									},
+								];
+							}
+							const entry = processes.get(pid);
+							return entry
+								? [
+										{
+											pid,
+											processUniqueIdentity: entry.preciseIdentityUnavailable
+												? undefined
+												: String(entry.version),
+											parentProcessPid: entry.parent,
+											processIdVersion: entry.version,
+											originalParentProcessIdVersion: entry.originalParentVersion,
+											outsideCurrentUser: entry.outsideCurrentUser === true,
+											processIsZombie: entry.zombie === true,
+											hasExecutionOwnershipToken: entry.hasNonce,
+										},
+									]
+								: [];
+						});
 						if (args[1] === "--snapshot") {
 							if (scenario.startsWith("darwin_expired_native_snapshot_rows") && cycle >= 1)
 								rows.push({
@@ -523,6 +579,8 @@ it.each([
 				"unchanged_unproven_process_budget",
 				"unproven_process_changes_after_budget",
 				"darwin_repeated_late_unproven_processes",
+				"darwin_repeated_late_processes_native_lookup_permission_denied",
+				"darwin_repeated_late_processes_native_generation_changed_during_probe",
 			].includes(scenario)
 		)
 			await expect(evaluation).rejects.toThrow("退出归属仍未知");
@@ -559,6 +617,24 @@ it.each([
 			expect(cycle).toBe(1);
 			expect(signals).toEqual([]);
 		}
+		if (scenario === "darwin_repeated_late_processes_exit_before_native_probe") {
+			expect(progress.status).toBe("cancelled");
+			expect(progress.timedOut).toBe(true);
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(cycle).toBeGreaterThanOrEqual(2);
+			expect(signals).toEqual([]);
+		}
+		if (lateParentLeavesLiveDescendant) {
+			expect(signals).toContain(6001);
+			expect(processes.has(6001)).toBe(false);
+			expect(progress.ownedProcesses.map((entry: { pid: number }) => entry.pid)).toContain(6001);
+			expect(progress.nativeOwnershipUnproven).toBe(false);
+			expect(cleanupDispatchCount).toBe(1);
+			const confirmation = JSON.parse(
+				await readFile(join(sandbox.path, "post-process-exit-cleanup-confirmation-nonce-dispatch-1.json"), "utf8"),
+			);
+			expect(confirmation.ownedProcessesExited).toBe(true);
+		}
 		if (scenario === "darwin_late_group_pid_reused_by_unrelated_process") {
 			expect(signals).not.toContain(301);
 			expect(progress.status).toBe("exited");
@@ -566,7 +642,13 @@ it.each([
 			expect(processes.get(301)?.version).toBe(3301);
 			expect(progress.ownedProcesses.map((entry: { pid: number }) => entry.pid)).not.toContain(301);
 		}
-		if (scenario === "darwin_repeated_late_unproven_processes") {
+		if (
+			[
+				"darwin_repeated_late_unproven_processes",
+				"darwin_repeated_late_processes_native_lookup_permission_denied",
+				"darwin_repeated_late_processes_native_generation_changed_during_probe",
+			].includes(scenario)
+		) {
 			expect(progress.status).not.toBe("exited");
 			expect(progress.nativeOwnershipUnproven).toBe(true);
 			expect(signals).toEqual([]);

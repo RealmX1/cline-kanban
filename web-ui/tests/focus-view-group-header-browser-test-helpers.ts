@@ -2,7 +2,11 @@ import { expect, type Page } from "@playwright/test";
 
 const scrollRootSelector = "[data-task-card-column-scroll-container]";
 
-export async function openIsolatedFocusViewCompactGroupHeadersBrowserHarness(page: Page, scope: "current" | "all") {
+export async function openIsolatedFocusViewCompactGroupHeadersBrowserHarness(
+	page: Page,
+	scope: "current" | "all",
+	options: { view?: "focus" | "board"; usesGroupBoundaryFixtures?: boolean } = {},
+) {
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 	await page.route("**/api/**", (route) => route.abort());
@@ -16,14 +20,18 @@ export async function openIsolatedFocusViewCompactGroupHeadersBrowserHarness(pag
 			body: "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body></body></html>",
 		}),
 	);
-	await page.goto(`/isolated-compact-focus-headers?scope=${scope}`);
+	const browserHarnessQueryParameters = new URLSearchParams({ scope, view: options.view ?? "focus" });
+	if (options.usesGroupBoundaryFixtures) browserHarnessQueryParameters.set("group-boundary-fixtures", "true");
+	await page.goto(`/isolated-compact-focus-headers?${browserHarnessQueryParameters}`);
 	await page.addScriptTag({
 		type: "module",
 		content:
 			"import RefreshRuntime from '/@react-refresh'; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>type=>type; window.__vite_plugin_react_preamble_installed__=true;",
 	});
 	await page.addScriptTag({ type: "module", url: "/tests/focus-view-compact-group-headers-browser-harness.tsx" });
-	await expect(page.locator(scrollRootSelector)).toBeVisible();
+	await expect(
+		page.locator(options.view === "board" && scope === "current" ? ".kb-board" : ".kb-task-group").first(),
+	).toBeVisible();
 	await expect.poll(() => pageErrors).toEqual([]);
 	return pageErrors;
 }

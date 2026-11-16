@@ -15,6 +15,57 @@ import { loadWorkspaceContext, loadWorkspaceState } from "../../../src/state/wor
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 describe("workspace registry runtime project availability cache", () => {
+	it("切换项目只等待目标核验，其他项目在后台补证并广播", async () => {
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const first = fixture.createNonBareRepository({ repositoryDirectoryName: "target-project" }).repositoryPath;
+		const second = fixture.createNonBareRepository({
+			repositoryDirectoryName: "slow-background-project",
+		}).repositoryPath;
+		const previousHome = process.env.HOME;
+		process.env.HOME = fixture.isolatedHomeDirectoryPath;
+		let releaseBackground!: () => void;
+		const background = new Promise<void>((resolve) => {
+			releaseBackground = resolve;
+		});
+		try {
+			await loadWorkspaceState(first);
+			await loadWorkspaceState(second);
+			const target = await loadWorkspaceContext(first);
+			const registry = await createWorkspaceRegistry({
+				cwd: fixture.isolatedHomeDirectoryPath,
+				loadGlobalRuntimeConfig: async () => ({}) as never,
+				loadRuntimeConfig: async () => ({}) as never,
+				hasGitRepository: () => false,
+				inspectRuntimeProjectAvailability: async (path) => {
+					if (path === second) await background;
+					return { status: "available" };
+				},
+			});
+			try {
+				let resolved = false;
+				const selection = registry.resolveWorkspaceForStream(target.workspaceId).then((result) => {
+					resolved = true;
+					return result;
+				});
+				await vi.waitFor(() => expect(resolved).toBe(true));
+				expect((await selection).status).toBe("available");
+				const payload = await registry.buildProjectsPayloadUsingCachedRuntimeProjectAvailability(
+					target.workspaceId,
+				);
+				expect(payload.projects.find((project) => project.path === second)?.availability).toEqual({
+					status: "unavailable",
+					reason: "project_path_access_could_not_be_verified",
+				});
+			} finally {
+				releaseBackground();
+				registry.disposeWorkspace(target.workspaceId);
+			}
+		} finally {
+			releaseBackground();
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+		}
+	});
 	it("冷恢复的 ACP 主会话与空侧会话在首帧覆盖已中断的终端水合快照", async () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const projectPath = fixture.createNonBareRepository({

@@ -48,6 +48,7 @@ export function useRecoverableForegroundRead<T>({
 	retainedValueScopeIdentity,
 	isDataEqual,
 	workspaceId,
+	pauseWhileDocumentHidden = false,
 }: {
 	identity: string;
 	read: (signal: AbortSignal) => Promise<T>;
@@ -58,6 +59,7 @@ export function useRecoverableForegroundRead<T>({
 	retainedValueScopeIdentity?: string;
 	isDataEqual?: (previous: T, next: T) => boolean;
 	workspaceId?: string;
+	pauseWhileDocumentHidden?: boolean;
 }) {
 	const [result, setResult] = useState<{
 		identity: string;
@@ -101,6 +103,7 @@ export function useRecoverableForegroundRead<T>({
 				};
 			});
 		const attempt = async (attemptNumber: number): Promise<boolean> => {
+			if (pauseWhileDocumentHidden && document.visibilityState !== "visible") return false;
 			markReading();
 			try {
 				const value = await readWithForegroundDeadline(read, owner.signal);
@@ -143,6 +146,7 @@ export function useRecoverableForegroundRead<T>({
 		};
 		const requestRefresh = (): Promise<void> => {
 			if (owner.signal.aborted) return Promise.resolve();
+			if (pauseWhileDocumentHidden && document.visibilityState !== "visible") return Promise.resolve();
 			if (runningRead) {
 				refreshRequestedDuringRead = true;
 				return runningRead;
@@ -194,6 +198,7 @@ export function useRecoverableForegroundRead<T>({
 		retainedValueScopeIdentity,
 		isDataEqual,
 		workspaceId,
+		pauseWhileDocumentHidden,
 	]);
 	const visibleResult =
 		result.identity === identity ||

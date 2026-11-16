@@ -74,6 +74,7 @@ export interface CreateWorkspaceRegistryDependencies {
 	loadRuntimeConfig: (cwd: string) => Promise<RuntimeConfigState>;
 	hasGitRepository: (path: string) => boolean;
 	inspectRuntimeProjectAvailability?: typeof inspectRuntimeProjectAvailability;
+	onProjectAvailabilityUpdated?: () => void;
 	onTerminalManagerReady?: (workspaceId: string, manager: TerminalSessionManager) => void;
 	// Cline SDK / ACP 会话不在 TerminalSessionManager 里，由 runtime-state-hub 订阅持有。跨项目视图
 	// （in_progress 明细、跨项目切换面板）要覆盖全部三种 transport，故后绑定一个读口（hub 晚于 registry 创建）。
@@ -386,6 +387,10 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	const runtimeProjectAvailabilityByWorkspaceId = new Map<
 		string,
 		{ repoPath: string; availability: RuntimeProjectAvailability }
+	>();
+	const pendingProjectAvailabilityInspectionsByWorkspaceId = new Map<
+		string,
+		{ repoPath: string; inspection: Promise<RuntimeProjectAvailability> }
 	>();
 	const terminalManagersByWorkspaceId = new Map<string, TerminalSessionManager>();
 	const projectSummaryBoardReadCache = createParsedPersistedJsonFileReadCache<RuntimeBoardData>();
@@ -758,7 +763,25 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 	): Promise<void> => {
 		await Promise.all(
 			projects.map(async (project) => {
-				const availability = await inspectRuntimeProjectAvailabilityForRegistry(project.repoPath);
+				const previous = pendingProjectAvailabilityInspectionsByWorkspaceId.get(project.workspaceId);
+				if (previous?.repoPath === project.repoPath) {
+					await previous.inspection;
+					return;
+				}
+				const inspection = inspectRuntimeProjectAvailabilityForRegistry(project.repoPath).catch(
+					(): RuntimeProjectAvailability => ({
+						status: "unavailable",
+						reason: "project_path_access_could_not_be_verified",
+					}),
+				);
+				pendingProjectAvailabilityInspectionsByWorkspaceId.set(project.workspaceId, {
+					repoPath: project.repoPath,
+					inspection,
+				});
+				const availability = await inspection;
+				if (pendingProjectAvailabilityInspectionsByWorkspaceId.get(project.workspaceId)?.inspection !== inspection)
+					return;
+				pendingProjectAvailabilityInspectionsByWorkspaceId.delete(project.workspaceId);
 				runtimeProjectAvailabilityByWorkspaceId.set(project.workspaceId, {
 					repoPath: project.repoPath,
 					availability,
@@ -842,7 +865,18 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			return { status: "no_registered_project", projectId: null, workspacePath: null };
 		}
 
-		await refreshRuntimeProjectAvailabilityForRegisteredProjects(allProjects);
+		await refreshRuntimeProjectAvailabilityForRegisteredProjects([targetWorkspace]);
+		const otherProjects = allProjects.filter((project) => project.workspaceId !== targetWorkspace.workspaceId);
+		for (const project of otherProjects) {
+			if (runtimeProjectAvailabilityByWorkspaceId.get(project.workspaceId)?.repoPath !== project.repoPath)
+				runtimeProjectAvailabilityByWorkspaceId.set(project.workspaceId, {
+					repoPath: project.repoPath,
+					availability: { status: "unavailable", reason: "project_path_access_could_not_be_verified" },
+				});
+		}
+		void refreshRuntimeProjectAvailabilityForRegisteredProjects(otherProjects).then(() => {
+			if (otherProjects.length > 0) deps.onProjectAvailabilityUpdated?.();
+		});
 		const availability = await getRuntimeProjectAvailabilityUsingCache(
 			targetWorkspace.workspaceId,
 			targetWorkspace.repoPath,
