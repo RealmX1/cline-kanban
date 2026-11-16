@@ -319,12 +319,19 @@ export function summarizeLocalDeploymentExecution(
 	const hasQualityValidationFailure =
 		latestUnfinishedCommandResult?.kind === "command_failed" &&
 		latestUnfinishedCommandResult.commandFailureKind === "quality_validation_failed";
+	const hasHumanDecision =
+		latestUnfinishedCommandResult?.kind === "command_failed" &&
+		latestUnfinishedCommandResult.commandFailureKind === "human_decision_required";
 	const deploymentOutcome =
 		record.finishedOutcome ??
 		(deploymentSucceeded
 			? "succeeded"
 			: (restriction?.kind ??
-				(hasQualityValidationFailure ? "quality_validation_failed" : "machine_evidence_pending")));
+				(hasQualityValidationFailure
+					? "quality_validation_failed"
+					: hasHumanDecision
+						? "human_decision_required"
+						: "machine_evidence_pending")));
 	const started = record.observations.filter((item) => item.kind === "command_execution_intent_persisted");
 	const failures = record.observations.filter(
 		(item) => item.kind === "command_failed" || item.kind === "command_not_started",
@@ -361,10 +368,14 @@ export function summarizeLocalDeploymentExecution(
 			condition: restriction
 				? `${restriction.reason}（${restriction.sourceReference}）；不自动恢复权限`
 				: hasQualityValidationFailure
-					? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
-					: unfinishedStage
-						? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件或阶段只读语义证据变化后取得新重试预算"
-						: null,
+					? unfinishedStage === "candidate_preparation"
+						? "源码验证真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
+						: "后续阶段质量失败已交回；在 deployment-repair 分支修复并提交后，用失败原目录准备新候选。阶段检查会重跑，不按机器缺证自动重试"
+					: hasHumanDecision
+						? "发布身份与授权目标不一致，交回判断；不把这次失败当成源码质量失败，也不按机器缺证自动重试"
+						: unfinishedStage
+							? "先核验原动作效果；非重复动作不重发；普通动作只在补证文件或阶段只读语义证据变化后取得新重试预算"
+							: null,
 		},
 		metrics: {
 			commandAttempts: started.length,
@@ -824,6 +835,7 @@ async function executeOneStage(
 		}
 		let reportedFailure = false;
 		let qualityValidationFailed = false;
+		let humanDecisionRequired = false;
 		let machineEvidencePending = false;
 		let blockingFailure: unknown;
 		try {
@@ -838,6 +850,11 @@ async function executeOneStage(
 					reportedFailure &&
 					"status" in reported &&
 					reported.status === "quality_validation_failed";
+				humanDecisionRequired =
+					result.processWasStarted === true &&
+					reportedFailure &&
+					"status" in reported &&
+					reported.status === "human_decision_required";
 			}
 		} catch {
 			/* 普通构建命令可以只输出文本。 */
@@ -855,9 +872,11 @@ async function executeOneStage(
 			result.stderr.slice(-2_000),
 			qualityValidationFailed
 				? "quality_validation_failed"
-				: machineEvidencePending
-					? "machine_evidence_pending"
-					: undefined,
+				: humanDecisionRequired
+					? "human_decision_required"
+					: machineEvidencePending
+						? "machine_evidence_pending"
+						: undefined,
 		);
 		previousAttempts = record.observations.filter(
 			(item) => item.stage === stage.stage && item.kind === "command_execution_intent_persisted",
@@ -884,7 +903,7 @@ async function executeOneStage(
 			}
 		}
 		if (result.processWasStarted === false) continue;
-		if (qualityValidationFailed) return false;
+		if (qualityValidationFailed || humanDecisionRequired) return false;
 		if (LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage)) return await verifyPreviousEffect(true);
 		if (machineEvidencePending) return false;
 		if (stage.recoveryEvidenceObservationMode === "semantic_observation_only" && !commandSucceeded) return false;

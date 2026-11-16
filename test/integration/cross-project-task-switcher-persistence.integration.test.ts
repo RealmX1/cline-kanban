@@ -49,7 +49,9 @@ describe.sequential("cross-project task switcher persistence integration", () =>
 
 	it("「我最后打开」拒绝 workspaces 根之外的路径", async () => {
 		await withIsolatedWorkspaceHome(async () => {
-			await expect(recordTaskLastOpenedByUser("../escape", "task-1", 1)).rejects.toThrow(/outside workspaces root/);
+			await expect(recordTaskLastOpenedByUser("../escape", "task-1", 1)).rejects.toThrow(
+				/项目身份不能包含路径分隔符|outside workspaces root/,
+			);
 		});
 	});
 

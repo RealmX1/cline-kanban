@@ -18,6 +18,24 @@ export interface RegisteredIsolatedWorkspace {
 
 export type RegisterIsolatedWorkspace = (repositoryDirectoryName: string) => Promise<RegisteredIsolatedWorkspace>;
 
+export async function registerExistingProjectInIsolatedFixtureHome(
+	gitFixture: IsolatedGitTestWorkspaceFixture,
+	repositoryPath: string,
+): Promise<void> {
+	const previousHome = process.env.HOME;
+	const previousUserProfile = process.env.USERPROFILE;
+	process.env.HOME = gitFixture.isolatedHomeDirectoryPath;
+	process.env.USERPROFILE = gitFixture.isolatedHomeDirectoryPath;
+	try {
+		await loadWorkspaceContext(repositoryPath);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+		if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+		else process.env.USERPROFILE = previousUserProfile;
+	}
+}
+
 async function registerWorkspace(
 	gitFixture: IsolatedGitTestWorkspaceFixture,
 	repositoryDirectoryName: string,

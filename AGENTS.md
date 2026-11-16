@@ -19,6 +19,7 @@
 - 程序化侧会话恢复使用 `conversation-session resume`／`resumeTaskConversationSession`，保留持久 Stop；旧外部 `startTaskSession` 属于显式启动，会清除 Stop。身份与撤销事实见 `docs/task-collaboration-sessions.md` 的受限接续说明。
 - 旧 RVF 用 `kanban task rvf-history` 只读查询；历史完成、失败和投递事实独立展示，缺证及当前候选覆盖为 unknown。见 `docs/task-rvf-history-query.md`。
 - 审阅、普通 Git 提交与 base 同步按本任务真实授权和各自约定执行。开工、计划与实现阶段不自动吸收 local main；Stop、禁止提交、同步、推送或部署的明确限制继续有效。
+- 主动授权的 local deploy 默认覆盖范围内必要修复及本地部署分支提交；质量失败保留原件，经有界修复接续入口固定新候选后继续。提交／部署的本次明确禁令仍优先，合同见 `docs/local-redeployment-standard-entry-and-offline-recovery.md`。
 
 ---
 

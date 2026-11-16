@@ -136,7 +136,9 @@ export const localDeploymentObservationSchema = z.strictObject({
 	exitCode: z.number().int().nullable(),
 	commandOutputDirectory: absolutePath,
 	detail: z.string(),
-	commandFailureKind: z.enum(["quality_validation_failed", "machine_evidence_pending"]).optional(),
+	commandFailureKind: z
+		.enum(["quality_validation_failed", "machine_evidence_pending", "human_decision_required"])
+		.optional(),
 });
 
 export const localDeploymentExecutionRecordSchema = z.strictObject({

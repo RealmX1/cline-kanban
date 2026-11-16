@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
@@ -19,7 +20,7 @@ import {
 describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, () => {
 	const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
 	afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
-	it("从真实离线起点构建、保全、发布、启动及登记；同请求重复启动不重复副作用", async (testContext) => {
+	it.for([false, true])("隔离部署与分支修复接续=%s", async (repairAfterQualityFailure, testContext) => {
 		const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 		const outputRoot = join(repositoryRoot, "test-results", "standard-redeployment");
 		await mkdir(outputRoot, { recursive: true });
@@ -28,7 +29,7 @@ describe("标准重部署打包入口全程隔离验收", { timeout: 180_000 }, 
 			fixtureRootParentDirectoryPath: outputRoot,
 		});
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "source" });
-		const executionDirectory = join(fixture.fixtureRootDirectoryPath, "persistent-redeployment-artifacts");
+		let executionDirectory = join(fixture.fixtureRootDirectoryPath, "persistent-redeployment-artifacts");
 		let cleanupSupervisorReference: { workspaceId: string; executionId: string; launchNonce: string } | null = null;
 		let cleanupSupervisorArtifactDirectory: string | null = null;
 		await mkdir(executionDirectory);
@@ -116,7 +117,7 @@ const program = new Command(); registerDeploymentCommand(program); await program
 			scripts: {
 				typecheck: "node --check fixture-cli.mjs",
 				"web:typecheck": "node --check fixture-cli.mjs",
-				test: "node --check fixture-cli.mjs",
+				test: repairAfterQualityFailure ? "node fixture-source-validation.mjs" : "node --check fixture-cli.mjs",
 				"web:test": "node --check fixture-cli.mjs",
 				lint: "node --check fixture-cli.mjs",
 				build: "node fixture-build.mjs",
@@ -164,7 +165,9 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 } else if(args[0]==='deployment'&&args[1]==='record') {const directory=args[args.indexOf('--execution-directory')+1];const receipt=execFileSync(process.execPath,[join(import.meta.dirname,'deployment-cli-for-fixture.mjs'),...args],{encoding:'utf8',env:process.env});appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(receipt);}
 `,
 		);
-		const commit = repository.commitAllRepositoryFilesAtDate({
+		if (repairAfterQualityFailure)
+			await writeFile(join(repository.repositoryPath, "fixture-source-validation.mjs"), "process.exitCode = 1;\n");
+		let commit = repository.commitAllRepositoryFilesAtDate({
 			message: "标准重部署隔离夹具",
 			authorAndCommitterIsoDate: "2026-11-13T00:00:00Z",
 		});
@@ -261,7 +264,11 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 					candidateSourceCommit: commit,
 					deploymentNodeBinaryPath: node,
 					distributionDirectoryPath: join(repository.repositoryPath, "dist"),
-					runtimeIdentity: { runtimeHomeDirectoryPath: runtimeHome, runtimeHost: "127.0.0.1", runtimePort: port },
+					runtimeIdentity: {
+						runtimeHomeDirectoryPath: runtimeHome,
+						runtimeHost: "127.0.0.1",
+						runtimePort: port,
+					},
 					serviceLaunch: { command: [node, runner], tmuxSessionName: sessionName },
 					authorization: {
 						sourceReference: "test:isolated-standard-flow",
@@ -272,6 +279,81 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			const prepared = await invoke("prepare-redeployment", ["--request-file", requestFile]);
 			expect(prepared.code, prepared.stdout + prepared.stderr).toBe(0);
 			expect(await readFile(join(repository.repositoryPath, "dist/cli.js"), "utf8")).toBe("旧版隔离入口");
+			if (repairAfterQualityFailure) {
+				const failedDirectory = executionDirectory;
+				const startedFailure = await invoke("start-redeployment");
+				expect(startedFailure.code, startedFailure.stdout + startedFailure.stderr).toBe(0);
+				await vi.waitFor(
+					async () =>
+						expect(
+							JSON.parse(await readFile(join(failedDirectory, "owned-command-business-result.json"), "utf8"))
+								.disposition,
+						).toBe("agent_review_ready"),
+					{ timeout: 60_000 },
+				);
+				const failedResult = await readFile(join(failedDirectory, "owned-command-business-result.json"), "utf8");
+				expect(JSON.parse(failedResult).error).toContain("源码验证真实失败");
+				expect(await readFile(join(repository.repositoryPath, "dist/cli.js"), "utf8")).toBe("旧版隔离入口");
+				const failedReference = JSON.parse(
+					await readFile(join(failedDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
+				);
+				await vi.waitFor(
+					async () =>
+						expect(
+							await inspectOwnedCommandSupervisor(
+								{
+									workspaceId,
+									executionId: failedReference.executionId,
+									launchNonce: failedReference.launchNonce,
+								},
+								{
+									artifactDirectory: join(
+										runtimeHome,
+										"workspaces",
+										workspaceId,
+										"task-command-executions",
+										failedReference.executionId,
+									),
+								},
+							),
+						).toBe("exited"),
+					{ timeout: 15_000 },
+				);
+				const repairBranch = "deployment-repair/external-caller-fixture";
+				repository.runGit(["branch", repairBranch]);
+				repository.runGit(["switch", repairBranch]);
+				await writeFile(
+					join(repository.repositoryPath, "fixture-source-validation.mjs"),
+					"process.stdout.write('隔离源码修复验证通过\\n');\n",
+				);
+				commit = repository.commitAllRepositoryFilesAtDate({
+					message: "修复隔离部署验证",
+					authorAndCommitterIsoDate: "2026-11-13T00:01:00Z",
+				});
+				const originalRequest = JSON.parse(
+					await readFile(join(failedDirectory, "frozen-redeployment-request.json"), "utf8"),
+				).request;
+				executionDirectory = join(fixture.fixtureRootDirectoryPath, "repaired-deployment-artifacts");
+				await mkdir(executionDirectory);
+				const repairedRequestFile = join(executionDirectory, "request.json");
+				await writeFile(
+					repairedRequestFile,
+					JSON.stringify({ ...originalRequest, executionId: randomUUID(), candidateSourceCommit: commit }),
+				);
+				const repairedPreparation = await invoke("prepare-redeployment", [
+					"--request-file",
+					repairedRequestFile,
+					"--repair-of-execution-directory",
+					failedDirectory,
+					"--deployment-branch",
+					repairBranch,
+				]);
+				expect(repairedPreparation.code, repairedPreparation.stdout + repairedPreparation.stderr).toBe(0);
+				expect(JSON.parse(repairedPreparation.stdout).repairContinuation.repairAttemptNumber).toBe(1);
+				expect(await readFile(join(failedDirectory, "owned-command-business-result.json"), "utf8")).toBe(
+					failedResult,
+				);
+			}
 			const executed = await invoke("start-redeployment");
 			expect(executed.code, executed.stdout + executed.stderr).toBe(0);
 			await vi.waitFor(

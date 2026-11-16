@@ -11,6 +11,7 @@ import type {
 } from "../../src/core/api-contract";
 import { computeStablePatchId } from "../../src/workspace/git-utils";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	sigkillChildProcessAndWaitForExit,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
@@ -73,6 +74,7 @@ it("隔离打包实例经真实 API 更新部署覆盖，raw worktree 缓存命�
 	const address = portReservation.address();
 	if (!address || typeof address === "string") throw new Error("隔离端口分配失败");
 	await new Promise<void>((done) => portReservation.close(() => done()));
+	await registerExistingProjectInIsolatedFixtureHome(fixture, repository.repositoryPath);
 	const child = spawn(
 		process.execPath,
 		[cli, "--host", "127.0.0.1", "--port", String(address.port), "--no-open", "--skip-shutdown-cleanup"],

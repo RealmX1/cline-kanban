@@ -57,11 +57,13 @@ import {
 	readFrozenLocalRedeploymentRequest,
 	writeLocalRedeploymentJson,
 } from "./local-redeployment-preparation";
+import { prepareLocalRedeploymentRepairContinuation } from "./local-redeployment-repair-continuation";
 import { preserveLocalRedeploymentRuntimeRestartAcceptance } from "./local-redeployment-runtime-restart-acceptance";
 import {
 	executeStandardLocalRedeploymentStage,
 	initializeStandardLocalRedeployment,
 	LocalRedeploymentQualityFailure,
+	localRedeploymentStageCommandStatus,
 	observeStandardLocalRedeploymentRecoveryEvidence,
 	observeStandardLocalRedeploymentStageRecoveryEvidence,
 } from "./local-redeployment-standard-execution";
@@ -129,8 +131,10 @@ async function runLocalDeploymentExecutionAndWriteBusinessResult(directory: stri
 			nextAction: needsMachineEvidence
 				? "按已登记的机器条件自动接续，不请求人工提供机器可取得的信息"
 				: result.deploymentOutcome === "quality_validation_failed"
-					? "本次核验真实失败；读取绑定报告和原件，由 Agent 修复或处置，不按机器缺证自动重试"
-					: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
+					? "本次核验真实失败；Agent 在原授权内于 deployment-repair 分支修复并提交，再用 prepare-redeployment --repair-of-execution-directory 与 --deployment-branch 准备新候选；保留旧失败，不按机器缺证重试"
+					: result.deploymentOutcome === "human_decision_required"
+						? "发布身份与授权目标不一致，交回判断；不要把这次失败当成源码质量失败去准备修复接续"
+						: "读取绑定原件，完成轻量语义复盘并固化独立发现，再查询既有 Issues；不重复部署",
 			recovery: needsMachineEvidence
 				? {
 						action: "resume_same_run",
@@ -185,15 +189,32 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 		.command("prepare-redeployment")
 		.requiredOption("--execution-directory <path>")
 		.requiredOption("--request-file <path>")
-		.action(async (options: { executionDirectory: string; requestFile: string }) => {
-			printResult(
-				await prepareLocalRedeployment(
-					await assertPersistentExecutionDirectory(options.executionDirectory),
-					JSON.parse(await readFile(options.requestFile, "utf8")),
-					process.argv[1],
-				),
-			);
-		});
+		.option("--repair-of-execution-directory <path>")
+		.option("--deployment-branch <name>")
+		.action(
+			async (options: {
+				executionDirectory: string;
+				requestFile: string;
+				repairOfExecutionDirectory?: string;
+				deploymentBranch?: string;
+			}) => {
+				if (!!options.repairOfExecutionDirectory !== !!options.deploymentBranch)
+					throw new Error("修复接续必须同时提供来源执行目录与本地部署分支");
+				const directory = await assertPersistentExecutionDirectory(options.executionDirectory);
+				const request = JSON.parse(await readFile(options.requestFile, "utf8"));
+				printResult(
+					options.repairOfExecutionDirectory && options.deploymentBranch
+						? await prepareLocalRedeploymentRepairContinuation(
+								directory,
+								request,
+								process.argv[1],
+								await assertPersistentExecutionDirectory(options.repairOfExecutionDirectory),
+								options.deploymentBranch,
+							)
+						: await prepareLocalRedeployment(directory, request, process.argv[1]),
+				);
+			},
+		);
 	for (const operation of ["start-redeployment", "cancel-redeployment", "observe-redeployment"] as const) {
 		program
 			.command(operation)
@@ -282,6 +303,10 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 					disposition,
 					deploymentExecutionId: executionId,
 					requestSha256,
+					nextAction:
+						error instanceof LocalRedeploymentQualityFailure
+							? "Agent 在原部署授权内修复并提交 deployment-repair 分支，通过 prepare-redeployment --repair-of-execution-directory 与 --deployment-branch 固定新候选继续部署；原失败保留，不跳过检查。"
+							: null,
 					error: String(error),
 					recovery:
 						disposition === "machine_evidence_pending"
@@ -328,10 +353,7 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 				printResult({
 					ok: false,
 					blockingFailure,
-					status:
-						error instanceof LocalRedeploymentQualityFailure || error instanceof LocalRedeploymentIdentityMismatch
-							? "quality_validation_failed"
-							: "machine_evidence_pending",
+					status: localRedeploymentStageCommandStatus(error),
 					error: String(error),
 				});
 				process.exitCode = 2;

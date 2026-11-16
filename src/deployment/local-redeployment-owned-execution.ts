@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { z } from "zod";
 import packageJson from "../../package.json";
 import {
 	collectKanbanCliInvocationEnvironmentActorClaims,
@@ -167,28 +168,63 @@ export async function startPreparedLocalRedeployment(directory: string) {
 				runtimeBaseline: baseline,
 				systemBootIdentity: await readSystemBootIdentity(),
 			});
-			const response = await (await getRuntimeFetch())(url, {
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-					"x-kanban-workspace-id": request.workspaceId,
-					[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME]:
-						encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
-							collectKanbanCliInvocationEnvironmentActorClaims({
-								environment: process.env,
-								invokingKanbanCliCodeVersion: packageJson.version,
-								invokingProcessWorkingDirectory: process.cwd(),
+			const sendRegistration = async (submittedSpecification: typeof specification) =>
+				(await getRuntimeFetch())(url, {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+						"x-kanban-workspace-id": request.workspaceId,
+						[KANBAN_CLI_INVOCATION_ENVIRONMENT_ACTOR_CLAIMS_REQUEST_HEADER_NAME]:
+							encodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(
+								collectKanbanCliInvocationEnvironmentActorClaims({
+									environment: process.env,
+									invokingKanbanCliCodeVersion: packageJson.version,
+									invokingProcessWorkingDirectory: process.cwd(),
+								}),
+							),
+					},
+					body: JSON.stringify({
+						taskId: request.taskId,
+						idempotencyKey,
+						specification: submittedSpecification,
+						expectedOwner: frozen.owner,
+					}),
+					signal: AbortSignal.timeout(20_000),
+				});
+			let response = await sendRegistration(specification);
+			if (response.status === 400 && specification.postProcessExitCleanupCommand) {
+				const rejection = await response.json();
+				let rejectsOnlyOptionalCleanup = false;
+				try {
+					const envelope = z.object({ error: z.object({ message: z.string() }) }).parse(rejection);
+					rejectsOnlyOptionalCleanup = z
+						.array(
+							z.object({
+								code: z.literal("unrecognized_keys"),
+								keys: z.tuple([z.literal("postProcessExitCleanupCommand")]),
 							}),
-						),
-				},
-				body: JSON.stringify({
-					taskId: request.taskId,
-					idempotencyKey,
-					specification,
-					expectedOwner: frozen.owner,
-				}),
-				signal: AbortSignal.timeout(20_000),
-			});
+						)
+						.length(1)
+						.safeParse(JSON.parse(envelope.error.message)).success;
+				} catch {
+					// 只有明确的 schema 拒绝才允许兼容重试，结果未知不另派发。
+				}
+				if (rejectsOnlyOptionalCleanup) {
+					const { postProcessExitCleanupCommand, ...compatibleSpecification } = specification;
+					await writeLocalRedeploymentJson(
+						join(directory, "online-registration-optional-cleanup-compatibility.json"),
+						{
+							requestSha256: frozen.requestSha256,
+							idempotencyKey,
+							rejection,
+							deferredCleanupCommand: postProcessExitCleanupCommand,
+						},
+					);
+					await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
+					assertLocalRedeploymentNotRevoked(directory);
+					response = await sendRegistration(compatibleSpecification);
+				}
+			}
 			if (!response.ok) throw new Error(`在线所属执行登记未确认：HTTP ${response.status}`);
 			return {
 				ok: true,
