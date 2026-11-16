@@ -6,9 +6,9 @@ import { loadavg } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-
 import { afterEach, describe, expect, it } from "vitest";
 import { runtimeCreationResolvedSettingsSchema } from "../../src/core/api-contract";
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
 
 import {
 	createIsolatedGitTestWorkspaceFixture,
@@ -466,6 +466,15 @@ async function startRuntimeServerForProject(options: {
 	gitFixture: IsolatedGitTestWorkspaceFixture;
 	port: string;
 }): Promise<ChildProcess> {
+	// 项目登记属于测试准备；普通启动不再隐式新增项目。
+	const previousHome = process.env.HOME;
+	process.env.HOME = options.gitFixture.isolatedHomeDirectoryPath;
+	try {
+		await loadWorkspaceContext(options.projectPath);
+	} finally {
+		if (previousHome === undefined) delete process.env.HOME;
+		else process.env.HOME = previousHome;
+	}
 	const env = createCliChildProcessEnvironmentWithPinnedTimeouts(options.gitFixture, {
 		KANBAN_RUNTIME_PORT: options.port,
 	});

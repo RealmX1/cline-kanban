@@ -110,6 +110,46 @@ export function claimTaskConversationSessionEvidenceProbe(
 	return true;
 }
 
+const appliedDuplicateProjectStopMigrationSchema = z.object({
+	operationId: z.string().min(1),
+	sourceWorkspaceId: z.string().min(1),
+});
+type AppliedDuplicateProjectStopMigration = z.infer<typeof appliedDuplicateProjectStopMigrationSchema>;
+type ExplicitStopMarkerDocument = {
+	sessionIds: string[];
+	appliedDuplicateProjectStopMigrations: AppliedDuplicateProjectStopMigration[];
+};
+// 旧文件仍是会话 ID 数组。只有记下“这次合并已经复制”时才写成对象，并且和名单同一次原子提交。
+const explicitStopMarkerDocumentSchema = z.union([
+	z.array(z.string()).transform(
+		(sessionIds): ExplicitStopMarkerDocument => ({
+			sessionIds,
+			appliedDuplicateProjectStopMigrations: [],
+		}),
+	),
+	z
+		.object({
+			schemaVersion: z.literal(1),
+			sessionIds: z.array(z.string()),
+			appliedDuplicateProjectStopMigrations: z.array(appliedDuplicateProjectStopMigrationSchema).default([]),
+		})
+		.transform(
+			(document): ExplicitStopMarkerDocument => ({
+				sessionIds: document.sessionIds,
+				appliedDuplicateProjectStopMigrations: document.appliedDuplicateProjectStopMigrations,
+			}),
+		),
+]);
+
+function explicitStopMarkerPayload(document: ExplicitStopMarkerDocument): unknown {
+	if (document.appliedDuplicateProjectStopMigrations.length === 0) return document.sessionIds;
+	return {
+		schemaVersion: 1,
+		sessionIds: document.sessionIds,
+		appliedDuplicateProjectStopMigrations: document.appliedDuplicateProjectStopMigrations,
+	};
+}
+
 export function createTaskConversationSessionOperationStore(
 	storageRootDirectoryPath = join(getRuntimeHomePath(), "task-conversation-session-operations"),
 ) {
@@ -121,14 +161,39 @@ export function createTaskConversationSessionOperationStore(
 			"explicit-session-stop-markers",
 			`${createHash("sha256").update(scope.workspaceId).digest("hex")}.json`,
 		);
-	const readExplicitStopMarkers = async (scope: TaskConversationSessionWorkspaceScope): Promise<string[] | null> => {
+	const readExplicitStopMarkerDocument = async (
+		scope: TaskConversationSessionWorkspaceScope,
+	): Promise<ExplicitStopMarkerDocument | null> => {
 		try {
-			return z.array(z.string()).parse(JSON.parse(await readFile(explicitStopMarkerPathForScope(scope), "utf8")));
+			return explicitStopMarkerDocumentSchema.parse(
+				JSON.parse(await readFile(explicitStopMarkerPathForScope(scope), "utf8")),
+			);
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 			throw error;
 		}
 	};
+	const readExplicitStopMarkers = async (scope: TaskConversationSessionWorkspaceScope): Promise<string[] | null> =>
+		(await readExplicitStopMarkerDocument(scope))?.sessionIds ?? null;
+	const writeExplicitStopMarkerDocument = async (
+		scope: TaskConversationSessionWorkspaceScope,
+		document: ExplicitStopMarkerDocument,
+	) => {
+		await lockedFileSystem.writeJsonFileAtomic(
+			explicitStopMarkerPathForScope(scope),
+			explicitStopMarkerPayload(document),
+			{
+				lock: null,
+				durable: true,
+				fileMode: 0o600,
+			},
+		);
+	};
+	const previousExplicitStopSessionIds = async (
+		scope: TaskConversationSessionWorkspaceScope,
+		previous: ExplicitStopMarkerDocument | null,
+	): Promise<string[]> =>
+		previous?.sessionIds ?? (await read(scope).catch(() => null))?.explicitlyStoppedSessionIds ?? [];
 	const updateExplicitStopMarkers = async (
 		scope: TaskConversationSessionWorkspaceScope,
 		update: (sessionIds: string[]) => string[],
@@ -136,14 +201,10 @@ export function createTaskConversationSessionOperationStore(
 		await mkdir(join(storageRootDirectoryPath, "explicit-session-stop-markers"), { recursive: true, mode: 0o700 });
 		await lockedFileSystem.withLock({ path: explicitStopMarkerPathForScope(scope) }, async () => {
 			// 操作记录损坏时，独立 Stop 标记仍须落盘；损坏的操作记录本身继续阻止自动执行。
-			const previousSessionIds =
-				(await readExplicitStopMarkers(scope)) ??
-				(await read(scope).catch(() => null))?.explicitlyStoppedSessionIds ??
-				[];
-			await lockedFileSystem.writeJsonFileAtomic(explicitStopMarkerPathForScope(scope), update(previousSessionIds), {
-				lock: null,
-				durable: true,
-				fileMode: 0o600,
+			const previous = await readExplicitStopMarkerDocument(scope);
+			await writeExplicitStopMarkerDocument(scope, {
+				sessionIds: update(await previousExplicitStopSessionIds(scope, previous)),
+				appliedDuplicateProjectStopMigrations: previous?.appliedDuplicateProjectStopMigrations ?? [],
 			});
 		});
 	};
@@ -181,6 +242,34 @@ export function createTaskConversationSessionOperationStore(
 			await updateExplicitStopMarkers(scope, (previousSessionIds) =>
 				previousSessionIds.filter((id) => id !== sessionId),
 			);
+		},
+		// 复制事实和目标名单同一次写入。已记录的合并即使名单随后被清空，也不能再次并集。
+		async migrateTransferredExplicitStopMarkers(
+			target: TaskConversationSessionWorkspaceScope,
+			migration: AppliedDuplicateProjectStopMigration,
+			sourceStoppedSessionIds: readonly string[],
+		) {
+			const parsedMigration = appliedDuplicateProjectStopMigrationSchema.parse(migration);
+			await mkdir(join(storageRootDirectoryPath, "explicit-session-stop-markers"), { recursive: true, mode: 0o700 });
+			await lockedFileSystem.withLock({ path: explicitStopMarkerPathForScope(target) }, async () => {
+				const previous = await readExplicitStopMarkerDocument(target);
+				const alreadyApplied = previous?.appliedDuplicateProjectStopMigrations.some(
+					(entry) =>
+						entry.operationId === parsedMigration.operationId &&
+						entry.sourceWorkspaceId === parsedMigration.sourceWorkspaceId,
+				);
+				if (alreadyApplied) return;
+				if (sourceStoppedSessionIds.length === 0 && previous === null) return;
+				await writeExplicitStopMarkerDocument(target, {
+					sessionIds: [
+						...new Set([...(await previousExplicitStopSessionIds(target, previous)), ...sourceStoppedSessionIds]),
+					],
+					appliedDuplicateProjectStopMigrations: [
+						...(previous?.appliedDuplicateProjectStopMigrations ?? []),
+						parsedMigration,
+					],
+				});
+			});
 		},
 		async update<T>(
 			scope: TaskConversationSessionWorkspaceScope,

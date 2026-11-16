@@ -2,9 +2,9 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-
 import type { RuntimeProjectTaskCounts } from "../../../src/core/api-contract";
 import { type CreateProjectsApiDependencies, createProjectsApi } from "../../../src/trpc/projects-api";
+import { KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE } from "../../utilities/task-mutation-intent-for-test-fixture";
 
 function createTestCwd(): string {
 	const base = join(tmpdir(), `kanban-test-dir-list-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
@@ -52,6 +52,15 @@ function createDefaultDeps(serverCwd: string): CreateProjectsApiDependencies {
 			runtimeSessionSummariesForSafePersistence: [],
 		})),
 		disposeProjectRuntime: vi.fn(async () => {}),
+		duplicateProjectConsolidationService: {
+			preview: vi.fn(async () => {
+				throw new Error("此用例不调用合并预览。");
+			}),
+			consolidate: vi.fn(async () => {
+				throw new Error("此用例不执行保全合并。");
+			}),
+			recoverPending: vi.fn(async () => {}),
+		},
 		warn: vi.fn(),
 		buildProjectsPayload: vi.fn(async () => ({ currentProjectId: null, projects: [] })),
 		pickDirectoryPathFromSystemDialog: vi.fn(() => null),
@@ -286,11 +295,33 @@ describe("addProject", () => {
 		rmSync(testCwd, { recursive: true, force: true });
 	});
 
+	it("非界面旧客户端缺授权时，在任何 clone 或 Git 初始化之前拒绝", async () => {
+		const deps = createDefaultDeps(testCwd);
+		const api = createProjectsApi(deps);
+		await expect(
+			api.addProject(
+				null,
+				{ gitUrl: "https://example.com/repo.git", initializeGit: true },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).rejects.toThrow("授权原话");
+		expect(deps.resolveProjectInputPath).not.toHaveBeenCalled();
+		expect(deps.assertPathIsDirectory).not.toHaveBeenCalled();
+		expect(deps.hasGitRepository).not.toHaveBeenCalled();
+	});
+
 	it("backward compat: accepts a path-only request", async () => {
 		const deps = createDefaultDeps(testCwd);
 		(deps.hasGitRepository as ReturnType<typeof vi.fn>).mockReturnValue(true);
 		const api = createProjectsApi(deps);
-		const result = await api.addProject(null, { path: testCwd });
+		const result = await api.addProject(
+			null,
+			{ path: testCwd },
+			{
+				...KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+				webUiPageLoadRequestOriginNonceVerificationStatus: "verified",
+			},
+		);
 		// The existing flow runs; we're verifying it doesn't throw on path-only input.
 		// Since loadWorkspaceContext is a real call that needs a git repo, the catch
 		// block will handle it. The important thing is no schema-level crash.
@@ -300,7 +331,13 @@ describe("addProject", () => {
 	it("rejects request with neither path nor gitUrl", async () => {
 		const deps = createDefaultDeps(testCwd);
 		const api = createProjectsApi(deps);
-		await expect(api.addProject(null, {})).rejects.toThrow();
+		await expect(
+			api.addProject(
+				null,
+				{},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+			),
+		).rejects.toThrow();
 	});
 
 	it("resolves clone destination relative to serverCwd, not the active project", async () => {
@@ -311,7 +348,14 @@ describe("addProject", () => {
 		const api = createProjectsApi(deps);
 		// The clone itself will fail (no real git server), but we can verify
 		// that resolveProjectInputPath was called with serverCwd as the base.
-		await api.addProject(null, { gitUrl: "https://example.com/repo.git", path: "my-new-proj" });
+		await api.addProject(
+			null,
+			{ gitUrl: "https://example.com/repo.git", path: "my-new-proj" },
+			{
+				...KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_WITHOUT_CLI_ACTOR_CLAIMS_HEADER_FOR_TEST_FIXTURE,
+				webUiPageLoadRequestOriginNonceVerificationStatus: "verified",
+			},
+		);
 		const resolveSpy = deps.resolveProjectInputPath as ReturnType<typeof vi.fn>;
 		expect(resolveSpy).toHaveBeenCalledWith("my-new-proj", testCwd);
 		// Crucially, it must NOT have been called with the active project path:

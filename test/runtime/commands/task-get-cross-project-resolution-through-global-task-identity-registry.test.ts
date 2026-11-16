@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDefaultAcpSummary } from "../../../src/acp-client-session/acp-session-state";
 import { registerTaskCommand } from "../../../src/commands/task";
 import { advanceAgentWorkProgress } from "../../../src/core/agent-work-progress";
+import { loadWorkspaceContext } from "../../../src/state/workspace-state";
 
 // `kanban task get` 在当前 project 找不到卡时，经 runtime 的全局 task 身份登记簿跨 project 解析（dd2db 1b）。
 // 唯一活卡候选却定位 / 读取不到时必须如实报错（说清候选在哪、为何读不到），绝不能误报「匹配多张卡」；
@@ -363,3 +364,8 @@ describe("kanban task get 的跨 project 解析", () => {
 		});
 	});
 });
+
+vi.mock("../../../src/state/registered-workspace-invocation-context", () => ({
+	resolveRegisteredWorkspaceInvocationContext: (path: string | undefined, cwd: string) =>
+		loadWorkspaceContext(path ?? cwd, { autoCreateIfMissing: false }),
+}));

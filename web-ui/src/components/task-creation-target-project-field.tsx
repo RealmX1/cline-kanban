@@ -1,5 +1,6 @@
 import type { ProjectVisualIdentity } from "@runtime-project-visual-identity";
 import type { ReactElement } from "react";
+import { taskEditorTargetProjectRepositoryPathSelectorAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { ProjectIcon } from "@/components/project-visual-identity";
 
 import { SearchSelectDropdown } from "@/components/search-select-dropdown";
@@ -11,6 +12,7 @@ export type TaskCreationTargetProjectField =
 			selectableProjects: ReadonlyArray<{
 				workspaceId: string;
 				projectName: string;
+				repositoryPath?: string;
 				visualIdentity?: ProjectVisualIdentity;
 			}>;
 			selectedTargetWorkspaceId: string | null;
@@ -29,13 +31,17 @@ export function TaskCreationTargetProjectFieldControl({
 	taskCreationTargetProjectField: TaskCreationTargetProjectField;
 }): ReactElement {
 	return (
-		<div data-testid="task-creation-target-project-field">
+		<div
+			data-testid="task-creation-target-project-field"
+			data-verification-anchor={taskEditorTargetProjectRepositoryPathSelectorAnchorKey()}
+		>
 			{taskCreationTargetProjectField.taskCreationTargetProjectFieldPresentation ===
 			"target_project_selectable_in_board_scope" ? (
 				<SearchSelectDropdown
 					options={taskCreationTargetProjectField.selectableProjects.map((project) => ({
 						value: project.workspaceId,
 						label: project.projectName,
+						description: project.repositoryPath ?? project.workspaceId,
 						icon: (
 							<ProjectIcon
 								workspaceId={project.workspaceId}

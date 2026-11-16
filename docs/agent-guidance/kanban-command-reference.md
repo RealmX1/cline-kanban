@@ -50,6 +50,8 @@ Peer 的选择依据是独立协作对话、用户可观察和可引导、共享
 
 ## 按需命令
 
+任务命令不得隐式新增项目。省略 `--project-path` 时优先使用会话绑定的已登记主仓；新增必须先 `project preview-add --path <路径>`，再 `project add --request-file <持久JSON>`，包含规范路径、预览指纹及用户授权原话和来源。不得把工具报错或工作树路径当作新增授权。重复项目保全合并见 `docs/duplicate-project-registration-and-task-preserving-consolidation.md`。
+
 - 查询：本任务用 `task get-current-task`；列表用 `task list --project-path <主仓库> [--column <列>]`；其他已知 ID 用 `task get --task-id <id> --project-path <主仓库>`。跨项目可按 ID 查询，标题不作身份。
 - 创建：`task create --title "[FIX,UI]具体结果" --prompt "完整需求" --project-path <主仓库> --start-in-plan-mode false [--preview]`。必须显式传 `--start-in-plan-mode true` 或 `--start-in-plan-mode false`，遗漏时不会创建任务；CLI 不读取界面的 Plan 偏好。先读本目录的 `task-authoring-and-startup-settings.md`。preview 不创建任务；实际 resolvedSettings 给出 base ref、Agent、权限、worktree 与 Plan 及来源。权限、模型等仅在确需覆盖时传递；可用 `--expect-resolved-settings-fingerprint` 绑定预览。
 - 编辑/启动：`task update --task-id <id> ...`、`task start --task-id <id>`。名称表达稳定目标；`task rename-current-task --title "新名称" --reason "范围依据"` 仅在核对原始需求后使用。

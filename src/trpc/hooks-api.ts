@@ -40,6 +40,7 @@ import {
 } from "../state/agent-raised-pending-user-decision-store";
 import { captureTaskMainSessionHandoverReportNativeIdentity } from "../state/capture-task-main-session-handover-report-native-identity";
 import { confirmTaskMainSessionHandoverInputAfterCorrelatedProcessingHooks } from "../state/confirm-task-main-session-handover-input-after-correlated-processing-hooks";
+import { assertWorkspaceHasNotBeenConsolidated } from "../state/duplicate-project-consolidation-status";
 import type {
 	RecoverableHookReviewLifecycleApplication,
 	RecoverableHookReviewLifecycleApplicationBoundary,
@@ -281,6 +282,7 @@ export function createHooksApi(deps: CreateHooksApiDependencies): RuntimeTrpcCon
 					}
 				}
 			}
+			await assertWorkspaceHasNotBeenConsolidated(workspaceId);
 			const knownWorkspacePath = deps.getWorkspacePathById(workspaceId);
 			const workspaceContext = knownWorkspacePath
 				? null

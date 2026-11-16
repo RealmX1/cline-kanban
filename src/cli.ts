@@ -11,6 +11,7 @@ import { registerDeploymentCommand } from "./commands/deployment";
 import { registerDiagnosticsCommand } from "./commands/diagnostics";
 import { registerExploratoryCommand } from "./commands/exploratory";
 import { registerHooksCommand } from "./commands/hooks";
+import { registerProjectCommand } from "./commands/project";
 import { registerRuntimeCommand } from "./commands/runtime";
 import { registerSupportCommand } from "./commands/support";
 import { registerTaskCommand } from "./commands/task";
@@ -61,6 +62,7 @@ import { disablePasscode, generateInternalToken, generatePasscode } from "./secu
 import { terminateProcessForTimeout } from "./server/process-termination";
 import type { RuntimeExitRequestHandler } from "./server/runtime-server";
 import type { RuntimeStateHub } from "./server/runtime-state-hub";
+import { resolveRegisteredWorkspaceInvocationContext } from "./state/registered-workspace-invocation-context";
 import { getRuntimeHomePath } from "./state/runtime-home-path";
 import { captureNodeException, flushNodeTelemetry } from "./telemetry/sentry-node.js";
 import type { TerminalSessionManager } from "./terminal/session-manager";
@@ -314,13 +316,12 @@ async function canReachKanbanServer(workspaceId: string | null): Promise<boolean
 }
 
 async function tryOpenExistingServer(options: { noOpen: boolean; shouldAutoOpenBrowser: boolean }): Promise<boolean> {
-	// 先识别服务，再读取或登记 cwd；重复启动不进入运行时初始化。
+	// 重复启动只选择已登记项目，不能把任务 worktree 注册为新项目。
 	if (!(await canReachKanbanServer(null))) return false;
 	let workspaceId: string | null = null;
 	if (hasGitRepository(process.cwd())) {
-		const { loadWorkspaceContext } = await import("./state/workspace-state.js");
-		const context = await loadWorkspaceContext(process.cwd());
-		workspaceId = context.workspaceId;
+		const context = await resolveRegisteredWorkspaceInvocationContext(undefined, process.cwd()).catch(() => null);
+		workspaceId = context?.workspaceId ?? null;
 	}
 	const projectUrl = workspaceId
 		? buildKanbanRuntimeUrl(`/${encodeURIComponent(workspaceId)}`)
@@ -947,6 +948,7 @@ function createProgram(invocationArgs: string[]): Command {
 	);
 
 	registerTaskCommand(program);
+	registerProjectCommand(program);
 	registerSupportCommand(program);
 	registerWorkUnitCommand(program);
 	registerHooksCommand(program);

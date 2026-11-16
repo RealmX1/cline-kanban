@@ -18,6 +18,7 @@ import {
 	resolveSessionFacets,
 } from "../core/session-activity";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "./duplicate-project-consolidation-status";
 
 const DEFAULT_RUNTIME_PROCESS_INSTANCE_OBSERVATION_ID = randomUUID();
 
@@ -207,6 +208,7 @@ export class RecoverableHookReviewLifecycleEventDeliveries {
 	private async mutate<T>(workspaceId: string, mutation: (file: DeliveryFile) => T): Promise<T> {
 		const path = this.options.getWorkspaceDeliveryFilePath(workspaceId);
 		return await lockedFileSystem.withLock({ path }, async () => {
+			await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
 			const file = await this.readFile(workspaceId);
 			const result = mutation(file);
 			await lockedFileSystem.writeJsonFileAtomic(path, file, { lock: null, durable: true, fileMode: 0o600 });

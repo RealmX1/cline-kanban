@@ -13,6 +13,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "./duplicate-project-consolidation-status";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath } from "./workspace-state";
 
 const TASK_LAST_OPENED_BY_USER_RECORD_FILENAME = "task-last-opened-by-user-records.json";
@@ -63,7 +64,11 @@ const writeQueueByWorkspaceId = new Map<string, Promise<unknown>>();
 
 function enqueueWrite<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
 	const previous = writeQueueByWorkspaceId.get(workspaceId) ?? Promise.resolve();
-	const next = previous.then(operation, operation);
+	const guardedOperation = async () => {
+		await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
+		return operation();
+	};
+	const next = previous.then(guardedOperation, guardedOperation);
 	writeQueueByWorkspaceId.set(
 		workspaceId,
 		next.catch(() => undefined),
@@ -135,4 +140,47 @@ export async function recordTaskLastOpenedByUser(
 // 测试与 workspace 删除用：丢掉内存缓存，下次从盘重读。
 export function forgetCachedTaskLastOpenedByUserRecords(workspaceId: string): void {
 	cachedRecordsByWorkspaceId.delete(workspaceId);
+}
+
+export function withTaskLastOpenedByUserRecordWritesPaused<T>(
+	workspaceIds: string[],
+	action: () => Promise<T>,
+): Promise<T> {
+	const [first, ...rest] = workspaceIds;
+	if (!first) return action();
+	const previous = writeQueueByWorkspaceId.get(first) ?? Promise.resolve();
+	const next = previous.then(
+		() => withTaskLastOpenedByUserRecordWritesPaused(rest, action),
+		() => withTaskLastOpenedByUserRecordWritesPaused(rest, action),
+	);
+	writeQueueByWorkspaceId.set(
+		first,
+		next.catch(() => undefined),
+	);
+	return next;
+}
+
+export async function mergeTransferredTaskLastOpenedByUserRecordsWithinPausedWrites(
+	workspaceId: string,
+	sourceSnapshotText: string,
+): Promise<void> {
+	const incoming = persistedTaskLastOpenedByUserRecordFileSchema.parse(JSON.parse(sourceSnapshotText));
+	const path = getTaskLastOpenedByUserRecordPath(workspaceId);
+	await lockedFileSystem.withLock({ path, type: "file" }, async () => {
+		const records = await readTaskLastOpenedByUserRecordsFromDisk(workspaceId, true);
+		for (const [taskId, openedAt] of Object.entries(incoming))
+			records.set(taskId, Math.max(records.get(taskId) ?? openedAt, openedAt));
+		const retained = new Map(
+			[...records]
+				.sort((left, right) => right[1] - left[1])
+				.slice(0, MAX_TASK_LAST_OPENED_BY_USER_RECORDS_PER_WORKSPACE),
+		);
+		await lockedFileSystem.writeJsonFileAtomic(path, Object.fromEntries(retained), {
+			lock: null,
+			durable: true,
+			fileMode: 0o600,
+		});
+		await pendingDiskReadsByWorkspaceId.get(workspaceId);
+		cachedRecordsByWorkspaceId.set(workspaceId, retained);
+	});
 }

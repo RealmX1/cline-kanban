@@ -13,6 +13,7 @@ import {
 } from "../../../src/core/api-contract";
 import { readTaskMessageInjectionLedger } from "../../../src/core/task-message-injection-ledger";
 import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../../src/state/queued-task-prompt-delivery-store";
+import { loadWorkspaceContext } from "../../../src/state/workspace-state";
 import { enqueueAgentIdleGatedProgrammaticTaskChatMessage } from "../../../src/trpc/agent-idle-gated-programmatic-task-chat-message-enqueue";
 
 const harness = vi.hoisted(() => ({
@@ -269,3 +270,8 @@ describe("task message 的卡片与会话精确绑定", () => {
 		]);
 	});
 });
+
+vi.mock("../../../src/state/registered-workspace-invocation-context", () => ({
+	resolveRegisteredWorkspaceInvocationContext: (path: string | undefined, cwd: string) =>
+		loadWorkspaceContext(path ?? cwd, { autoCreateIfMissing: false }),
+}));

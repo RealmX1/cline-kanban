@@ -29,6 +29,7 @@ import {
 	runtimeAgentSessionTransportSchema,
 } from "../core/api-contract";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { assertWorkspaceBackgroundStateWritesAreAllowed } from "./duplicate-project-consolidation-status";
 import { getWorkspaceDirectoryPath, getWorkspacesRootPath, listWorkspaceIndexEntries } from "./workspace-state";
 
 const AGENT_RAISED_PENDING_USER_DECISION_FILENAME = "agent-raised-pending-user-decisions.json";
@@ -225,7 +226,10 @@ function getAgentRaisedPendingUserDecisionPath(workspaceId: string): string {
 	return join(workspaceDirectory, AGENT_RAISED_PENDING_USER_DECISION_FILENAME);
 }
 
-async function readRawDecisions(workspaceId: string): Promise<PersistedAgentRaisedPendingUserDecision[]> {
+async function readRawDecisions(
+	workspaceId: string,
+	requireCompleteRead = false,
+): Promise<PersistedAgentRaisedPendingUserDecision[]> {
 	const path = getAgentRaisedPendingUserDecisionPath(workspaceId);
 	let raw: string;
 	try {
@@ -239,12 +243,14 @@ async function readRawDecisions(workspaceId: string): Promise<PersistedAgentRais
 	let parsedJson: unknown;
 	try {
 		parsedJson = JSON.parse(raw) as unknown;
-	} catch {
+	} catch (error) {
+		if (requireCompleteRead) throw error;
 		// 损坏容错：不让一份坏文件炸掉整个快照构建。代价是那些待答问题不再被重现（与「重复投递
 		// 一个已答问题」相比，这是更安全的失败方向）。
 		return [];
 	}
 	const parsed = persistedAgentRaisedPendingUserDecisionFileSchema.safeParse(parsedJson);
+	if (requireCompleteRead && !parsed.success) throw parsed.error;
 	return parsed.success ? parsed.data : [];
 }
 
@@ -258,7 +264,11 @@ const writeQueueByWorkspaceId = new Map<string, Promise<unknown>>();
 
 function enqueueWrite<T>(workspaceId: string, operation: () => Promise<T>): Promise<T> {
 	const previous = writeQueueByWorkspaceId.get(workspaceId) ?? Promise.resolve();
-	const next = previous.then(operation, operation);
+	const guardedOperation = async () => {
+		await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
+		return operation();
+	};
+	const next = previous.then(guardedOperation, guardedOperation);
 	writeQueueByWorkspaceId.set(
 		workspaceId,
 		next.catch(() => undefined),
@@ -826,5 +836,49 @@ export async function supersedeEarlierCodexUserQuestionsFromTranscript(
 					: record,
 		);
 		if (next.some((record, index) => record !== records[index])) await writeDecisions(workspaceId, next);
+	});
+}
+
+export function withAgentRaisedPendingUserDecisionWritesPaused<T>(
+	workspaceIds: string[],
+	action: () => Promise<T>,
+): Promise<T> {
+	const [first, ...rest] = workspaceIds;
+	if (!first) return action();
+	const previous = writeQueueByWorkspaceId.get(first) ?? Promise.resolve();
+	const next = previous.then(
+		() => withAgentRaisedPendingUserDecisionWritesPaused(rest, action),
+		() => withAgentRaisedPendingUserDecisionWritesPaused(rest, action),
+	);
+	writeQueueByWorkspaceId.set(
+		first,
+		next.catch(() => undefined),
+	);
+	return next;
+}
+
+export async function mergeTransferredAgentRaisedPendingUserDecisionsWithinPausedWrites(
+	workspaceId: string,
+	sourceSnapshotText: string,
+): Promise<void> {
+	const incoming = persistedAgentRaisedPendingUserDecisionFileSchema.parse(JSON.parse(sourceSnapshotText));
+	const path = getAgentRaisedPendingUserDecisionPath(workspaceId);
+	await lockedFileSystem.withLock({ path, type: "file" }, async () => {
+		const merged = await readRawDecisions(workspaceId, true);
+		for (const original of incoming) {
+			const previous = merged.find((entry) => entry.decisionId === original.decisionId);
+			if (
+				previous &&
+				(previous.taskId !== original.taskId ||
+					previous.nativeConversationSessionId !== original.nativeConversationSessionId)
+			)
+				throw new Error("待答问题身份不一致，未覆盖答案。");
+			if (!previous) merged.push({ ...original, workspaceId });
+		}
+		await lockedFileSystem.writeJsonFileAtomic(path, capDecisions(merged), {
+			lock: null,
+			durable: true,
+			fileMode: 0o600,
+		});
 	});
 }

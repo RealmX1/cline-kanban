@@ -188,6 +188,7 @@ import { createAgentSessionInactivityReclamationScheduler } from "./agent-sessio
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
+import { createDuplicateProjectConsolidationService } from "./duplicate-project-consolidation";
 import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
 import { withCompressedHttpResponses } from "./http-response-compression";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
@@ -806,6 +807,65 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				: {}),
 		});
 	};
+	const disposeProjectRuntime = async (workspaceId: string) => {
+		const disposalFailureMessages: string[] = [];
+		try {
+			disposeAcpTaskSessionService(workspaceId);
+		} catch (error) {
+			disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
+		}
+		try {
+			deps.disposeWorkspace(workspaceId, { stopTerminalSessions: false });
+		} catch (error) {
+			disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
+		}
+		if (disposalFailureMessages.length > 0) {
+			throw new Error(disposalFailureMessages.join(" "));
+		}
+	};
+	const confirmLoadedProjectRuntimeSessionsHaveExited = async (workspaceId: string) => {
+		const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId);
+		if (!terminalManager) return;
+		for (const summary of terminalManager.listSummaries()) {
+			const confirmed = await terminalManager.stopTaskSessionAndConfirmExit(summary.taskId);
+			if (confirmed.processExitConfirmed) continue;
+			if (typeof summary.pid === "number") {
+				try {
+					process.kill(summary.pid, 0);
+				} catch (error) {
+					if (error && typeof error === "object" && "code" in error && error.code === "ESRCH") continue;
+					throw error;
+				}
+				throw new Error(`来源进程 ${summary.pid} 仍存在，不能迁移。`);
+			}
+			const liveness = resolveSessionFacets(summary).liveness;
+			if (liveness === "starting" || liveness === "live" || liveness === "retrying")
+				throw new Error("来源项目的会话尚未确证停止。");
+		}
+	};
+	const hydrateTransferredTaskSessions = async (
+		workspaceId: string,
+		repoPath: string,
+		sessions: Record<string, RuntimeTaskSessionSummary>,
+	) => {
+		const manager = await deps.ensureTerminalManagerForWorkspace(workspaceId, repoPath);
+		manager.hydrateFromRecord(Object.fromEntries(Object.entries(sessions).filter(([id]) => !manager.getSummary(id))));
+	};
+	const duplicateProjectConsolidationService = createDuplicateProjectConsolidationService({
+		runtimeProcessInstanceId: runtimeProcessInstanceHeartbeat.runtimeProcessInstanceId,
+		getActiveWorkspaceId: deps.workspaceRegistry.getActiveWorkspaceId,
+		setActiveWorkspace: deps.workspaceRegistry.setActiveWorkspace,
+		listProjectRuntimeSessionSummaries,
+		stopAndCollectProjectRuntimeSessionsForSafePersistence,
+		confirmLoadedProjectRuntimeSessionsHaveExited,
+		disposeProjectRuntime,
+		hydrateTransferredTaskSessions,
+		observeTransferredTaskSessionHydrationGate: (workspaceId) => ({
+			terminalManagerLoaded: deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId) !== null,
+		}),
+		broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
+		warn: deps.warn,
+	});
 	const stopAllActiveRuntimeSessionsForShutdown = async (
 		hostedAgentSessionDisposition: HostedAgentSessionDispositionForRuntimeShutdown,
 	) => {
@@ -1184,11 +1244,16 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	deps.agentSessionPtyHostHookSpool?.bindSpooledHookIngestRequestApplier((spooledHookIngestRequest) =>
 		hooksApiForHookEventsSpooledInAgentSessionPtyHost.ingest(spooledHookIngestRequest as RuntimeHookIngestRequest),
 	);
-	let recoveringHookReviewLifecycleEvents = false;
-	const recoverPendingHookReviewLifecycleEvents = async () => {
-		if (recoveringHookReviewLifecycleEvents) return;
-		recoveringHookReviewLifecycleEvents = true;
+	let recoveringWorkspaceLifecycleOperations = false;
+	const recoverPendingWorkspaceLifecycleOperations = async () => {
+		if (recoveringWorkspaceLifecycleOperations) return;
+		recoveringWorkspaceLifecycleOperations = true;
 		try {
+			try {
+				await duplicateProjectConsolidationService.recoverPending();
+			} catch (error) {
+				deps.warn(`重复项目合并恢复保留待查状态：${error instanceof Error ? error.message : String(error)}`);
+			}
 			for (const workspace of await listWorkspaceIndexEntries()) {
 				try {
 					await recoverableHookReviewLifecycleEventDeliveries.reconcileWorkspace(
@@ -1233,12 +1298,15 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		} catch (error) {
 			deps.warn(`生命周期事件恢复保留待查状态：${error instanceof Error ? error.message : String(error)}`);
 		} finally {
-			recoveringHookReviewLifecycleEvents = false;
+			recoveringWorkspaceLifecycleOperations = false;
 		}
 	};
-	const hookReviewLifecycleRecoveryTimer = setInterval(() => void recoverPendingHookReviewLifecycleEvents(), 15_000);
-	hookReviewLifecycleRecoveryTimer.unref();
-	void recoverPendingHookReviewLifecycleEvents();
+	const workspaceLifecycleOperationRecoveryTimer = setInterval(
+		() => void recoverPendingWorkspaceLifecycleOperations(),
+		15_000,
+	);
+	workspaceLifecycleOperationRecoveryTimer.unref();
+	void recoverPendingWorkspaceLifecycleOperations();
 
 	let pauseAutomaticMainSessionHandoverForStoppedTask:
 		| ((workspaceId: string, taskId: string) => Promise<void>)
@@ -1891,22 +1959,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				broadcastRuntimeProjectsUpdated: deps.runtimeStateHub.broadcastRuntimeProjectsUpdated,
 				listProjectRuntimeSessionSummaries,
 				stopAndCollectProjectRuntimeSessionsForSafePersistence,
-				disposeProjectRuntime: async (workspaceId) => {
-					const disposalFailureMessages: string[] = [];
-					try {
-						disposeAcpTaskSessionService(workspaceId);
-					} catch (error) {
-						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
-					}
-					try {
-						deps.disposeWorkspace(workspaceId, { stopTerminalSessions: false });
-					} catch (error) {
-						disposalFailureMessages.push(error instanceof Error ? error.message : String(error));
-					}
-					if (disposalFailureMessages.length > 0) {
-						throw new Error(disposalFailureMessages.join(" "));
-					}
-				},
+				disposeProjectRuntime,
+				duplicateProjectConsolidationService,
 				warn: deps.warn,
 				buildProjectsPayload: deps.workspaceRegistry.buildProjectsPayload,
 				getAllProjectsTaskGroupQuerySnapshot: deps.workspaceRegistry.getAllProjectsTaskGroupQuerySnapshot,
@@ -2353,7 +2407,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		return httpServerStoppedAcceptingConnections;
 	};
 	const stopStartingNewBackgroundWork = (preserveAlreadyStartedQueueDispatches = false) => {
-		clearInterval(hookReviewLifecycleRecoveryTimer);
+		clearInterval(workspaceLifecycleOperationRecoveryTimer);
 		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
 		agentSessionInactivityReclamationScheduler.stop();

@@ -25,6 +25,12 @@ import {
 	parseProjectPermanentDeletionRequest,
 } from "../core/api-validation";
 import { CROSS_PROJECT_TASK_SWITCHER_EXTENDED_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
+import { lockedFileSystem } from "../fs/locked-file-system";
+import { resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence } from "../inter-work-unit-relation-ledger/kanban-actor-resolution-lookups-backed-by-workspace-state-files";
+import {
+	authorizeExplicitProjectRegistration,
+	previewExplicitProjectRegistration,
+} from "../projects/explicit-project-registration";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import type { ActiveRuntimeSessionShutdownResult } from "../server/active-runtime-session-shutdown";
 import {
@@ -33,6 +39,12 @@ import {
 	projectAllProjectsTaskSearchIndex,
 } from "../server/all-projects-task-search-index-projection";
 import { createConfirmedProjectPermanentDeletionService } from "../server/confirmed-project-permanent-deletion";
+import type { DuplicateProjectConsolidationService } from "../server/duplicate-project-consolidation";
+import {
+	assertProjectIsNotInPendingConsolidation,
+	assertWorkspaceHasNotBeenConsolidated,
+	duplicateProjectConsolidationDirectory,
+} from "../state/duplicate-project-consolidation-status";
 import { projectVisualIdentityStore } from "../state/project-visual-identity-store";
 import { recordTaskLastOpenedByUser } from "../state/task-last-opened-by-user-record-store";
 import { loadWorkspaceAgentConversationProgressAndOwnershipSnapshot } from "../state/workspace-agent-conversation-progress-observed-at-reader";
@@ -71,6 +83,7 @@ export interface CreateProjectsApiDependencies {
 		workspaceId: string,
 	) => Promise<ActiveRuntimeSessionShutdownResult>;
 	disposeProjectRuntime: (workspaceId: string) => Promise<void>;
+	duplicateProjectConsolidationService: DuplicateProjectConsolidationService;
 	warn: (message: string) => void;
 	buildProjectsPayload: (preferredCurrentProjectId: string | null) => Promise<{
 		currentProjectId: string | null;
@@ -112,6 +125,7 @@ const workspaceBoardLoadConcurrencyLimiter = pLimit(WORKSPACE_BOARD_LOAD_CONCURR
 
 export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeTrpcContext["projectsApi"] {
 	const filesystemRoot = resolve(deps.serverCwd, "/");
+	const consolidation = deps.duplicateProjectConsolidationService;
 	const confirmedProjectPermanentDeletionService = createConfirmedProjectPermanentDeletionService({
 		getActiveWorkspaceId: deps.getActiveWorkspaceId,
 		setActiveWorkspace: deps.setActiveWorkspace,
@@ -125,13 +139,24 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 	});
 
 	return {
+		previewDuplicateProjectConsolidation: consolidation.preview,
+		consolidateDuplicateProject: async (input, evidence) =>
+			consolidation.consolidate(
+				input,
+				await resolveTaskMutationIntentFromKanbanRequestOriginActorEvidence({
+					taskMutationIntentKind: "duplicate_project_consolidated",
+					kanbanRequestOriginActorEvidence: evidence,
+				}),
+			),
 		getAllProjectsTaskGroupQuerySnapshot: (input) => deps.getAllProjectsTaskGroupQuerySnapshot(input),
 		setProjectVisualIdentity: async (input) => {
+			await assertWorkspaceHasNotBeenConsolidated(input.workspaceId);
 			const identity = await projectVisualIdentityStore.save(input);
 			await deps.broadcastRuntimeProjectsUpdated(null);
 			return identity;
 		},
 		resetProjectVisualIdentityToDefault: async (input) => {
+			await assertWorkspaceHasNotBeenConsolidated(input.workspaceId);
 			const project = (await listWorkspaceIndexEntries()).find((entry) => entry.workspaceId === input.workspaceId);
 			if (!project) throw new Error("项目未注册或已删除");
 			const identity = await projectVisualIdentityStore.reset(
@@ -149,8 +174,11 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 				projects: payload.projects,
 			};
 		},
-		addProject: async (preferredWorkspaceId, input) => {
+		previewProjectAdd: async (input) =>
+			previewExplicitProjectRegistration(deps.resolveProjectInputPath(input.path, deps.serverCwd)),
+		addProject: async (preferredWorkspaceId, input, evidence) => {
 			const body = parseProjectAddRequest(input);
+			const authorizationAudit = await authorizeExplicitProjectRegistration(body, evidence);
 			const preferredWorkspaceContext = preferredWorkspaceId
 				? await loadWorkspaceContextById(preferredWorkspaceId)
 				: null;
@@ -207,6 +235,17 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 					}
 				}
 				const context = await loadWorkspaceContext(projectPath);
+				if (authorizationAudit)
+					await lockedFileSystem.writeJsonFileAtomic(
+						authorizationAudit.auditPath,
+						{
+							...authorizationAudit.audit,
+							status: "registered",
+							workspaceId: context.workspaceId,
+							registeredAt: Date.now(),
+						},
+						{ durable: true, fileMode: 0o600 },
+					);
 				deps.rememberWorkspace(context.workspaceId, context.repoPath);
 				const projectsAfterAdd = await listWorkspaceIndexEntries();
 				const activeWorkspaceId = deps.getActiveWorkspaceId();
@@ -247,7 +286,13 @@ export function createProjectsApi(deps: CreateProjectsApiDependencies): RuntimeT
 		},
 		permanentlyDeleteProjectData: async (_preferredWorkspaceId, input) => {
 			const body = parseProjectPermanentDeletionRequest(input);
-			return await confirmedProjectPermanentDeletionService.permanentlyDeleteProjectData(body);
+			return lockedFileSystem.withLock(
+				{ path: duplicateProjectConsolidationDirectory(), type: "directory" },
+				async () => {
+					await assertProjectIsNotInPendingConsolidation(body.projectId);
+					return confirmedProjectPermanentDeletionService.permanentlyDeleteProjectData(body);
+				},
+			);
 		},
 		pickProjectDirectory: async () => {
 			try {

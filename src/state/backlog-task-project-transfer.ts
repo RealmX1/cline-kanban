@@ -13,6 +13,7 @@ import {
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { readTaskIndexingSupportJsonFile } from "../task-indexing-support/task-indexing-support-storage";
+import { hasRemovedTaskFromDuplicateProjectConsolidation } from "./duplicate-project-consolidation-status";
 import { getRuntimeHomePath } from "./runtime-home-path";
 import type { TaskMutationIntentWithResolvedActor } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import {
@@ -195,6 +196,7 @@ export async function hasBoardSnapshotRemovedTaskTransferredIntoWorkspace(
 		.flatMap((column) => column.cards)
 		.filter((card) => !nextIdentities.has(`${card.id}:${card.createdAt}`));
 	if (!removedCards.length) return false;
+	if (await hasRemovedTaskFromDuplicateProjectConsolidation(workspaceId, removedCards)) return true;
 	const receipts = await readBacklogTaskProjectTransferReceipts();
 	return removedCards.some((card) => {
 		const latest = receipts

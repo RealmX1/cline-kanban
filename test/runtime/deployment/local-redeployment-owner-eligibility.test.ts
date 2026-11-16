@@ -31,6 +31,7 @@ beforeEach(() => {
 		read: readOperations,
 		recordExplicitStopMarkers: vi.fn(),
 		clearExplicitStopMarker: vi.fn(),
+		migrateTransferredExplicitStopMarkers: vi.fn(),
 		update: vi.fn(),
 		listScopes: vi.fn(),
 	});
