@@ -14,6 +14,7 @@ import {
 import { getKanbanRuntimeOrigin } from "../core/runtime-endpoint";
 import { logTuiFreezeWarning } from "../diagnostics/tui-freeze-logger";
 import { handleSocketUpgrade } from "../server/middleware";
+import { RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS } from "../server/runtime-websocket-compression-options";
 import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
 import type { TerminalSessionService } from "./terminal-session-service";
 
@@ -22,6 +23,7 @@ interface TerminalWebSocketConnectionContext {
 	workspaceId: string;
 	clientId: string;
 	terminalManager: TerminalSessionService;
+	chunkedRestoreSupported: boolean;
 }
 
 interface UpgradeRequest extends IncomingMessage {
@@ -73,6 +75,13 @@ interface TerminalViewerState {
 	clientId: string;
 	outputDemand: "continuous_output" | "awaiting_restore_snapshot" | "paused_output";
 	restoreRequestSequenceNumber: number;
+	restoreOutputVersion: number;
+	restoreStartedAtMs: number;
+	restoreSnapshotByteLength: number;
+	restoreChunkCount: number;
+	restoreTransmissionComplete: boolean;
+	receivedRestoreChunkCount: number;
+	parsedRestoreByteLength: number;
 	pendingOutputChunks: Buffer[];
 	pendingOutputByteLength: number;
 	restoreComplete: boolean;
@@ -84,8 +93,8 @@ interface TerminalViewerState {
 	appendPendingOutput: (chunk: Buffer) => void;
 	resetPendingOutput: () => void;
 	flushPendingOutput: () => void;
-	/** 强开 restore 闸门并把扣住的输出放出去。兜底超时与缓冲溢出共用这一条出口。 */
-	releaseRestoreHandshakeGate: (releaseReason: "handshake-timeout" | "pending-buffer-overflow") => void;
+	evictUnrestoredViewer: (reason: string) => void;
+	renewRestoreProgressDeadline: () => void;
 	clearRestoreHandshakeCompletionTimeoutTimer: () => void;
 }
 
@@ -113,10 +122,11 @@ const LOW_LATENCY_IDLE_WINDOW_MS = 5;
 // 分帧后客户端逐帧解析/逐帧 ack,未确认字节平滑收敛。取值与 OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES
 // 对齐:单帧不会仅凭 ws.bufferedAmount 一项瞬时越过 socket 高水位。
 const OUTPUT_FRAME_MAX_BYTES = 16 * 1024;
-const OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES = 16 * 1024;
-const OUTPUT_BUFFER_LOW_WATER_MARK_BYTES = Math.floor(OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES / 4);
-const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 100_000;
-const OUTPUT_ACK_LOW_WATER_MARK_BYTES = 5_000;
+// EXPERIMENT_NODE: 以冻结语料的远程延迟、暂停占比和内存测量持续校准有界发送窗口。
+const OUTPUT_BUFFER_HIGH_WATER_MARK_BYTES = 256 * 1024;
+const OUTPUT_BUFFER_LOW_WATER_MARK_BYTES = 64 * 1024;
+const OUTPUT_ACK_HIGH_WATER_MARK_BYTES = 400_000;
+const OUTPUT_ACK_LOW_WATER_MARK_BYTES = 200_000;
 const OUTPUT_RESUME_CHECK_INTERVAL_MS = 16;
 // [tui-freeze] 诊断:PTY 被 ack 背压暂停期间,新按键的 shell 回显完全停产——用户体感即
 // 「键盘输入冻结」。暂停超过该阈值才打日志,短暂正常流控不刷屏。
@@ -126,15 +136,12 @@ const OUTPUT_BACKPRESSURE_PAUSE_WARN_THRESHOLD_MS = 200;
 // 高水位之上,共享 PTY 于是被这一个 viewer 永久按住,其他标签页跟着一起哑。超过这个时长就直接把这条
 // viewer 逐出(terminate → close → ioState.dispose → resume),宁可断一个人,不能拖死一条 PTY。
 const MAX_OUTPUT_BACKPRESSURE_PAUSE_BEFORE_EVICTING_VIEWER_MS = 30_000;
-// restore 握手的服务端兜底超时。restoreComplete 为 false 期间,这条 viewer 的实时输出**一个字节都不上线**
-// (全进 pendingOutputChunks),而解锁的唯一途径是客户端回 restore_complete。客户端那边卡住(写队列死锁、
-// 控制帧丢失)就没有任何东西能把闸门放开:屏幕 100% 静止,却因为一个字节都没发出去而**永不触发背压**、
-// PTY 照跑、lastOutputAt 照刷,看板卡片仍显示「agent 在算」——正是最难判读的那种冻结。
-// 到点强开闸门 + flush:宁可让屏幕从一份过期状态续写,也不能让 viewer 永久失聪。
+// 只有有效接收或解析进展才能续期；停滞或总期限耗尽就淘汰观看连接，不能在未知屏幕上续写。
 const RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS = 10_000;
-// restore 握手期间每个 viewer 能扣住的输出上限。原本无上限——一条永不回 restore_complete 的 viewer
-// 会让服务端 RSS 随 PTY 输出单调增长。溢出即强开闸门;闸门开了仍下不去(io socket 根本没连上)就从队首
-// 丢最旧的。丢弃是有据的降级:服务端 mirror 持完整 scrollback,下一份 restore 快照会把丢掉的内容带回来。
+const RESTORE_HANDSHAKE_TOTAL_TIMEOUT_MS = 60_000;
+const RESTORE_SNAPSHOT_CHUNK_MAXIMUM_UTF8_BYTES = 64 * 1024;
+const RESTORE_SNAPSHOT_MAXIMUM_UTF8_BYTES = 64 * 1024 * 1024;
+// 溢出只淘汰观看连接；Agent 和权威 mirror 继续运行，重连必须重新握手。
 const MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE = 4 * 1024 * 1024;
 // WebSocket 心跳。半开连接(睡眠唤醒、NAT 空闲超时、中间盒静默丢弃)不会触发 close 事件:socket 停在
 // OPEN、字节永不到达、客户端也就永不重连。ping/pong 是唯一能把这种「看起来还连着」的连接判死的手段。
@@ -201,8 +208,11 @@ export function createTerminalWebSocketBridge({
 		});
 	});
 
-	const ioServer = new WebSocketServer({ noServer: true });
-	const controlServer = new WebSocketServer({ noServer: true });
+	const ioServer = new WebSocketServer({ noServer: true, perMessageDeflate: RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS });
+	const controlServer = new WebSocketServer({
+		noServer: true,
+		perMessageDeflate: RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS,
+	});
 
 	const getOrCreateTerminalStreamState = (connectionKey: string): TerminalStreamState => {
 		const existing = terminalStreamStates.get(connectionKey);
@@ -243,6 +253,13 @@ export function createTerminalWebSocketBridge({
 			clientId,
 			outputDemand: "continuous_output",
 			restoreRequestSequenceNumber: 0,
+			restoreOutputVersion: 0,
+			restoreStartedAtMs: 0,
+			restoreSnapshotByteLength: 0,
+			restoreChunkCount: 0,
+			restoreTransmissionComplete: false,
+			receivedRestoreChunkCount: 0,
+			parsedRestoreByteLength: 0,
 			pendingOutputChunks: [],
 			pendingOutputByteLength: 0,
 			restoreComplete: false,
@@ -257,19 +274,7 @@ export function createTerminalWebSocketBridge({
 				if (created.pendingOutputByteLength <= MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE) {
 					return;
 				}
-				created.releaseRestoreHandshakeGate("pending-buffer-overflow");
-				if (created.pendingOutputByteLength <= MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE) {
-					return;
-				}
-				// 闸门开了还下不去 = 这条 viewer 的 io socket 根本没接上，没有出口。从队首丢最旧的，
-				// 保住服务端的内存;丢掉的内容仍在服务端 mirror 里，下一份 restore 快照会带回来。
-				while (
-					created.pendingOutputChunks.length > 0 &&
-					created.pendingOutputByteLength > MAX_PENDING_OUTPUT_BYTES_BUFFERED_DURING_RESTORE_HANDSHAKE
-				) {
-					const droppedChunk = created.pendingOutputChunks.shift();
-					created.pendingOutputByteLength -= droppedChunk?.byteLength ?? 0;
-				}
+				created.evictUnrestoredViewer("pending-buffer-overflow");
 			},
 			resetPendingOutput: () => {
 				created.pendingOutputChunks = [];
@@ -285,16 +290,25 @@ export function createTerminalWebSocketBridge({
 					created.ioState.enqueueOutput(chunk);
 				}
 			},
-			releaseRestoreHandshakeGate: (releaseReason) => {
+			evictUnrestoredViewer: (reason) => {
 				created.clearRestoreHandshakeCompletionTimeoutTimer();
-				if (created.restoreComplete) {
-					return;
-				}
 				logTuiFreezeWarning(
-					`[tui-freeze] restore-handshake-force-release taskId=${taskId} clientId=${clientId} reason=${releaseReason} pendingBytes=${created.pendingOutputByteLength} hasIoSocket=${created.ioSocket !== null}`,
+					`[tui-freeze] restore-viewer-evicted taskId=${taskId} clientId=${clientId} reason=${reason} pendingBytes=${created.pendingOutputByteLength}`,
 				);
-				created.restoreComplete = true;
-				created.flushPendingOutput();
+				created.outputDemand = "paused_output";
+				created.resetPendingOutput();
+				created.ioState?.suspendOutputForViewer();
+				created.ioSocket?.terminate();
+				created.controlSocket?.terminate();
+			},
+			renewRestoreProgressDeadline: () => {
+				created.clearRestoreHandshakeCompletionTimeoutTimer();
+				const remainingMs = RESTORE_HANDSHAKE_TOTAL_TIMEOUT_MS - (Date.now() - created.restoreStartedAtMs);
+				created.restoreHandshakeCompletionTimeoutTimer = setTimeout(
+					() => created.evictUnrestoredViewer("handshake-timeout"),
+					Math.max(0, Math.min(RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS, remainingMs)),
+				);
+				created.restoreHandshakeCompletionTimeoutTimer.unref?.();
 			},
 			clearRestoreHandshakeCompletionTimeoutTimer: () => {
 				if (created.restoreHandshakeCompletionTimeoutTimer !== null) {
@@ -667,7 +681,13 @@ export function createTerminalWebSocketBridge({
 			const targetServer = isIoRequest ? ioServer : controlServer;
 			const clientId = getTerminalClientId(url);
 			targetServer.handleUpgrade(request, socket, head, (ws: WebSocket) => {
-				targetServer.emit("connection", ws, { taskId, workspaceId, clientId, terminalManager });
+				targetServer.emit("connection", ws, {
+					taskId,
+					workspaceId,
+					clientId,
+					terminalManager,
+					chunkedRestoreSupported: url.searchParams.get("restoreProtocolVersion") === "2",
+				});
 			});
 		} catch {
 			socket.destroy();
@@ -696,6 +716,7 @@ export function createTerminalWebSocketBridge({
 		}
 
 		ws.on("message", async (rawMessage: RawData) => {
+			if (viewerState.ioSocket !== ws) return;
 			try {
 				// 进程已回收时，保留画面仍可能产生鼠标或焦点报告。没有输入接收者不代表传输故障；
 				// 丢弃这些字节并保留 viewer，续跑后的新进程仍可复用同一条连接。
@@ -733,6 +754,7 @@ export function createTerminalWebSocketBridge({
 		const taskId = (context as TerminalWebSocketConnectionContext).taskId;
 		const workspaceId = (context as TerminalWebSocketConnectionContext).workspaceId;
 		const clientId = (context as TerminalWebSocketConnectionContext).clientId;
+		const chunkedRestoreSupported = (context as TerminalWebSocketConnectionContext).chunkedRestoreSupported;
 		const terminalManager = (context as TerminalWebSocketConnectionContext).terminalManager;
 		const connectionKey = buildConnectionKey(workspaceId, taskId);
 		terminalManager.recoverStaleSession(taskId);
@@ -775,25 +797,72 @@ export function createTerminalWebSocketBridge({
 			viewerState.outputDemand = "awaiting_restore_snapshot";
 			const restoreRequestSequenceNumber = ++viewerState.restoreRequestSequenceNumber;
 			const outputVersion = streamState.outputVersion;
+			viewerState.restoreOutputVersion = outputVersion;
+			viewerState.restoreStartedAtMs = Date.now();
+			viewerState.restoreTransmissionComplete = false;
+			viewerState.receivedRestoreChunkCount = 0;
+			viewerState.parsedRestoreByteLength = 0;
 			viewerState.restoreComplete = false;
 			viewerState.resetPendingOutput();
-			// 兜底:客户端迟迟不回 restore_complete(写队列死锁、控制帧丢失)时强开闸门,不让这条 viewer
-			// 永久失聪。见 RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS 的注释。
-			viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
-			viewerState.restoreHandshakeCompletionTimeoutTimer = setTimeout(() => {
-				viewerState.restoreHandshakeCompletionTimeoutTimer = null;
-				viewerState.releaseRestoreHandshakeGate("handshake-timeout");
-			}, RESTORE_HANDSHAKE_COMPLETION_TIMEOUT_MS);
-			viewerState.restoreHandshakeCompletionTimeoutTimer.unref?.();
+			viewerState.renewRestoreProgressDeadline();
+			const isCurrentRestore = () =>
+				viewerState.controlSocket === ws &&
+				viewerState.restoreRequestSequenceNumber === restoreRequestSequenceNumber &&
+				viewerState.outputDemand !== "paused_output" &&
+				ws.readyState === ws.OPEN;
 			void terminalManager
 				.getRestoreSnapshot(taskId)
-				.then((snapshot) => {
+				.then(async (snapshot) => {
 					if (
 						viewerState.controlSocket !== ws ||
 						viewerState.restoreRequestSequenceNumber !== restoreRequestSequenceNumber ||
 						viewerState.outputDemand === "paused_output"
 					)
 						return;
+					const identity = {
+						streamGenerationId: streamState.streamGenerationId,
+						outputVersion,
+						restoreRequestSequenceNumber,
+					};
+					if (chunkedRestoreSupported) {
+						const snapshotBytes = Buffer.from(snapshot?.snapshot ?? "", "utf8");
+						if (snapshotBytes.byteLength > RESTORE_SNAPSHOT_MAXIMUM_UTF8_BYTES)
+							throw new Error("终端快照超过恢复上限");
+						viewerState.restoreSnapshotByteLength = snapshotBytes.byteLength;
+						viewerState.restoreChunkCount = 0;
+						sendControlMessage(ws, {
+							type: "restore_begin",
+							...identity,
+							outputDemandProtocolVersion: 1,
+							snapshotByteLength: snapshotBytes.byteLength,
+							cols: snapshot?.cols ?? null,
+							rows: snapshot?.rows ?? null,
+						});
+						for (let offset = 0; offset < snapshotBytes.byteLength; ) {
+							if (!isCurrentRestore()) return;
+							let end = Math.min(offset + RESTORE_SNAPSHOT_CHUNK_MAXIMUM_UTF8_BYTES, snapshotBytes.byteLength);
+							while (end < snapshotBytes.byteLength && (snapshotBytes[end]! & 0xc0) === 0x80) end -= 1;
+							const message: RuntimeTerminalWsServerMessage = {
+								type: "restore_chunk",
+								...identity,
+								chunkSequenceNumber: viewerState.restoreChunkCount++,
+								snapshotPart: snapshotBytes.subarray(offset, end).toString("utf8"),
+							};
+							await new Promise<void>((resolve, reject) =>
+								ws.send(JSON.stringify(message), (error) => (error ? reject(error) : resolve())),
+							);
+							offset = end;
+						}
+						if (isCurrentRestore()) {
+							viewerState.restoreTransmissionComplete = true;
+							sendControlMessage(ws, {
+								type: "restore_end",
+								...identity,
+								chunkCount: viewerState.restoreChunkCount,
+							});
+						}
+						return;
+					}
 					sendControlMessage(ws, {
 						type: "restore",
 						outputDemandProtocolVersion: 1,
@@ -812,19 +881,13 @@ export function createTerminalWebSocketBridge({
 						viewerState.outputDemand === "paused_output"
 					)
 						return;
-					viewerState.outputDemand = "continuous_output";
-					viewerState.restoreComplete = true;
-					viewerState.clearRestoreHandshakeCompletionTimeoutTimer();
-					viewerState.flushPendingOutput();
-					sendControlMessage(ws, {
-						type: "error",
-						message: "读取终端恢复快照失败，已恢复连续输出；保留现有画面并等待重新同步。",
-					});
+					viewerState.evictUnrestoredViewer("snapshot-read-or-send-failed");
 				});
 		};
 		sendRestoreSnapshot();
 
 		ws.on("message", (rawMessage: RawData) => {
+			if (viewerState.controlSocket !== ws) return;
 			const message = parseWebSocketPayload(rawMessage);
 			if (!message) {
 				sendControlMessage(ws, {
@@ -854,11 +917,18 @@ export function createTerminalWebSocketBridge({
 				} else {
 					sendRestoreSnapshot();
 				}
+				// 暂停已把恢复序号加一，用来拒绝旧 ACK。免快照续传不再发 restore_begin，
+				// 必须在这里公布当前序号，客户端才能确认后续输出。
+				// 新快照路径会再递增一次，序号由 restore_begin 公布；若本帧提前带上同一个序号，
+				// 客户端会把它当成已见代次而丢掉这份快照。
 				sendControlMessage(ws, {
 					type: "output_demand_state",
 					demand: viewerState.outputDemand,
 					outputVersion: streamState.outputVersion,
 					streamGenerationId: streamState.streamGenerationId,
+					...(viewerState.outputDemand === "awaiting_restore_snapshot"
+						? {}
+						: { restoreRequestSequenceNumber: viewerState.restoreRequestSequenceNumber }),
 				});
 				return;
 			}
@@ -873,11 +943,58 @@ export function createTerminalWebSocketBridge({
 			}
 
 			if (message.type === "output_ack") {
+				if (
+					(chunkedRestoreSupported ||
+						message.streamGenerationId !== undefined ||
+						message.restoreRequestSequenceNumber !== undefined) &&
+					(message.streamGenerationId !== streamState.streamGenerationId ||
+						message.restoreRequestSequenceNumber !== viewerState.restoreRequestSequenceNumber)
+				)
+					return;
 				viewerState.ioState?.acknowledgeOutput(message.bytes);
+				return;
+			}
+			if (message.type === "restore_progress") {
+				if (
+					!chunkedRestoreSupported ||
+					viewerState.restoreComplete ||
+					viewerState.outputDemand !== "awaiting_restore_snapshot" ||
+					message.restoreRequestSequenceNumber !== viewerState.restoreRequestSequenceNumber ||
+					message.streamGenerationId !== streamState.streamGenerationId ||
+					message.outputVersion !== viewerState.restoreOutputVersion
+				)
+					return;
+				if (
+					message.receivedChunkCount < viewerState.receivedRestoreChunkCount ||
+					message.receivedChunkCount > viewerState.restoreChunkCount ||
+					message.parsedByteLength < viewerState.parsedRestoreByteLength ||
+					message.parsedByteLength > viewerState.restoreSnapshotByteLength
+				)
+					return;
+				if (
+					message.receivedChunkCount > viewerState.receivedRestoreChunkCount ||
+					message.parsedByteLength > viewerState.parsedRestoreByteLength
+				) {
+					viewerState.receivedRestoreChunkCount = message.receivedChunkCount;
+					viewerState.parsedRestoreByteLength = message.parsedByteLength;
+					viewerState.renewRestoreProgressDeadline();
+				}
 				return;
 			}
 
 			if (message.type === "restore_complete") {
+				if (
+					chunkedRestoreSupported &&
+					(!viewerState.restoreTransmissionComplete || viewerState.ioSocket?.readyState !== ws.OPEN)
+				)
+					return;
+				if (
+					chunkedRestoreSupported &&
+					(message.streamGenerationId !== streamState.streamGenerationId ||
+						message.outputVersion !== viewerState.restoreOutputVersion ||
+						message.restoreRequestSequenceNumber !== viewerState.restoreRequestSequenceNumber)
+				)
+					return;
 				if (
 					viewerState.outputDemand === "paused_output" ||
 					(message.restoreRequestSequenceNumber !== undefined &&

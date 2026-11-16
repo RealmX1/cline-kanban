@@ -94,6 +94,7 @@ import {
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
 import { createNativeAgentConversationActivityObserver } from "./native-agent-conversation-activity-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
+import { RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS } from "./runtime-websocket-compression-options";
 import { createWorkspaceMetadataMonitor } from "./workspace-metadata-monitor";
 import type { ResolvedWorkspaceStreamTarget, WorkspaceRegistry } from "./workspace-registry";
 
@@ -465,13 +466,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	};
 	const runtimeStateWebSocketServer = new WebSocketServer({
 		noServer: true,
-		perMessageDeflate: {
-			threshold: 1024,
-			serverNoContextTakeover: true,
-			clientNoContextTakeover: true,
-			concurrencyLimit: 4,
-			zlibDeflateOptions: { level: 4 },
-		},
+		perMessageDeflate: RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS,
 	});
 	const workspaceMetadataMonitor = createWorkspaceMetadataMonitor({
 		onMetadataUpdated: (workspaceId, workspaceMetadata) => {

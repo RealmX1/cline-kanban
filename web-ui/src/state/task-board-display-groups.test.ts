@@ -1,6 +1,7 @@
 import type { DropResult } from "@hello-pangea/dnd";
 import { describe, expect, it } from "vitest";
 import { buildTaskCardBusinessProps } from "@/components/task-card-business-props";
+import type { RuntimeTaskSessionSummary } from "@/runtime/types";
 import { normalizeBoardData, resolveTaskCardDropFromDragResultByTaskId } from "@/state/board-state";
 import { projectTaskBoardDisplayGroups } from "@/state/task-board-display-groups";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
@@ -33,6 +34,31 @@ function drop(taskId: string, source: string, destination: string, index = 0): D
 }
 
 describe("真实 Stage 与 Shelved 展示分组", () => {
+	it("共享卡片领域层每份会话集合只扫描一次，并按真实任务归属隔离活动", () => {
+		let collectionScans = 0;
+		const summaries = new Proxy<Record<string, RuntimeTaskSessionSummary>>(
+			{
+				"task-a": { taskId: "task-a" } as RuntimeTaskSessionSummary,
+				"task-b": { taskId: "task-b" } as RuntimeTaskSessionSummary,
+				"side-a": {
+					taskId: "side-a",
+					taskConversationSessionMetadata: { workspaceTaskId: "task-a" },
+				} as RuntimeTaskSessionSummary,
+			},
+			{
+				ownKeys(target) {
+					collectionScans += 1;
+					return Reflect.ownKeys(target);
+				},
+			},
+		);
+		const observations = (id: string) =>
+			buildTaskCardBusinessProps({ card: card(id), columnId: "review", handlers: {}, taskSessions: summaries })
+				.taskConversationSessionActivityObservations;
+		expect(observations("task-a")?.map((entry) => entry.sessionId)).toEqual(["task-a", "side-a"]);
+		expect(observations("task-b")?.map((entry) => entry.sessionId)).toEqual(["task-b"]);
+		expect(collectionScans).toBe(1);
+	});
 	it("五个 Stage 的搁置卡只在最后一组出现，保留完整持久看板和置顶意图", () => {
 		const original = board();
 		const groups = projectTaskBoardDisplayGroups(original.columns);

@@ -1,25 +1,24 @@
-// restore 快照的分片写入切片。
-//
-// 服务端 mirror 的 restore 快照最多带 2 万行 scrollback(数 MB 字符串)。xterm 对单次
-// terminal.write 的 chunk 是整段同步解析——WriteBuffer 的 12ms 时间预算只在 chunk 之间
-// 检查,单个巨型快照 chunk 意味着一次数百 ms 的主线程冻结,restore_complete 也被同一次
-// 解析推迟。按固定字符数切片后逐段 write:xterm 的解析器跨 write 调用保持转义序列与
-// 代理对的中间状态(StringToUtf32 的 interim 缓存),任意切点都安全。
-export const RESTORE_SNAPSHOT_WRITE_SLICE_CHARS = 64 * 1024;
+// 按 UTF-8 字节限制每次解析量，保留完整字符；xterm 自身延续跨片 ANSI 解析状态。
+export const RESTORE_SNAPSHOT_WRITE_SLICE_MAXIMUM_UTF8_BYTES = 64 * 1024;
 
 export function sliceRestoreSnapshotForIncrementalWrite(
 	snapshot: string,
-	sliceChars: number = RESTORE_SNAPSHOT_WRITE_SLICE_CHARS,
+	maximumUtf8Bytes: number = RESTORE_SNAPSHOT_WRITE_SLICE_MAXIMUM_UTF8_BYTES,
 ): string[] {
+	if (!Number.isInteger(maximumUtf8Bytes) || maximumUtf8Bytes < 4)
+		throw new RangeError("恢复切片上限必须是至少 4 字节的整数。");
 	if (snapshot.length === 0) {
 		return [];
 	}
-	if (snapshot.length <= sliceChars) {
-		return [snapshot];
-	}
 	const snapshotSlices: string[] = [];
-	for (let sliceStartIndex = 0; sliceStartIndex < snapshot.length; sliceStartIndex += sliceChars) {
-		snapshotSlices.push(snapshot.slice(sliceStartIndex, sliceStartIndex + sliceChars));
+	const snapshotBytes = new TextEncoder().encode(snapshot);
+	if (snapshotBytes.byteLength <= maximumUtf8Bytes) return [snapshot];
+	const decoder = new TextDecoder();
+	for (let offset = 0; offset < snapshotBytes.byteLength; ) {
+		let end = Math.min(offset + maximumUtf8Bytes, snapshotBytes.byteLength);
+		while (end < snapshotBytes.byteLength && (snapshotBytes[end]! & 0xc0) === 0x80) end -= 1;
+		snapshotSlices.push(decoder.decode(snapshotBytes.subarray(offset, end)));
+		offset = end;
 	}
 	return snapshotSlices;
 }
