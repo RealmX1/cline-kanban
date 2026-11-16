@@ -296,13 +296,13 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 				await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
 			);
 			cleanupSupervisorReference = {
-				workspaceId: "isolated",
+				workspaceId,
 				executionId: reference.executionId,
 				launchNonce: reference.launchNonce,
 			};
 			cleanupSupervisorArtifactDirectory = join(
 				runtimeHome,
-				"workspaces/isolated/task-command-executions",
+				`workspaces/${workspaceId}/task-command-executions`,
 				reference.executionId,
 				"post-process-exit-cleanup",
 				reference.launchNonce,

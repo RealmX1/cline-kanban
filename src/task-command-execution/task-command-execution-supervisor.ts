@@ -303,7 +303,7 @@ if(owner.pid===process.pid) {
   }
   catch(error){throw Object.assign(error,{processSnapshotQuery:'process_group_snapshot'});}
  }
- async function collect() {
+ async function collect(allowImmediateLateProcessAbsenceSubtreeRescan=true) {
   nativeQueryFailureObservations=[];
   let entries=processEntries();
   if(!child?.pid){lastProcessSnapshot=new Map(entries.filter(entry=>entry.pid===process.pid && !entry.processIsZombie).map(entry=>[entry.pid,entry]));nativeOwnershipUnproven=false;unprovenOwnershipProcesses=[];return [];}
@@ -339,6 +339,7 @@ if(owner.pid===process.pid) {
     }
    } catch { unprovenOwnershipPids.add(-1); }
   }
+  let lateProcessAbsenceRequiresSubtreeRescan=false;
   const groupMembers=new Set(); const lateNativeSnapshotPids=new Set(); const zombies=new Set(entries.filter(entry=>entry.processIsZombie).map(entry=>entry.pid));
   if(materials.superviseProcessGroup) {
    // Linux 已从同一份 /proc stat 读取代际与 PGID，保留双快照核验而不再派生第三次 ps。
@@ -356,8 +357,8 @@ if(owner.pid===process.pid) {
     for(const row of lateProcessRows){
      lateNativeSnapshotPids.add(row.pid);
      const native=lateNativeObservations.get(row.pid);
-     // 只有原生身份、BSD 信息及再次身份查询均为 ESRCH，才排除采样间已消失的 PID。
-     if(native?.nativeProcessNoLongerExists===true){zombies.add(row.pid);continue;}
+     // PID 消失不能排除其后代；完整补查只立即执行一次，再遇竞态仍保留未知并走既有恢复预算。
+     if(native?.nativeProcessNoLongerExists===true&&allowImmediateLateProcessAbsenceSubtreeRescan){lateProcessAbsenceRequiresSubtreeRescan=true;continue;}
      const entry={...row,...native,parent:native?.parentProcessPid??-1,startAndCommand:native?.processStartIdentity??'unavailable',...(native?.processUniqueIdentity?{nativeProcessGenerationIdentity:'darwin_unique_process_id:'+native.processUniqueIdentity}:{})};
      entries.push(entry);
      if(native?.processIsZombie)zombies.add(row.pid);
@@ -369,6 +370,7 @@ if(owner.pid===process.pid) {
     for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid&&!lateNativeSnapshotPids.has(entry.pid))groupMembers.add(entry.pid);
    }
   }
+  if(lateProcessAbsenceRequiresSubtreeRescan)return collect(false);
   const parents=new Set(entries.filter(entry=>!zombies.has(entry.pid)&&(groupMembers.has(entry.pid)||hasSameProcessGeneration(entry,owned.get(entry.pid)))).map(entry=>entry.pid)); if(linuxKernelContainmentVerified&&!linuxKernelContainmentContinuityLost)parents.add(process.pid); let changed=true;
   while(changed){changed=false;for(const entry of entries)if(entry.pid!==process.pid && !lateNativeSnapshotPids.has(entry.pid) && parents.has(entry.parent)&&!parents.has(entry.pid)){const parent=entries.find(candidate=>candidate.pid===entry.parent);const current=currentParentGeneration(entry);const currentParent=currentParentGeneration(parent);if(!materials.superviseProcessGroup || (current?.generation===entry.nativeProcessGenerationIdentity && current?.parent===entry.parent && currentParent?.generation===parent?.nativeProcessGenerationIdentity && entry.nativeProcessGenerationIdentity && parent?.nativeProcessGenerationIdentity)){parents.add(entry.pid);changed=true;}}}
   for(const entry of entries)if(entry.pid!==process.pid&&parents.has(entry.pid)&&(!materials.superviseProcessGroup||entry.nativeProcessGenerationIdentity))rememberOwned({pid:entry.pid,startAndCommand:entry.startAndCommand,...(entry.nativeProcessGenerationIdentity?{nativeProcessGenerationIdentity:entry.nativeProcessGenerationIdentity}:{})});
