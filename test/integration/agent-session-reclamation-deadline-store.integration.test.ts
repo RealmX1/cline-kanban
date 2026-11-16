@@ -363,8 +363,9 @@ describe.sequential("agent-session-reclamation-deadline-store integration", () =
 			await expect(readAgentSessionReclamationDeadlineRecords("../escaped")).rejects.toThrow(
 				/outside workspaces root/,
 			);
+			// 写入可先由项目身份门禁拒绝；两层都必须阻止路径逃逸。
 			await expect(recordAgentSessionRetentionDeadline("../escaped", stopAnchorInput())).rejects.toThrow(
-				/outside workspaces root/,
+				/outside workspaces root|项目身份不能包含路径分隔符/u,
 			);
 		});
 	});
