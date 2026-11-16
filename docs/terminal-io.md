@@ -46,15 +46,14 @@
 
 ## 2. 持久终端的 visibility 协议
 
+当前终端双通道支持无上下文复用的 permessage-deflate，活输出维持 16KiB 分帧；解析后 ACK 按 32KiB/8ms 聚合。新端默认在隐藏时声明 `paused_output`，服务端停止该观看者的画面传输，Agent、mirror 和必要活动观察继续运行；非活跃任务暂停仍关闭。完整参数、分片恢复及自动验收见 [远程终端响应实现与验证](remote-terminal-response-implementation-and-validation.md)。
+
 agent 终端是持久 xterm（`web-ui/src/terminal/persistent-terminal-manager.ts`），终端实例跨浏览器标签页切换保持存活。要解决的问题：**浏览器会暂停隐藏标签页的 `requestAnimationFrame`/`setTimeout`**，xterm 的渲染器随之停摆——若隐藏期间照常写入，活输出只会在渲染队列里堆积，回到前台时「延时摄影」式回放（话多的 TUI 上可达数分钟）。
 
 ### 协议内容（管理器自监听 `visibilitychange`，`:501`）
 
-- **隐藏时**（`renderingSuspended` 分支，`:998-1007`）：跳过 `enqueueTerminalWrite`（渲染器已停，写了只是积压），但仍然：
-  - 立即回 `output_ack`（`:1002`）——服务端靠 ack 做背压，不 ack 会暂停 PTY/agent 本身；
-  - 照常 `notifyOutputText(decoded)`（`:1004`）——保持活动检测与 `waitForLikelyPrompt` 存活（每个 chunk 无论可见性都先经流式 TextDecoder 解码，`:997`）；
-  - 置 `needsSnapshotResync = true`。
-- **回前台时**（`setDocumentVisible`，`:511-524`）：若 `needsSnapshotResync`，**先武装 `awaitingRestoreSnapshot` 门控再发** `request_restore` 控制消息（`:521-522`、`:532`）；服务端（`src/terminal/ws-server.ts:792`）重跑快照握手，直接跳到最新屏幕，不做逐帧追赶。
+- **隐藏时**：优先声明 `paused_output`。服务端把该观看者的恢复序号加一、清零未确认字节并停止转发；客户端不再确认暂停期间到达的帧，以免用新序号把旧输出记入新账。连续观察租约、协议不支持或声明失败时，仍跳过 `enqueueTerminalWrite`，但按聚合规则回 `output_ack`（服务端靠 ack 做背压），照常 `notifyOutputText(decoded)`，并置 `needsSnapshotResync = true`。每个 chunk 无论可见性都先经流式 TextDecoder 解码。
+- **回前台时**：优先通过 `declare_output_demand` 核对已应用的输出版本。版本与流代次未变时走免快照连续输出，`output_demand_state` 公布当前恢复序号；客户端只在序号前进时改用它，并取消尚未发出的旧批次。否则沿用 `needsSnapshotResync` 与 `request_restore`。两条路径都先武装恢复门控，再请求服务端镜像，避免逐帧追赶。
 - **竞态门控**：快照在途期间到达的实时 chunk 属于「将被快照整段覆盖」的过期窗口——ack + 丢弃，但**不再置 `needsSnapshotResync`**（快照本就在途，置位会自触发下一轮 `request_restore` 死循环）。开始等待时淘汰旧写队列和恢复代次；若 `AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS` 内快照未到，则按既有退避轮换 `clientId`、重连两条通道，不能在未知的屏幕和鼠标模式上继续渲染。
 - 服务端 `TerminalStateMirror`（`src/terminal/terminal-state-mirror.ts:24`）**与观看者可见性无关地实时保持最新**，这正是快照便宜的的原因（`ws-server.ts:726-727` 注释：初次连接与 `request_restore` 共用同一条快照路径）。
 
@@ -67,6 +66,8 @@ IO 和 control 共同构成一个 viewer 的恢复握手：任一通道断线，
 control 快照到达只证明服务端已关闭后续输出转发，不能证明另一条 IO 的旧帧已到齐。既有 viewer 再次恢复时，快照到达后保留 `clientId` 和 control，替换 IO；旧 IO 的事件从此失效，新 IO 连接时服务端仍在快照握手门控中。客户端门控保持到快照完整落屏且新 IO 已打开，随后发送 `restore_complete`，服务端才把快照之后的输出交给新 IO；新 IO 迟迟未打开时仍由恢复超时成对重连。IO 替换会重建背压记账，所以旧输出 ACK 同时核对 IO 与 control 身份，不得扣减新 IO 的未确认字节。
 
 恢复只使用服务端 mirror 与 WebSocket 握手，不重启活着的 agent，也不修改终端滚动选项：全屏 TUI 恢复 alternate buffer 与原生鼠标协议，shell 和 `--no-alt-screen` 保留 normal buffer 的历史滚动。回归覆盖见 `persistent-terminal-manager.test.ts` 与 `web-ui/tests/persistent-terminal-fullscreen-restore.spec.ts`，后者使用真实 xterm 和隔离的模拟 WebSocket 对端。
+
+新端声明 `restoreProtocolVersion=2` 后使用带完整恢复身份的 `restore_begin / restore_chunk / restore_end`，正文每片至多 64KiB UTF-8。有效接收和解析进展续期，两端另设 60 秒总时限；超时、缺片或缓冲溢出关闭观看连接并重新握手，不再强开恢复闸门。三次连续失败后保留画面与错误，等待 online、重新可见或工作区状态流重新连接再接续。恢复中隐藏会取消等待，返回时重新核验。
 
 ### 新增终端 WS 消息要动的三处
 

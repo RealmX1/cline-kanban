@@ -5740,12 +5740,16 @@ export type RuntimeTerminalWsStopMessage = z.infer<typeof runtimeTerminalWsStopM
 export const runtimeTerminalWsOutputAckMessageSchema = z.object({
 	type: z.literal("output_ack"),
 	bytes: z.number().int().nonnegative(),
+	streamGenerationId: z.string().uuid().optional(),
+	restoreRequestSequenceNumber: z.number().int().nonnegative().optional(),
 });
 export type RuntimeTerminalWsOutputAckMessage = z.infer<typeof runtimeTerminalWsOutputAckMessageSchema>;
 
 export const runtimeTerminalWsRestoreCompleteMessageSchema = z.object({
 	type: z.literal("restore_complete"),
 	restoreRequestSequenceNumber: z.number().int().nonnegative().optional(),
+	streamGenerationId: z.string().uuid().optional(),
+	outputVersion: z.number().int().nonnegative().optional(),
 });
 export type RuntimeTerminalWsRestoreCompleteMessage = z.infer<typeof runtimeTerminalWsRestoreCompleteMessageSchema>;
 
@@ -5758,6 +5762,14 @@ export const runtimeTerminalWsRequestRestoreMessageSchema = z.object({
 export type RuntimeTerminalWsRequestRestoreMessage = z.infer<typeof runtimeTerminalWsRequestRestoreMessageSchema>;
 
 export const runtimeTerminalWsClientMessageSchema = z.discriminatedUnion("type", [
+	z.object({
+		type: z.literal("restore_progress"),
+		streamGenerationId: z.string().uuid(),
+		outputVersion: z.number().int().nonnegative(),
+		restoreRequestSequenceNumber: z.number().int().nonnegative(),
+		receivedChunkCount: z.number().int().nonnegative(),
+		parsedByteLength: z.number().int().nonnegative(),
+	}),
 	z.object({
 		type: z.literal("declare_output_demand"),
 		demand: z.enum(["continuous_output", "awaiting_restore_snapshot", "paused_output"]),
@@ -5802,17 +5814,56 @@ export const runtimeTerminalWsRestoreMessageSchema = z.object({
 });
 export type RuntimeTerminalWsRestoreMessage = z.infer<typeof runtimeTerminalWsRestoreMessageSchema>;
 
+const runtimeTerminalWsChunkedRestoreIdentitySchema = z.object({
+	streamGenerationId: z.string().uuid(),
+	outputVersion: z.number().int().nonnegative(),
+	restoreRequestSequenceNumber: z.number().int().nonnegative(),
+});
+
+export const runtimeTerminalWsRestoreBeginMessageSchema = runtimeTerminalWsChunkedRestoreIdentitySchema.extend({
+	type: z.literal("restore_begin"),
+	outputDemandProtocolVersion: z.literal(1),
+	snapshotByteLength: z
+		.number()
+		.int()
+		.nonnegative()
+		.max(64 * 1024 * 1024),
+	cols: z.number().int().positive().nullable(),
+	rows: z.number().int().positive().nullable(),
+});
+export type RuntimeTerminalWsRestoreBeginMessage = z.infer<typeof runtimeTerminalWsRestoreBeginMessageSchema>;
+
+export const runtimeTerminalWsRestoreChunkMessageSchema = runtimeTerminalWsChunkedRestoreIdentitySchema.extend({
+	type: z.literal("restore_chunk"),
+	chunkSequenceNumber: z.number().int().nonnegative(),
+	snapshotPart: z
+		.string()
+		.min(1)
+		.max(64 * 1024),
+});
+
+export const runtimeTerminalWsRestoreEndMessageSchema = runtimeTerminalWsChunkedRestoreIdentitySchema.extend({
+	type: z.literal("restore_end"),
+	chunkCount: z.number().int().nonnegative(),
+});
+
 export const runtimeTerminalWsServerMessageSchema = z.discriminatedUnion("type", [
 	z.object({
 		type: z.literal("output_demand_state"),
 		demand: z.enum(["continuous_output", "awaiting_restore_snapshot", "paused_output"]),
 		outputVersion: z.number().int().nonnegative(),
 		streamGenerationId: z.string().uuid(),
+		// 暂停会递增恢复序号。免快照续传不再另发 restore_begin，由该状态公布当前序号。
+		// 新快照仍只由 restore_begin 公布，因此等待快照时省略本字段。
+		restoreRequestSequenceNumber: z.number().int().nonnegative().optional(),
 	}),
 	runtimeTerminalWsStateMessageSchema,
 	runtimeTerminalWsErrorMessageSchema,
 	runtimeTerminalWsExitMessageSchema,
 	runtimeTerminalWsRestoreMessageSchema,
+	runtimeTerminalWsRestoreBeginMessageSchema,
+	runtimeTerminalWsRestoreChunkMessageSchema,
+	runtimeTerminalWsRestoreEndMessageSchema,
 ]);
 export type RuntimeTerminalWsServerMessage = z.infer<typeof runtimeTerminalWsServerMessageSchema>;
 

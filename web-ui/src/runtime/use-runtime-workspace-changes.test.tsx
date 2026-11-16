@@ -113,6 +113,44 @@ function HookHarness({
 }
 
 describe("useRuntimeWorkspaceChanges", () => {
+	it("隐藏时初读、版本失效与轮询合并，重新可见只条件读取一次并保留内容", async () => {
+		vi.useFakeTimers();
+		getChangesQueryMock.mockResolvedValue(createWorkspaceChangesResponse("retained.ts"));
+		const snapshots: HookSnapshot[] = [];
+		const onSnapshot = (snapshot: HookSnapshot) => snapshots.push(snapshot);
+		const setVisibility = (value: string) => {
+			Object.defineProperty(document, "visibilityState", { configurable: true, value });
+			document.dispatchEvent(new Event("visibilitychange"));
+		};
+		try {
+			await act(async () =>
+				root.render(<HookHarness taskId="task-a" pollIntervalMs={1000} onSnapshot={onSnapshot} />),
+			);
+			expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
+			const retained = snapshots.at(-1)?.changes;
+			await act(async () => setVisibility("hidden"));
+			for (const stateVersion of [1, 2, 3]) {
+				await act(async () =>
+					root.render(
+						<HookHarness
+							taskId="task-a"
+							stateVersion={stateVersion}
+							pollIntervalMs={1000}
+							onSnapshot={onSnapshot}
+						/>,
+					),
+				);
+			}
+			await act(async () => vi.advanceTimersByTimeAsync(4000));
+			expect(getChangesQueryMock).toHaveBeenCalledTimes(1);
+			expect(snapshots.at(-1)?.changes).toBe(retained);
+			await act(async () => setVisibility("visible"));
+			expect(getChangesQueryMock).toHaveBeenCalledTimes(2);
+			expect(getChangesQueryMock.mock.calls[1]?.[0]).toMatchObject({ knownContentVersion: "test-content-version" });
+		} finally {
+			await act(async () => setVisibility("visible"));
+		}
+	});
 	let container: HTMLDivElement;
 	let root: Root;
 	let previousActEnvironment: boolean | undefined;

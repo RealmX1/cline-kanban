@@ -1,3 +1,8 @@
+import {
+	runtimeTerminalWsRestoreBeginMessageSchema,
+	runtimeTerminalWsRestoreChunkMessageSchema,
+	runtimeTerminalWsRestoreEndMessageSchema,
+} from "@runtime-contract";
 import { resolveSessionFacets } from "@runtime-session-activity";
 import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
@@ -18,8 +23,10 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeTerminalWsClientMessage,
 	RuntimeTerminalWsResizeMessage,
+	RuntimeTerminalWsRestoreBeginMessage,
 	RuntimeTerminalWsServerMessage,
 } from "@/runtime/types";
+import { subscribeToTaskVisualizationBrowserEvents } from "@/stores/task-visualization-browser-bridge";
 import { OSC_52_CLIPBOARD_PROVIDER_TOLERATING_INSECURE_BROWSER_CONTEXT } from "@/terminal/osc-52-clipboard-provider-tolerating-insecure-browser-context";
 import { sliceRestoreSnapshotForIncrementalWrite } from "@/terminal/restore-snapshot-slicing";
 import {
@@ -50,8 +57,9 @@ import { shouldHandOffKeyboardFocusToAgentEntryNow } from "@/utils/keyboard-focu
 import { isFirefox, isMacPlatform, isSafari, isWindowsPlatform } from "@/utils/platform";
 import { isBrowserOnTheSameMachineAsAgentRuntimeHost } from "@/utils/resolve-project-filesystem-access-route-for-browser";
 
-// EXPERIMENT_NODE: 隐藏页面与切换任务分别通过 10 Mbps/80 ms RTT、20,000 行历史的延迟门槛后才能默认启用。
-const PAUSE_HIDDEN_PAGE_TERMINAL_OUTPUT_BY_DEFAULT = false;
+// 原生 Chrome 窗口隐藏及两万行历史恢复已自动核验；非活跃任务暂停继续独立实验。
+const PAUSE_HIDDEN_PAGE_TERMINAL_OUTPUT_BY_DEFAULT = true;
+// EXPERIMENT_NODE: 切换任务暂停须通过额外切回延迟门槛后才能默认启用。
 const PAUSE_INACTIVE_TERMINAL_OUTPUT_BY_DEFAULT = false;
 function terminalOutputDemandExperimentEnabled(strategy: "hidden_page" | "inactive_terminal"): boolean {
 	const enabledByDefault =
@@ -72,8 +80,12 @@ const TERMINAL_RECONNECT_MAX_DELAY_MS = 5_000;
 // EXPERIMENT_NODE: 连接连续健康 5 秒后清零重连退避，后续按真实弱网体验校准稳定窗口。
 const TERMINAL_TRANSPORT_CONNECTION_STABILITY_BEFORE_RETRY_RESET_MS = 5_000;
 const VIEWER_QUEUE_STALL_MS = 5_000;
+const OUTPUT_ACKNOWLEDGEMENT_BATCH_MAXIMUM_BYTES = 32 * 1024;
+const OUTPUT_ACKNOWLEDGEMENT_BATCH_MAXIMUM_DELAY_MS = 8;
 // 可见性恢复超时后重建两条通道，避免在错误的屏幕和鼠标模式上续写。
 const AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS = 5_000;
+const TERMINAL_RESTORE_TOTAL_TIMEOUT_MS = 60_000;
+const TERMINAL_RESTORE_MAXIMUM_FAILED_ATTEMPTS_PER_EPISODE = 3;
 // 「重新同步画面」（resyncTerminalViewFromServerMirrorWithoutRestartingAgentSession）等第一份服务端快照的
 // 截止时间。刻意远短于上面那个 5s 被动兜底：那是「标签页切回来了，顺手要一份新快照」，等久一点无所谓；
 // 这里是用户盯着一块冻住的屏幕、刚刚亲手点下按钮，1.5s 还没等到就说明服务端那条 viewer 大概率已经僵死
@@ -175,6 +187,7 @@ function getTerminalControlWebSocketUrl(taskId: string, workspaceId: string, cli
 	url.searchParams.set("taskId", taskId);
 	url.searchParams.set("workspaceId", workspaceId);
 	url.searchParams.set("clientId", clientId);
+	url.searchParams.set("restoreProtocolVersion", "2");
 	return url.toString();
 }
 
@@ -331,6 +344,7 @@ class PersistentTerminal {
 	private controlSocket: WebSocket | null = null;
 	private connectionReady = false;
 	private restoreCompleted = false;
+	private hasReceivedRestoreSnapshotForCurrentViewer = false;
 	private terminalRestoreGeneration = 0;
 	private pendingScrollToBottomAnimationFrameRestoreGeneration: number | null = null;
 	private hasRenderedAnyTerminalContent = false;
@@ -339,6 +353,14 @@ class PersistentTerminal {
 	// 「打开 / 回到」信号上叫它评估一次。
 	private readonly staleAgentTerminalSessionAutomaticResumeScheduler: StaleAgentTerminalSessionAutomaticResumeScheduler;
 	private outputTextDecoder = new TextDecoder();
+	private pendingOutputAcknowledgement: {
+		bytes: number;
+		ioSocket: WebSocket;
+		controlSocket: WebSocket;
+		streamGenerationId?: string;
+		restoreRequestSequenceNumber?: number;
+	} | null = null;
+	private outputAcknowledgementTimer: ReturnType<typeof setTimeout> | null = null;
 	private terminalWriteQueue: Promise<void> = Promise.resolve();
 	// 写队列的代次。discardStalledTerminalWriteQueue 换得掉 terminalWriteQueue 这个「队尾指针」，却取消不了
 	// 已经排在旧链上、正等着前驱 write 回调的那些 link——而写队列卡死最常见的成因（xterm 写缓冲积压、
@@ -370,6 +392,18 @@ class PersistentTerminal {
 	private outputDemandOutputVersion = -1;
 	private outputDemandStreamGenerationId: string | undefined;
 	private restoreRequestSequenceNumber: number | undefined;
+	private restoreSnapshotOutputVersion = 0;
+	private chunkedRestoreActive = false;
+	private completedRestoreChunkCount = 0;
+	private pendingChunkedRestore: {
+		begin: RuntimeTerminalWsRestoreBeginMessage;
+		snapshotParts: string[];
+		receivedByteLength: number;
+	} | null = null;
+	private restoreAttemptStartedAtMs = 0;
+	private failedTerminalRestoreAttemptCount = 0;
+	private restoreRetryBudgetExhausted = false;
+	private readonly unsubscribeTerminalRestoreRecoverySignals: () => void;
 	private continuousOutputObservationCount = 0;
 	private inactiveOutputPauseTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -395,6 +429,12 @@ class PersistentTerminal {
 			)
 				return;
 			this.outputDemandPaused = this.sendControlMessage({ type: "declare_output_demand", demand: "paused_output" });
+			if (this.outputDemandPaused && this.awaitingRestoreSnapshot) {
+				this.pendingChunkedRestore = null;
+				this.outputDemandOutputVersion = -1;
+				this.discardStalledTerminalWriteQueue();
+				this.endAwaitingRestoreSnapshotGate();
+			}
 		};
 		if (shouldPauseHidden) {
 			pause();
@@ -609,6 +649,11 @@ class PersistentTerminal {
 		if (typeof document !== "undefined") {
 			document.addEventListener("visibilitychange", this.handleVisibilityChange);
 		}
+		window.addEventListener("online", this.resumeTerminalRestoreAfterRecoverySignal);
+		this.unsubscribeTerminalRestoreRecoverySignals = subscribeToTaskVisualizationBrowserEvents((message) => {
+			if (message.type === "stream_reconnected" && message.workspaceId === this.workspaceId)
+				this.resumeTerminalRestoreAfterRecoverySignal();
+		});
 		// 焦点点进终端也算「回到这个任务」：覆盖标签页一直可见、人离开数小时后回来直接点进终端的情形——
 		// 那时既没有新的挂载，也没有可见性变化。
 		this.hostElement.addEventListener("focusin", this.handleTerminalFocusIn);
@@ -660,6 +705,7 @@ class PersistentTerminal {
 		}
 		this.documentVisible = visible;
 		this.renderingSuspended = !visible;
+		if (visible) this.resumeTerminalRestoreAfterRecoverySignal();
 		const resumedUsingOutputDemand = this.updateOutputDemandForVisibility();
 		if (visible && this.needsSnapshotResync && !resumedUsingOutputDemand) {
 			this.needsSnapshotResync = false;
@@ -686,20 +732,68 @@ class PersistentTerminal {
 	}
 
 	private beginAwaitingRestoreSnapshotGate(): void {
+		this.cancelPendingOutputAcknowledgement();
 		this.discardStalledTerminalWriteQueue();
 		this.connectionReady = false;
 		this.restoreCompleted = false;
 		this.clearTerminalTransportConnectionStabilityTimer();
 		this.awaitingRestoreSnapshot = true;
+		this.restoreAttemptStartedAtMs = Date.now();
+		this.renewTerminalRestoreProgressDeadline();
+	}
+
+	private renewTerminalRestoreProgressDeadline(): void {
 		this.clearAwaitingRestoreSnapshotTimeoutTimer();
-		this.awaitingRestoreSnapshotTimeoutTimer = setTimeout(() => {
-			this.awaitingRestoreSnapshotTimeoutTimer = null;
-			if (this.outputDemandSupported) {
-				this.outputDemandFallbackToContinuous = true;
-				this.outputDemandPaused = false;
-			}
-			this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
-		}, AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS);
+		this.awaitingRestoreSnapshotTimeoutTimer = setTimeout(
+			() => {
+				this.awaitingRestoreSnapshotTimeoutTimer = null;
+				this.failTerminalRestoreAndReconnect("终端恢复未取得有效进展，正在重新握手。");
+			},
+			Math.max(
+				0,
+				Math.min(
+					AWAITING_RESTORE_SNAPSHOT_TIMEOUT_MS,
+					TERMINAL_RESTORE_TOTAL_TIMEOUT_MS - (Date.now() - this.restoreAttemptStartedAtMs),
+				),
+			),
+		);
+	}
+
+	private failTerminalRestoreAndReconnect(message: string): void {
+		this.failedTerminalRestoreAttemptCount += 1;
+		this.restoreRetryBudgetExhausted =
+			this.failedTerminalRestoreAttemptCount >= TERMINAL_RESTORE_MAXIMUM_FAILED_ATTEMPTS_PER_EPISODE;
+		this.suppressAutomaticResumeForOutputDemandRecovery = true;
+		this.lastError = this.restoreRetryBudgetExhausted
+			? "终端画面恢复已连续失败三次，保留画面，等待连接恢复、页面重新可见或运行时代际更新后自动重试。"
+			: message;
+		this.notifyLastError();
+		this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
+	}
+
+	private readonly resumeTerminalRestoreAfterRecoverySignal = (): void => {
+		if (this.disposed || !this.restoreRetryBudgetExhausted) return;
+		this.restoreRetryBudgetExhausted = false;
+		this.failedTerminalRestoreAttemptCount = 0;
+		this.reconnectAttempt = 0;
+		this.ensureConnected();
+	};
+
+	private reportChunkedRestoreProgress(receivedChunkCount: number, parsedByteLength: number): void {
+		if (
+			!this.chunkedRestoreActive ||
+			this.restoreRequestSequenceNumber === undefined ||
+			!this.outputDemandStreamGenerationId
+		)
+			return;
+		this.sendControlMessage({
+			type: "restore_progress",
+			streamGenerationId: this.outputDemandStreamGenerationId,
+			outputVersion: this.restoreSnapshotOutputVersion,
+			restoreRequestSequenceNumber: this.restoreRequestSequenceNumber,
+			receivedChunkCount,
+			parsedByteLength,
+		});
 	}
 
 	private endAwaitingRestoreSnapshotGate(): void {
@@ -798,6 +892,7 @@ class PersistentTerminal {
 		if (this.disposed) {
 			return;
 		}
+		this.cancelPendingOutputAcknowledgement();
 		this.clientId = generateTerminalClientId();
 		this.discardStalledTerminalWriteQueue();
 		this.endAwaitingRestoreSnapshotGate();
@@ -809,6 +904,11 @@ class PersistentTerminal {
 		this.connectionReady = false;
 		this.restoreCompleted = false;
 		this.lastSentResizeMessage = null;
+		this.pendingChunkedRestore = null;
+		this.restoreAttemptStartedAtMs = 0;
+		this.outputDemandPaused = false;
+		this.restoreRequestSequenceNumber = undefined;
+		this.hasReceivedRestoreSnapshotForCurrentViewer = false;
 		this.outputTextDecoder = new TextDecoder();
 		for (const stalledSocket of [stalledIoSocket, stalledControlSocket]) {
 			try {
@@ -819,6 +919,7 @@ class PersistentTerminal {
 		}
 		this.clearReconnectTimer();
 		this.clearTerminalTransportConnectionStabilityTimer();
+		if (this.restoreRetryBudgetExhausted) return;
 		if (preserveReconnectBackoff) {
 			this.scheduleReconnect();
 		} else {
@@ -878,12 +979,19 @@ class PersistentTerminal {
 		this.endAwaitingRestoreSnapshotGate();
 		this.sendControlMessage({
 			type: "restore_complete",
+			...(this.chunkedRestoreActive
+				? {
+						streamGenerationId: this.outputDemandStreamGenerationId,
+						outputVersion: this.restoreSnapshotOutputVersion,
+					}
+				: {}),
 			...(this.restoreRequestSequenceNumber === undefined
 				? {}
 				: { restoreRequestSequenceNumber: this.restoreRequestSequenceNumber }),
 		});
 		this.updateOutputDemandForVisibility();
 		this.connectionReady = true;
+		this.failedTerminalRestoreAttemptCount = 0;
 		void recoverPendingTerminalInputBoxStash({ workspaceId: this.workspaceId, taskId: this.taskId });
 		this.clearReconnectTimer();
 		this.lastError = null;
@@ -1005,6 +1113,72 @@ class PersistentTerminal {
 		return true;
 	}
 
+	private cancelPendingOutputAcknowledgement(): void {
+		if (this.outputAcknowledgementTimer !== null) clearTimeout(this.outputAcknowledgementTimer);
+		this.outputAcknowledgementTimer = null;
+		this.pendingOutputAcknowledgement = null;
+	}
+
+	private flushProcessedOutputAcknowledgement(): void {
+		const pending = this.pendingOutputAcknowledgement;
+		this.cancelPendingOutputAcknowledgement();
+		if (
+			!this.disposed &&
+			pending &&
+			this.ioSocket === pending.ioSocket &&
+			this.controlSocket === pending.controlSocket
+		) {
+			this.sendControlMessage({
+				type: "output_ack",
+				bytes: pending.bytes,
+				...(pending.streamGenerationId === undefined || pending.restoreRequestSequenceNumber === undefined
+					? {}
+					: {
+							streamGenerationId: pending.streamGenerationId,
+							restoreRequestSequenceNumber: pending.restoreRequestSequenceNumber,
+						}),
+			});
+		}
+	}
+
+	private acknowledgeProcessedOutput(
+		bytes: number,
+		ioSocket = this.ioSocket,
+		controlSocket = this.controlSocket,
+	): void {
+		if (
+			this.disposed ||
+			bytes <= 0 ||
+			!ioSocket ||
+			!controlSocket ||
+			this.ioSocket !== ioSocket ||
+			this.controlSocket !== controlSocket
+		)
+			return;
+		if (
+			this.pendingOutputAcknowledgement &&
+			(this.pendingOutputAcknowledgement.ioSocket !== ioSocket ||
+				this.pendingOutputAcknowledgement.controlSocket !== controlSocket)
+		)
+			this.cancelPendingOutputAcknowledgement();
+		this.pendingOutputAcknowledgement ??= {
+			bytes: 0,
+			ioSocket,
+			controlSocket,
+			streamGenerationId: this.outputDemandStreamGenerationId,
+			restoreRequestSequenceNumber: this.restoreRequestSequenceNumber,
+		};
+		this.pendingOutputAcknowledgement.bytes += bytes;
+		if (this.pendingOutputAcknowledgement.bytes >= OUTPUT_ACKNOWLEDGEMENT_BATCH_MAXIMUM_BYTES) {
+			this.flushProcessedOutputAcknowledgement();
+		} else {
+			this.outputAcknowledgementTimer ??= setTimeout(
+				() => this.flushProcessedOutputAcknowledgement(),
+				OUTPUT_ACKNOWLEDGEMENT_BATCH_MAXIMUM_DELAY_MS,
+			);
+		}
+	}
+
 	private enqueueTerminalWrite(
 		data: string | Uint8Array,
 		options: {
@@ -1027,7 +1201,7 @@ class PersistentTerminal {
 		const acknowledgeOutput = (): void => {
 			// IO 替换会重建服务端背压记账；旧输出的 ACK 不能扣减新 IO 的未确认字节。
 			if (ackBytes > 0 && this.controlSocket === controlSocketAtEnqueue && this.ioSocket === ioSocketAtEnqueue) {
-				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+				this.acknowledgeProcessedOutput(ackBytes, ioSocketAtEnqueue, controlSocketAtEnqueue);
 			}
 		};
 		this.terminalWriteQueue = this.terminalWriteQueue
@@ -1106,14 +1280,17 @@ class PersistentTerminal {
 		// 快照分片写入:整段写会让 xterm 在一次 write 里同步解析数 MB(其 12ms 时间预算只在
 		// chunk 之间生效),页面冻结且 restore_complete 被推迟。切片后写队列逐段解析,主线程
 		// 在片间保持可响应。滚动定位保持在全部写完之后。
-		let lastSnapshotSliceWrite: Promise<void> = Promise.resolve();
+		let parsedByteLength = 0;
 		for (const snapshotSlice of sliceRestoreSnapshotForIncrementalWrite(snapshot)) {
-			lastSnapshotSliceWrite = this.enqueueTerminalWrite(snapshotSlice, {
+			await this.enqueueTerminalWrite(snapshotSlice, {
 				keepScrolledToBottom: false,
 				restoreIdentity,
 			});
+			if (!this.isCurrentTerminalRestore(restoreIdentity)) return false;
+			parsedByteLength += new TextEncoder().encode(snapshotSlice).byteLength;
+			this.renewTerminalRestoreProgressDeadline();
+			this.reportChunkedRestoreProgress(this.completedRestoreChunkCount, parsedByteLength);
 		}
-		await lastSnapshotSliceWrite;
 		if (!this.isCurrentTerminalRestore(restoreIdentity)) {
 			return false;
 		}
@@ -1229,7 +1406,11 @@ class PersistentTerminal {
 				// Tab is hidden: skip the xterm write (the renderer is paused, so it would
 				// only build a backlog). Ack immediately to keep the agent's PTY flowing,
 				// keep activity notifications alive, and remember to resync on return.
-				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+				// 已声明 paused_output 时服务端会清零该观看者的未确认字节并停止转发。
+				// 这些迟到帧属于递增前的恢复序号，不能在新序号下确认。
+				if (!this.outputDemandPaused) {
+					this.acknowledgeProcessedOutput(ackBytes);
+				}
 				if (decoded) {
 					this.notifyOutputText(decoded);
 				}
@@ -1240,7 +1421,7 @@ class PersistentTerminal {
 				// 标签页已回归可见、恢复快照在途:这段实时 chunk 属于「将被快照整段覆盖」的
 				// 过期窗口——ack + 丢弃,但**不**置 needsSnapshotResync(快照本就在途,置位会
 				// 自触发下一轮 request_restore 死循环)。丢弃无损,见 awaitingRestoreSnapshot 注释。
-				this.sendControlMessage({ type: "output_ack", bytes: ackBytes });
+				this.acknowledgeProcessedOutput(ackBytes);
 				if (decoded) {
 					this.notifyOutputText(decoded);
 				}
@@ -1275,6 +1456,10 @@ class PersistentTerminal {
 			if (this.disposed || this.ioSocket !== ioSocket) {
 				return;
 			}
+			if (this.awaitingRestoreSnapshot && !isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
+				this.failTerminalRestoreAndReconnect("终端恢复连接中断，正在重新握手。");
+				return;
+			}
 			// 热重启：agent 还在跑，新 runtime 几秒内就回来——如实说明，并从最短退避开始重连。
 			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
 				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
@@ -1293,6 +1478,7 @@ class PersistentTerminal {
 		}
 		const controlSocket = new WebSocket(getTerminalControlWebSocketUrl(this.taskId, this.workspaceId, this.clientId));
 		this.controlSocket = controlSocket;
+		if (!this.awaitingRestoreSnapshot) this.beginAwaitingRestoreSnapshotGate();
 		this.lastSentResizeMessage = null;
 		controlSocket.onopen = () => {
 			if (this.disposed || this.controlSocket !== controlSocket) {
@@ -1318,6 +1504,17 @@ class PersistentTerminal {
 			}
 
 			if (payload.type === "output_demand_state") {
+				// 免快照重显不发 restore_begin。暂停已经把服务端序号加一；只在序号前进时改用新序号，
+				// 并取消尚未发出的旧批次，避免旧输出记入新账。相同或更旧的序号保持隔离。
+				if (
+					(payload.demand === "paused_output" || payload.demand === "continuous_output") &&
+					payload.restoreRequestSequenceNumber !== undefined &&
+					(this.restoreRequestSequenceNumber === undefined ||
+						payload.restoreRequestSequenceNumber > this.restoreRequestSequenceNumber)
+				) {
+					this.cancelPendingOutputAcknowledgement();
+					this.restoreRequestSequenceNumber = payload.restoreRequestSequenceNumber;
+				}
 				if (payload.demand === "continuous_output" && this.awaitingRestoreSnapshot) {
 					this.endAwaitingRestoreSnapshotGate();
 					this.needsSnapshotResync = false;
@@ -1327,18 +1524,91 @@ class PersistentTerminal {
 				}
 				return;
 			}
+			let completedChunkedRestore = false;
+			if (payload.type === "restore_begin") {
+				const parsed = runtimeTerminalWsRestoreBeginMessageSchema.safeParse(payload);
+				if (!parsed.success) {
+					this.failTerminalRestoreAndReconnect("终端恢复起始帧无效。");
+					return;
+				}
+				const begin = parsed.data;
+				if (
+					this.outputDemandStreamGenerationId === begin.streamGenerationId &&
+					this.restoreRequestSequenceNumber !== undefined &&
+					begin.restoreRequestSequenceNumber <= this.restoreRequestSequenceNumber
+				)
+					return;
+				this.beginAwaitingRestoreSnapshotGate();
+				this.chunkedRestoreActive = true;
+				this.outputDemandSupported = true;
+				this.outputDemandStreamGenerationId = begin.streamGenerationId;
+				this.outputDemandOutputVersion = -1;
+				this.restoreSnapshotOutputVersion = begin.outputVersion;
+				this.restoreRequestSequenceNumber = begin.restoreRequestSequenceNumber;
+				this.pendingChunkedRestore = { begin, snapshotParts: [], receivedByteLength: 0 };
+				this.outputDemandPaused = false;
+				this.updateOutputDemandForVisibility();
+				return;
+			}
+			if (payload.type === "restore_chunk" || payload.type === "restore_end") {
+				const pending = this.pendingChunkedRestore;
+				if (!pending) return;
+				if (
+					payload.streamGenerationId !== pending.begin.streamGenerationId ||
+					payload.outputVersion !== pending.begin.outputVersion ||
+					payload.restoreRequestSequenceNumber !== pending.begin.restoreRequestSequenceNumber
+				)
+					return;
+				if (payload.type === "restore_chunk") {
+					const parsed = runtimeTerminalWsRestoreChunkMessageSchema.safeParse(payload);
+					if (!parsed.success || parsed.data.chunkSequenceNumber !== pending.snapshotParts.length) {
+						this.failTerminalRestoreAndReconnect("终端恢复分片缺失或顺序无效。");
+						return;
+					}
+					const byteLength = new TextEncoder().encode(parsed.data.snapshotPart).byteLength;
+					if (
+						byteLength > 64 * 1024 ||
+						pending.receivedByteLength + byteLength > pending.begin.snapshotByteLength
+					) {
+						this.failTerminalRestoreAndReconnect("终端恢复分片超过字节上限。");
+						return;
+					}
+					pending.snapshotParts.push(parsed.data.snapshotPart);
+					pending.receivedByteLength += byteLength;
+					this.renewTerminalRestoreProgressDeadline();
+					this.reportChunkedRestoreProgress(pending.snapshotParts.length, 0);
+					return;
+				}
+				const parsed = runtimeTerminalWsRestoreEndMessageSchema.safeParse(payload);
+				if (
+					!parsed.success ||
+					parsed.data.chunkCount !== pending.snapshotParts.length ||
+					pending.receivedByteLength !== pending.begin.snapshotByteLength
+				) {
+					this.failTerminalRestoreAndReconnect("终端恢复快照不完整。");
+					return;
+				}
+				this.completedRestoreChunkCount = pending.snapshotParts.length;
+				this.pendingChunkedRestore = null;
+				completedChunkedRestore = true;
+				payload = { ...pending.begin, type: "restore", snapshot: pending.snapshotParts.join("") };
+			}
 			if (payload.type === "restore") {
+				this.chunkedRestoreActive = completedChunkedRestore;
+				this.cancelPendingOutputAcknowledgement();
 				this.outputDemandSupported = payload.outputDemandProtocolVersion === 1;
 				this.outputDemandOutputVersion = payload.outputVersion ?? -1;
+				this.restoreSnapshotOutputVersion = payload.outputVersion ?? 0;
 				this.outputDemandStreamGenerationId = payload.streamGenerationId;
 				this.restoreRequestSequenceNumber = payload.restoreRequestSequenceNumber;
 				this.outputDemandPaused = false;
-				const shouldReplaceTerminalIoSocketAfterRestoreSnapshot =
-					this.awaitingRestoreSnapshot || this.restoreCompleted;
+				const shouldReplaceTerminalIoSocketAfterRestoreSnapshot = this.hasReceivedRestoreSnapshotForCurrentViewer;
+				this.hasReceivedRestoreSnapshotForCurrentViewer = true;
 				this.awaitingRestoreSnapshot = true;
 				this.connectionReady = false;
 				this.clearTerminalTransportConnectionStabilityTimer();
 				this.restoreCompleted = false;
+				this.renewTerminalRestoreProgressDeadline();
 				if (shouldReplaceTerminalIoSocketAfterRestoreSnapshot) {
 					// control 快照证明服务端已关转发闸，但旧 IO 仍可能有在途帧；换 IO 才能隔离这些字节。
 					const previousIoSocket = this.ioSocket;
@@ -1390,13 +1660,7 @@ class PersistentTerminal {
 						if (!this.isCurrentTerminalRestore(restoreIdentity)) {
 							return;
 						}
-						this.lastError = "Terminal restore failed.";
-						this.notifyLastError();
-						if (this.outputDemandSupported && !this.outputDemandFallbackToContinuous) {
-							this.outputDemandFallbackToContinuous = true;
-							this.outputDemandPaused = false;
-							this.reconnectTerminalSocketsUnderRotatedClientId({ preserveReconnectBackoff: true });
-						}
+						this.failTerminalRestoreAndReconnect("终端恢复解析失败，正在重新握手。");
 					});
 				return;
 			}
@@ -1410,6 +1674,10 @@ class PersistentTerminal {
 				return;
 			}
 			if (payload.type === "error") {
+				if (this.awaitingRestoreSnapshot) {
+					this.failTerminalRestoreAndReconnect(payload.message);
+					return;
+				}
 				if (
 					this.outputDemandSupported &&
 					!this.outputDemandFallbackToContinuous &&
@@ -1436,6 +1704,10 @@ class PersistentTerminal {
 			if (this.disposed || this.controlSocket !== controlSocket) {
 				return;
 			}
+			if (this.awaitingRestoreSnapshot && !isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
+				this.failTerminalRestoreAndReconnect("终端恢复控制连接中断，正在重新握手。");
+				return;
+			}
 			if (isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting(closeEvent)) {
 				this.lastError = KANBAN_RUNTIME_HOT_RESTART_RECONNECTING_MESSAGE;
 				this.reconnectAttempt = 0;
@@ -1448,7 +1720,7 @@ class PersistentTerminal {
 	}
 
 	private ensureConnected(): void {
-		if (this.disposed || this.reconnectTimer !== null) {
+		if (this.disposed || this.reconnectTimer !== null || this.restoreRetryBudgetExhausted) {
 			return;
 		}
 		if (!this.ioSocket) {
@@ -1936,6 +2208,10 @@ class PersistentTerminal {
 			return;
 		}
 		this.disposed = true;
+		window.removeEventListener("online", this.resumeTerminalRestoreAfterRecoverySignal);
+		this.unsubscribeTerminalRestoreRecoverySignals();
+		this.pendingChunkedRestore = null;
+		this.cancelPendingOutputAcknowledgement();
 		if (this.inactiveOutputPauseTimer) clearTimeout(this.inactiveOutputPauseTimer);
 		this.staleAgentTerminalSessionAutomaticResumeScheduler.dispose();
 		if (typeof document !== "undefined") {
