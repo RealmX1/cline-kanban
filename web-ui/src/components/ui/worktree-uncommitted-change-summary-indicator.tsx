@@ -1,5 +1,6 @@
 import type { CSSProperties, ReactElement } from "react";
 import { cn } from "@/components/ui/cn";
+import { formatLineChangeCountWithThousandsSuffix } from "@/utils/format-line-change-count-with-thousands-suffix";
 
 // worktree 相对 HEAD 的未提交改动统计「(N files +A -D)」。This project 卡片目录行、顶栏分支按钮、跨项目切换面板
 // 的行共用这一份，括号与文件数的颜色由宿主决定（各自所在行的排版不同），增删行数恒为绿 / 红。
@@ -61,7 +62,7 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 				)}
 			>
 				{" "}
-				+{additions}
+				+{formatLineChangeCountWithThousandsSuffix(additions)}
 			</span>
 			<span
 				className={cn(
@@ -70,7 +71,7 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 				)}
 			>
 				{" "}
-				-{deletions}
+				-{formatLineChangeCountWithThousandsSuffix(deletions)}
 			</span>
 			<span {...mutedProps}>)</span>
 		</>
