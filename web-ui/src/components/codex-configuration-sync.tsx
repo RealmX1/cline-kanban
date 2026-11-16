@@ -1,6 +1,6 @@
 import * as Popover from "@radix-ui/react-popover";
 import * as RadixSwitch from "@radix-ui/react-switch";
-import { ChevronDown, ClipboardCheck } from "lucide-react";
+import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import {
 	CodexConfigurationComparisonRows,
@@ -866,7 +866,7 @@ export function CodexConfigurationSyncSummaryButton({ notice }: { notice: CodexC
 				notice.isExpanded && "bg-surface-3",
 			)}
 		>
-			<ClipboardCheck size={14} aria-hidden="true" />
+			<SlidersHorizontal size={14} aria-hidden="true" />
 			<span className="hidden xl:inline">配置</span>
 			<span className="font-mono tabular-nums">
 				{notice.pendingApprovalCount + notice.sourceUpdateCount ||

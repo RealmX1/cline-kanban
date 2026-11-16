@@ -110,10 +110,7 @@ export function FocusViewGroupHeaderRails({
 						data-focus-view-header-rail-row={rowIndex}
 						style={{
 							gridRowStart: rowIndex + 1,
-							gridColumn:
-								row.groupIds.includes(focusedGroupId ?? "") || row.presentation === "standard"
-									? "1 / -1"
-									: columnIndex + 1,
+							gridColumn: row.groupIds.length === 1 ? "1 / -1" : columnIndex + 1,
 						}}
 					>
 						{renderEntry(groupId, edge, row.presentation)}

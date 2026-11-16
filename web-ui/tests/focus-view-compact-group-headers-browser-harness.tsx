@@ -45,6 +45,9 @@ if (usesGroupBoundaryFixtures) {
 	board.columns[0]!.cards[0]!.pinnedToTaskPinboardAt = observedAt;
 	board.columns[0]!.title = "待办分组的超长中文标题用于验证截断".repeat(3);
 }
+if (browserHarnessQueryParameters.has("pinned-fixtures")) {
+	for (const card of board.columns[0]!.cards.slice(0, 7)) card.pinnedToTaskPinboardAt = observedAt;
+}
 const entries: RuntimeCrossProjectTaskSwitcherEntry[] = board.columns.flatMap((column) =>
 	column.cards.map((card) => ({
 		taskId: card.id,

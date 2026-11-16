@@ -32,6 +32,31 @@ async function measureTaskCardSummaryMetadataCellGeometry(summary: Locator) {
 }
 
 for (const cardWidth of [200, 240, 320, 480]) {
+	test(`${cardWidth}px 卡宽：普通统计变化保持中间列起点，Files 图标保留可访问文件数`, async ({ page }) => {
+		await page.setViewportSize({ width: 1600, height: 1100 });
+		await mountCardMetadataHarness(page, `cardWidth=${cardWidth}`);
+		const hosts = ["all-projects", "project-specific", "standard-board"];
+		const before = await Promise.all(
+			hosts.map((host) =>
+				measureTaskCardSummaryMetadataCellGeometry(
+					page.locator(`[data-layout-host="${host}"] [data-task-card-secondary-metadata-row]:visible`),
+				),
+			),
+		);
+		await page.getByRole("button", { name: "切换统计密度", exact: true }).click();
+		for (const [index, host] of hosts.entries()) {
+			const summary = page.locator(`[data-layout-host="${host}"] [data-task-card-secondary-metadata-row]:visible`);
+			const after = await measureTaskCardSummaryMetadataCellGeometry(summary);
+			if (cardWidth >= 320) expect(Math.abs(after[1].x - before[index][1].x)).toBeLessThan(1);
+			else expect(after[1].width).toBeGreaterThan((await visibleBox(summary)).width * 0.25);
+			expect(Math.abs(after[4].x - after[1].x)).toBeLessThan(1);
+			const dirty = summary.locator('[data-task-card-summary-cell="dirty"]');
+			await expect(dirty.locator("svg.lucide-files")).toBeVisible();
+			await expect(dirty).toContainText("123 files");
+			await expect(dirty.locator(".sr-only")).toHaveText(" files");
+			for (const cell of after) expect(cell.scrollWidth).toBeLessThanOrEqual(cell.clientWidth + 1);
+		}
+	});
 	test(`${cardWidth}px 卡宽：列宽随内容分配，空统计不占一整列`, async ({ page }) => {
 		await page.setViewportSize({ width: 1600, height: 1100 });
 		const populatedProjectWidths: number[] = [];
@@ -52,10 +77,7 @@ for (const cardWidth of [200, 240, 320, 480]) {
 					expect(cells[0].width).toBeGreaterThan(populatedProjectWidths[index] + 20);
 				} else {
 					populatedProjectWidths.push(cells[0].width);
-					expect(
-						Math.max(...cells.slice(0, 3).map((cell) => cell.width)) -
-							Math.min(...cells.slice(0, 3).map((cell) => cell.width)),
-					).toBeGreaterThan(10);
+					for (const cell of cells.slice(0, 3)) expect(cell.width).toBeGreaterThan(0);
 				}
 			}
 			await page.screenshot({
@@ -68,8 +90,9 @@ for (const cardWidth of [200, 240, 320, 480]) {
 		await page.setViewportSize({ width: 1280, height: 1100 });
 		const errors = await mountCardMetadataHarness(page, `longMetadata&largeStatistics&cardWidth=${cardWidth}`);
 		const summary = page.locator('[data-layout-host="all-projects"] [data-task-card-secondary-metadata-row]:visible');
-		await expect(summary).toContainText("123456789");
-		await expect(summary).toContainText("987654321");
+		await expect(summary).toContainText("123457K");
+		await expect(summary).toContainText("987654K");
+		await expect(summary.getByRole("button", { name: "已提交 +123456789 −987654321", exact: true })).toBeVisible();
 		const cells = await measureTaskCardSummaryMetadataCellGeometry(summary);
 		expect(cells).toHaveLength(6);
 		for (let index = 0; index < 3; index++) {

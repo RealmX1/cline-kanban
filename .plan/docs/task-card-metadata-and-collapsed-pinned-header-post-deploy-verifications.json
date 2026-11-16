@@ -1,0 +1,38 @@
+[
+	{
+		"verificationId": "768fe0ba-2cd5-4f5d-8405-f8d2816b2631",
+		"kind": "guided_manual",
+		"label": "实际部署中顶栏图标可区分，任务卡文件图标与两行摘要清晰对齐",
+		"guidance": {
+			"steps": [
+				"在实际部署的看板打开有 Git 统计的任务；配置提醒自然出现时，观察它与部署验证入口。无需制造配置变更。",
+				"部署验证应保留 ClipboardCheck，配置提醒应显示 SlidersHorizontal；计数、提示与点击展开行为正常。",
+				"对比同宽任务卡，再在 Focus View 的缩略行、展开卡及吸顶副本中观察：dirty 文件数使用 Files 图标，仍有数量和增删行数。",
+				"调整卡宽到约 200、240、320、480px。正常内容的 base 关系和部署覆盖从相同横向位置起排；窄卡、大数字可让项目列收窄并换行，空统计释放宽度。"
+			],
+			"expectedObservation": "真实实例使用新图标，顶栏两入口可直接区分；卡片上下两行各自对应三列，常规宽度的中间列有一致起点，窄卡内容保持在边界内，读屏仍能读到文件数。",
+			"failureSignature": "配置提醒仍与部署验证共用 ClipboardCheck；卡片仍显示可见的 file/files 单词、文件数量丢失，或摘要溢出、上下列错位、普通卡与副本的样式不一致。",
+			"anchor": { "view": "board", "anchorKey": "board-task-card:d2631" }
+		},
+		"script": null,
+		"cleanup": { "mode": "automatic", "assetsDir": null, "manualSteps": [] }
+	},
+	{
+		"verificationId": "95cb021d-250d-40fa-86d7-8712a6e26a2c",
+		"kind": "guided_manual",
+		"label": "实际部署中收起的 Pinned 共享顶轨，单标题行铺满，跳转首卡不被遮挡",
+		"guidance": {
+			"steps": [
+				"打开已有置顶任务的 Focus View，分别选择当前项目和 All projects；保持焦点任务位于普通分组。",
+				"收起 Pinned 并上下连续滚动：它应进入共享顶轨，与其他紧凑标题按行排列；上下轨道中每个只有一个标题的行铺满可用宽度。",
+				"点击分组标题跳转，首卡应完整位于顶轨下方；再展开 Pinned，确认它固定在列表上方，条目溢出时可独立滚动。All projects 中只存在于 Pinned 的焦点行继续留存。",
+				"刷新后确认折叠偏好保留；在触屏视口确认标题仍带名称、按单列呈现，并可点击展开。"
+			],
+			"expectedObservation": "两个真实项目视图的收起态 Pinned 与上方标题共享行；单标题行没有多余空列。展开态固定区独立滚动，跳转后的首卡不藏在轨道后；偏好、焦点行与触屏单列交互保留。",
+			"failureSignature": "无任务显示的 Pinned 仍独占原固定区，单标题仍只占部分行宽，或轨道盖住跳转首卡；展开态不再固定、滚动互相干扰、焦点行消失或刷新丢失折叠偏好。",
+			"anchor": { "view": "task_detail", "anchorKey": "focus-view-group-header-rails" }
+		},
+		"script": null,
+		"cleanup": { "mode": "automatic", "assetsDir": null, "manualSteps": [] }
+	}
+]

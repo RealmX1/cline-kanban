@@ -69,7 +69,10 @@ export function TaskCardSummaryMetadata({
 			data-task-directory={showGitMetadata ? "" : undefined}
 			aria-label={description ?? undefined}
 			className={cn(
-				"relative mb-1 grid min-w-0 grid-cols-[minmax(0,1fr)_fit-content(30%)_fit-content(40%)] items-stretch gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary",
+				"relative mb-1 grid min-w-0 items-stretch gap-x-1.5 gap-y-1 text-[10px] leading-[1.4] text-text-secondary",
+				showGitMetadata && (showsDirty || showsCommitted)
+					? "grid-cols-[minmax(0,32%)_minmax(min(26%,6rem),1fr)_fit-content(40%)]"
+					: "grid-cols-[minmax(0,1fr)_fit-content(30%)_fit-content(40%)]",
 				className,
 			)}
 		>
@@ -141,6 +144,7 @@ export function TaskCardSummaryMetadata({
 								deletions={snapshot.deletions ?? 0}
 								showUncommittedChangeBackground
 								allowLineWrapping
+								showChangedFileCountWithIcon
 							/>
 						</span>
 					</Tooltip>

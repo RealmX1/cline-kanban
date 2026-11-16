@@ -57,6 +57,7 @@ export interface UseFocusViewStageSectionExpansionOptions {
 	scrollRootRef: RefObject<HTMLElement | null>;
 	/** 全部 stage 的 columnId，按列表文档序（跳转落点按目标之上有几个 stage 计算顶 rail 高度）。 */
 	orderedColumnIds: readonly BoardDisplayGroupId[];
+	fixedTopGroupIds?: readonly string[];
 	/** 焦点卡所在 stage：它在目标之上且焦点卡会钉顶时，顶 rail 多出一张焦点卡克隆的高度。 */
 	focusedColumnId: BoardDisplayGroupId;
 	focusedTaskId: string;
@@ -80,6 +81,7 @@ export interface FocusViewStageSectionExpansionController {
 export function useFocusViewStageSectionExpansion({
 	scrollRootRef,
 	orderedColumnIds,
+	fixedTopGroupIds,
 	focusedColumnId,
 	focusedTaskId,
 }: UseFocusViewStageSectionExpansionOptions): FocusViewStageSectionExpansionController {
@@ -108,6 +110,7 @@ export function useFocusViewStageSectionExpansion({
 	return useFocusViewGroupSectionNavigation({
 		scrollRootRef,
 		orderedColumnIds,
+		fixedTopGroupIds,
 		focusedColumnId,
 		focusedCardElementSelector: `[data-task-id="${escapeCssAttributeSelectorValue(focusedTaskId)}"]`,
 		isStageSectionExpanded,
@@ -119,6 +122,7 @@ export function useFocusViewStageSectionExpansion({
 export function useFocusViewGroupSectionNavigation({
 	scrollRootRef,
 	orderedColumnIds,
+	fixedTopGroupIds,
 	focusedColumnId,
 	focusedCardElementSelector,
 	focusedCardCloneHeightPx,
@@ -128,6 +132,7 @@ export function useFocusViewGroupSectionNavigation({
 }: {
 	scrollRootRef: RefObject<HTMLElement | null>;
 	orderedColumnIds: readonly string[];
+	fixedTopGroupIds?: readonly string[];
 	focusedColumnId: string;
 	focusedCardElementSelector: string;
 	/** 未受视口限高的完整副本自然高度，不包含 rail 外层 padding。 */
@@ -162,6 +167,7 @@ export function useFocusViewGroupSectionNavigation({
 				focusedCardViewportTop: focusedCardRect?.top ?? 0,
 				focusedCardHeight: naturalFocusedCardHeight,
 				railLayout: {
+					fixedTopGroupIds,
 					sections: orderedColumnIds.map((id) => {
 						const rect = scrollRoot
 							.querySelector<HTMLElement>(
@@ -190,6 +196,7 @@ export function useFocusViewGroupSectionNavigation({
 		},
 		[
 			orderedColumnIds,
+			fixedTopGroupIds,
 			focusedColumnId,
 			focusedCardElementSelector,
 			focusedCardCloneHeightPx,
