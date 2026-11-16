@@ -298,7 +298,13 @@ function createValidationFixture() {
 		});
 		return { recordPath, stdoutPath };
 	}
-	function addLegacyBundle(options: { wrongContentManifest?: boolean } = {}) {
+	function addLegacyBundle(
+		options: {
+			wrongContentManifest?: boolean;
+			interruptedExitCode?: 130 | -2;
+			interruptedPrecommitExitCode?: 130 | -2;
+		} = {},
+	) {
 		const bundleDirectory = join(
 			runtimeHomeDirectoryPath,
 			"cross-task-handoff-artifacts/isolated-workspace/isolated-task/handback",
@@ -329,18 +335,34 @@ function createValidationFixture() {
 			before: snapshot,
 			after: snapshot,
 			validationEnvironment: currentEnvironmentIdentity(),
-			status: "passed",
-			exitCode: 0,
+			status: options.interruptedExitCode === undefined ? "passed" : "interrupted",
+			exitCode: options.interruptedExitCode ?? 0,
 			stdoutPath,
 			stdoutSha256: digest(readFileSync(stdoutPath)),
 			stderrPath,
 			stderrSha256: digest(""),
 		});
+		const precommitLogPath = join(originals, "precommit.stdout");
+		if (options.interruptedPrecommitExitCode !== undefined)
+			writeFileSync(precommitLogPath, "vitest run --project precommit-safe\nSIGINT\n");
 		writeJson(join(bundleDirectory, "final-complete-tree-verification-evidence.json"), {
 			taskId: "isolated-task",
 			taskCommit: commit,
 			completeTree: tree,
 			status: "passed",
+			...(options.interruptedPrecommitExitCode !== undefined
+				? {
+						precommit: {
+							taskId: "isolated-task",
+							commit,
+							completeTree: tree,
+							status: "interrupted",
+							exitCode: options.interruptedPrecommitExitCode,
+							rawLog: precommitLogPath,
+							rawLogSha256: digest(readFileSync(precommitLogPath)),
+						},
+					}
+				: {}),
 			proofs: {
 				typecheck: {
 					recordPath,
@@ -477,6 +499,67 @@ describe("local deploy 自动复用源码验证证据", () => {
 		expect(
 			JSON.parse(readFileSync(join(fixture.output, "source-validation-execution-state.json"), "utf8")).attempts,
 		).toHaveLength(1);
+	});
+
+	it("当前检查自行退出 130 时保留中止，并只允许有界接续补验", () => {
+		const fixture = createValidationFixture();
+		writeJson(fixture.planPath, {
+			schemaVersion: 1,
+			commands: [{ name: "自行中止的检查", argv: [process.execPath, "-e", "process.exit(130)"] }],
+		});
+		for (let invocation = 0; invocation < 3; invocation++) {
+			const result = fixture.run();
+			expect(result.summary.status).toBe("machine_evidence_pending");
+			expect(result.report().sourceValidationCheckResults[0].decision).toBe("machine_evidence_pending");
+		}
+		const state = JSON.parse(readFileSync(join(fixture.output, "source-validation-execution-state.json"), "utf8"));
+		expect(state.attempts).toHaveLength(2);
+		expect(state.attempts.map((attempt: { status: string }) => attempt.status)).toEqual([
+			"interrupted",
+			"interrupted",
+		]);
+	});
+
+	it.each([130, -2] as const)("接回持久监督结果 %s 时保留中止，不能缓存为质量失败", (exitCode) => {
+		const fixture = createValidationFixture();
+		expect(fixture.run().status).toBe(0);
+		const statePath = join(fixture.output, "source-validation-execution-state.json");
+		const state = JSON.parse(readFileSync(statePath, "utf8"));
+		const attempt = state.attempts[0];
+		attempt.status = "running";
+		writeJson(statePath, state);
+		const supervision = JSON.parse(readFileSync(attempt.nativeSupervisionPath, "utf8"));
+		writeJson(attempt.nativeSupervisionPath, { ...supervision, status: "completed", exitCode, interrupted: false });
+		expect(fixture.run().status).toBe(0);
+		const recoveredState = JSON.parse(readFileSync(statePath, "utf8"));
+		expect(recoveredState.attempts.map((entry: { status: string }) => entry.status)).toEqual([
+			"interrupted",
+			"passed",
+		]);
+		expect(readFileSync(fixture.executedSourceValidationCounterPath, "utf8")).toBe("检查\n检查\n");
+	});
+
+	it.each([130, -2] as const)("备用包的退出码 %s 保留为中止，不阻塞当前候选补验", (interruptedExitCode) => {
+		const fixture = createValidationFixture();
+		fixture.addLegacyBundle({ interruptedExitCode });
+		const result = fixture.run({ inspectOnly: true });
+		expect(result.report().availableSourceValidationChecks[0].status).toBe("interrupted");
+		expect(result.report().sourceValidationCheckResults.map((check) => check.decision)).toEqual([
+			"missing_check",
+			"missing_check",
+		]);
+	});
+
+	it.each([130, -2] as const)("备用包的 precommit 退出码 %s 也不能作为质量失败", (interruptedPrecommitExitCode) => {
+		const fixture = createValidationFixture();
+		fixture.addLegacyBundle({ interruptedPrecommitExitCode });
+		writeJson(fixture.planPath, {
+			schemaVersion: 1,
+			commands: [{ name: "提交前检查", argv: ["npm", "run", "test:precommit"] }],
+		});
+		const result = fixture.run({ inspectOnly: true });
+		expect(result.report().availableSourceValidationChecks.at(-1)?.status).toBe("interrupted");
+		expect(result.report().sourceValidationCheckResults[0].decision).toBe("missing_check");
 	});
 
 	it("验证计划增加检查时保留已完成项，不因整份计划变化重跑它", () => {

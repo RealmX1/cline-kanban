@@ -16,6 +16,7 @@ import {
 import { dirname, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { getRuntimeFetch } from "../core/runtime-endpoint";
+import { isFilesystemKernelAtomicWriteTemporaryFilePath } from "../fs/locked-file-system";
 import {
 	getWorkspaceStateSnapshotReadFingerprintById,
 	listWorkspaceIndexEntries,
@@ -59,27 +60,25 @@ export async function readLocalRedeploymentWorkspaceState(
 	workspaceId: string,
 ): Promise<PersistedWorkspaceStateById> {
 	const fingerprint = await getWorkspaceStateSnapshotReadFingerprintById(workspaceId);
+	const validateWorkspaceState = (value: unknown): value is PersistedWorkspaceStateById =>
+		!!value &&
+		typeof value === "object" &&
+		"workspaceId" in value &&
+		value.workspaceId === workspaceId &&
+		"board" in value &&
+		!!value.board &&
+		typeof value.board === "object" &&
+		"columns" in value.board &&
+		Array.isArray(value.board.columns);
 	return reuseLocalRedeploymentCheck({
 		directory,
 		checkKey: `workspace-state:${workspaceId}`,
 		inputFingerprint: fingerprint,
-		validate: (value): value is PersistedWorkspaceStateById =>
-			!!value &&
-			typeof value === "object" &&
-			"workspaceId" in value &&
-			value.workspaceId === workspaceId &&
-			"board" in value &&
-			!!value.board &&
-			typeof value.board === "object" &&
-			"columns" in value.board &&
-			Array.isArray(value.board.columns),
+		validate: validateWorkspaceState,
 		read: async () => {
 			try {
-				const value = (await queryLocalRedeploymentRuntime(
-					request,
-					"workspace.getState",
-					workspaceId,
-				)) as PersistedWorkspaceStateById;
+				const value = await queryLocalRedeploymentRuntime(request, "workspace.getState", workspaceId);
+				if (!validateWorkspaceState(value)) throw new Error(`workspace.getState 身份或结构缺证：${workspaceId}`);
 				return { value, evidenceSource: "runtime_workspace_getState" };
 			} catch (error) {
 				const value = await loadPersistedWorkspaceStateById(workspaceId);
@@ -334,6 +333,14 @@ export async function backupLocalRedeploymentRuntimeState(
 			runtimeHomeRelativePathSegments[2] === "task-command-executions"
 		);
 	}
+	function isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(path: string): boolean {
+		// 原生状态区的发布前临时文件可消失；用户资产与历史实验中的同形文件仍完整复制。
+		const segments = relative(request.runtimeIdentity.runtimeHomeDirectoryPath, path).split(sep);
+		return (
+			(segments.length === 1 || segments[0] === "workspaces" || segments[0] === "agent-session-pty-host") &&
+			isFilesystemKernelAtomicWriteTemporaryFilePath(path)
+		);
+	}
 	async function hashRuntimeStateFileContents(path: string): Promise<string> {
 		const hash = createHash("sha256");
 		for await (const chunk of createReadStream(path)) hash.update(chunk);
@@ -341,8 +348,11 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function fingerprintRuntimeStateEntry(path: string, recordSkipped = false): Promise<string | null> {
 		assertLocalRedeploymentNotRevoked(directory);
-		// 活跃监督者持续改写这些持久原件；原地保留，不能要求部署自己的进度静止。
-		if (isRuntimeWorkspaceCommandExecutionArtifactDirectory(path)) {
+		// 活跃监督原件原地保留；内核发布前临时文件可随 rename 消失，不作为正式状态。
+		if (
+			isRuntimeWorkspaceCommandExecutionArtifactDirectory(path) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(path)
+		) {
 			if (recordSkipped) skipped.push(path);
 			return null;
 		}
@@ -379,7 +389,10 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function copyRuntimeStateEntry(source: string, destination: string): Promise<void> {
 		assertLocalRedeploymentNotRevoked(directory);
-		if (isRuntimeWorkspaceCommandExecutionArtifactDirectory(source)) {
+		if (
+			isRuntimeWorkspaceCommandExecutionArtifactDirectory(source) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(source)
+		) {
 			skipped.push(source);
 			return;
 		}
@@ -410,7 +423,7 @@ export async function backupLocalRedeploymentRuntimeState(
 				preservedDatabase.close();
 			}
 		} else {
-			await cp(source, destination, { dereference: false });
+			await cp(source, destination, { dereference: false, verbatimSymlinks: true });
 			if ((await fingerprintRuntimeStateEntry(source)) !== (await fingerprintRuntimeStateEntry(destination)))
 				throw Object.assign(new Error("运行时文件副本与源内容不一致，等待逐项重验"), {
 					code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
@@ -430,6 +443,7 @@ export async function backupLocalRedeploymentRuntimeState(
 		const source = join(request.runtimeIdentity.runtimeHomeDirectoryPath, name);
 		if (
 			preservedInPlace.has(name) ||
+			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(source) ||
 			resolve(directory) === resolve(source) ||
 			resolve(directory).startsWith(`${resolve(source)}/`)
 		) {
@@ -510,7 +524,11 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	const previousBuild = join(directory, "preserved-previous-distribution");
 	if (!(await readLocalRedeploymentJson(join(directory, "previous-distribution-backup.json")))) {
-		await cp(request.distributionDirectoryPath, previousBuild, { recursive: true, dereference: false });
+		await cp(request.distributionDirectoryPath, previousBuild, {
+			recursive: true,
+			dereference: false,
+			verbatimSymlinks: true,
+		});
 		await writeLocalRedeploymentJson(join(directory, "previous-distribution-backup.json"), { previousBuild });
 	}
 	await writeLocalRedeploymentJson(join(directory, "runtime-state-backup-receipt.json"), {

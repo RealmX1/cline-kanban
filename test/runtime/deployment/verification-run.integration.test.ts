@@ -9,11 +9,18 @@ import { buildPostDeployVerificationTaskFieldsAddedForDeploymentAttributionAndCl
 import { getPostDeployVerificationStatePath } from "../../../src/deployment/post-deploy-verification-state";
 import { ensureVerificationAssetsDir } from "../../../src/deployment/verification-assets";
 import { createDeploymentApi } from "../../../src/trpc/deployment-api";
+import { judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline } from "../../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import { createTempDir } from "../../utilities/temp-dir";
 import { cleanupIsolatedVerificationExecutionAttempts } from "./verification-execution-isolated-runtime-fixture";
 
-// server 端「运行自动脚本」全链路（不经 HTTP/tRPC 传输，直接调 handler）：置 running → spawn 脚本 → 写结果 + 自动勾选。
-describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_000 }, () => {
+const verificationExitStatusDeadline = {
+	waitedForDescription: "验证脚本退出并持久化退出状态（从 handler 调用起算）",
+	softDeadlineMsExpectedOnUncontendedHost: 10_000,
+	hardDeadlineMsOnlyExplainedByRealHangOrRegression: 60_000,
+};
+
+// 本组验证退出状态；冷启动超过软档保留告警，脚本硬期限与外层清理预算闭合。
+describe.sequential("runPostDeployVerificationItem integration", { timeout: 90_000 }, () => {
 	let sandbox: ReturnType<typeof createTempDir>;
 	let previousHome: string | undefined;
 	let previousUserProfile: string | undefined;
@@ -88,7 +95,12 @@ describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_0
 									source: "authored",
 									kind: "automated_script",
 									guidance: null,
-									script: { entrypoint: "run.sh", interpreter: "bash", timeoutMs: 10000 },
+									script: {
+										entrypoint: "run.sh",
+										interpreter: "bash",
+										timeoutMs:
+											verificationExitStatusDeadline.hardDeadlineMsOnlyExplainedByRealHangOrRegression,
+									},
 									run: null,
 									cleanup: { mode: "manual", assetsDir, manualSteps: [] },
 								},
@@ -110,9 +122,9 @@ describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_0
 		return { deploymentId, taskId, itemId };
 	}
 
-	it("exit 0 → passed 且自动勾选 checked=true", async () => {
+	it("exit 0 → passed 且自动勾选 checked=true", async (context) => {
 		const { deploymentId, taskId, itemId } = await seedAutomatedItem("exit 0\n");
-
+		const startedAt = performance.now();
 		const response = await deploymentApi.runPostDeployVerificationItem(
 			{ workspaceId: "ws-1", workspacePath: "/tmp/ws-1" },
 			{ deploymentId, taskId, itemId },
@@ -120,13 +132,18 @@ describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_0
 
 		expect(response.ok).toBe(true);
 		const item = response.task?.checklist.find((entry) => entry.id === itemId);
-		expect(item?.run?.status).toBe("passed");
+		expect(item?.run?.status, JSON.stringify(item?.run)).toBe("passed");
 		expect(item?.checked).toBe(true);
+		await judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline(
+			context,
+			verificationExitStatusDeadline,
+			performance.now() - startedAt,
+		);
 	});
 
-	it("exit 1 → failed 且取消勾选 checked=false", async () => {
+	it("exit 1 → failed 且取消勾选 checked=false", async (context) => {
 		const { deploymentId, taskId, itemId } = await seedAutomatedItem("exit 1\n");
-
+		const startedAt = performance.now();
 		const response = await deploymentApi.runPostDeployVerificationItem(
 			{ workspaceId: "ws-1", workspacePath: "/tmp/ws-1" },
 			{ deploymentId, taskId, itemId },
@@ -134,8 +151,13 @@ describe.sequential("runPostDeployVerificationItem integration", { timeout: 45_0
 
 		expect(response.ok).toBe(true);
 		const item = response.task?.checklist.find((entry) => entry.id === itemId);
-		expect(item?.run?.status).toBe("failed");
+		expect(item?.run?.status, JSON.stringify(item?.run)).toBe("failed");
 		expect(item?.checked).toBe(false);
+		await judgeMeasuredElapsedAgainstLoadSensitiveTwoTierDeadline(
+			context,
+			verificationExitStatusDeadline,
+			performance.now() - startedAt,
+		);
 	});
 
 	// workspace 归属校验回归（RVF CI5）：跨 workspace 的 deploymentId 必须在置 running 前被拒绝，脚本绝不 spawn。
