@@ -954,7 +954,7 @@ export function registerDeploymentCommand(program: Command): void {
 		.option("--execution-directory <path>", "绑定本次持久部署执行；同一执行重试返回原登记，不重复创建验证组。")
 		.option(
 			"--project-path <path>",
-			"Registered project whose tasks to correlate. Defaults to matching the source checkout path.",
+			"关联任务的已注册项目。绑定执行时默认按冻结 workspaceId 解析；否则按源码目录匹配。",
 		)
 		.action(
 			async (options: {
