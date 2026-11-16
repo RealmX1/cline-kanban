@@ -46,17 +46,23 @@ int environment_ownership(int pid,const char *token) {
 int emit_coherent_native_process_generation_and_origin_observation(int pid,const char *token,int written,int *complete) {
  struct DarwinProcessUniqueIdentity identity,after;memset(&identity,0,sizeof(identity));memset(&after,0,sizeof(after));
  struct proc_bsdinfo info;memset(&info,0,sizeof(info));
+ errno=0;
  int identity_known=proc_pidinfo(pid,DARWIN_PROCESS_UNIQUE_IDENTITY_FLAVOR,0,&identity,sizeof(identity))==sizeof(identity);
  int identity_errno=identity_known?0:errno;
+ errno=0;
  int info_known=proc_pidinfo(pid,PROC_PIDTBSDINFO,0,&info,sizeof(info))==sizeof(info);
+ int info_errno=info_known?0:errno;
  int has_token=token[0]?environment_ownership(pid,token):-1;
+ errno=0;
  int after_known=proc_pidinfo(pid,DARWIN_PROCESS_UNIQUE_IDENTITY_FLAVOR,0,&after,sizeof(after))==sizeof(after);
+ int after_errno=after_known?0:errno;
  int coherent=identity_known && after_known && identity.unique_process_id==after.unique_process_id;
+ int absence_confirmed=!identity_known && identity_errno==ESRCH && !info_known && info_errno==ESRCH && !after_known && after_errno==ESRCH;
  if(!coherent)*complete=0;
  if(written)printf(",");
  printf("{\"pid\":%d,\"parentProcessPid\":%d,\"outsideCurrentUser\":%s,\"hasExecutionOwnershipToken\":%s,\"processIsZombie\":%s,\"processStartIdentity\":\"native process observation\"",pid,info_known?info.pbi_ppid:-1,info_known && info.pbi_uid!=getuid()?"true":"false",has_token<0?"null":has_token?"true":"false",info_known && info.pbi_status==SZOMB?"true":"false");
  if(coherent) printf(",\"processUniqueIdentity\":\"%llu\",\"processIdVersion\":%d,\"originalParentProcessIdVersion\":%d",(unsigned long long)identity.unique_process_id,identity.process_id_version,identity.original_parent_process_id_version);
- else printf(",\"nativeProcessSnapshotUnproven\":true,\"nativeProcessLookupErrno\":%d",identity_errno);
+ else printf(",\"nativeProcessSnapshotUnproven\":true,\"nativeProcessLookupErrno\":%d,\"nativeProcessNoLongerExists\":%s",identity_errno,absence_confirmed?"true":"false");
  printf("}");return written+1;
 }
 int main(int argc,char **argv) {

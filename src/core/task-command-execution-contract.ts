@@ -24,6 +24,7 @@ export const taskCommandExecutionSpecificationSchema = z
 		continuationNoticesFile: z.string().min(1).optional(),
 		producerExecutionRevocationFile: z.string().min(1).optional(),
 		cancelCommand: commandArgumentsSchema.optional(),
+		postProcessExitCleanupCommand: commandArgumentsSchema.optional(),
 		workingDirectory: z.string().min(1),
 		resultFile: z.string().min(1),
 		materialSha256: z.string().regex(/^[a-f0-9]{64}$/),
@@ -47,6 +48,18 @@ export const taskCommandExecutionSpecificationSchema = z
 		},
 	);
 export type TaskCommandExecutionSpecification = z.infer<typeof taskCommandExecutionSpecificationSchema>;
+export const taskCommandExecutionOwnedProcessesExitConfirmationSchema = z.strictObject({
+	schemaVersion: z.literal(1),
+	executionId: z.uuid(),
+	launchNonce: z.uuid(),
+	businessDispatchSequenceNumber: z.number().int().positive(),
+	materialSha256: z.string().regex(/^[a-f0-9]{64}$/u),
+	command: commandArgumentsSchema,
+	systemBootIdentity: z.string().nullable(),
+	ownedProcessesExited: z.literal(true),
+	originalOutputDurablySaved: z.literal(true),
+	confirmedAtEpochMs: z.number(),
+});
 export const taskCommandExecutionStartRequestSchema = z.object({
 	taskId: z.string().min(1),
 	idempotencyKey: z.string().min(1),

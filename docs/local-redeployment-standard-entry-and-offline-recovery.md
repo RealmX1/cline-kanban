@@ -56,6 +56,8 @@
 
 v2 manifest 在候选完成后固定产物摘要。`runtimeStartingState` 区分 `verified_online` 与 `verified_offline`；离线 `runtimeBefore=null` 并引用原生无监听、连接拒绝与 boot 原件。HTTP 超时保留 unknown，不填虚拟 PID。此前的构建也已由同一所属执行托管。
 
+`deployment record --execution-directory` 按冻结 manifest 的 `workspaceId` 定位已注册项目，私有 `sourceCheckoutPath` 仅用于候选与提交核验，不需另补 `--project-path`。显式项目参数仍须匹配冻结归属；未注册或不匹配时拒绝登记，不自动注册候选。普通登记和 `recover-deployment-record` 复用同一入口及原回执，不重复建组、发布或重启。不带执行目录的旧入口仍按显式项目或源码路径解析。
+
 ## 状态保全与效果核验
 
 保全配置、SQLite online backup、一致性工作区快照、任务映射、Git binary/full-index 补丁以及真实 staged/unstaged/untracked 内容。Git 只读查询不取 optional locks。逐项目缓存成功核验，快照指纹变化只使相关结果失效；API 超时或不可达时，使用 `loadPersistedWorkspaceStateById` 读取一致性持久快照。前后变化保存在 `state-preservation-comparison.json`，并行改动不自动归因于部署丢失。

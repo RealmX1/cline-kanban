@@ -32,6 +32,7 @@ import {
 	formatTaskCommandContinuationNotice,
 	readEligibleTaskCommandContinuationNotices,
 } from "./task-command-execution-continuation-notices";
+import { recoverOwnedCommandPostProcessExitCleanup } from "./task-command-execution-post-process-exit-cleanup";
 import {
 	mutateTaskCommandExecutions,
 	readTaskCommandExecutions,
@@ -120,6 +121,8 @@ function canonicalTaskCommandExecutionMaterialJson(specification: TaskCommandExe
 	if (specification.producerExecutionRevocationFile !== undefined)
 		material.producerExecutionRevocationFile = specification.producerExecutionRevocationFile;
 	if (specification.cancelCommand !== undefined) material.cancelCommand = specification.cancelCommand;
+	if (specification.postProcessExitCleanupCommand !== undefined)
+		material.postProcessExitCleanupCommand = specification.postProcessExitCleanupCommand;
 	material.workingDirectory = specification.workingDirectory;
 	material.resultFile = specification.resultFile;
 	material.materialSha256 = specification.materialSha256;
@@ -734,6 +737,13 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			);
 			if (!initialRecord) return;
 			let record: TaskCommandExecutionRecord = initialRecord;
+			if (record.specification.postProcessExitCleanupCommand) {
+				try {
+					await recoverOwnedCommandPostProcessExitCleanup(record);
+				} catch (error) {
+					deps.warn(`退出后清理待证 executionId=${executionId} reason=${String(error)}`);
+				}
+			}
 			const originatingConversationSessionSweepKey = `${workspaceId}/${record.originatingConversationSessionId}`;
 			if (
 				executionIdsWithInitialDispatchInProgress.has(executionId) ||

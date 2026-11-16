@@ -27,7 +27,12 @@ import {
 	findTaskIdsWhoseCommitsAreIncludedInDeploymentDelta,
 } from "../deployment/task-deployment-attribution-from-commit-integration-provenance";
 import { resolveProjectInputPath } from "../projects/project-path";
-import { getRuntimeHomePath, loadWorkspaceBoardById, loadWorkspaceContext } from "../state/workspace-state";
+import {
+	getRuntimeHomePath,
+	loadWorkspaceBoardById,
+	loadWorkspaceContext,
+	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
+} from "../state/workspace-state";
 import { runGit } from "../workspace/git-utils";
 
 // `kanban deployment record`：写部署标记、建本次部署的 Post-Deploy Verification 组。
@@ -75,12 +80,13 @@ export async function recordDeploymentWithTaskDeploymentAttribution(
 	const { manifest } = await readLocalDeploymentExecution(input.executionDirectory);
 	if (getRuntimeHomePath() !== manifest.runtimeIdentity.runtimeHomeDirectoryPath)
 		throw new Error("登记 runtime home 与本次执行绑定不一致");
-	if (input.projectPath) {
-		const target = await loadWorkspaceContext(resolveProjectInputPath(input.projectPath, input.cwd), {
-			autoCreateIfMissing: false,
-		});
-		if (target.workspaceId !== manifest.workspaceId) throw new Error("项目参数与部署执行绑定不一致");
-	}
+	// 私有候选只提供源码；缺省项目归属来自冻结的 workspaceId。
+	const target = input.projectPath
+		? await loadWorkspaceContext(resolveProjectInputPath(input.projectPath, input.cwd), {
+				autoCreateIfMissing: false,
+			})
+		: await resolveRegisteredWorkspaceScopeByIdWithoutGitProbe(manifest.workspaceId);
+	if (!target || target.workspaceId !== manifest.workspaceId) throw new Error("已注册项目与部署执行绑定不一致");
 	const receipt = await recordBoundLocalDeploymentExecutionOnce({
 		executionDirectory: input.executionDirectory,
 		sourceCheckoutPath: input.sourceCheckoutPath
@@ -91,6 +97,7 @@ export async function recordDeploymentWithTaskDeploymentAttribution(
 			await recordDeploymentFromValidatedSource(
 				{
 					...input,
+					projectPath: target.repoPath,
 					sourceCheckoutPath: manifest.sourceCheckoutPath,
 					newCommit: manifest.candidateSourceCommit,
 				},

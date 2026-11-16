@@ -183,10 +183,12 @@ const materialsFile = process.argv[2];
 const materials = JSON.parse(await readFile(materialsFile, 'utf8'));
 const directory = materials.directory;
 const nonce = materials.launchNonce;
+let businessDispatchSequenceNumber=0;
 let outputTail = '';
 let lastSavedProgress=null;
 function captureOutput(chunk) { outputTail=(outputTail+chunk.toString('utf8')).slice(-materials.outputTailMaxChars); }
-async function save(name, value) {
+async function save(name, value, targetDirectory=directory) {
+ if(name.startsWith('supervisor-progress-'))value={businessDispatchSequenceNumber,...value};
  if(materials.outputTailMaxChars && name.startsWith('supervisor-progress-'))value={...value,outputTail};
  let progressObservation=null;
  if(name.startsWith('supervisor-progress-')){
@@ -194,9 +196,9 @@ async function save(name, value) {
   progressObservation={name,ownedProcesses,fingerprint:JSON.stringify(semantic)};
   if(lastSavedProgress?.name===name && lastSavedProgress.ownedProcesses===ownedProcesses && lastSavedProgress.fingerprint===progressObservation.fingerprint)return;
  }
- const target=join(directory,name); const staging=target+'.'+process.pid+'.pending';
+ const target=join(targetDirectory,name); const staging=target+'.'+process.pid+'.pending';
  const handle=await open(staging,'w',0o600); await handle.writeFile(JSON.stringify(value)); await handle.sync(); await handle.close(); await rename(staging,target);
- if(process.platform!=='win32'){const directoryHandle=await open(directory,'r');try{await directoryHandle.sync();}finally{await directoryHandle.close();}}
+ if(process.platform!=='win32'){const directoryHandle=await open(targetDirectory,'r');try{await directoryHandle.sync();}finally{await directoryHandle.close();}}
  if(progressObservation)lastSavedProgress=progressObservation;
 }
 function nativeGeneration(pid) {
@@ -301,7 +303,7 @@ if(owner.pid===process.pid) {
   }
   catch(error){throw Object.assign(error,{processSnapshotQuery:'process_group_snapshot'});}
  }
- async function collect() {
+ async function collect(allowImmediateLateProcessAbsenceSubtreeRescan=true) {
   nativeQueryFailureObservations=[];
   let entries=processEntries();
   if(!child?.pid){lastProcessSnapshot=new Map(entries.filter(entry=>entry.pid===process.pid && !entry.processIsZombie).map(entry=>[entry.pid,entry]));nativeOwnershipUnproven=false;unprovenOwnershipProcesses=[];return [];}
@@ -337,6 +339,7 @@ if(owner.pid===process.pid) {
     }
    } catch { unprovenOwnershipPids.add(-1); }
   }
+  let lateProcessAbsenceRequiresSubtreeRescan=false;
   const groupMembers=new Set(); const lateNativeSnapshotPids=new Set(); const zombies=new Set(entries.filter(entry=>entry.processIsZombie).map(entry=>entry.pid));
   if(materials.superviseProcessGroup) {
    // Linux 已从同一份 /proc stat 读取代际与 PGID，保留双快照核验而不再派生第三次 ps。
@@ -354,6 +357,8 @@ if(owner.pid===process.pid) {
     for(const row of lateProcessRows){
      lateNativeSnapshotPids.add(row.pid);
      const native=lateNativeObservations.get(row.pid);
+     // PID 消失不能排除其后代；完整补查只立即执行一次，再遇竞态仍保留未知并走既有恢复预算。
+     if(native?.nativeProcessNoLongerExists===true&&allowImmediateLateProcessAbsenceSubtreeRescan){lateProcessAbsenceRequiresSubtreeRescan=true;continue;}
      const entry={...row,...native,parent:native?.parentProcessPid??-1,startAndCommand:native?.processStartIdentity??'unavailable',...(native?.processUniqueIdentity?{nativeProcessGenerationIdentity:'darwin_unique_process_id:'+native.processUniqueIdentity}:{})};
      entries.push(entry);
      if(native?.processIsZombie)zombies.add(row.pid);
@@ -365,6 +370,7 @@ if(owner.pid===process.pid) {
     for(const entry of processGroupSnapshot)if(entry.processIsZombie)zombies.add(entry.pid);else if(entry.processGroupPid===process.pid && entry.pid!==process.pid&&!lateNativeSnapshotPids.has(entry.pid))groupMembers.add(entry.pid);
    }
   }
+  if(lateProcessAbsenceRequiresSubtreeRescan)return collect(false);
   const parents=new Set(entries.filter(entry=>!zombies.has(entry.pid)&&(groupMembers.has(entry.pid)||hasSameProcessGeneration(entry,owned.get(entry.pid)))).map(entry=>entry.pid)); if(linuxKernelContainmentVerified&&!linuxKernelContainmentContinuityLost)parents.add(process.pid); let changed=true;
   while(changed){changed=false;for(const entry of entries)if(entry.pid!==process.pid && !lateNativeSnapshotPids.has(entry.pid) && parents.has(entry.parent)&&!parents.has(entry.pid)){const parent=entries.find(candidate=>candidate.pid===entry.parent);const current=currentParentGeneration(entry);const currentParent=currentParentGeneration(parent);if(!materials.superviseProcessGroup || (current?.generation===entry.nativeProcessGenerationIdentity && current?.parent===entry.parent && currentParent?.generation===parent?.nativeProcessGenerationIdentity && entry.nativeProcessGenerationIdentity && parent?.nativeProcessGenerationIdentity)){parents.add(entry.pid);changed=true;}}}
   for(const entry of entries)if(entry.pid!==process.pid&&parents.has(entry.pid)&&(!materials.superviseProcessGroup||entry.nativeProcessGenerationIdentity))rememberOwned({pid:entry.pid,startAndCommand:entry.startAndCommand,...(entry.nativeProcessGenerationIdentity?{nativeProcessGenerationIdentity:entry.nativeProcessGenerationIdentity}:{})});
@@ -396,6 +402,22 @@ if(owner.pid===process.pid) {
   for(const observed of [...lastProcessSnapshot.values()].reverse()) { const entry=owned.get(observed.pid);if(!hasSameProcessGeneration(observed,entry))continue;try{const current=identity(entry.pid);if(!current || (current.nativeProcessGenerationIdentity && !hasSameProcessGeneration(current,entry)))lastProcessSnapshot.delete(entry.pid);if(hasSameProcessGeneration(current,entry)) { try { process.kill(entry.pid,signal); }catch{} }}catch{nativeOwnershipUnproven=true;} }
  }
  process.on('SIGTERM',terminate); process.on('SIGINT',terminate);
+ async function launchPostProcessExitCleanup() {
+  if(!materials.postProcessExitCleanupCommand||nativeOwnershipUnproven||businessDispatchSequenceNumber===0)return;
+  const cleanupDirectory=join(directory,'post-process-exit-cleanup',nonce,'dispatch-'+businessDispatchSequenceNumber);await mkdir(cleanupDirectory,{recursive:true});
+  try{const progress=JSON.parse(await readFile(join(cleanupDirectory,'supervisor-progress-'+nonce+'.json'),'utf8'));if(progress.status==='exited'&&progress.returncode===0&&!progress.timedOut)return;}catch{}
+  try{const owner=JSON.parse(await readFile(join(cleanupDirectory,'supervisor-identity-'+nonce+'.json'),'utf8'));if(hasSameProcessGeneration(identity(owner.pid),owner))return;}catch{}
+  try{for(const stream of ['stdout','stderr']){const original=await open(join(directory,'command-'+nonce+'.'+stream+'.txt'),'r+');try{await original.sync();}finally{await original.close();}}}catch(error){try{await save('post-process-exit-cleanup-pending-'+nonce+'.json',{status:'evidence_pending',error:String(error)});}catch{}return;}
+  const confirmationName='post-process-exit-cleanup-confirmation-'+nonce+'-dispatch-'+businessDispatchSequenceNumber+'.json';
+  const confirmation=join(directory,confirmationName);
+  try{await readFile(confirmation);}catch(error){if(error.code!=='ENOENT')throw error;await save(confirmationName,{schemaVersion:1,executionId:materials.executionId,launchNonce:nonce,businessDispatchSequenceNumber,materialSha256:materials.materialSha256,command:materials.command,systemBootIdentity:materials.systemBootIdentity,ownedProcessesExited:true,originalOutputDurablySaved:true,confirmedAtEpochMs:Date.now()});}
+  const cleanupMaterials={...materials,directory:cleanupDirectory,command:materials.postProcessExitCleanupCommand,isRecoveryLaunch:false,semanticRecovery:null,postProcessExitCleanupCommand:null,producerExecutionRevocationFile:null,revocationFile:join(cleanupDirectory,'cleanup-revocation.json'),deadlineAtEpochMs:Date.now()+300000,environment:{...materials.environment,KANBAN_COMMAND_EXECUTION_EXIT_CONFIRMATION_FILE:confirmation}};
+  const cleanupMaterialsFile=join(cleanupDirectory,'launch-materials-'+nonce+'.json');
+  await save('launch-materials-'+nonce+'.json',cleanupMaterials,cleanupDirectory);
+  await save('supervisor-spawn-dispatch-barrier-'+nonce+'.json',{launchNonce:nonce,phase:'supervisor_spawn_may_start'},cleanupDirectory);
+  const log=await open(join(cleanupDirectory,'supervisor-'+nonce+'.log'),'a',0o600);
+  try{const cleanup=spawn(process.execPath,[process.argv[1],cleanupMaterialsFile],{cwd:materials.workingDirectory,detached:true,stdio:['ignore',log.fd,log.fd],env:{...process.env,...materials.environment}});cleanup.unref();}finally{await log.close();}
+ }
  async function waitForSemanticBusinessRecovery(permitResumeWithoutBusinessResult=false) {
   if(!materials.semanticRecovery)return false;
   let result;try{result=JSON.parse(await readFile(materials.semanticRecovery.resultFile,'utf8'));}catch(error){return permitResumeWithoutBusinessResult&&error.code==='ENOENT';}
@@ -406,6 +428,7 @@ if(owner.pid===process.pid) {
   if(persisted&&persisted.materialSha256!==materials.semanticRecovery.materialSha256)throw new Error('恢复预算与冻结命令材料不匹配');
   const budgets=persisted?.budgets??{};let baselineEvidence=persisted?.baselineEvidence??null;let semanticRecoveryObservationCount=0;
   while(!cancelled&&!timedOut&&!await revoked()) {
+   await launchPostProcessExitCleanup();
    semanticRecoveryObservationCount++;
    const observed=spawnSync(materials.semanticRecovery.observationCommand[0],materials.semanticRecovery.observationCommand.slice(1),{cwd:materials.workingDirectory,encoding:'utf8',timeout:15000,maxBuffer:1048576,stdio:['ignore','pipe','ignore']});
    let fingerprint;try{if(observed.status===0){const observation=JSON.parse(observed.stdout);if(/^[a-f0-9]{64}$/.test(observation.evidenceSha256))fingerprint=observation.evidenceSha256;}}catch{}
@@ -444,6 +467,7 @@ if(owner.pid===process.pid) {
  while(dispatchAgain) {
  if(materials.deadlineAtEpochMs && Date.now()>=materials.deadlineAtEpochMs)timedOut=true;
  if(!timedOut && !cancelled && !await revoked()) {
+  businessDispatchSequenceNumber++;
   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'dispatch_committed',ownedProcesses:[],dispatchCommittedAtEpochMs:Date.now(),updatedAtEpochMs:Date.now()});
   const stdout=await open(join(directory,'command-'+nonce+'.stdout.txt'),'a',0o600); const stderr=await open(join(directory,'command-'+nonce+'.stderr.txt'),'a',0o600);
   child=spawn(materials.command[0],materials.command.slice(1),{cwd:materials.workingDirectory,env:{...process.env,...materials.environment,...(materials.superviseProcessGroup?{NODE_OPTIONS:materials.commandNodeOptions??undefined}:{}),...(materials.superviseProcessGroup?{[OWNED_COMMAND_EXECUTION_OWNERSHIP_ENVIRONMENT_KEY]:nonce}:{}),KANBAN_COMMAND_EXECUTION_ID:materials.executionId,KANBAN_COMMAND_EXECUTION_REVOCATION_FILE:materials.revocationFile},detached:!materials.superviseProcessGroup,stdio:materials.outputTailMaxChars?['ignore','pipe','pipe']:['ignore',stdout.fd,stderr.fd]});
@@ -499,6 +523,7 @@ if(owner.pid===process.pid) {
   if(cancelled)terminate();
   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:cancelled?'cancelled':'exited',timedOut,...settled,kernelChildExitObservation,linuxKernelContainmentVerified,linuxKernelContainmentContinuityLost,nativeOwnershipUnproven,ownedProcesses:ownedProcessHistory(),updatedAtEpochMs:Date.now()});
  } else await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'cancelled',timedOut,error:containmentPreparationError??undefined,ownedProcesses:[],updatedAtEpochMs:Date.now()});
+ await launchPostProcessExitCleanup();
  dispatchAgain=await waitForSemanticBusinessRecovery();
  }
  if(!initialBusinessDispatchPermitted&&!cancelled&&!await revoked())await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'exited',timedOut,ownedProcesses:[],updatedAtEpochMs:Date.now()});
@@ -649,6 +674,8 @@ export async function launchOwnedCommandSupervisor(
 					executionId: record.executionId,
 					revocationFile: record.revocationFile,
 					workingDirectory: record.specification.workingDirectory,
+					materialSha256: record.specification.materialSha256,
+					postProcessExitCleanupCommand: record.specification.postProcessExitCleanupCommand,
 					command:
 						record.launchAttemptCount > 1 ? record.specification.resumeCommand : record.specification.command,
 					isRecoveryLaunch: record.launchAttemptCount > 1,
