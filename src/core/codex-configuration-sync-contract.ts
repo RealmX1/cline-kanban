@@ -142,6 +142,12 @@ export interface CodexConfigurationProfileAutomaticAdoptionGuard {
 	expectedNativeSessionId: string;
 	readTaskExecutionEligibilityFingerprint?: () => Promise<string | null>;
 	pendingProcessReplacementRetainedInputRecordPath?: string;
+	readConfigurationSafetyFingerprint?: (launchSelection?: {
+		sessionModelId?: string;
+		sessionReasoningEffortOverride?: string;
+		sessionPermissionMode?: string;
+		sessionPermissionSelectionSource?: "profile" | "task_local";
+	}) => Promise<string | null>;
 	onBeforeProcessReplacement: (evidenceFingerprint: string) => Promise<boolean>;
 }
 
@@ -239,7 +245,25 @@ export const codexConfigurationChangeDetailsSchema = codexConfigurationChangeCom
 });
 export type CodexConfigurationChangeDetails = z.infer<typeof codexConfigurationChangeDetailsSchema>;
 
+export const codexConfigurationChangeSharingScopeSchema = z.enum(["session_only", "profile"]);
+export const codexConfigurationChangeSharingScopeStateSchema = z.object({
+	currentScope: codexConfigurationChangeSharingScopeSchema,
+	requestedScope: codexConfigurationChangeSharingScopeSchema,
+	withdrawalStatus: z.enum(["not_requested", "pending", "completed", "protected_conflicts"]),
+	compensationChangeIds: z.array(z.string()),
+	conflicts: z.array(
+		z.object({
+			writerId: z.string().optional(),
+			fieldKey: z.string(),
+			reason: z.string(),
+			recoveryCondition: z.string().nullable(),
+		}),
+	),
+});
 export const codexConfigurationChangeSchema = z.object({
+	changeSharingScope: codexConfigurationChangeSharingScopeStateSchema.optional(),
+	noticePresentedAtMs: z.number().optional(),
+	compensationForChangeId: z.string().optional(),
 	candidateFieldGroupKey: z.string().optional(),
 	completeCandidateValueDigest: z.string().optional(),
 	settingsIsolationArchivedAtMs: z.number().optional(),
@@ -486,6 +510,9 @@ export const codexConfigurationMutationReceiptRequestSchema = z.object({
 	expectedAction: z.enum(["confirm_source", "defer", "approve", "reject"]).optional(),
 	expectedEntry: codexConfigurationBatchActionRequestSchema.shape.items.element.optional(),
 	expectedProfileMutation: codexConfigurationProfileMutationRequestSchema.optional(),
+	expectedSharingScopeMutation: codexConfigurationChangeMutationRequestSchema
+		.extend({ targetScope: codexConfigurationChangeSharingScopeSchema })
+		.optional(),
 });
 export type CodexConfigurationMutationReceiptRequest = z.infer<typeof codexConfigurationMutationReceiptRequestSchema>;
 export type CodexConfigurationBatchActionRequest = z.infer<typeof codexConfigurationBatchActionRequestSchema>;
@@ -513,6 +540,11 @@ export const codexConfigurationSynchronizeRequestSchema = codexConfigurationChan
 	synchronizeExistingSessions: z.boolean().default(false),
 });
 export type CodexConfigurationSynchronizeRequest = z.infer<typeof codexConfigurationSynchronizeRequestSchema>;
+export const codexConfigurationSetChangeSharingScopeRequestSchema =
+	codexConfigurationChangeMutationRequestSchema.extend({ targetScope: codexConfigurationChangeSharingScopeSchema });
+export type CodexConfigurationSetChangeSharingScopeRequest = z.infer<
+	typeof codexConfigurationSetChangeSharingScopeRequestSchema
+>;
 export const codexConfigurationResolveConflictRequestSchema = codexConfigurationChangeMutationRequestSchema.extend({
 	resolution: z.enum(["use_session_value", "keep_shared_value"]),
 	expectedSharedValueDigest: z.string().min(1).optional(),
@@ -530,6 +562,9 @@ export type CodexConfigurationResolveTargetConflictRequest = z.infer<
 
 // procedure 只依赖浏览器安全的端口类型，避免把文件系统与原生进程实现带进前端类型图。
 export interface CodexConfigurationSyncApi {
+	setChangeSharingScope: (
+		input: CodexConfigurationSetChangeSharingScopeRequest,
+	) => Promise<CodexConfigurationSyncState>;
 	getOverview: () => Promise<CodexConfigurationSyncOverview>;
 	listSessionAdoptionProgress: (
 		input: CodexConfigurationSessionAdoptionProgressRequest,

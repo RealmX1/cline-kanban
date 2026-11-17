@@ -2,10 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, realpath, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setStoredCodexConfigurationChangeSharingScope } from "../../../src/codex-configuration-sync/codex-configuration-change-sharing-scope";
 import type { CodexConfigurationFieldValue } from "../../../src/codex-configuration-sync/codex-configuration-field-projection";
 import {
 	reuseConfirmedCodexHookTrust,
 	shareObservedCodexHookTrust,
+	updateCodexConfigurationProfileFields,
 } from "../../../src/codex-configuration-sync/codex-configuration-profiles";
 import {
 	type CodexConfigurationSyncStore,
@@ -79,6 +81,102 @@ function onlyHookTrustDecision(configurationSyncStore: CodexConfigurationSyncSto
 }
 
 describe("跨 profile hook 信任的定义与内容边界", () => {
+	it("跨 profile 撤回已采用目标时，只核验目标所属 profile 的字段版本", async () => {
+		const fixture = await createHookTrustSharingFixture();
+		const store = fixture.configurationSyncStore;
+		const target = structuredClone(fixture.originWriter);
+		target.binding.writerId = randomUUID();
+		target.binding.conversationSessionId = randomUUID();
+		target.codexConfigurationProfileId = "fixture-target-profile";
+		target.lastObservedFields[fixture.hookStateFieldKey] = observedHookStateField({ enabled: false });
+		store.writers[target.binding.writerId] = target;
+		updateCodexConfigurationProfileFields(
+			store,
+			requireDefinedTestFixtureValue(fixture.originWriter.codexConfigurationProfileId),
+			{ [fixture.hookStateFieldKey]: observedHookStateField(confirmedHookTrustState) },
+			{ sourceWriterId: fixture.originWriter.binding.writerId, recordIdenticalFields: true },
+		);
+		shareObservedCodexHookTrust(
+			store,
+			fixture.originWriter,
+			fixture.hookStateFieldKey,
+			observedHookStateField({ enabled: false }),
+			observedHookStateField(confirmedHookTrustState),
+		);
+		const sourceChange = requireDefinedTestFixtureValue(
+			store.changes.find((entry) => entry.sourceWriterId === fixture.originWriter.binding.writerId),
+		);
+		const targetChange = requireDefinedTestFixtureValue(
+			store.changes.find((entry) => entry.codexConfigurationProfileId === target.codexConfigurationProfileId),
+		);
+		const targetReceipt = requireDefinedTestFixtureValue(
+			targetChange.targets.find((entry) => entry.writerId === target.binding.writerId),
+		);
+		targetReceipt.status = "applied";
+		targetReceipt.diskSavedAt = Date.now();
+		target.lastObservedFields[fixture.hookStateFieldKey] = requireDefinedTestFixtureValue(targetChange.value);
+		fixture.originWriter.lastObservedFields[fixture.hookStateFieldKey] =
+			observedHookStateField(confirmedHookTrustState);
+		fixture.originWriter.localFieldMutationVersions = { ...sourceChange.sourceFieldMutationVersionsAtObservation };
+		setStoredCodexConfigurationChangeSharingScope(store, {
+			changeId: sourceChange.changeId,
+			expectedVersion: sourceChange.version,
+			targetScope: "session_only",
+			idempotencyKey: randomUUID(),
+		});
+		const compensation = store.changes.find(
+			(entry) =>
+				entry.compensationForChangeId === targetChange.changeId &&
+				entry.targets.some((receipt) => receipt.writerId === target.binding.writerId),
+		);
+		expect(compensation?.value?.value).toEqual({ enabled: false });
+		expect(sourceChange.changeSharingScope?.conflicts).toEqual([]);
+	});
+	it("撤回来源 hook 信任时，同一范围组里的其他 profile 回到传播前决定", () => {
+		const fixture = createHookTrustSharingFixture();
+		return fixture.then((ready) => {
+			updateCodexConfigurationProfileFields(
+				ready.configurationSyncStore,
+				requireDefinedTestFixtureValue(ready.originWriter.codexConfigurationProfileId),
+				{ [ready.hookStateFieldKey]: observedHookStateField(confirmedHookTrustState) },
+				{ sourceWriterId: ready.originWriter.binding.writerId, recordIdenticalFields: true },
+			);
+			shareObservedCodexHookTrust(
+				ready.configurationSyncStore,
+				ready.originWriter,
+				ready.hookStateFieldKey,
+				observedHookStateField({ enabled: false }),
+				observedHookStateField(confirmedHookTrustState),
+			);
+			const sourceChange = requireDefinedTestFixtureValue(
+				ready.configurationSyncStore.changes.find(
+					(entry) => entry.sourceWriterId === ready.originWriter.binding.writerId,
+				),
+			);
+			const propagated = ready.configurationSyncStore.changes.filter(
+				(entry) => entry.sharingScope === "all_profiles_hook_trust",
+			);
+			expect(propagated.length).toBeGreaterThan(0);
+			expect(propagated.every((entry) => entry.sharingScopeGroupId === sourceChange.sharingScopeGroupId)).toBe(true);
+			ready.originWriter.lastObservedFields = {
+				...ready.originWriter.lastObservedFields,
+				[ready.hookStateFieldKey]: observedHookStateField(confirmedHookTrustState),
+			};
+			ready.originWriter.localFieldMutationVersions = {
+				...(sourceChange.sourceFieldMutationVersionsAtObservation ?? {}),
+			};
+			setStoredCodexConfigurationChangeSharingScope(ready.configurationSyncStore, {
+				changeId: sourceChange.changeId,
+				expectedVersion: sourceChange.version,
+				targetScope: "session_only",
+				idempotencyKey: randomUUID(),
+			});
+			expect(
+				ready.configurationSyncStore.profiles["fixture-target-profile"].fields[ready.hookStateFieldKey].value,
+			).toEqual({ enabled: false });
+			expect(onlyHookTrustDecision(ready.configurationSyncStore)?.trustedHash ?? null).toBeNull();
+		});
+	});
 	it("完整确认同时保存和复用两个哈希，保留目标本地禁用", async () => {
 		const fixture = await createHookTrustSharingFixture();
 		shareObservedCodexHookTrust(

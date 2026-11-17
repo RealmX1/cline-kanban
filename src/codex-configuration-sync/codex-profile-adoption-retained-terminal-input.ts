@@ -28,6 +28,11 @@ const retainedTerminalInputSchema = z.object({
 	automaticProcessReplacementEvidenceFingerprint: z.string().optional(),
 	automaticProcessReplacementAttemptCount: z.number().int().nonnegative().optional(),
 	bytesBase64: z.string(),
+	capturedDraftText: z.string().optional(),
+	capturedFromRuntimeSessionIncarnationId: z.string().optional(),
+	capturedDraftRestoreStatus: z.enum(["pending", "submission_started", "restored"]).optional(),
+	draftRestoreVerificationEvidenceFingerprint: z.string().optional(),
+	draftRestoreVerificationAttemptCount: z.number().int().nonnegative().optional(),
 	updatedAtMs: z.number(),
 	acceptanceCandidate: runtimeAgentConversationPromptSubmissionAcceptanceSchema.optional(),
 });
@@ -68,7 +73,13 @@ export function saveCodexProfileAdoptionRetainedInput(path: string, record: Code
 export function createCodexProfileAdoptionRetainedInput(
 	input: Pick<
 		CodexProfileAdoptionRetainedTerminalInput,
-		"workspaceId" | "conversationSessionId" | "nativeSessionId" | "profileId"
+		| "workspaceId"
+		| "conversationSessionId"
+		| "nativeSessionId"
+		| "profileId"
+		| "capturedDraftText"
+		| "capturedFromRuntimeSessionIncarnationId"
+		| "capturedDraftRestoreStatus"
 	>,
 ) {
 	mkdirSync(retainedInputDirectory(), { recursive: true, mode: 0o700 });

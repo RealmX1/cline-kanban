@@ -12,7 +12,9 @@ import {
 	type CodexConfigurationSourceObservation,
 	type CodexConfigurationTaskSourceSnapshot,
 	type CodexConfigurationWriterBinding,
+	codexConfigurationChangeSharingScopeStateSchema,
 	codexConfigurationPropagationTargetSchema,
+	codexConfigurationSetChangeSharingScopeRequestSchema,
 	codexConfigurationSourceEvidenceSchema,
 	codexConfigurationSourceObservationSchema,
 	codexConfigurationTaskSourceSnapshotSchema,
@@ -44,6 +46,9 @@ export interface StoredCodexConfigurationProfile {
 }
 
 export interface StoredCodexConfigurationWriter {
+	previousWriterId?: string;
+	nativeConversationSessionId?: string;
+	localFieldMutationVersions?: Record<string, number>;
 	pendingSourceSharedPluginInstallationPreparations?: Record<string, unknown>;
 	taskReasoningEffortSelectionAtLaunch?: string;
 	taskReasoningEffortFeedbackSelection?: {
@@ -63,6 +68,7 @@ export interface StoredCodexConfigurationWriter {
 		conversationSessionId: string;
 		profileId: string;
 		onlyUpdatePermissionSelectionSource?: boolean;
+		permissionSelectionSource?: "profile" | "task_local";
 	};
 	taskModelSelectionAtLaunch?: string;
 	taskPermissionModeSelectionAtLaunch?: string;
@@ -98,6 +104,43 @@ export interface StoredCodexConfigurationSource {
 	observedUserFields: CodexConfigurationFields;
 }
 export interface StoredCodexConfigurationChange {
+	changeSharingScope?: z.infer<typeof codexConfigurationChangeSharingScopeStateSchema>;
+	noticePresentedAtMs?: number;
+	sharingScopeGroupId?: string;
+	sharingScopeDecisionHistory?: Array<{
+		requestedScope: "session_only" | "profile";
+		recordedAtMs: number;
+		priorAcceptedChange: Record<string, unknown>;
+	}>;
+	pendingSharingScopeMutation?: z.infer<typeof codexConfigurationSetChangeSharingScopeRequestSchema>;
+	pendingSharingScopeMutationPreviousState?: z.infer<typeof codexConfigurationChangeSharingScopeStateSchema>;
+	sharingScopeRecoveryEvidenceFingerprint?: string;
+	sharingScopeRecoveryAttemptCount?: number;
+	withdrawalProfileFieldVersion?: number;
+	sourceFieldMutationVersionsAtObservation?: Record<string, number>;
+	compensationForChangeId?: string;
+	sharingPropagationSnapshot?: {
+		profileValue?: CodexConfigurationFieldValue;
+		profileFieldVersion: number;
+		targets: Record<
+			string,
+			{
+				value?: CodexConfigurationFieldValue;
+				localFieldMutationVersion: number;
+				consumedProfileFieldVersion: number;
+				nativeConversationSessionId?: string;
+				localExceptionOverride?: NonNullable<StoredCodexConfigurationWriter["localExceptionOverrides"]>[string];
+			}
+		>;
+	};
+	targetSpecificCompensation?: {
+		expectedLocalFieldMutationVersion: number;
+		expectedGroupMutationVersions?: Record<string, number>;
+		expectedNativeConversationSessionId?: string;
+		expectedProfileFieldVersions?: Record<string, number>;
+		expectedTargetValueDigest: string;
+		previousTargetValueDigest: string;
+	};
 	propagationTargetTotalCount?: number;
 	settingsIsolationArchivedAtMs?: number;
 	taskReasoningEffortFeedbackSelectionId?: string;
@@ -145,6 +188,10 @@ export interface StoredCodexConfigurationChange {
 		CodexConfigurationPropagationTarget & {
 			evidenceFingerprint?: string;
 			writeSubmissionStartedAt?: number;
+			sharingWithdrawalCompensationPending?: boolean;
+			writeSubmissionFinishedAtMs?: number;
+			sharingWithdrawalRequestedAtMs?: number;
+			withdrawnWriteObservedAtMs?: number;
 			expectedNativeVersion?: string;
 			startupVerificationAttemptCount?: number;
 			safeResumeAttemptCount?: number;
@@ -281,6 +328,9 @@ const storeSchema = z.object({
 	writers: z.record(
 		z.string(),
 		z.object({
+			previousWriterId: z.string().optional(),
+			nativeConversationSessionId: z.string().optional(),
+			localFieldMutationVersions: z.record(z.string(), z.number()).optional(),
 			pendingSourceSharedPluginInstallationPreparations: z.record(z.string(), z.unknown()).optional(),
 			sourceTaskSnapshot: codexConfigurationTaskSourceSnapshotSchema.optional(),
 			pendingSessionProfileBinding: z
@@ -289,6 +339,7 @@ const storeSchema = z.object({
 					conversationSessionId: z.string(),
 					profileId: z.string(),
 					onlyUpdatePermissionSelectionSource: z.boolean().optional(),
+					permissionSelectionSource: z.enum(["profile", "task_local"]).optional(),
 				})
 				.optional(),
 			legacyLaunchExceptionSelectionAtMigration: z
@@ -336,6 +387,57 @@ const storeSchema = z.object({
 	),
 	changes: z.array(
 		z.object({
+			changeSharingScope: codexConfigurationChangeSharingScopeStateSchema.optional(),
+			noticePresentedAtMs: z.number().optional(),
+			sharingScopeGroupId: z.string().optional(),
+			sharingScopeDecisionHistory: z
+				.array(
+					z.object({
+						requestedScope: z.enum(["session_only", "profile"]),
+						recordedAtMs: z.number(),
+						priorAcceptedChange: z.record(z.string(), z.unknown()),
+					}),
+				)
+				.optional(),
+			pendingSharingScopeMutation: codexConfigurationSetChangeSharingScopeRequestSchema.optional(),
+			pendingSharingScopeMutationPreviousState: codexConfigurationChangeSharingScopeStateSchema.optional(),
+			sharingScopeRecoveryEvidenceFingerprint: z.string().optional(),
+			sharingScopeRecoveryAttemptCount: z.number().optional(),
+			withdrawalProfileFieldVersion: z.number().optional(),
+			sourceFieldMutationVersionsAtObservation: z.record(z.string(), z.number()).optional(),
+			compensationForChangeId: z.string().optional(),
+			sharingPropagationSnapshot: z
+				.object({
+					profileValue: fieldSchema.optional(),
+					profileFieldVersion: z.number(),
+					targets: z.record(
+						z.string(),
+						z.object({
+							value: fieldSchema.optional(),
+							localFieldMutationVersion: z.number(),
+							consumedProfileFieldVersion: z.number(),
+							nativeConversationSessionId: z.string().optional(),
+							localExceptionOverride: z
+								.object({
+									profileVersionAtSelection: z.number(),
+									fields: fieldsSchema,
+									deletedFieldKeys: z.array(z.string()).optional(),
+								})
+								.optional(),
+						}),
+					),
+				})
+				.optional(),
+			targetSpecificCompensation: z
+				.object({
+					expectedLocalFieldMutationVersion: z.number(),
+					expectedGroupMutationVersions: z.record(z.string(), z.number()).optional(),
+					expectedProfileFieldVersions: z.record(z.string(), z.number()).optional(),
+					expectedNativeConversationSessionId: z.string().optional(),
+					expectedTargetValueDigest: z.string(),
+					previousTargetValueDigest: z.string(),
+				})
+				.optional(),
 			propagationTargetTotalCount: z.number().int().nonnegative().optional(),
 			modificationInitiator: codexConfigurationSourceEvidenceSchema.shape.initiator.optional(),
 			settingsIsolationArchivedAtMs: z.number().optional(),
@@ -391,6 +493,10 @@ const storeSchema = z.object({
 						.optional(),
 					evidenceFingerprint: z.string().optional(),
 					writeSubmissionStartedAt: z.number().optional(),
+					sharingWithdrawalCompensationPending: z.boolean().optional(),
+					writeSubmissionFinishedAtMs: z.number().optional(),
+					sharingWithdrawalRequestedAtMs: z.number().optional(),
+					withdrawnWriteObservedAtMs: z.number().optional(),
 					expectedNativeVersion: z.string().optional(),
 					startupVerificationAttemptCount: z.number().optional(),
 					safeResumeAttemptCount: z.number().optional(),

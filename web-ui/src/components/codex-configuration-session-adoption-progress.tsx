@@ -64,10 +64,15 @@ export function CodexConfigurationSessionAdoptionProgress({
 	const counts = controller.state?.adoptionCounts?.find((entry) => entry.profileId === profileId);
 	const selectedProfile = controller.state?.profiles?.find((entry) => entry.profileId === profileId);
 	return (
-		<section aria-label="会话自动采用" className="space-y-3 py-3">
+		<section
+			aria-label="会话自动采用"
+			className="space-y-3 py-3"
+			data-verification-anchor="codex-configuration-session-adoption-progress"
+		>
 			<h3 className="m-0 text-lg font-semibold text-text-primary">自动采用</h3>
 			<p className="m-0 max-w-prose text-sm text-text-secondary">
-				已保存默认会在原所有者可达或会话达到安全条件后继续采用。文件已写入与已确认采用分别展示，旧代传播目标不计入当前会话。
+				原进程支持的配置会热更新；显示模式可在回合结束并保全草稿后自动重启。模型、权限或未知 cache
+				风险等待下次正常启动。文件已保存与已确认采用分别展示，旧代目标不计入当前会话。
 			</p>
 			{counts && (
 				<p className="m-0 text-sm text-text-primary">
