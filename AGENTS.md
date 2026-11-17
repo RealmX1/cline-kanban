@@ -121,6 +121,7 @@ web-ui：
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
 | `docs/non-modal-floating-form-windows-and-retained-sessions.md` | 通用填写浮窗、常驻宿主、实例归属、焦点层级及跨页面保存 |
+| `docs/visited-task-navigation-history.md` | 跨项目访问历史、前后导航、浏览器持久快照与 Backlog 浮窗实际显示回报 |
 | `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |

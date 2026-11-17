@@ -116,4 +116,87 @@ describe("常驻填写浮窗", () => {
 		expect(document.querySelector('input[aria-label="A"]')).not.toBeNull();
 		container.remove();
 	});
+
+	it("迁移后的历史身份展开原编辑窗并收起其他窗，不新建实例", async () => {
+		function Form({ label }: { label: string }) {
+			const [value, setValue] = useState("未保存正文");
+			return (
+				<NonModalFloatingFormWindow open title={label} onOpenChange={() => undefined}>
+					<textarea aria-label={label} value={value} onChange={(event) => setValue(event.target.value)} />
+				</NonModalFloatingFormWindow>
+			);
+		}
+		function App() {
+			const host = useNonModalFloatingFormWindowHost();
+			return (
+				<>
+					<button
+						type="button"
+						onClick={() =>
+							host?.openWindow({
+								formKind: "task-editor",
+								instanceIdentity: JSON.stringify(["project-a", "task", 100]),
+								ownership: { workspaceId: "project-a", taskId: "task", taskIncarnationCreatedAtEpochMs: 100 },
+								render: () => <Form label="原窗口" />,
+							})
+						}
+					>
+						打开原窗口
+					</button>
+					<button
+						type="button"
+						onClick={() =>
+							host?.openWindow({
+								formKind: "task-editor",
+								instanceIdentity: JSON.stringify(["project-c", "other", 200]),
+								ownership: { workspaceId: "project-c", taskId: "other", taskIncarnationCreatedAtEpochMs: 200 },
+								render: () => <Form label="其他窗口" />,
+							})
+						}
+					>
+						打开其他窗口
+					</button>
+					<button
+						type="button"
+						onClick={() =>
+							host?.revealTaskEditorPreservingEarlierWorkspace({
+								workspaceId: "project-b",
+								taskId: "task",
+								taskIncarnationCreatedAtEpochMs: 100,
+								workspaceIdsUsedByTaskIncarnation: ["project-a", "project-b"],
+							})
+						}
+					>
+						按迁移后身份展开
+					</button>
+				</>
+			);
+		}
+		const container = document.body.appendChild(document.createElement("div"));
+		root = createRoot(container);
+		await act(async () =>
+			root.render(
+				<NonModalFloatingFormWindowHostProvider>
+					<App />
+				</NonModalFloatingFormWindowHostProvider>,
+			),
+		);
+		const buttons = [...container.querySelectorAll("button")];
+		await act(async () => buttons[0]?.click());
+		await act(async () => buttons[1]?.click());
+		const original = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="原窗口"]');
+		expect(original).not.toBeNull();
+		await act(async () => buttons[2]?.click());
+		expect(document.querySelectorAll('[role="dialog"]')).toHaveLength(2);
+		expect(document.querySelector('textarea[aria-label="原窗口"]')).toBe(original);
+		expect(original?.value).toBe("未保存正文");
+		const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"]')];
+		expect(dialogs.find((dialog) => dialog.textContent?.includes("原窗口"))?.getAttribute("data-collapsed")).not.toBe(
+			"true",
+		);
+		expect(dialogs.find((dialog) => dialog.textContent?.includes("其他窗口"))?.getAttribute("data-collapsed")).toBe(
+			"true",
+		);
+		container.remove();
+	});
 });

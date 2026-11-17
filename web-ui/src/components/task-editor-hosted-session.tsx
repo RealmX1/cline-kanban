@@ -214,6 +214,7 @@ const HostedTaskEditorEntry = hostNonModalFloatingForm(TaskEditorHostedSession, 
 		workspaceId: props.editorSessionWorkspaceId ?? props.workspaceId,
 		taskId: props.editingTaskId,
 		taskIncarnationCreatedAtEpochMs: props.editingTaskSnapshot?.createdAt,
+		taskTitleSnapshot: props.editingTaskSnapshot?.title,
 	}),
 	withClose: (props, close) => ({
 		...props,

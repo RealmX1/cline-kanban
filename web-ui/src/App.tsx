@@ -26,6 +26,10 @@ import { FocusViewCrossProjectTaskOpenInTransitShell } from "@/components/detail
 import { FindingsView } from "@/components/findings/findings-view";
 import { GitHistoryView } from "@/components/git-history-view";
 import { KanbanBoard } from "@/components/kanban-board";
+import {
+	type NonModalFloatingFormWindowHost,
+	useNonModalFloatingFormWindowHost,
+} from "@/components/non-modal-floating-form-window-host-provider";
 import { NotificationCenter } from "@/components/notification-center";
 import { PermanentlyDeletedTaskHistoryDialog } from "@/components/permanently-deleted-task-history-dialog";
 import { PostDeployVerificationController } from "@/components/post-deploy-verification/post-deploy-verification-controller";
@@ -62,6 +66,7 @@ import {
 import { Spinner } from "@/components/ui/spinner";
 import { UnavailableProjectRuntimeState } from "@/components/unavailable-project-runtime-state";
 import { UpdateNotificationController } from "@/components/update-notification-controller";
+import { VisitedTaskNavigationControls } from "@/components/visited-task-navigation-controls";
 import { createInitialBoardData } from "@/data/board-data";
 import { useExpandedForegroundViewNavigation } from "@/expanded-foreground-view/expanded-foreground-view-context";
 import { createIdleTaskSession } from "@/hooks/app-utils";
@@ -110,6 +115,7 @@ import { useTaskSessions } from "@/hooks/use-task-sessions";
 import { useTaskSpotlightSearchController } from "@/hooks/use-task-spotlight-search-controller";
 import { useTaskStartActions } from "@/hooks/use-task-start-actions";
 import { useTerminalPanels } from "@/hooks/use-terminal-panels";
+import { useVisitedTaskNavigationHistoryController } from "@/hooks/use-visited-task-navigation-history-controller";
 import { useWorkspaceSync } from "@/hooks/use-workspace-sync";
 import { LayoutCustomizationsProvider } from "@/resize/layout-customizations";
 import { ResizableBottomPane } from "@/resize/resizable-bottom-pane";
@@ -145,7 +151,20 @@ import {
 import { useTerminalThemeColors } from "@/terminal/theme-colors";
 import type { BoardCard, BoardData } from "@/types";
 
+function BindTaskNavigationToFloatingFormWindowHost({
+	onHostChanged,
+}: {
+	onHostChanged: (host: NonModalFloatingFormWindowHost | null) => void;
+}) {
+	const host = useNonModalFloatingFormWindowHost();
+	useEffect(() => {
+		onHostChanged(host);
+	}, [host, onHostChanged]);
+	return null;
+}
+
 export default function App(): ReactElement {
+	const [floatingFormWindowHost, setFloatingFormWindowHost] = useState<NonModalFloatingFormWindowHost | null>(null);
 	const expandedForegroundView = useExpandedForegroundViewNavigation();
 	const terminalThemeColors = useTerminalThemeColors();
 	const [board, setBoard] = useState<BoardData>(() => createInitialBoardData());
@@ -490,6 +509,7 @@ export default function App(): ReactElement {
 	}, [isBoardScopeAllProjectsSelected, currentProjectId]);
 
 	const selectBoardScopeAllProjects = useCallback(() => {
+		cancelVisitedTaskHistoryNavigationRef.current();
 		setSelectedBoardOrSingleProjectScope("board_scope_all_projects");
 		setIsGitHistoryOpen(false);
 		setIsFindingsOpen(false);
@@ -498,6 +518,7 @@ export default function App(): ReactElement {
 	// 跨项目打开任务（面板、Spotlight、通知）不走这里——Board Scope 下点别的项目的任务，范围不变。
 	const handleSelectProjectNarrowingToSingleProjectScope = useCallback(
 		(projectId: string) => {
+			cancelVisitedTaskHistoryNavigationRef.current();
 			setSelectedBoardOrSingleProjectScope("single_project_scope");
 			handleSelectProject(projectId);
 		},
@@ -507,6 +528,8 @@ export default function App(): ReactElement {
 	const openBacklogTaskEditorForCrossProjectTaskOpenRef = useRef<(workspaceId: string, card: BoardCard) => void>(
 		() => {},
 	);
+	const cancelVisitedTaskHistoryNavigationRef = useRef<() => void>(() => {});
+	const closeTaskLookupWorkbenchForHistoryNavigationRef = useRef<() => void>(() => {});
 	const isCurrentProjectBoardSettled =
 		!isInitialRuntimeLoad && !isProjectSwitching && !isAwaitingWorkspaceSnapshot && !isWorkspaceMetadataPending;
 	const {
@@ -516,6 +539,7 @@ export default function App(): ReactElement {
 		handleNavigateToProjectBoard,
 		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
 		dismissPendingCrossProjectTaskOpen,
+		openTaskInProjectWithResult,
 	} = useCrossProjectTaskOpenInProject({
 		board: displayedBoard,
 		currentProjectId,
@@ -528,7 +552,35 @@ export default function App(): ReactElement {
 		navigationCurrentProjectId,
 		openBacklogTaskEditor: (workspaceId, card) =>
 			openBacklogTaskEditorForCrossProjectTaskOpenRef.current(workspaceId, card),
+		onOrdinaryTaskOpenRequested: () => cancelVisitedTaskHistoryNavigationRef.current(),
+		floatingFormWindowHost,
 	});
+	const visitedTaskNavigation = useVisitedTaskNavigationHistoryController({
+		displayedTask:
+			selectedCard &&
+			projectRuntimeWorkspaceId &&
+			projectIdOwningHydratedBoard === projectRuntimeWorkspaceId &&
+			isCurrentProjectBoardSettled &&
+			!pendingCrossProjectTaskOpen
+				? {
+						workspaceId: projectRuntimeWorkspaceId,
+						taskId: selectedCard.card.id,
+						taskIncarnationCreatedAtEpochMs: selectedCard.card.createdAt,
+						titleSnapshot: selectedCard.card.title ?? selectedCard.card.id,
+						projectNameSnapshot: currentProjectSummary?.name ?? projectRuntimeWorkspaceId,
+						lastVisitedAtEpochMs: 0,
+						unavailable: false,
+					}
+				: null,
+		projects,
+		isRuntimeConnected: !isRuntimeDisconnected,
+		openTaskInProjectWithResult: (workspaceId, taskId, createdAt, signal, workspaceIdsUsedByTaskIncarnation) => {
+			closeTaskLookupWorkbenchForHistoryNavigationRef.current();
+			return openTaskInProjectWithResult(workspaceId, taskId, createdAt, signal, workspaceIdsUsedByTaskIncarnation);
+		},
+		floatingFormWindowHost,
+	});
+	cancelVisitedTaskHistoryNavigationRef.current = visitedTaskNavigation.cancelNavigation;
 	const selectedCardTaskId = selectedCard?.card.id ?? null;
 	useRecordTaskOpenedByUserOnRuntime({
 		workspaceId: projectRuntimeWorkspaceId,
@@ -568,6 +620,9 @@ export default function App(): ReactElement {
 		includeAllProjectsByDefault: isBoardScopeAllProjectsSelected,
 		streamSnapshotGeneration,
 	});
+	closeTaskLookupWorkbenchForHistoryNavigationRef.current = () => {
+		if (taskLookupWorkbench.isOpen) taskLookupWorkbench.close();
+	};
 	const taskLookupWorkbenchContent = taskLookupWorkbench.isOpen ? (
 		<TaskLookupWorkbenchView
 			controller={taskLookupWorkbench}
@@ -1660,6 +1715,7 @@ export default function App(): ReactElement {
 	// 给同号任务建出一个幽灵终端，还可能把终端 LRU 里新项目已停放的热终端挤出去。
 	// 顶栏「返回」：在途期间先丢掉在途态（导航照常落到目标项目、显示它的看板），再关详情。
 	const handleBackFromFocusView = useCallback(() => {
+		cancelVisitedTaskHistoryNavigationRef.current();
 		dismissPendingCrossProjectTaskOpen();
 		handleBack();
 	}, [dismissPendingCrossProjectTaskOpen, handleBack]);
@@ -1768,6 +1824,7 @@ export default function App(): ReactElement {
 							}
 							onToggleSidebar={!isFocusViewChromeShown ? handleToggleSidebar : undefined}
 							projectSwitcher={topBarProjectSwitcherState}
+							visitedTaskNavigationControl={<VisitedTaskNavigationControls controller={visitedTaskNavigation} />}
 							onOpenTaskSpotlightSearch={taskSpotlightSearch.canOpen ? taskSpotlightSearch.open : undefined}
 							onToggleTaskLookupWorkbench={
 								!hasNoProjects
@@ -2592,6 +2649,7 @@ export default function App(): ReactElement {
 						}}
 					>
 						<TaskCommentsDialogProvider currentWorkspaceId={currentProjectId}>
+							<BindTaskNavigationToFloatingFormWindowHost onHostChanged={setFloatingFormWindowHost} />
 							<PostDeployVerificationTaskClosureFormHost />
 							<SideSessionCreationWorkbench />
 							{isRuntimeDisconnected ? <RuntimeDisconnectedFallback /> : renderedApplicationView}
