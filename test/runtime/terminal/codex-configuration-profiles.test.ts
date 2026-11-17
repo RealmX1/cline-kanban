@@ -74,7 +74,11 @@ describe("Codex profile 自动共享", () => {
 		const configuration = parse(await readFile(configurationPath, "utf8"));
 		configuration.model = "local-model";
 		await writeFile(configurationPath, stringify(configuration));
-		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await sync.scan();
 			const suggestion = requireDefinedTestFixtureValue(
@@ -145,6 +149,10 @@ describe("Codex profile 自动共享", () => {
 		await writeFile(configurationPath, stringify(configuration));
 		const observed = vi.fn();
 		const dependencies = {
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "profiles-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "profiles-fixture", summary }],
 			onUpdated: () => {},
 			onWriterPermissionsObserved: observed,
@@ -276,7 +284,11 @@ describe("Codex profile 自动共享", () => {
 		const changed = parse(await readFile(path, "utf8"));
 		delete changed.sandbox_mode;
 		await writeFile(path, stringify(changed));
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const suggestion = requireDefinedTestFixtureValue(
@@ -334,6 +346,10 @@ describe("Codex profile 自动共享", () => {
 			unavailableWorkspaceCount: 0,
 		});
 		const first = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				listSessions().find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions,
 			listTaskProfileBindings,
 			onUpdated: () => {},
@@ -371,6 +387,10 @@ describe("Codex profile 自动共享", () => {
 			summary.codexConfigurationProfileId = profileId;
 		});
 		const recovered = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				listSessions().find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions,
 			listTaskProfileBindings,
 			onUpdated: () => {},
@@ -432,6 +452,10 @@ describe("Codex profile 自动共享", () => {
 		});
 		const adopted = vi.fn();
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "profiles-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "profiles-fixture", summary }],
 			onUpdated: () => {},
 			onSessionProfileBound: adopted,
@@ -486,6 +510,10 @@ describe("Codex profile 自动共享", () => {
 		const acceptedClaims: boolean[] = [];
 		const create = () =>
 			createCodexConfigurationSyncService({
+				getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+					[{ workspaceId: "profiles-fixture", summary }].find(
+						(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+					)?.summary ?? null,
 				listSessions: () => [{ workspaceId: "profiles-fixture", summary }],
 				onUpdated: () => {},
 				resumeSessionToAdoptProfile: async (input) => {
@@ -675,7 +703,11 @@ describe("Codex profile 自动共享", () => {
 		const second = await writer("second");
 		const path = join(binding.configurationHomeDirectoryPath, "config.toml");
 		await writeFile(path, stringify({ ...parse(await readFile(path, "utf8")), model: "feedback-model" }));
-		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await sync.scan();
 			const before = await sync.getState();
@@ -727,7 +759,11 @@ describe("Codex profile 自动共享", () => {
 				sandbox_workspace_write: { network_access: false },
 			}),
 		);
-		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		await sync.scan();
 		const before = await sync.getState();
 		await sync.close();
@@ -742,7 +778,11 @@ describe("Codex profile 自动共享", () => {
 			expect(Object.keys(change.relatedFields ?? {})).toHaveLength(3);
 			change.feedbackExpiresAtMs = Date.now() - 1;
 		});
-		const restarted = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const restarted = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const result = await restarted.batchAction({
 				action: "approve",
@@ -770,7 +810,11 @@ describe("Codex profile 自动共享", () => {
 		const binding = await writer("permission-group-stale-feedback");
 		const path = join(binding.configurationHomeDirectoryPath, "config.toml");
 		await writeFile(path, 'approval_policy="never"\nsandbox_mode="workspace-write"\n');
-		const sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await sync.scan();
 			const suggestion = requireDefinedTestFixtureValue(

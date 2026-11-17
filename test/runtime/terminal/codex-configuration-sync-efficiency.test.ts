@@ -61,6 +61,7 @@ function resetPersistenceCounts() {
 }
 function service(dependencies: Partial<Parameters<typeof createCodexConfigurationSyncService>[0]> = {}) {
 	const instance = createCodexConfigurationSyncService({
+		getSessionSummary: () => null,
 		listSessions: () => [],
 		onUpdated: () => {},
 		...dependencies,

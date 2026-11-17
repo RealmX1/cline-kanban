@@ -164,7 +164,11 @@ describe("配置 store 锁不等待卷系统查询", () => {
 			await prepareWriterForSource(volumeQueryFixture.slowSourceHome);
 			const reliableBinding = await prepareWriterForSource(reliableSourceHome);
 			const slowQueryStarted = holdSlowVolumeQueriesUntilExplicitRelease();
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			const slowOperation = (
 				slowOperationKind === "source_observation"
 					? service.scan()

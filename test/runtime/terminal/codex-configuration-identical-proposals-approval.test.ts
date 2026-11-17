@@ -58,7 +58,11 @@ const createWriter = (conversationSessionId: string) =>
 	});
 
 function createService() {
-	const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+	const service = createCodexConfigurationSyncService({
+		getSessionSummary: () => null,
+		listSessions: () => [],
+		onUpdated: () => {},
+	});
 	services.push(service);
 	return service;
 }

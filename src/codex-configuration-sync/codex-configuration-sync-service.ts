@@ -136,6 +136,7 @@ interface CodexConfigurationSyncServiceDependencies {
 		onBeforeProcessReplacement: (evidenceFingerprint: string) => Promise<boolean>;
 	}) => Promise<{ resumed: boolean; reason: string }>;
 	listSessions: () => SessionTarget[];
+	getSessionSummary: (workspaceId: string, conversationSessionId: string) => RuntimeTaskSessionSummary | null;
 	onUpdated: (revision: number) => void;
 	withOwnerConnection?: <T>(
 		summary: RuntimeTaskSessionSummary,
@@ -480,25 +481,34 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				writerBinding: summary.codexConfigurationWriterBinding ?? undefined,
 			}));
 	let reconcilingSessionProfileBindings: Promise<boolean> | null = null;
-	const reconcileSessionProfileBindings = (): Promise<boolean> => {
-		if (reconcilingSessionProfileBindings) return reconcilingSessionProfileBindings;
+	let reconcilingSessionProfileBindingWriterIdsKey: string | undefined;
+	const reconcileSessionProfileBindings = (observedConfigurationWriterIds?: readonly string[]): Promise<boolean> => {
+		const observedWriterIdsKey = observedConfigurationWriterIds
+			? JSON.stringify([...new Set(observedConfigurationWriterIds)].sort())
+			: undefined;
+		if (reconcilingSessionProfileBindings) {
+			if (
+				!reconcilingSessionProfileBindingWriterIdsKey ||
+				reconcilingSessionProfileBindingWriterIdsKey === observedWriterIdsKey
+			)
+				return reconcilingSessionProfileBindings;
+			return reconcilingSessionProfileBindings.then(() =>
+				reconcileSessionProfileBindings(observedConfigurationWriterIds),
+			);
+		}
+		reconcilingSessionProfileBindingWriterIdsKey = observedWriterIdsKey;
 		reconcilingSessionProfileBindings = (async () => {
 			let hasUnavailableBinding = false;
 			const snapshot = await readCodexConfigurationSyncStore();
 			for (const writerId of Object.keys(snapshot.writers)) {
+				if (observedConfigurationWriterIds && !observedConfigurationWriterIds.includes(writerId)) continue;
 				if (!snapshot.writers[writerId].pendingSessionProfileBinding) continue;
 				const writer = (await readCodexConfigurationSyncStore()).writers[writerId];
 				if (!writer) continue;
 				const pending = writer.pendingSessionProfileBinding;
 				if (!pending) continue;
 				try {
-					const summary = deps
-						.listSessions()
-						.find(
-							(session) =>
-								session.workspaceId === pending.workspaceId &&
-								session.summary.taskId === pending.conversationSessionId,
-						)?.summary;
+					const summary = deps.getSessionSummary(pending.workspaceId, pending.conversationSessionId);
 					const obsoletePermissionMetadata =
 						pending.onlyUpdatePermissionSelectionSource &&
 						(writer.retiredAt ||
@@ -525,13 +535,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						const current = store.writers[writer.binding.writerId];
 						if (current && isDeepStrictEqual(current.pendingSessionProfileBinding, pending)) {
 							if (!pending.onlyUpdatePermissionSelectionSource) {
-								const currentBinding = deps
-									.listSessions()
-									.find(
-										(session) =>
-											session.workspaceId === pending.workspaceId &&
-											session.summary.taskId === pending.conversationSessionId,
-									)?.summary.codexConfigurationWriterBinding;
+								const currentBinding = deps.getSessionSummary(
+									pending.workspaceId,
+									pending.conversationSessionId,
+								)?.codexConfigurationWriterBinding;
 								const replacement = currentBinding && store.writers[currentBinding.writerId];
 								if (
 									replacement &&
@@ -554,6 +561,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			return hasUnavailableBinding;
 		})().finally(() => {
 			reconcilingSessionProfileBindings = null;
+			reconcilingSessionProfileBindingWriterIdsKey = undefined;
 		});
 		return reconcilingSessionProfileBindings;
 	};
@@ -575,13 +583,38 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		writer.consumedProfileFieldVersions[fieldKey] = fieldVersion;
 		return true;
 	};
-	const observe = async () => {
-		await refreshTaskSourceContext();
-		const hasUnavailableProfileBinding = await reconcileSessionProfileBindings();
+	const observe = async (observedConfigurationWriterIds?: readonly string[]) => {
+		// 全量扫描刷新一次任务归属。写前局部观察若逐目标重读，会再次解析全部项目的持久会话摘要。
+		// 会话、代次、Stop、草稿和输入资格仍在每次决定前通过 getSessionSummary 重读，不复用这份归属快照。
+		if (!observedConfigurationWriterIds) await refreshTaskSourceContext();
+		const hasUnavailableProfileBinding = await reconcileSessionProfileBindings(observedConfigurationWriterIds);
 		const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
+		const observedWriterBindings = observedConfigurationWriterIds?.flatMap((writerId) =>
+			preflightStoreSnapshot.writers[writerId] ? [preflightStoreSnapshot.writers[writerId].binding] : [],
+		);
+		const isObservedWriter = (writerId: string) =>
+			!observedConfigurationWriterIds || observedConfigurationWriterIds.includes(writerId);
+		const isObservedSession = (workspaceId: string, conversationSessionId: string) =>
+			!observedWriterBindings ||
+			observedWriterBindings.some(
+				(binding) => binding.workspaceId === workspaceId && binding.conversationSessionId === conversationSessionId,
+			);
+		const listObservationSessions = (): SessionTarget[] => {
+			if (!observedWriterBindings) return deps.listSessions();
+			const observedSessions: SessionTarget[] = [];
+			const observedSessionIdentityKeys = new Set<string>();
+			for (const { workspaceId, conversationSessionId } of observedWriterBindings) {
+				if (!workspaceId || !conversationSessionId) continue;
+				const identityKey = JSON.stringify([workspaceId, conversationSessionId]);
+				if (observedSessionIdentityKeys.has(identityKey)) continue;
+				observedSessionIdentityKeys.add(identityKey);
+				const summary = deps.getSessionSummary(workspaceId, conversationSessionId);
+				if (summary) observedSessions.push({ workspaceId, summary });
+			}
+			return observedSessions;
+		};
 		await Promise.allSettled(
-			deps
-				.listSessions()
+			listObservationSessions()
 				.filter(
 					(session) =>
 						session.summary.agentId === "codex" &&
@@ -599,7 +632,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		await prepareCodexDirectoryVolumeObservations([
 			...Object.values(preflightStoreSnapshot.sources).map((source) => source.home),
 			...Object.values(preflightStoreSnapshot.writers)
-				.filter((writer) => writer.binding.purpose === "native_session" && !writer.retiredAt)
+				.filter(
+					(writer) =>
+						isObservedWriter(writer.binding.writerId) &&
+						writer.binding.purpose === "native_session" &&
+						!writer.retiredAt,
+				)
 				.flatMap(({ binding }) => [
 					binding.sourceHomeDirectoryPath,
 					binding.conversationStorageHomeDirectoryPath,
@@ -629,7 +667,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				sourceIdentity: string;
 			}
 		>();
-		for (const { workspaceId, summary } of deps.listSessions()) {
+		for (const { workspaceId, summary } of listObservationSessions()) {
 			if (
 				summary.agentId !== "codex" ||
 				summary.codexConfigurationWriterBinding ||
@@ -663,11 +701,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				unavailableObservedHookFieldKeys: Set<string>;
 				observedNativePermissionChange: boolean;
 				configurationChangedAtMs: number | undefined;
-				ownerSummary: RuntimeTaskSessionSummary | undefined;
+				ownerSummary: RuntimeTaskSessionSummary | null;
 				nativePermissionEvidence: CodexConfigurationFields | null;
 			}
 		>();
 		for (const writer of Object.values(preflightStoreSnapshot.writers)) {
+			if (!isObservedWriter(writer.binding.writerId)) continue;
 			if (writer.binding.purpose !== "native_session" || writer.retiredAt) continue;
 			try {
 				await assertCodexConfigurationWriterBindingIdentity(writer.binding);
@@ -709,13 +748,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					? (await stat(join(writer.binding.configurationHomeDirectoryPath, "config.toml"))).mtimeMs
 					: writer.pendingNativePermissionVerificationAtMs;
 				const ownerSummary = structuredClone(
-					deps
-						.listSessions()
-						.find(
-							(item) =>
-								item.workspaceId === writer.binding.workspaceId &&
-								item.summary.taskId === writer.binding.conversationSessionId,
-						)?.summary,
+					deps.getSessionSummary(writer.binding.workspaceId ?? "", writer.binding.conversationSessionId ?? ""),
 				);
 				const nativePermissionEvidence =
 					ownerSummary &&
@@ -757,7 +790,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			return undefined;
 		});
 		taskProfileObservationProblem ||= (taskProfileObservations?.unavailableWorkspaceCount ?? 0) > 0;
-		const requestedTaskProfileBindings = taskProfileObservations?.bindings ?? [];
+		const requestedTaskProfileBindings = (taskProfileObservations?.bindings ?? []).filter((binding) =>
+			isObservedSession(binding.workspaceId, binding.conversationSessionId),
+		);
 		const observationPersistenceOptions = {
 			skipUnchangedObservationPersistence: true,
 			selection: {
@@ -780,7 +815,9 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			if (deps.listTaskProfileBindings) {
 				try {
 					const freshTaskProfileObservations = await deps.listTaskProfileBindings();
-					taskProfileBindingsToApply = freshTaskProfileObservations.bindings;
+					taskProfileBindingsToApply = freshTaskProfileObservations.bindings.filter((binding) =>
+						isObservedSession(binding.workspaceId, binding.conversationSessionId),
+					);
 					taskProfileObservationProblem =
 						hasUnavailableProfileBinding || freshTaskProfileObservations.unavailableWorkspaceCount > 0;
 				} catch {
@@ -799,6 +836,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			);
 			expireCodexConfigurationProfileFeedbackSuggestions(store);
 			for (const [writerId, task] of Object.entries(taskSourceContext?.writerTasks ?? {})) {
+				if (!isObservedWriter(writerId)) continue;
 				const writer = store.writers[writerId];
 				if (
 					writer &&
@@ -822,7 +860,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			let problem: string | null = taskProfileObservationProblem
 				? "部分 Task profile 绑定暂不可读，保留现有归属，恢复后自动补证。"
 				: preflightObservationProblem;
-			for (const { workspaceId, summary } of deps.listSessions()) {
+			for (const { workspaceId, summary } of listObservationSessions()) {
 				if (summary.agentId !== "codex") continue;
 				const key = JSON.stringify([workspaceId, summary.taskId]);
 				if (summary.codexConfigurationWriterBinding) {
@@ -885,14 +923,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				}
 			}
 			for (const requested of taskProfileBindingsToApply) {
-				const session = deps
-					.listSessions()
-					.find(
-						(session) =>
-							session.workspaceId === requested.workspaceId &&
-							session.summary.taskId === requested.conversationSessionId,
-					);
-				const writer = store.writers[session?.summary.codexConfigurationWriterBinding?.writerId ?? ""];
+				const summary = deps.getSessionSummary(requested.workspaceId, requested.conversationSessionId);
+				const writer = store.writers[summary?.codexConfigurationWriterBinding?.writerId ?? ""];
 				if (
 					!writer ||
 					!unchangedSourceIdentities.has(writer.binding.sourceIdentity) ||
@@ -924,6 +956,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				}
 			}
 			for (const writer of Object.values(store.writers)) {
+				if (!isObservedWriter(writer.binding.writerId)) continue;
 				if (writer.binding.purpose !== "native_session" || writer.retiredAt) continue;
 				const observation = writerFieldObservations.get(writer.binding.writerId);
 				if (!observation) continue;
@@ -953,18 +986,17 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							feedback.supersededAtMs = Date.now();
 							store.revision++;
 						}
-						const launchedSession = deps
-							.listSessions()
-							.find(
-								({ workspaceId, summary }) =>
-									workspaceId === writer.binding.workspaceId &&
-									summary.taskId === writer.binding.conversationSessionId &&
-									summary.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
-									summary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
-									summary.codexTaskReasoningEffortFeedbackLaunch?.selectionId === feedback.selectionId &&
-									(summary.exitCode === null || summary.exitCode === 0),
-							);
-						const launch = launchedSession?.summary.codexTaskReasoningEffortFeedbackLaunch;
+						const launchedSummary = deps.getSessionSummary(
+							writer.binding.workspaceId ?? "",
+							writer.binding.conversationSessionId ?? "",
+						);
+						const launch =
+							launchedSummary?.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+							launchedSummary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId &&
+							launchedSummary.codexTaskReasoningEffortFeedbackLaunch?.selectionId === feedback.selectionId &&
+							(launchedSummary.exitCode === null || launchedSummary.exitCode === 0)
+								? launchedSummary.codexTaskReasoningEffortFeedbackLaunch
+								: undefined;
 						if (launch && !feedback.supersededAtMs && feedback.profileId === writer.codexConfigurationProfileId) {
 							const change = recordCodexConfigurationExceptionFeedbackSuggestion(
 								store,
@@ -995,13 +1027,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							transcriptFingerprint,
 						));
 					// 所有异步复核完成后再取当前归属，避免转录 stat 等待期间会话已换代。
-					const currentOwnerSummary = deps
-						.listSessions()
-						.find(
-							(item) =>
-								item.workspaceId === writer.binding.workspaceId &&
-								item.summary.taskId === writer.binding.conversationSessionId,
-						)?.summary;
+					const currentOwnerSummary = deps.getSessionSummary(
+						writer.binding.workspaceId ?? "",
+						writer.binding.conversationSessionId ?? "",
+					);
 					const permissionObservationStillOwnedByCurrentSession =
 						ownerSummary &&
 						currentOwnerSummary &&
@@ -1123,12 +1152,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						}
 					}
 				}
+			if (observedConfigurationWriterIds && problem === null) problem = store.observationProblem;
 			if (store.observationProblem !== problem) {
 				store.observationProblem = problem;
 				store.revision++;
 			}
 		}, observationPersistenceOptions);
-		await reconcileSessionProfileBindings();
+		await reconcileSessionProfileBindings(observedConfigurationWriterIds);
 	};
 	const reconcileSubsequentStartAdoption = async () => {
 		const store = await readCodexConfigurationSyncStore();
@@ -1136,12 +1166,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			for (const target of change.targets) {
 				if (!isCodexConfigurationChangeApprovedForPropagation(change)) continue;
 				if (target.status !== "pending_next_start") continue;
-				const summary = deps
-					.listSessions()
-					.find(
-						(item) =>
-							item.workspaceId === target.workspaceId && item.summary.taskId === target.conversationSessionId,
-					)?.summary;
+				const summary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
 				const binding = summary?.codexConfigurationWriterBinding;
 				const replacement = binding && store.writers[binding.writerId];
 				const endpoint = summary?.codexNativeSessionControlEndpoint;
@@ -1247,13 +1272,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						if (!isDeepStrictEqual(actual, change.value?.value)) return;
 						await mutateCodexConfigurationSyncStore(
 							(latest) => {
-								const liveSummary = deps
-									.listSessions()
-									.find(
-										(item) =>
-											item.workspaceId === target.workspaceId &&
-											item.summary.taskId === target.conversationSessionId,
-									)?.summary;
+								const liveSummary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
 								const current = latest.changes
 									.find((item) => item.changeId === change.changeId)
 									?.targets.find((item) => item.writerId === target.writerId);
@@ -1295,13 +1314,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const writer = store.writers[writerId];
 		if (!change || !target || !writer || ["applied", "conflict", "not_applicable"].includes(target.status)) return;
 		if (!isCodexConfigurationChangeApprovedForPropagation(change)) return;
-		const summary = deps
-			.listSessions()
-			.find(
-				(item) =>
-					item.workspaceId === writer.binding.workspaceId &&
-					item.summary.taskId === writer.binding.conversationSessionId,
-			)?.summary;
+		const summary = deps.getSessionSummary(
+			writer.binding.workspaceId ?? "",
+			writer.binding.conversationSessionId ?? "",
+		);
 		const update = async (patch: Partial<typeof target>) =>
 			mutateCodexConfigurationSyncStore(
 				(latest) => {
@@ -1473,6 +1489,22 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			}
 		}
 		if (target.evidenceFingerprint === fingerprint && target.attemptCount >= 3) return;
+		const observePropagationWriters = async () => {
+			const latest = await readCodexConfigurationSyncStore();
+			const profileId = latest.changes.find((item) => item.changeId === changeId)?.codexConfigurationProfileId;
+			const writerIds = new Set([writerId, change.sourceWriterId]);
+			// 同一 profile 的其他活体会话可以在原所有者 RPC 等待期间改写非例外共享字段。
+			// 只观察来源和目标会漏掉新的 profile 字段版本，门禁无法在 batchWrite 前停住旧值。
+			if (profileId)
+				for (const candidate of Object.values(latest.writers))
+					if (
+						candidate.codexConfigurationProfileId === profileId &&
+						candidate.binding.purpose === "native_session" &&
+						!candidate.retiredAt
+					)
+						writerIds.add(candidate.binding.writerId);
+			await observe([...writerIds]);
+		};
 		const nativeKeyPath = keyPath.map((key) =>
 			key.startsWith(`${store.sources[change.sourceIdentity].home}/`)
 				? `${writer.binding.configurationHomeDirectoryPath}${key.slice(store.sources[change.sourceIdentity].home.length)}`
@@ -1627,7 +1659,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					(keyPath.at(-1)?.startsWith(`${store.sources[change.sourceIdentity].home}/hooks.json:`) ||
 						keyPath.at(-1)?.startsWith(`${store.sources[change.sourceIdentity].home}/config.toml:`));
 				// 在提交可能开始之前持久保存；失去回执不能换一个操作身份盲写。
-				await observe();
+				await observePropagationWriters();
 				if (!(await update({ writeSubmissionStartedAt: Date.now(), expectedNativeVersion: layer.version }))) return;
 				const response = z
 					.object({ status: z.enum(["ok", "okOverridden"]), filePath: z.string(), version: z.string() })
@@ -1658,7 +1690,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					},
 				});
 				if (!sameConfigurationField(saved[change.fieldKey], change.value)) throw new Error("磁盘值尚未匹配");
-				await observe();
+				await observePropagationWriters();
 				await mutateCodexConfigurationSyncStore(
 					(latest) => {
 						const liveWriter = latest.writers[writerId];
@@ -1684,7 +1716,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				});
 			});
 		} catch {
-			await observe();
+			await observePropagationWriters();
 			await update({
 				status: "pending_reload",
 				reason: "原所有者暂不可达、版本冲突或回执未确认；保留实际未知状态。",
@@ -1711,12 +1743,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			!isCodexConfigurationSourceObservationStillCurrent(store, change)
 		)
 			return;
-		const summary = deps
-			.listSessions()
-			.find(
-				(session) =>
-					session.workspaceId === target.workspaceId && session.summary.taskId === target.conversationSessionId,
-			)?.summary;
+		const summary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
 		if (
 			!summary ||
 			((resolveSessionFacets(summary).liveness !== "live" ||
@@ -1734,13 +1761,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					(latest) => {
 						const latestChange = latest.changes.find((item) => item.changeId === changeId);
 						const current = latestChange?.targets.find((item) => item.writerId === writerId);
-						const liveSummary = deps
-							.listSessions()
-							.find(
-								(session) =>
-									session.workspaceId === target.workspaceId &&
-									session.summary.taskId === target.conversationSessionId,
-							)?.summary;
+						const liveSummary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
 						if (
 							!latestChange ||
 							!current ||
@@ -1792,13 +1813,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			const store = await readCodexConfigurationSyncStore();
 			for (const [key, legacy] of Object.entries(store.legacySessionProfileAdoptions)) {
 				if (!deps.resumeSessionToAdoptProfile) break;
-				const summary = deps
-					.listSessions()
-					.find(
-						(session) =>
-							session.workspaceId === legacy.workspaceId &&
-							session.summary.taskId === legacy.conversationSessionId,
-					)?.summary;
+				const summary = deps.getSessionSummary(legacy.workspaceId, legacy.conversationSessionId);
 				if (
 					!summary ||
 					summary.codexConfigurationWriterBinding ||
@@ -1868,14 +1883,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					if (["accepted", "pending_reload"].includes(target.status))
 						await applyTarget(change.changeId, target.writerId);
 					if (!deps.resumeSessionToAdoptProfile || !change.codexConfigurationProfileId) continue;
-					const summary = deps
-						.listSessions()
-						.find(
-							(session) =>
-								session.workspaceId === target.workspaceId &&
-								session.summary.taskId === target.conversationSessionId,
-						)?.summary;
-					// 本轮快照只筛掉无动作目标；实际续接仍定向重读并核验当前代际与提交资格。
+					const summary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
+					// 此处只筛掉无动作目标；实际续接仍定向重读并核验当前代际与提交资格。
 					if (
 						!summary ||
 						((resolveSessionFacets(summary).liveness !== "live" ||
@@ -2327,19 +2336,13 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						},
 					});
 				} else {
-					const session = deps
-						.listSessions()
-						.find(
-							(session) =>
-								session.workspaceId === input.workspaceId &&
-								session.summary.taskId === input.conversationSessionId,
-						);
-					const binding = session?.summary.codexConfigurationWriterBinding;
+					const summary = deps.getSessionSummary(input.workspaceId, input.conversationSessionId);
+					const binding = summary?.codexConfigurationWriterBinding;
 					const writer = binding && store.writers[binding.writerId];
 					if (
 						!writer ||
 						binding?.sourceIdentity !== profile.sourceIdentity ||
-						session?.summary.runtimeSessionIncarnationId !== input.expectedRuntimeSessionIncarnationId
+						summary?.runtimeSessionIncarnationId !== input.expectedRuntimeSessionIncarnationId
 					)
 						throw new Error("会话代际或配置来源已变化，未改变绑定。");
 					writer.codexConfigurationProfileId = profile.profileId;

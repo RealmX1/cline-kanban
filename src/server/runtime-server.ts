@@ -550,6 +550,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				.flatMap(({ workspaceId, terminalManager }) =>
 					terminalManager.listSummaries().map((summary) => ({ workspaceId, summary })),
 				),
+		getSessionSummary: (workspaceId, conversationSessionId) =>
+			deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId)?.getSummary(conversationSessionId) ?? null,
 		onUpdated: (revision) => deps.runtimeStateHub.broadcastCodexConfigurationSyncUpdated?.(revision),
 		onSessionProfileBound: async (
 			workspaceId,

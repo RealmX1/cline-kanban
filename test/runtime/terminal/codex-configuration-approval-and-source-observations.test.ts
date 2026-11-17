@@ -77,6 +77,7 @@ describe("配置审批与来源提示", () => {
 		});
 		const onUpdated = vi.fn();
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
 			listSessions: () => [],
 			onUpdated,
 			reconcileRetainedTerminalInput: async () => {
@@ -148,7 +149,11 @@ describe("配置审批与来源提示", () => {
 			configuration[field] = value;
 			await writeFile(path, stringify(configuration));
 		}
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();
@@ -221,7 +226,7 @@ describe("配置审批与来源提示", () => {
 		configuration.model_reasoning_effort = "high";
 		configuration.hide_agent_reasoning = true;
 		await writeFile(filePath, stringify(configuration));
-		const dependencies = { listSessions: () => [], onUpdated: () => {} };
+		const dependencies = { getSessionSummary: () => null, listSessions: () => [], onUpdated: () => {} };
 		const service = createCodexConfigurationSyncService(dependencies);
 		await service.scan();
 		const state = await service.getState();
@@ -303,7 +308,11 @@ describe("配置审批与来源提示", () => {
 		const configuration = parse(await readFile(filePath, "utf8"));
 		configuration.model = "local-choice";
 		await writeFile(filePath, stringify(configuration));
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();

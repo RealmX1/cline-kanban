@@ -144,6 +144,10 @@ function createNativeOwnerHarness() {
 }
 function createConfigurationService(owner: ReturnType<typeof createNativeOwnerHarness>, approveObserved = true) {
 	const rawService = createCodexConfigurationSyncService({
+		getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+			sessionTargets.find(
+				(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+			)?.summary ?? null,
 		listSessions: () => sessionTargets,
 		onUpdated: () => {},
 		withOwnerConnection: owner.connect,

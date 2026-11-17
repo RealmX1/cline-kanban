@@ -76,7 +76,11 @@ describe("Codex profile 跨代与配置边界回归", () => {
 			await writeFile(path, stringify(configuration));
 		};
 		await changeValue(first, group === "model" ? "older-session-selection" : "on-request");
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const before = await service.getState();
@@ -262,6 +266,10 @@ describe("Codex profile 跨代与配置边界回归", () => {
 		const ownerRead = vi.fn();
 		const configurationPath = join(replacement.configurationHomeDirectoryPath, "config.toml");
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "boundary-fixture-workspace", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "boundary-fixture-workspace", summary }],
 			onUpdated: () => {},
 			withOwnerConnection: async (_summary, operation) =>
@@ -299,7 +307,11 @@ describe("Codex profile 跨代与配置边界回归", () => {
 			const path = join(binding.configurationHomeDirectoryPath, "config.toml");
 			const value = fieldName === "model" ? "approved-global-model" : true;
 			await writeFile(path, stringify({ ...parse(await readFile(path, "utf8")), [fieldName]: value }));
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			try {
 				await service.scan();
 				const state = await service.getState();
