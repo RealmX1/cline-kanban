@@ -80,8 +80,8 @@ it("共享行模型让紧凑项换行，焦点项独占整行，副本预算由�
 			["a", "1", "1"],
 			["b", "1", "2"],
 			["c", "2", "1 / -1"],
-			["d", "3", "1"],
-			["e", "1", "1"],
+			["d", "3", "1 / -1"],
+			["e", "1", "1 / -1"],
 		]);
 		expect(container.querySelectorAll('[data-presentation="compact"]')).toHaveLength(5);
 		const rail = container.querySelector<HTMLElement>('[data-testid="stage-header-rail"]')!;

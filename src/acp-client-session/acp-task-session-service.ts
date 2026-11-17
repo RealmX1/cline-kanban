@@ -138,6 +138,7 @@ interface AcpPromptTurnAwaitingProtocolEvidence {
 	eventId: string;
 	attemptedAtMs: number;
 	originalSubmittedPromptText: string;
+	owningCommandExecutionId?: string;
 	accepted: boolean;
 	cancellationRequested: boolean;
 	confirmationTimeout: ReturnType<typeof setTimeout> | null;
@@ -583,6 +584,7 @@ export class AcpTaskSessionService {
 		onPromptAcceptanceSettled?: (accepted: boolean) => void,
 		programmaticPromptSubmissionIdempotencyKey?: string,
 		onPromptSubmissionNotStarted?: (reason: "connection_unavailable" | "request_busy") => void,
+		owningCommandExecutionId?: string,
 	): Promise<RuntimeTaskSessionSummary | null> {
 		const entry = this.registry.getEntry(taskId);
 		const connection = this.connectionRuntime.getConnection(taskId);
@@ -620,6 +622,7 @@ export class AcpTaskSessionService {
 			text,
 			onPromptAcceptanceSettled,
 			programmaticPromptSubmissionIdempotencyKey,
+			owningCommandExecutionId,
 		);
 		return cloneAcpSummary(entry.summary);
 	}
@@ -654,6 +657,18 @@ export class AcpTaskSessionService {
 			return unparkedSummary;
 		}
 		return cloneAcpSummary(entry.summary);
+	}
+
+	// 没有执行身份的接受不能清掉其他所属等待；没有剩余 owner 时才恢复无归属等待的清除语义。
+	private releaseParkAfterAcceptedPrompt(taskId: string, owningCommandExecutionId?: string): void {
+		if (owningCommandExecutionId) {
+			this.unparkTaskSession(taskId, owningCommandExecutionId);
+			return;
+		}
+		const remainingOwningCommandExecutionIds =
+			this.registry.getEntry(taskId)?.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds;
+		if ((remainingOwningCommandExecutionIds?.length ?? 0) > 0) return;
+		this.unparkTaskSession(taskId);
 	}
 
 	getAwaitingDispatchedBackgroundWork(
@@ -968,6 +983,7 @@ export class AcpTaskSessionService {
 		originalSubmittedPromptText: string,
 		onPromptAcceptanceSettled?: (accepted: boolean) => void,
 		programmaticPromptSubmissionIdempotencyKey?: string,
+		owningCommandExecutionId?: string,
 	): Promise<void> {
 		const entry = this.registry.getEntry(taskId);
 		const runtimeSessionIncarnationId = entry?.summary.runtimeSessionIncarnationId;
@@ -979,6 +995,7 @@ export class AcpTaskSessionService {
 			eventId: programmaticPromptSubmissionIdempotencyKey ?? `acp-prompt:${randomUUID()}`,
 			attemptedAtMs: now(),
 			originalSubmittedPromptText,
+			owningCommandExecutionId,
 			accepted: false,
 			cancellationRequested: false,
 			confirmationTimeout: null,
@@ -1120,13 +1137,13 @@ export class AcpTaskSessionService {
 		if (pending.confirmationTimeout) clearTimeout(pending.confirmationTimeout);
 		pending.confirmationTimeout = null;
 		const confirmedAtMs = now();
+		this.releaseParkAfterAcceptedPrompt(taskId, pending.owningCommandExecutionId);
 		this.emitSummary(
 			updateAcpSummary(pending.entry, {
 				...deriveAcpFacetPatch("running", null, {
 					pid: pending.connection.pid,
 					agentId: pending.connection.agentId,
 				}),
-				...ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK,
 				reviewReason: null,
 				agentCurrentWorkPhaseGoalInvalidatedAt: confirmedAtMs,
 				...(pending.entry.summary.taskConversationSessionMetadata

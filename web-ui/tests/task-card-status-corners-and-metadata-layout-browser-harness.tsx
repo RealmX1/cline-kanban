@@ -192,6 +192,10 @@ function Harness() {
 						<output aria-label="打开任务次数">{openedCount}</output>
 						<button type="button" onClick={() => {
 							const previous = getTaskWorkspaceSnapshot("layout-task");
+							if (previous) setTaskWorkspaceSnapshot({ ...previous, changedFiles: 123, additions: 2300, deletions: 45, commitsAheadOfBaseRef: 29, commitsBehindBaseRef: 9 });
+						}}>切换统计密度</button>
+						<button type="button" onClick={() => {
+							const previous = getTaskWorkspaceSnapshot("layout-task");
 							if (previous?.taskCommitCoverageInCurrentDeployment) setTaskWorkspaceSnapshot({
 								...previous, taskCommitCoverageInCurrentDeployment: {
 									...previous.taskCommitCoverageInCurrentDeployment,

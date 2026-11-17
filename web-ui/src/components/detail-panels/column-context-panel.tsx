@@ -1,5 +1,6 @@
 import { type BeforeCapture, DragDropContext, Droppable, type DropResult } from "@hello-pangea/dnd";
 import { resolveMainTaskConversationSessionSummary } from "@runtime-session-activity";
+import { Pin } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BoardCard } from "@/components/board-card";
 import { useCrossProjectRecentlyActiveTaskSwitcherHostContext } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
@@ -7,6 +8,7 @@ import { CrossProjectRecentlyActiveTaskSwitcherPanel } from "@/components/detail
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { FocusViewGroupHeader } from "@/components/detail-panels/focus-view-group-header";
 import { FocusViewStageGroupHeaderActions } from "@/components/detail-panels/focus-view-stage-group-header-actions";
+import { computeFocusViewGroupHeaderRailHeight } from "@/components/detail-panels/stage-header-rail-geometry";
 import { StageHeaderRails } from "@/components/detail-panels/stage-header-rails";
 import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
 import { LoadMoreTasksSentinel } from "@/components/load-more-tasks-sentinel";
@@ -32,8 +34,10 @@ import {
 	resolveTaskCardOriginalStage,
 } from "@/state/task-board-display-groups";
 import { collectTasksPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
+import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard as BoardCardModel, BoardDisplayGroup, BoardDisplayGroupId, CardSelection } from "@/types";
 import { escapeCssAttributeSelectorValue } from "@/utils/css-attribute-selector-value";
+import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 // 详情页左侧所有 section 共用一个滚动容器；模块级常量保持引用稳定。
 const getDetailTaskListScrollRoot = (sentinel: HTMLElement): HTMLElement | null =>
@@ -290,6 +294,18 @@ export function ColumnContextPanel({
 	const displayGroups = useMemo(() => projectTaskBoardDisplayGroups(selection.allColumns), [selection.allColumns]);
 	const focusedDisplayGroupId = selection.card.taskShelvingState?.isShelved ? "shelved" : selection.column.id;
 	const columnIds = useMemo(() => displayGroups.map((column) => column.id), [displayGroups]);
+	const [isPinnedSectionCollapsed, setIsPinnedSectionCollapsed] = useBooleanLocalStorageValue(
+		LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
+		false,
+	);
+	const pinnedTasks = useMemo(
+		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns }),
+		[selection.allColumns],
+	);
+	const fixedTopGroupIds = useMemo(
+		() => (isPinnedSectionCollapsed && pinnedTasks.length > 0 ? ["pinned"] : []),
+		[isPinnedSectionCollapsed, pinnedTasks.length],
+	);
 
 	// stage 分段的展开态集中持有（Done 默认折叠，其余默认展开），行内卡头与钉住 rail 的孪生卡头共读同一份；
 	// rail 卡头发起的跳转 / 折叠 / 展开各自的滚动落点也由它决定。
@@ -302,6 +318,7 @@ export function ColumnContextPanel({
 	} = useFocusViewStageSectionExpansion({
 		scrollRootRef: scrollContainerRef,
 		orderedColumnIds: columnIds,
+		fixedTopGroupIds,
 		focusedColumnId: focusedDisplayGroupId,
 		focusedTaskId: selection.card.id,
 	});
@@ -311,10 +328,6 @@ export function ColumnContextPanel({
 	}, [focusedDisplayGroupId, selection.card.id, expandStageSectionWithoutScrolling]);
 
 	const activateCard = useCallback((card: BoardCardModel) => onCardSelect(card.id), [onCardSelect]);
-	const pinnedTasks = useMemo(
-		() => collectTasksPinnedToTaskPinboard({ columns: selection.allColumns }),
-		[selection.allColumns],
-	);
 
 	// 点置顶板分身上的 stage 标签：先把目标所在分段展开（折叠时整段 display:none，scrollIntoView 无效），
 	// 再由控制器逐帧重试直到本体卡挂载、滚入视野并脉冲高亮。
@@ -382,6 +395,7 @@ export function ColumnContextPanel({
 	const stageHeaderPinLayout = useStageHeaderPinLayout({
 		scrollRootRef: scrollContainerRef,
 		columnIds,
+		fixedTopGroupIds,
 		focusedColumnId: focusedDisplayGroupId,
 		focusedTaskId: selection.card.id,
 		focusedCardPinState: selectedCardPinState,
@@ -481,6 +495,8 @@ export function ColumnContextPanel({
 					{/* 置顶板分段是 scrollport 之外的固定区：常驻列表顶端、不随 stage 列表滚走。 */}
 					<TaskPinboardSectionInFocusView
 						pinnedTasks={pinnedTasks}
+						isCollapsed={isPinnedSectionCollapsed}
+						onToggleCollapsed={() => setIsPinnedSectionCollapsed(!isPinnedSectionCollapsed)}
 						selectedCardId={selection.card.id}
 						taskSessions={taskSessions}
 						handlers={taskCardActionHandlers}
@@ -511,6 +527,19 @@ export function ColumnContextPanel({
 									overflowAnchor: "none",
 								}}
 							>
+								{fixedTopGroupIds.length > 0 ? (
+									<div
+										aria-hidden="true"
+										className="shrink-0"
+										style={{
+											height: computeFocusViewGroupHeaderRailHeight({
+												groupIds: fixedTopGroupIds,
+												compactGroupIds: stageHeaderPinLayout.compactGroupIds,
+												columnCount: stageHeaderPinLayout.columnCount,
+											}),
+										}}
+									/>
+								) : null}
 								{displayGroups.map((column) => (
 									<ColumnSection
 										key={column.id}
@@ -558,6 +587,24 @@ export function ColumnContextPanel({
 							</div>
 						</DragDropContext>
 						<StageHeaderRails
+							renderFixedTopGroupHeader={(groupId, presentation) =>
+								groupId === "pinned" ? (
+									<div
+										className="kb-task-group min-w-0"
+										style={getTaskGroupSemanticColorStyle("pinned")}
+										data-focus-view-group-header-rail-entry="pinned"
+									>
+										<FocusViewGroupHeader
+											title="Pinned"
+											count={pinnedTasks.length}
+											icon={<Pin size={13} className="text-accent" />}
+											isExpanded={false}
+											presentation={presentation}
+											onToggleExpanded={() => setIsPinnedSectionCollapsed(false)}
+										/>
+									</div>
+								) : null
+							}
 							onRequestStartAllReadyBacklogTasks={onRequestStartAllReadyBacklogTasks}
 							onClearTrash={onClearTrash}
 							selection={selection}

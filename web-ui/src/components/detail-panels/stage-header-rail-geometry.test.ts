@@ -17,6 +17,83 @@ import {
 } from "@/components/detail-panels/stage-header-rail-geometry";
 
 describe("紧凑分组标题的共享几何", () => {
+	it.each([false, true])("收起的 Pinned 参与顶轨、遮挡与首分组跳转预算，桌面=%s", (compactHeadersEnabled) => {
+		const input = {
+			sections: [{ id: "running", top: 500, bottom: 1000 }],
+			fixedTopGroupIds: ["pinned"],
+			viewportTop: 0,
+			viewportHeight: 500,
+			columnCount: 3,
+			compactHeadersEnabled,
+			focusedColumnId: "",
+			focusedCardTop: 0,
+			focusedCardBottom: 0,
+			focusedCardHeight: 0,
+			focusedCardPinState: "hidden" as const,
+		};
+		const layout = computeStageHeaderPinLayoutGeometry(input);
+		expect(layout.topPinnedColumnIds).toEqual(["pinned"]);
+		expect(layout.bottomPinnedColumnIds).toEqual(["running"]);
+		expect(layout.compactGroupIds.includes("pinned")).toBe(compactHeadersEnabled);
+		const reservedHeight = computeTopRailHeightAboveStageJumpTarget({
+			targetStageIndex: 0,
+			focusedStageIndex: -1,
+			focusedCardViewportTop: 0,
+			focusedCardHeight: 0,
+			targetSectionViewportTop: 500,
+			railLayout: input,
+		});
+		expect(reservedHeight).toBe((compactHeadersEnabled ? 26 : 30) + STAGE_RAIL_GAP_PX);
+	});
+
+	it("收起的 Pinned 与滚出视口的分组共用一行及同一高度", () => {
+		const layout = computeStageHeaderPinLayoutGeometry({
+			sections: [{ id: "running", top: -500, bottom: -10 }],
+			fixedTopGroupIds: ["pinned"],
+			viewportTop: 0,
+			viewportHeight: 500,
+			columnCount: 3,
+			compactHeadersEnabled: true,
+			focusedColumnId: "",
+			focusedCardTop: 0,
+			focusedCardBottom: 0,
+			focusedCardHeight: 0,
+			focusedCardPinState: "hidden",
+		});
+		const rows = computeFocusViewGroupHeaderRailRows({
+			groupIds: layout.topPinnedColumnIds,
+			compactGroupIds: layout.compactGroupIds,
+			columnCount: layout.columnCount,
+		});
+		expect(rows.map(({ groupIds }) => groupIds)).toEqual([["pinned", "running"]]);
+		expect(
+			computeFocusViewGroupHeaderRailHeight({
+				groupIds: layout.topPinnedColumnIds,
+				compactGroupIds: layout.compactGroupIds,
+				columnCount: layout.columnCount,
+			}),
+		).toBe(26);
+	});
+	it.each(["pinTop", "pinBottom"] as const)("收起的 Pinned 不改变首分组焦点副本的归属：%s", (focusedCardPinState) => {
+		const layout = computeStageHeaderPinLayoutGeometry({
+			sections: [{ id: "running", top: -500, bottom: 1000 }],
+			fixedTopGroupIds: ["pinned"],
+			viewportTop: 0,
+			viewportHeight: 500,
+			columnCount: 3,
+			compactHeadersEnabled: true,
+			focusedColumnId: "running",
+			focusedCardTop: focusedCardPinState === "pinTop" ? -100 : 600,
+			focusedCardBottom: focusedCardPinState === "pinTop" ? -20 : 680,
+			focusedCardHeight: 80,
+			focusedCardPinState,
+		});
+		expect(layout.focusedCardRailEdge).toBe(focusedCardPinState);
+		expect(layout.topPinnedColumnIds).toContain("pinned");
+		expect(focusedCardPinState === "pinTop" ? layout.topPinnedColumnIds : layout.bottomPinnedColumnIds).toContain(
+			"running",
+		);
+	});
 	it.each([
 		[199, 1],
 		[200, 2],

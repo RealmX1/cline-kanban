@@ -142,6 +142,7 @@ describe("ColumnContextPanel", () => {
 	let scrollIntoViewMock: ReturnType<typeof vi.fn>;
 
 	beforeEach(() => {
+		window.localStorage.clear();
 		previousActEnvironment = (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
 			.IS_REACT_ACT_ENVIRONMENT;
 		(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -258,10 +259,9 @@ describe("ColumnContextPanel", () => {
 			);
 			const pinboardToggle = pinboard?.querySelector<HTMLButtonElement>("button");
 			await act(async () => pinboardToggle?.click());
-			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("false");
+			expect(container.querySelector('[data-task-pinboard-container="focus-view-section"]')).toBeNull();
+			expect(window.localStorage.getItem("kanban.task-pinboard-section-collapsed-in-focus-view.v1")).toBe("true");
 			expect(stageList?.firstElementChild?.contains(createButton)).toBe(true);
-			await act(async () => pinboardToggle?.click());
-			expect(pinboardToggle?.getAttribute("aria-expanded")).toBe("true");
 		} else {
 			expect(pinboard).toBeNull();
 		}

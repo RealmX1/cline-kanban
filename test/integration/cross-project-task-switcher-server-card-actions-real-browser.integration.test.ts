@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { setTimeout as waitForNextObservation } from "node:timers/promises";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../../src/core/kanban-web-ui-page-load-request-origin-nonce";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType, Request } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -18,6 +19,7 @@ import {
 	waitForChildProcessExit,
 } from "./runtime-integration-test-spawned-child-process-lifecycle";
 import { runTaskRetainedCommittedLineChangeRealBrowserCheck } from "./task-retained-committed-line-change-real-browser-check";
+import { runTaskReviewGatewayResponseRecoveryRealBrowserCheck } from "./task-review-gateway-response-recovery-real-browser-check";
 import { runTaskSessionConnectionRetryGroupingRealBrowserCheck } from "./task-session-connection-retry-grouping-real-browser-check";
 import { runTaskShelvingRealBrowserCheck } from "./task-shelving-real-browser-check";
 
@@ -30,7 +32,10 @@ const runAllProjectsRecentBrowserCheck = process.env.KANBAN_RUN_ISOLATED_ALL_PRO
 const runConnectionRetryGroupingBrowserCheck =
 	process.env.KANBAN_RUN_ISOLATED_CONNECTION_RETRY_GROUPING_BROWSER_CHECK === "1";
 const runTaskShelvingBrowserCheck = process.env.KANBAN_RUN_ISOLATED_TASK_SHELVING_BROWSER_CHECK === "1";
+const runReviewResponseRecoveryBrowserCheck =
+	process.env.KANBAN_RUN_ISOLATED_REVIEW_RESPONSE_RECOVERY_BROWSER_CHECK === "1";
 const runRealBrowserCheck =
+	runReviewResponseRecoveryBrowserCheck ||
 	runTaskShelvingBrowserCheck ||
 	runConnectionRetryGroupingBrowserCheck ||
 	runAllProjectsRecentBrowserCheck ||
@@ -159,12 +164,20 @@ setInterval(() => {}, 1000);
 			child.on("exit", () => writeFileSync(join(evidenceOutputDirectory, `${role}.log`), output));
 			return child;
 		}
-		const runtimeClient = (workspaceId?: string) =>
+		const runtimeClient = (workspaceId?: string, projectRegistrationFixtureNonce?: string) =>
 			createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
 					httpLink({
 						url: `${runtimeOrigin}/api/trpc`,
-						headers: workspaceId ? { "x-kanban-workspace-id": workspaceId } : {},
+						headers: {
+							...(workspaceId ? { "x-kanban-workspace-id": workspaceId } : {}),
+							...(projectRegistrationFixtureNonce
+								? {
+										[KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME]:
+											projectRegistrationFixtureNonce,
+									}
+								: {}),
+						},
 					}),
 				],
 			});
@@ -238,6 +251,18 @@ setInterval(() => {}, 1000);
 						.catch(() => false),
 				"隔离 runtime 启动",
 			);
+			const { kanbanWebUiPageLoadIssuedRequestOriginNonce } =
+				await runtimeClient().runtime.issueKanbanWebUiPageLoadRequestOriginNonce.mutate();
+			for (const project of [firstProject, secondProject]) {
+				const preview = await runtimeClient().projects.previewAdd.query({ path: project.repositoryPath });
+				const registered = await runtimeClient(
+					undefined,
+					kanbanWebUiPageLoadIssuedRequestOriginNonce,
+				).projects.add.mutate({
+					path: preview.path,
+				});
+				expect(registered.ok).toBe(true);
+			}
 			const singleStartId = await createTask(firstProject.repositoryPath, "单张启动");
 			const allReadyId = await createTask(firstProject.repositoryPath, "全部就绪启动");
 			const retryId = await createTask(firstProject.repositoryPath, "重试启动");
@@ -345,6 +370,34 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 				.filter({ hasText: "Get started" })
 				.getByRole("button", { name: "关闭填写窗口", exact: true })
 				.click({ timeout: 10000 });
+			if (runReviewResponseRecoveryBrowserCheck) {
+				await runTaskReviewGatewayResponseRecoveryRealBrowserCheck({
+					page,
+					webUiOrigin,
+					workspaceId: alphaWorkspaceId,
+					otherWorkspaceId: betaWorkspaceId,
+					focusTaskId: focusId,
+					evidenceOutputDirectory,
+					observeUntil,
+					taskCardActionToolbar,
+					createAndStartTask: async (workspaceId, title) => {
+						const projectPath =
+							workspaceId === alphaWorkspaceId ? firstProject.repositoryPath : secondProject.repositoryPath;
+						const taskId = await createTask(projectPath, title);
+						const result = await runtimeClient(
+							workspaceId,
+						).taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress.mutate({ taskId });
+						expect(result.agentSessionStartOutcome).toBe("agent_session_started");
+						return taskId;
+					},
+					readTaskColumn: async (workspaceId, taskId) =>
+						(await runtimeClient(workspaceId).workspace.getState.query()).board.columns.find((column) =>
+							column.cards.some((card) => card.id === taskId),
+						)?.id,
+				});
+				expect(pageErrors).toEqual([]);
+				return;
+			}
 			if (runTaskShelvingBrowserCheck) {
 				await runtimeClient(alphaWorkspaceId).taskCardAction.setTaskPinboardPinStateOfTaskCard.mutate({
 					taskId: focusId,

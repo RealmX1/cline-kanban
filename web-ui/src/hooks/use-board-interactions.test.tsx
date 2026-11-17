@@ -2084,7 +2084,11 @@ describe("useBoardInteractions", () => {
 
 			expect(taskCardActionQueryMocks.moveTaskCardIntoReviewByHandingTurnToUserInWorkspace).toHaveBeenCalledWith(
 				"project-1",
-				{ taskId: "task-mr", boardMutationInitiator: "web_ui_user_gesture" },
+				{
+					taskId: "task-mr",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+					boardMutationInitiator: "web_ui_user_gesture",
+				},
 			);
 			// 服务端翻回合后显式移列；会被保存的 board 由广播回灌更新，这里仍在原列，显示层由 overlay 承担。
 			expect(cardIdsIn(latestBoard, "in_progress")).toEqual(["task-mr"]);

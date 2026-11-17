@@ -21,6 +21,10 @@ async function expectRowsMatchRenderedGeometry(page: Page) {
 				top: Math.min(...entries.map((entry) => entry.getBoundingClientRect().top)),
 				bottom: Math.max(...entries.map((entry) => entry.getBoundingClientRect().bottom)),
 			}));
+			for (const entries of rowEntries.values()) {
+				if (entries.length === 1 && Math.abs(entries[0]!.getBoundingClientRect().width - rail.clientWidth + 4) > 1)
+					errors.push("单标题行未铺满可用宽度");
+			}
 			for (const header of rail.querySelectorAll<HTMLElement>("[data-focus-view-group-header]")) {
 				const expectedHeight = header.dataset.presentation === "compact" ? 24 : 28;
 				if (header.dataset.presentation === "compact" && header.parentElement!.getBoundingClientRect().width < 96)
@@ -43,6 +47,93 @@ async function expectRowsMatchRenderedGeometry(page: Page) {
 }
 
 for (const scope of ["current", "all"] as const) {
+	test(`${scope} Pinned 收起后并入共享顶轨，展开后独立滚动，跳转保留首卡`, async ({ page }) => {
+		const errors = await openIsolatedFocusViewCompactGroupHeadersBrowserHarness(page, scope, {
+			usesPinnedFixtures: true,
+		});
+		const pinnedSection = page.locator(
+			scope === "current"
+				? '[data-task-pinboard-container="focus-view-section"]'
+				: '[data-testid="cross-project-task-switcher-section-pinned"]',
+		);
+		await expect(pinnedSection).toBeVisible();
+		await pinnedSection.getByRole("button", { name: "Show 2 more", exact: true }).click();
+		const pinnedScroll = pinnedSection.locator(".overflow-y-auto");
+		await expect(pinnedScroll).toBeVisible();
+		const scrollRoot = page.locator(scrollRootSelector);
+		const beforeScroll = await scrollRoot.evaluate((root) => root.scrollTop);
+		await pinnedScroll.evaluate((root) => {
+			root.scrollTop = root.scrollHeight;
+		});
+		expect(await pinnedScroll.evaluate((root) => root.scrollTop)).toBeGreaterThan(0);
+		expect(await scrollRoot.evaluate((root) => root.scrollTop)).toBe(beforeScroll);
+		await pinnedSection.getByRole("button", { name: "收起 Pinned", exact: true }).click();
+		await expect(pinnedSection).toHaveCount(0);
+		const pinnedHeader = page.locator(
+			`${railSelector}[data-edge="top"] [data-focus-view-group-header-rail-entry="pinned"]`,
+		);
+		await expect(pinnedHeader).toBeVisible();
+		await expect(pinnedHeader.locator("[data-focus-view-group-header]")).toHaveAttribute(
+			"data-presentation",
+			"compact",
+		);
+		let sharedRowObserved = false;
+		let singletonRowObserved = false;
+		for (const fraction of [0, 0.15, 0.4, 0.7, 1, 0.2]) {
+			await setFocusViewTaskListScrollFractionAndWaitForLayout(page, fraction);
+			await expectRowsMatchRenderedGeometry(page);
+			const rowCounts = await page.locator(railSelector).evaluateAll((rails) =>
+				rails.flatMap((rail) => {
+					const counts = new Map<string, number>();
+					for (const entry of rail.querySelectorAll<HTMLElement>("[data-focus-view-header-rail-row]")) {
+						const row = entry.dataset.focusViewHeaderRailRow!;
+						counts.set(row, (counts.get(row) ?? 0) + 1);
+					}
+					return [...counts.values()];
+				}),
+			);
+			sharedRowObserved ||= rowCounts.some((count) => count > 1);
+			singletonRowObserved ||= rowCounts.includes(1);
+			if (fraction === 0 || fraction === 0.4 || fraction === 1)
+				await page.screenshot({ path: test.info().outputPath(`${scope}-collapsed-pinned-${fraction}.png`) });
+		}
+		expect(sharedRowObserved).toBe(true);
+		expect(singletonRowObserved).toBe(true);
+		for (const target of scope === "current" ? ["Review", "Backlog"] : ["Recent", "Running"]) {
+			await page
+				.locator(railSelector)
+				.getByRole("button", { name: `跳转到 ${target}`, exact: true })
+				.click();
+			const section = page.locator(
+				scope === "current"
+					? `[data-stage-section-id="${target === "Review" ? "review" : "backlog"}"]`
+					: `[data-testid="cross-project-task-switcher-section-${target === "Recent" ? "remaining" : "running"}"]`,
+			);
+			const firstCard = section
+				.locator(scope === "current" ? "[data-task-id]" : "[data-cross-project-task-switcher-task-id]")
+				.first();
+			await expect
+				.poll(async () => {
+					const rail = (await page.locator(`${railSelector}[data-edge="top"]`).boundingBox())!;
+					return (await firstCard.boundingBox())!.y - rail.y - rail.height;
+				})
+				.toBeGreaterThanOrEqual(0);
+		}
+		await pinnedHeader.getByRole("button", { name: "展开 Pinned", exact: true }).press("Enter");
+		await expect(pinnedSection).toBeVisible();
+		await expect(pinnedHeader).toHaveCount(0);
+		await expect(pinnedScroll).toBeVisible();
+		await page.screenshot({ path: test.info().outputPath(`${scope}-expanded-pinned.png`) });
+		expect(
+			await page.evaluate(
+				(key) => localStorage.getItem(key),
+				scope === "current"
+					? "kanban.task-pinboard-section-collapsed-in-focus-view.v1"
+					: "kanban.cross-project-task-switcher-pinned-section-collapsed.v1",
+			),
+		).toBe("false");
+		expect(errors).toEqual([]);
+	});
 	for (const [width, height] of [
 		[1280, 720],
 		[1366, 768],
@@ -144,6 +235,38 @@ for (const scope of ["current", "all"] as const) {
 		await expect(page.getByRole("button", { name: `展开 ${collapseName}`, exact: true }).first()).toBeVisible();
 		expect(await scrollRoot.evaluate((root) => root.scrollTop)).toBeLessThanOrEqual(beforeCollapse);
 		await expectRowsMatchRenderedGeometry(page);
+	});
+}
+
+for (const scope of ["current", "all"] as const) {
+	test(`${scope} 触屏 Pinned 收起后保持单列名称与点击展开`, async ({ browser }) => {
+		const context = await browser.newContext({
+			viewport: { width: 390, height: 844 },
+			isMobile: true,
+			hasTouch: true,
+		});
+		const page = await context.newPage();
+		try {
+			const errors = await openIsolatedFocusViewCompactGroupHeadersBrowserHarness(page, scope, {
+				usesPinnedFixtures: true,
+			});
+			const pinnedSection = page.locator(
+				scope === "current"
+					? '[data-task-pinboard-container="focus-view-section"]'
+					: '[data-testid="cross-project-task-switcher-section-pinned"]',
+			);
+			await pinnedSection.getByRole("button", { name: "收起 Pinned", exact: true }).tap();
+			const pinnedHeader = page.locator(`${railSelector} [data-focus-view-group-header-rail-entry="pinned"]`);
+			await expect(pinnedHeader).toBeVisible();
+			await expect(page.locator(compactHeaderSelector)).toHaveCount(0);
+			await expect(pinnedHeader.locator("[data-focus-view-group-header]")).toContainText("Pinned");
+			await expectRowsMatchRenderedGeometry(page);
+			await pinnedHeader.getByRole("button", { name: "展开 Pinned", exact: true }).tap();
+			await expect(pinnedSection).toBeVisible();
+			expect(errors).toEqual([]);
+		} finally {
+			await context.close();
+		}
 	});
 }
 
