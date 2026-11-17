@@ -15,13 +15,15 @@ async function openHarness(page: Page) {
 		const workspaceId = workspaceHeader ?? url.searchParams.get("workspace") ?? "project-a";
 		observedWorkspaceHeaders.push(workspaceHeader ?? `missing:${workspaceId}`);
 		const inputs = JSON.parse(url.searchParams.get("input") ?? route.request().postData() ?? "{}");
+		const isBatchedRequest = url.searchParams.get("batch") === "1";
 		const results = procedures.map((procedure, index) => {
-			const input = inputs[index] ?? {};
+			const input = isBatchedRequest ? (inputs[index] ?? {}) : inputs;
 			let data: unknown = null;
 			if (procedure === "workUnit.resolveKanbanBoardCardIdentityByBareTaskId")
 				data = { kanbanBoardCardIdentityCandidates: [] };
 			else if (procedure === "taskCardAction.readTaskCardWithBoardColumn") {
 				const taskId = input.taskId;
+				expect(taskId).toEqual(expect.any(String));
 				const card = {
 					id: taskId,
 					title:
@@ -72,7 +74,7 @@ async function openHarness(page: Page) {
 				data = { git: { defaultBranch: "main", branches: ["main"], currentBranch: "main" } };
 			return { result: { data } };
 		});
-		await route.fulfill({ json: url.searchParams.get("batch") === "1" ? results : results[0] });
+		await route.fulfill({ json: isBatchedRequest ? results : results[0] });
 	});
 	await page.route("**/isolated-task-visits", (route) =>
 		route.fulfill({
