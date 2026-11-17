@@ -112,6 +112,39 @@ describe("runtime tRPC client page-load nonce", () => {
 		vi.unstubAllGlobals();
 		resetKanbanWebUiPageLoadRequestOriginNonceStoreForTests();
 	});
+	it.each(["text/plain", "text/html", "application/json"])(
+		"%s 的 502 保留 HTTP 状态且不暴露响应正文",
+		async (contentType) => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(
+					async () =>
+						new Response("<html>Bad Gateway private proxy detail</html>", {
+							status: 502,
+							statusText: "Bad Gateway",
+							headers: { "content-type": contentType },
+						}),
+				),
+			);
+			for (const sendAsIndependentHttpRequest of [false, true]) {
+				const caught = await getRuntimeTrpcClient("gateway-failure")
+					.workspace.getState.query(undefined, { context: { sendAsIndependentHttpRequest } })
+					.catch((error: unknown) => error);
+				expect(caught).toBeInstanceOf(TRPCClientError);
+				expect(caught).toMatchObject({ meta: { response: { status: 502 } } });
+				expect((caught as Error).message).toContain("HTTP 502");
+				expect((caught as Error).message).not.toMatch(/private|Unexpected token/u);
+			}
+		},
+	);
+	it("连接重置显示可读错误且不重发请求", async () => {
+		const fetchMock = vi.fn(async () => {
+			throw new TypeError("fetch failed: ECONNRESET");
+		});
+		vi.stubGlobal("fetch", fetchMock);
+		await expect(getRuntimeTrpcClient("reset-connection").workspace.getState.query()).rejects.toThrow("连接中断");
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
 	it("来源操作与状态补读独立发送 HTTP，挂起的其他 mutation 或来源不阻塞它们", async () => {
 		await reacquireKanbanWebUiPageLoadRequestOriginNonceFromRuntime();
 		const hangingRequests = new AbortController();

@@ -244,6 +244,7 @@ async function sendTaskChatMessageThroughSelectedTransport(
 							},
 						};
 					},
+					deps.owningCommandExecutionId,
 				);
 			} catch (error) {
 				if (!notStartedReceipt) throw error;

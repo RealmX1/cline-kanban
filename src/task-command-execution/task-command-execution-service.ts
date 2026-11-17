@@ -255,13 +255,9 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			throw new Error("原主会话正在等待用户决策");
 		if (forDelivery && owner.summary) {
 			const park = owner.summary.awaitingDispatchedBackgroundWork;
-			if (
-				park &&
-				(park.hasUnownedBackgroundWorkWait ||
-					!park.owningCommandExecutionIds?.includes(record.executionId) ||
-					park.owningCommandExecutionIds.some((id) => id !== record.executionId))
-			)
-				throw new Error("其他执行或人工后台等待尚未解除");
+			// 结果归属由执行记录核验；其他所属等待不能互相阻挡，自身等待也可能已被接受回执解除。
+			if (park && (park.hasUnownedBackgroundWorkWait || !park.owningCommandExecutionIds))
+				throw new Error("人工后台等待尚未解除");
 		}
 		const latest = await inspect(record.workspaceId, record, observationOnly);
 		if (
@@ -314,6 +310,24 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 	const releaseOwnedWait = async (record: TaskCommandExecutionRecord) => {
 		await deps.unpark(record);
 		return update(record.workspaceId, record.executionId, (value) => ({ ...value, parkOwned: false }));
+	};
+	const readDeliveryRecoveryEvidenceSha256 = async (record: TaskCommandExecutionRecord) => {
+		const owner = await deps.readOwner(record.workspaceId, record.taskId, record);
+		const park = owner?.summary?.awaitingDispatchedBackgroundWork;
+		return sha256(
+			JSON.stringify({
+				nativeEvidence:
+					(await deps.readDeliveryRecoveryEvidenceSha256?.(record)) ?? record.originatingNativeSessionId,
+				// 自身 park 的重建、时间戳与标签不代表可写状态改变，不能补发已消耗的预算。
+				otherOwningCommandExecutionIds: (park?.owningCommandExecutionIds ?? [])
+					.filter((id) => id !== record.executionId)
+					.sort(),
+				hasUnownedBackgroundWorkWait: Boolean(
+					park && (park.hasUnownedBackgroundWorkWait || !park.owningCommandExecutionIds),
+				),
+				isNativeInputSubmissionBusy: owner?.isNativeInputSubmissionBusy ?? false,
+			}),
+		);
 	};
 	const retainOwnedWait = async (record: TaskCommandExecutionRecord) => {
 		const current = await inspect(record.workspaceId, record);
@@ -1308,15 +1322,13 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				await retainOwnedWait(record);
 				return;
 			}
-			if (record.parkOwned && record.resultDelivery?.attemptId === null) record = await releaseOwnedWait(record);
 			if (record.resultDelivery?.state === "native_accepted") {
 				if (record.parkOwned) await releaseOwnedWait(record);
 				return;
 			}
 			if (record.resultDelivery?.awaitingTransportReceipt) return;
 			if (record.resultDelivery?.state === "submission_unknown") {
-				const fingerprint =
-					(await deps.readDeliveryRecoveryEvidenceSha256?.(record)) ?? sha256(record.originatingNativeSessionId);
+				const fingerprint = await readDeliveryRecoveryEvidenceSha256(record);
 				const changed = fingerprint !== record.resultDelivery.lastReconciliationEvidenceSha256;
 				if (
 					!changed &&
@@ -1349,8 +1361,7 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 			} catch {
 				return;
 			}
-			const preflightEvidence =
-				(await deps.readDeliveryRecoveryEvidenceSha256?.(record)) ?? sha256(record.originatingNativeSessionId);
+			const preflightEvidence = await readDeliveryRecoveryEvidenceSha256(record);
 			const unchangedPreflightFailure =
 				record.resultDelivery?.lastPreflightFailureEvidenceSha256 === preflightEvidence;
 			if (
@@ -1415,7 +1426,6 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					};
 				});
 				try {
-					await releaseOwnedWait(record);
 					await assertTaskCommandContinuationNoticeStillEligible(await assertOwnership(record, true));
 					await assertOwnership(record, true);
 				} catch (error) {

@@ -1,4 +1,4 @@
-import type { RuntimeAppRouterInputs } from "@runtime-trpc";
+import type { RuntimeAppRouter, RuntimeAppRouterInputs } from "@runtime-trpc";
 import { TRPCClientError } from "@trpc/client";
 import type {
 	RuntimeTaskCardActionSetShelvingStateRequest,
@@ -10,7 +10,7 @@ import type {
 // 全部 procedure 都是 workspace-scoped：连接 scope 就是卡片所在的项目，可以是**任意**已注册项目——这正是
 // 「跨项目执行动作而不切换当前项目」的基础。
 
-import { getRuntimeTrpcClient } from "@/runtime/trpc-client";
+import { getRuntimeTrpcClient, isRuntimeTrpcTransportFailure } from "@/runtime/trpc-client";
 
 export async function readTaskClosureHistoryInWorkspace(workspaceId: string, taskId: string, createdAt: number) {
 	return await getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskClosureHistory.query({
@@ -62,7 +62,7 @@ export async function readTaskCardWithBoardColumnInWorkspace(
 		...(expectedTaskIncarnationCreatedAtEpochMs !== undefined ? { expectedTaskIncarnationCreatedAtEpochMs } : {}),
 	};
 	const query = getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskCardWithBoardColumn;
-	return signal ? await query.query(request, { signal }) : await query.query(request);
+	return await query.query(request, { signal, context: { sendAsIndependentHttpRequest: true } });
 }
 
 export async function startTaskCardAgentSessionMovingItIntoInProgressInWorkspace(
@@ -74,13 +74,74 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressInWorkspace
 	);
 }
 
+async function runReviewStateRecoveryRequestWithDeadline<T>(request: (signal: AbortSignal) => Promise<T>): Promise<T> {
+	const controller = new AbortController();
+	let deadline: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			request(controller.signal),
+			new Promise<never>((_, reject) => {
+				deadline = setTimeout(() => {
+					const error = new TRPCClientError<RuntimeAppRouter>("等待运行时响应超时。");
+					reject(error);
+					controller.abort(error);
+				}, 8_000);
+			}),
+		]);
+	} finally {
+		clearTimeout(deadline);
+	}
+}
+
 export async function moveTaskCardIntoReviewByHandingTurnToUserInWorkspace(
 	workspaceId: string,
 	request: RuntimeTaskCardActionMoveIntoReviewRequest,
 ): Promise<RuntimeTaskCardActionMoveIntoReviewResponse> {
-	return await getRuntimeTrpcClient(workspaceId).taskCardAction.moveTaskCardIntoReviewByHandingTurnToUser.mutate(
-		request,
-	);
+	try {
+		return await runReviewStateRecoveryRequestWithDeadline((signal) =>
+			getRuntimeTrpcClient(workspaceId).taskCardAction.moveTaskCardIntoReviewByHandingTurnToUser.mutate(request, {
+				signal,
+				context: { sendAsIndependentHttpRequest: true },
+			}),
+		);
+	} catch (error) {
+		if (!isRuntimeTrpcTransportFailure(error)) throw error;
+		// 响应丢失不能证明未执行；只回查原 incarnation，不重发移列副作用。
+		for (const backoffMs of [0, 400, 1_200]) {
+			if (backoffMs) await new Promise<void>((resolve) => setTimeout(resolve, backoffMs));
+			try {
+				const lookup = await runReviewStateRecoveryRequestWithDeadline((signal) =>
+					readTaskCardWithBoardColumnInWorkspace(
+						workspaceId,
+						request.taskId,
+						request.expectedTaskIncarnationCreatedAtEpochMs,
+						signal,
+					),
+				);
+				if (lookup.taskCardLookupOutcome !== "task_card_found_on_workspace_board") continue;
+				const { taskCardSnapshot } = lookup;
+				if (
+					request.expectedTaskIncarnationCreatedAtEpochMs !== undefined &&
+					taskCardSnapshot.taskCard.id === request.taskId &&
+					taskCardSnapshot.taskCard.createdAt === request.expectedTaskIncarnationCreatedAtEpochMs &&
+					taskCardSnapshot.boardColumnIdContainingTaskCard === "review"
+				) {
+					return {
+						agentTurnHandoffToUserOutcome: "agent_turn_handed_to_user",
+						agentTurnHandoffToUserFailureMessage: null,
+						taskCardWasMovedIntoReviewColumnByThisAction: false,
+						taskCardSnapshotAfterAction: taskCardSnapshot,
+					};
+				}
+			} catch {
+				// 查询失败保留未知，继续使用同一有限预算。
+			}
+		}
+		throw new Error(
+			`移入 Review 的结果未知；已回查三次，请待运行时恢复后查看卡片状态。${error instanceof Error ? ` ${error.message}` : ""}`,
+			{ cause: error },
+		);
+	}
 }
 
 export async function moveTaskCardBetweenNonTrashColumnsWithoutSessionSideEffectsInWorkspace(

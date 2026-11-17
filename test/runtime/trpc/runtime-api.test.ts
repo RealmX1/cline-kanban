@@ -1578,6 +1578,7 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			undefined,
 			undefined,
 			expect.any(Function),
+			undefined,
 		);
 		expect(turnCheckpointMocks.captureTaskTurnCheckpoint).not.toHaveBeenCalled();
 	});
@@ -3309,6 +3310,7 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			expect.any(Function),
 			"rvf-acp-1",
 			expect.any(Function),
+			undefined,
 		);
 		expect(response.terminalDelivery).toEqual({
 			status: "accepted_pending_submit_confirmation",
@@ -3402,6 +3404,7 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			undefined,
 			undefined,
 			expect.any(Function),
+			undefined,
 		);
 		expect(terminalManager.submitTaskChatInputWhenReady).not.toHaveBeenCalled();
 	});
