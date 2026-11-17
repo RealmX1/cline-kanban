@@ -1047,9 +1047,14 @@ describe("local deploy 自动复用源码验证证据", () => {
 		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
 	});
 
-	it("RVF 首个命令真实失败时保留失败，不采用更早通过", () => {
+	it.for([
+		{ exitCode: 1, stderr: "失败\n", environmentUnavailable: false },
+		{ exitCode: 127, stderr: "sh: tsc: command not found\n", environmentUnavailable: true },
+		{ exitCode: 127, stderr: "检查实际执行后的失败\n", environmentUnavailable: false },
+		{ exitCode: 127, stderr: "源码检查已失败\nsh: tsc: command not found\n", environmentUnavailable: false },
+	])("RVF 首项失败区分缺工具与真实质量失败：%j", ({ exitCode, stderr, environmentUnavailable }) => {
 		const fixture = createValidationFixture();
-		fixture.addStandardRecord({ concludedAt: "2026-11-04T00:00:00Z" });
+		if (!environmentUnavailable) fixture.addStandardRecord({ concludedAt: "2026-11-04T00:00:00Z" });
 		const runDirectory = join(
 			fixture.fixture.isolatedHomeDirectoryPath,
 			".rvf/user-local-data/task-snapshot-reviews/failed-rvf-run",
@@ -1069,7 +1074,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 		});
 		writeJson(join(runDirectory, "validation.json"), {
 			status: "failed",
-			returncode: 1,
+			returncode: exitCode,
 			candidate_commit: fixture.commit,
 			tested_tree: fixture.tree,
 			commands: [fixture.command.argv],
@@ -1082,23 +1087,29 @@ describe("local deploy 自动复用源码验证证据", () => {
 			source_tree_before: fixture.tree,
 			source_tree_after: fixture.tree,
 			status: "failed",
-			returncode: 1,
+			returncode: exitCode,
 			finished_at: "2026-11-04T01:00:00Z",
 		});
 		writeFileSync(join(commandDirectory, "stdout.txt"), "");
-		writeFileSync(join(commandDirectory, "stderr.txt"), "失败\n");
+		writeFileSync(join(commandDirectory, "stderr.txt"), stderr);
 		writeJson(join(commandDirectory, "command-supervision.json"), {
 			argv: fixture.command.argv,
 			status: "completed",
 			owned_process_exit_status: "exited",
 			command_execution_started: true,
-			returncode: 1,
+			returncode: exitCode,
 			stdout_sha256: digest(""),
-			stderr_sha256: digest("失败\n"),
+			stderr_sha256: digest(stderr),
 		});
-		expect(fixture.run().status).toBe(1);
-		expect(fixture.run().report().sourceValidationCheckResults[0].decision).toBe("quality_validation_failed");
-		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
+		const result = fixture.run();
+		expect(result.status).toBe(environmentUnavailable ? 0 : 1);
+		expect(result.report().sourceValidationCheckResults[0].decision).toBe(
+			environmentUnavailable ? "executed_missing_check" : "quality_validation_failed",
+		);
+		expect(result.report().availableSourceValidationChecks.at(-1)?.status).toBe(
+			environmentUnavailable ? "validation_environment_unavailable" : "failed",
+		);
+		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(environmentUnavailable);
 	});
 
 	it("源码含 WIP 或候选不是完整固定 SHA 时不消费旧通过", () => {

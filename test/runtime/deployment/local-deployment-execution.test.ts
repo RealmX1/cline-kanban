@@ -251,6 +251,33 @@ describe("本地部署执行与复盘", () => {
 		).toBe(true);
 	});
 
+	it("发布身份不匹配交回判断，不记成源码质量失败，也不安排机器重试", async () => {
+		const directory = createExecutionDirectory("local-deployment-identity-mismatch-");
+		await initializeLocalDeploymentExecution(directory, manifest(directory));
+		const commands: string[] = [];
+		const result = await executeLocalDeploymentStages(directory, {
+			runCommand: async (command) => {
+				commands.push(command[0]);
+				if (command[0] === "cleanup") return { processWasStarted: true, exitCode: 0, stdout: "", stderr: "" };
+				return {
+					processWasStarted: true,
+					exitCode: 2,
+					stdout: JSON.stringify({ ok: false, status: "human_decision_required" }),
+					stderr: "当前源码 package 的 CLI 名称或链接目标与授权发布目录不一致",
+				};
+			},
+		});
+		expect(commands).toEqual(["prepare", "cleanup"]);
+		expect(result.deploymentOutcome).toBe("human_decision_required");
+		expect(result.recovery.nextCheckAtEpochMs).toBeNull();
+		expect(result.recovery.condition).toContain("不把这次失败当成源码质量失败");
+		expect(
+			(await readLocalDeploymentExecution(directory)).observations.find(
+				(item) => item.stage === "candidate_preparation" && item.kind === "command_failed",
+			)?.commandFailureKind,
+		).toBe("human_decision_required");
+	});
+
 	it("准备阶段只读观察进入既有恢复指纹，nonce 不触发重试，Stop 禁止继续观察", async () => {
 		const directory = createExecutionDirectory("local-deployment-source-validation-observation-");
 		const binding = manifest(directory);

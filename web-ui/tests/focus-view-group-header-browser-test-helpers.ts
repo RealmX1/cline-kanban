@@ -5,7 +5,7 @@ const scrollRootSelector = "[data-task-card-column-scroll-container]";
 export async function openIsolatedFocusViewCompactGroupHeadersBrowserHarness(
 	page: Page,
 	scope: "current" | "all",
-	options: { view?: "focus" | "board"; usesGroupBoundaryFixtures?: boolean } = {},
+	options: { view?: "focus" | "board"; usesGroupBoundaryFixtures?: boolean; usesPinnedFixtures?: boolean } = {},
 ) {
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -22,6 +22,7 @@ export async function openIsolatedFocusViewCompactGroupHeadersBrowserHarness(
 	);
 	const browserHarnessQueryParameters = new URLSearchParams({ scope, view: options.view ?? "focus" });
 	if (options.usesGroupBoundaryFixtures) browserHarnessQueryParameters.set("group-boundary-fixtures", "true");
+	if (options.usesPinnedFixtures) browserHarnessQueryParameters.set("pinned-fixtures", "true");
 	await page.goto(`/isolated-compact-focus-headers?${browserHarnessQueryParameters}`);
 	await page.addScriptTag({
 		type: "module",

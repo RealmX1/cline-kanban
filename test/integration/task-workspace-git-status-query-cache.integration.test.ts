@@ -14,6 +14,7 @@ import type {
 	RuntimeTaskWorkspaceGitStatusesResponse,
 } from "../../src/core/api-contract";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	sigkillChildProcessAndWaitForExit,
 	waitForRuntimeServerStartupBannerOrSigkillChild,
@@ -150,6 +151,7 @@ it("打包实例的Git查询并发、变更、断开与冷启动保持新鲜，�
 			child = processHandle;
 			await waitForRuntimeServerStartupBannerOrSigkillChild(processHandle);
 		};
+		await registerExistingProjectInIsolatedFixtureHome(fixture, repository.repositoryPath);
 		await startRuntime();
 		try {
 			let workspaceId = "";

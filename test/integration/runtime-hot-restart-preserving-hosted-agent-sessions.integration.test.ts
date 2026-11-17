@@ -28,6 +28,7 @@ import {
 	type LoadSensitiveWallClockTwoTierDeadline,
 	waitForConditionWithinLoadSensitiveTwoTierDeadline,
 } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -136,6 +137,7 @@ async function createHotRestartTestEnvironment(): Promise<HotRestartTestEnvironm
 	const fixture = createIsolatedGitTestWorkspaceFixture();
 	isolatedFixturesCleanedUpAfterEachTest.push(fixture);
 	const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "hot-restart-project" });
+	await registerExistingProjectInIsolatedFixtureHome(fixture, repository.repositoryPath);
 	const standInShellPidFilePath = join(fixture.fixtureRootDirectoryPath, "stand-in-shell.pid");
 	const standInShellReceivedInputFilePath = join(
 		fixture.fixtureRootDirectoryPath,
@@ -238,11 +240,9 @@ async function startStandInShellInHostedSession(
 	testContext: LoadSensitiveDeadlineAnnotatingTestContext,
 	environment: HotRestartTestEnvironment,
 ): Promise<{ workspaceId: string; standInShellProcessId: number }> {
-	const added = await createRuntimeClient(environment, null).projects.add.mutate({ path: environment.repositoryPath });
-	const workspaceId = added.project?.id;
-	if (!workspaceId) {
-		throw new Error(`could not register the test project: ${added.error ?? "unknown error"}`);
-	}
+	const projects = await createRuntimeClient(environment, null).projects.list.query();
+	const workspaceId = projects.projects.find((project) => project.path === environment.repositoryPath)?.id;
+	if (!workspaceId) throw new Error("隔离测试项目未登记");
 	const started = await createRuntimeClient(environment, workspaceId).runtime.startShellSession.mutate({
 		taskId: STAND_IN_SHELL_TASK_ID,
 		baseRef: "main",

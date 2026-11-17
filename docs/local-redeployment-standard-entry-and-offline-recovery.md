@@ -44,6 +44,27 @@
 
 标准源码验证计划同时包含运行时与 Web 类型检查、各自测试以及源码 lint。复用按冻结命令及候选绑定的证据；缺项补跑，已确认的质量失败禁止继续发布。
 
+## 质量失败后的部署分支修复
+
+已授权 local deploy 默认覆盖范围内的兼容修复与必要本地提交。质量失败仍交回原 Agent：读取真实报告，在 `deployment-repair/<taskId>-<来源执行短ID>` 分支修复、审阅并提交，然后准备新的固定候选。新请求复制原冻结请求，仅更改 `executionId` 与 `candidateSourceCommit`；服务目标、启动入口、运行目录和原部署授权继续保留。
+
+```sh
+"$DEPLOYMENT_NODE" "$INSTALLED_DEPLOYMENT_EXECUTOR" prepare-redeployment \
+  --execution-directory "$REPAIRED_EXECUTION_DIRECTORY" --request-file "$REPAIRED_REQUEST_FILE" \
+  --repair-of-execution-directory "$FAILED_EXECUTION_DIRECTORY" \
+  --deployment-branch "$DEPLOYMENT_REPAIR_BRANCH"
+"$DEPLOYMENT_NODE" "$INSTALLED_DEPLOYMENT_EXECUTOR" start-redeployment \
+  --execution-directory "$REPAIRED_EXECUTION_DIRECTORY"
+```
+
+入口核验真实质量失败报告、任务 incarnation、原工作树实体、当前所属会话和 Stop；会话正常重启不抹去历史授权，当前代际仍重新核验。分支必须属于本任务、指向所报完整 SHA，且提交是失败候选的后代并实际改变源码树。准备不会发布或启动部署。
+
+源码验证已经通过、报告为 `passed` 或 `inspection_complete` 时，只有失败原目录里记录了后续阶段的 `LocalRedeploymentQualityFailure`，并且业务结果仍是 `quality_validation_failed`，才接受同一接续。它只解锁该阶段的共享预算，阶段检查会在新候选上重跑。`LocalRedeploymentIdentityMismatch` 保持人工判断，阶段状态是 `human_decision_required`，不进入修复接续，也不按机器缺证重试。
+
+`deployment-repair-continuation.json` 关联新旧执行、根执行、分支、失败报告摘要和候选；根目录的 `deployment-repair-continuations/` 保存持久预算。同一原授权最多三次修复候选，重复准备不增加次数，新目录和新分支不重置预算。原失败和验证原件继续保留；新树重新消费既有验证工具，仅复用实际匹配的证据。不覆盖失败、不跳过检查，不把既有生产缺陷误写成验证通过。
+
+旧 runtime 只因 strict schema 不认识 `postProcessExitCleanupCommand` 而明确拒绝在线登记时，入口保存拒绝回执及待补清理命令，仅省略该可选字段，以同一幂等键和完整 owner 重试一次。其它拒绝、网络超时或结果未知不降级，也不另起离线执行；原冻结规格保留。
+
 ## 归属与恢复
 
 在线且有可信来源会话时经 `task command-execution` 登记。离线只调用通用独立 supervisor primitive，不伪造所属执行索引。通用恢复循环发现待接回请求，校验真实 task/session/worktree、材料摘要和原生进程后登记；存活执行与已完成结果均不重发命令。没有会话绑定的外部调用只提供持久结果。

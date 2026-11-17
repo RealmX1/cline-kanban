@@ -23,6 +23,7 @@ export interface UseStageHeaderPinLayoutOptions {
 	scrollRootRef: RefObject<HTMLElement | null>;
 	/** 全部 stage 的 columnId，按列表文档序。 */
 	columnIds: readonly string[];
+	fixedTopGroupIds?: readonly string[];
 	/** 焦点卡所在 stage 的 columnId。 */
 	focusedColumnId: string;
 	/** 焦点卡 taskId：其真实卡高用于把焦点条目（卡头+卡）计入堆叠偏移。 */
@@ -67,6 +68,7 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
 export function useStageHeaderPinLayout({
 	scrollRootRef,
 	columnIds,
+	fixedTopGroupIds = [],
 	focusedColumnId,
 	focusedTaskId,
 	focusedCardPinState,
@@ -82,6 +84,7 @@ export function useStageHeaderPinLayout({
 	const [layout, setLayout] = useState<StageHeaderPinLayout>(EMPTY_LAYOUT);
 	// 数组入参每渲染换新引用；用稳定字符串 key 作为 effect 依赖，并在 effect 内还原（columnId 不含此分隔符）。
 	const columnIdsKey = columnIds.join("\0");
+	const fixedTopGroupIdsKey = fixedTopGroupIds.join("\0");
 
 	useEffect(() => {
 		const commit = (next: StageHeaderPinLayout): void => {
@@ -132,6 +135,7 @@ export function useStageHeaderPinLayout({
 			const naturalFocusedCardHeight = focusedCardRect ? focusedCardCloneHeightPx || focusedCardRect.height : 0;
 			const layoutInput = {
 				sections,
+				fixedTopGroupIds: fixedTopGroupIdsKey ? fixedTopGroupIdsKey.split("\0") : [],
 				viewportTop: rootRect.top,
 				viewportHeight: rootRect.height,
 				columnCount: computeFocusViewCompactHeaderColumnCount(root.clientWidth || rootRect.width),
@@ -198,6 +202,7 @@ export function useStageHeaderPinLayout({
 		};
 	}, [
 		columnIdsKey,
+		fixedTopGroupIdsKey,
 		focusedColumnId,
 		focusedTaskId,
 		focusedCardPinState,

@@ -183,8 +183,13 @@ test("Pinned 固定在列表上方且内部限高滚动，重复任务只有真�
 		await content.evaluate((element) => element.clientHeight),
 	);
 	await pinned.getByRole("button", { name: "收起 Pinned", exact: true }).click();
-	expect((await pinned.boundingBox())!.height).toBe(30);
-	await expect(pinned.locator(":scope > div")).toHaveCount(1);
+	await expect(pinned).toHaveCount(0);
+	const collapsedPinned = page.locator(
+		'.kb-stage-header-rail[data-edge="top"] [data-focus-view-group-header-rail-entry="pinned"]',
+	);
+	await expect(collapsedPinned).toBeVisible();
+	expect((await collapsedPinned.boundingBox())!.height).toBe(26);
+	await expect(collapsedPinned.locator("[data-cross-project-task-switcher-task-id]")).toHaveCount(0);
 	const running = page.getByTestId("cross-project-task-switcher-section-running");
 	expect((await running.boundingBox())!.height).toBe(30);
 	await expect(running.locator(":scope > div")).toHaveCount(1);

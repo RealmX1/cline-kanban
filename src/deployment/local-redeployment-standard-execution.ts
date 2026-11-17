@@ -52,6 +52,7 @@ import {
 	readLocalRedeploymentJson,
 	writeLocalRedeploymentJson,
 } from "./local-redeployment-preparation";
+import { observeLocalRedeploymentRepairValidationEligibility } from "./local-redeployment-repair-continuation";
 import { preserveLocalRedeploymentRuntimeRestartAcceptance } from "./local-redeployment-runtime-restart-acceptance";
 import {
 	backupLocalRedeploymentRuntimeState,
@@ -59,7 +60,17 @@ import {
 	queryLocalRedeploymentRuntime,
 } from "./local-redeployment-state-preservation";
 
-export class LocalRedeploymentQualityFailure extends Error {}
+export class LocalRedeploymentQualityFailure extends Error {
+	override name = "LocalRedeploymentQualityFailure";
+}
+
+export function localRedeploymentStageCommandStatus(
+	error: unknown,
+): "quality_validation_failed" | "human_decision_required" | "machine_evidence_pending" {
+	if (error instanceof LocalRedeploymentIdentityMismatch) return "human_decision_required";
+	if (error instanceof LocalRedeploymentQualityFailure) return "quality_validation_failed";
+	return "machine_evidence_pending";
+}
 const normalizeStart = (value: string): string => value.trim().replace(/\s+/gu, " ");
 const candidateCheckout = (directory: string) => join(directory, "candidate-source-checkout");
 const frozenExecutor = (directory: string) => join(directory, "frozen-local-redeployment-executor.mjs");
@@ -1067,6 +1078,10 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		return { evidenceSha256: localRedeploymentSha256("persistently_revoked"), recoveryEvidenceReady: false };
 	const targetBudget = await readLocalDeploymentTargetStageRecoveryBudget(frozen.request, activeStage);
 	const failure = targetBudget?.blockingFailure;
+	if (failure) {
+		const repair = await observeLocalRedeploymentRepairValidationEligibility(directory, failure);
+		if (repair) return repair;
+	}
 	if (failure && failure.classification !== "verification_evidence_pending")
 		return observeLocalRedeploymentBlockingFailureRecovery(directory, failure);
 	if (failure?.logicalResource === "filesystem-lock-protocol-transition") {

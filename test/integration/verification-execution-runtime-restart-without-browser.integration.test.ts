@@ -16,6 +16,7 @@ import {
 } from "../../src/task-command-execution/task-command-execution-supervisor";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -73,6 +74,7 @@ describe(
 				const { runtimeUrl } = await waitForRuntimeServerStartupBannerOrSigkillChild(child);
 				return { child, origin: new URL(runtimeUrl).origin };
 			};
+			await registerExistingProjectInIsolatedFixtureHome(fixture, repository.repositoryPath);
 			const firstRuntime = await startRuntime();
 			const client = (workspaceId?: string) =>
 				createTRPCProxyClient<RuntimeAppRouter>({

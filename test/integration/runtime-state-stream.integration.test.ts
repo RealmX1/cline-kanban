@@ -39,6 +39,7 @@ import type {
 	LoadSensitiveWallClockTwoTierDeadline,
 } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -355,6 +356,9 @@ async function startKanbanServer(input: {
 	runtimeUrl: string;
 	stop: (options?: StopKanbanServerOptions) => Promise<void>;
 }> {
+	if (existsSync(join(input.cwd, ".git"))) {
+		await registerExistingProjectInIsolatedFixtureHome(input.gitFixture, input.cwd);
+	}
 	const cliEntrypoint = resolve(process.cwd(), "src/cli.ts");
 	const shutdownIpcHookPath = resolveShutdownIpcHookPath();
 	const tsxLoaderImportSpecifier = resolveTsxLoaderImportSpecifier();
@@ -534,6 +538,18 @@ async function requestJson<T>(input: {
 		return value;
 	};
 	const headers = new Headers();
+	if (input.procedure === "projects.add") {
+		const issued = await requestJson<{ kanbanWebUiPageLoadIssuedRequestOriginNonce: string }>({
+			baseUrl: input.baseUrl,
+			procedure: "runtime.issueKanbanWebUiPageLoadRequestOriginNonce",
+			type: "mutation",
+		});
+		expect(issued.status).toBe(200);
+		headers.set(
+			"x-kanban-web-ui-page-load-request-origin-nonce",
+			issued.payload.kanbanWebUiPageLoadIssuedRequestOriginNonce,
+		);
+	}
 	if (input.workspaceId) {
 		headers.set("x-kanban-workspace-id", input.workspaceId);
 	}
@@ -549,7 +565,7 @@ async function requestJson<T>(input: {
 		method = "POST";
 		body = input.payload === undefined ? undefined : JSON.stringify(input.payload);
 	}
-	if (body !== undefined) {
+	if (input.type === "mutation") {
 		headers.set("Content-Type", "application/json");
 	}
 	const response = await fetch(url, {

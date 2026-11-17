@@ -9,15 +9,13 @@ import { buildTaskCardBusinessProps, type TaskCardActionHandlerBundle } from "@/
 import { getTaskGroupSemanticColorStyle } from "@/data/task-group-semantic-color-style";
 import type { RuntimeAgentId, RuntimeTaskSessionSummary } from "@/runtime/types";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
-import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
-import { useBooleanLocalStorageValue } from "@/utils/react-use";
 
 /** 分段展开时默认露出的置顶分身张数；超出部分由分段最下方的按钮展开。 */
 const DEFAULT_VISIBLE_PINNED_TASK_COUNT_IN_FOCUS_VIEW_PINBOARD_SECTION = 5;
 
 /**
- * Focus View 左侧任务列表顶部的置顶板分段，外观与 `ColumnSection` 同构。
+ * Focus View 展开的固定置顶板；收起状态和共享轨道标题由面板持有。
  *
  * 位于 stage 列表的 scrollport（`.kb-detail-task-list-scroll`）**之外**，是面板顶部的固定区：不随列表滚走。
  * stage 卡头 rail 锚在 scrollport 所在的「stage 列表区」上，故顶沿 rail 从本分段下沿起算、不会盖住它。
@@ -28,6 +26,8 @@ const DEFAULT_VISIBLE_PINNED_TASK_COUNT_IN_FOCUS_VIEW_PINBOARD_SECTION = 5;
  */
 export function TaskPinboardSectionInFocusView({
 	pinnedTasks,
+	isCollapsed,
+	onToggleCollapsed,
 	selectedCardId,
 	taskSessions,
 	handlers,
@@ -38,6 +38,8 @@ export function TaskPinboardSectionInFocusView({
 	defaultAgentId,
 }: {
 	pinnedTasks: TaskPinnedToTaskPinboard[];
+	isCollapsed: boolean;
+	onToggleCollapsed: () => void;
 	selectedCardId: string | null;
 	taskSessions: Record<string, RuntimeTaskSessionSummary>;
 	handlers: TaskCardActionHandlerBundle;
@@ -47,16 +49,12 @@ export function TaskPinboardSectionInFocusView({
 	workspacePath?: string | null;
 	defaultAgentId?: RuntimeAgentId | null;
 }): ReactElement | null {
-	const [collapsed, setCollapsed] = useBooleanLocalStorageValue(
-		LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
-		false,
-	);
 	// 只存内存：每次重新挂载都回到「默认 5 张」。
 	const [showsAllPinnedTasksBeyondDefaultVisibleCount, setShowsAllPinnedTasksBeyondDefaultVisibleCount] =
 		useState(false);
 	const pinnedScrollbarSlot = useFocusViewPinnedSectionOwnScrollbarSlot();
 
-	if (pinnedTasks.length === 0) {
+	if (pinnedTasks.length === 0 || isCollapsed) {
 		return null;
 	}
 
@@ -79,57 +77,55 @@ export function TaskPinboardSectionInFocusView({
 				title="Pinned"
 				count={pinnedTasks.length}
 				icon={<Pin size={13} className="text-accent" />}
-				isExpanded={!collapsed}
-				onToggleExpanded={() => setCollapsed((previousCollapsed) => !previousCollapsed)}
+				isExpanded
+				onToggleExpanded={onToggleCollapsed}
 			/>
-			{collapsed ? null : (
-				<div
-					ref={pinnedScrollbarSlot.ref}
-					style={pinnedScrollbarSlot.style}
-					className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-0.5 pb-2"
-				>
-					{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
-						<div key={card.id} className="mb-1.5 last:mb-0">
-							<TaskCardBody
-								renderRole="pinned_card_copy_in_task_pinboard"
-								stageDisplayNameForTaskPinboardCopy={columnTitle}
-								onNavigateToCanonicalCardInItsStage={onRevealCanonicalCardInItsStage}
-								onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
-								{...buildTaskCardBusinessProps({
-									card,
-									columnId,
-									sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
-									taskSessions,
-									selected: card.id === selectedCardId,
-									handlers,
-									onActivateCard,
-									workspacePath,
-									defaultAgentId,
-								})}
-							/>
-						</div>
-					))}
-					{hiddenPinnedTaskCountBeyondDefaultVisibleCount > 0 ? (
-						<div className="flex shrink-0 justify-center pt-1">
-							<button
-								type="button"
-								onClick={() => setShowsAllPinnedTasksBeyondDefaultVisibleCount((previous) => !previous)}
-								aria-expanded={showsAllPinnedTasksBeyondDefaultVisibleCount}
-								className="flex cursor-pointer items-center gap-1 rounded-md border-none bg-transparent px-2 py-1 text-xs text-text-tertiary transition-colors hover:bg-surface-3 hover:text-text-secondary"
-							>
-								{showsAllPinnedTasksBeyondDefaultVisibleCount ? (
-									<ChevronUp size={12} className="shrink-0" />
-								) : (
-									<ChevronDown size={12} className="shrink-0" />
-								)}
-								{showsAllPinnedTasksBeyondDefaultVisibleCount
-									? "Show less"
-									: `Show ${hiddenPinnedTaskCountBeyondDefaultVisibleCount} more`}
-							</button>
-						</div>
-					) : null}
-				</div>
-			)}
+			<div
+				ref={pinnedScrollbarSlot.ref}
+				style={pinnedScrollbarSlot.style}
+				className="flex min-h-0 flex-col overflow-y-auto overscroll-contain px-0.5 pb-2"
+			>
+				{visiblePinnedTasks.map(({ card, columnId, columnTitle }) => (
+					<div key={card.id} className="mb-1.5 last:mb-0">
+						<TaskCardBody
+							renderRole="pinned_card_copy_in_task_pinboard"
+							stageDisplayNameForTaskPinboardCopy={columnTitle}
+							onNavigateToCanonicalCardInItsStage={onRevealCanonicalCardInItsStage}
+							onEditTaskPinboardPinReason={onEditTaskPinboardPinReason}
+							{...buildTaskCardBusinessProps({
+								card,
+								columnId,
+								sessionSummary: resolveMainTaskConversationSessionSummary(card, taskSessions) ?? undefined,
+								taskSessions,
+								selected: card.id === selectedCardId,
+								handlers,
+								onActivateCard,
+								workspacePath,
+								defaultAgentId,
+							})}
+						/>
+					</div>
+				))}
+				{hiddenPinnedTaskCountBeyondDefaultVisibleCount > 0 ? (
+					<div className="flex shrink-0 justify-center pt-1">
+						<button
+							type="button"
+							onClick={() => setShowsAllPinnedTasksBeyondDefaultVisibleCount((previous) => !previous)}
+							aria-expanded={showsAllPinnedTasksBeyondDefaultVisibleCount}
+							className="flex cursor-pointer items-center gap-1 rounded-md border-none bg-transparent px-2 py-1 text-xs text-text-tertiary transition-colors hover:bg-surface-3 hover:text-text-secondary"
+						>
+							{showsAllPinnedTasksBeyondDefaultVisibleCount ? (
+								<ChevronUp size={12} className="shrink-0" />
+							) : (
+								<ChevronDown size={12} className="shrink-0" />
+							)}
+							{showsAllPinnedTasksBeyondDefaultVisibleCount
+								? "Show less"
+								: `Show ${hiddenPinnedTaskCountBeyondDefaultVisibleCount} more`}
+						</button>
+					</div>
+				) : null}
+			</div>
 		</div>
 	);
 }

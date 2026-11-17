@@ -26,6 +26,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 ## 部署请求与确认
 
 - **开发者主动触发**：开发者主动要求执行本 skill，或直接要求“现在部署／重启本机 Kanban”，无需增加本节要求的额外确认；既有备份、预检与状态保护仍须执行。仅提及或要求修改本 skill 不算触发部署。
+- **部署内必要修复默认授权**：已授权 local deploy 时，Agent 可自主修复阻塞部署的测试准备、环境兼容或部署工具缺陷，创建本地部署修复分支与必要提交，再从该分支固定候选继续部署，无需再次等待提交或部署确认。不得通过跳过失败检查、削弱门禁或改写失败历史放行；本次明确禁止提交／部署的限制继续优先，扩大产品范围、改变部署目标、推送远端等仍按各自授权处理。
 - **Agent 默认不请求 redeploy**：请求本身也会阻塞开发者。只有非常紧急且阻塞所有既有工作，并且本任务全部工作完成、必要审阅与验证完成、经 `base-branch-sync` 实际进入本地 `main` 后，才可考虑请求。先核对审阅与验证结果、提交已被 `main` 包含，且候选不夹带未提交补丁；不得提前询问、预约或排队部署，也没有紧急绕过例外。单个任务完成、想验修复、刷新版本或所有 agent 闲置均不足以请求。
 - **先准备，再确认**：Agent 发起时，先完成独立验证、隔离候选构建／预检、备份与现场盘点，说明本次目标、候选 commit、影响与回滚方式，再取得针对本次部署的明确人工确认。确认前不得更新共享构建产物（包括经符号链接写入的 `dist`）、relink、重启，或启动能执行部署的后台／定时执行器；不能先启动执行器再等待确认。
 - **核查授权来源**：Agent 自行读取／调用 skill、前期范围问答、计划批准、普通“继续”、Agent 生成的 handoff 或 user-role 投递，均不等于开发者主动触发或本次部署确认。跨会话续接只复用可核查且仍匹配本次目标、候选与影响的确认；发生实质变化须重新确认。
@@ -37,6 +38,8 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 准备本次执行时读取仓库的 [执行与复盘合同](../../../docs/local-deployment-execution-and-retrospective.md)。候选构建中的 `local-deployment-execution.js` 提供冻结 manifest、阶段原件、补证核验和复盘请求；不要再手写一套发布监督者、恢复循环或 launchd 作业。旧材料仅经 `kanban deployment analyze --execution-directory <精确持久目录>` 只读分析，不重放部署。
 
 新部署按 [标准入口与离线恢复](../../../docs/local-redeployment-standard-entry-and-offline-recovery.md) 使用 `prepare-redeployment`、`start-redeployment`。准备命令冻结请求，不构建或部署；启动命令必须已有本次真实部署授权。实现方案获批不产生新的生产部署授权。
+
+源码质量失败交回后，先读取原报告，在本地 `deployment-repair/<taskId>-<来源执行短ID>` 分支修复并提交；同一授权最多三次修复候选。准备新候选时继续使用 `prepare-redeployment`，额外传 `--repair-of-execution-directory <失败原目录> --deployment-branch <本地修复分支>`；新请求仅改变 executionId 与 candidateSourceCommit。入口核对失败、任务归属、Stop、提交祖先和分支，持久关联新旧执行；之后调用新目录的 `start-redeployment`。原目录和旧失败不重写，未变化的失败不重跑。源码验证已通过后，服务启动、PATH 或工作树的质量失败使用同一接续，并只重跑失败阶段；发布身份不匹配交回判断，不占用修复名额。超出修复范围或预算时保存证据与原因，由 Agent 明确区分产品取舍、权限缺口和机器问题。
 
 - 标准入口将私有 checkout、依赖、源码验证复用、生产构建、备份与八阶段动作交给既有宿主；日常不再编写阶段 adapter，构建前即可登记所属执行。
 - 在线且有可信来源会话时走 `task command-execution`；离线复用独立 supervisor。runtime 恢复后由已有恢复循环发现待接回材料，校验真实归属、启动材料及原生身份后接回，不重发命令。外部 CLI 无会话绑定时只返回持久结果。
@@ -87,6 +90,8 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
    - **首次部署即生效**：候选须包含持久偏好实现及下述 handover 实现；新 runtime 首次启动就读取持久偏好，受支持的固定端口实例在字段和环境覆盖均缺失时默认启用，无需再部署一次。显式关闭继续有效。首次没有 hosted 基线只影响跨重启连续性的取证，不推迟功能启用；仍须先等待旧非托管会话自然结束，并在启动后核验实际模式。
    - **会话连续性硬闸**：停止旧 runtime 前，按 `references/kanban-runtime-upgrades.md` 用 `verify-agent-session-pty-host-runtime-readiness.mjs --before-runtime-restart` 生成本次候选绑定的持久基线，并在停止前再次核验。非托管活会话默认等待自然结束；不得自动 Stop/resume 或使用中断会话的 override。旧诊断接口不存在时仅允许经旧 API 与原生进程交叉证明无活会话后首次切换，不能把它写成连续性通过。
    - 使用 dbfe4 的 `runtime handover-restart` 契约（候选须实际包含该实现），不在部署 skill 重建 handover、离线全停或 host 回收。重启后核对原 session PID/启动身份/native ID、host 实例、持续输出及自然新输入；只读观察器不自行部署。没有 hosted 基线或自然输入时如实保留待验。禁止无条件 SIGKILL 后只查 HTTP 便宣告成功。
+   - **tmux 启动归属**：session 存在不代表服务或 pane 已退出；服务退出后原 pane 可能仍运行 shell。复用 canonical service runner 及其单实例锁，在既有 session 的新窗口启动，保留原 pane 日志；不得仅凭 session 存在就执行 `respawn-pane`，也不得用 `-k` 强制替换未知活 pane。隔离演练须覆盖「原 pane 仍活着」的启动情形。
+   - **离线恢复闭环**：发布后的启动失败须由仍存活的独立执行宿主核对监听、启动原件与 Stop，再有界尝试等价启动入口；不能把已停止 runtime 的恢复轮询当作当前可用执行者。若接手时 runtime 已离线，记录此事实，直接使用绑定候选的既有部署执行器保存阶段原件和效果核验，不伪造在线任务会话或另建调度器。
    - **重启前硬闸**：在即将部署的源 checkout 内，用实际启动服务的 Node 绝对路径执行 `scripts/verify-notification-archive-native-runtime.mjs`。脚本只操作内存 SQLite；非零退出立即停止部署，保留旧服务。即使 `npm run build` 的预检通过，也不能省略这一步（构建 Node 与启动 Node 可能不同）。失败时用目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3` 并重新预检；禁止仅换一个能通过的 Node 测试后仍用原来的不匹配 Node 启动。
    - Before stopping the old process, check whether shutdown cleanup mutates worktrees or task state.
    - Prefer `--skip-shutdown-cleanup` or the tool's equivalent for upgrade restarts.

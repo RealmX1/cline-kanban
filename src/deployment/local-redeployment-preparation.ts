@@ -18,7 +18,9 @@ import {
 } from "../state/workspace-state";
 import { createTaskConversationSessionOperationStore } from "../task-conversation-sessions/task-conversation-session-operation-store";
 
-export class LocalRedeploymentIdentityMismatch extends Error {}
+export class LocalRedeploymentIdentityMismatch extends Error {
+	override name = "LocalRedeploymentIdentityMismatch";
+}
 
 export const executeLocalRedeploymentFile = promisify(execFile);
 export const localRedeploymentSha256 = (value: string | Buffer): string =>
@@ -96,7 +98,9 @@ export function assertLocalRedeploymentNotRevoked(directory: string): void {
 		if (existsSync(join(directory, name))) throw new Error("本次重部署已有持久撤销或执行限制");
 }
 
-async function readBoundOwner(request: LocalRedeploymentRequest): Promise<FrozenLocalRedeploymentRequest["owner"]> {
+export async function readCurrentBoundLocalRedeploymentOwner(
+	request: LocalRedeploymentRequest,
+): Promise<FrozenLocalRedeploymentRequest["owner"]> {
 	// 外部 CLI 没有会话绑定时只保存业务结果，不从 taskId 猜测接收会话。
 	if (process.env.KANBAN_TASK_ID !== request.taskId || !process.env.KANBAN_TASK_CONVERSATION_SESSION_ID) return null;
 	const state = await loadPersistedWorkspaceStateById(request.workspaceId);
@@ -129,9 +133,10 @@ async function readBoundOwner(request: LocalRedeploymentRequest): Promise<Frozen
 	};
 }
 
-export async function prepareLocalRedeployment(directory: string, raw: unknown, executorPath: string) {
-	const parsedRequest = localRedeploymentRequestSchema.parse(raw);
-	const request = {
+export async function canonicalizeLocalRedeploymentRequest(
+	parsedRequest: LocalRedeploymentRequest,
+): Promise<LocalRedeploymentRequest> {
+	return {
 		...parsedRequest,
 		sourceCheckoutPath: await realpath(parsedRequest.sourceCheckoutPath),
 		originatingTaskWorktreePath: await realpath(parsedRequest.originatingTaskWorktreePath),
@@ -139,6 +144,10 @@ export async function prepareLocalRedeployment(directory: string, raw: unknown, 
 			? await realpath(parsedRequest.distributionDirectoryPath)
 			: resolve(parsedRequest.distributionDirectoryPath),
 	};
+}
+
+export async function prepareLocalRedeployment(directory: string, raw: unknown, executorPath: string) {
+	const request = await canonicalizeLocalRedeploymentRequest(localRedeploymentRequestSchema.parse(raw));
 	if ((await realpath(request.deploymentNodeBinaryPath)) !== (await realpath(process.execPath)))
 		throw new Error("必须使用本次服务绑定的实际 Node 准备重部署");
 	const commit = (
@@ -161,7 +170,7 @@ export async function prepareLocalRedeployment(directory: string, raw: unknown, 
 			executorSha256: localRedeploymentSha256(source),
 			npmCliEntrypointPath: await realpath(join(dirname(request.deploymentNodeBinaryPath), "npm")),
 			serviceExecutableSha256: localRedeploymentSha256(await readFile(request.serviceLaunch.command[0])),
-			owner: await readBoundOwner(request),
+			owner: await readCurrentBoundLocalRedeploymentOwner(request),
 		};
 		const previous = await readLocalRedeploymentJson(join(directory, "frozen-redeployment-request.json"));
 		if (previous && JSON.stringify(frozenRequestSchema.parse(previous)) !== JSON.stringify(frozen))

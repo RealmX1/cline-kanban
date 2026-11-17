@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getRuntimeFetch } from "../../../src/core/runtime-endpoint";
@@ -50,7 +50,13 @@ afterEach(() => {
 });
 
 describe("在线登记结果未知时避免重复离线派发", () => {
-	it.each(["原进程仍存活", "原生身份暂时不可读"])("%s 时只等待，确证原进程退出后自动接续", async (condition) => {
+	const registrationRecoveryScenarios = [
+		"原进程仍存活",
+		"原生身份暂时不可读",
+		"旧runtime仅拒绝可选清理字段",
+		"其它schema拒绝不能降级",
+	];
+	it.each(registrationRecoveryScenarios)("%s", async (condition) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		onTestFinished(fixture.cleanup);
 		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
@@ -86,7 +92,12 @@ describe("在线登记结果未知时避免重复离线派发", () => {
 				conversationSessionId: "task",
 				nativeSessionId: "native-session",
 				runtimeSessionIncarnationId: "session-generation",
-				worktreeIdentity: { realPath: fixture.fixtureRootDirectoryPath, device: 1, inode: 1, createdAtEpochMs: 1 },
+				worktreeIdentity: {
+					realPath: fixture.fixtureRootDirectoryPath,
+					device: 1,
+					inode: 1,
+					createdAtEpochMs: 1,
+				},
 			},
 		};
 		await writeFile(
@@ -103,6 +114,46 @@ describe("在线登记结果未知时避免重复离线派发", () => {
 			state: "verified_online",
 			runtimeBefore: { processId: 12345, processStartTimeText: "Fri Nov 13 12:00:00 2026" },
 		});
+		if (condition === "旧runtime仅拒绝可选清理字段" || condition === "其它schema拒绝不能降级") {
+			const keys =
+				condition === "旧runtime仅拒绝可选清理字段" ? ["postProcessExitCleanupCommand"] : ["expectedOwner"];
+			const fetchRuntime = vi
+				.fn()
+				.mockResolvedValueOnce(
+					new Response(
+						JSON.stringify({ error: { message: JSON.stringify([{ code: "unrecognized_keys", keys }]) } }),
+						{ status: 400 },
+					),
+				)
+				.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true })));
+			vi.mocked(getRuntimeFetch).mockResolvedValue(fetchRuntime);
+			if (condition === "其它schema拒绝不能降级") {
+				await expect(startPreparedLocalRedeployment(directory)).rejects.toThrow("HTTP 400");
+				expect(fetchRuntime).toHaveBeenCalledTimes(1);
+			} else {
+				expect(await startPreparedLocalRedeployment(directory)).toMatchObject({
+					mode: "online_owned_execution",
+				});
+				expect(fetchRuntime).toHaveBeenCalledTimes(2);
+				const first = JSON.parse(fetchRuntime.mock.calls[0][1].body);
+				const second = JSON.parse(fetchRuntime.mock.calls[1][1].body);
+				expect(second).toMatchObject({
+					expectedOwner: first.expectedOwner,
+					idempotencyKey: first.idempotencyKey,
+				});
+				expect(second.specification.postProcessExitCleanupCommand).toBeUndefined();
+				expect(
+					JSON.parse(await readFile(join(directory, "owned-command-specification.json"), "utf8"))
+						.postProcessExitCleanupCommand,
+				).toBeDefined();
+				expect(
+					JSON.parse(
+						await readFile(join(directory, "online-registration-optional-cleanup-compatibility.json"), "utf8"),
+					).deferredCleanupCommand,
+				).toBeDefined();
+			}
+			return;
+		}
 		vi.mocked(getRuntimeFetch).mockResolvedValue(vi.fn().mockRejectedValue(new Error("在线登记超时")));
 		await expect(startPreparedLocalRedeployment(directory)).rejects.toThrow("在线登记超时");
 		vi.mocked(observeLocalRedeploymentRuntimeBaseline).mockResolvedValue({

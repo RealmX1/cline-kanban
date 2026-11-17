@@ -9,6 +9,7 @@ import {
 	type IsolatedGitTestWorkspaceFixture,
 } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import type { LoadSensitiveDeadlineAnnotatingTestContext } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
+import { registerExistingProjectInIsolatedFixtureHome } from "./isolated-workspace-home-fixture";
 import {
 	computeIntegrationTestTimeoutMsCoveringRuntimeColdStarts,
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -152,6 +153,7 @@ describe("真实打包 CLI 的异步异常传播", { timeout: packagedCliTestTim
 			message: "初始化隔离项目",
 			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 		});
+		await registerExistingProjectInIsolatedFixtureHome(fixture, repository.repositoryPath);
 		const server = spawnedCliProcesses.register(
 			spawn(process.execPath, [packagedCliEntrypoint, "--port", "auto", "--no-open"], {
 				cwd: repository.repositoryPath,
