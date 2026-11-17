@@ -33,6 +33,7 @@ export type CodexDraftStashEditorBridgeIdentity = z.infer<typeof bridgeIdentityS
 export type CodexDraftStashEditorBridge = z.infer<typeof bridgeSpecificationSchema> & { directoryPath: string };
 
 export const codexDraftStashOperationSpecificationSchema = bridgeIdentitySchema.extend({
+	purpose: z.literal("profile_adoption_capture").optional(),
 	operationId: z.uuid(),
 	promptId: z.uuid(),
 	taskId: z.string().min(1),
@@ -251,6 +252,8 @@ export async function runCodexDraftStashEditorInvocation(
 			return 1;
 		}
 		persist("captured-draft.json", { text });
+		// 配置续接只导出，不保存编辑文件；非零退出让原生 composer 原样保留。
+		if (operation.purpose === "profile_adoption_capture") return 1;
 		while (Date.now() <= operation.writeDeadlineAtMs) {
 			const rawDecision = readCodexDraftStashJson(join(operationDirectoryPath, "editor-decision.json"));
 			if (rawDecision !== null) {

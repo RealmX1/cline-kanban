@@ -4,6 +4,7 @@ import {
 	CodexConfigurationFullComparisonControls,
 	CodexConfigurationSourceEvidenceView,
 } from "@/components/codex-configuration-change-comparison";
+import { CodexConfigurationChangeSharingScopeSelect } from "@/components/codex-configuration-change-sharing-scope-select";
 import { Button } from "@/components/ui/button";
 import type {
 	CodexConfigurationCandidateValueGroup,
@@ -98,18 +99,36 @@ function ConfigurationCandidateValue({
 				rows={details.comparison?.rows ?? []}
 				valueKind="detected"
 				action={
-					<Button
-						size="sm"
-						variant="primary"
-						disabled={controller.pendingChangeId !== null || !details.comparison?.rows.length}
-						onClick={() => {
-							void controller.adoptCandidate(candidate.members, details.comparison?.expectedSharedValueDigest);
-						}}
-					>
-						更新默认并同步
-					</Button>
+					representative.changeSharingScope ? (
+						<span className="text-xs text-text-secondary">按下方来源选择本次范围</span>
+					) : (
+						<Button
+							size="sm"
+							variant="primary"
+							disabled={controller.pendingChangeId !== null || !details.comparison?.rows.length}
+							onClick={() => {
+								void controller.adoptCandidate(
+									candidate.members,
+									details.comparison?.expectedSharedValueDigest,
+								);
+							}}
+						>
+							更新默认并同步
+						</Button>
+					)
 				}
 			/>
+			{representative.changeSharingScope &&
+				candidate.members.map((change) => (
+					<div key={change.changeId} className="mb-3 space-y-1">
+						<p className="m-0 text-xs text-text-secondary">来源：{change.sourceConversationSessionId}</p>
+						<CodexConfigurationChangeSharingScopeSelect
+							change={change}
+							pending={controller.pendingChangeId !== null}
+							onScopeChange={controller.setChangeSharingScope}
+						/>
+					</div>
+				))}
 			{!details.comparison && (
 				<p className="text-xs text-text-secondary">{representative.valueSummary}；完整比较恢复后可采用。</p>
 			)}

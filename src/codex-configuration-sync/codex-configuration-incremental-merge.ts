@@ -39,7 +39,13 @@ export function mergeObservedCodexConfigurationWriter(
 					configurationTable(profileState) && configurationTable(value.value)
 						? { ...value, value: { ...profileState, trusted_hash: value.value.trusted_hash } }
 						: { ...value, value: {} };
-				const confirmed = reuseConfirmedCodexHookTrust(store, writer.binding.sourceIdentity, fieldKey, candidate);
+				const confirmed = reuseConfirmedCodexHookTrust(
+					store,
+					writer.binding.sourceIdentity,
+					fieldKey,
+					candidate,
+					profile.fieldVersions[fieldKey] ?? 0,
+				);
 				if (
 					!sameConfigurationField(candidate, confirmed) &&
 					!sameConfigurationField(profile.fields[fieldKey], confirmed)
@@ -54,6 +60,8 @@ export function mergeObservedCodexConfigurationWriter(
 			continue;
 		}
 		const exceptionGroup = codexConfigurationExceptionGroup(fieldKey);
+		writer.localFieldMutationVersions ??= {};
+		writer.localFieldMutationVersions[fieldKey] = ++store.revision;
 		const newerProfileFieldVersion =
 			(profile.fieldVersions[fieldKey] ?? 0) > (writer.consumedProfileFieldVersions?.[fieldKey] ?? 0);
 		if (
@@ -69,6 +77,7 @@ export function mergeObservedCodexConfigurationWriter(
 			continue;
 		}
 		if (store.schemaVersion === 3) {
+			delete writer.localExceptionOverrides?.[fieldKey];
 			const previous = writer.lastObservedFields[fieldKey];
 			if (hasOnlyCodexConfigurationDefinitionChange({ previous, value })) {
 				const change = {
@@ -97,6 +106,7 @@ export function mergeObservedCodexConfigurationWriter(
 						writer.binding.sourceIdentity,
 						fieldKey,
 						candidate,
+						profile.fieldVersions[fieldKey] ?? 0,
 					);
 					if (!sameConfigurationField(candidate, confirmed))
 						updateCodexConfigurationProfileFields(

@@ -1,12 +1,13 @@
 import * as Popover from "@radix-ui/react-popover";
 import * as RadixSwitch from "@radix-ui/react-switch";
 import { ChevronDown, ClipboardCheck } from "lucide-react";
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
 	CodexConfigurationComparisonRows,
 	CodexConfigurationFullComparisonControls,
 	CodexConfigurationSourceEvidenceView,
 } from "@/components/codex-configuration-change-comparison";
+import { CodexConfigurationChangeSharingScopeSelect } from "@/components/codex-configuration-change-sharing-scope-select";
 import { CodexConfigurationFeedbackSuggestionGroupView } from "@/components/codex-configuration-feedback-suggestion-group";
 import { CodexConfigurationProfileManagement } from "@/components/codex-configuration-profile-management";
 import { CodexConfigurationSessionAdoptionProgress } from "@/components/codex-configuration-session-adoption-progress";
@@ -74,12 +75,19 @@ function CodexConfigurationChangeActions({
 			aria-label={`来自 ${change.sourceConversationSessionId} 的配置变更`}
 		>
 			<p className="m-0 text-sm font-medium text-text-primary break-words">{change.fieldLabel}</p>
+			<CodexConfigurationChangeSharingScopeSelect
+				change={change}
+				pending={disabled}
+				onScopeChange={controller.setChangeSharingScope}
+			/>
 			{change.profileName && (
 				<p className="mt-1 mb-0 text-xs text-text-secondary">
 					{change.profileName} ·{" "}
-					{change.sharingScope === "all_profiles_hook_trust"
-						? "同来源同定义的所有 profile"
-						: "所属 profile 的现有及未来会话"}
+					{change.changeSharingScope
+						? `来源 ${change.sourceConversationSessionId}`
+						: change.sharingScope === "all_profiles_hook_trust"
+							? "同来源同定义的所有 profile"
+							: "所属 profile 的现有及未来会话"}
 				</p>
 			)}
 			{!change.profileName && (
@@ -87,7 +95,7 @@ function CodexConfigurationChangeActions({
 					选择范围：看板 Codex 的未来默认；现有会话的实际采用见会话同步进度。
 				</p>
 			)}
-			{change.feedbackExpiresAtMs !== undefined && (
+			{change.feedbackExpiresAtMs !== undefined && !change.changeSharingScope && (
 				<p className="mt-1 mb-0 text-xs text-text-secondary">
 					{change.approvalStatus === "approved"
 						? "已反馈到 profile；所属现有和未来会话自动采用。"
@@ -889,11 +897,21 @@ function CodexConfigurationFeedbackPopoverCandidate({
 	change,
 	members,
 	controller,
+	onPresented,
 }: {
 	change: CodexConfigurationChange;
 	members: CodexConfigurationChange[];
 	controller: Controller;
+	onPresented?: (changes: CodexConfigurationChange[]) => void;
 }) {
+	const presentedMembers = useRef(members);
+	presentedMembers.current = members;
+	const presentedIdentity = members
+		.map((member) => `${member.changeId}:${member.completeCandidateValueDigest ?? member.observedAt}`)
+		.join("|");
+	useLayoutEffect(() => {
+		onPresented?.(presentedMembers.current);
+	}, [presentedIdentity, onPresented]);
 	const current = controller.state?.changes.find((entry) => entry.changeId === change.changeId);
 	const expired = change.feedbackExpiresAtMs !== undefined && change.feedbackExpiresAtMs <= Date.now();
 	const stale = !current || current.version !== change.version || current.approvalStatus !== "pending";
@@ -912,8 +930,10 @@ function CodexConfigurationFeedbackPopoverCandidate({
 			<h3 className="m-0 text-base font-semibold text-text-primary">
 				{label}：
 				<span className="break-all font-mono">
-					{rows[0]?.sharedCurrent?.text ?? change.previousValueSummary} →{" "}
-					{rows[0]?.detected.text ?? change.valueSummary}
+					{change.changeSharingScope && change.approvalStatus !== "pending"
+						? (rows[0]?.previous.text ?? change.previousValueSummary)
+						: (rows[0]?.sharedCurrent?.text ?? change.previousValueSummary)}{" "}
+					→ {rows[0]?.detected.text ?? change.valueSummary}
 				</span>
 			</h3>
 			<p className="m-0 break-words text-sm text-text-secondary">
@@ -922,34 +942,66 @@ function CodexConfigurationFeedbackPopoverCandidate({
 			</p>
 			{rows.length > 1 && <CodexConfigurationComparisonRows comparison={change.comparison!} />}
 			<div className="flex flex-wrap gap-2">
-				<Button
-					size="sm"
-					variant="primary"
-					className="min-h-9"
-					disabled={disabled}
-					onClick={() => void controller.adoptCandidate(members, change.comparison?.expectedSharedValueDigest)}
-				>
-					更新默认并同步
-				</Button>
-				<Button
-					size="sm"
-					variant="ghost"
-					className="min-h-9"
-					disabled={controller.pendingChangeId !== null || stale || expired}
-					onClick={() =>
-						void controller.batch("reject", [
-							{ entryKind: "settings_proposal", changeId: change.changeId, expectedVersion: change.version },
-						])
-					}
-				>
-					保持默认
-				</Button>
+				{change.changeSharingScope ? (
+					members.map((member) => {
+						const latest = controller.state?.changes.find((entry) => entry.changeId === member.changeId);
+						const current =
+							latest && latest.completeCandidateValueDigest === member.completeCandidateValueDigest
+								? latest
+								: member;
+						return (
+							<CodexConfigurationChangeSharingScopeSelect
+								key={member.changeId}
+								change={current}
+								pending={
+									controller.pendingChangeId !== null ||
+									(latest !== undefined &&
+										latest.completeCandidateValueDigest !== member.completeCandidateValueDigest)
+								}
+								onScopeChange={controller.setChangeSharingScope}
+							/>
+						);
+					})
+				) : (
+					<>
+						<Button
+							size="sm"
+							variant="primary"
+							className="min-h-9"
+							disabled={disabled}
+							onClick={() =>
+								void controller.adoptCandidate(members, change.comparison?.expectedSharedValueDigest)
+							}
+						>
+							更新默认并同步
+						</Button>
+						<Button
+							size="sm"
+							variant="ghost"
+							className="min-h-9"
+							disabled={controller.pendingChangeId !== null || stale || expired}
+							onClick={() =>
+								void controller.batch("reject", [
+									{
+										entryKind: "settings_proposal",
+										changeId: change.changeId,
+										expectedVersion: change.version,
+									},
+								])
+							}
+						>
+							保持默认
+						</Button>
+					</>
+				)}
 			</div>
 			<p className="m-0 text-xs text-text-secondary">
 				{expired
 					? "未更新默认，局部选择保留。"
 					: stale
-						? "此比较已更新或处理，请重新核对建议。"
+						? change.changeSharingScope
+							? "可从本次范围下拉或变更记录继续调整。"
+							: "此比较已更新或处理，请重新核对建议。"
 						: "同配置的现有会话在安全时采用；不操作会保留默认。"}
 			</p>
 		</article>
@@ -966,15 +1018,18 @@ export function CodexConfigurationSyncNotice({
 		getBoundingClientRect: () => notice.summaryButtonRef.current?.getBoundingClientRect() ?? new DOMRect(),
 	});
 	const [showOtherCandidates, setShowOtherCandidates] = useState(false);
-	const candidates = groupCodexConfigurationFeedbackSuggestions(
-		notice.displayedChanges,
-		Number.NEGATIVE_INFINITY,
-	).flatMap((group) =>
-		group.candidates.flatMap((candidate) => {
-			const representative = candidate.members[0];
-			return representative ? [{ representative, members: candidate.members }] : [];
-		}),
-	);
+	const candidates = [
+		...notice.displayedChanges
+			.filter((change) => change.changeSharingScope && change.approvalStatus !== "pending")
+			.map((change) => ({ representative: change, members: [change] })),
+		...groupCodexConfigurationFeedbackSuggestions(notice.displayedChanges, Number.NEGATIVE_INFINITY).flatMap(
+			(group) =>
+				group.candidates.flatMap((candidate) => {
+					const representative = candidate.members[0];
+					return representative ? [{ representative, members: candidate.members }] : [];
+				}),
+		),
+	];
 	if (!notice.hasReminders) return null;
 	return (
 		<Popover.Root
@@ -1003,7 +1058,7 @@ export function CodexConfigurationSyncNotice({
 					onEscapeKeyDown={() => notice.closeAndRestoreSummaryFocus()}
 				>
 					<div className="flex shrink-0 items-center justify-between gap-2">
-						<span className="text-xs text-text-secondary">可选反馈 · {notice.pendingApprovalCount} 项</span>
+						<span className="text-xs text-text-secondary">配置变更 · {candidates.length} 项</span>
 						<Button size="sm" variant="ghost" onClick={notice.closeAndRestoreSummaryFocus}>
 							收起
 						</Button>
@@ -1029,6 +1084,7 @@ export function CodexConfigurationSyncNotice({
 								change={candidates[0].representative}
 								members={candidates[0].members}
 								controller={notice.controller}
+								onPresented={notice.acknowledgeRenderedChanges}
 							/>
 						) : (
 							<p className="text-sm text-text-secondary">
@@ -1055,12 +1111,14 @@ export function CodexConfigurationSyncNotice({
 												change={candidate.representative}
 												members={candidate.members}
 												controller={notice.controller}
+												onPresented={notice.acknowledgeRenderedChanges}
 											/>
 										))}
 							</>
 						)}
 						{candidates.some(
 							(candidate) =>
+								!candidate.representative.changeSharingScope &&
 								!notice.controller.state?.changes.some(
 									(entry) =>
 										entry.changeId === candidate.representative.changeId &&

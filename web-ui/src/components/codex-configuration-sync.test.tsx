@@ -21,6 +21,7 @@ const queries = vi.hoisted(() => ({
 	batch: vi.fn(),
 	profile: vi.fn(),
 	adoption: vi.fn(),
+	sharingScope: vi.fn(),
 }));
 vi.mock("@/runtime/trpc-client", () => ({
 	getRuntimeTrpcClient: () => ({
@@ -28,6 +29,7 @@ vi.mock("@/runtime/trpc-client", () => ({
 			getCodexConfigurationSyncOverview: { query: queries.fetch },
 			getCodexConfigurationChangeDetails: { query: queries.details },
 			mutateCodexConfigurationProfile: { mutate: queries.profile },
+			setCodexConfigurationChangeSharingScope: { mutate: queries.sharingScope },
 			listCodexConfigurationSessionAdoptionProgress: { query: queries.adoption },
 			batchCodexConfigurationAction: { mutate: queries.batch },
 			synchronizeCodexConfigurationChange: { mutate: queries.synchronize },
@@ -67,6 +69,7 @@ const button = (label: string) =>
 				(element) => element.textContent === label,
 			) as HTMLButtonElement);
 beforeEach(() => {
+	queries.sharingScope.mockReset().mockImplementation(async () => state);
 	queries.details.mockReset();
 	localStorage.clear();
 	vi.useFakeTimers();
@@ -156,6 +159,67 @@ function setTargetComparisonFixture(targetWriterId: string, expectedTargetValueD
 }
 
 describe("Codex 配置同步提示和设置", () => {
+	it("普通自动共享即使已处理也会展示范围入口，键盘可选择仅本会话", async () => {
+		Object.assign(state.changes[0]!, {
+			codexConfigurationProfileId: "profile-a",
+			recordKind: "historical_record",
+			approvalStatus: "approved",
+			acknowledgedAt: 2,
+			changeSharingScope: {
+				currentScope: "profile",
+				requestedScope: "profile",
+				withdrawalStatus: "not_requested",
+				compensationChangeIds: [],
+				conflicts: [],
+			},
+		});
+		await renderConfigurationNotice();
+		await act(async () => vi.advanceTimersByTimeAsync(10_000));
+		const trigger = document.querySelector<HTMLButtonElement>('[aria-label*="本次修改的共享范围"]')!;
+		expect(trigger.textContent).toContain("共享到配置方案");
+		expect(trigger.className).toContain("border-accent");
+		await act(async () => {
+			trigger.focus();
+			trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+		});
+		await act(async () => vi.advanceTimersByTimeAsync(1));
+		const local = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find((entry) =>
+			entry.textContent?.includes("仅本会话"),
+		)!;
+		expect(local).toBeDefined();
+		await act(async () => local.click());
+		await flush();
+		expect(queries.sharingScope).toHaveBeenCalledWith(
+			expect.objectContaining({
+				changeId: "change-first",
+				expectedVersion: 1,
+				targetScope: "session_only",
+				stateResponseScope: "overview",
+			}),
+			expect.anything(),
+		);
+	});
+	it("过期的局部变更仍能在历史中通过同一下拉切换范围", async () => {
+		Object.assign(state.changes[0]!, {
+			codexConfigurationProfileId: "profile-a",
+			approvalStatus: "expired",
+			feedbackExpiresAtMs: 1,
+			changeSharingScope: {
+				currentScope: "session_only",
+				requestedScope: "session_only",
+				withdrawalStatus: "not_requested",
+				compensationChangeIds: [],
+				conflicts: [],
+			},
+		});
+		await act(async () => root.render(<CodexConfigurationSyncSettings workspaceId="workspace" />));
+		await act(async () => button("历史").click());
+		await flush();
+		const trigger = container.querySelector<HTMLButtonElement>('[aria-label*="本次修改的共享范围"]')!;
+		expect(trigger.disabled).toBe(false);
+		expect(trigger.textContent).toContain("仅本会话");
+		expect(trigger.className).toContain("border-text-secondary");
+	});
 	it("归档的旧外部记录只展示历史事实，不显示同步动作或正在广播的文案", async () => {
 		state.changes[0] = {
 			...state.changes[0]!,
@@ -666,6 +730,38 @@ describe("Codex 配置同步提示和设置", () => {
 		expect(container.textContent).toContain("来源暂不可核验");
 	});
 
+	it("折叠中的其他建议不登记展示回执，展开后才确认", async () => {
+		const original = state.changes[0]!;
+		state.changes = ["visible", "folded"].map((label, index) => ({
+			...original,
+			changeId: `scope-${label}`,
+			fieldLabel: label,
+			valueSummary: label,
+			observedAt: 200 - index,
+			approvalStatus: "approved" as const,
+			acknowledgedAt: 1,
+			noticePresentedAtMs: undefined,
+			changeSharingScope: {
+				currentScope: "profile" as const,
+				requestedScope: "profile" as const,
+				withdrawalStatus: "not_requested" as const,
+				compensationChangeIds: [],
+				conflicts: [],
+			},
+		}));
+		const acknowledged: string[] = [];
+		queries.acknowledge.mockImplementation(async (input: { changeId: string }) => {
+			acknowledged.push(input.changeId);
+			return state;
+		});
+		await renderConfigurationNotice();
+		await act(async () => vi.advanceTimersByTimeAsync(10_000));
+		await flush();
+		expect(acknowledged).toEqual(["scope-visible"]);
+		await act(async () => button("其他建议 · 1 项").click());
+		await flush();
+		expect(acknowledged).toEqual(["scope-visible", "scope-folded"]);
+	});
 	it("紧凑浮层不抢焦点，只处理展示的候选，Escape 返回顶栏", async () => {
 		const original = state.changes[0]!;
 		state.changes = ["max", "ultra"].map((value, index) => ({

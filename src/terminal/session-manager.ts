@@ -250,6 +250,7 @@ import {
 	writeCodexDraftStashJsonDurably,
 } from "./codex-draft-stash-editor-bridge";
 import {
+	captureCodexDraftForProfileAdoption,
 	createCodexCapturedDraftPromptRecoveryCoordinator,
 	runCodexDraftStashOperation,
 } from "./codex-draft-stash-operation";
@@ -810,6 +811,7 @@ interface SessionEntry {
 export interface StartTaskSessionRequest {
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard;
+	codexAutomaticProcessReplacementMustRemainRenderingOnly?: boolean;
 	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
 	taskId: string;
@@ -6389,6 +6391,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 							environment: { ...process.env, ...request.env },
 							workingDirectory: request.cwd,
 							revalidateNativeCapabilityRetryStillAuthorized: throwIfTaskSessionStartWasCancelled,
+							automaticProcessReplacementMustRemainRenderingOnly:
+								request.codexAutomaticProcessReplacementMustRemainRenderingOnly,
 						}),
 				);
 				throwIfTaskSessionStartWasCancelled();
@@ -7957,6 +7961,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private requestCapturedCodexDraftPromptRecoveryOnce(operationDirectoryPath: string): void {
+		const operation = readCodexDraftStashJson(join(operationDirectoryPath, "operation.json")) as {
+			purpose?: string;
+		} | null;
+		if (operation?.purpose === "profile_adoption_capture") return;
 		if (
 			!this.codexCapturedDraftPromptRecoveryCoordinator ||
 			!existsSync(join(operationDirectoryPath, "captured-draft.json")) ||
@@ -7993,9 +8001,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				exitCode: number;
 				finishedAtMs: number;
 			} | null;
-			if (!finished) return;
-			this.requestCapturedCodexDraftPromptRecoveryOnce(directoryPath);
-			if (finished.exitCode === 0) {
+			const operationSpecification = readCodexDraftStashJson(join(directoryPath, "operation.json")) as {
+				purpose?: string;
+			} | null;
+			const reservation = readCodexDraftEditorReservation(bridge);
+			const profileCaptureAbandoned =
+				operationSpecification?.purpose === "profile_adoption_capture" &&
+				!(reservation?.origin === "stash" && reservation.operation.operationId === operation.operationId);
+			if (!finished && !profileCaptureAbandoned) return;
+			if (finished) {
+				this.requestCapturedCodexDraftPromptRecoveryOnce(directoryPath);
+			}
+			if (finished?.exitCode === 0) {
 				if (!existsSync(join(directoryPath, "input-box-clear-confirmed.json"))) {
 					const snapshot = await entry.terminalStateMirror?.getScreenSnapshot({
 						includeDimmedTextColumnRanges: true,
@@ -8009,20 +8026,25 @@ export class TerminalSessionManager implements TerminalSessionService {
 				}
 				releaseCodexDraftEditorReservation(bridge, operation.operationId);
 			}
-			if (finished.exitCode !== 0) {
+			if (finished?.exitCode !== 0 && finished) {
 				if (!existsSync(join(directoryPath, "input-box-restored-after-editor-failure.json"))) {
 					const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
-					if (
-						entry.active !== active ||
-						!snapshot ||
-						(entry.summary.lastOutputAt ?? 0) < finished.finishedAtMs ||
-						!snapshot.lines.some((line) => /^›(?: |$)/u.test(line.text)) ||
-						snapshot.lines.some((line) => line.text.includes("Save and close external editor"))
-					)
-						return;
-					writeCodexDraftStashJsonDurably(join(directoryPath, "input-box-restored-after-editor-failure.json"), {
-						confirmedAtMs: Date.now(),
-					});
+					const editorStillOpen = snapshot?.lines.some((line) =>
+						line.text.includes("Save and close external editor"),
+					);
+					const restored =
+						entry.active === active &&
+						Boolean(snapshot) &&
+						(entry.summary.lastOutputAt ?? 0) >= finished.finishedAtMs &&
+						Boolean(snapshot?.lines.some((line) => /^›(?: |$)/u.test(line.text))) &&
+						!editorStillOpen;
+					if (!restored) {
+						if (!profileCaptureAbandoned || editorStillOpen) return;
+					} else {
+						writeCodexDraftStashJsonDurably(join(directoryPath, "input-box-restored-after-editor-failure.json"), {
+							confirmedAtMs: Date.now(),
+						});
+					}
 				}
 				releaseCodexDraftEditorReservation(bridge, operation.operationId);
 			}
@@ -9966,6 +9988,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 			)
 				continue;
 			if (
+				record.capturedDraftText !== undefined &&
+				record.capturedFromRuntimeSessionIncarnationId === entry.summary.runtimeSessionIncarnationId
+			)
+				continue;
+			if (
 				!entry.active &&
 				!entry.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled &&
 				record.automaticProcessReplacementContinuationStatus === "pending_automatic_start"
@@ -9983,6 +10010,72 @@ export class TerminalSessionManager implements TerminalSessionService {
 					);
 			}
 			if (record.status === "restore_submission_started") {
+				const retainedText = Buffer.from(record.bytesBase64, "base64")
+					.toString("utf8")
+					.replaceAll("\u001b[200~", "")
+					.replaceAll("\u001b[201~", "");
+				if (
+					record.capturedDraftText !== undefined &&
+					!["\r", "\u001b", "\b"].some((character) => retainedText.includes(character))
+				) {
+					const active = entry.active;
+					const bridge = this.readCodexDraftStashBridgeForTask(record.conversationSessionId);
+					const inputSequence = this.getTaskTerminalInputSideMutationSnapshot(
+						record.conversationSessionId,
+					)?.humanTerminalInputMutationSequenceNumber;
+					const fingerprint = configurationDigest([
+						entry.summary.runtimeSessionIncarnationId,
+						record.nativeSessionId,
+						inputSequence,
+					]);
+					const facets = resolveSessionFacets(entry.summary);
+					if (
+						active &&
+						bridge &&
+						facets.turnOwner === "user" &&
+						(facets.userTurnKind === "review" || facets.userTurnKind === null) &&
+						(await this.resolveInteractivePromptReadiness(entry)) === "prompt" &&
+						(record.draftRestoreVerificationEvidenceFingerprint !== fingerprint ||
+							(record.draftRestoreVerificationAttemptCount ?? 0) < 3)
+					) {
+						record.draftRestoreVerificationAttemptCount =
+							record.draftRestoreVerificationEvidenceFingerprint === fingerprint
+								? (record.draftRestoreVerificationAttemptCount ?? 0) + 1
+								: 1;
+						record.draftRestoreVerificationEvidenceFingerprint = fingerprint;
+						saveCodexProfileAdoptionRetainedInput(path, record);
+						const operationId = randomUUID();
+						const capture = await captureCodexDraftForProfileAdoption({
+							bridge,
+							taskId: record.conversationSessionId,
+							operationId,
+							isCurrent: () =>
+								entry.active === active &&
+								this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId)
+									?.humanTerminalInputMutationSequenceNumber === inputSequence,
+							triggerExport: () => {
+								this.writeInput(record.conversationSessionId, Buffer.from([0x07]), operationId);
+							},
+							confirmOriginalComposerRestored: async () => {
+								const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+								return Boolean(
+									entry.active === active &&
+										snapshot?.lines.some((line) => /^›(?: |$)/u.test(line.text)) &&
+										!snapshot.lines.some((line) => line.text.includes("Save and close external editor")),
+								);
+							},
+							persistCapturedDraft: () => {},
+						});
+						await this.resumeCodexDraftStashRetainedInput(record.conversationSessionId);
+						if (capture?.text === record.capturedDraftText + retainedText) {
+							record.status = "restored";
+							record.capturedDraftRestoreStatus = "restored";
+							saveCodexProfileAdoptionRetainedInput(path, record);
+							this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
+							continue;
+						}
+					}
+				}
 				if (record.acceptanceCandidate && entry.summary.runtimeSessionIncarnationId) {
 					const reconciliation = await reconcileCodexPromptSubmissionAcceptance({
 						summary: {
@@ -10010,7 +10103,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 						codexConfigurationProfileRetainedInputRecovery: {
 							retainedInputRecordPath: path,
 							retainedByteCount: Buffer.from(record.bytesBase64, "base64").length,
-							reason: "恢复提交可能已开始，回执未知；保留输入记录，等待原生接受证据，不自动重复提交。",
+							reason:
+								"恢复可能已开始，回执未知；保留原稿，不重复回放。原生编辑器或接受记录恢复、代际或人工输入变化后自动补证，同一证据最多三次。",
 						},
 					}),
 				);
@@ -10033,9 +10127,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const current = readCodexProfileAdoptionRetainedInput(path);
 			if (current.status !== "capturing") continue;
 			current.status = "restore_submission_started";
+			if (current.capturedDraftText !== undefined) current.capturedDraftRestoreStatus = "submission_started";
 			const bytes = Buffer.from(current.bytesBase64, "base64");
 			// 仅可还原成一条正文提交的输入才做转录补证；编辑按键与草稿保留未知，不猜测提交事实。
-			const submittedText = bytes.toString("utf8").replaceAll("\u001b[200~", "").replaceAll("\u001b[201~", "");
+			const submittedText =
+				(current.capturedDraftText ?? "") +
+				bytes.toString("utf8").replaceAll("\u001b[200~", "").replaceAll("\u001b[201~", "");
 			if (
 				submittedText.endsWith("\r") &&
 				!["\r", "\u001b", "\b"].some((character) => submittedText.slice(0, -1).includes(character)) &&
@@ -10051,7 +10148,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 				};
 			saveCodexProfileAdoptionRetainedInput(path, current);
 			this.terminalInputRetainedDuringCodexProfileReplacement.delete(record.conversationSessionId);
+			if (current.capturedDraftText !== undefined) {
+				this.writeInput(
+					record.conversationSessionId,
+					Buffer.from(`\u001b[200~${current.capturedDraftText}\u001b[201~`, "utf8"),
+				);
+			}
 			if (bytes.length) this.writeInput(record.conversationSessionId, bytes);
+			if (current.capturedDraftText !== undefined) continue;
 			current.status = "restored";
 			saveCodexProfileAdoptionRetainedInput(path, current);
 			this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
@@ -10460,6 +10564,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 			? resolveSessionFacets(summaryBeforeProcessStop).userTurnKind
 			: undefined;
 		const configurationAdoption = request.configurationProfileAutomaticAdoptionGuard;
+		const automaticReplacementLaunchSelection = {
+			sessionModelId:
+				request.terminalAgentModelOverrideSettings?.agentId === "codex"
+					? request.terminalAgentModelOverrideSettings.modelId
+					: undefined,
+			sessionReasoningEffortOverride: request.codexReasoningEffortOverride,
+			sessionPermissionMode: request.taskAgentPermissionMode,
+			sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
+		};
+		if (
+			configurationAdoption?.readConfigurationSafetyFingerprint &&
+			!(await configurationAdoption.readConfigurationSafetyFingerprint(automaticReplacementLaunchSelection))
+		)
+			throw new Error("完整配置存在 cache 风险或尚未核验，等待后续正常启动。");
 		const continuesPendingProcessReplacement = Boolean(
 			configurationAdoption?.pendingProcessReplacementRetainedInputRecordPath &&
 				!this.entries.get(request.taskId)?.active,
@@ -10525,6 +10643,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		} else if (configurationAdoption) {
 			const entry = this.entries.get(request.taskId);
 			if (!entry) throw new Error("原会话已退出，等待下次启动采用 profile。");
+			const configurationSafetyFingerprint = await configurationAdoption.readConfigurationSafetyFingerprint?.(
+				automaticReplacementLaunchSelection,
+			);
+			if (configurationAdoption.readConfigurationSafetyFingerprint && !configurationSafetyFingerprint)
+				throw new Error("完整配置存在 cache 风险或尚未核验，等待后续正常启动。");
 			const active = entry?.active;
 			const nativeSemanticGuardBeforeRead = buildCodexNativeAgentTurnExecutionSemanticGuard(entry.summary);
 			const inputSnapshot = this.getTaskTerminalInputSideMutationSnapshot(request.taskId);
@@ -10546,10 +10669,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 						facets.turnOwner === "user" &&
 						(facets.userTurnKind === "review" || facets.userTurnKind === null) &&
 						!current.suppressAutoRestartOnExit &&
+						!current.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled &&
 						!current.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
 						active.deferredStartupPromptText === null &&
 						active.programmaticDeliveryReceipt === null &&
-						!this.getTaskTerminalInputSideMutationSnapshot(request.taskId)?.hasUncommittedInput &&
+						!current.summary.awaitingDispatchedBackgroundWork &&
 						this.getTaskTerminalInputSideMutationSnapshot(request.taskId)
 							?.humanTerminalInputMutationSequenceNumber ===
 							inputSnapshot?.humanTerminalInputMutationSequenceNumber,
@@ -10569,19 +10693,64 @@ export class TerminalSessionManager implements TerminalSessionService {
 				!stillSafe() ||
 				(nativeTurn?.observation.executionStatus !== "finished" && !transcriptCompletion) ||
 				!occupancy ||
-				occupancy.hasUncommittedInput ||
-				occupancy.screenReadingSaysNonEmpty !== false
+				occupancy.screenReadingSaysNonEmpty === null ||
+				(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({
+					workspaceId: request.workspaceId ?? "",
+					taskId: request.taskId,
+				}))
 			)
 				throw new Error("原生回合或空输入框尚未确证，保留待采用并自动重验。");
+			let capturedDraftText: string | undefined;
 			const evidenceFingerprint = configurationDigest([
 				configurationAdoption.expectedRuntimeSessionIncarnationId,
 				configurationAdoption.expectedNativeSessionId,
 				inputSnapshot,
 				taskExecutionEligibilityFingerprint,
-				entry?.summary.lastHookAt,
+				entry.summary.lastHookAt,
 				nativeTurn?.observation.executionStatus ?? transcriptCompletion?.evidenceFingerprint,
 			]);
-			if (!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint)) || !stillSafe())
+			let captureAttemptClaimed = false;
+			if (
+				inputSnapshot?.hasUncommittedInput ||
+				occupancy.hasUncommittedInput ||
+				occupancy.screenReadingSaysNonEmpty !== false
+			) {
+				const bridge = this.readCodexDraftStashBridgeForTask(request.taskId);
+				if (!bridge || occupancy.unrecoverablePasteCount > 0)
+					throw new Error("原生草稿桥接尚不可用或附件无法完整保全，保留原进程。 ");
+				if (!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint)) || !stillSafe())
+					throw new Error("同一草稿捕获证据已达三次或输入已变化，等待条件变化后自动重验。");
+				captureAttemptClaimed = true;
+				const operationId = randomUUID();
+				const capture = await captureCodexDraftForProfileAdoption({
+					bridge,
+					taskId: request.taskId,
+					operationId,
+					isCurrent: stillSafe,
+					triggerExport: () => {
+						this.writeInput(request.taskId, Buffer.from([0x07]), operationId);
+					},
+					confirmOriginalComposerRestored: async () => {
+						const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
+						return Boolean(
+							entry.active === active &&
+								snapshot?.lines.some((line) => /^›(?: |$)/u.test(line.text)) &&
+								!snapshot.lines.some((line) => line.text.includes("Save and close external editor")),
+						);
+					},
+					persistCapturedDraft: (text) => {
+						capturedDraftText = text;
+					},
+				});
+				await this.resumeCodexDraftStashRetainedInput(request.taskId);
+				if (!capture || !stillSafe())
+					throw new Error("完整草稿尚未确认或捕获期间出现新输入，保留原进程后自动重验。");
+			}
+			if (
+				(!captureAttemptClaimed &&
+					!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint))) ||
+				!stillSafe()
+			)
 				throw new Error("续接证据已变化或同一证据已达三次，保留待采用状态。");
 			if (
 				transcriptCompletion &&
@@ -10597,19 +10766,38 @@ export class TerminalSessionManager implements TerminalSessionService {
 			)
 				throw new Error("Task 在预检期间已搁置、结案或改变归属，未停止原进程。");
 			if (!stillSafe()) throw new Error("资格重验期间出现新输入，未停止原进程。");
+			if (
+				configurationAdoption.readConfigurationSafetyFingerprint &&
+				(await configurationAdoption.readConfigurationSafetyFingerprint(automaticReplacementLaunchSelection)) !==
+					configurationSafetyFingerprint
+			)
+				throw new Error("完整启动配置已变化，未停止原进程；按最新 cache 风险自动重验。");
+			if (!stillSafe()) throw new Error("配置重验期间出现新输入，未停止原进程。");
+			if (
+				await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({
+					workspaceId: request.workspaceId ?? "",
+					taskId: request.taskId,
+				})
+			)
+				throw new Error("后台执行仍存活或退出证据未知，保留原进程并自动重验。");
+			if (!stillSafe()) throw new Error("后台归属重验期间会话已变化，未停止原进程。");
 			const retainedInputRecordPath = createCodexProfileAdoptionRetainedInput({
 				workspaceId: request.workspaceId ?? "",
 				conversationSessionId: request.taskId,
 				nativeSessionId: configurationAdoption.expectedNativeSessionId,
 				profileId: configurationAdoption.profileId,
+				capturedDraftText,
+				capturedFromRuntimeSessionIncarnationId:
+					capturedDraftText === undefined ? undefined : (entry.summary.runtimeSessionIncarnationId ?? undefined),
+				capturedDraftRestoreStatus: capturedDraftText === undefined ? undefined : "pending",
 			});
 			this.terminalInputRetainedDuringCodexProfileReplacement.set(request.taskId, retainedInputRecordPath);
 			this.emitSummary(
 				updateSummary(entry, {
 					codexConfigurationProfileRetainedInputRecovery: {
 						retainedInputRecordPath,
-						retainedByteCount: 0,
-						reason: "安全续接窗口中的新输入将持久保留。",
+						retainedByteCount: Buffer.byteLength(capturedDraftText ?? "", "utf8"),
+						reason: "完整草稿与安全续接窗口中的新输入将持久保留。",
 					},
 				}),
 			);
@@ -10641,7 +10829,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 				);
 		}
 		if (!isTaskSessionRefreshStillRequested()) return cloneSummary(this.ensureEntry(request.taskId).summary);
-		request = { ...request, configurationProfileAutomaticAdoptionGuard: undefined };
+		request = {
+			...request,
+			configurationProfileAutomaticAdoptionGuard: undefined,
+			codexAutomaticProcessReplacementMustRemainRenderingOnly: Boolean(configurationAdoption),
+		};
 		const summary = await this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 			request,
 			taskSessionStartOrigin,

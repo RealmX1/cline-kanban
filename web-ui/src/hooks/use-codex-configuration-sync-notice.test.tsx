@@ -1,4 +1,4 @@
-import { act } from "react";
+import { act, useLayoutEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useCodexConfigurationSyncNotice } from "@/hooks/use-codex-configuration-sync-notice";
@@ -8,6 +8,7 @@ const fixture = vi.hoisted(() => ({
 	state: { storageIdentity: "notice-fixture", changes: [] as unknown[], sourceObservations: [] as unknown[] },
 	pendingChangeId: null as string | null,
 	sourceOperations: {},
+	markNoticePresented: vi.fn(),
 }));
 vi.mock("@/hooks/use-codex-configuration-sync", () => ({ useCodexConfigurationSync: () => fixture }));
 let root: Root, container: HTMLDivElement, notice: ReturnType<typeof useCodexConfigurationSyncNotice>;
@@ -33,22 +34,29 @@ const candidate = (id: string, value: string): CodexConfigurationChange => ({
 	candidateFieldGroupKey: "reasoning",
 	completeCandidateValueDigest: value,
 });
-function Harness({ available = true }: { available?: boolean }) {
+function Harness({ available = true, mountPanel = true }: { available?: boolean; mountPanel?: boolean }) {
 	notice = useCodexConfigurationSyncNotice({ workspaceId: "workspace", isPresentationAvailable: available });
+	const rendered = mountPanel && notice.isVisible ? notice.displayedChanges[0] : undefined;
+	useLayoutEffect(() => {
+		if (rendered) notice.acknowledgeRenderedChanges([rendered]);
+	}, [rendered?.changeId, rendered?.observedAt, rendered?.valueSummary]);
 	return (
 		<>
 			<button ref={notice.summaryButtonRef} type="button" onClick={() => notice.toggleExpanded(false)}>
 				配置
 			</button>
-			<section ref={notice.panelRef} hidden={!notice.isVisible}>
-				<p>{notice.displayedChanges[0]?.valueSummary}</p>
-			</section>
+			{mountPanel && (
+				<section ref={notice.bindPanelRef} hidden={!notice.isVisible}>
+					<p>{notice.displayedChanges[0]?.valueSummary}</p>
+				</section>
+			)}
 		</>
 	);
 }
 const render = async (available = true) => act(async () => root.render(<Harness available={available} />));
 const advance = async (ms: number) => act(async () => vi.advanceTimersByTime(ms));
 beforeEach(() => {
+	fixture.markNoticePresented.mockReset();
 	localStorage.clear();
 	vi.useFakeTimers();
 	vi.setSystemTime(new Date("2026-11-11T20:00:00Z"));
@@ -69,6 +77,13 @@ afterEach(async () => {
 	vi.useRealTimers();
 	vi.unstubAllGlobals();
 	vi.restoreAllMocks();
+});
+it("浮层没有实际挂载时不写展示回执，挂载后才确认展示", async () => {
+	await act(async () => root.render(<Harness mountPanel={false} />));
+	await advance(10_000);
+	expect(fixture.markNoticePresented).not.toHaveBeenCalled();
+	await act(async () => root.render(<Harness mountPanel />));
+	expect(fixture.markNoticePresented).toHaveBeenCalledTimes(1);
 });
 it("十秒归并真实变化，元数据刷新不重置，展示三十秒且刷新不重复提醒", async () => {
 	localStorage.setItem("codex-configuration-change-notice-collapsed", "true");
@@ -134,6 +149,7 @@ it("自动展开后面板才挂载时，仍启动三十秒空闲收起", async (
 	const panel = document.createElement("div");
 	document.body.append(panel);
 	await act(async () => notice.bindPanelRef(panel));
+	await act(async () => notice.acknowledgeRenderedChanges(notice.displayedChanges));
 	await advance(29_999);
 	expect(notice.isVisible).toBe(true);
 	await advance(1);

@@ -21,6 +21,7 @@ import type { CodexAppServerRequestPort } from "../../../src/codex-native-sessio
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import type { CodexConfigurationWriterBinding } from "../../../src/core/codex-configuration-sync-contract";
 import { withExplicitApprovalOfObservedCodexConfigurationProposals } from "../../utilities/explicitly-approve-observed-codex-configuration-proposals";
+import { requireDefinedTestFixtureValue } from "../../utilities/require-defined-test-fixture-value";
 import { createTempDir } from "../../utilities/temp-dir";
 
 interface NativeRequestBarrier {
@@ -271,6 +272,94 @@ function expectHookDecision(configuration: TomlTable, binding: CodexConfiguratio
 }
 
 describe("原所有者写入窗口中的并发配置决定", () => {
+	it("撤回本次 hook 信任传播后，较旧账本决定不会重新覆盖较新的 profile 补偿", async () => {
+		const source = await createConfigurationWriter("source-session");
+		const target = await createConfigurationWriter("target-session");
+		await setWriterHookDecision(source, newerHookDecision);
+		const service = createConfigurationService(createNativeOwnerHarness());
+		await service.scan();
+		const change = requireDefinedTestFixtureValue(
+			(await service.getState()).changes.find((entry) => entry.sourceWriterId === source.writerId),
+		);
+		await service.setChangeSharingScope({
+			changeId: change.changeId,
+			expectedVersion: change.version,
+			targetScope: "session_only",
+			idempotencyKey: randomUUID(),
+		});
+		await service.scan();
+		await service.scan();
+		expectHookDecision(await readWriterConfiguration(target), target, originalHookDecision);
+		expectHookDecision(await readWriterConfiguration(source), source, newerHookDecision);
+		const store = await readCodexConfigurationSyncStore();
+		expect(store.profiles[source.codexConfigurationProfileId ?? ""].fields[change.fieldKey ?? ""]?.value).toEqual(
+			originalHookDecision,
+		);
+	});
+	it("已采用的共享撤回后恢复目标原值，来源保留本次值且补偿不反向共享", async () => {
+		const { sourceWriter, targetWriter, service, change } = await prepareSourceDecision();
+		await service.scan();
+		const current = requireDefinedTestFixtureValue(
+			(await service.getState()).changes.find((entry) => entry.changeId === change.changeId),
+		);
+		expect(current.targets[0].status).toBe("applied");
+		await service.setChangeSharingScope({
+			changeId: current.changeId,
+			expectedVersion: current.version,
+			targetScope: "session_only",
+			idempotencyKey: randomUUID(),
+		});
+		await service.scan();
+		expectHookDecision(await readWriterConfiguration(sourceWriter), sourceWriter, propagatedHookDecision);
+		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, originalHookDecision);
+		const store = await readCodexConfigurationSyncStore();
+		const original = requireDefinedTestFixtureValue(
+			store.changes.find((entry) => entry.changeId === current.changeId),
+		);
+		expect(original.changeSharingScope).toMatchObject({
+			currentScope: "session_only",
+			withdrawalStatus: "completed",
+		});
+		expect(original.sharingScopeDecisionHistory).toHaveLength(1);
+		expect(store.changes.filter((entry) => entry.sourceWriterId === targetWriter.writerId)).toHaveLength(0);
+		expect(store.changes.some((entry) => entry.compensationForChangeId === current.changeId)).toBe(true);
+	});
+	it("传播提交后撤回，迟到的保存不会形成反向共享并在下一次补扫恢复", async () => {
+		const barrier = createNativeRequestBarrier("config/batchWrite", "after");
+		const { targetWriter, service, change } = await prepareSourceDecision({ barrier });
+		const scan = service.scan();
+		await barrier.reached;
+		try {
+			const current = requireDefinedTestFixtureValue(
+				(await service.getState()).changes.find((entry) => entry.changeId === change.changeId),
+			);
+			const withdrawal = service.setChangeSharingScope({
+				changeId: current.changeId,
+				expectedVersion: current.version,
+				targetScope: "session_only",
+				idempotencyKey: randomUUID(),
+			});
+			await vi.waitFor(async () =>
+				expect(
+					(await readCodexConfigurationSyncStore()).changes.find((entry) => entry.changeId === current.changeId)
+						?.changeSharingScope?.currentScope,
+				).toBe("session_only"),
+			);
+			barrier.release();
+			await withdrawal;
+		} finally {
+			barrier.release();
+		}
+		await scan;
+		await service.scan();
+		await service.scan();
+		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, originalHookDecision);
+		expect(
+			(await readCodexConfigurationSyncStore()).changes.filter(
+				(entry) => entry.sourceWriterId === targetWriter.writerId,
+			),
+		).toHaveLength(0);
+	});
 	it.each([
 		["thread/loaded/list", "before"],
 		["config/read", "before"],
