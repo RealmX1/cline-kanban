@@ -66,10 +66,13 @@ vi.mock("@/runtime/cross-project-task-worktree-git-metadata-query", () => ({
 
 const stickyLayout = vi.hoisted(() => ({ edge: "hidden" as "hidden" | "pinTop" | "pinBottom" }));
 vi.mock("@/hooks/use-stage-header-pin-layout", () => ({
-	useStageHeaderPinLayout: ({ focusedColumnId }: UseStageHeaderPinLayoutOptions) => ({
+	useStageHeaderPinLayout: ({ focusedColumnId, fixedTopGroupIds = [] }: UseStageHeaderPinLayoutOptions) => ({
 		focusedCardRailEdge: stickyLayout.edge,
-		topPinnedColumnIds: stickyLayout.edge === "pinTop" ? [focusedColumnId] : [],
+		topPinnedColumnIds: [...fixedTopGroupIds, ...(stickyLayout.edge === "pinTop" ? [focusedColumnId] : [])],
 		bottomPinnedColumnIds: stickyLayout.edge === "pinBottom" ? [focusedColumnId] : [],
+		compactGroupIds: fixedTopGroupIds,
+		columnCount: 3,
+		focusedCardContentMaximumHeight: 200,
 	}),
 }));
 
@@ -1037,9 +1040,16 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 		expect(toggle?.getAttribute("aria-expanded")).toBe("true");
 		act(() => toggle?.click());
 
-		expect(rowTaskIds(section("pinned"))).toEqual([]);
-		expect(section("pinned").textContent).toContain("Pinned1");
+		expect(container.querySelector('[data-testid="cross-project-task-switcher-section-pinned"]')).toBeNull();
+		const pinnedRailEntry = container.querySelector<HTMLElement>(
+			'[data-focus-view-group-header-rail-entry="pinned"]',
+		)!;
+		expect(rowTaskIds(pinnedRailEntry)).toEqual([]);
+		expect(pinnedRailEntry.textContent).toContain("Pinned1");
 		expect(window.localStorage.getItem(LocalStorageKey.CrossProjectTaskSwitcherPinnedSectionCollapsed)).toBe("true");
+		act(() => pinnedRailEntry.querySelector<HTMLButtonElement>('[aria-label="展开 Pinned"]')!.click());
+		expect(container.querySelector('[data-focus-view-group-header-rail-entry="pinned"]')).toBeNull();
+		expect(rowTaskIds(section("pinned"))).toEqual(["recent"]);
 	});
 
 	it("行内只显示会话时间，创建时间留详情；缓存 tooltip 写明估计起点与来源", () => {

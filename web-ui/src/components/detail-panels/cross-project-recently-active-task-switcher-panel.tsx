@@ -1,6 +1,6 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
-import { type ReactElement, type ReactNode, useEffect, useRef } from "react";
+import { type ReactElement, type ReactNode, useEffect, useMemo, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
 	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
@@ -15,6 +15,7 @@ import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
 import { CrossProjectTaskSwitcherFocusedTaskCard } from "@/components/detail-panels/cross-project-task-switcher-focused-task-card";
 import { FocusViewGroupHeaderRails } from "@/components/detail-panels/focus-view-group-header-rails";
+import { computeFocusViewGroupHeaderRailHeight } from "@/components/detail-panels/stage-header-rail-geometry";
 import { crossProjectTaskSwitcherFocusedTaskVisibilityPanelAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { Button } from "@/components/ui/button";
 import { DeletedTaskHistoryIcon } from "@/components/ui/deleted-task-history-icon";
@@ -82,6 +83,16 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	});
 	const { focusedTaskEntryKey, focusedTaskSelection, focusedTaskSourceSection, focusedTaskPinState } =
 		focusedTaskVisibility;
+	// 收起后仍保留焦点行时，Pinned 继续作为有内容的固定分组。
+	const fixedTopGroupIds = useMemo(
+		() =>
+			sectionsModel.isPinnedSectionCollapsed &&
+			sectionsModel.sections.pinnedEntries.length > 0 &&
+			focusedTaskSourceSection !== "pinned"
+				? ["pinned"]
+				: [],
+		[sectionsModel.isPinnedSectionCollapsed, sectionsModel.sections.pinnedEntries.length, focusedTaskSourceSection],
+	);
 	const focusedTaskProjectName =
 		host.projects.find((project) => project.id === focusedTaskVisibility.focusedTaskInProject?.workspaceId)?.name ??
 		"";
@@ -165,6 +176,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	const groupNavigation = useFocusViewGroupSectionNavigation({
 		scrollRootRef: panelScrollContainerRef,
 		orderedColumnIds: groupIds,
+		fixedTopGroupIds,
 		focusedColumnId: focusedTaskSelection ? (focusedTaskSourceSection ?? "") : "",
 		focusedCardElementSelector: focusedTaskVisibility.focusedTaskScrollAnchorSelector,
 		focusedCardCloneHeightPx: focusedCardCloneBounds.height,
@@ -176,6 +188,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	const headerPinLayout = useStageHeaderPinLayout({
 		scrollRootRef: panelScrollContainerRef,
 		columnIds: groupIds,
+		fixedTopGroupIds,
 		focusedColumnId: focusedTaskSelection ? (focusedTaskSourceSection ?? "") : "",
 		focusedTaskId: host.focusedTaskInProject?.taskId ?? "",
 		focusedCardElementSelector: focusedTaskVisibility.focusedTaskScrollAnchorSelector,
@@ -226,31 +239,33 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					) : null}
 				</div>
 			) : null}
-			<CrossProjectTaskSwitcherPinnedSectionBlock
-				{...sectionBlockProps}
-				sectionColumnScrollContainerBinding={{
-					sectionColumnScrollContainerRef: pinnedScrollContainerRef,
-					onSectionColumnScroll: () => {},
-					onSectionColumnPointerEnter:
-						rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerEnter,
-					onSectionColumnPointerLeave:
-						rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerLeave,
-					onSectionColumnPointerDownCapture:
-						rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerDownCapture,
-				}}
-				renderRowInHostingScrollContainer={(entry, section) =>
-					renderCrossProjectTaskSwitcherSectionRow(
-						entry,
-						section,
-						rowHoverExpansionOfPinnedScrollContainer,
-						section === focusedTaskSourceSection &&
-							buildCrossProjectTaskSwitcherEntryKey(entry.workspaceId, entry.entry.taskId) ===
-								focusedTaskEntryKey
-							? (focusedTaskEntryKey ?? undefined)
-							: undefined,
-					)
-				}
-			/>
+			{fixedTopGroupIds.length === 0 ? (
+				<CrossProjectTaskSwitcherPinnedSectionBlock
+					{...sectionBlockProps}
+					sectionColumnScrollContainerBinding={{
+						sectionColumnScrollContainerRef: pinnedScrollContainerRef,
+						onSectionColumnScroll: () => {},
+						onSectionColumnPointerEnter:
+							rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerEnter,
+						onSectionColumnPointerLeave:
+							rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerLeave,
+						onSectionColumnPointerDownCapture:
+							rowHoverExpansionOfPinnedScrollContainer.panelPointerHandlers.onPointerDownCapture,
+					}}
+					renderRowInHostingScrollContainer={(entry, section) =>
+						renderCrossProjectTaskSwitcherSectionRow(
+							entry,
+							section,
+							rowHoverExpansionOfPinnedScrollContainer,
+							section === focusedTaskSourceSection &&
+								buildCrossProjectTaskSwitcherEntryKey(entry.workspaceId, entry.entry.taskId) ===
+									focusedTaskEntryKey
+								? (focusedTaskEntryKey ?? undefined)
+								: undefined,
+						)
+					}
+				/>
+			) : null}
 			{focusedTaskEntryKey && focusedTaskSourceSection === null ? (
 				<div
 					className="mx-0.5 mt-1 shrink-0"
@@ -276,6 +291,19 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					data-testid="cross-project-recently-active-task-switcher-panel"
 					data-cross-project-focused-task-pin-state={headerPinLayout.focusedCardRailEdge}
 				>
+					{fixedTopGroupIds.length > 0 ? (
+						<div
+							aria-hidden="true"
+							className="shrink-0"
+							style={{
+								height: computeFocusViewGroupHeaderRailHeight({
+									groupIds: fixedTopGroupIds,
+									compactGroupIds: headerPinLayout.compactGroupIds,
+									columnCount: headerPinLayout.columnCount,
+								}),
+							}}
+						/>
+					) : null}
 					{navigableGroups.map(({ id, Component }) => (
 						<Component
 							key={id}
@@ -295,6 +323,14 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 					}
 					focusedCardContentMaximumHeight={headerPinLayout.focusedCardContentMaximumHeight}
 					renderEntry={(groupId, edge, presentation) => {
+						if (groupId === "pinned")
+							return (
+								<CrossProjectTaskSwitcherPinnedSectionBlock
+									{...sectionBlockProps}
+									headerPresentation={presentation}
+									rendersGroupHeaderRailEntry
+								/>
+							);
 						const group = navigableGroups.find(({ id }) => id === groupId);
 						if (!group) return null;
 						const showsFocusedCard =

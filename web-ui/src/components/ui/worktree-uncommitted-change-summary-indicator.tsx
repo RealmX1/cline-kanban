@@ -1,3 +1,4 @@
+import { Files } from "lucide-react";
 import type { CSSProperties, ReactElement } from "react";
 import { cn } from "@/components/ui/cn";
 import { formatLineChangeCountWithThousandsSuffix } from "@/utils/format-line-change-count-with-thousands-suffix";
@@ -28,6 +29,7 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	parenthesesAndChangedFileCountStyle,
 	showUncommittedChangeBackground = false,
 	allowLineWrapping = false,
+	showChangedFileCountWithIcon = false,
 }: {
 	changedFiles: number;
 	additions: number;
@@ -36,6 +38,7 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 	parenthesesAndChangedFileCountStyle?: CSSProperties;
 	showUncommittedChangeBackground?: boolean;
 	allowLineWrapping?: boolean;
+	showChangedFileCountWithIcon?: boolean;
 }): ReactElement {
 	const mutedProps = showUncommittedChangeBackground
 		? {}
@@ -53,7 +56,17 @@ export function WorktreeUncommittedChangeSummaryIndicator({
 		<>
 			<span {...mutedProps}>(</span>
 			<span {...mutedProps}>
-				{changedFiles} {changedFiles === 1 ? "file" : "files"}
+				{showChangedFileCountWithIcon ? (
+					<span className="inline-flex max-w-full items-center gap-0.5 align-baseline">
+						<span className="min-w-0 [overflow-wrap:anywhere]">{changedFiles}</span>
+						<Files size={10} className="shrink-0" aria-hidden="true" />
+						<span className="sr-only"> {changedFiles === 1 ? "file" : "files"}</span>
+					</span>
+				) : (
+					<>
+						{changedFiles} {changedFiles === 1 ? "file" : "files"}
+					</>
+				)}
 			</span>
 			<span
 				className={cn(

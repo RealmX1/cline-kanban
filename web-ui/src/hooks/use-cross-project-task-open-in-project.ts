@@ -1,12 +1,46 @@
 import { isRuntimeAgentSessionSummaryRenderedAsConversationPanel } from "@runtime-agent-catalog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { showAppToast } from "@/components/app-toaster";
+import {
+	type NonModalFloatingFormOwnershipSnapshot,
+	type NonModalFloatingFormWindowHost,
+	useNonModalFloatingFormWindowHost,
+} from "@/components/non-modal-floating-form-window-host-provider";
 import { getTerminalThemeColors } from "@/hooks/use-theme";
 import { readTaskCardWithBoardColumnInWorkspace } from "@/runtime/task-card-action-query";
 import { findCardSelection } from "@/state/board-state";
 import { writeWorkspaceMetadataProbeScopeDeclarationInputsOfBrowserTab } from "@/stores/workspace-metadata-probe-scope-declaration-inputs-of-browser-tab-store";
 import { ensurePersistentTerminal } from "@/terminal/persistent-terminal-manager";
 import type { BoardCard, BoardData } from "@/types";
+
+export type CrossProjectTaskOpenResult =
+	| { outcome: "opened" }
+	| { outcome: "cancelled" }
+	| { outcome: "unavailable" }
+	| { outcome: "failed"; message: string };
+
+interface AwaitedTaskOpenRequest {
+	identity: symbol;
+	workspaceId: string;
+	taskId: string;
+	createdAt: number;
+	workspaceIdsUsedByTaskIncarnation?: readonly string[];
+	signal?: AbortSignal;
+	resolve: (result: CrossProjectTaskOpenResult) => void;
+}
+
+function awaitedTaskOpenMatchesRevealedEditor(
+	request: AwaitedTaskOpenRequest,
+	ownership: NonModalFloatingFormOwnershipSnapshot,
+) {
+	if (request.taskId !== ownership.taskId || request.createdAt !== ownership.taskIncarnationCreatedAtEpochMs)
+		return false;
+	if (request.workspaceId === ownership.workspaceId) return true;
+	return (
+		ownership.workspaceId != null &&
+		request.workspaceIdsUsedByTaskIncarnation?.includes(ownership.workspaceId) === true
+	);
+}
 
 export interface PendingCrossProjectTaskOpen {
 	repoId: string;
@@ -47,6 +81,8 @@ export function useCrossProjectTaskOpenInProject({
 	setSelectedTaskId,
 	handleSelectProject,
 	openBacklogTaskEditor,
+	onOrdinaryTaskOpenRequested,
+	floatingFormWindowHost,
 }: {
 	board: BoardData;
 	currentProjectId: string | null;
@@ -60,6 +96,8 @@ export function useCrossProjectTaskOpenInProject({
 	setSelectedTaskId: (taskId: string | null) => void;
 	handleSelectProject: (projectId: string) => void;
 	openBacklogTaskEditor: (workspaceId: string, card: BoardCard) => void;
+	onOrdinaryTaskOpenRequested?: () => void;
+	floatingFormWindowHost?: NonModalFloatingFormWindowHost | null;
 }): {
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	handleOpenTaskInProject: (repoId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
@@ -73,7 +111,65 @@ export function useCrossProjectTaskOpenInProject({
 	cancelPendingCrossProjectTaskOpenReturningToOriginTask: () => void;
 	// 只丢掉在途态、不改导航（顶栏「返回看板」用：导航照常落到目标项目，落地后显示它的看板）。
 	dismissPendingCrossProjectTaskOpen: () => void;
+	openTaskInProjectWithResult: (
+		workspaceId: string,
+		taskId: string,
+		createdAt: number,
+		signal?: AbortSignal,
+		workspaceIdsUsedByTaskIncarnation?: readonly string[],
+	) => Promise<CrossProjectTaskOpenResult>;
 } {
+	const inheritedFloatingFormHost = useNonModalFloatingFormWindowHost();
+	const floatingFormHost = floatingFormWindowHost ?? inheritedFloatingFormHost;
+	const awaitedTaskOpenRef = useRef<AwaitedTaskOpenRequest | null>(null);
+	const [awaitedTaskOpen, setAwaitedTaskOpen] = useState<AwaitedTaskOpenRequest | null>(null);
+	const finishAwaitedTaskOpen = useCallback((result: CrossProjectTaskOpenResult) => {
+		const request = awaitedTaskOpenRef.current;
+		awaitedTaskOpenRef.current = null;
+		setAwaitedTaskOpen(null);
+		request?.resolve(result);
+	}, []);
+	useEffect(
+		() =>
+			floatingFormHost?.subscribeToRevealedTaskEditors((ownership) => {
+				const request = awaitedTaskOpenRef.current;
+				if (request && awaitedTaskOpenMatchesRevealedEditor(request, ownership))
+					finishAwaitedTaskOpen({ outcome: "opened" });
+			}),
+		[floatingFormHost?.subscribeToRevealedTaskEditors, finishAwaitedTaskOpen],
+	);
+	useEffect(() => {
+		if (
+			!awaitedTaskOpen ||
+			!isCurrentProjectBoardSettled ||
+			!isDetailViewOpen ||
+			currentProjectId !== awaitedTaskOpen.workspaceId ||
+			projectIdOwningHydratedBoard !== awaitedTaskOpen.workspaceId ||
+			selectedTaskId !== awaitedTaskOpen.taskId
+		)
+			return;
+		const selection = findCardSelection(board, selectedTaskId);
+		if (
+			selection?.card.createdAt === awaitedTaskOpen.createdAt &&
+			(selection.column.id !== "backlog" || selection.card.taskShelvingState?.isShelved)
+		)
+			finishAwaitedTaskOpen({ outcome: "opened" });
+	}, [
+		awaitedTaskOpen,
+		board,
+		currentProjectId,
+		projectIdOwningHydratedBoard,
+		selectedTaskId,
+		isCurrentProjectBoardSettled,
+		isDetailViewOpen,
+		finishAwaitedTaskOpen,
+	]);
+	useEffect(
+		() => () => {
+			awaitedTaskOpenRef.current?.resolve({ outcome: "cancelled" });
+		},
+		[],
+	);
 	const focusedTaskCardReadIdentityRef = useRef<symbol | null>(null);
 	useEffect(
 		() => () => {
@@ -92,6 +188,7 @@ export function useCrossProjectTaskOpenInProject({
 	const pendingProjectBoardNavigationRef = useRef(pendingProjectBoardNavigation);
 	const handleNavigateToProjectBoard = useCallback(
 		(repoId: string): Promise<void> => {
+			finishAwaitedTaskOpen({ outcome: "cancelled" });
 			focusedTaskCardReadIdentityRef.current = null;
 			pendingProjectBoardNavigationRef.current?.reject(new Error("看板导航已被新的导航取代"));
 			setPendingCrossProjectTaskOpen(null);
@@ -103,7 +200,7 @@ export function useCrossProjectTaskOpenInProject({
 				handleSelectProject(repoId);
 			});
 		},
-		[handleSelectProject, setSelectedTaskId],
+		[handleSelectProject, setSelectedTaskId, finishAwaitedTaskOpen],
 	);
 	useEffect(() => {
 		if (!pendingProjectBoardNavigation || !isCurrentProjectBoardSettled) return;
@@ -151,6 +248,25 @@ export function useCrossProjectTaskOpenInProject({
 	latestBoardRef.current = board;
 	const openBacklogTaskEditorRef = useRef(openBacklogTaskEditor);
 	openBacklogTaskEditorRef.current = openBacklogTaskEditor;
+	const revealEarlierTaskEditorRef = useRef<(workspaceId: string, taskId: string, createdAt: number) => boolean>(
+		() => false,
+	);
+	revealEarlierTaskEditorRef.current = (workspaceId, taskId, createdAt) => {
+		const aliases = awaitedTaskOpenRef.current?.workspaceIdsUsedByTaskIncarnation;
+		if (!aliases?.length) return false;
+		return (
+			floatingFormHost?.revealTaskEditorPreservingEarlierWorkspace({
+				workspaceId,
+				taskId,
+				taskIncarnationCreatedAtEpochMs: createdAt,
+				workspaceIdsUsedByTaskIncarnation: aliases,
+			}) === true
+		);
+	};
+	const openBacklogTaskEditorUnlessMigratedWindowRemains = (workspaceId: string, taskCard: BoardCard) => {
+		if (!revealEarlierTaskEditorRef.current(workspaceId, taskCard.id, taskCard.createdAt))
+			openBacklogTaskEditorRef.current(workspaceId, taskCard);
+	};
 
 	const handleOpenTaskInProject = useCallback(
 		(
@@ -158,7 +274,11 @@ export function useCrossProjectTaskOpenInProject({
 			taskId: string,
 			expectedTaskIncarnationCreatedAtEpochMs?: number,
 			shouldReadBacklogTaskBeforeLeavingBoard = false,
+			awaitedOpeningRequestIdentity?: symbol,
 		) => {
+			if (!awaitedOpeningRequestIdentity) onOrdinaryTaskOpenRequested?.();
+			if (awaitedTaskOpenRef.current?.identity !== awaitedOpeningRequestIdentity)
+				finishAwaitedTaskOpen({ outcome: "cancelled" });
 			focusedTaskCardReadIdentityRef.current = null;
 			// 刻意不改范围：All projects 首页点进任务时仍留在 Board Scope，从 detail 返回（handleBack 清 selectedTaskId）
 			// 即回到首页（Focus View 打开时首页被卸载，列滚动位置由 continuity store 补回）——与 Post-Deploy Verification
@@ -175,15 +295,17 @@ export function useCrossProjectTaskOpenInProject({
 					selection.card.createdAt !== expectedTaskIncarnationCreatedAtEpochMs
 				) {
 					showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
+					finishAwaitedTaskOpen({ outcome: "unavailable" });
 					return;
 				}
 				if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
-					openBacklogTaskEditorRef.current(repoId, selection.card);
+					openBacklogTaskEditorUnlessMigratedWindowRemains(repoId, selection.card);
 					return;
 				}
 				if (!selection) {
 					// 选中一个看板上没有的 id 会让 Focus View 无卡可显、静默关掉——保持当前视图，如实提示（cf427）。
 					showAppToast({ intent: "warning", message: "That task is no longer on its project's board." });
+					finishAwaitedTaskOpen({ outcome: "unavailable" });
 					return;
 				}
 				setSelectedTaskId(taskId);
@@ -225,16 +347,28 @@ export function useCrossProjectTaskOpenInProject({
 			// Backlog 专用入口在普通看板也原地编辑；在途导航仍沿已有来源恢复协议处理。
 			const focusedTaskCardReadIdentity = Symbol("focused-task-card-read");
 			focusedTaskCardReadIdentityRef.current = focusedTaskCardReadIdentity;
+			const awaitedReadSignal =
+				awaitedTaskOpenRef.current?.identity === awaitedOpeningRequestIdentity
+					? awaitedTaskOpenRef.current?.signal
+					: undefined;
 			void (
-				expectedTaskIncarnationCreatedAtEpochMs === undefined
-					? readTaskCardWithBoardColumnInWorkspace(repoId, taskId)
-					: readTaskCardWithBoardColumnInWorkspace(repoId, taskId, expectedTaskIncarnationCreatedAtEpochMs)
+				awaitedReadSignal
+					? readTaskCardWithBoardColumnInWorkspace(
+							repoId,
+							taskId,
+							expectedTaskIncarnationCreatedAtEpochMs,
+							awaitedReadSignal,
+						)
+					: expectedTaskIncarnationCreatedAtEpochMs === undefined
+						? readTaskCardWithBoardColumnInWorkspace(repoId, taskId)
+						: readTaskCardWithBoardColumnInWorkspace(repoId, taskId, expectedTaskIncarnationCreatedAtEpochMs)
 			).then(
 				(response) => {
 					if (focusedTaskCardReadIdentityRef.current !== focusedTaskCardReadIdentity) return;
 					focusedTaskCardReadIdentityRef.current = null;
 					if (response.taskCardLookupOutcome !== "task_card_found_on_workspace_board") {
 						showAppToast({ intent: "warning", message: "目标任务已失效，无法打开。" });
+						finishAwaitedTaskOpen({ outcome: "unavailable" });
 						return;
 					}
 					const { taskCard, boardColumnIdContainingTaskCard } = response.taskCardSnapshot;
@@ -243,10 +377,11 @@ export function useCrossProjectTaskOpenInProject({
 						taskCard.createdAt !== expectedTaskIncarnationCreatedAtEpochMs
 					) {
 						showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
+						finishAwaitedTaskOpen({ outcome: "unavailable" });
 						return;
 					}
 					if (boardColumnIdContainingTaskCard === "backlog" && !taskCard.taskShelvingState?.isShelved) {
-						openBacklogTaskEditorRef.current(repoId, taskCard);
+						openBacklogTaskEditorUnlessMigratedWindowRemains(repoId, taskCard);
 						return;
 					}
 					navigateToTargetTask();
@@ -258,6 +393,10 @@ export function useCrossProjectTaskOpenInProject({
 						intent: "danger",
 						message: `无法读取目标任务：${error instanceof Error ? error.message : String(error)}`,
 					});
+					finishAwaitedTaskOpen({
+						outcome: "failed",
+						message: error instanceof Error ? error.message : String(error),
+					});
 				},
 			);
 		},
@@ -267,7 +406,54 @@ export function useCrossProjectTaskOpenInProject({
 			handleSelectProject,
 			projectIdOwningHydratedBoard,
 			setSelectedTaskId,
+			finishAwaitedTaskOpen,
+			onOrdinaryTaskOpenRequested,
 		],
+	);
+	const openTaskInProjectWithResult = useCallback(
+		(
+			workspaceId: string,
+			taskId: string,
+			createdAt: number,
+			signal?: AbortSignal,
+			workspaceIdsUsedByTaskIncarnation?: readonly string[],
+		): Promise<CrossProjectTaskOpenResult> => {
+			finishAwaitedTaskOpen({ outcome: "cancelled" });
+			if (signal?.aborted) return Promise.resolve({ outcome: "cancelled" });
+			return new Promise((resolve) => {
+				const identity = Symbol("awaited-task-open");
+				const cancel = () => {
+					if (awaitedTaskOpenRef.current?.identity !== identity) return;
+					focusedTaskCardReadIdentityRef.current = null;
+					setPendingCrossProjectTaskOpen(null);
+					finishAwaitedTaskOpen({ outcome: "cancelled" });
+				};
+				const deadline = window.setTimeout(() => {
+					if (awaitedTaskOpenRef.current?.identity !== identity) return;
+					focusedTaskCardReadIdentityRef.current = null;
+					setPendingCrossProjectTaskOpen(null);
+					finishAwaitedTaskOpen({ outcome: "failed", message: "目标任务尚未显示，请在连接恢复后重试。" });
+				}, 30_000);
+				const request = {
+					identity,
+					workspaceId,
+					taskId,
+					createdAt,
+					workspaceIdsUsedByTaskIncarnation,
+					signal,
+					resolve: (result: CrossProjectTaskOpenResult) => {
+						window.clearTimeout(deadline);
+						signal?.removeEventListener("abort", cancel);
+						resolve(result);
+					},
+				};
+				awaitedTaskOpenRef.current = request;
+				setAwaitedTaskOpen(request);
+				signal?.addEventListener("abort", cancel, { once: true });
+				handleOpenTaskInProject(workspaceId, taskId, createdAt, false, identity);
+			});
+		},
+		[handleOpenTaskInProject, finishAwaitedTaskOpen],
 	);
 	const handleOpenBacklogTaskEditorInProject = useCallback(
 		(repoId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) =>
@@ -334,6 +520,7 @@ export function useCrossProjectTaskOpenInProject({
 			// handleSelectProject 与 setPendingCrossProjectTaskOpen 同批 setRequestedProjectId，下一次渲染起
 			// isProjectSwitching 为真、board 不算落定，直到 currentProjectId 真正换成目标项目。
 			setPendingCrossProjectTaskOpen(null);
+			finishAwaitedTaskOpen({ outcome: "cancelled" });
 			return;
 		}
 		if (projectIdOwningHydratedBoard !== pendingCrossProjectTaskOpen.repoId) return;
@@ -345,12 +532,13 @@ export function useCrossProjectTaskOpenInProject({
 			selection.card.createdAt !== pendingCrossProjectTaskOpen.expectedTaskIncarnationCreatedAtEpochMs
 		) {
 			showAppToast({ intent: "warning", message: "原任务已被删除并重建，无法用旧关联打开同 ID 新任务。" });
+			finishAwaitedTaskOpen({ outcome: "unavailable" });
 			return;
 		}
 		const backlogTaskToEdit = pendingCrossProjectTaskOpen.backlogTaskToEditAfterReturningToOrigin;
 		if (selection && backlogTaskToEdit) {
 			setSelectedTaskId(pendingCrossProjectTaskOpen.taskId);
-			openBacklogTaskEditorRef.current(backlogTaskToEdit.workspaceId, backlogTaskToEdit.taskCard);
+			openBacklogTaskEditorUnlessMigratedWindowRemains(backlogTaskToEdit.workspaceId, backlogTaskToEdit.taskCard);
 			return;
 		}
 		if (selection?.column.id === "backlog" && !selection.card.taskShelvingState?.isShelved) {
@@ -369,7 +557,7 @@ export function useCrossProjectTaskOpenInProject({
 				handleSelectProject(origin.repoId);
 				return;
 			}
-			openBacklogTaskEditorRef.current(pendingCrossProjectTaskOpen.repoId, selection.card);
+			openBacklogTaskEditorUnlessMigratedWindowRemains(pendingCrossProjectTaskOpen.repoId, selection.card);
 			return;
 		}
 		if (selection) {
@@ -377,6 +565,7 @@ export function useCrossProjectTaskOpenInProject({
 			return;
 		}
 		showAppToast({ intent: "warning", message: "That task is no longer on its project's board." });
+		finishAwaitedTaskOpen({ outcome: "unavailable" });
 	}, [
 		board,
 		currentProjectId,
@@ -385,13 +574,16 @@ export function useCrossProjectTaskOpenInProject({
 		isCurrentProjectBoardSettled,
 		pendingCrossProjectTaskOpen,
 		setSelectedTaskId,
+		finishAwaitedTaskOpen,
 	]);
 
 	const dismissPendingCrossProjectTaskOpen = useCallback(() => {
+		finishAwaitedTaskOpen({ outcome: "cancelled" });
 		focusedTaskCardReadIdentityRef.current = null;
 		setPendingCrossProjectTaskOpen(null);
-	}, []);
+	}, [finishAwaitedTaskOpen]);
 	const cancelPendingCrossProjectTaskOpenReturningToOriginTask = useCallback(() => {
+		finishAwaitedTaskOpen({ outcome: "cancelled" });
 		focusedTaskCardReadIdentityRef.current = null;
 		const origin = pendingCrossProjectTaskOpen?.originFocusedTaskInProject ?? null;
 		if (!origin) {
@@ -400,7 +592,7 @@ export function useCrossProjectTaskOpenInProject({
 		}
 		// 走同一个入口：原项目仍是当前项目（快照未到）时它撤销在途切换并选中原任务；已切过去时反向打开。
 		handleOpenTaskInProject(origin.repoId, origin.taskId);
-	}, [handleOpenTaskInProject, pendingCrossProjectTaskOpen]);
+	}, [handleOpenTaskInProject, pendingCrossProjectTaskOpen, finishAwaitedTaskOpen]);
 
 	return {
 		pendingCrossProjectTaskOpen,
@@ -409,5 +601,6 @@ export function useCrossProjectTaskOpenInProject({
 		handleNavigateToProjectBoard,
 		cancelPendingCrossProjectTaskOpenReturningToOriginTask,
 		dismissPendingCrossProjectTaskOpen,
+		openTaskInProjectWithResult,
 	};
 }

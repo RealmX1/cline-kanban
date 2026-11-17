@@ -1,6 +1,13 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
+import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import * as nativeDeliveryJournal from "../../../src/core/codex-native-prompt-delivery-journal";
+import * as workspaceState from "../../../src/state/workspace-state";
+import { createTaskCommandExecutionService } from "../../../src/task-command-execution/task-command-execution-service";
 import type {
 	CodexNativePromptDeliveryInput,
 	CodexNativePromptDeliveryResult,
@@ -12,6 +19,8 @@ import {
 	recordTerminalInputBytesIntoOccupancyTracker,
 } from "../../../src/terminal/terminal-input-box-occupancy";
 import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
+import { canTransitionTaskForHookEvent } from "../../../src/trpc/hook-event-task-transition-gate";
+import { sendTaskChatMessageAcrossSessionTransports } from "../../../src/trpc/task-chat-message-send-across-session-transports";
 
 const INCARNATION = "e96aa879-02a4-480e-bbd6-97b7e5e83843";
 const managedRecording = vi.hoisted(() => ({ begin: vi.fn(), settle: vi.fn() }));
@@ -109,6 +118,181 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 }
 
 describe("session manager 的 Codex 原生投递", () => {
+	it("所属执行服务经过真实统一投递出口与终端门禁接续，最后一个结果完成才允许 Review", async () => {
+		vi.useRealTimers();
+		const directory = await mkdtemp(join(tmpdir(), "owned-result-terminal-chain-"));
+		const workspaceDirectory = vi
+			.spyOn(workspaceState, "getWorkspaceDirectoryPath")
+			.mockImplementation((id) => join(directory, "workspaces", id));
+		const runtimeHome = vi.spyOn(workspaceState, "getRuntimeHomePath").mockReturnValue(directory);
+		const native = vi.fn(async (input: CodexNativePromptDeliveryInput): Promise<CodexNativePromptDeliveryResult> => {
+			if (!(await input.beforeSubmit())) return { status: "cancelled" };
+			await input.onRequestAttempted();
+			manager.confirmAcceptedAgentConversationInput("conversation-1", {
+				observedAtMs: Date.now(),
+				eventId: input.clientUserMessageId,
+				nativeSessionId: "thread-1",
+				runtimeSessionIncarnationId: INCARNATION,
+				submittedPromptText: input.text,
+				acceptedNativeAgentTurnIsInProgress: true,
+			});
+			return {
+				status: "confirmed",
+				evidence: {
+					clientUserMessageId: input.clientUserMessageId,
+					nativeSessionId: "thread-1",
+					nativeTurnId: input.clientUserMessageId,
+					nativeUserMessageId: input.clientUserMessageId,
+				},
+			};
+		});
+		const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
+		const { entry, active, write } = installSession(manager);
+		entry.summary = runtimeTaskSessionSummarySchema.parse({
+			...entry.summary,
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			workspacePath: directory,
+		});
+		Object.assign(active, { outputReactionEngine: null, outputReactionSession: null });
+		const acp = new AcpTaskSessionService();
+		const launch = vi.fn(async () => {});
+		const pendingSettlements: Promise<void>[] = [];
+		const service = createTaskCommandExecutionService({
+			readOwner: async (_workspaceId, _taskId, record) => ({
+				taskId: "task",
+				taskIncarnationCreatedAtEpochMs: 7,
+				conversationSessionId: "conversation-1",
+				nativeSessionId: "thread-1",
+				worktreePath: directory,
+				summary: manager.getSummary("conversation-1"),
+				isNativeInputSubmissionBusy: manager.hasPendingProgrammaticTaskChatInputDelivery(
+					"conversation-1",
+					record?.resultDelivery?.resultId,
+				),
+			}),
+			park: async (record) =>
+				manager.parkTaskSessionAwaitingDispatchedBackgroundWork("conversation-1", {
+					owningCommandExecutionId: record.executionId,
+				}).ok,
+			unpark: async (record) => {
+				manager.unparkTaskSession("conversation-1", record.executionId);
+			},
+			deliver: async (record, validate, settled) => {
+				if (!record.resultDelivery) throw new Error("缺少冻结结果");
+				return sendTaskChatMessageAcrossSessionTransports(
+					{
+						getScopedTerminalManager: async () => manager,
+						getScopedAcpTaskSessionService: async () => acp,
+						loadScopedRuntimeConfig: async () => ({
+							globalConfigPath: join(directory, "config.json"),
+							projectConfigPath: null,
+							selectedAgentId: "codex",
+							selectedShortcutLabel: null,
+							agentAutonomousModeEnabled: false,
+							newTaskStartInPlanModeByDefault: false,
+							ompAgentSessionTransportForNewTasks: "pty_terminal",
+							readyForReviewNotificationsEnabled: false,
+							notificationSoundEnabled: false,
+							autoContinueOnConnectionDropEnabled: false,
+							programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: false,
+							postDeployVerificationForceCompleteEnabled: false,
+							shortcuts: [],
+							commitPromptTemplate: "",
+							openPrPromptTemplate: "",
+							commitPromptTemplateDefault: "",
+							openPrPromptTemplateDefault: "",
+							userInterfacePreferencesSharedAcrossBrowserOrigins:
+								USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
+						}),
+						validateBeforeTerminalWrite: validate,
+						preserveExistingComposerDraft: true,
+						owningCommandExecutionId: record.executionId,
+						programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
+						onProgrammaticTerminalDeliverySettled: (receipt) => {
+							const pending = settled(receipt);
+							pendingSettlements.push(pending);
+							void pending.catch(() => {});
+						},
+					},
+					{ workspaceId: "workspace-1", workspacePath: directory },
+					{
+						taskId: "conversation-1",
+						text: record.resultDelivery.text,
+						source: "owned_command_execution_result",
+						idempotencyKey: record.resultDelivery.resultId,
+					},
+				);
+			},
+			reconcileDelivery: async () => "unknown",
+			listWorkspaceIds: async () => ["workspace-1"],
+			warn: () => {},
+			launch,
+			inspectWorker: async () => "running",
+		});
+		try {
+			const start = (name: string) =>
+				service.start("workspace-1", {
+					taskId: "task",
+					idempotencyKey: name,
+					specification: {
+						command: ["isolated-no-process"],
+						resumeCommand: ["isolated-no-process"],
+						workingDirectory: directory,
+						resultFile: join(directory, `${name}.json`),
+						materialSha256: "a".repeat(64),
+						label: name,
+					},
+				});
+			const first = await start("first-result");
+			const second = await start("second-result");
+			for (const record of [first, second])
+				await writeFile(record.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+			await service.sweepExecution("workspace-1", first.executionId);
+			await service.sweepExecution("workspace-1", second.executionId);
+			await vi.waitFor(
+				async () =>
+					expect((await service.inspect("workspace-1", first)).resultDelivery?.state).toBe("native_accepted"),
+				{ timeout: 8_000 },
+			);
+			expect(
+				manager.getSummary("conversation-1")?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds,
+			).toEqual([second.executionId]);
+			expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+			expect(native).toHaveBeenCalledTimes(1);
+			await service.sweepExecution("workspace-1", second.executionId);
+			await vi.waitFor(
+				async () =>
+					expect((await service.inspect("workspace-1", second)).resultDelivery?.state).toBe("native_accepted"),
+				{ timeout: 8_000 },
+			);
+			expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(true);
+			expect(manager.transitionToReview("conversation-1", "hook")).toMatchObject({
+				turnOwner: "user",
+				userTurnKind: "review",
+				awaitingDispatchedBackgroundWork: null,
+			});
+			await service.sweepExecution("workspace-1", first.executionId);
+			await service.sweepExecution("workspace-1", second.executionId);
+			expect(native).toHaveBeenCalledTimes(2);
+			expect(launch).toHaveBeenCalledTimes(2);
+			expect(write).not.toHaveBeenCalled();
+		} finally {
+			service.stop();
+			const pendingDeliveryId = active.programmaticDeliveryReceipt?.idempotencyKey;
+			if (pendingDeliveryId) manager.cancelTaskChatInputDelivery("conversation-1", pendingDeliveryId);
+			acp.disposeAllTaskSessions();
+			try {
+				await Promise.all(pendingSettlements);
+			} finally {
+				workspaceDirectory.mockRestore();
+				runtimeHome.mockRestore();
+				await rm(directory, { recursive: true, force: true });
+			}
+		}
+	});
 	it("原生投递准备期间开始暂存时先暂停，暂存结束后沿用原消息继续提交", async () => {
 		let enterNativeSubmit!: () => void;
 		const nativePreparation = new Promise<void>((resolve) => {
@@ -260,15 +444,164 @@ describe("session manager 的 Codex 原生投递", () => {
 		expect(firstOutcome).not.toHaveBeenCalled();
 		expect(active.programmaticDeliveryReceipt?.idempotencyKey).toBe("first-result");
 	});
-	it("所属结果只解除自己的等待", () => {
+	it("所属结果排队后仍挡住 Review，尚未提交时同文接受不解除等待", () => {
 		const manager = new TerminalSessionManager();
-		installSession(manager, "");
-		const unpark = vi.spyOn(manager, "unparkTaskSession");
+		const { entry } = installSession(manager, "");
+		Object.assign(entry.summary, {
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			reviewReason: null,
+		});
+		entry.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			owningCommandExecutionIds: ["execution", "other-execution"],
+		};
 		manager.submitTaskChatInputWhenReady("conversation-1", "RESULT", {
 			owningCommandExecutionId: "execution",
 			onDeliveryOutcome: vi.fn(),
 		});
-		expect(unpark).toHaveBeenCalledExactlyOnceWith("conversation-1", "execution");
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"execution",
+			"other-execution",
+		]);
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+		manager.confirmAcceptedAgentConversationInput("conversation-1", {
+			observedAtMs: Date.now(),
+			eventId: "not-this-delivery",
+			nativeSessionId: "thread-1",
+			runtimeSessionIncarnationId: INCARNATION,
+			submittedPromptText: "RESULT",
+			acceptedNativeAgentTurnIsInProgress: true,
+		});
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"execution",
+			"other-execution",
+		]);
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+	});
+	it("没有执行身份的程序化输入在排队和接受后均保留其他所属等待", () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installSession(manager, "");
+		Object.assign(entry.summary, {
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			reviewReason: null,
+		});
+		entry.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			owningCommandExecutionIds: ["other-execution"],
+		};
+		manager.submitTaskChatInputWhenReady("conversation-1", "普通提示", { onDeliveryOutcome: vi.fn() });
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual(["other-execution"]);
+		manager.confirmAcceptedAgentConversationInput("conversation-1", {
+			observedAtMs: Date.now(),
+			eventId: "ordinary-prompt-accepted",
+			nativeSessionId: "thread-1",
+			runtimeSessionIncarnationId: INCARNATION,
+			submittedPromptText: "普通提示",
+			acceptedNativeAgentTurnIsInProgress: true,
+		});
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual(["other-execution"]);
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+	});
+	it("只剩无归属等待时，没有执行身份的程序化输入仍清除空 owner", () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installSession(manager, "");
+		Object.assign(entry.summary, {
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			reviewReason: null,
+		});
+		entry.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			label: "其他后台等待",
+			hasUnownedBackgroundWorkWait: true,
+			owningCommandExecutionIds: [],
+		};
+		manager.submitTaskChatInputWhenReady("conversation-1", "普通提示", { onDeliveryOutcome: vi.fn() });
+		expect(entry.summary.awaitingDispatchedBackgroundWork ?? null).toBeNull();
+	});
+	it("所属等待抽干后的空数组不再挡住新输入清除无归属等待", () => {
+		const manager = new TerminalSessionManager();
+		const { entry } = installSession(manager, "");
+		Object.assign(entry.summary, {
+			state: "running",
+			turnOwner: "agent",
+			liveness: "live",
+			userTurnKind: null,
+			reviewReason: null,
+		});
+		entry.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			label: "其他后台等待",
+			hasUnownedBackgroundWorkWait: true,
+			owningCommandExecutionIds: [],
+		};
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+		manager.confirmAcceptedAgentConversationInput("conversation-1", {
+			observedAtMs: Date.now(),
+			eventId: "new-user-input",
+			nativeSessionId: "thread-1",
+			runtimeSessionIncarnationId: INCARNATION,
+			submittedPromptText: "继续",
+			acceptedNativeAgentTurnIsInProgress: true,
+		});
+		expect(entry.summary.awaitingDispatchedBackgroundWork ?? null).toBeNull();
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(true);
+	});
+	it.each([true, false])("其他后台等待保留时，当前结果仍可原生接续：自身等待存在=%s", async (stillOwnsWait) => {
+		const native = vi.fn(async (input: CodexNativePromptDeliveryInput): Promise<CodexNativePromptDeliveryResult> => {
+			if (!(await input.beforeSubmit())) return { status: "cancelled" };
+			await input.onRequestAttempted();
+			return {
+				status: "confirmed",
+				evidence: {
+					clientUserMessageId: input.clientUserMessageId,
+					nativeSessionId: "thread-1",
+					nativeTurnId: "continued-turn",
+					nativeUserMessageId: "continued-result",
+				},
+			};
+		});
+		const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
+		const { entry, write } = installSession(manager);
+		entry.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			owningCommandExecutionIds: stillOwnsWait ? ["execution", "other-execution"] : ["other-execution"],
+		};
+		const outcome = vi.fn();
+		expect(
+			manager.submitTaskChatInputWhenReady("conversation-1", "RESULT", {
+				owningCommandExecutionId: "execution",
+				idempotencyKey: "result",
+				onDeliveryOutcome: outcome,
+			}),
+		).not.toBeNull();
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual(
+			stillOwnsWait ? ["execution", "other-execution"] : ["other-execution"],
+		);
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+		await vi.advanceTimersByTimeAsync(1500);
+		expect(native).toHaveBeenCalledTimes(1);
+		expect(outcome).toHaveBeenCalledWith(expect.objectContaining({ status: "delivered_and_submit_confirmed" }));
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual(["other-execution"]);
+		manager.confirmAcceptedAgentConversationInput("conversation-1", {
+			observedAtMs: Date.now(),
+			eventId: "accepted-owned-result",
+			nativeSessionId: "thread-1",
+			runtimeSessionIncarnationId: INCARNATION,
+			submittedPromptText: "RESULT",
+			acceptedNativeAgentTurnIsInProgress: true,
+		});
+		expect(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual(["other-execution"]);
+		expect(canTransitionTaskForHookEvent(entry.summary, "to_review")).toBe(false);
+		expect(write).not.toHaveBeenCalled();
 	});
 	it.each(["human_input", "persistent_revocation"] as const)(
 		"持久化 PTY 意图期间 %s 不会被备用投递覆盖",

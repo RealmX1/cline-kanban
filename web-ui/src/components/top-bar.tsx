@@ -244,6 +244,7 @@ export function TopBar({
 	workspaceId,
 	onToggleSidebar,
 	projectSwitcher,
+	visitedTaskNavigationControl,
 	onOpenTaskSpotlightSearch,
 	onToggleTaskLookupWorkbench,
 	isTaskLookupWorkbenchOpen = false,
@@ -304,6 +305,7 @@ export function TopBar({
 	// 刻意不受 `hideProjectDependentActions` 影响——切换中、项目不可用、任务详情页里它都必须可用，
 	// 因为任务详情页会把左侧 ProjectNavigationPanel 整个卸载，这里是那时唯一的换项目入口。
 	projectSwitcher?: TopBarProjectSwitcherState;
+	visitedTaskNavigationControl?: React.ReactNode;
 	// 打开任务 Spotlight 搜索。不传就不渲染入口（无项目态）。与项目切换器同理，刻意不受
 	// `hideProjectDependentActions` 影响——跨项目搜索在任务详情页里同样有效。
 	onOpenTaskSpotlightSearch?: () => void;
@@ -428,6 +430,7 @@ export function TopBar({
 					) : null}
 
 					{projectSwitcher ? <TopBarProjectSwitcher {...projectSwitcher} /> : null}
+					{!isMobile ? visitedTaskNavigationControl : null}
 
 					{onOpenTaskSpotlightSearch ? (
 						<TaskSpotlightSearchTriggerButton
@@ -510,6 +513,7 @@ export function TopBar({
 						isMobile ? "h-11 ml-auto min-w-0 max-w-full overflow-x-auto" : "h-10",
 					)}
 				>
+					{isMobile ? visitedTaskNavigationControl : null}
 					{/* Desktop: inline shortcut, terminal, debug buttons */}
 					{!isMobile ? (
 						<>

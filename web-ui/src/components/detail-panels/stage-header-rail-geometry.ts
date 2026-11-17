@@ -113,6 +113,8 @@ export interface FocusViewGroupSectionGeometry {
 
 export interface StageHeaderPinLayoutGeometryInput {
 	sections: readonly FocusViewGroupSectionGeometry[];
+	/** 收起的固定分组始终占顶轨首行，与滚出视口的标题共享排列。 */
+	fixedTopGroupIds?: readonly string[];
 	viewportTop: number;
 	viewportHeight: number;
 	columnCount: number;
@@ -143,14 +145,18 @@ export function computeStageHeaderPinLayoutGeometry(
 ): StageHeaderPinLayoutGeometry {
 	const { sections, viewportTop, viewportHeight, columnCount, focusedColumnId } = input;
 	const viewportBottom = viewportTop + viewportHeight;
-	const groupIds = sections.map(({ id }) => id);
-	const compactGroupIds: string[] = [];
+	const fixedTopGroupIds = input.fixedTopGroupIds ?? [];
+	const groupIds = [...fixedTopGroupIds, ...sections.map(({ id }) => id)];
+	const compactGroupIds: string[] = input.compactHeadersEnabled ? [...fixedTopGroupIds] : [];
 	const compactHeight = (ids: string[]) =>
 		computeFocusViewGroupHeaderRailHeight({ groupIds: ids, compactGroupIds: ids, columnCount });
 	if (input.compactHeadersEnabled) {
 		const prefix: string[] = [];
 		for (const section of sections) {
-			if (section.bottom > viewportTop + compactHeight([...prefix, section.id]) || !Number.isFinite(section.bottom))
+			if (
+				section.bottom > viewportTop + compactHeight([...fixedTopGroupIds, ...prefix, section.id]) ||
+				!Number.isFinite(section.bottom)
+			)
 				break;
 			prefix.push(section.id);
 		}
@@ -190,7 +196,7 @@ export function computeStageHeaderPinLayoutGeometry(
 			focusedCardHeight,
 		});
 	const classify = (focusedEdge: FocusedCardRailEdge) => {
-		const topPinnedColumnIds: string[] = [];
+		const topPinnedColumnIds: string[] = [...fixedTopGroupIds];
 		for (const section of sections) {
 			if (section.id === focusedColumnId && focusedEdge === "pinBottom") break;
 			const threshold =
@@ -205,12 +211,13 @@ export function computeStageHeaderPinLayoutGeometry(
 			topPinnedColumnIds.push(section.id);
 		}
 		const bottomPinnedColumnIds: string[] = [];
-		const focusedIndex = groupIds.indexOf(focusedColumnId);
-		for (let index = sections.length - 1; index >= topPinnedColumnIds.length; index--) {
+		const focusedSectionIndex = sections.findIndex(({ id }) => id === focusedColumnId);
+		const topPinnedSectionCount = topPinnedColumnIds.length - fixedTopGroupIds.length;
+		for (let index = sections.length - 1; index >= topPinnedSectionCount; index--) {
 			const section = sections[index];
 			if (!section || !Number.isFinite(section.top) || !Number.isFinite(section.bottom)) break;
 			const containsFocusedCardBelow =
-				focusedEdge === "pinBottom" && focusedIndex >= topPinnedColumnIds.length && index >= focusedIndex;
+				focusedEdge === "pinBottom" && focusedSectionIndex >= topPinnedSectionCount && index >= focusedSectionIndex;
 			if (
 				!containsFocusedCardBelow &&
 				isInFlowHeaderOnlySection(section, input.compactHeadersEnabled, compactGroupIds)
@@ -427,7 +434,7 @@ export function computeTopRailHeightAboveStageJumpTarget({
 	targetSectionViewportTop,
 	railLayout,
 }: StageJumpTargetRailGeometryInput): number {
-	if (targetStageIndex <= 0) {
+	if (targetStageIndex <= 0 && !railLayout?.fixedTopGroupIds?.length) {
 		return 0;
 	}
 	if (railLayout) {
@@ -448,7 +455,10 @@ export function computeTopRailHeightAboveStageJumpTarget({
 			});
 			const nextHeight =
 				computeFocusViewGroupHeaderRailHeight({
-					groupIds: railLayout.sections.slice(0, targetStageIndex).map(({ id }) => id),
+					groupIds: [
+						...(railLayout.fixedTopGroupIds ?? []),
+						...railLayout.sections.slice(0, targetStageIndex).map(({ id }) => id),
+					],
 					compactGroupIds: predictedLayout.compactGroupIds,
 					columnCount: railLayout.columnCount,
 					focusedGroupId:

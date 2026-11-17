@@ -53,6 +53,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **Factory Droid 与 Kiro 保留接入、停止后续适配**：`droid` / `kiro` 的现有实现、启动入口、历史数据及回归测试保留；不再跟进其 CLI / 协议变化、补齐专属能力，也不作为新功能的适配或验收要求。共享能力改动可自然覆盖；只有用户明确要求时再恢复针对性适配。
 - **契约双点**：zod schema 主来源在 `src/core/api-contract.ts`；procedure 层契约（有哪些 procedure、input/output 绑定、就地派生的输入 schema）在 `src/trpc/app-router.ts`——新增/改 procedure 两处都要看。web-ui 直接 import 运行时源码：纯类型引用加 `web-ui/tsconfig.json` 即可；**有值引用必须三处同步**（tsconfig + vite.config + vitest.config），漏一处就是「类型过了但运行/测试解析失败」。
 - **Queue 是任务消息的统一投递观察面**：新增 Kanban 主动消息先经 `managed-task-prompt-delivery-coordinator.ts` 登记；只有 `after_agent_turn` 进入等待调度。类型/来源显示元数据不能写入控制后台让位的 `source`，也不能把受理冒充送达。语义见 `.plan/docs/queued-task-prompt-delivery-semantics.md` §12。
+- **所属后台结果独立接续**：核验执行归属后，其他所属等待不拦当前结果；PTY 与 ACP 的接受路径都只能解除本执行的等待。恢复指纹排除自身 park 的时间戳与标签，不能因此补发预算。见 `docs/task-owned-command-execution-and-result-delivery.md`。
 - **前端**：`web-ui/src/App.tsx` 是组合根（别让它长成第二个运行时编排器）；「这个行为怎么实现的」先查 `web-ui/src/hooks/`，别从组件翻起。
 - **任务概况与进展分开**：独立 `taskDescription` 不覆盖 Initial Prompt；实施开始核对名称与简介，更新概况带读取时版本。Progress 增量记录阶段结果，查卡只取当前主会话投影；旧阶段目标不能推断成功。见 `docs/task-description-and-work-progress.md`。
 - **独立填写窗由页面级宿主持有**：入口只登记窗口，导航不卸载表单；任务键带 workspace/task/incarnation，保存绑定打开时归属。任务编辑器入口不得与窗口 controller 竞争持久草稿。见 `docs/non-modal-floating-form-windows-and-retained-sessions.md`。
@@ -120,6 +121,7 @@ web-ui：
 | `docs/task-assistance-api-provider-routing.md` | 辅助 AI API 主备路由、持久冷却、图片兼容及轻量项目归属 Context |
 | `docs/task-editor-floating-window-and-project-assignment.md` | 创建与 Backlog 共用浮窗、设置显示偏好、项目迁移恢复及单轮 AI 分析 |
 | `docs/non-modal-floating-form-windows-and-retained-sessions.md` | 通用填写浮窗、常驻宿主、实例归属、焦点层级及跨页面保存 |
+| `docs/visited-task-navigation-history.md` | 跨项目访问历史、前后导航、浏览器持久快照与 Backlog 浮窗实际显示回报 |
 | `docs/task-editor-creation-submission-recovery.md` | 新建提交的冻结身份、保存即关闭、后续步骤恢复与启动前持久边界 |
 | `src/codex-native-session-control-host/` | 每代 Codex TUI 的独享控制宿主；端点随 summary/adoption record 接管，退出资源由 PTY 内监督进程持有 |
 | `docs/task-collaboration-sessions.md` | Sessions 角色、跨 agent 协作会话、独立启动快照与恢复边界 |

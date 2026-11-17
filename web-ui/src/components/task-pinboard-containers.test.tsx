@@ -1,14 +1,31 @@
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { TaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
+import { TaskPinboardSectionInFocusView as ControlledTaskPinboardSectionInFocusView } from "@/components/detail-panels/task-pinboard-section-in-focus-view";
 import { TaskPinboardStripOnKanbanBoard } from "@/components/task-pinboard-strip-on-kanban-board";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { TaskPinnedToTaskPinboard } from "@/state/task-pinboard-pinning";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 import type { BoardCard } from "@/types";
+import { useBooleanLocalStorageValue } from "@/utils/react-use";
+
+function TaskPinboardSectionInFocusView(
+	props: Omit<ComponentProps<typeof ControlledTaskPinboardSectionInFocusView>, "isCollapsed" | "onToggleCollapsed">,
+) {
+	const [isCollapsed, setIsCollapsed] = useBooleanLocalStorageValue(
+		LocalStorageKey.TaskPinboardSectionCollapsedInFocusView,
+		false,
+	);
+	return (
+		<ControlledTaskPinboardSectionInFocusView
+			{...props}
+			isCollapsed={isCollapsed}
+			onToggleCollapsed={() => setIsCollapsed(!isCollapsed)}
+		/>
+	);
+}
 
 // 两个置顶板容器的共同契约：0 张时整块不渲染、折叠态落 localStorage、分身不携带 data-task-id
 // （全局唯一是「点 stage 标签跳回本体卡」以及依赖连线锚点能工作的前提）。

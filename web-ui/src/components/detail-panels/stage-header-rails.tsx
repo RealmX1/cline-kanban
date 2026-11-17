@@ -33,6 +33,10 @@ interface StageHeaderGroupActionHandlers {
 }
 
 interface StageHeaderRailsProps extends StageRailFocusedCardProps, StageHeaderGroupActionHandlers {
+	renderFixedTopGroupHeader?: (
+		groupId: string,
+		presentation: FocusViewGroupHeaderPresentation,
+	) => React.ReactElement | null;
 	selection: CardSelection;
 	displayGroups: BoardDisplayGroup[];
 	focusedDisplayGroupId: BoardDisplayGroupId;
@@ -151,6 +155,7 @@ function StageHeaderRailEntry({
  * 焦点卡的 prop 包。
  */
 export function StageHeaderRails({
+	renderFixedTopGroupHeader,
 	selection,
 	displayGroups,
 	focusedDisplayGroupId,
@@ -189,7 +194,7 @@ export function StageHeaderRails({
 	): React.ReactElement | null => {
 		const column = columnById.get(columnId);
 		if (!column) {
-			return null;
+			return renderFixedTopGroupHeader?.(columnId, presentation) ?? null;
 		}
 		const withCard = columnId === focusedDisplayGroupId && focusedCardPinState === edge;
 		return (
