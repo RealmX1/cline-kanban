@@ -1686,7 +1686,10 @@ export function useBoardInteractions({
 						showAppToast({
 							intent: "warning",
 							icon: "info-sign",
-							message: "Couldn't move task to Review — try again.",
+							message:
+								result.taskCardActionCommandExecutionOutcome === "command_failed"
+									? result.commandFailureMessage
+									: "尚未移入 Review，请查看任务状态后重试。",
 							timeout: 3000,
 						});
 					}

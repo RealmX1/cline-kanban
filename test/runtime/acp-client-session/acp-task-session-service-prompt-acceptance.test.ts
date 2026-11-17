@@ -158,6 +158,88 @@ describe("ACP 提交只在可靠协议活动后确认接受", () => {
 		);
 		service.disposeAllTaskSessions();
 	});
+	it("所属结果被 ACP 接受和完成时仍保留其他后台等待", async () => {
+		const { service, connection, turn } = await startAwaitingUserSession({ initialPromptText: "派发后台工作" });
+		notify({ sessionUpdate: "tool_call", toolCallId: "dispatch", title: "派发工作" });
+		for (const owningCommandExecutionId of ["execution", "other-execution"])
+			expect(service.parkTaskSessionAwaitingDispatchedBackgroundWork(TASK_ID, { owningCommandExecutionId }).ok).toBe(
+				true,
+			);
+		turn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		const continuationTurn = deferredPrompt();
+		vi.mocked(connection.prompt).mockReturnValueOnce(continuationTurn.promise);
+		await service.sendTaskSessionInput(
+			TASK_ID,
+			"所属执行结果",
+			undefined,
+			undefined,
+			"owned-result",
+			undefined,
+			"execution",
+		);
+		notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "接续结果" } });
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"other-execution",
+		]);
+		continuationTurn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"other-execution",
+		]);
+		service.disposeAllTaskSessions();
+	});
+	it("没有执行身份的协议接受保留其他所属等待", async () => {
+		const { service, turn } = await startAwaitingUserSession({ initialPromptText: "派发后台工作" });
+		notify({ sessionUpdate: "tool_call", toolCallId: "dispatch", title: "派发工作" });
+		for (const owningCommandExecutionId of ["execution", "other-execution"])
+			expect(service.parkTaskSessionAwaitingDispatchedBackgroundWork(TASK_ID, { owningCommandExecutionId }).ok).toBe(
+				true,
+			);
+		turn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		const continuationTurn = deferredPrompt();
+		const connection = runtime.state.connection;
+		if (!connection) throw new Error("缺少 ACP 连接");
+		vi.mocked(connection.prompt).mockReturnValueOnce(continuationTurn.promise);
+		await service.sendTaskSessionInput(TASK_ID, "用户继续聊天");
+		notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "收到" } });
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"execution",
+			"other-execution",
+		]);
+		continuationTurn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([
+			"execution",
+			"other-execution",
+		]);
+		service.disposeAllTaskSessions();
+	});
+	it("所属等待抽干后，没有执行身份的协议接受清掉无归属等待", async () => {
+		const { service, turn } = await startAwaitingUserSession({ initialPromptText: "派发后台工作" });
+		notify({ sessionUpdate: "tool_call", toolCallId: "dispatch", title: "派发工作" });
+		const executionId = "9aacf74c-c9ee-4c2c-a70e-997879f182e1";
+		expect(
+			service.parkTaskSessionAwaitingDispatchedBackgroundWork(TASK_ID, { owningCommandExecutionId: executionId }).ok,
+		).toBe(true);
+		expect(service.parkTaskSessionAwaitingDispatchedBackgroundWork(TASK_ID, { label: "其他后台等待" }).ok).toBe(true);
+		service.unparkTaskSession(TASK_ID, executionId);
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork).toMatchObject({
+			hasUnownedBackgroundWorkWait: true,
+			owningCommandExecutionIds: [],
+		});
+		turn.resolve({ stopReason: "end_turn" });
+		await vi.waitFor(() => expect(service.getTaskSessionInputSubmissionReadiness(TASK_ID).isBusy).toBe(false));
+		const continuationTurn = deferredPrompt();
+		const connection = runtime.state.connection;
+		if (!connection) throw new Error("缺少 ACP 连接");
+		vi.mocked(connection.prompt).mockReturnValueOnce(continuationTurn.promise);
+		await service.sendTaskSessionInput(TASK_ID, "新的用户输入");
+		notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "收到" } });
+		expect(service.getSummary(TASK_ID)?.awaitingDispatchedBackgroundWork ?? null).toBeNull();
+		service.disposeAllTaskSessions();
+	});
 	it("忙碌拒绝在注册新 prompt 前提供明确未派发事实", async () => {
 		const { service, connection } = await startAwaitingUserSession();
 		await service.sendTaskSessionInput(TASK_ID, "第一条输入", undefined, undefined, "first-input");

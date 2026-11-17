@@ -307,6 +307,11 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 	currentProjectBoardForOptimisticOverlay?: BoardData;
 	boardMutationInitiator?: WebUiBoardMutationInitiator;
 }): Promise<TaskCardActionCommandExecutionResult<RuntimeTaskCardActionMoveIntoReviewResponse>> {
+	const expectedTaskIncarnationCreatedAtEpochMs =
+		input.expectedTaskIncarnationCreatedAtEpochMs ??
+		(input.currentProjectBoardForOptimisticOverlay
+			? findCardSelection(input.currentProjectBoardForOptimisticOverlay, input.taskId)?.card.createdAt
+			: undefined);
 	return await executeTaskCardActionCommand({
 		workspaceId: input.workspaceId,
 		taskIds: [input.taskId],
@@ -318,8 +323,8 @@ export async function moveTaskCardIntoReviewByHandingTurnToUserThroughRuntime(in
 		sendCommand: () =>
 			moveTaskCardIntoReviewByHandingTurnToUserInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
-				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
-					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
+				...(expectedTaskIncarnationCreatedAtEpochMs !== undefined
+					? { expectedTaskIncarnationCreatedAtEpochMs }
 					: {}),
 				boardMutationInitiator: input.boardMutationInitiator ?? "web_ui_user_gesture",
 			}),

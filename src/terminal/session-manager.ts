@@ -3082,10 +3082,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			const park = entry.summary.awaitingDispatchedBackgroundWork;
 			if (
 				this.hasPendingProgrammaticTaskChatInputDelivery(taskId) ||
-				park?.hasUnownedBackgroundWorkWait ||
-				(park &&
-					(!park.owningCommandExecutionIds?.includes(options.owningCommandExecutionId) ||
-						park.owningCommandExecutionIds.some((id) => id !== options.owningCommandExecutionId)))
+				(park && (park.hasUnownedBackgroundWorkWait || !park.owningCommandExecutionIds))
 			)
 				return null;
 		}
@@ -3094,10 +3091,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		}
 		const deferWhileUserTurn = options?.deferWhileUserTurn ?? false;
-		// 程序化「已提交用户轮」投递即外部编排的 resume 动作（后台任务消息）——一个 parked 会话收到投递就是被恢复，
-		// 故在此清 park（单一幂等 sink unparkTaskSession，未 parked 时 no-op）。这是最可靠的清标点：纯内存、同步、
-		// 不依赖任何 hook 往返，且只在 parked 期间真正有后台等待时投递才会出现（park→Stop 后无投递，故 park 稳定保持）。
-		this.unparkTaskSession(taskId, options?.owningCommandExecutionId);
 		// last-write-wins：清掉该 task 上一个未决投递的定时器，并自增代际令本次成为唯一有效投递——
 		// 把已过定时器、正 await 就绪判定的在途 attempt 也一并作废（见 taskChatInputDeliveryGeneration）。
 		clearTaskChatInputDeliveryTimer(active);
@@ -3108,7 +3101,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 单飞槽被抢占：上一条投递从此再无人推进，必须当场给它一个诚实结论，
 		// 否则它的等待者（RVF）会永远停在 pending——这正是契约里 superseded_by_later_delivery 的用途。
 		settleActiveProgrammaticDelivery(active, "delivery_failed", "superseded_by_later_delivery");
-		if (options?.onDeliveryOutcome) {
+		// 排队不撤销其他所属等待。没有执行身份且没有剩余 owner 时，才清除无归属等待。
+		// 所属结果只在真实接受回执中按捕获的执行 ID 解除自身等待；失败和未知回执不清理。
+		if (
+			!options?.owningCommandExecutionId &&
+			!(entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds?.length ?? 0)
+		)
+			this.unparkTaskSession(taskId);
+		if (options?.onDeliveryOutcome || options?.owningCommandExecutionId) {
 			const receipt: PendingProgrammaticDeliveryReceipt = {
 				idempotencyKey: options.idempotencyKey ?? null,
 				phase: "awaiting_readiness",
@@ -3121,11 +3121,14 @@ export class TerminalSessionManager implements TerminalSessionService {
 						outcome.status === "delivered_and_submit_confirmed" ||
 						outcome.status === "delivered_queued_behind_active_agent_turn"
 					) {
-						if (this.entries.get(taskId)?.active === active)
+						if (this.entries.get(taskId)?.active === active) {
+							if (options.owningCommandExecutionId)
+								this.unparkTaskSession(taskId, options.owningCommandExecutionId);
 							this.invalidateCurrentWorkPhaseGoalAfterDeliveredUserPrompt(
 								taskId,
 								receipt.firstSubmitCarriageReturnAtEpochMs ?? now(),
 							);
+						}
 					}
 					options.onDeliveryOutcome?.(outcome);
 				},
@@ -9623,6 +9626,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 已结束回合的迟到接受只补证；真实新输入接受才使旧批次与在途错误核验失效。
 		if (entry.summary.agentId === "codex" && !shouldPreserveCurrentTurnAfterAcceptedInput)
 			this.codexModelCapacityErrorAcceptedTurnEventIdByActiveProcess.set(entry.active, input.eventId);
+		if (
+			!shouldPreserveCurrentTurnAfterAcceptedInput &&
+			entry.summary.awaitingDispatchedBackgroundWork &&
+			(entry.summary.awaitingDispatchedBackgroundWork.owningCommandExecutionIds?.length ?? 0) === 0
+		)
+			this.unparkTaskSession(taskId);
 		const submittedUserMessagePreview = input.submittedPromptText?.trim();
 		const summary = updateSummary(
 			entry,
@@ -9642,7 +9651,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 								pid: entry.summary.pid,
 								agentId: entry.summary.agentId,
 							}),
-							awaitingDispatchedBackgroundWork: null,
+							// 所属接受只解除本执行。没有剩余 owner 时，空数组不能再挡住无归属等待的清除。
+							awaitingDispatchedBackgroundWork: entry.summary.awaitingDispatchedBackgroundWork ?? null,
 							reviewReason: null,
 						}
 					: {}),
@@ -11099,6 +11109,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (resolveSessionFacets(entry.summary).turnOwner !== "agent") {
 			return false;
 		}
+		// 在途投递单独挡住空闲自愈，覆盖接受回执与状态观察之间的时序窗口。
+		if (this.hasPendingProgrammaticTaskChatInputDelivery(taskId)) return false;
 		const substantiveBaseline =
 			resolveLastEffectiveAgentConversationActivityObservation(entry.summary)?.observedAtMs ??
 			entry.summary.startedAt;

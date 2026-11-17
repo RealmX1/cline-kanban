@@ -20,9 +20,13 @@
 
 结果正文和稳定 ID 先持久化，再登记统一 managed delivery 与原生发送意图。执行记录区分 `known_not_submitted`、`submission_unknown` 与 `native_accepted`。写入可能发生前先保存未知标记；重启优先读取持久回执与原生历史，只有证明未提交才允许同 ID 重试。逻辑结果和实际投递尝试分别计数。旧托管者或旧 attempt 的迟到回执不能结算当前尝试；普通人工队列的重启确认规则保持原有语义。
 
-park sidecar 的 `owningCommandExecutionIds` 记录归属，不修改 facet 伪装空闲。结果只能移除本执行的等待；其他等待、模态审批和主会话交接仍然阻止投递。发送复用 `sendTaskChatMessageAcrossSessionTransports`、`validateBeforeTerminalWrite` 和原生受理证据；所属结果关闭自动暂存草稿，等待可写状态或通过原生通道保留 composer。
+park sidecar 的 `owningCommandExecutionIds` 记录归属，不修改 facet 伪装空闲。执行记录核验后，其他所属执行的等待不再阻挡当前结果；每次只移除本执行的等待。普通或归属未知的后台等待、模态审批和主会话交接仍然阻止投递。发送复用 `sendTaskChatMessageAcrossSessionTransports`、`validateBeforeTerminalWrite` 和原生受理证据；所属结果关闭自动暂存草稿，等待可写状态或通过原生通道保留 composer。PTY 的接受记录、真实接受回执和 ACP 的接受回调同样保留其他执行的等待。
 
-冻结可交回结果后先移除本执行的计算等待，避免同会话多个执行互相卡住；投递等待或失败时保留本执行的等待，原生确认后才完成交回。ACP 回执超时仍是提交未知；连接缺失或忙碌只有在 prompt 注册前提供明确事实，并绑定原生会话、稳定结果 ID 和精确尝试 ID，才允许有界重投。旧尝试的未派发证据不能授权新尝试重投。机器等待执行 `resume_same_run` 时读取 `maximum_unchanged_retries`，没有截止时间也会退避后复核，普通进度时间戳不重置恢复预算。
+冻结可交回结果不预先清理计算等待；排队和写前登记均保留所属等待，统一 transport 取得真实接受回执后才解除自身等待并完成交回。没有执行 ID 的普通输入保留其他所属 owner；只剩无归属等待时沿用既有恢复语义。其他工作仍在等待时，主会话保持 In Progress／Running；全部接续结束后，既有主回合完成事件经 facet 链进入 Review。旧完成事件不能覆盖更新的输入或回合。
+
+结果恢复的证据指纹包含原生投递证据、其他等待的归属与实际输入忙碌状态；排除自身 park 的时间戳、标签及 owner 数组顺序。重启和自身等待重建不补发预算，其他等待或可写证据变化后沿用原结果身份恢复。ACP 回执超时仍是提交未知；连接缺失或忙碌只有在 prompt 注册前提供明确事实，并绑定原生会话、稳定结果 ID 和精确尝试 ID，才允许有界重投。旧尝试的未派发证据不能授权新尝试重投。机器等待执行 `resume_same_run` 时读取 `maximum_unchanged_retries`，没有截止时间也会退避后复核，普通进度时间戳不重置恢复预算。
+
+浏览器手动移入 Review 遇到非 JSON 网关响应或连接中断时，不自动重发移列动作。共享 tRPC 层保留 HTTP 状态，既有 nonce 拒绝仍可重新取得 nonce 并重试一次。Review 请求与状态回查各有 8 秒上限；回查绑定原 workspace/task/incarnation，最多三次，退避 400／1200 毫秒。读取到 Review 就采用权威快照，仍无法确认则明确显示“结果未知”并恢复操作入口。主看板、Focus View 与跨项目入口共用这条路径。
 
 用户 Stop、取消回合、终端 Ctrl+C/生成中的 Escape 及删卡的停止链路先持久撤销，再取消所属 controller、CLI 和验证后代。独立监督进程持续核对撤销，并保存已观察的后代启动身份；核验身份后才发信号，不杀共享服务。持久撤销跨 runtime/机器重启保持有效。本地退出、取消请求与原生取消接受分别展示；原生缺证保持 unknown，并进行有界复核。
 

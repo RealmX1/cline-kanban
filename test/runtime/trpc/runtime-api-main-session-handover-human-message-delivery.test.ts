@@ -404,6 +404,7 @@ describe("真人消息确认提交后才解除主会话交接 hold", () => {
 				undefined,
 				undefined,
 				expect.any(Function),
+				undefined,
 			);
 		},
 	);

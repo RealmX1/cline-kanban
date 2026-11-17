@@ -869,6 +869,86 @@ describe("所属执行与一次逻辑交回", () => {
 		expect(summary.awaitingDispatchedBackgroundWork).toBeUndefined();
 		expect(launch).not.toHaveBeenCalled();
 	});
+	it("写前登记后直到真实接受回执仍保留自身等待", async () => {
+		const { service, request, summary, deliver } = fixture();
+		const record = await service.start("workspace", request);
+		deliver.mockImplementation(async (_record, validate, settled) => {
+			await validate("before_transport_acceptance");
+			await validate("before_first_transport_write");
+			expect(summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([record.executionId]);
+			expect((await service.inspect("workspace", record)).parkOwned).toBe(true);
+			await settled({ status: "delivered_and_submit_confirmed", reason: null });
+			return { ok: true, summary, terminalDelivery: { status: "delivered_and_submit_confirmed", reason: null } };
+		});
+		await writeFile(request.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+		await service.sweepExecution("workspace", record.executionId);
+		expect(deliver).toHaveBeenCalledTimes(1);
+		expect((await service.inspect("workspace", record)).resultDelivery?.state).toBe("native_accepted");
+		expect(summary.awaitingDispatchedBackgroundWork).toBeUndefined();
+	});
+	it.each([false, true])("其他结果就绪=%s 时各所属结果独立接续一次并保留其他等待", async (bothReady) => {
+		const { service, request, summary, deliver, launch } = fixture();
+		const first = await service.start("workspace", request);
+		const secondRequest = {
+			...request,
+			idempotencyKey: "second-background-work",
+			specification: { ...request.specification, resultFile: join(directory, "second-business-result.json") },
+		};
+		const second = await service.start("workspace", secondRequest);
+		await writeFile(request.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+		if (bothReady)
+			await writeFile(secondRequest.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+		await service.sweepExecution("workspace", first.executionId);
+		expect(deliver).toHaveBeenCalledTimes(1);
+		expect(summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toEqual([second.executionId]);
+		expect((await service.inspect("workspace", first)).resultDelivery?.state).toBe("native_accepted");
+		await service.sweepExecution("workspace", first.executionId);
+		expect(deliver).toHaveBeenCalledTimes(1);
+		if (!bothReady)
+			await writeFile(secondRequest.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+		await service.sweepExecution("workspace", second.executionId);
+		expect(deliver).toHaveBeenCalledTimes(2);
+		expect(summary.awaitingDispatchedBackgroundWork).toBeUndefined();
+		expect(launch).toHaveBeenCalledTimes(2);
+	});
+	it("重启与自身 park 元数据不补发预算，其他等待归属改变后自动恢复同一结果", async () => {
+		const f = fixture(async () => "same-native-evidence");
+		const record = await f.service.start("workspace", f.request);
+		f.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 1,
+			owningCommandExecutionIds: [record.executionId, "other-execution"],
+		};
+		f.deliver.mockRejectedValue(new Error("写前暂不可用"));
+		await writeFile(f.request.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+		await f.service.sweepExecution("workspace", record.executionId);
+		await mutateTaskCommandExecutions("workspace", (records) => ({
+			records: records.map((value) => ({
+				...value,
+				resultDelivery: value.resultDelivery && { ...value.resultDelivery, retryPreflightNotBeforeEpochMs: 0 },
+			})),
+			result: undefined,
+		}));
+		await f.service.sweepExecution("workspace", record.executionId);
+		expect(f.deliver).toHaveBeenCalledTimes(2);
+		const frozenResultId = (await f.service.inspect("workspace", record)).resultDelivery?.resultId;
+		f.service.stop();
+		const restarted = fixture(async () => "same-native-evidence");
+		restarted.summary.awaitingDispatchedBackgroundWork = {
+			sinceMs: 999,
+			label: "仅标签更新",
+			owningCommandExecutionIds: ["other-execution", record.executionId],
+		};
+		await restarted.service.sweepExecution("workspace", record.executionId);
+		expect(restarted.deliver).not.toHaveBeenCalled();
+		restarted.summary.awaitingDispatchedBackgroundWork.owningCommandExecutionIds = [record.executionId];
+		await restarted.service.sweepExecution("workspace", record.executionId);
+		expect(restarted.deliver).toHaveBeenCalledTimes(1);
+		expect((await restarted.service.inspect("workspace", record)).resultDelivery).toMatchObject({
+			resultId: frozenResultId,
+			state: "native_accepted",
+		});
+		expect(restarted.launch).not.toHaveBeenCalled();
+	});
 	it("结果重试保留并等待普通后台工作解除", async () => {
 		const { service, request, deliver, summary } = fixture();
 		const accepted = deliver.getMockImplementation();
@@ -1824,15 +1904,13 @@ describe("所属执行与一次逻辑交回", () => {
 		const first = { noticeId: "before-rewrite", stage: "final_agent_review", text: "写前仍有效的修订。" };
 		const revised = { noticeId: "after-rewrite", stage: "final_agent_review", text: "清单在未知标记之后被替换。" };
 		await writeFile(noticesFile, JSON.stringify({ notices: [first] }));
-		const originalUnpark = f.unpark.getMockImplementation();
-		if (!originalUnpark) throw new Error("缺少 unpark fixture");
-		f.unpark.mockImplementation(async (current) => {
+		f.readOwner.mockImplementation(async () => {
 			const persisted = (await readTaskCommandExecutions("workspace")).find(
 				(item) => item.executionId === record.executionId,
 			);
 			if (persisted?.resultDelivery?.state === "submission_unknown")
 				await writeFile(noticesFile, JSON.stringify({ notices: [revised] }));
-			await originalUnpark(current);
+			return f.owner;
 		});
 		let wrote = false;
 		f.deliver.mockImplementationOnce(async (_ignored, validate) => {

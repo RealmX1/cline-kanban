@@ -26,6 +26,33 @@ type RuntimeTrpcClient = ReturnType<typeof createTRPCProxyClient<RuntimeAppRoute
 
 const clientByWorkspaceId = new Map<string, RuntimeTrpcClient>();
 
+export function isRuntimeTrpcTransportFailure(error: unknown): boolean {
+	return error instanceof TRPCClientError && !error.shape;
+}
+
+async function fetchRuntimeTrpcResponsePreservingHttpFailure(input: RequestInfo | URL, init?: RequestInit) {
+	let response: Response;
+	try {
+		response = await fetch(input, init);
+	} catch (cause) {
+		throw new TRPCClientError<RuntimeAppRouter>("与运行时的连接中断，操作结果尚未确认。", {
+			cause: cause instanceof Error ? cause : undefined,
+		});
+	}
+	if (!response.ok) {
+		try {
+			await response.clone().json();
+		} catch (cause) {
+			// tRPC 解析失败时会丢失 response；在解析前保留状态，不显示代理返回的 HTML 或内部正文。
+			throw new TRPCClientError<RuntimeAppRouter>(`运行时请求失败（HTTP ${response.status}），操作结果尚未确认。`, {
+				cause: cause instanceof Error ? cause : undefined,
+				meta: { response },
+			});
+		}
+	}
+	return response;
+}
+
 // 请求头在每个 HTTP 请求发出那一刻求值：nonce 被重连 / 重试换掉后，后续请求（含重发）自动带上新值。
 // 还没拿到过 nonce 时不带这个头——runtime 不拒绝不带头的请求，只把它记成裸 tRPC 调用方。
 export function buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(
@@ -116,10 +143,12 @@ export function getRuntimeTrpcClient(workspaceId: string | null): RuntimeTrpcCli
 				condition: (operation) => operation.context.sendAsIndependentHttpRequest === true,
 				true: httpLink({
 					url: "/api/trpc",
+					fetch: fetchRuntimeTrpcResponsePreservingHttpFailure,
 					headers: () => buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(workspaceId),
 				}),
 				false: httpBatchLink({
 					url: "/api/trpc",
+					fetch: fetchRuntimeTrpcResponsePreservingHttpFailure,
 					headers: () => buildRuntimeTrpcRequestHeadersWithWorkspaceScopeAndWebUiPageLoadNonce(workspaceId),
 				}),
 			}),
