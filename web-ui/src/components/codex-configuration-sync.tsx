@@ -1048,6 +1048,7 @@ export function CodexConfigurationSyncNotice({
 					align="end"
 					sideOffset={8}
 					collisionPadding={12}
+					sticky="always"
 					aria-label="Codex 配置变更提示"
 					data-codex-configuration-feedback-popover=""
 					data-verification-anchor="codex-configuration-sync-notice"

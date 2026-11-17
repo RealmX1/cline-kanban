@@ -97,14 +97,32 @@ it.skipIf(!process.env.KANBAN_CODEX_CONFIGURATION_SYNC_PACKAGED_CLI_PATH)(
 		await notice.waitFor({ state: "visible", timeout: 45_000 });
 		const trigger = notice.locator('[aria-label*="本次修改的共享范围"]').first();
 		expect(await trigger.textContent()).toContain("共享到配置方案");
+		const evidenceDirectory = process.env.KANBAN_CODEX_CONFIGURATION_SYNC_EVIDENCE_DIRECTORY;
+		if (evidenceDirectory) {
+			await mkdir(evidenceDirectory, { recursive: true });
+			await writeFile(
+				join(evidenceDirectory, "sharing-scope-keyboard-readiness.json"),
+				JSON.stringify({ disabledBeforeKeyboardInteraction: !(await trigger.isEnabled()) }),
+			);
+		}
+		await vi.waitFor(async () => expect(await trigger.isEnabled()).toBe(true), { timeout: 15_000 });
 		await trigger.focus();
+		await vi.waitFor(async () =>
+			expect(await trigger.evaluate((element) => element.ownerDocument.activeElement === element)).toBe(true),
+		);
 		await page.keyboard.press("ArrowDown");
 		await page.getByRole("menuitemradio", { name: "仅本会话", exact: true }).click();
 		await vi.waitFor(async () => expect(await trigger.textContent()).toContain("仅本会话"), { timeout: 15_000 });
-		const evidenceDirectory = process.env.KANBAN_CODEX_CONFIGURATION_SYNC_EVIDENCE_DIRECTORY;
 		const measurements: Array<{ theme: string; width: number; contrast: number; label: string }> = [];
 		for (const width of [1280, 390]) {
 			await page.setViewportSize({ width, height: 900 });
+			await vi.waitFor(async () => {
+				const bounds = await notice.boundingBox();
+				expect(bounds).not.toBeNull();
+				if (!bounds) throw new Error("配置提示尚未定位。");
+				expect(bounds.x).toBeGreaterThanOrEqual(0);
+				expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+			});
 			for (const theme of ["graphite", "light", "high-contrast-dark", "high-contrast-light"]) {
 				await page.locator("html").evaluate((element, value) => {
 					element.setAttribute("data-theme", value);
