@@ -1,11 +1,14 @@
-# 从既有会话 fork 出分身：五家 harness 的 prompt cache 实测
+# 从既有会话 fork 出分身：多家 harness 的 prompt cache 实测
 
 本文件记录 2026-09-11 / 09-12 两天对「**从一个既有 agent 会话 fork 出一次性分身**」这件事做的跨 harness
 缓存实测。它服务于 exploratory mode 的维护作业——那个作业每跑一次就 fork 一次，所以「fork 能不能复用父会话
 的 prompt cache」直接决定这个功能是几分钱还是几美元一次。
 
 **日期边界**：第一至七节保留 2026-09-11 / 09-12 的历史记录（提交 `c6880b232`）。2026-10-30 / 10-31
-的脚本、配置、复测数据及复现命令见第八至十节；历史能力扫描与结论不能自动当作当前状态。
+的脚本、配置、复测数据及复现命令见第八至十节；2026-11-16 的 Claude Opus / Sonnet 5.5 单组复测见第十一节。
+历史能力扫描与结论不能自动当作当前状态。
+2026-11-16 的 Antigravity CLI / Gemini 4 Hydrogen、Argon，以及仅准备的 Carbon 入口见第十二节。
+方法论审计见第十三节；经隔离中继实测稳定前缀 / 父 root 锚点的结果见第十四节。
 
 **最终结论入口**：[原生分身缓存调查最终报告](agent-session-fork-prompt-cache-investigation-final-report.md)。
 本文件继续保留历史原文、逐请求样本与各轮复现经过，最终报告负责汇总当前结论和证据索引。
@@ -165,7 +168,8 @@ model 全是 canonical 名 `claude-opus-5`，而真正在跑的启动形态是 `
 | Kimi | `--output-format stream-json` 的输出只有 3 行，**零 token/cache 字段**。真数据在 `~/.kimi-code/sessions/.../agents/main/wire.jsonl` 的 `usage.record`。REST 面读历史会话全是 0。 |
 | Cursor | `cacheWriteTokens` 恒为 0，缓存写入成本不可观测，只能靠读取单边推断。 |
 
-Claude Code 与 DeepSeek 的遥测是直的，没有这类坑。
+九月测量时 Claude Code 与 DeepSeek 未遇到上述计量问题。当前 Claude Code 的累计费用与流式暂态 usage
+另见第十一节，不能沿用「所有 result 字段都是本轮增量」的假设。
 
 ## 五、对本仓库的影响
 
@@ -652,3 +656,424 @@ CURSOR_CACHE_MEASUREMENT_NODE_BIN="$HOME/.nvm/versions/node/v24.12.0/bin/node"
 入口在调用模型前先检查 SQLite 原生绑定，ABI 不匹配时直接拒绝，不先发请求再在读取 store 时失败。
 新建实验的凭据准备当前仅验证 macOS。离线 fixtures 覆盖输入口径、缺字段、继承污染、多响应、工具与压缩、
 模型目录选择、十六进制元数据及完整 blob 继承。生产分身行为、共享构建产物与全局配置均未改动。
+
+## 十一、2026-11-16：Claude Opus / Sonnet 5.5，各一组热父会话与 fork 首轮
+
+**所测两种模型均成功复用父历史缓存，首轮总输入命中率约 99.9%。** 这是当前模拟会话的正面证据，
+不是九月 446k 交互式 scratchpad 故障已修复的证据。本次捕获的默认 system prompt 没有 scratchpad 段。
+
+### 方法与边界
+
+先审阅 `measure-native-agent-fork-prompt-cache.mjs` 和 Cursor 入口；原脚本没有 Claude 执行器，
+因此新增仅依赖 Node 标准库的 `scripts/measure-claude-native-fork-prompt-cache.mjs`，沿用环境白名单、
+合成词序列、空历史公共前缀上界和提交前持久化方法。没有为此安装仓库依赖。
+
+- CLI：本机 Claude Code **2.1.323**，没有更新全局 CLI。认证为 first-party OAuth。
+- 模型：明确指定并核验原生回执中的 `claude-opus-5-5`、`claude-sonnet-5-5`，均为 `high` effort。
+  模型名称与 ID 经 [Opus 官方文档](https://platform.claude.com/docs/en/models/opus-5-5/overview) 和
+  [Sonnet 官方文档](https://platform.claude.com/docs/en/models/sonnet-5-5/overview) 核对。
+- 独立 HOME、CLAUDE_CONFIG_DIR 与 cwd；不导入仓库指导、用户 hooks、MCP 或 plugins。
+  保留默认 system prompt 和工具集；`dontAsk` 权限模式；所有测试回合都没有工具调用或压缩。
+  父子均用 `-p` headless（SDK 入口的默认 system），不是 PTY 交互式会话。
+- 每模型只有一组：空历史基线 → 父 seed → 同 ID 父 hot → `--resume <父 ID> --fork-session` 首轮。
+  父会话共两轮；没有重复比较、多规模矩阵、分身第二轮或 fork 后的父续跑。
+- `--context-tokens 64000` 控制合成词数，并不是模型 tokenizer 的精确输入目标。本轮实际输入为约 116k / 119k。
+  fork 提问不携带答案，要求回读父首条 user 消息中的随机 UUID。
+- 父 hot 请求完成后分别 **0.034 / 0.041 秒**开始启动 fork 命令；首轮在其后约 8 / 6 秒完成。
+  这是本地命令间隔，不声称测得服务端到达时间。
+
+原生 fork 语义参照 [官方 CLI 文档](https://code.claude.com/docs/en/cli-reference)。本次没有设置自定义
+system prompt、关闭默认 snapshot，或手工复制历史来制造 fork。
+
+### 全部八个模型回合
+
+`总输入 = input_tokens + cache_read_input_tokens + cache_creation_input_tokens`。
+
+| 模型 | 步骤 | 总输入 | cache read | cache write | 非缓存 input | output |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Opus 5.5 | 空历史基线 | 18,071 | 11,370 | 6,699 | 2 | 4 |
+| Opus 5.5 | 父 seed | 116,366 | 11,370 | 104,994 | 2 | 4 |
+| Opus 5.5 | 父 hot | 116,447 | 112,218 | 4,227 | 2 | 4 |
+| Opus 5.5 | **fork 首轮** | **116,562** | **116,425** | **135** | **2** | **25** |
+| Sonnet 5.5 | 空历史基线 | 17,961 | 11,370 | 6,589 | 2 | 4 |
+| Sonnet 5.5 | 父 seed | 118,972 | 13,291 | 105,679 | 2 | 4 |
+| Sonnet 5.5 | 父 hot | 119,049 | 114,820 | 4,227 | 2 | 4 |
+| Sonnet 5.5 | **fork 首轮** | **119,164** | **119,027** | **135** | **2** | **33** |
+
+| 模型 | fork 总命中率 | 公共前缀保守上界 | 超出上界的 cache read | 相对父 hot 历史缓存参考 | fork 首轮增量估算费用 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Opus 5.5 | **99.8825%** | 18,071 | 98,354 | 100% | **$0.0248730** |
+| Sonnet 5.5 | **99.8850%** | 17,961 | 101,066 | 100% | **$0.0127767** |
+
+公共前缀上界取空历史总输入与父 seed 已读缓存中的较大值。100% 为达到父 hot 扣上界后的参考量，
+上限截为 100%；不表示 fork 全部输入命中。此次 fork 只重写 135 tokens，另有 2 个非缓存输入 tokens，
+cache read 明显覆盖了父对话历史，不能用「只复用共享工具或 system prompt」解释。
+两组含冷建父会话与空历史基线的 CLI 累计估算增量分别约 **$0.97949 / $0.49284**，合计 **$1.47233**；
+这是 CLI 按价目估算的费用，不是订阅账户的额外扣款账单。
+
+### 继承、前缀与计量核验
+
+两次均取得独立子 session ID；父 transcript 在 fork 前后逐字节 SHA-256 相同；父 user / assistant
+消息的 UUID 与内容完整出现在子历史；子首轮都准确回读随机 UUID。计量只取本次 stdout，
+不把子 transcript 内复制过来的父 usage 算进首轮。
+
+原生 transcript 现在含 `api-request-shape` 与 `api-request`：两组父 hot 与子首轮的 system、工具声明和
+请求参数（模型、thinking、effort、betas 等）SHA-256 分别一致。实际 system 快照中没有 scratchpad，
+因此这次仍不能覆盖九月的 session ID 路径差异。没有据此宣布上游
+[issue #77306](https://github.com/anthropics/claude-code/issues/77306) 已修复；2026-11-16 查询时它仍 open，
+已读取正文与全部评论。相同前缀与成功 usage 证明本次路径可用，不能证明复杂工具历史、改变角色指导、
+切换 cwd / 模型 / 权限、跨重启或所有交互式会话也会命中。
+
+本次还确认两个新版本遥测细节：
+
+1. `result.usage.iterations` 与原生 transcript 的最终 assistant usage 一致。流式 assistant 的
+   `output_tokens` 在 Opus seed 中暂报 3，最终是 4，输入与缓存三项一致。入口最初因此中止采集，
+   修正后从原 stdout 补证，再执行尚未提交的步骤；没有重发任何已完成请求。
+2. `total_cost_usd` 和 `modelUsage` 是继承父计数器的累计值。Opus 子结果的 $0.9235346 包含父 $0.8986616，
+   本次 fork 增量为差值 $0.0248730。Sonnet 同理；把全部 result 费用直接相加会重复计算父成本。
+
+### 证据与复现
+
+本机私有证据目录：`~/.cline/kanban/claude-native-fork-cache-recheck-20261116/`。
+包含 `manifest.json`、`measurements.json`，以及八个步骤各自的 prompt、stdout、stderr、debug 与原生
+transcript 快照。私有 runtime 含账户配置，不作为公开附件。
+
+```sh
+# 新实验会真实调用模型；目录必须全新。此次只执行了一组两模型对比。
+node scripts/measure-claude-native-fork-prompt-cache.mjs \
+  --evidence-directory "$HOME/.cline/kanban/new-claude-fork-cache-measurement" \
+  --context-tokens 64000
+
+# 已有证据离线重算；不读取凭据、不调用模型。
+node scripts/measure-claude-native-fork-prompt-cache.mjs --analyze-only \
+  --evidence-directory "$HOME/.cline/kanban/claude-native-fork-cache-recheck-20261116"
+```
+
+`--continue` 只补采已成功步骤，并发送尚未登记的新步骤；提交状态未知的步骤直接拒绝重发。
+语法与离线重算在 Node 22.23.4 验证。没有修改生产适配器、部署运行实例或成本闸；本次没有只能部署后验证的行为。
+
+## 十二、2026-11-16：Antigravity CLI / Gemini 4；Carbon 仅准备
+
+**Argon 本次原生 fork 首轮没有复用缓存，前后父热对照有效。Hydrogen 首轮同样为零，但最近的父对照也失效，
+其 fork 缓存结论保持证据不足。** 两种模型各只创建一个真实分支、只执行一次分支首轮；没有重复分支比较。
+
+### 产品入口与配置
+
+个人 Google AI Pro / Ultra 的 coding 订阅当前应经 Antigravity CLI（`agy`）测试。此前准备的 Gemini CLI
+没有发送模型请求：Google 的[个人账号弃用公告](https://developers.google.com/gemini-code-assist/docs/deprecations/code-assist-individuals)
+确认个人订阅已于 2026-06-18 迁往 Antigravity；旧认证页仍存在个人登录说明，不能优先于迁移公告与当前 README。
+本轮使用用户已安装并登录的 **Antigravity CLI 1.5.9**，没有替换或更新它。
+
+| 配置 | 原生 `agy models` 中的 slug | 本轮处理 |
+| --- | --- | --- |
+| Gemini 4 Hydrogen / High | `gemini-4-hydrogen-high` | 实测 |
+| Gemini 4 Argon / High | `gemini-4-argon-high` | 实测 |
+| Gemini 4 Carbon / High | 当前账号目录中没有；待资格就绪后核对 `gemini-4-carbon-high` | 仅准备，零模型请求 |
+
+没有选 Orchestrator，也没有混入其他 provider。每个成功回合的原生 `init.model` 均与请求 slug 一致，
+`init` 中的工具集合、cwd 和 `permission_mode=request-review` 在各自父热对照与子首轮之间一致。
+所有回合没有工具或子代理执行。
+
+入口为 `scripts/measure-antigravity-native-fork-prompt-cache.py`，只依赖 Python 标准库。
+真实 HOME 保留给原生账号 / keyring；会话、配置、缓存、工作目录和日志用原生 `--gemini_dir`、`--app_data_dir`
+参数隔离，未复制用户会话。诊断配置关闭 `useG1Credits`，不修改用户全局设置。
+直接更换 HOME 会失去原生登录可见性，本轮已在发模型请求前用只读模型目录查询确认这一点。
+
+### 原生分支与完整性
+
+父回合经 `--input-format stream-json --output-format stream-json` 发出。首次尝试 `--print /fork` 时，CLI
+明确拒绝 print 模式，返回空会话 ID、`num_turns=0` 和全零 usage；没有模型请求，也没有创建分支。
+随后按[官方原生 `/fork` 流程](https://antigravity.google/docs/cli/conversations)经自有 PTY 操作同一父会话。
+
+Hydrogen 的第一次 PTY 只停在隔离存储的首次界面初始化，没有进入会话输入。停止后核对原生 store ID 集合与
+父 steps 均未变化，再导入同账号已经完成的 onboarding 缓存；没有代替用户确认新条款或数据收集选项。
+初始化延迟使最早的热对照离实际 fork 约五分钟，因此补了一次父热请求；它返回零缓存，不能冒充有效热对照。
+
+两次真正 fork 都保存 PTY 的 `Forked conversation` 回执与退出时的完整子 ID，并与原生
+`last_conversations.json` 的当前 cwd 绑定、独立 SQLite store 交叉核验。SQLite 只读备份进入私有证据目录。
+父 `steps` 的 idx、type、status、payload 在 fork 前后完整一致；子首轮之前的 store 继承了全部冻结父 steps。
+Hydrogen 的父参考取实际 fork 前已保存的 hot-refresh 快照，初始化前的旧快照继续保留。
+这里证明的是历史步骤没有改写，不宣称 SQLite 的访问元数据或文件字节也不变化。
+
+分支首轮的问题不携带随机 UUID 答案，两种模型都正确回读了父首条 user 消息中的 `RECALL_KEY`。
+没有手工复制数据库或重放消息来冒充原生 fork。
+
+### 全部十二个成功主回合
+
+`--context-words 64000` 为合成词数；Gemini tokenizer 下实际请求约 43k–45k tokens，不是 64k 精确输入目标。
+`总输入 = step.usage.input_tokens + step.usage.cache_read_tokens`；本 CLI 的 `input_tokens` 与
+`total_tokens` 都排除了 cached，不能直接用 cached 除以它们求总输入命中率。thinking 已计入 output，不能再加一次。
+
+| 模型 | 步骤 | 主请求总输入 | cache read | output（含 thinking） |
+| --- | --- | ---: | ---: | ---: |
+| Hydrogen | 空历史基线 | 10,454 | 0 | 32 |
+| Hydrogen | 父 seed | 43,390 | 0 | 93 |
+| Hydrogen | 最初父 hot | 43,692 | 41,336 | 30 |
+| Hydrogen | 初始化等待后父 hot-refresh | 43,931 | 0 | 14 |
+| Hydrogen | **唯一分支首轮** | **44,164** | **0** | **150** |
+| Hydrogen | 分支后父 hot-after | 44,855 | 0 | 14 |
+| Hydrogen | 最后一次父热补对照 | 45,078 | 0 | 14 |
+| Argon | 空历史基线 | 9,750 | 0 | 27 |
+| Argon | 父 seed | 42,914 | 0 | 89 |
+| Argon | 父 hot | 43,212 | 40,865 | 27 |
+| Argon | **唯一分支首轮** | **43,463** | **0** | **155** |
+| Argon | 分支后父 hot-after | 43,448 | 41,163 | 27 |
+
+两次子首轮命令分别在最近父请求结束后 **6.409 / 6.430 秒**启动，间隔主要用于原生 PTY fork。
+Argon 前后父 hot 的总命中率分别约 **94.57% / 94.74%**，且 cache read 远超 9,750 的公共前缀上界。
+因此 Argon 的首轮 **0 / 43,463** 是有效对比中的未命中，不是父历史根本没有缓存。
+
+Hydrogen 最初的普通续跑曾读取 41,336，但初始化等待后的父请求及分支后的两次补对照都为零。
+最后一次补对照仍冷时，入口没有再创建第二个分支或发送第二个子首轮。该模型的 **0 / 44,164** 作为观察保留，
+`historyReuseRatio=null`；不能断言其原因只在 fork，也不推定任何内部 TTL、路由或 prompt 变化根因。
+
+### 会继承的累计计数器
+
+[官方 headless 文档](https://antigravity.google/docs/cli/headless)提供逐步 stream 事件与累计 result 的区别。
+本轮还直接确认 **跨进程 resume / fork 的 result 会继承父计数器**：
+
+| 数据 | Hydrogen | Argon |
+| --- | ---: | ---: |
+| 子首轮 `result.usage.cache_read_tokens` | 41,336 | 40,865 |
+| 子首轮本次完成的 `agent_response.usage.cache_read_tokens` | **0** | **0** |
+
+如果只读 result，就会把父命中错算成子首轮命中。脚本只取本次 stdout 中唯一完成的主 `agent_response`，
+按 step index 去重，要求完整计量、成功结束和同一原生会话 ID；继承的数据库 usage 也不参与首轮统计。
+用量表不是费用账单，本轮没有从缓存数字反推订阅额度消耗或美元费用。
+
+### Carbon 待测入口与证据
+
+```text
+~/.cline/kanban/antigravity-native-fork-cache-recheck-20261116/
+~/.cline/kanban/antigravity-carbon-fork-cache-prepared-20261116/prepared-plan.json
+```
+
+第一处包含 manifest、重算结果、十二个主回合的原始 stdout / stderr、每步原生 store 备份、PTY 回执、
+失败的本地准备记录及模型目录。第二处为 Carbon 的待执行计划：记录 `currentlyAvailable=false`、
+`liveModelRequests=0`，以及升级后使用相同 High / 64,000 词配置的命令。执行时必须重新命中原生模型目录，
+不回落其他模型、不购买或升级订阅、不自动开始未来测试。
+
+```sh
+# 不调用模型：重算现有两模型证据。
+python3 scripts/measure-antigravity-native-fork-prompt-cache.py --analyze-only \
+  --evidence-directory "$HOME/.cline/kanban/antigravity-native-fork-cache-recheck-20261116"
+
+# 不调用模型：准备或更新 Carbon 计划。
+python3 scripts/measure-antigravity-native-fork-prompt-cache.py --prepare-only --models carbon \
+  --evidence-directory "$HOME/.cline/kanban/antigravity-carbon-fork-cache-prepared-20261116"
+
+# 用户确认订阅资格就绪后才执行；会真实调用模型。
+python3 scripts/measure-antigravity-native-fork-prompt-cache.py --models carbon \
+  --evidence-directory "$HOME/.cline/kanban/antigravity-carbon-fork-cache-prepared-20261116"
+```
+
+新的独立实验使用全新目录；已有实验只有 `--continue` 才能接续，已成功的模型回合不会重发。
+提交状态未知的 PTY fork 必须先核对回执与原生事实；没有原生子身份就不发送子首轮。
+Python 语法、离线计量与资格拒绝校验另行验证；没有修改生产适配器、部署实例或成本闸，无部署后待验断言。
+
+## 十三、2026-11-16：Antigravity 方法论复核与社区修复候选
+
+**本节没有新增模型请求，也没有再次创建分支。** 从第十二节保存的十二个 SQLite 快照离线补读原生提示词，
+并查询社区原始讨论、官方维护者答复和候选实现。Carbon 继续保持未执行。
+
+### 原实验可以与不可以证明什么
+
+| 检查项 | 复核结果 | 结论边界或改进 |
+| --- | --- | --- |
+| 是否误读继承计数 | 没有；使用完成的主 `agent_response`，排除了 result 中父会话累计 cache read | Argon 子 result 的 40,865 不能冒充本次读取；本次 step 确为 0 |
+| 是否没有继承父历史 | 两次原生 fork 的独立 ID、冻结 steps 和随机标记都通过 | 已证明所测分支语义，未用新建空会话冒充分支 |
+| 是否没有热父缓存 | Argon 前后父热读取均有效；Hydrogen 最近父对照及后续补对照失效 | Argon 支持该原生路径的单次零读取观察；Hydrogen 继续为证据不足 |
+| 是否证明请求前缀逐字一致 | 之前没有；`configurationFingerprint` 只涵盖 `init` 的模型、工具名、cwd、权限等 | 现在显式标注其 scope，并增加独立的原生 system prompt 证据，不能把 UI 配置指纹当完整请求指纹 |
+| 是否只测了 fork 一个变量 | 实际路径为 headless 父 → TUI `/fork` → headless 子，包含模式 / 进程边界 | 只对该自动化路径下结论；不外推全程同一 TUI，也不由零读取直接证明后台 KV 路由故障 |
+| 规模与次数 | 每模型一个真实 fork，实际约 43k–45k 输入；无真实工具历史 | 不当作大规模生产可靠性或计费测试；没有为补样本反复创建分支 |
+
+四分钟只是本诊断的时间资格检查，不是服务端承诺的缓存 TTL。实际的前后热读取才是对照依据。
+所有命中与未命中均指原生接口**报告的缓存 token 数**；物理 KV 是否复用、具体订阅额度扣减，仍须后端诊断或计费证据。
+
+### 新增本机证据：完整 system prompt 确实发生变化
+
+`gen_metadata` 保存了与生成 step 绑定的请求记录。诊断入口增加只读 protobuf wire 解码：按本次 `sourceStepIndex`
+选择生成记录，读取已观察的 agy 1.5.9 布局 `field 1 → field 1` 的完整 system prompt。
+同时验证 `<identity>` / `<user_information>` 边界；布局不匹配或缺少唯一记录时返回 unavailable，绝不猜测或补零。
+这是本地保存的请求记录，**不是对实际 HTTP 请求或服务端处理后提示词的抓包**。
+
+| 模型 | 完整 system prompt 字符数 | 父 hot → 子首轮的不同处 | 父 hot → 父 hot-after |
+| --- | ---: | --- | --- |
+| Argon High | 20,387 | 仅 `Conversation ID`、`Artifact Directory Path` 中的会话 UUID | 完全相同 |
+| Hydrogen High | 23,682 | 同上，仅两处 UUID | 完全相同 |
+
+两处字段均位于靠前的 `<user_information>` 中。将它们**仅在离线诊断副本中**归一化为同一占位符后，
+父子完整 system prompt 的 SHA-256 完全相同；未归一化时不同。没有修改原始 prompt、数据库、发送内容或子身份。
+Argon 的父 hot system SHA-256 为 `5eabf571b275b27c80642872a9abdde8ff49b6fc039b7dd886ca67e35ca4f003`，
+子为 `139f9441448962fd51180b3865eb1d6b69eb4cdf0f853489dbdd40f835d25d79`；父 hot-after 恢复为前者。
+
+因此，本次不是「已证明前缀逐字相同，fork 仍失去后端亲和性」的实验。**本机已观察到原生 fork 自身改写前部
+system 内容**；按 prefix caching 机制，这足以构成历史前缀无法完整复用的候选原因，但尚未通过修正请求后的实测
+隔离出其全部因果影响，也不能排除其他请求字段或后端缓存因素。
+
+### 社区讨论与实现：可借鉴，但没有直接验证的官方 agy 修复
+
+截至本次查询，已阅读 GitHub issues 的正文、全部评论与当前状态；来源区分如下。
+
+| 来源 | 实际证据 / 方法 | 对当前目标的适用性 |
+| --- | --- | --- |
+| [官方论坛的 `/btw` 分支缓存调查](https://discuss.ai.google.dev/t/after-the-latest-antigravity-app-update-btw-side-question-kept-re-running-the-same-turn-in-a-background-loop-259-turns-30m-tokens-weekly-quota-dropped-50-30/198137) | 参与者报告多次子首轮零读取；指出相同的两处 ID 注入，并提出把子身份 / 目录覆盖移到历史末尾的 system message | 与本机 prompt 差异吻合；帖子中的移动建议未附修复后首轮数据，不能当已实现补丁。App `/btw` 与 CLI `/fork` 路径也须区分 |
+| [Gemini 4 缓存异常 #1533](https://github.com/google-antigravity/antigravity-cli/issues/1533) | 作者报告固定单 IP / HTTP2、逐字相同请求下仍出现缓存回退；评论另有 1.5.9 的普通续跑瞬时零读取 | 说明还存在 fork 以外的变量；它支持保留 Hydrogen 的未知态，不证明我们的 miss 属于同一根因。issue 仍 open |
+| [headless 缓存与用量 #1411](https://github.com/google-antigravity/antigravity-cli/issues/1411#issuecomment-6681347816) | 维护者建议常驻 `stream-json` 进程或精确 resume，减少新会话 / 进程开销 | 可改善同一会话的多轮调用；没有证明新独立子会话首轮能复用父缓存，不算 fork 修复 |
+| [Pi provider 的亲和性实现](https://github.com/heyhuynhgiabuu/pi-oauth-antigravity) | 初始内容派生稳定 session ID、trajectory / response 链接、固定成功 endpoint、跨重启状态持久化；源码在请求中设置 sessionId 和 labels | 是可研究的亲和性设计，但自行构造另一套 provider 请求，不是官方 agy `/fork` 的补丁；本任务没有安装或实测它 |
+| [Antigravity-Manager 的 SessionScope 实现](https://github.com/lbjlaq/Antigravity-Manager/blob/9b82fb7ef51c42e9d1662a14bd5b718da0525cd8/src-tauri/src/proxy/thinking_store.rs) | 路由 affinity key 与独立 store key 分离；裁掉 `:step:` / `:agent:` 等派生后缀，或按凭据保持账号粘性 | 修复其 API 代理的账号调度。原生 fork 的两个随机 UUID 没有该后缀关系，而且固定路由不会消除 agy system 中两处内容差异 |
+
+官方 changelog 可查到规则 / 路径排序稳定化等旧的缓存改进，未找到针对本次两处分支 ID 注入、且已给出首轮验证的
+可直接套用修复。headless `--fork` 的 [#982](https://github.com/google-antigravity/antigravity-cli/issues/982) 与
+ACP `session/fork` 的 [#1592](https://github.com/google-antigravity/antigravity-cli/issues/1592) 查询时仍 open；
+没有发现等同于 Codex 官方 ephemeral root fork 的现成 agy 路径。上述检索结果不声称穷尽所有实验分支。
+
+### 与 Codex 修复的关系、下一步资格
+
+第九节 Codex 已测修复的重点是**独立 child 身份与父缓存亲和性分离**，而非把父 ID 直接当子会话 ID 使用。
+同样的设计原则可借鉴，但 Antigravity 至少还要处理已经观察到的提示词内容变化：
+
+1. 父 system、工具定义与历史保持逐字稳定；子会话的真实 ID / artifact 目录在父历史之后单独告知。
+2. 子存储、工具归属与行动身份继续独立；如后端缓存需要 affinity，则另行继承明确的父缓存锚点。
+3. 新候选只有在原生请求证据、有效前后热对照、独立子身份以及**子第一次主响应**的计量同时成立时才算修复。
+   同一子会话第二轮命中、长任务平均 98% 或换 provider 后变快，都不能代替这个断言。
+
+这是待验证的 harness 改造方向，不是已测成功方案。当前只给用户消息加一段「沿用父 ID」并不会移除原生 system
+已经生成的 UUID；直接复用父执行身份也会破坏独立分支语义。本任务未部署代理、修改安装二进制或发送社区消息。
+
+审计证据在原私有目录的 `methodology-audit/`，包含原生提示词的私有提取副本、逐字 diff 与 hash 比较；
+`measurements.json` 新增 `requestPrefixEvidence`，明确 `fullRequestPrefixEquality=not_tested`，避免再次把 init 指纹
+误读成完整请求相同。Carbon 待执行计划也标明混合 transport 范围和原生 system 抓取要求，仍为零模型请求。
+本次仅改诊断与调查材料，无需注册部署后验证。
+
+## 十四、2026-11-16：Antigravity 修复候选的真实请求测试
+
+**两个模型均观察到独立子会话首轮读取父历史缓存，约 94.5%；尚无完整合格的稳定修复样本。**
+原生不修改请求的 `/fork` 对照仍为零。修复候选的首轮线上 usage 与原生本次主响应一致，缓存量明显超过空历史
+全部输入，因此不是继承 result 计数器的假命中。不过同版本候选的后置父热对照失效；另一个前后对照有效的 Argon
+样本跨了 CLI 版本。下面分别保留「首轮正面观察」与「完整对照资格」，不为宣布成功改变第十三节的验收条件。
+
+### 受控改动与原生语义
+
+入口为 `scripts/measure-antigravity-fork-cache-repair-candidates.py`。保留官方 `agy`、原生账号和订阅通道，
+使用进程级 `CLOUD_CODE_URL` 指向自有 loopback 中继；中继仅转发到固定的
+`https://daily-cloudcode-pa.googleapis.com`，保留 TLS 验证，不接第三方 provider，不记录认证头。
+普通 CLI 不接受 ACP 的 `--cloud_code_endpoint` 参数，`--version` 又会绕过该参数检查，所以实际以只读模型目录
+请求验证环境变量入口，不能用「带参数的 version 成功」作为支持证据。
+
+父会话使用常驻 `stream-json` 进程，mock seed 为 64,000 个合成词，实际约 43k–44k 输入 tokens。
+每个子会话均通过官方 TUI `/fork` 创建；没有复制数据库或重放消息来伪造原生分支。
+子会话保留独立 ID、store、`cascade_id`、`trajectory_id` 和请求 ID，完整继承冻结父 steps，父历史未被子回合改写，
+首轮均回读父 seed 的随机 `RECALL_KEY`；答案没有放在子 prompt 里。只测每个具体候选的第一次响应，没有子第二轮。
+
+| 候选 | 真正转发的改动 | 保留独立性的方式 |
+| --- | --- | --- |
+| `passthrough` | 不修改请求内容，作为同一中继内的原生对照 | 所有原生身份和前缀原样转发 |
+| `prefix` | 只把 system 的 `Conversation ID` 和 `/brain/<UUID>` 两处改为父值 | 子真实 ID / artifact 目录放在末尾新增 user 消息中；原生 store 和执行身份仍为子 |
+| `affinity` | 在 `prefix` 上再将 `request.labels.root_cascade_id` 指向父 root；也检查可独立继承的 `request.sessionId` | `cascade_id`、`trajectory_id`、request ID 仍独立；不冒用父原生会话身份 |
+
+线上抓包发现，所测父子 `request.sessionId` 原本就同为 `-3750763034362895579`，所以 affinity 样本中该字段
+**没有实际变化**；不能把命中归功于更改 sessionId。实际新增改动只有 `root_cascade_id`。
+转发 JSON 显示：修复候选的 system、工具定义、generationConfig 与最近父热请求完全相同，父请求的全部 contents
+逐条保留为子请求的开头。局部原生 `gen_metadata` 仍记录修改前的子 system；本节以前向 Google 的 JSON 作为请求证据，
+不混淆原生本地记录与线上实际转发内容，也不声称知道 Google 服务端追加或处理后的最终 prompt。
+
+### 原始读数与资格
+
+| 模型 / 样本 | 父 before cache read / 总输入 | 子首轮 cache read / 总输入 | 父 after cache read / 总输入 | 资格与解释 |
+| --- | ---: | ---: | ---: | --- |
+| Argon，1.5.9 原生对照 | 40,974 / 43,186 | **0 / 43,425** | 41,137 / 43,289 | 同版本，完整对照下未命中 |
+| Argon，仅固定前缀 | 41,137 / 43,289 | **未取得有效响应** | 未执行 | 请求已发，最终超时；不是 cache=0，未重发此首轮 |
+| Argon，固定前缀＋父 root，跨版本 | 41,475 / 43,627 | **41,578 / 44,010（94.474%）** | 41,578 / 43,730 | 首轮命中且前后热读取有效；父为 1.5.9、子为 1.5.10，效果归因有版本混杂 |
+| Argon，固定 1.5.10 原生对照 | 41,681 / 43,965 | **0 / 44,206** | 41,916 / 44,068 | 同版本，完整对照下未命中 |
+| Argon，固定 1.5.10，前缀＋父 root | 41,916 / 44,068 | **42,019 / 44,452（94.527%）** | **9,596 / 44,171** | 首轮命中；后置父缓存未超出 9,742 的公共前缀上界，完整对照不合格 |
+| Hydrogen，固定 1.5.10 原生对照 | 41,266 / 43,491 | **0 / 43,721** | 41,442 / 43,582 | 同版本，完整对照下未命中 |
+| Hydrogen，固定 1.5.10，仅固定前缀 | 41,442 / 43,582 | **41,533 / 43,950（94.501%）** | **0 / 44,374** | 首轮命中；后置父热对照失效，未继续追加 root 候选 |
+
+Argon / Hydrogen 的空历史全部输入分别为 **9,742 / 10,441**。Argon 基线来自 1.5.9；1.5.10 复核继续沿用，
+线上工具定义与 generationConfig 完全相同，system 仅将两处会话 UUID 离线归一化后也完全相同，未再花一次请求重测基线。
+三个有正面读数的子首轮均远超各自上界；至少约 31k–32k 的读取无法由公共输入解释。
+所有已完成样本均以本次唯一 `agent_response` 计量，并与 Google SSE 最后的 `usageMetadata` 交叉核验：
+`promptTokenCount` 对应 native 总输入，`cachedContentTokenCount` 对应本次 cache read，
+`candidatesTokenCount + thoughtsTokenCount` 对应 native output。没有使用继承的 `result.usage`。
+Google 未设置 cached 字段时，原生逐步计数也必须为零，不能用缺少整个 usage 的记录补成零。
+
+修复候选的线上前缀与后置父 system 都核对相同，原生父 steps 也保持完整；后置缓存退化的原因仍未隔离，
+不能凭此次观察宣布「子分支驱逐了父缓存」或认定根因是 TTL / 路由 / 订阅扣费。
+Hydrogen 说明仅稳定前缀就能出现首轮命中；Argon 仅前缀项超时，所以**不能断言父 root 锚点是必要条件**。
+这些是单次存在性证据，不是连续多次成功率或费用优惠的保证。
+
+### 异常、版本冻结与成本边界
+
+本次新增 **21 个具有有效主响应计量的成功回合、6 个具有计量的子首轮、7 次真正原生 fork**。
+其中三个原生零读取首轮具备完整同版本前后热对照；三个有命中的首轮分别因版本或后置热对照不合格而不列入
+`qualifiedSuccess`。另一个 Argon 子首轮只有已提交请求和超时，没有计量，独立列为 unknown，不重发、不算 miss。
+
+安装路径在实验中由 1.5.9 变成 1.5.10，本诊断没有执行更新命令。
+逐进程原生日志暴露了父子版本差异；随后将 1.5.10 复制到私有目录并记录 SHA-256，后续启动只使用固定副本。
+没有重复 Argon seed，而是在现有父历史上补同版本原生对照与同一组合候选；所有先前读数保留。
+最终入口对新实验默认冻结 CLI 副本，离线分析逐进程核对实际日志版本，而不只相信实验开始时的版本字段。
+
+中继预检最初未处理 HTTP chunked 请求，模型请求在 JSON 解码前被拒绝，未转发到 Google；修正后以假上游离线验证。
+另一次 Hydrogen 空历史探针受到后台只读 RPC 断开影响被提前停止，已有生成提交状态不确定；其目录单独保留，
+不纳入成功回合，不用后来的新基线覆盖它。最终中继只在生成请求异常时中止实验，普通后台客户端取消不终止模型回合。
+任何未知提交都不自动重发；Carbon 未进入此脚本的允许模型集合，仍为零模型请求。
+
+### 证据、复核与交付范围
+
+```text
+~/.cline/kanban/antigravity-fork-cache-repair-20261116/
+  argon/manifest.json
+  argon/audited-measurements.json
+  argon/incomplete-submissions.json
+  hydrogen/manifest.json
+  hydrogen/audited-measurements.json
+  argon-transport-preflight-no-generation/
+  hydrogen-aborted-background-rpc/
+```
+
+每模型目录保存原始 / 转发后的生成 JSON、逐次 Google SSE、原生逐步输出、完整进程日志、PTY 回执和冻结数据库。
+只有请求与响应体进入私有证据；认证头不写盘。文件权限为仅本用户可读写，证据不提交仓库。
+
+```sh
+# 仅离线核验，不查询模型目录、不调用模型。
+python3 scripts/measure-antigravity-fork-cache-repair-candidates.py --model argon --action analyze \
+  --evidence-directory "$HOME/.cline/kanban/antigravity-fork-cache-repair-20261116/argon"
+python3 scripts/measure-antigravity-fork-cache-repair-candidates.py --model hydrogen --action analyze \
+  --evidence-directory "$HOME/.cline/kanban/antigravity-fork-cache-repair-20261116/hydrogen"
+```
+
+`observedFirstHistoryHitVerified` 只表示本次独立子首轮的正面读取证据，`completeControlledComparison` 表示对照资格，
+`qualifiedSuccess` 仍要求所有对照通过及足量历史复用，不能互相替代。未知请求另列在 `incomplete-submissions.json`。
+脚本的身份限定改写、保留独立执行字段、未知格式拒发、HTTP chunked 转发与离线核验经过 stdlib 检查；
+没有运行全仓测试或声称通过全仓检查。所有自有 CLI 进程和中继退出后才结束。
+
+这仍是**诊断用改写**：末尾 user 身份说明尚未验证真实工具和 artifact 的权限 / 归属语义；后续恢复会话也没有验收。
+未把中继作为生产服务安装，未改 Kanban 适配器、成本闸或用户全局设置，没有提交或部署。
+本次均为独立诊断和调查材料，无新增部署后才能核验的产品行为，无需注册部署后验证。
+
+## 十五、2026-11-17：Fable 5.2 尝试与全量离线复核
+
+用户已明确窗口期结束，停止 Fable 续测。本节不新增模型调用；全范围的复核等级与交接事项见
+[最终报告的离线复核说明](agent-session-fork-prompt-cache-investigation-final-report.md#2026-11-17-离线复核与交接说明)，
+可移交的读数与来源 hash 见 [脱敏数据](measurement-evidence/agent-session-fork-cache-review-2026-11-17.json)。
+
+Fable 入口为 Claude Code 2.1.326、精确模型 `claude-fable-5-2`、high，沿用隔离 HOME / cwd、禁 hooks / MCP、
+原生 `--resume --fork-session` 的计划。脚本新增可选 `--parent-hot-after`，不改变旧组的验收要求；
+继承检查加强为逐项按顺序比较 UUID 与 message。`--analyze-only` 现在也保留错误终止的原因，不把无 iteration 补成零。
+
+| 步骤 | 原始记录 | 解释 |
+| --- | --- | --- |
+| 空历史小基线 | input 19,525 = uncached 2 + read 11,457 + write 8,066；output 4；实际 Fable 5.2，成功 | 只证明小请求及公共前缀读取，不证明父历史复用 |
+| 长父 seed | exit 1，is_error=true，api_error_status=429，terminal_reason=api_error；usage.iterations=[] | 明确返回 “Fable 5.2 requires usage credits”；没有成功推理计量，不能用零 usage 当 miss |
+| 父 hot、子首轮、后置父 hot | 均未执行 | 尚未创建原生 fork，没有首轮命中率 |
+
+父 seed 的 transcript 已登记 api-request，所以不能声称「请求从未发出」或「完全在 API 前拒绝」。
+小基线原生 list-price 估算为 $0.1315234，不等于订阅实际扣款；没有购买额度、切换模型或重发。
+原始目录：`~/.cline/kanban/claude-fable-5-2-native-fork-cache-20261117/`。
+该目录状态保留历史事实，**不是待自动继续的工作项**；任何未来测试均须用户重新发起。
+
+本次离线重算 Claude 5.5、Antigravity 原生、Argon / Hydrogen 修复候选与 Fable 未完成组。
+十月原始证据目录当前缺失，只核对仓库报告及受保护的 44 个解析 / 恢复测试，不冒充重新验证过历史请求。
+总体 160 / 58 是含历史报告的汇总；当前机器可复算的是 42 / 10，另有拒绝与未知请求记录。
+Claude 5.5 原测试只有前置热对照；它们的 measured 与 Antigravity 修复候选的双向资格不是统一统计口径。
