@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { platform, userInfo } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as waitBeforeLockAcquisitionRetry } from "node:timers/promises";
 import Database from "better-sqlite3";
 import type { LockOptions } from "proper-lockfile";
@@ -91,16 +91,29 @@ export function getFilesystemKernelWriteLockDirectoryPath(): string {
 	return join(userInfo().homedir, ".cline", "kanban", "filesystem-kernel-write-locks");
 }
 
-async function canonicalizeLockPath(path: string): Promise<string> {
+async function canonicalizeLockPath(path: string, rejectDanglingSymlinks = false): Promise<string> {
 	const absolutePath = resolve(path);
 	try {
 		return await realpath(absolutePath);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+		if (rejectDanglingSymlinks) {
+			const entry = await lstat(absolutePath).catch((failure: NodeJS.ErrnoException) => {
+				if (failure.code !== "ENOENT") throw failure;
+			});
+			if (entry?.isSymbolicLink()) throw new Error("测试文件锁路径包含无效软链。");
+		}
 		const parent = dirname(absolutePath);
 		if (parent === absolutePath) throw error;
-		return join(await canonicalizeLockPath(parent), absolutePath.slice(parent.length));
+		return join(await canonicalizeLockPath(parent, rejectDanglingSymlinks), absolutePath.slice(parent.length));
 	}
+}
+
+const ISOLATED_TEST_LOCK_DATABASE_DIRECTORY_NAME = "filesystem-kernel-write-locks";
+
+function isInsideDirectory(directory: string, path: string): boolean {
+	const location = relative(directory, path);
+	return location !== "" && location !== ".." && !location.startsWith(`..${sep}`) && !isAbsolute(location);
 }
 
 function foldCanonicalFilesystemKernelWriteLockPath(canonicalLockPath: string): string {
@@ -205,18 +218,63 @@ async function synchronizeFilesystemPath(path: string, filesystemPathKind: "file
 }
 
 export class LockedFileSystem {
+	#isolatedTestLockRoot?: string;
+
+	static async forIsolatedTestDirectory(directoryPath: string): Promise<LockedFileSystem> {
+		if (!directoryPath || !isAbsolute(directoryPath)) throw new Error("测试文件锁必须绑定已创建的绝对目录。");
+		const canonicalDirectory = await realpath(directoryPath);
+		if (!(await stat(canonicalDirectory)).isDirectory()) throw new Error("测试文件锁绑定必须是目录。");
+		const filesystem = new LockedFileSystem();
+		filesystem.#isolatedTestLockRoot = canonicalDirectory;
+		return filesystem;
+	}
+
+	private async canonicalizeIsolatedTestLockTarget(path: string, root: string): Promise<string> {
+		if (path.split(/[\\/]/u).includes("..")) throw new Error("测试文件锁目标超出已绑定目录。");
+		if ((await realpath(root)) !== root) throw new Error("测试文件锁绑定目录已变更。");
+		const canonicalPath = await canonicalizeLockPath(path, true);
+		const databaseDirectory = join(root, ISOLATED_TEST_LOCK_DATABASE_DIRECTORY_NAME);
+		if (
+			!isInsideDirectory(root, canonicalPath) ||
+			relative(databaseDirectory, canonicalPath) === "" ||
+			isInsideDirectory(databaseDirectory, canonicalPath)
+		)
+			throw new Error("测试文件锁目标超出已绑定目录或进入锁数据库目录。");
+		return canonicalPath;
+	}
+
 	private async normalizeLockRequest(request: LockRequest): Promise<NormalizedLockRequest> {
-		await mkdir(request.type === "directory" ? request.path : dirname(request.path), { recursive: true });
 		const lockPath =
 			request.lockfilePath ??
 			(request.type === "directory" ? join(request.path, request.lockfileName ?? ".lock") : `${request.path}.lock`);
+		const testLockRoot = this.#isolatedTestLockRoot;
+		const targetPath =
+			testLockRoot === undefined
+				? request.path
+				: await this.canonicalizeIsolatedTestLockTarget(request.path, testLockRoot);
+		const isolatedCanonicalLockPath =
+			testLockRoot === undefined ? undefined : await this.canonicalizeIsolatedTestLockTarget(lockPath, testLockRoot);
+		await mkdir(request.type === "directory" ? targetPath : dirname(targetPath), { recursive: true });
 		// 不存在的叶子也折叠，保守串行大小写与 Unicode 别名；不依赖会在原子替换后改变的目标 inode。
-		const canonicalLockPath = foldCanonicalFilesystemKernelWriteLockPath(await canonicalizeLockPath(lockPath));
-		const directoryPath = getFilesystemKernelWriteLockDirectoryPath();
+		const canonicalLockPath = foldCanonicalFilesystemKernelWriteLockPath(
+			isolatedCanonicalLockPath ?? (await canonicalizeLockPath(lockPath)),
+		);
+		const directoryPath =
+			testLockRoot === undefined
+				? getFilesystemKernelWriteLockDirectoryPath()
+				: join(testLockRoot, ISOLATED_TEST_LOCK_DATABASE_DIRECTORY_NAME);
+		if (testLockRoot !== undefined && (await canonicalizeLockPath(directoryPath, true)) !== directoryPath)
+			throw new Error("测试文件锁数据库目录不能使用软链。");
+		const databasePath = join(
+			directoryPath,
+			`${createHash("sha256").update(canonicalLockPath).digest("hex")}.sqlite`,
+		);
 		await mkdir(directoryPath, { recursive: true, mode: 0o700 });
+		if (testLockRoot !== undefined && (await canonicalizeLockPath(databasePath, true)) !== databasePath)
+			throw new Error("测试文件锁数据库不能使用软链。");
 		return {
 			canonicalLockPath,
-			databasePath: join(directoryPath, `${createHash("sha256").update(canonicalLockPath).digest("hex")}.sqlite`),
+			databasePath,
 			retries: request.retries ?? DEFAULT_LOCK_ACQUISITION_RETRY_SCHEDULE_COVERING_STALE_THRESHOLD,
 		};
 	}
@@ -256,6 +314,8 @@ export class LockedFileSystem {
 	}
 
 	async writeTextFileAtomic(path: string, content: string, options: AtomicTextWriteOptions = {}): Promise<void> {
+		if (this.#isolatedTestLockRoot !== undefined)
+			await this.canonicalizeIsolatedTestLockTarget(path, this.#isolatedTestLockRoot);
 		const lockRequest: LockRequest | null =
 			options.lock === undefined
 				? {
@@ -307,6 +367,8 @@ export class LockedFileSystem {
 	}
 
 	async removePath(path: string, options: { lock: LockRequest; recursive?: boolean; force?: boolean }): Promise<void> {
+		if (this.#isolatedTestLockRoot !== undefined)
+			await this.canonicalizeIsolatedTestLockTarget(path, this.#isolatedTestLockRoot);
 		await this.withLock(options.lock, async () => {
 			await rm(path, {
 				recursive: options.recursive,

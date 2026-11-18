@@ -184,11 +184,33 @@ interface DecodedTranscriptVersion {
 	references: number;
 }
 
+export type CodexCompressedTranscriptReadSource = "usage_signature_check" | "history_pagination" | "other";
+
+function createCompressedTranscriptCacheMetrics() {
+	return {
+		cacheHitCount: 0,
+		inFlightDecodeReuseCount: 0,
+		newDecodeCount: 0,
+		snapshotByteBudgetEvictionCount: 0,
+		sourceVersionLimitEvictionCount: 0,
+		streamReadCount: 0,
+		successfulSnapshotWrittenBytes: 0,
+		overBudgetSnapshotDiscardCount: 0,
+		overBudgetDiscardedSnapshotWrittenBytes: 0,
+	};
+}
+type CompressedTranscriptCacheMetrics = ReturnType<typeof createCompressedTranscriptCacheMetrics>;
+
 export function createCodexTranscriptReadSourceCache(options: { maximumCachedDecodedBytes?: number } = {}) {
 	const maximumBytes = options.maximumCachedDecodedBytes ?? MAXIMUM_CACHED_DECODED_BYTES;
 	const decodeLimit = pLimit(2);
 	const versions = new Map<string, DecodedTranscriptVersion>();
 	const inFlight = new Map<string, Promise<DecodedTranscriptVersion>>();
+	const metricsByReadSource = {
+		usage_signature_check: createCompressedTranscriptCacheMetrics(),
+		history_pagination: createCompressedTranscriptCacheMetrics(),
+		other: createCompressedTranscriptCacheMetrics(),
+	};
 	let cachedDecodedBytes = 0;
 	let completedDecodeCount = 0;
 	async function withDecodeSlot<T>(operation: () => Promise<T>): Promise<T> {
@@ -201,18 +223,25 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 		cachedDecodedBytes -= entry.logicalByteLength;
 		await snapshot.close();
 	}
-	async function reserveSnapshotBytes(bytes: number): Promise<boolean> {
+	async function reserveSnapshotBytes(bytes: number, metrics: CompressedTranscriptCacheMetrics): Promise<boolean> {
 		for (const [key, candidate] of versions) {
 			if (cachedDecodedBytes + bytes <= maximumBytes) break;
 			if (candidate.references > 0 || !candidate.snapshot) continue;
 			versions.delete(key);
+			metrics.snapshotByteBudgetEvictionCount += 1;
 			await discardSnapshot(candidate);
 		}
 		if (cachedDecodedBytes + bytes > maximumBytes) return false;
 		cachedDecodedBytes += bytes;
 		return true;
 	}
-	async function decodeVersion(handle: FileHandle, nativePath: string, metadata: Stats) {
+	async function decodeVersion(
+		handle: FileHandle,
+		nativePath: string,
+		metadata: Stats,
+		metrics: CompressedTranscriptCacheMetrics,
+	) {
+		metrics.newDecodeCount += 1;
 		const entry: DecodedTranscriptVersion = { logicalByteLength: 0, sha256: "", snapshot: null, references: 0 };
 		const directory = await mkdtemp(join(tmpdir(), "kanban-codex-private-read-snapshot-"));
 		try {
@@ -223,10 +252,14 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 			for await (const chunk of readCodexDecodedTranscriptChunks(handle, nativePath, metadata.size)) {
 				hash.update(chunk);
 				if (entry.snapshot) {
-					if (!(await reserveSnapshotBytes(chunk.length))) await discardSnapshot(entry);
-					else {
+					if (!(await reserveSnapshotBytes(chunk.length, metrics))) {
+						metrics.overBudgetSnapshotDiscardCount += 1;
+						metrics.overBudgetDiscardedSnapshotWrittenBytes += entry.logicalByteLength;
+						await discardSnapshot(entry);
+					} else {
 						try {
 							await entry.snapshot.writeFile(chunk);
+							metrics.successfulSnapshotWrittenBytes += chunk.length;
 						} catch (error) {
 							cachedDecodedBytes -= chunk.length;
 							throw error;
@@ -252,7 +285,11 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 		}
 	}
 	return {
-		async open(requestedPath: string): Promise<CodexTranscriptReadSource> {
+		async open(
+			requestedPath: string,
+			readSource: CodexCompressedTranscriptReadSource = "other",
+		): Promise<CodexTranscriptReadSource> {
+			const metrics = metricsByReadSource[readSource];
 			const ordinaryPath = codexTranscriptJsonlPath(resolve(requestedPath));
 			const counterpart = requestedPath.endsWith(".jsonl.zst") ? ordinaryPath : `${ordinaryPath}.zst`;
 			for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -287,10 +324,12 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 					}
 					const key = `${nativePath}:${physicalVersion(metadata)}`;
 					let entry = versions.get(key);
-					if (!entry) {
+					if (entry) metrics.cacheHitCount += 1;
+					else {
 						let pending = inFlight.get(key);
-						if (!pending) {
-							pending = withDecodeSlot(() => decodeVersion(sourceHandle, nativePath, metadata));
+						if (pending) metrics.inFlightDecodeReuseCount += 1;
+						else {
+							pending = withDecodeSlot(() => decodeVersion(sourceHandle, nativePath, metadata, metrics));
 							inFlight.set(key, pending);
 							pending.finally(() => inFlight.delete(key)).catch(() => {});
 						}
@@ -309,6 +348,7 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 						const oldest = [...versions].find(([, value]) => value.references === 0);
 						if (!oldest) break;
 						versions.delete(oldest[0]);
+						metrics.sourceVersionLimitEvictionCount += 1;
 						await discardSnapshot(oldest[1]);
 					}
 					let closed = false;
@@ -323,6 +363,7 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 					const streamPrefix = async (end: number, onChunk: (chunk: Uint8Array, position: number) => void) => {
 						await assertUnchanged();
 						await withDecodeSlot(async () => {
+							metrics.streamReadCount += 1;
 							let position = 0;
 							for await (const chunk of readCodexDecodedTranscriptChunks(
 								sourceHandle,
@@ -399,6 +440,7 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 			completedDecodeCount,
 			maximumObservedConcurrentDecodes: maximumObservedCodexTranscriptDecoderConcurrency,
 		}),
+		readCumulativeMetricsByReadSource: () => structuredClone(metricsByReadSource),
 		async dispose() {
 			await Promise.allSettled(inFlight.values());
 			for (const [key, entry] of versions) {
@@ -411,12 +453,16 @@ export function createCodexTranscriptReadSourceCache(options: { maximumCachedDec
 }
 
 const sharedCodexTranscriptReadSourceCache = createCodexTranscriptReadSourceCache();
+export const readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource =
+	sharedCodexTranscriptReadSourceCache.readCumulativeMetricsByReadSource;
+
 export async function openCodexTranscriptReadSource(
 	path: string,
 	nativeSessionId?: string,
+	readSource?: CodexCompressedTranscriptReadSource,
 ): Promise<CodexTranscriptReadSource> {
 	try {
-		return await sharedCodexTranscriptReadSourceCache.open(path);
+		return await sharedCodexTranscriptReadSourceCache.open(path, readSource);
 	} catch (error) {
 		const root = codexTranscriptNativeStorageRoot(path);
 		if (!root || !nativeSessionId || (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -437,7 +483,7 @@ export async function openCodexTranscriptReadSource(
 			})
 		)
 			throw new Error("Codex 当前原生指针超出已绑定存储目录。");
-		const source = await sharedCodexTranscriptReadSourceCache.open(candidate);
+		const source = await sharedCodexTranscriptReadSourceCache.open(candidate, readSource);
 		try {
 			if (
 				!codexTranscriptMetadataMatchesPersistentMainConversation(
@@ -454,8 +500,12 @@ export async function openCodexTranscriptReadSource(
 	}
 }
 
-export async function statCodexTranscriptReadSource(path: string, nativeSessionId?: string): Promise<Stats> {
-	const source = await openCodexTranscriptReadSource(path, nativeSessionId);
+export async function statCodexTranscriptReadSource(
+	path: string,
+	nativeSessionId?: string,
+	readSource?: CodexCompressedTranscriptReadSource,
+): Promise<Stats> {
+	const source = await openCodexTranscriptReadSource(path, nativeSessionId, readSource);
 	try {
 		return await source.stat();
 	} finally {

@@ -387,8 +387,10 @@ export function createAgentConversationModelTokenUsageIncrementalReader(
 		readTranscriptFileSignature: async (filePath: string, nativeSessionId?: string): Promise<string | null> => {
 			try {
 				const fileStats = nativeSessionId
-					? await statCodexTranscriptReadSource(filePath, nativeSessionId)
-					: await stat(filePath).catch(() => statCodexTranscriptReadSource(filePath));
+					? await statCodexTranscriptReadSource(filePath, nativeSessionId, "usage_signature_check")
+					: await stat(filePath).catch(() =>
+							statCodexTranscriptReadSource(filePath, undefined, "usage_signature_check"),
+						);
 				return `${fileStats.size}:${fileStats.mtimeMs}`;
 			} catch {
 				return null;
