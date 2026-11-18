@@ -1,12 +1,18 @@
 import {
 	codexConfigurationBatchActionRequestSchema,
 	codexConfigurationProfileMutationRequestSchema,
+	codexConfigurationSetChangeSharingScopeRequestSchema,
 } from "@runtime-contract";
 import { z } from "zod";
-import type { CodexConfigurationBatchActionRequest, CodexConfigurationProfileMutationRequest } from "@/runtime/types";
+import type {
+	CodexConfigurationBatchActionRequest,
+	CodexConfigurationProfileMutationRequest,
+	CodexConfigurationSetChangeSharingScopeRequest,
+} from "@/runtime/types";
 import { LocalStorageKey, readLocalStorageItem, writeLocalStorageItem } from "@/storage/local-storage-store";
 
 type SettingMutation =
+	| { kind: "sharing_scope"; input: CodexConfigurationSetChangeSharingScopeRequest }
 	| { kind: "profile"; input: CodexConfigurationProfileMutationRequest }
 	| { kind: "feedback"; input: CodexConfigurationBatchActionRequest };
 const persistedCodexConfigurationSettingActionMetadataSchema = z.object({
@@ -16,6 +22,10 @@ const persistedCodexConfigurationSettingActionMetadataSchema = z.object({
 	automaticResendCount: z.number().int().nonnegative().catch(0),
 });
 const unconfirmedCodexConfigurationSettingActionSchema = z.discriminatedUnion("kind", [
+	persistedCodexConfigurationSettingActionMetadataSchema.extend({
+		kind: z.literal("sharing_scope"),
+		input: codexConfigurationSetChangeSharingScopeRequestSchema,
+	}),
 	persistedCodexConfigurationSettingActionMetadataSchema.extend({
 		kind: z.literal("profile"),
 		input: codexConfigurationProfileMutationRequestSchema,
@@ -55,7 +65,7 @@ export function rememberUnconfirmedCodexConfigurationSettingAction(
 	mutation: SettingMutation,
 ) {
 	const input =
-		mutation.kind === "profile"
+		mutation.kind !== "feedback"
 			? { ...mutation.input, idempotencyKey: undefined, stateResponseScope: undefined }
 			: {
 					...mutation.input,
@@ -91,6 +101,10 @@ export function isConfirmedCodexConfigurationProfileMutationRejection(error: unk
 	if (!(error instanceof Error)) return false;
 	return (
 		[
+			"配置变更版本已变化",
+			"来源已有较新修改",
+			"此记录不属于可切换范围",
+			"幂等凭证与原配置范围",
 			"相关默认字段已更新",
 			"Codex profile 已更新",
 			"会话代际或配置来源已变化",

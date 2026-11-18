@@ -115,6 +115,23 @@ export function NonModalFloatingFormWindow({
 	const accessibleTitleId = useId();
 	const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
 	const [collapsed, setCollapsed] = useState(false);
+	const lastHandledCollapseSequence = useRef(session?.collapseSequence ?? 0);
+	const lastReportedRevealSequence = useRef<number | null>(null);
+	useLayoutEffect(() => {
+		if (lastHandledCollapseSequence.current === session?.collapseSequence) return;
+		lastHandledCollapseSequence.current = session?.collapseSequence ?? 0;
+		setCollapsed(true);
+	}, [session?.collapseSequence]);
+	useEffect(() => {
+		if (!open || collapsed) {
+			lastReportedRevealSequence.current = null;
+			return;
+		}
+		const sequence = session?.revealSequence ?? 0;
+		if (lastReportedRevealSequence.current === sequence) return;
+		lastReportedRevealSequence.current = sequence;
+		session?.reportRevealed();
+	}, [open, collapsed, session?.revealSequence, session?.reportRevealed]);
 	const [viewport, setViewport] = useState(readFloatingFormVisualViewport);
 	const ownership = session?.ownership;
 	const displayedOwnership =
@@ -170,7 +187,7 @@ export function NonModalFloatingFormWindow({
 		left: position?.left ?? Math.max(8, viewport.left + (viewport.width - Math.min(860, viewport.width * 0.94)) / 2),
 		top: position?.top ?? viewport.top + Math.min(viewport.height * 0.05, 40),
 		width: collapsed
-			? Math.min(320, viewport.width - 16)
+			? Math.min(320, viewport.width * 0.94, viewport.width - 16)
 			: `min(${expandedWidth}, ${Math.max(0, viewport.width - 16)}px)`,
 		maxHeight: Math.max(0, Math.min(viewport.height - 16, window.innerHeight * maximumExpandedViewportHeightRatio)),
 	};

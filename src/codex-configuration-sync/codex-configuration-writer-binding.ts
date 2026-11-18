@@ -18,6 +18,7 @@ import {
 	codexConfigurationWriterBindingSchema,
 } from "../core/codex-configuration-sync-contract";
 import { resolveCodexNativeDefaultReasoningEffortForModel } from "../terminal/terminal-agent-model-selection";
+import { assessCodexConfigurationAutomaticProcessReplacement } from "./codex-configuration-automatic-process-replacement-policy";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -271,6 +272,7 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 	nativeDefaultReasoningEffort?: string;
 	sessionPermissionMode?: string;
 	sessionPermissionSelectionSource?: "profile" | "task_local";
+	automaticProcessReplacementMustRemainRenderingOnly?: boolean;
 }): Promise<CodexConfigurationWriterBinding> {
 	const preflightStoreSnapshot = await readCodexConfigurationSyncStore();
 	const preflightParentBinding =
@@ -510,6 +512,15 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 				};
 			}
 		}
+		if (input.automaticProcessReplacementMustRemainRenderingOnly) {
+			const replacementSafety = assessCodexConfigurationAutomaticProcessReplacement(
+				previous,
+				selectedProfile,
+				launchSelectionFields,
+			);
+			if (!replacementSafety.allowed)
+				throw new Error("自动续接即将采用的模型、Effort 或其他变化尚未通过 cache 风险核验，未创建新进程配置。");
+		}
 		const writerId = randomUUID();
 		const writerDirectory = join(getCodexConfigurationSyncDirectory(), "writers", writerId);
 		await mkdir(join(writerDirectory, "configuration-home"), { recursive: true, mode: 0o700 });
@@ -613,12 +624,12 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 					const address = configurationFieldAddress(fieldKey);
 					if (address.fileName !== fileName) continue;
 					const group = codexConfigurationExceptionGroup(fieldKey);
-					const local = group && previous.localExceptionOverrides?.[group];
+					const local = previous.localExceptionOverrides?.[group ?? fieldKey];
 					const groupWasExplicitlyUpdated =
 						local &&
 						Object.keys(selectedProfile.fieldVersions).some(
 							(key) =>
-								codexConfigurationExceptionGroup(key) === group &&
+								(group ? codexConfigurationExceptionGroup(key) === group : key === fieldKey) &&
 								(selectedProfile.fieldVersions[key] ?? 0) > local.profileVersionAtSelection,
 						);
 					if (
@@ -716,7 +727,16 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 			onHookDefinitionObservationProblem,
 		});
 		for (const [fieldKey, field] of Object.entries(baseline)) {
-			const trusted = reuseConfirmedCodexHookTrust(store, sourceIdentity, fieldKey, field);
+			const trusted = reuseConfirmedCodexHookTrust(
+				store,
+				sourceIdentity,
+				fieldKey,
+				field,
+				Math.max(
+					selectedProfile.fieldVersions[fieldKey] ?? 0,
+					selectedLocalExceptions[fieldKey]?.profileVersionAtSelection ?? 0,
+				),
+			);
 			if (sameConfigurationField(trusted, field)) continue;
 			const address = configurationFieldAddress(fieldKey);
 			const filePath = join(configurationHome, address.fileName);
@@ -826,6 +846,8 @@ async function prepareCodexConfigurationWriterBindingInternal(input: {
 			codexConfigurationProfileId: selectedProfileId,
 			consumedProfileFieldVersions: structuredClone(selectedProfile.fieldVersions),
 			localExceptionOverrides: selectedLocalExceptions,
+			previousWriterId: previous?.binding.writerId,
+			localFieldMutationVersions: structuredClone(previous?.localFieldMutationVersions ?? {}),
 			binding,
 			fileNames,
 			launchBaselineFields: structuredClone(baseline),

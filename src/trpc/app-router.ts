@@ -490,6 +490,7 @@ import {
 	codexConfigurationResolveTargetConflictRequestSchema,
 	codexConfigurationSessionAdoptionProgressPageSchema,
 	codexConfigurationSessionAdoptionProgressRequestSchema,
+	codexConfigurationSetChangeSharingScopeRequestSchema,
 	codexConfigurationSourceObservationRequestSchema,
 	codexConfigurationSourceObservationSchema,
 	codexConfigurationSyncActiveStateSchema,
@@ -2022,6 +2023,13 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 			return ctx.codexConfigurationSyncApi.getState();
 		}),
 	mutateCodexConfigurationProfile: codexConfigurationProfileMutationProcedure,
+	setCodexConfigurationChangeSharingScope: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(codexConfigurationSetChangeSharingScopeRequestSchema)
+		.output(codexConfigurationSyncStateSchema)
+		.mutation(({ ctx, input }) => {
+			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
+			return ctx.codexConfigurationSyncApi.setChangeSharingScope(input);
+		}),
 	getCodexConfigurationChangeDetails: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(codexConfigurationChangeDetailsRequestSchema)
 		.output(codexConfigurationChangeDetailsSchema)

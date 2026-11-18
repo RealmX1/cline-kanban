@@ -17,10 +17,12 @@ import {
 	type CodexConfigurationBatchActionResult,
 	type CodexConfigurationChangeDetailsRequest,
 	type CodexConfigurationMutationReceiptRequest,
+	type CodexConfigurationProfileAutomaticAdoptionGuard,
 	type CodexConfigurationProfileMutationRequest,
 	type CodexConfigurationResolveConflictRequest,
 	type CodexConfigurationResolveTargetConflictRequest,
 	type CodexConfigurationSessionAdoptionProgressRequest,
+	type CodexConfigurationSetChangeSharingScopeRequest,
 	type CodexConfigurationSyncHistoryRequest,
 	type CodexConfigurationSynchronizeRequest,
 	type CodexConfigurationSyncState,
@@ -36,11 +38,26 @@ import {
 } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
 import { getTerminalAgentModelSelectionOptions } from "../terminal/terminal-agent-model-selection";
 import {
+	assessCodexConfigurationAutomaticProcessReplacement,
+	codexConfigurationAutomaticReplacementLaunchOverlay,
+	codexConfigurationDiskFieldsAwaitingAutomaticReplacement,
+} from "./codex-configuration-automatic-process-replacement-policy";
+import {
 	type CodexConfigurationTaskSourceContext,
 	completeCodexConfigurationCandidateValueDigest,
 	currentCodexConfigurationSharedValueDigest,
 	describeCodexConfigurationChange,
 } from "./codex-configuration-change-presentation";
+import {
+	codexConfigurationChangeCompleteFieldsForSharingScope,
+	codexConfigurationPropagationReceiptBelongsToCurrentTarget,
+	codexConfigurationSharingScopeMutationDigest,
+	reconcileCodexConfigurationSharingScopeWithdrawals,
+	resolveCodexConfigurationChangeSourceWriter,
+	resumeStoredCodexConfigurationChangeSharingScopeMutations,
+	retainProtectedTargetDecisionAfterRejectedCompensation,
+	setStoredCodexConfigurationChangeSharingScope,
+} from "./codex-configuration-change-sharing-scope";
 import {
 	type CodexConfigurationFields,
 	configurationDigest,
@@ -127,12 +144,14 @@ interface CodexConfigurationSyncServiceDependencies {
 		conversationSessionId: string,
 		profileId: string,
 		onlyUpdatePermissionSelectionSource?: boolean,
+		permissionSelectionSource?: "profile" | "task_local",
 	) => Promise<void> | void;
 	resumeSessionToAdoptProfile?: (input: {
 		workspaceId: string;
 		summary: RuntimeTaskSessionSummary;
 		profileId: string;
 		changeId: string;
+		readConfigurationSafetyFingerprint?: CodexConfigurationProfileAutomaticAdoptionGuard["readConfigurationSafetyFingerprint"];
 		onBeforeProcessReplacement: (evidenceFingerprint: string) => Promise<boolean>;
 	}) => Promise<{ resumed: boolean; reason: string }>;
 	listSessions: () => SessionTarget[];
@@ -222,6 +241,8 @@ function publicState(
 			.filter(
 				(change) =>
 					stateResponseScope === "full" ||
+					(change.changeSharingScope !== undefined && change.noticePresentedAtMs === undefined) ||
+					change.changeSharingScope?.withdrawalStatus === "pending" ||
 					change.approvalStatus === "pending" ||
 					change.mergeStatus === "conflict" ||
 					(change.recordKind === "source_observation" &&
@@ -238,6 +259,9 @@ function publicState(
 				const writer = store.writers[change.sourceWriterId];
 				const presentation = describeCodexConfigurationChange(store, change, false, undefined, taskSourceContext);
 				return {
+					changeSharingScope: change.changeSharingScope,
+					noticePresentedAtMs: change.noticePresentedAtMs,
+					compensationForChangeId: change.compensationForChangeId,
 					candidateFieldGroupKey: JSON.stringify([
 						change.codexConfigurationProfileId ?? change.sourceIdentity,
 						change.exceptionGroup ?? change.fieldKey,
@@ -312,6 +336,32 @@ function withoutConfigurationStateResponseScope<T extends object>(input: T) {
 }
 
 export function createCodexConfigurationSyncService(deps: CodexConfigurationSyncServiceDependencies) {
+	const verifySharingScopeSourceCurrentFields = async (
+		store: CodexConfigurationSyncStore,
+		change: StoredCodexConfigurationChange,
+	) => {
+		const writer = resolveCodexConfigurationChangeSourceWriter(store, change);
+		if (!writer) return false;
+		const fields = codexConfigurationChangeCompleteFieldsForSharingScope(change);
+		let current: CodexConfigurationFields;
+		try {
+			await assertCodexConfigurationWriterBindingIdentity(writer.binding);
+			current = await projectCodexConfigurationFields({
+				home: writer.binding.configurationHomeDirectoryPath,
+				sourceHome: await realpath(writer.binding.sourceHomeDirectoryPath),
+				fileNames: writer.fileNames,
+				previousFields: writer.lastObservedFields,
+				onHookDefinitionObservationProblem: (key) => {
+					if (key in fields) throw new Error("本次设置的定义暂不可核验。");
+				},
+			});
+		} catch {
+			return false;
+		}
+		if (Object.entries(fields).some(([key, value]) => !sameConfigurationField(current[key], value)))
+			throw new Error("来源已有较新修改，原范围请求未覆盖新值。");
+		return true;
+	};
 	const withRequestSelection = <T>(
 		input: {
 			changeId?: string;
@@ -530,6 +580,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							pending.conversationSessionId,
 							pending.profileId,
 							pending.onlyUpdatePermissionSelectionSource,
+							pending.permissionSelectionSource,
 						);
 					await mutateCodexConfigurationSyncStore((store) => {
 						const current = store.writers[writer.binding.writerId];
@@ -835,6 +886,16 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					.map(([sourceIdentity]) => sourceIdentity),
 			);
 			expireCodexConfigurationProfileFeedbackSuggestions(store);
+			for (const { summary } of listObservationSessions()) {
+				const binding = summary.codexConfigurationWriterBinding;
+				const writer = binding && store.writers[binding.writerId];
+				if (
+					writer &&
+					isObservedWriter(writer.binding.writerId) &&
+					summary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId
+				)
+					writer.nativeConversationSessionId = summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+			}
 			for (const [writerId, task] of Object.entries(taskSourceContext?.writerTasks ?? {})) {
 				if (!isObservedWriter(writerId)) continue;
 				const writer = store.writers[writerId];
@@ -913,7 +974,8 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							nativeSessionId,
 							profileId: profile.profileId,
 							sourceIdentity,
-							reason: "旧会话保持原存储；等待回合结束、无草稿与待答问题后安全续接至独立配置副本。",
+							reason:
+								"旧会话保持原存储；缺少完整启动基线，等待 stale 后重进、正常启动或手动重启采用独立配置副本。",
 							attemptCount: 0,
 						};
 						store.revision++;
@@ -1043,6 +1105,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							ownerSummary.agentNativeConversationSessionIdentity,
 						);
 					writer.fileNames = observation.fileNames;
+					if (
+						currentOwnerSummary?.codexConfigurationWriterBinding?.writerId === writer.binding.writerId &&
+						currentOwnerSummary.runtimeSessionIncarnationId === writer.binding.runtimeSessionIncarnationId
+					)
+						writer.nativeConversationSessionId =
+							currentOwnerSummary.agentNativeConversationSessionIdentity?.nativeSessionId;
 					// 丢失回执后的保存结果属于已登记操作，不伪装成目标用户的新决定或新通知。
 					for (const change of store.changes) {
 						const pendingTarget = change.targets.find(
@@ -1058,6 +1126,19 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						) {
 							if (change.value === undefined) delete writer.lastObservedFields[change.fieldKey];
 							else writer.lastObservedFields[change.fieldKey] = change.value;
+							if (
+								change.changeSharingScope?.currentScope === "session_only" &&
+								pendingTarget.sharingWithdrawalRequestedAtMs &&
+								!pendingTarget.withdrawnWriteObservedAtMs &&
+								(!pendingTarget.writeSubmissionFinishedAtMs ||
+									pendingTarget.writeSubmissionFinishedAtMs >= pendingTarget.sharingWithdrawalRequestedAtMs)
+							) {
+								pendingTarget.withdrawnWriteObservedAtMs = Date.now();
+								pendingTarget.sharingWithdrawalCompensationPending = true;
+								pendingTarget.status = "not_applicable";
+								change.changeSharingScope.withdrawalStatus = "pending";
+								store.revision++;
+							}
 							if (pendingTarget.diskSavedAt === null) {
 								pendingTarget.diskSavedAt = Date.now();
 								store.revision++;
@@ -1197,9 +1278,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 							(override) => joinedKeyPath === override || joinedKeyPath.startsWith(`${override}.`),
 						)) ||
 					!sameConfigurationField(replacement.launchBaselineFields[change.fieldKey], change.value) ||
-					!sameConfigurationField(
-						codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey],
-						change.value,
+					!isCodexConfigurationSourceObservationStillCurrent(store, change) ||
+					(change.targetSpecificCompensation?.expectedNativeConversationSessionId !== undefined &&
+						nativeSessionId !== change.targetSpecificCompensation.expectedNativeConversationSessionId) ||
+					Object.entries(change.targetSpecificCompensation?.expectedGroupMutationVersions ?? {}).some(
+						([key, version]) => (replacement.localFieldMutationVersions?.[key] ?? 0) !== version,
 					)
 				)
 					continue;
@@ -1318,29 +1401,50 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			writer.binding.workspaceId ?? "",
 			writer.binding.conversationSessionId ?? "",
 		);
-		const update = async (patch: Partial<typeof target>) =>
+		const update = async (patch: Partial<typeof target>, protectedFields?: CodexConfigurationFields) =>
 			mutateCodexConfigurationSyncStore(
 				(latest) => {
 					const latestChange = latest.changes.find((item) => item.changeId === changeId);
 					const latestTarget = latestChange?.targets.find((item) => item.writerId === writerId);
+					const liveWriter = latest.writers[writerId];
+					if (patch.status === "conflict" && protectedFields && liveWriter)
+						retainProtectedTargetDecisionAfterRejectedCompensation(liveWriter, change, protectedFields);
 					const sourceDecisionIsCurrent =
 						Boolean(
 							latestChange &&
+								latestTarget &&
+								codexConfigurationPropagationReceiptBelongsToCurrentTarget({
+									capturedAcceptedProfileFieldVersion: change.acceptedProfileFieldVersion,
+									currentAcceptedProfileFieldVersion: latestChange.acceptedProfileFieldVersion,
+									capturedTargetAcceptedAt: target.acceptedAt,
+									currentTargetAcceptedAt: latestTarget.acceptedAt,
+								}) &&
 								(!latestChange.codexConfigurationProfileId ||
 									latest.writers[writerId]?.codexConfigurationProfileId ===
 										latestChange.codexConfigurationProfileId) &&
 								isCodexConfigurationChangeApprovedForPropagation(latestChange) &&
 								isCodexConfigurationSourceObservationStillCurrent(latest, latestChange),
 						) &&
-						sameConfigurationField(
-							codexConfigurationChangeSharedFields(latest, change)?.[change.fieldKey],
-							change.value,
-						);
+						(change.targetSpecificCompensation !== undefined ||
+							sameConfigurationField(
+								codexConfigurationChangeSharedFields(latest, change)?.[change.fieldKey],
+								change.value,
+							));
 					const guardedPatch: Partial<typeof target> = sourceDecisionIsCurrent
 						? patch
 						: {
 								...patch,
-								status: "conflict",
+								status:
+									latestChange?.changeSharingScope?.currentScope === "session_only"
+										? latestTarget?.sharingWithdrawalRequestedAtMs &&
+											latestTarget.writeSubmissionStartedAt &&
+											!latestTarget.withdrawnWriteObservedAtMs &&
+											(!latestTarget.writeSubmissionFinishedAtMs ||
+												(patch.writeSubmissionFinishedAtMs ?? latestTarget.writeSubmissionFinishedAtMs) >=
+													latestTarget.sharingWithdrawalRequestedAtMs)
+											? "pending_reload"
+											: "not_applicable"
+										: "conflict",
 								reason: latestChange?.codexConfigurationProfileId
 									? "profile 字段已有较新版本，旧操作停止传播；保存事实保留，较新版本自动继续采用。"
 									: "来源观测或共享默认已有更新，旧操作已停止传播；已确认的保存事实继续保留。新观测仍须单独审批。",
@@ -1382,7 +1486,11 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 			);
 		if (
 			!isCodexConfigurationSourceObservationStillCurrent(store, change) ||
-			!sameConfigurationField(codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey], change.value)
+			(!change.targetSpecificCompensation &&
+				!sameConfigurationField(
+					codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey],
+					change.value,
+				))
 		) {
 			await update({
 				status: "conflict",
@@ -1444,6 +1552,32 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				reason: "目标 hook 来源或定义暂不可核验，保留既有决定。",
 				recoveryCondition: "同一来源定义恢复可读后自动重验",
 			});
+			return;
+		}
+		const compensationIsProtected = (fields: CodexConfigurationFields) => {
+			const guard = change.targetSpecificCompensation;
+			if (!guard) return false;
+			const digest = configurationDigest(fields[change.fieldKey] ?? null);
+			return (
+				(guard.expectedNativeConversationSessionId !== undefined &&
+					summary?.agentNativeConversationSessionIdentity?.nativeSessionId !==
+						guard.expectedNativeConversationSessionId) ||
+				Object.entries(guard.expectedGroupMutationVersions ?? {}).some(
+					([key, version]) => (writer.localFieldMutationVersions?.[key] ?? 0) !== version,
+				) ||
+				(writer.localFieldMutationVersions?.[change.fieldKey] ?? 0) !== guard.expectedLocalFieldMutationVersion ||
+				(digest !== guard.expectedTargetValueDigest && digest !== guard.previousTargetValueDigest)
+			);
+		};
+		if (compensationIsProtected(current)) {
+			await update(
+				{
+					status: "conflict",
+					reason: "撤回目标已有后续局部修改，已保留新值。",
+					recoveryCondition: null,
+				},
+				current,
+			);
 			return;
 		}
 		let socketIdentity: string | null = null;
@@ -1624,6 +1758,17 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 					layer = confirmedLayer;
 				}
 				if (!versionBoundTargetFields) throw new Error("目标配置持续变化，等待稳定证据后自动恢复");
+				if (compensationIsProtected(versionBoundTargetFields)) {
+					await update(
+						{
+							status: "conflict",
+							reason: "版本核验期间目标已有新决定，未执行补偿。",
+							recoveryCondition: null,
+						},
+						versionBoundTargetFields,
+					);
+					return;
+				}
 				const versionBoundHookState = versionBoundTargetFields[change.fieldKey]?.value;
 				if (
 					isHookDisablePreservingExistingTrust &&
@@ -1680,6 +1825,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						}),
 					);
 				if (response.filePath !== filePath) throw new Error("回执目录归属不符");
+				await update({ writeSubmissionFinishedAtMs: Date.now() });
 				const saved = await projectCodexConfigurationFields({
 					home: writer.binding.configurationHomeDirectoryPath,
 					sourceHome: await realpath(writer.binding.sourceHomeDirectoryPath),
@@ -1738,6 +1884,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		const target = change?.targets.find((item) => item.writerId === writerId);
 		if (
 			!change?.codexConfigurationProfileId ||
+			!isCodexConfigurationChangeApprovedForPropagation(change) ||
 			!target ||
 			!["pending_next_start", "pending_reload"].includes(target.status) ||
 			!isCodexConfigurationSourceObservationStillCurrent(store, change)
@@ -1751,11 +1898,67 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				!summary.codexConfigurationProfileRetainedInputRecovery)
 		)
 			return;
+		const safety = assessCodexConfigurationAutomaticProcessReplacement(
+			store.writers[writerId],
+			store.profiles[change.codexConfigurationProfileId],
+		);
+		if (!safety.allowed) {
+			if (target.reason !== safety.reason)
+				await mutateCodexConfigurationSyncStore(
+					(latest) => {
+						const current = latest.changes
+							.find((entry) => entry.changeId === changeId)
+							?.targets.find((entry) => entry.writerId === writerId);
+						if (current) {
+							current.reason = safety.reason;
+							current.recoveryCondition = "stale 后重进、正常启动或手动重启；完整配置风险变化后自动重验";
+							latest.revision++;
+						}
+					},
+					{ selection },
+				);
+			return;
+		}
 		const outcome = await deps.resumeSessionToAdoptProfile({
 			workspaceId: target.workspaceId,
 			summary,
 			profileId: change.codexConfigurationProfileId,
 			changeId,
+			readConfigurationSafetyFingerprint: async (launchSelection) => {
+				const latest = await readCodexConfigurationSyncLookupStore(selection);
+				const writer = latest.writers[writerId];
+				const profile = latest.profiles[change.codexConfigurationProfileId ?? ""];
+				if (!writer || !profile) return null;
+				let observed: CodexConfigurationFields = {};
+				try {
+					observed = await projectCodexConfigurationFields({
+						home: writer.binding.configurationHomeDirectoryPath,
+						sourceHome: await realpath(writer.binding.sourceHomeDirectoryPath),
+						fileNames: writer.fileNames,
+						previousFields: writer.lastObservedFields,
+						onHookDefinitionObservationProblem: () => {},
+					});
+				} catch {
+					return null;
+				}
+				const permissionSourceFlippedToProfile =
+					launchSelection?.sessionPermissionSelectionSource === "profile" &&
+					writer.taskPermissionSelectionSourceAtLaunch !== "profile";
+				const safetyWriter = permissionSourceFlippedToProfile
+					? {
+							...writer,
+							localExceptionOverrides: Object.fromEntries(
+								Object.entries(writer.localExceptionOverrides ?? {}).filter(
+									([group]) => group !== "permissions",
+								),
+							),
+						}
+					: writer;
+				return assessCodexConfigurationAutomaticProcessReplacement(safetyWriter, profile, {
+					...codexConfigurationDiskFieldsAwaitingAutomaticReplacement(writer, profile, observed),
+					...codexConfigurationAutomaticReplacementLaunchOverlay(writer, launchSelection),
+				}).fingerprint;
+			},
 			onBeforeProcessReplacement: (fingerprint) =>
 				mutateCodexConfigurationSyncStore(
 					(latest) => {
@@ -1764,6 +1967,10 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 						const liveSummary = deps.getSessionSummary(target.workspaceId, target.conversationSessionId);
 						if (
 							!latestChange ||
+							!assessCodexConfigurationAutomaticProcessReplacement(
+								latest.writers[writerId],
+								latest.profiles[latestChange.codexConfigurationProfileId ?? ""],
+							).allowed ||
 							!current ||
 							latest.writers[writerId]?.codexConfigurationProfileId !==
 								latestChange.codexConfigurationProfileId ||
@@ -1810,54 +2017,37 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		recovering = (async () => {
 			await deps.reconcileRetainedTerminalInput?.();
 			await reconcileSubsequentStartAdoption();
-			const store = await readCodexConfigurationSyncStore();
-			for (const [key, legacy] of Object.entries(store.legacySessionProfileAdoptions)) {
-				if (!deps.resumeSessionToAdoptProfile) break;
-				const summary = deps.getSessionSummary(legacy.workspaceId, legacy.conversationSessionId);
-				if (
-					!summary ||
-					summary.codexConfigurationWriterBinding ||
-					summary.agentNativeConversationSessionIdentity?.nativeSessionId !== legacy.nativeSessionId ||
-					(resolveSessionFacets(summary).liveness !== "live" &&
-						!summary.codexConfigurationProfileRetainedInputRecovery)
-				)
-					continue;
-				const outcome = await deps
-					.resumeSessionToAdoptProfile({
-						workspaceId: legacy.workspaceId,
-						summary,
-						profileId: legacy.profileId,
-						changeId: `legacy-profile-adoption:${key}`,
-						onBeforeProcessReplacement: (fingerprint) =>
-							mutateCodexConfigurationSyncStore((latest) => {
-								const current = latest.legacySessionProfileAdoptions[key];
-								if (
-									!current ||
-									current.nativeSessionId !== legacy.nativeSessionId ||
-									current.profileId !== legacy.profileId ||
-									(current.evidenceFingerprint === fingerprint && current.attemptCount >= 3)
-								)
-									return false;
-								current.attemptCount =
-									current.evidenceFingerprint === fingerprint ? current.attemptCount + 1 : 1;
-								current.evidenceFingerprint = fingerprint;
-								current.reason = "已持久登记旧会话的安全续接；同一证据最多三次，等待独立配置副本建立。";
-								latest.revision++;
-								return true;
-							}),
-					})
-					.catch((error) => ({
-						resumed: false,
-						reason: error instanceof Error ? error.message : "旧会话续接暂不可用，条件恢复后自动重验。",
-					}));
-				if (!outcome.resumed)
-					await mutateCodexConfigurationSyncStore((latest) => {
-						const current = latest.legacySessionProfileAdoptions[key];
-						if (current && current.reason !== outcome.reason) {
-							current.reason = outcome.reason;
-							latest.revision++;
-						}
-					});
+			let store = await readCodexConfigurationSyncStore();
+			if (store.changes.some((entry) => entry.pendingSharingScopeMutation)) {
+				await mutateCodexConfigurationSyncStore(
+					(latest) =>
+						resumeStoredCodexConfigurationChangeSharingScopeMutations(
+							latest,
+							verifySharingScopeSourceCurrentFields,
+						),
+					{
+						selection: { scope: "full" },
+					},
+				);
+				store = await readCodexConfigurationSyncStore();
+			}
+			const withdrawals = store.changes.filter((entry) => entry.changeSharingScope?.withdrawalStatus === "pending");
+			if (withdrawals.length) {
+				await mutateCodexConfigurationSyncStore(reconcileCodexConfigurationSharingScopeWithdrawals, {
+					selection: withdrawals.some((entry) =>
+						entry.changeSharingScope?.conflicts.some((conflict) => conflict.recoveryCondition),
+					)
+						? { scope: "full" }
+						: {
+								scope: "lookup",
+								includeTerminalTargets: true,
+								changeIds: withdrawals.flatMap((entry) => [
+									entry.changeId,
+									...(entry.changeSharingScope?.compensationChangeIds ?? []),
+								]),
+							},
+				});
+				store = await readCodexConfigurationSyncStore();
 			}
 			// 撤销和禁用先处理；更晚的重新启用仍由版本和冲突门禁决定。
 			const restrictive = (change: StoredCodexConfigurationChange) =>
@@ -2132,6 +2322,7 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 				}
 			}
 			if (kind !== "resolve_conflict") change.acknowledgedAt = Date.now();
+			if (kind === "acknowledge") change.noticePresentedAtMs = Date.now();
 			store.mutationReceipts[input.idempotencyKey] = { requestDigest, changeId: change.changeId };
 			store.revision++;
 		});
@@ -2366,6 +2557,41 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		return await responseState(input);
 	};
 	return {
+		setChangeSharingScope: async (input: CodexConfigurationSetChangeSharingScopeRequest) => {
+			await observe();
+			await prepareCodexConfigurationProposalIdentityVolumeObservations([input.changeId]).catch(() => {});
+			await mutateCodexConfigurationSyncStore(
+				async (store) => {
+					const change = store.changes.find((entry) => entry.changeId === input.changeId);
+					const cancellingPendingRequest =
+						change?.pendingSharingScopeMutation && change.changeSharingScope?.currentScope === input.targetScope;
+					const verified =
+						change && !cancellingPendingRequest && !store.mutationReceipts[input.idempotencyKey]
+							? await verifySharingScopeSourceCurrentFields(store, change)
+							: true;
+					setStoredCodexConfigurationChangeSharingScope(store, input, false, verified);
+				},
+				{ selection: { scope: "full" } },
+			);
+			await reconcileSessionProfileBindings();
+			await recover();
+			await publish();
+			const state = await responseState(input);
+			if (input.stateResponseScope !== "overview") return state;
+			const selected = publicState(
+				await readCodexConfigurationSyncLookupStore({ changeIds: [input.changeId] }),
+				deps.listSessions(),
+				traceMonitor.getCoverage(),
+				taskSourceContext,
+			);
+			return {
+				...state,
+				changes: [
+					...state.changes.filter((entry) => entry.changeId !== input.changeId),
+					...selected.changes.filter((entry) => entry.changeId === input.changeId),
+				],
+			};
+		},
 		mutateProfile: (input: CodexConfigurationProfileMutationRequest) =>
 			withRequestSelection(input, () => mutateProfile(input)),
 		getChangeDetails: async (input: CodexConfigurationChangeDetailsRequest) => {
@@ -2468,6 +2694,12 @@ export function createCodexConfigurationSyncService(deps: CodexConfigurationSync
 		getMutationReceipt: async (input: CodexConfigurationMutationReceiptRequest) => {
 			const store = await readCodexConfigurationSyncLookupStore({ receiptKeys: [input.idempotencyKey] });
 			const receipt = store.mutationReceipts[input.idempotencyKey] ?? null;
+			if (
+				receipt &&
+				input.expectedSharingScopeMutation &&
+				receipt.requestDigest !== codexConfigurationSharingScopeMutationDigest(input.expectedSharingScopeMutation)
+			)
+				throw new Error("幂等凭证与原配置范围请求不符。");
 			if (
 				receipt &&
 				input.expectedProfileMutation &&

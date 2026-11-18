@@ -6,8 +6,19 @@ import type {
 	CodexConfigurationProfileMutationRequest,
 	CodexConfigurationResolveConflictRequest,
 	CodexConfigurationResolveTargetConflictRequest,
+	CodexConfigurationSetChangeSharingScopeRequest,
 	CodexConfigurationSynchronizeRequest,
 } from "@/runtime/types";
+
+export const setCodexConfigurationChangeSharingScope = (
+	workspaceId: string | null,
+	input: CodexConfigurationSetChangeSharingScopeRequest,
+	signal?: AbortSignal,
+) =>
+	getRuntimeTrpcClient(workspaceId).runtime.setCodexConfigurationChangeSharingScope.mutate(
+		{ ...input, stateResponseScope: "overview" },
+		{ signal, context: { sendAsIndependentHttpRequest: true } },
+	);
 
 export const mutateCodexConfigurationProfile = (
 	workspaceId: string | null,

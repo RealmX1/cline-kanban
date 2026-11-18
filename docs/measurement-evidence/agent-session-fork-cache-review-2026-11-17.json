@@ -1,0 +1,1943 @@
+{
+  "reviewDate": "2026-11-17",
+  "reviewMode": "offline_only_no_new_model_calls",
+  "historicalRawEvidenceAvailable": false,
+  "historicalEvidenceLocationReportedPreviously": "~/.cline/kanban/native-agent-fork-prompt-cache-measurements/",
+  "historicalScope": "September/October results retained from committed reports; parser fixtures tested, not raw requests replayed",
+  "groups": [
+    {
+      "id": "claude-5.5",
+      "privateEvidenceDirectory": "~/.cline/kanban/claude-native-fork-cache-recheck-20261116",
+      "cliVersionAtStart": "2.1.323 (Claude Code)",
+      "operations": [
+        {
+          "model": "claude-opus-5-5",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WBHfbkha55bN4Cyptb",
+            "inputTokens": 18071,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 11370,
+            "cacheCreationTokens": 6699,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 6699
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-opus-5-5-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "b893a4d7cdf23337b89da6b0df8548e3e18516f0d2d04f3f3b3a204d0b779187",
+          "requestConfiguration": {
+            "requestId": "17409898-e145-42fa-b967-30f0bc07910a",
+            "systemSha256": "51b72535ac9334c81e608b9a60a39ec695a122913ff231255016c5a55a197304",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "e33bcd3b27f7347b18928fedb9645d5c3b9fba02edf790f4e84ec3b62f6a8039",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-opus-5-5",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WBTed4RoqwyVUjSKJx",
+            "inputTokens": 116366,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 11370,
+            "cacheCreationTokens": 104994,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 104994
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-opus-5-5-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "3ce8205d049cab2a4b83583ad667dd3e4b9524246c676495ff7965fd80af0db4",
+          "requestConfiguration": {
+            "requestId": "a40b6aca-060c-4ea9-b828-0eff8e98e9fe",
+            "systemSha256": "527452e82371396a44237f7af395d8989546927ad730b1eecf4b6399cb5a899c",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "e33bcd3b27f7347b18928fedb9645d5c3b9fba02edf790f4e84ec3b62f6a8039",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-opus-5-5",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WHkZnLeFaR5HEJr4uG",
+            "inputTokens": 116447,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 112218,
+            "cacheCreationTokens": 4227,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 4227
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-opus-5-5-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "c1997ea6cdfcbe02c5246bcb60667202a564309dac3f3761b82c06fbcad32654",
+          "requestConfiguration": {
+            "requestId": "fb391f19-e522-48b7-8a17-de8167a70f76",
+            "systemSha256": "527452e82371396a44237f7af395d8989546927ad730b1eecf4b6399cb5a899c",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "e33bcd3b27f7347b18928fedb9645d5c3b9fba02edf790f4e84ec3b62f6a8039",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-opus-5-5",
+          "step": "fork-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WJHgHPtVxe8aaMLbWN",
+            "inputTokens": 116562,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 116425,
+            "cacheCreationTokens": 135,
+            "outputTokens": 25,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 135
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-opus-5-5-fork-first/stdout.jsonl",
+          "sourceStdoutSha256": "ecd299d41cd5e4b8e6c98fdbbaef81742c1e519362a7441fea20cc8c7c585658",
+          "parentUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "requestConfiguration": {
+            "requestId": "6d7f6342-6032-4965-bc74-a440c6b7fe7f",
+            "systemSha256": "527452e82371396a44237f7af395d8989546927ad730b1eecf4b6399cb5a899c",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "e33bcd3b27f7347b18928fedb9645d5c3b9fba02edf790f4e84ec3b62f6a8039",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WJmh1uusxzHSsE1oYh",
+            "inputTokens": 17961,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 11370,
+            "cacheCreationTokens": 6589,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 6589
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-sonnet-5-5-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "51919b7d1f0e519a8ea78ec29bb03c105900724874b7901977704a89bdc0e530",
+          "requestConfiguration": {
+            "requestId": "86fc74b1-f8eb-41b6-add5-1b8f65ffd8f1",
+            "systemSha256": "b07dae2b55d7a2d456a10572fbda9c5f82ceb69393dd9b26513ae4154ee4b97d",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "bcefb905458a60b5390f974a5456b26b0d5319992676501292a79383ed33154e",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WKUEZsqLeBQe8GEf9b",
+            "inputTokens": 118972,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 13291,
+            "cacheCreationTokens": 105679,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 105679
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-sonnet-5-5-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "9efa6bab465fb88c77c81f611c9fe3ac9e9e3c09d9a5aac8650f90ace3e05ac1",
+          "requestConfiguration": {
+            "requestId": "52eda39b-2f20-4671-a30f-f39ded76eb67",
+            "systemSha256": "b07dae2b55d7a2d456a10572fbda9c5f82ceb69393dd9b26513ae4154ee4b97d",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "bcefb905458a60b5390f974a5456b26b0d5319992676501292a79383ed33154e",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WLKHLmZCUh5m2f2hTi",
+            "inputTokens": 119049,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 114820,
+            "cacheCreationTokens": 4227,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 4227
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-sonnet-5-5-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "b92bea93b94bd1ac3c4ac444a2d0a7933a0f63e4b745f433b08796524de58bee",
+          "requestConfiguration": {
+            "requestId": "383d4ca8-5bf9-424f-913f-7b67ab57cd0f",
+            "systemSha256": "b07dae2b55d7a2d456a10572fbda9c5f82ceb69393dd9b26513ae4154ee4b97d",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "bcefb905458a60b5390f974a5456b26b0d5319992676501292a79383ed33154e",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "step": "fork-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WLpyH5LsbckeVNVwhC",
+            "inputTokens": 119164,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 119027,
+            "cacheCreationTokens": 135,
+            "outputTokens": 33,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 135
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-native-fork-cache-recheck-20261116/operations/claude-sonnet-5-5-fork-first/stdout.jsonl",
+          "sourceStdoutSha256": "102bc1805f60799fef219dc52c52eb78d39934d0e2501f0a3d7e9c0a3d82f4a1",
+          "parentUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "requestConfiguration": {
+            "requestId": "789a9406-96ec-4308-a633-8eb178a28b23",
+            "systemSha256": "b07dae2b55d7a2d456a10572fbda9c5f82ceb69393dd9b26513ae4154ee4b97d",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "bcefb905458a60b5390f974a5456b26b0d5319992676501292a79383ed33154e",
+            "scratchpadInSystem": false
+          }
+        }
+      ],
+      "measurements.json": [
+        {
+          "model": "claude-opus-5-5",
+          "status": "measured",
+          "problems": [],
+          "publicPrefixTokenUpperBound": 18071,
+          "parentHot": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WHkZnLeFaR5HEJr4uG",
+            "inputTokens": 116447,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 112218,
+            "cacheCreationTokens": 4227,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 4227
+            }
+          },
+          "forkFirst": {
+            "model": "claude-opus-5-5",
+            "messageId": "msg_011Ch7WJHgHPtVxe8aaMLbWN",
+            "inputTokens": 116562,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 116425,
+            "cacheCreationTokens": 135,
+            "outputTokens": 25,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 135
+            }
+          },
+          "forkHitRatio": 0.998824659837683,
+          "historyReuseRatio": 1,
+          "secondsAfterHotParent": 0.034,
+          "parentUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "requestConfiguration": {
+            "requestId": "6d7f6342-6032-4965-bc74-a440c6b7fe7f",
+            "systemSha256": "527452e82371396a44237f7af395d8989546927ad730b1eecf4b6399cb5a899c",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "e33bcd3b27f7347b18928fedb9645d5c3b9fba02edf790f4e84ec3b62f6a8039",
+            "scratchpadInSystem": false
+          },
+          "forkIncrementalEstimatedCostUsd": 0.024873000000000034,
+          "groupEstimatedCostUsd": 0.9794886
+        },
+        {
+          "model": "claude-sonnet-5-5",
+          "status": "measured",
+          "problems": [],
+          "publicPrefixTokenUpperBound": 17961,
+          "parentHot": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WLKHLmZCUh5m2f2hTi",
+            "inputTokens": 119049,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 114820,
+            "cacheCreationTokens": 4227,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 4227
+            }
+          },
+          "forkFirst": {
+            "model": "claude-sonnet-5-5",
+            "messageId": "msg_011Ch7WLpyH5LsbckeVNVwhC",
+            "inputTokens": 119164,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 119027,
+            "cacheCreationTokens": 135,
+            "outputTokens": 33,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 135
+            }
+          },
+          "forkHitRatio": 0.9988503239233325,
+          "historyReuseRatio": 1,
+          "secondsAfterHotParent": 0.041,
+          "parentUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "requestConfiguration": {
+            "requestId": "789a9406-96ec-4308-a633-8eb178a28b23",
+            "systemSha256": "b07dae2b55d7a2d456a10572fbda9c5f82ceb69393dd9b26513ae4154ee4b97d",
+            "toolsSha256": "2adc551d64dac4b26a6999b5d3223a41967ed7b3bd5f0344e9e4adb87454fd11",
+            "parametersSha256": "bcefb905458a60b5390f974a5456b26b0d5319992676501292a79383ed33154e",
+            "scratchpadInSystem": false
+          },
+          "forkIncrementalEstimatedCostUsd": 0.012776699999999974,
+          "groupEstimatedCostUsd": 0.49283679999999996
+        }
+      ]
+    },
+    {
+      "id": "agy-native",
+      "privateEvidenceDirectory": "~/.cline/kanban/antigravity-native-fork-cache-recheck-20261116",
+      "cliVersionAtStart": "1.5.9",
+      "operations": [
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 10454,
+            "uncachedInputTokens": 10454,
+            "cachedInputTokens": 0,
+            "outputTokens": 32,
+            "thinkingTokens": 27,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "2a8b60e8746087b082c0f1b09ad23bd02a10e50cfad6c11e94289fc109ccba23",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "8e6075973c38635d29e8a3ff7c55ae7ba1f8d56b8512d128aceb1e5c631f6bf5",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43390,
+            "uncachedInputTokens": 43390,
+            "cachedInputTokens": 0,
+            "outputTokens": 93,
+            "thinkingTokens": 88,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "0a5cb7977dd394dc99a5b023ec8f944d05167c3faf7171037921dde0ddbd54f7",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43692,
+            "uncachedInputTokens": 2356,
+            "cachedInputTokens": 41336,
+            "outputTokens": 30,
+            "thinkingTokens": 25,
+            "sourceStepIndex": 4
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "5eb8755f52eee3aad642e9257a8c47e9b4c4d1313268d6c91cdb40111b465cd1",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 1,
+            "sourceStepIndex": 4,
+            "systemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot-refresh",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43931,
+            "uncachedInputTokens": 43931,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 7
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-parent-hot-refresh/stdout.jsonl",
+          "sourceStdoutSha256": "c1ed7db3f9502932d3363e0d14d018d2c11cd3b4a1c765a6edfbb99ee7203169",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 7,
+            "systemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "fork-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44164,
+            "uncachedInputTokens": 44164,
+            "cachedInputTokens": 0,
+            "outputTokens": 150,
+            "thinkingTokens": 111,
+            "sourceStepIndex": 10
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-fork-first/stdout.jsonl",
+          "sourceStdoutSha256": "464a09cb3b3468905d8a7e1ffae8d9fcd0888a06e7f19002bffab99b570b16b9",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 3,
+            "sourceStepIndex": 10,
+            "systemPromptSha256": "33fdc1a2dd2ef3b6df4a0ddf291e413e2de0f1f4ba3c068e056ff18c885dca08",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 9750,
+            "uncachedInputTokens": 9750,
+            "cachedInputTokens": 0,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-argon-high-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "9741dc7c2c1597b41bd489282adbaccc740b3fa7382b47d122962fa7a8fef130",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "5e83e7e531c4fa06d0e5741bcadf508a7664eb76a311d2567ee037bd02cec0f6",
+            "systemPromptCharacters": 20387,
+            "normalizedSystemPromptSha256": "fff8298908397b4feb70e5756a2d5972e723046fb8729fb0e5f39bd340df84cc",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 42914,
+            "uncachedInputTokens": 42914,
+            "cachedInputTokens": 0,
+            "outputTokens": 89,
+            "thinkingTokens": 84,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-argon-high-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "456e5a0691d5a0bc9fddd8d1c2496da79ee53259d38ecd433d54ad721470e356",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "5eabf571b275b27c80642872a9abdde8ff49b6fc039b7dd886ca67e35ca4f003",
+            "systemPromptCharacters": 20387,
+            "normalizedSystemPromptSha256": "fff8298908397b4feb70e5756a2d5972e723046fb8729fb0e5f39bd340df84cc",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43212,
+            "uncachedInputTokens": 2347,
+            "cachedInputTokens": 40865,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 4
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-argon-high-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "3076db77e01634d6905433cdfce00fa2864e55057b5e1efdfa6a38cc93a78977",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 1,
+            "sourceStepIndex": 4,
+            "systemPromptSha256": "5eabf571b275b27c80642872a9abdde8ff49b6fc039b7dd886ca67e35ca4f003",
+            "systemPromptCharacters": 20387,
+            "normalizedSystemPromptSha256": "fff8298908397b4feb70e5756a2d5972e723046fb8729fb0e5f39bd340df84cc",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "fork-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43463,
+            "uncachedInputTokens": 43463,
+            "cachedInputTokens": 0,
+            "outputTokens": 155,
+            "thinkingTokens": 117,
+            "sourceStepIndex": 7
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-argon-high-fork-first/stdout.jsonl",
+          "sourceStdoutSha256": "7dc76ae4355b6e41b6b687967dfba6867a306bc631866bdbc45f3dd3f39b14fb",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 7,
+            "systemPromptSha256": "139f9441448962fd51180b3865eb1d6b69eb4cdf0f853489dbdd40f835d25d79",
+            "systemPromptCharacters": 20387,
+            "normalizedSystemPromptSha256": "fff8298908397b4feb70e5756a2d5972e723046fb8729fb0e5f39bd340df84cc",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot-after",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44855,
+            "uncachedInputTokens": 44855,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 10
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-parent-hot-after/stdout.jsonl",
+          "sourceStdoutSha256": "057609ee9eb395c51a6b48342e7946ea759812fdd3aed0cbad4dac4297e619bd",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 3,
+            "sourceStepIndex": 10,
+            "systemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot-after",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43448,
+            "uncachedInputTokens": 2285,
+            "cachedInputTokens": 41163,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 7
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-argon-high-parent-hot-after/stdout.jsonl",
+          "sourceStdoutSha256": "bf882aa62f3d3206f5d31f328ed78976f763555f3aaae3a73de1199f30ca255b",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 7,
+            "systemPromptSha256": "5eabf571b275b27c80642872a9abdde8ff49b6fc039b7dd886ca67e35ca4f003",
+            "systemPromptCharacters": 20387,
+            "normalizedSystemPromptSha256": "fff8298908397b4feb70e5756a2d5972e723046fb8729fb0e5f39bd340df84cc",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot-qualified",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 45078,
+            "uncachedInputTokens": 45078,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 13
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-native-fork-cache-recheck-20261116/operations/gemini-4-hydrogen-high-parent-hot-qualified/stdout.jsonl",
+          "sourceStdoutSha256": "569f091515da6ba3dd9f333ecee8bed9cf12e36e46e8f6609fba72d1c6acdfcd",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 4,
+            "sourceStepIndex": 13,
+            "systemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "systemPromptCharacters": 23682,
+            "normalizedSystemPromptSha256": "19ae50f89a2d95a86554834f337de8991e081f73e006b19130cadc3cb32395f9",
+            "normalizationDiagnosticOnly": true
+          }
+        }
+      ],
+      "measurements.json": [
+        {
+          "model": "gemini-4-hydrogen-high",
+          "status": "insufficient_evidence",
+          "problems": [
+            "父热对照无效",
+            "分支后父热对照无效"
+          ],
+          "publicPrefixTokenUpperBound": 10454,
+          "parentHot": {
+            "inputTokens": 43931,
+            "uncachedInputTokens": 43931,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 7
+          },
+          "parentHotAfter": {
+            "inputTokens": 44855,
+            "uncachedInputTokens": 44855,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 10
+          },
+          "forkFirst": {
+            "inputTokens": 44164,
+            "uncachedInputTokens": 44164,
+            "cachedInputTokens": 0,
+            "outputTokens": 150,
+            "thinkingTokens": 111,
+            "sourceStepIndex": 10
+          },
+          "secondsAfterParentControl": 6.408546,
+          "parentHistoryUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "forkHitRatio": 0.0,
+          "requestPrefixEvidence": {
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "fullRequestPrefixEquality": "not_tested",
+            "parentSystemPromptSha256": "708ac9631029328a971d32da4d7dad534d39c2491fa937fdf7a9114b15208491",
+            "childSystemPromptSha256": "33fdc1a2dd2ef3b6df4a0ddf291e413e2de0f1f4ba3c068e056ff18c885dca08",
+            "sameSystemPrompt": false,
+            "equalAfterDiagnosticIdNormalization": true,
+            "parentAfterSystemPromptMatchesBefore": true
+          },
+          "historyReuseRatio": null
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "status": "measured",
+          "problems": [],
+          "publicPrefixTokenUpperBound": 9750,
+          "parentHot": {
+            "inputTokens": 43212,
+            "uncachedInputTokens": 2347,
+            "cachedInputTokens": 40865,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 4
+          },
+          "parentHotAfter": {
+            "inputTokens": 43448,
+            "uncachedInputTokens": 2285,
+            "cachedInputTokens": 41163,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 7
+          },
+          "forkFirst": {
+            "inputTokens": 43463,
+            "uncachedInputTokens": 43463,
+            "cachedInputTokens": 0,
+            "outputTokens": 155,
+            "thinkingTokens": 117,
+            "sourceStepIndex": 7
+          },
+          "secondsAfterParentControl": 6.430402,
+          "parentHistoryUnchanged": true,
+          "inheritedHistory": true,
+          "recalledNonce": true,
+          "forkHitRatio": 0.0,
+          "requestPrefixEvidence": {
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "fullRequestPrefixEquality": "not_tested",
+            "parentSystemPromptSha256": "5eabf571b275b27c80642872a9abdde8ff49b6fc039b7dd886ca67e35ca4f003",
+            "childSystemPromptSha256": "139f9441448962fd51180b3865eb1d6b69eb4cdf0f853489dbdd40f835d25d79",
+            "sameSystemPrompt": false,
+            "equalAfterDiagnosticIdNormalization": true,
+            "parentAfterSystemPromptMatchesBefore": true
+          },
+          "historyReuseRatio": 0
+        }
+      ]
+    },
+    {
+      "id": "agy-repair-argon",
+      "privateEvidenceDirectory": "~/.cline/kanban/antigravity-fork-cache-repair-20261116/argon",
+      "cliVersionAtStart": "1.5.9",
+      "operations": [
+        {
+          "model": "gemini-4-argon-high",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 9742,
+            "uncachedInputTokens": 9742,
+            "cachedInputTokens": 0,
+            "outputTokens": 27,
+            "thinkingTokens": 22,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "0b91cc70666714edb7cb09f7a96b1ec3a34b648b61c0844e3ee9fc7b910e3d27",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "98155ce2809bfb3b464acd1d8c9a6f8e37587eb95e07ac20e274976d11be9f21",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43028,
+            "uncachedInputTokens": 43028,
+            "cachedInputTokens": 0,
+            "outputTokens": 81,
+            "thinkingTokens": 76,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "8871c9d8991e0cf01f30e38e1a0434f611bd074f6200a58e1ddf2a02eca63f29",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43186,
+            "uncachedInputTokens": 2212,
+            "cachedInputTokens": 40974,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 3
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "872e0191107bb39be84da212ea2abef3c75f8abb1ca7a3cd5d0603dc95c957b0",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 1,
+            "sourceStepIndex": 3,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "passthrough-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43425,
+            "uncachedInputTokens": 43425,
+            "cachedInputTokens": 0,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 6
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-passthrough-first/stdout.jsonl",
+          "sourceStdoutSha256": "48d707417cb0b0bd503b7e6a09c29989c820e34410b9e033965e1270e4c4c28c",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 6,
+            "systemPromptSha256": "f4bbf629d716bb46514b7918c8d8b9d7631c588f07945fd820a65ea252ab1201",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot-after-passthrough",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43289,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41137,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 5
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-hot-after-passthrough/stdout.jsonl",
+          "sourceStdoutSha256": "be19e314c200c5e996e2ceead212fb97095a69823993700518675603fd72412d",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 5,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "prefix-first",
+          "status": "unknown_do_not_retry",
+          "validMainResponse": false,
+          "request": null,
+          "problems": [
+            "没有唯一主 agent_response，不能把多次请求合计当首轮",
+            "逐步 usage 字段缺失，不能用零补齐"
+          ],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-prefix-first/stdout.jsonl",
+          "sourceStdoutSha256": "3dd70cf48788f083a3d3d386ef396138f2a8cd539bfcce63f3ab0612777978aa"
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-resume-warm",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43524,
+            "uncachedInputTokens": 43524,
+            "cachedInputTokens": 0,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 8
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-resume-warm/stdout.jsonl",
+          "sourceStdoutSha256": "87c9faf777cbaea76d11ef6a648a8a931e1291eeb8553b22657667b801fbcfaa",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 3,
+            "sourceStepIndex": 8,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-resume-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43627,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41475,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 10
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-resume-hot/stdout.jsonl",
+          "sourceStdoutSha256": "78847df72ebc1fd744bd49139de0b4f2e1c82fcd1bf79c15456403047864952a",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 4,
+            "sourceStepIndex": 10,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "affinity-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44010,
+            "uncachedInputTokens": 2432,
+            "cachedInputTokens": 41578,
+            "outputTokens": 142,
+            "thinkingTokens": 106,
+            "sourceStepIndex": 13
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-affinity-first/stdout.jsonl",
+          "sourceStdoutSha256": "11f57582b1897571cb973e3bbc616f4b53bc45b4753e0a5814dd1dc0f6b7a482",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 5,
+            "sourceStepIndex": 13,
+            "systemPromptSha256": "2b0e8c2b8e11d329d5e23c5a9c523391881c58de47fac36c494750c3cbc135a4",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot-after-affinity",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43730,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41578,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 12
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-hot-after-affinity/stdout.jsonl",
+          "sourceStdoutSha256": "bb82554f73d9ceab5f5dcb087e718d9aef09ccb4f4d535c0d7a63dee12010c23",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 5,
+            "sourceStepIndex": 12,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-pinned-warm",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43965,
+            "uncachedInputTokens": 2284,
+            "cachedInputTokens": 41681,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 15
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-pinned-warm/stdout.jsonl",
+          "sourceStdoutSha256": "dced509e420b60b7bebcfa6f26330f0888775994401c2f0cfbf9acc6e85ce43c",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 6,
+            "sourceStepIndex": 15,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "passthrough-pinned-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44206,
+            "uncachedInputTokens": 44206,
+            "cachedInputTokens": 0,
+            "outputTokens": 188,
+            "thinkingTokens": 152,
+            "sourceStepIndex": 18
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-passthrough-pinned-first/stdout.jsonl",
+          "sourceStdoutSha256": "45f76957908ad5b090bfe2aab316a4af159f8260ccc7e4e016e8224cdfdc14c7",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 7,
+            "sourceStepIndex": 18,
+            "systemPromptSha256": "e8ce414b8bb73ba9d7104043bf2a5b02bb8536778277b33c3ef12cb3211004ff",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot-after-passthrough-pinned",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44068,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41916,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 17
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-hot-after-passthrough-pinned/stdout.jsonl",
+          "sourceStdoutSha256": "080c8b94e8a7dd37a5973e81cad0b07747c1bf7d83b238e2b0707e7505453f37",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 7,
+            "sourceStepIndex": 17,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "affinity-pinned-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44452,
+            "uncachedInputTokens": 2433,
+            "cachedInputTokens": 42019,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 20
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-affinity-pinned-first/stdout.jsonl",
+          "sourceStdoutSha256": "de129a4dfd91db5a597a781c6ca33e2c3a402aeb3b9ea17dc9cc387431d3144b",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 8,
+            "sourceStepIndex": 20,
+            "systemPromptSha256": "865d3f2d83bb8e44b84568bea2ab6eeab281c923c6842283c13a0e651fe1c916",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-argon-high",
+          "step": "parent-hot-after-affinity-pinned",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44171,
+            "uncachedInputTokens": 34575,
+            "cachedInputTokens": 9596,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 19
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/argon/operations/gemini-4-argon-high-parent-hot-after-affinity-pinned/stdout.jsonl",
+          "sourceStdoutSha256": "be581ee868731afa472ad6c77374330e2c7cd1592cfefd6e0d03c82b9a145f93",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 8,
+            "sourceStepIndex": 19,
+            "systemPromptSha256": "311411b83940dd0b7014871bf7bece9063d1f52b53dfd5eca8318bb09ffa7f81",
+            "systemPromptCharacters": 20369,
+            "normalizedSystemPromptSha256": "aed70b3176eb563be44d1dc024fdf60258c9a62054c0f13671d5e7d5929b439f",
+            "normalizationDiagnosticOnly": true
+          }
+        }
+      ],
+      "measurements.json": [
+        {
+          "candidate": "passthrough",
+          "problems": [],
+          "first": {
+            "inputTokens": 43425,
+            "uncachedInputTokens": 43425,
+            "cachedInputTokens": 0,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 6
+          },
+          "parentBefore": {
+            "inputTokens": 43186,
+            "uncachedInputTokens": 2212,
+            "cachedInputTokens": 40974,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 3
+          },
+          "parentAfter": {
+            "inputTokens": 43289,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41137,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 5
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "independentChild": "fcf93971-2539-4537-a67e-927cf4ee7e00",
+          "parent": "7e00f911-a167-41f1-b5d6-26783a24ee17",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        },
+        {
+          "candidate": "affinity",
+          "problems": [],
+          "first": {
+            "inputTokens": 44010,
+            "uncachedInputTokens": 2432,
+            "cachedInputTokens": 41578,
+            "outputTokens": 142,
+            "thinkingTokens": 106,
+            "sourceStepIndex": 13
+          },
+          "beforeStep": "parent-resume-hot",
+          "parentBefore": {
+            "inputTokens": 43627,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41475,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 10
+          },
+          "parentAfter": {
+            "inputTokens": 43730,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41578,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 12
+          },
+          "qualifiedSuccess": true,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9447398318563963,
+          "independentChild": "7c4f97f8-6985-4426-a520-15c3795a16fa",
+          "parent": "7e00f911-a167-41f1-b5d6-26783a24ee17",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        },
+        {
+          "candidate": "passthrough-pinned",
+          "problems": [],
+          "first": {
+            "inputTokens": 44206,
+            "uncachedInputTokens": 44206,
+            "cachedInputTokens": 0,
+            "outputTokens": 188,
+            "thinkingTokens": 152,
+            "sourceStepIndex": 18
+          },
+          "beforeStep": "parent-pinned-warm",
+          "parentBefore": {
+            "inputTokens": 43965,
+            "uncachedInputTokens": 2284,
+            "cachedInputTokens": 41681,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 15
+          },
+          "parentAfter": {
+            "inputTokens": 44068,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41916,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 17
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "independentChild": "950f8307-e033-402d-879e-ffdc22da7666",
+          "parent": "7e00f911-a167-41f1-b5d6-26783a24ee17",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        },
+        {
+          "candidate": "affinity-pinned",
+          "problems": [
+            "父会话前后热对照未同时通过"
+          ],
+          "first": {
+            "inputTokens": 44452,
+            "uncachedInputTokens": 2433,
+            "cachedInputTokens": 42019,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 20
+          },
+          "beforeStep": "parent-hot-after-passthrough-pinned",
+          "parentBefore": {
+            "inputTokens": 44068,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41916,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 17
+          },
+          "parentAfter": {
+            "inputTokens": 44171,
+            "uncachedInputTokens": 34575,
+            "cachedInputTokens": 9596,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 19
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9452668046432107,
+          "independentChild": "f61d4942-0308-4c42-8523-6d96d673d121",
+          "parent": "7e00f911-a167-41f1-b5d6-26783a24ee17",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        }
+      ],
+      "audited-measurements.json": [
+        {
+          "candidate": "passthrough",
+          "problems": [],
+          "first": {
+            "inputTokens": 43425,
+            "uncachedInputTokens": 43425,
+            "cachedInputTokens": 0,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 6
+          },
+          "parentBefore": {
+            "inputTokens": 43186,
+            "uncachedInputTokens": 2212,
+            "cachedInputTokens": 40974,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 3
+          },
+          "parentAfter": {
+            "inputTokens": 43289,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41137,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 5
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.9",
+            "1.5.9",
+            "1.5.9"
+          ],
+          "observedFirstHistoryHitVerified": false,
+          "secondsAfterParentControl": 6.335555,
+          "historyReuseRatio": 0.0,
+          "completeControlledComparison": true
+        },
+        {
+          "candidate": "affinity",
+          "problems": [
+            "父子 CLI 版本不同或缺证，效果归因受混杂"
+          ],
+          "first": {
+            "inputTokens": 44010,
+            "uncachedInputTokens": 2432,
+            "cachedInputTokens": 41578,
+            "outputTokens": 142,
+            "thinkingTokens": 106,
+            "sourceStepIndex": 13
+          },
+          "beforeStep": "parent-resume-hot",
+          "parentBefore": {
+            "inputTokens": 43627,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41475,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 10
+          },
+          "parentAfter": {
+            "inputTokens": 43730,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41578,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 12
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9447398318563963,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.9",
+            "1.5.10",
+            "1.5.9"
+          ],
+          "observedFirstHistoryHitVerified": true,
+          "secondsAfterParentControl": 6.380891,
+          "historyReuseRatio": null,
+          "completeControlledComparison": false
+        },
+        {
+          "candidate": "passthrough-pinned",
+          "problems": [],
+          "first": {
+            "inputTokens": 44206,
+            "uncachedInputTokens": 44206,
+            "cachedInputTokens": 0,
+            "outputTokens": 188,
+            "thinkingTokens": 152,
+            "sourceStepIndex": 18
+          },
+          "beforeStep": "parent-pinned-warm",
+          "parentBefore": {
+            "inputTokens": 43965,
+            "uncachedInputTokens": 2284,
+            "cachedInputTokens": 41681,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 15
+          },
+          "parentAfter": {
+            "inputTokens": 44068,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41916,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 17
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.10",
+            "1.5.10",
+            "1.5.10"
+          ],
+          "observedFirstHistoryHitVerified": false,
+          "secondsAfterParentControl": 6.369623,
+          "historyReuseRatio": 0.0,
+          "completeControlledComparison": true
+        },
+        {
+          "candidate": "affinity-pinned",
+          "problems": [
+            "父会话前后热对照未同时通过"
+          ],
+          "first": {
+            "inputTokens": 44452,
+            "uncachedInputTokens": 2433,
+            "cachedInputTokens": 42019,
+            "outputTokens": 146,
+            "thinkingTokens": 110,
+            "sourceStepIndex": 20
+          },
+          "beforeStep": "parent-hot-after-passthrough-pinned",
+          "parentBefore": {
+            "inputTokens": 44068,
+            "uncachedInputTokens": 2152,
+            "cachedInputTokens": 41916,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 17
+          },
+          "parentAfter": {
+            "inputTokens": 44171,
+            "uncachedInputTokens": 34575,
+            "cachedInputTokens": 9596,
+            "outputTokens": 26,
+            "thinkingTokens": 21,
+            "sourceStepIndex": 19
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9452668046432107,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.10",
+            "1.5.10",
+            "1.5.10"
+          ],
+          "observedFirstHistoryHitVerified": true,
+          "secondsAfterParentControl": 6.374774,
+          "historyReuseRatio": null,
+          "completeControlledComparison": false
+        }
+      ]
+    },
+    {
+      "id": "agy-repair-hydrogen",
+      "privateEvidenceDirectory": "~/.cline/kanban/antigravity-fork-cache-repair-20261116/hydrogen",
+      "cliVersionAtStart": "1.5.10",
+      "operations": [
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 10441,
+            "uncachedInputTokens": 10441,
+            "cachedInputTokens": 0,
+            "outputTokens": 30,
+            "thinkingTokens": 25,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "50aa3bdf5497b954264ea6edcf291da19faa7c145033acb8ed2b2e66c7e7a0f5",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "285f3a3467e348ce6a25f8a1281584beb40e850551890e1733da496ab5f8bb41",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-seed",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43320,
+            "uncachedInputTokens": 43320,
+            "cachedInputTokens": 0,
+            "outputTokens": 94,
+            "thinkingTokens": 89,
+            "sourceStepIndex": 1
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "8d5084441f169d2acf326c2cf0a162898474336877afde48c37aea390e2a025a",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 0,
+            "sourceStepIndex": 1,
+            "systemPromptSha256": "998775fffebcade49b2673b7b37e734c4f57f7282bf457fa38c0e2f4bb998ac9",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43491,
+            "uncachedInputTokens": 2225,
+            "cachedInputTokens": 41266,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 3
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-parent-hot/stdout.jsonl",
+          "sourceStdoutSha256": "c03ae0765f1d6335c35566a9b5dd324399c6deb1c5568e64dbb9e1900ca7731f",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 1,
+            "sourceStepIndex": 3,
+            "systemPromptSha256": "998775fffebcade49b2673b7b37e734c4f57f7282bf457fa38c0e2f4bb998ac9",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "passthrough-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43721,
+            "uncachedInputTokens": 43721,
+            "cachedInputTokens": 0,
+            "outputTokens": 93,
+            "thinkingTokens": 55,
+            "sourceStepIndex": 6
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-passthrough-first/stdout.jsonl",
+          "sourceStdoutSha256": "0c70b71df9b8f356664ec4f940fdff937d0164614b63df07c007644a3a5a65df",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 6,
+            "systemPromptSha256": "9707920271034a3e93182bffd7c7426ab80bac9f92fcad00e175910b8e1ca1e2",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot-after-passthrough",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43582,
+            "uncachedInputTokens": 2140,
+            "cachedInputTokens": 41442,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 5
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-parent-hot-after-passthrough/stdout.jsonl",
+          "sourceStdoutSha256": "a0cc2a03698787030247112fdaf84ee8d0280834e5c10ae598fe228d6c1e824e",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 2,
+            "sourceStepIndex": 5,
+            "systemPromptSha256": "998775fffebcade49b2673b7b37e734c4f57f7282bf457fa38c0e2f4bb998ac9",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "prefix-first",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 43950,
+            "uncachedInputTokens": 2417,
+            "cachedInputTokens": 41533,
+            "outputTokens": 101,
+            "thinkingTokens": 63,
+            "sourceStepIndex": 8
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-prefix-first/stdout.jsonl",
+          "sourceStdoutSha256": "fd389b1d7a39018baf0190b5f16f90f28909f266307394e621a2ce9ff0ae3953",
+          "recalledNonce": true,
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 3,
+            "sourceStepIndex": 8,
+            "systemPromptSha256": "34d189fd3e36fb321d6555e604b44fa1b307c8842c301ed70373a931c9f5abe7",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        },
+        {
+          "model": "gemini-4-hydrogen-high",
+          "step": "parent-hot-after-prefix",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "inputTokens": 44374,
+            "uncachedInputTokens": 44374,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 7
+          },
+          "problems": [],
+          "sourceStdout": "antigravity-fork-cache-repair-20261116/hydrogen/operations/gemini-4-hydrogen-high-parent-hot-after-prefix/stdout.jsonl",
+          "sourceStdoutSha256": "26df3b6732217e2573993e48c4ddfab2aa0ad1b9f4979609f6f5086c2afa5bcd",
+          "nativeRequestEvidence": {
+            "status": "captured",
+            "scope": "locally_recorded_system_prompt_not_wire_capture",
+            "sourceGenerationIndex": 3,
+            "sourceStepIndex": 7,
+            "systemPromptSha256": "998775fffebcade49b2673b7b37e734c4f57f7282bf457fa38c0e2f4bb998ac9",
+            "systemPromptCharacters": 23691,
+            "normalizedSystemPromptSha256": "68ac5f4f3e2aed4d66c42864d4de1786da57af4d2a001fcb7ead980a21528ae2",
+            "normalizationDiagnosticOnly": true
+          }
+        }
+      ],
+      "measurements.json": [
+        {
+          "candidate": "passthrough",
+          "problems": [],
+          "first": {
+            "inputTokens": 43721,
+            "uncachedInputTokens": 43721,
+            "cachedInputTokens": 0,
+            "outputTokens": 93,
+            "thinkingTokens": 55,
+            "sourceStepIndex": 6
+          },
+          "beforeStep": "parent-hot",
+          "parentBefore": {
+            "inputTokens": 43491,
+            "uncachedInputTokens": 2225,
+            "cachedInputTokens": 41266,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 3
+          },
+          "parentAfter": {
+            "inputTokens": 43582,
+            "uncachedInputTokens": 2140,
+            "cachedInputTokens": 41442,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 5
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "independentChild": "f4727ed5-8c34-4dea-a935-f395ba31450a",
+          "parent": "84bcc3a4-1c4c-4db6-8043-33c92282005b",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        },
+        {
+          "candidate": "prefix",
+          "problems": [
+            "父会话前后热对照未同时通过"
+          ],
+          "first": {
+            "inputTokens": 43950,
+            "uncachedInputTokens": 2417,
+            "cachedInputTokens": 41533,
+            "outputTokens": 101,
+            "thinkingTokens": 63,
+            "sourceStepIndex": 8
+          },
+          "beforeStep": "parent-hot-after-passthrough",
+          "parentBefore": {
+            "inputTokens": 43582,
+            "uncachedInputTokens": 2140,
+            "cachedInputTokens": 41442,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 5
+          },
+          "parentAfter": {
+            "inputTokens": 44374,
+            "uncachedInputTokens": 44374,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 7
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9450056882821388,
+          "independentChild": "a483e87c-b1bc-4e28-b2ff-d74c46659b99",
+          "parent": "84bcc3a4-1c4c-4db6-8043-33c92282005b",
+          "parentHistoryIntact": true,
+          "recalledNonce": true
+        }
+      ],
+      "audited-measurements.json": [
+        {
+          "candidate": "passthrough",
+          "problems": [],
+          "first": {
+            "inputTokens": 43721,
+            "uncachedInputTokens": 43721,
+            "cachedInputTokens": 0,
+            "outputTokens": 93,
+            "thinkingTokens": 55,
+            "sourceStepIndex": 6
+          },
+          "beforeStep": "parent-hot",
+          "parentBefore": {
+            "inputTokens": 43491,
+            "uncachedInputTokens": 2225,
+            "cachedInputTokens": 41266,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 3
+          },
+          "parentAfter": {
+            "inputTokens": 43582,
+            "uncachedInputTokens": 2140,
+            "cachedInputTokens": 41442,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 5
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": false,
+          "firstHitRatio": 0.0,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.10",
+            "1.5.10",
+            "1.5.10"
+          ],
+          "observedFirstHistoryHitVerified": false,
+          "secondsAfterParentControl": 6.415623,
+          "historyReuseRatio": 0.0,
+          "completeControlledComparison": true
+        },
+        {
+          "candidate": "prefix",
+          "problems": [
+            "父会话前后热对照未同时通过"
+          ],
+          "first": {
+            "inputTokens": 43950,
+            "uncachedInputTokens": 2417,
+            "cachedInputTokens": 41533,
+            "outputTokens": 101,
+            "thinkingTokens": 63,
+            "sourceStepIndex": 8
+          },
+          "beforeStep": "parent-hot-after-passthrough",
+          "parentBefore": {
+            "inputTokens": 43582,
+            "uncachedInputTokens": 2140,
+            "cachedInputTokens": 41442,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 5
+          },
+          "parentAfter": {
+            "inputTokens": 44374,
+            "uncachedInputTokens": 44374,
+            "cachedInputTokens": 0,
+            "outputTokens": 14,
+            "thinkingTokens": 9,
+            "sourceStepIndex": 7
+          },
+          "qualifiedSuccess": false,
+          "historyBeyondPublicPrefixHit": true,
+          "firstHitRatio": 0.9450056882821388,
+          "parentHistoryIntact": true,
+          "recalledNonce": true,
+          "actualCliVersionsBeforeChildAfter": [
+            "1.5.10",
+            "1.5.10",
+            "1.5.10"
+          ],
+          "observedFirstHistoryHitVerified": true,
+          "secondsAfterParentControl": 6.427761,
+          "historyReuseRatio": null,
+          "completeControlledComparison": false
+        }
+      ]
+    },
+    {
+      "id": "fable-5.2",
+      "privateEvidenceDirectory": "~/.cline/kanban/claude-fable-5-2-native-fork-cache-20261117",
+      "cliVersionAtStart": "2.1.326 (Claude Code)",
+      "operations": [
+        {
+          "model": "claude-fable-5-2",
+          "step": "baseline",
+          "status": "completed",
+          "validMainResponse": true,
+          "request": {
+            "model": "claude-fable-5-2",
+            "messageId": "msg_011Ch89ZZARyiUZW5Yu2Rax2",
+            "inputTokens": 19525,
+            "uncachedInputTokens": 2,
+            "cachedInputTokens": 11457,
+            "cacheCreationTokens": 8066,
+            "outputTokens": 4,
+            "cacheCreation": {
+              "ephemeral_5m_input_tokens": 0,
+              "ephemeral_1h_input_tokens": 8066
+            }
+          },
+          "problems": [],
+          "sourceStdout": "claude-fable-5-2-native-fork-cache-20261117/operations/claude-fable-5-2-baseline/stdout.jsonl",
+          "sourceStdoutSha256": "88519b9cff6b21289855348f05ccf8e21fec7545fe5884ccdea77f4683886b8e",
+          "requestConfiguration": {
+            "requestId": "ffe6c0f2-abe9-41b9-adae-564221551529",
+            "systemSha256": "b69a1133d37d6883269c2ab809ed7521da5bf9c7b32c46dfcf7bc7de847ae616",
+            "toolsSha256": "7e9e08ebf52ad24636b02b50d9ffad95f5bf2012a3f1ac775316b675a36a0d77",
+            "parametersSha256": "67e4f5dfecc20ece5b974fbbc2637ad4ecd55b6e2127ee86b326cc5fc9c41068",
+            "scratchpadInSystem": false
+          }
+        },
+        {
+          "model": "claude-fable-5-2",
+          "step": "parent-seed",
+          "status": "unresolved_no_automatic_retry",
+          "validMainResponse": false,
+          "request": null,
+          "problems": [
+            "没有唯一的成功 result",
+            "没有唯一的最终逐请求 iteration",
+            "缺少有效的原生逐请求 usage"
+          ],
+          "sourceStdout": "claude-fable-5-2-native-fork-cache-20261117/operations/claude-fable-5-2-parent-seed/stdout.jsonl",
+          "sourceStdoutSha256": "52a265d5b6f7c138171c3d4c511f7c7dbb069bd3978b8601611c9e2c6e118a4f",
+          "failure": {
+            "apiStatus": 429,
+            "reason": "Fable 5.2 requires usage credits. Switch to another model, or manage usage credits at https://claude.ai/settings/usage?from=cc_cli_limit_message, to continue.",
+            "terminalReason": "api_error"
+          }
+        }
+      ],
+      "measurements.json": [
+        {
+          "model": "claude-fable-5-2",
+          "status": "insufficient_evidence",
+          "problems": [
+            "没有唯一的成功 result",
+            "没有唯一的最终逐请求 iteration",
+            "缺少有效的原生逐请求 usage",
+            "本组未完成"
+          ]
+        }
+      ]
+    }
+  ],
+  "locallyRecomputedValidMainResponses": 42,
+  "locallyMeasuredForkFirstResponses": 10,
+  "historicalReportedMainResponses": 118,
+  "historicalReportedFirstResponses": 48,
+  "combinedReportedMainResponses": 160,
+  "combinedReportedFirstResponses": 58,
+  "countQualification": "51 eligible first responses under original per-study criteria; Claude 5.5 only had a pre-fork hot control, not a uniform before/after criterion",
+  "carbonModelRequests": 0
+}

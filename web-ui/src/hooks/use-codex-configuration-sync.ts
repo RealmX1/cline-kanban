@@ -23,6 +23,7 @@ import {
 	notifyCodexConfigurationSyncUpdated,
 	resolveCodexConfigurationConflict,
 	resolveCodexConfigurationTargetConflict,
+	setCodexConfigurationChangeSharingScope,
 	subscribeCodexConfigurationSyncUpdated,
 	synchronizeCodexConfigurationChange,
 } from "@/runtime/codex-configuration-sync-query";
@@ -139,7 +140,32 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 	const recoverSettingAction = useCallback(
 		async (action: UnconfirmedCodexConfigurationSettingAction, automatic = false) => {
 			const recoveredResults: CodexConfigurationBatchActionResult["results"] = [];
-			if (action.kind === "profile") {
+			if (action.kind === "sharing_scope") {
+				const receipt = await runCodexConfigurationSyncRequestWithinBudget(
+					(signal) =>
+						fetchCodexConfigurationMutationReceipt(
+							workspaceId,
+							{ idempotencyKey: action.input.idempotencyKey, expectedSharingScopeMutation: action.input },
+							signal,
+						),
+					scope.requestAbortController.signal,
+				);
+				if (!receipt) {
+					if (automatic) recordUnconfirmedCodexConfigurationSettingActionAutomaticResend(action.identity);
+					try {
+						acceptState(
+							await runCodexConfigurationSyncRequestWithinBudget(
+								(signal) => setCodexConfigurationChangeSharingScope(workspaceId, action.input, signal),
+								scope.requestAbortController.signal,
+							),
+						);
+					} catch (error) {
+						if (isConfirmedCodexConfigurationProfileMutationRejection(error))
+							forgetUnconfirmedCodexConfigurationSettingAction(action.identity);
+						throw error;
+					}
+				} else await refresh();
+			} else if (action.kind === "profile") {
 				const receipt = await runCodexConfigurationSyncRequestWithinBudget(
 					(signal) =>
 						fetchCodexConfigurationMutationReceipt(
@@ -383,6 +409,69 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		},
 		[workspaceId, refresh, scope, acceptState, isCurrentScope],
 	);
+	const setChangeSharingScope = useCallback(
+		async (change: CodexConfigurationChange, targetScope: "session_only" | "profile") => {
+			if (scope.pending) return false;
+			scope.pending = true;
+			setPendingChangeId(change.changeId);
+			setError(null);
+			let pendingAction: UnconfirmedCodexConfigurationSettingAction | undefined;
+			let confirmedChange: CodexConfigurationChange | undefined;
+			try {
+				const pending = rememberUnconfirmedCodexConfigurationSettingAction(
+					workspaceId,
+					state?.storageIdentity ?? null,
+					{
+						kind: "sharing_scope",
+						input: {
+							changeId: change.changeId,
+							expectedVersion: change.version,
+							targetScope,
+							idempotencyKey: crypto.randomUUID(),
+						},
+					},
+				);
+				pendingAction = pending.action;
+				if (pending.requiresReceiptCheck) await recoverSettingAction(pending.action);
+				else if (pending.action.kind === "sharing_scope") {
+					const input = pending.action.input;
+					const next = await runCodexConfigurationSyncRequestWithinBudget(
+						(signal) => setCodexConfigurationChangeSharingScope(workspaceId, input, signal),
+						scope.requestAbortController.signal,
+					);
+					confirmedChange = next.changes.find((entry) => entry.changeId === change.changeId);
+					acceptState(next);
+					forgetUnconfirmedCodexConfigurationSettingAction(pending.action.identity);
+				}
+				if (isCurrentScope()) notifyCodexConfigurationSyncUpdated();
+				return confirmedChange;
+			} catch (error) {
+				if (pendingAction && isConfirmedCodexConfigurationProfileMutationRejection(error))
+					forgetUnconfirmedCodexConfigurationSettingAction(pendingAction.identity);
+				if (isCurrentScope())
+					setError(error instanceof Error ? error.message : "范围切换回执未确认，已保留原身份并等待自动核验。");
+				void refresh();
+				return false;
+			} finally {
+				scope.pending = false;
+				if (isCurrentScope()) setPendingChangeId(null);
+				notifyUnconfirmedCodexConfigurationSettingActionsChanged();
+			}
+		},
+		[scope, workspaceId, state?.storageIdentity, acceptState, refresh, recoverSettingAction, isCurrentScope],
+	);
+	const markNoticePresented = useCallback(
+		async (changes: CodexConfigurationChange[]) => {
+			for (const change of changes)
+				if (
+					change.changeSharingScope &&
+					change.approvalStatus !== "pending" &&
+					change.noticePresentedAtMs === undefined
+				)
+					await act(change, "acknowledge");
+		},
+		[act],
+	);
 	const resolveTarget = useCallback(
 		async (
 			change: CodexConfigurationChange,
@@ -532,6 +621,8 @@ export function useCodexConfigurationSync(workspaceId: string | null, enabled = 
 		[batch, refresh, isCurrentScope],
 	);
 	return {
+		setChangeSharingScope,
+		markNoticePresented,
 		historicalDefaultEditRequest,
 		clearHistoricalDefaultEditRequest: () => setHistoricalDefaultEditRequest(null),
 		beginHistoricalDefaultEdit: async (change: CodexConfigurationChange) => {

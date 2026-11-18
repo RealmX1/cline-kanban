@@ -63,6 +63,8 @@ export function isCodexConfigurationChangeApprovedForPropagation(change: StoredC
 	return (
 		!isCodexConfigurationChangeExcludedFromSettingsSynchronization(change) &&
 		change.recordKind !== "source_observation" &&
+		change.changeSharingScope?.currentScope !== "session_only" &&
+		change.changeSharingScope?.requestedScope !== "session_only" &&
 		(change.approvalStatus === "approved" || change.approvalStatus === "historical") &&
 		change.mergeStatus === "shared_default_updated"
 	);
@@ -74,10 +76,18 @@ export function isCodexConfigurationSourceObservationStillCurrent(
 ) {
 	if (change.codexConfigurationProfileId && change.approvalStatus === "approved")
 		return (
+			Object.entries(change.targetSpecificCompensation?.expectedProfileFieldVersions ?? {}).every(
+				([key, version]) =>
+					store.profiles[change.codexConfigurationProfileId ?? ""]?.fieldVersions[key] === version,
+			) &&
 			(change.acceptedProfileFieldVersion === undefined ||
 				(store.profiles[change.codexConfigurationProfileId]?.fieldVersions[change.fieldKey] ?? 0) ===
 					change.acceptedProfileFieldVersion) &&
-			sameConfigurationField(codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey], change.value)
+			(change.targetSpecificCompensation !== undefined ||
+				sameConfigurationField(
+					codexConfigurationChangeSharedFields(store, change)?.[change.fieldKey],
+					change.value,
+				))
 		);
 	const writer = store.writers[change.sourceWriterId];
 	const observed = writer?.lastObservedFields ?? store.sources[change.sourceIdentity]?.observedUserFields;

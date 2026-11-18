@@ -2,6 +2,7 @@ import { act, createElement, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { NonModalFloatingFormWindowHost } from "@/components/non-modal-floating-form-window-host-provider";
 import { useCrossProjectTaskOpenInProject } from "@/hooks/use-cross-project-task-open-in-project";
 import type { BoardCard, BoardColumnId, BoardData } from "@/types";
 
@@ -43,6 +44,7 @@ interface HarnessProps {
 	selectedTaskId: string | null;
 	isDetailViewOpen: boolean;
 	isCurrentProjectBoardSettled: boolean;
+	floatingFormWindowHost?: NonModalFloatingFormWindowHost | null;
 }
 
 let latest: ReturnType<typeof useCrossProjectTaskOpenInProject> | null = null;
@@ -68,6 +70,7 @@ function Harness(props: HarnessProps): null {
 			setRequestedProjectId(projectId);
 		},
 		openBacklogTaskEditor,
+		floatingFormWindowHost: props.floatingFormWindowHost,
 	});
 	return null;
 }
@@ -114,6 +117,89 @@ function render(props: Partial<HarnessProps> = {}): void {
 }
 
 describe("useCrossProjectTaskOpenInProject", () => {
+	it("可等待的打开回报要等详情真实显示，取消与失败分别结算", async () => {
+		render();
+		let outcome: unknown;
+		act(() => {
+			void latest?.openTaskInProjectWithResult("project-a", "a-backlog", 42).then((result) => {
+				outcome = result;
+			});
+		});
+		await act(async () => {});
+		expect(outcome).toMatchObject({ outcome: "unavailable" });
+		render({ selectedTaskId: null, isDetailViewOpen: false });
+		act(() => {
+			void latest?.openTaskInProjectWithResult("project-a", "a-review", 0).then((result) => {
+				outcome = result;
+			});
+		});
+		outcome = undefined;
+		await act(async () => {});
+		expect(outcome).toBeUndefined();
+		render({ selectedTaskId: "a-review", isDetailViewOpen: true });
+		await act(async () => {});
+		expect(outcome).toMatchObject({ outcome: "opened" });
+		act(() => {
+			void latest?.openTaskInProjectWithResult("project-b", "b-review", 0).then((result) => {
+				outcome = result;
+			});
+		});
+		act(() => latest?.dismissPendingCrossProjectTaskOpen());
+		await act(async () => {});
+		expect(outcome).toMatchObject({ outcome: "cancelled" });
+	});
+	it("迁移别名匹配到原编辑窗时复用该窗，并以原项目的显示回报结束等待", async () => {
+		let revealListener:
+			| ((ownership: {
+					workspaceId?: string | null;
+					taskId?: string | null;
+					taskIncarnationCreatedAtEpochMs?: number;
+			  }) => void)
+			| undefined;
+		const reveal = vi.fn(() => true);
+		render({
+			currentProjectId: "project-b",
+			board: makeBoard({ backlog: ["moved"] }),
+			selectedTaskId: null,
+			isDetailViewOpen: false,
+			floatingFormWindowHost: {
+				hasOpenWindows: true,
+				openWindow: () => Symbol(),
+				closeWindow: () => undefined,
+				collapseTaskEditorWindowsExcept: () => undefined,
+				revealTaskEditorPreservingEarlierWorkspace: reveal,
+				subscribeToRevealedTaskEditors: (listener) => {
+					revealListener = listener;
+					return () => {
+						revealListener = undefined;
+					};
+				},
+			},
+		});
+		let outcome: unknown;
+		act(() => {
+			void latest
+				?.openTaskInProjectWithResult("project-b", "moved", 0, undefined, ["project-a", "project-b"])
+				.then((result) => {
+					outcome = result;
+				});
+		});
+		await act(async () => undefined);
+		expect(reveal).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workspaceId: "project-b",
+				taskId: "moved",
+				taskIncarnationCreatedAtEpochMs: 0,
+				workspaceIdsUsedByTaskIncarnation: ["project-a", "project-b"],
+			}),
+		);
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(outcome).toBeUndefined();
+		act(() => revealListener?.({ workspaceId: "project-a", taskId: "moved", taskIncarnationCreatedAtEpochMs: 0 }));
+		await act(async () => undefined);
+		expect(outcome).toEqual({ outcome: "opened" });
+	});
+
 	it("普通看板的 Backlog 专用入口跨项目原地编辑，不切项目或选中详情", async () => {
 		render({ selectedTaskId: null, isDetailViewOpen: false });
 		readTaskCardMock.mockResolvedValue(taskReadResponse("b-backlog", "backlog", 42));

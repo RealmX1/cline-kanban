@@ -481,7 +481,7 @@ describe("Codex profile 自动共享", () => {
 			await service.close();
 		}
 	});
-	it("旧共享会话保持原存储，登记迁入 profile 的进度与三次重试边界并跨重启保留", async () => {
+	it("旧共享会话缺少完整启动基线时不自动重启，跨运行时保留待自然采用", async () => {
 		await writer("known-source");
 		const globalBefore = await readFile(join(sourceHome, "config.toml"), "utf8");
 		const summary = runtimeTaskSessionSummarySchema.parse({
@@ -530,8 +530,8 @@ describe("Codex profile 自动共享", () => {
 			const state = await resumed.getState();
 			expect(
 				state.sessionProfileBindings?.find((binding) => binding.conversationSessionId === "legacy")?.adoptionReason,
-			).toContain("尚未完成");
-			expect(acceptedClaims).toEqual([true, true, true, false, false]);
+			).toContain("缺少完整启动基线");
+			expect(acceptedClaims).toEqual([]);
 			expect(await readFile(join(sourceHome, "config.toml"), "utf8")).toBe(globalBefore);
 			expect(summary.codexConversationStorageHomeDirectoryPath).toBe(sourceHome);
 		} finally {

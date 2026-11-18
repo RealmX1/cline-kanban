@@ -176,15 +176,49 @@ export function updateCodexConfigurationProfileFields(
 		sourceWriterId?: string;
 		sharingScope?: "profile" | "all_profiles_hook_trust";
 		adoptedFeedbackSuggestion?: StoredCodexConfigurationChange;
+		propagate?: boolean;
+		preserveLocalOverrides?: boolean;
+		compensationForChangeId?: string;
+		recordIdenticalFields?: boolean;
+		sharingScopeGroupId?: string;
 	} = {},
 ) {
 	const profile = store.profiles[profileId];
 	if (!profile) throw new Error("Codex profile 不存在。");
 	if (Object.keys(fields).some(isCodexLocalStateConfigurationField))
 		throw new Error("本地状态不属于 Kanban 可共享或编辑的配置。");
+	const sharingScopeGroupId = input.sharingScopeGroupId ?? randomUUID();
+	const sharingSnapshots = Object.fromEntries(
+		Object.keys(fields).map((fieldKey) => [
+			fieldKey,
+			{
+				profileValue: structuredClone(profile.fields[fieldKey]),
+				profileFieldVersion: profile.fieldVersions[fieldKey] ?? 0,
+				targets: Object.fromEntries(
+					Object.values(store.writers)
+						.filter(
+							(writer) =>
+								writer.codexConfigurationProfileId === profileId && writer.binding.purpose === "native_session",
+						)
+						.map((writer) => [
+							writer.binding.writerId,
+							{
+								value: structuredClone(writer.lastObservedFields[fieldKey]),
+								localFieldMutationVersion: writer.localFieldMutationVersions?.[fieldKey] ?? 0,
+								consumedProfileFieldVersion: writer.consumedProfileFieldVersions?.[fieldKey] ?? 0,
+								nativeConversationSessionId: writer.nativeConversationSessionId,
+								localExceptionOverride: structuredClone(
+									writer.localExceptionOverrides?.[codexConfigurationExceptionGroup(fieldKey) ?? fieldKey],
+								),
+							},
+						]),
+				),
+			},
+		]),
+	);
 	for (const [fieldKey, value] of Object.entries(fields)) {
 		const previous = profile.fields[fieldKey];
-		if (sameConfigurationField(previous, value)) continue;
+		if (sameConfigurationField(previous, value) && !input.recordIdenticalFields) continue;
 		const priorFieldVersion = profile.fieldVersions[fieldKey];
 		const priorChange = store.changes.find(
 			(entry) =>
@@ -212,9 +246,10 @@ export function updateCodexConfigurationProfileFields(
 		);
 		for (const writer of Object.values(store.writers)) {
 			if (writer.codexConfigurationProfileId !== profileId) continue;
-			if (exceptionGroup) delete writer.localExceptionOverrides?.[exceptionGroup];
+			if (!input.preserveLocalOverrides) delete writer.localExceptionOverrides?.[exceptionGroup ?? fieldKey];
 			if (
 				exceptionGroup === "permissions" &&
+				!input.compensationForChangeId &&
 				writer.binding.workspaceId &&
 				writer.binding.conversationSessionId &&
 				!writer.pendingSessionProfileBinding
@@ -227,6 +262,36 @@ export function updateCodexConfigurationProfileFields(
 				};
 		}
 		const change: StoredCodexConfigurationChange = {
+			exceptionGroup: exceptionGroup ?? undefined,
+			...(exceptionGroup
+				? {
+						relatedFields: Object.fromEntries(
+							Object.entries(fields).filter(([key]) => codexConfigurationExceptionGroup(key) === exceptionGroup),
+						),
+						relatedDeletedFieldKeys: Object.entries(fields)
+							.filter(
+								([key, field]) =>
+									field === undefined && codexConfigurationExceptionGroup(key) === exceptionGroup,
+							)
+							.map(([key]) => key),
+					}
+				: {}),
+			sourceFieldMutationVersionsAtObservation: input.sourceWriterId
+				? structuredClone(store.writers[input.sourceWriterId]?.localFieldMutationVersions ?? {})
+				: undefined,
+			sharingScopeGroupId,
+			sharingPropagationSnapshot: sharingSnapshots[fieldKey],
+			compensationForChangeId: input.compensationForChangeId,
+			changeSharingScope:
+				input.sourceWriterId && !input.compensationForChangeId
+					? {
+							currentScope: "profile",
+							requestedScope: "profile",
+							withdrawalStatus: "not_requested",
+							compensationChangeIds: [],
+							conflicts: [],
+						}
+					: undefined,
 			modificationInitiator: input.modificationInitiator,
 			...presentationEvidence,
 			sourceTaskSnapshot:
@@ -265,6 +330,7 @@ export function updateCodexConfigurationProfileFields(
 		const acceptedChange = adoptedSuggestion ?? change;
 		for (const writer of Object.values(store.writers)) {
 			if (
+				input.propagate === false ||
 				writer.codexConfigurationProfileId !== profileId ||
 				writer.binding.purpose !== "native_session" ||
 				writer.binding.writerId === input.sourceWriterId
@@ -340,6 +406,14 @@ export function recordCodexConfigurationExceptionFeedbackSuggestion(
 	}
 	const observedAt = launchFeedback?.observedAtMs ?? Date.now();
 	const change: StoredCodexConfigurationChange = {
+		sourceFieldMutationVersionsAtObservation: structuredClone(writer.localFieldMutationVersions ?? {}),
+		changeSharingScope: {
+			currentScope: "session_only",
+			requestedScope: "session_only",
+			withdrawalStatus: "not_requested",
+			compensationChangeIds: [],
+			conflicts: [],
+		},
 		taskReasoningEffortFeedbackSelectionId: launchFeedback?.selectionId,
 		changeId: randomUUID(),
 		version: ++store.revision,
@@ -381,6 +455,7 @@ export function reuseConfirmedCodexHookTrust(
 	sourceIdentity: string,
 	fieldKey: string,
 	field: CodexConfigurationFieldValue,
+	configurationFieldSelectionVersion = 0,
 ) {
 	const { keyPath } = configurationFieldAddress(fieldKey);
 	if (!field.definitionDigest || !keyPath.includes("state") || !configurationTable(field.value)) return field;
@@ -388,6 +463,7 @@ export function reuseConfirmedCodexHookTrust(
 	const decision =
 		store.hookTrustDecisions[hookTrustDecisionIdentity(sourceIdentity, hookSourceKey, field.definitionDigest)];
 	if (!decision) return field;
+	if (decision.version < configurationFieldSelectionVersion) return field;
 	if (decision.trustedHash !== null) {
 		// 内容事实缺失不能补造；插件及已有内容约束不能降为旧格式信任。
 		if (decision.trustedContentHash === undefined) return field;
@@ -406,6 +482,34 @@ export function reuseConfirmedCodexHookTrust(
 		if (typeof decision.trustedContentHash === "string") state.trusted_content_hash = decision.trustedContentHash;
 	}
 	return { ...field, value: state };
+}
+
+export function restoreObservedCodexHookTrustDecision(
+	store: CodexConfigurationSyncStore,
+	sourceIdentity: string,
+	fieldKey: string,
+	restored: CodexConfigurationFieldValue | undefined,
+) {
+	const { keyPath } = configurationFieldAddress(fieldKey);
+	const definitionDigest = restored?.definitionDigest;
+	if (!definitionDigest || !keyPath.includes("state")) return;
+	const hookSourceKey = keyPath.at(-1) ?? "";
+	const trustedHash =
+		configurationTable(restored.value) && typeof restored.value.trusted_hash === "string"
+			? restored.value.trusted_hash
+			: null;
+	const trustedContentHash =
+		configurationTable(restored.value) && typeof restored.value.trusted_content_hash === "string"
+			? restored.value.trusted_content_hash
+			: null;
+	store.hookTrustDecisions[hookTrustDecisionIdentity(sourceIdentity, hookSourceKey, definitionDigest)] = {
+		sourceIdentity,
+		hookSourceKey,
+		definitionDigest,
+		trustedHash,
+		trustedContentHash,
+		version: ++store.revision,
+	};
 }
 
 export function shareObservedCodexHookTrust(
@@ -435,6 +539,17 @@ export function shareObservedCodexHookTrust(
 			? value.value.trusted_content_hash
 			: null;
 	if (trustedHash === previousTrustedHash && trustedContentHash === previousTrustedContentHash) return;
+	const sourceChange = [...store.changes]
+		.reverse()
+		.find(
+			(entry) =>
+				entry.sourceWriterId === writer.binding.writerId &&
+				entry.codexConfigurationProfileId === writer.codexConfigurationProfileId &&
+				entry.fieldKey === fieldKey &&
+				!entry.compensationForChangeId &&
+				entry.sharingScope !== "all_profiles_hook_trust",
+		);
+	if (sourceChange) sourceChange.sharingScopeGroupId ??= randomUUID();
 	store.hookTrustDecisions[hookTrustDecisionIdentity(writer.binding.sourceIdentity, hookSourceKey, definitionDigest)] =
 		{
 			sourceIdentity: writer.binding.sourceIdentity,
@@ -460,13 +575,22 @@ export function shareObservedCodexHookTrust(
 				targetValue.definitionDigest !== definitionDigest
 			)
 				continue;
-			const next = reuseConfirmedCodexHookTrust(store, profile.sourceIdentity, targetFieldKey, targetValue);
+			const next = reuseConfirmedCodexHookTrust(
+				store,
+				profile.sourceIdentity,
+				targetFieldKey,
+				targetValue,
+				profile.fieldVersions[targetFieldKey] ?? 0,
+			);
 			if (!sameConfigurationField(targetValue, next))
 				updateCodexConfigurationProfileFields(
 					store,
 					profile.profileId,
 					{ [targetFieldKey]: next },
-					{ sharingScope: "all_profiles_hook_trust" },
+					{
+						sharingScope: "all_profiles_hook_trust",
+						sharingScopeGroupId: sourceChange?.sharingScopeGroupId,
+					},
 				);
 		}
 	}

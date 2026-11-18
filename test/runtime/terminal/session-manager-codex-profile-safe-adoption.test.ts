@@ -3,8 +3,17 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { updateCodexConfigurationProfileFields } from "../../../src/codex-configuration-sync/codex-configuration-profiles";
 import { mutateCodexConfigurationSyncStore } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
-import { listUnrestoredCodexProfileAdoptionRetainedInput } from "../../../src/codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
+import {
+	appendCodexProfileAdoptionRetainedInput,
+	createCodexProfileAdoptionRetainedInput,
+	listUnrestoredCodexProfileAdoptionRetainedInput,
+	readCodexProfileAdoptionRetainedInput,
+} from "../../../src/codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
+import {
+	prepareCodexDraftStashEditorBridge,
+	runCodexDraftStashEditorInvocation,
+} from "../../../src/terminal/codex-draft-stash-editor-bridge";
 import { createIdleHarnessBackgroundSessionReclaimWatchState } from "../../../src/terminal/harness-background-session-reclaim-watch-after-unsafe-resume-refusal";
 import { type StartTaskSessionRequest, TerminalSessionManager } from "../../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../../src/terminal/terminal-input-box-occupancy";
@@ -182,6 +191,47 @@ function installOwnedCodexSession(nativeSessionId = randomUUID()) {
 }
 
 describe("Codex profile 自动续接的执行与恢复门禁", () => {
+	it("完整多行草稿与续接窗口输入只恢复一次，回执不明时用原生编辑器补证而不重送", async () => {
+		const session = installOwnedCodexSession();
+		const text = "中文草稿\nemoji 🐈 与末尾空白  \n";
+		const path = createCodexProfileAdoptionRetainedInput({
+			workspaceId: "profile-fixture",
+			conversationSessionId: session.entry.summary.taskId,
+			nativeSessionId: session.nativeSessionId,
+			profileId: "profile",
+			capturedDraftText: text,
+			capturedFromRuntimeSessionIncarnationId: "old-runtime-generation",
+			capturedDraftRestoreStatus: "pending",
+		});
+		appendCodexProfileAdoptionRetainedInput(path, Buffer.from("期间的新输入"));
+		await session.manager.restoreTerminalInputRetainedDuringCodexProfileAdoption();
+		expect(session.originalWrite).toHaveBeenNthCalledWith(1, Buffer.from(`\u001b[200~${text}\u001b[201~`));
+		expect(session.originalWrite).toHaveBeenNthCalledWith(2, Buffer.from("期间的新输入"));
+		expect(readCodexProfileAdoptionRetainedInput(path).status).toBe("restore_submission_started");
+		const bridge = await prepareCodexDraftStashEditorBridge({
+			workspaceId: "profile-fixture",
+			conversationSessionId: session.entry.summary.taskId,
+			runtimeSessionIncarnationId: session.entry.summary.runtimeSessionIncarnationId ?? "",
+			environment: {},
+		});
+		const editorFile = `${isolatedHome.path}/restored-composer.md`;
+		await writeFile(editorFile, `${text}期间的新输入`);
+		Object.assign(session.entry, {
+			terminalStateMirror: { getScreenSnapshot: async () => ({ lines: [{ text: "› 已恢复草稿" }] }) },
+		});
+		session.originalWrite.mockImplementation((bytes: Buffer) => {
+			if (bytes.length === 1 && bytes[0] === 7)
+				void runCodexDraftStashEditorInvocation(bridge.directoryPath, editorFile);
+		});
+		await session.manager.restoreTerminalInputRetainedDuringCodexProfileAdoption();
+		expect(readCodexProfileAdoptionRetainedInput(path)).toMatchObject({
+			status: "restored",
+			capturedDraftRestoreStatus: "restored",
+			draftRestoreVerificationAttemptCount: 1,
+		});
+		await session.manager.restoreTerminalInputRetainedDuringCodexProfileAdoption();
+		expect(session.originalWrite).toHaveBeenCalledTimes(3);
+	});
 	it("同一持久启动证据最多三次且跨重启不重置，profile 修正后自动恢复资格", async () => {
 		await mutateCodexConfigurationSyncStore((store) => {
 			store.sources["recovery-fixture-source"] = {
@@ -338,7 +388,7 @@ describe("Codex profile 自动续接的执行与恢复门禁", () => {
 			expect(session.stop).toHaveBeenCalledTimes(1);
 		}
 	});
-	it.each(["进行中回合", "待答问题", "未提交草稿", "明确 Stop", "原生回合未知", "输入框不可读"])(
+	it.each(["进行中回合", "待答问题", "未提交草稿", "明确 Stop", "持久 Stop", "原生回合未知", "输入框不可读"])(
 		"%s 时不停止原进程",
 		async (condition) => {
 			const session = installOwnedCodexSession();
@@ -359,6 +409,8 @@ describe("Codex profile 自动续接的执行与恢复门禁", () => {
 			if (condition === "未提交草稿" && session.entry.active)
 				session.entry.active.inputBoxOccupancyTracker.hasUncommittedInputFromInputSideByteTracking = true;
 			if (condition === "明确 Stop") session.entry.suppressAutoRestartOnExit = true;
+			if (condition === "持久 Stop")
+				session.entry.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled = true;
 			if (condition === "原生回合未知") session.nativeExecution.mockResolvedValue(null);
 			if (condition === "输入框不可读") session.occupancy.mockResolvedValue(null);
 			await expect(session.refresh()).rejects.toThrow();

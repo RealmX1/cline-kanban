@@ -51,15 +51,17 @@ export function useCodexConfigurationSyncNotice({
 	const settingsReminders = (controller.state?.changes ?? [])
 		.filter(
 			(change) =>
-				change.recordKind === "settings_proposal" &&
-				change.approvalStatus === "pending" &&
+				((change.recordKind === "settings_proposal" && change.approvalStatus === "pending") ||
+					(change.changeSharingScope !== undefined && change.noticePresentedAtMs === undefined)) &&
 				change.settingsIsolationArchivedAtMs === undefined &&
 				(change.feedbackExpiresAtMs === undefined || change.feedbackExpiresAtMs > nowMs),
 		)
 		.sort((left, right) => right.observedAt - left.observedAt || right.changeId.localeCompare(left.changeId));
 	const latestChanges = useRef(settingsReminders);
 	latestChanges.current = settingsReminders;
-	const pendingApprovalCount = groupCodexConfigurationFeedbackSuggestions(settingsReminders).length;
+	const pendingApprovalCount =
+		groupCodexConfigurationFeedbackSuggestions(settingsReminders).length +
+		settingsReminders.filter((change) => change.changeSharingScope && change.approvalStatus !== "pending").length;
 	const sourceUpdateCount =
 		controller.state?.sourceObservations.filter((observation) => observation.acknowledgedAt === null).length ?? 0;
 	const hasReminders = Boolean(controller.state || controller.error);
@@ -90,8 +92,9 @@ export function useCodexConfigurationSyncNotice({
 				] = change.feedbackExpiresAtMs ?? change.observedAt + 600_000;
 			presentationReceipts.current = receipts;
 			writeLocalStorageItem(receiptStorageKey, JSON.stringify(receipts));
+			void controller.markNoticePresented?.(changes);
 		},
-		[scopeIdentity, receiptStorageKey],
+		[scopeIdentity, receiptStorageKey, controller.markNoticePresented],
 	);
 	useEffect(() => {
 		const check = () =>
@@ -129,7 +132,9 @@ export function useCodexConfigurationSyncNotice({
 	useEffect(() => {
 		if (expansionMode !== "collapsed" || !isPresentationAvailable || !presentationEnvironmentAvailable) return;
 		const candidates = latestChanges.current.filter(
-			(change) => change.acknowledgedAt === null && !presentationReceipts.current[candidateIdentity(change)],
+			(change) =>
+				(change.changeSharingScope || change.acknowledgedAt === null) &&
+				!presentationReceipts.current[candidateIdentity(change)],
 		);
 		if (!candidates.length) return;
 		const stableAtMs = Math.max(...latestChanges.current.map((change) => change.observedAt)) + 10_000;
@@ -139,7 +144,6 @@ export function useCodexConfigurationSyncNotice({
 			);
 			if (!changes.length) return;
 			setDisplayedChanges(changes);
-			acknowledgePresentation(changes);
 			setExpansionMode("automatic");
 		};
 		if (stableAtMs <= Date.now()) {
@@ -177,7 +181,6 @@ export function useCodexConfigurationSyncNotice({
 		}
 		shouldFocusPanelOnExpansionRef.current = fromKeyboard;
 		setDisplayedChanges(latestChanges.current);
-		acknowledgePresentation(latestChanges.current);
 		setExpansionMode("manual");
 	};
 	useLayoutEffect(() => {
@@ -268,8 +271,8 @@ export function useCodexConfigurationSyncNotice({
 		hasNewSuggestions,
 		showLatestSuggestions: () => {
 			setDisplayedChanges(latestChanges.current);
-			acknowledgePresentation(latestChanges.current);
 		},
+		acknowledgeRenderedChanges: acknowledgePresentation,
 		contentId,
 		hasReminders,
 		pendingApprovalCount,

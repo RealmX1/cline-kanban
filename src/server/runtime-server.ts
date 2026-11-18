@@ -558,6 +558,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			conversationSessionId,
 			profileId,
 			onlyUpdatePermissionSelectionSource,
+			permissionSelectionSource,
 		) => {
 			const workspacePath = deps.workspaceRegistry
 				.listManagedWorkspaces()
@@ -568,7 +569,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				workspacePath,
 				conversationSessionId,
 				profileId,
-				permissionSelectionSource: "profile",
+				permissionSelectionSource: permissionSelectionSource ?? "profile",
 				onlyUpdatePermissionSelectionSource,
 				broadcastWorkspaceUpdated: deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
 			});
@@ -581,7 +582,13 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			deps.workspaceRegistry
 				.getTerminalManagerForWorkspace(workspaceId)
 				?.applyCodexEffectivePermissionMode(conversationSessionId, fields),
-		resumeSessionToAdoptProfile: async ({ workspaceId, summary, profileId, onBeforeProcessReplacement }) => {
+		resumeSessionToAdoptProfile: async ({
+			workspaceId,
+			summary,
+			profileId,
+			onBeforeProcessReplacement,
+			readConfigurationSafetyFingerprint,
+		}) => {
 			const workspace = deps.workspaceRegistry
 				.listManagedWorkspaces()
 				.find((workspace) => workspace.workspaceId === workspaceId);
@@ -601,6 +608,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					expectedRuntimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
 					expectedNativeSessionId: nativeSessionId,
 					onBeforeProcessReplacement,
+					readConfigurationSafetyFingerprint,
 				},
 			);
 			return { resumed: response.ok, reason: response.error ?? "同一原生会话已续接，等待配置实际加载核验。" };
