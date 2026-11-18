@@ -18,7 +18,9 @@ import {
 	readLocalRedeploymentMachineEvidenceRequests,
 } from "./local-redeployment-persistent-checks";
 import {
+	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH,
 	localRedeploymentSha256,
 	readFrozenLocalRedeploymentRequest,
 	readLocalRedeploymentJson,
@@ -240,6 +242,73 @@ async function observeBoundProcessNotStarted(
 	return { kind: "bound_command_not_started", stage };
 }
 
+async function observeSourceValidationDiscoveryBudgetRecovery(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	failure: LocalDeploymentBlockingFailure,
+): Promise<{ sourceValidationPreparerSha256: string } | null> {
+	try {
+		const originalDirectory = dirname(dirname(dirname(failure.originalErrorReference)));
+		const original = (await readLocalRedeploymentJson(failure.originalErrorReference)) as {
+			stage?: string;
+			error?: string;
+		} | null;
+		const originalAttemptPath = original?.error?.match(
+			/^Error: 标准部署命令未成功：source-validation；原件 (.*\/source-validation-[a-f0-9-]{36})$/u,
+		)?.[1];
+		if (
+			original?.stage !== "candidate_bootstrap" ||
+			!originalAttemptPath ||
+			dirname(originalAttemptPath) !== join(originalDirectory, "standard-command-originals")
+		)
+			return null;
+		const originalFrozen = await readFrozenLocalRedeploymentRequest(originalDirectory);
+		const originalResult = (await readLocalRedeploymentJson(join(originalAttemptPath, "result.json"))) as {
+			requestSha256?: string;
+			exitCode?: number;
+		} | null;
+		const originalOutput = JSON.parse(await readFile(join(originalAttemptPath, "stdout.txt"), "utf8"));
+		if (
+			originalResult?.requestSha256 !== originalFrozen.requestSha256 ||
+			originalResult?.exitCode !== 2 ||
+			originalOutput?.status !== "machine_evidence_pending" ||
+			originalOutput?.reason !== "证据目录发现预算已用完"
+		)
+			return null;
+		const candidate = join(directory, "candidate-source-checkout");
+		const preparer = join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH);
+		const committedPreparer = await executeLocalRedeploymentFile("git", [
+			"--no-optional-locks",
+			"-C",
+			frozen.request.sourceCheckoutPath,
+			"show",
+			`${frozen.request.candidateSourceCommit}:${LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH}`,
+		]);
+		if (committedPreparer.stdout !== (await readFile(preparer, "utf8"))) return null;
+		const result = await executeLocalRedeploymentFile(
+			frozen.request.deploymentNodeBinaryPath,
+			[
+				preparer,
+				"--source-checkout-path",
+				candidate,
+				"--candidate-source-commit",
+				frozen.request.candidateSourceCommit,
+				"--runtime-home-directory",
+				frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
+				"--output-directory",
+				join(directory, "source-validation"),
+				"--observe-recovery-evidence",
+			],
+			{ timeout: 7_000, maxBuffer: 1024 * 1024 },
+		);
+		if (JSON.parse(result.stdout).sourceValidationDiscoveryCompleted === true)
+			return { sourceValidationPreparerSha256: localRedeploymentSha256(committedPreparer.stdout) };
+	} catch {
+		/* 缺少原件或候选发现失败时不消费重试资格。 */
+	}
+	return null;
+}
+
 export async function observeLocalRedeploymentBlockingFailureRecovery(
 	directory: string,
 	failure: LocalDeploymentBlockingFailure,
@@ -315,7 +384,10 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 		}
 	}
 	if (!proof && failure.classification === "unclassified_failure" && !failure.sourcePath)
-		proof = await observeBoundProcessNotStarted(directory, failure);
+		proof =
+			failure.logicalResource === "candidate_bootstrap"
+				? await observeSourceValidationDiscoveryBudgetRecovery(directory, frozen, failure)
+				: await observeBoundProcessNotStarted(directory, failure);
 	return {
 		evidenceSha256: localRedeploymentSha256(
 			JSON.stringify({ classification: failure.classification, logicalResource: failure.logicalResource, proof }),

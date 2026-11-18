@@ -158,6 +158,7 @@ function createValidationFixture() {
 				status: string;
 				reason?: string;
 				evidenceSha256?: string;
+				sourceValidationDiscoveryCompleted?: boolean;
 				reusedSourceValidationCheckCount: number;
 			},
 			report: () =>
@@ -773,6 +774,10 @@ describe("local deploy 自动复用源码验证证据", () => {
 		const reportBefore = readFileSync(reportPath, "utf8");
 		const first = fixture.run({ observeRecovery: true });
 		expect(first.summary.evidenceSha256).toMatch(/^[a-f0-9]{64}$/);
+		expect(first.summary.sourceValidationDiscoveryCompleted).toBe(true);
+		expect(
+			fixture.run({ observeRecovery: true, commit: "a".repeat(40) }).summary.sourceValidationDiscoveryCompleted,
+		).toBe(false);
 		expect(fixture.run({ observeRecovery: true }).summary).toEqual(first.summary);
 		expect(readFileSync(reportPath, "utf8")).toBe(reportBefore);
 		const report = JSON.parse(reportBefore);

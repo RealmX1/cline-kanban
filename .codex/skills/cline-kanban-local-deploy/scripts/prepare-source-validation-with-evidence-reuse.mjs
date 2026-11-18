@@ -1520,7 +1520,12 @@ async function observeSourceValidationRecoveryEvidence(values, sourceCheckoutPat
 				})),
 		),
 	};
-	process.stdout.write(`${JSON.stringify({ evidenceSha256: sha256(JSON.stringify(semanticObservation)) })}\n`);
+	process.stdout.write(
+		`${JSON.stringify({
+			evidenceSha256: sha256(JSON.stringify(semanticObservation)),
+			sourceValidationDiscoveryCompleted: Boolean(candidateSourceObservation.snapshot),
+		})}\n`,
+	);
 }
 
 async function main() {

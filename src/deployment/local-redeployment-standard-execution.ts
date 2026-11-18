@@ -45,6 +45,7 @@ import {
 	assertLocalRedeploymentOwnerStillEligible,
 	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH,
 	LocalRedeploymentIdentityMismatch,
 	localRedeploymentRuntimeBaselineSchema,
 	localRedeploymentSha256,
@@ -265,10 +266,7 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 				node: request.deploymentNodeBinaryPath,
 			});
 		}
-		const sourceValidation = join(
-			candidate,
-			".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
-		);
+		const sourceValidation = join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH);
 		const plan = join(directory, "frozen-source-validation-plan.json");
 		await writeLocalRedeploymentJson(plan, {
 			schemaVersion: 1,
@@ -1216,10 +1214,7 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			const response = await executeLocalRedeploymentFile(
 				frozen.request.deploymentNodeBinaryPath,
 				[
-					join(
-						candidate,
-						".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
-					),
+					join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH),
 					"--source-checkout-path",
 					candidate,
 					"--candidate-source-commit",

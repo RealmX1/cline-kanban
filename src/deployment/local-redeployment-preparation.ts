@@ -62,6 +62,8 @@ export const localRedeploymentRequestSchema = z.strictObject({
 	authorization: z.strictObject({ sourceReference: z.string().min(1), userRequestQuote: z.string().min(1) }),
 });
 export type LocalRedeploymentRequest = z.infer<typeof localRedeploymentRequestSchema>;
+export const LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH =
+	".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs";
 const frozenRequestSchema = z.strictObject({
 	request: localRedeploymentRequestSchema,
 	requestSha256: z.string().length(64),
