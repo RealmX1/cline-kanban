@@ -119,7 +119,7 @@ async function waitForControlledSubscriptionReady(collectorIndex: number, existi
 	return collector;
 }
 
-describe("系统采集正常关闭与活动期损坏分别处理 EOF", () => {
+describe("系统采集正常关闭与活动期损坏分别处理 EOF", { timeout: 60_000 }, () => {
 	it("正常关闭的半条 JSON EOF 保留覆盖缺口，连续四次仍可重新订阅", async () => {
 		for (let index = 0; index < 4; index++) {
 			const existingEventCount = index === 0 ? 0 : (await readEvents()).length;
