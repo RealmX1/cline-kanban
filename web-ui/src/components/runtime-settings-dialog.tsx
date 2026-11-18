@@ -54,6 +54,7 @@ import { useNotificationIntelligenceSettingsDraft } from "@/hooks/use-notificati
 import { useTaskAssistanceModelProviderRoutingSettingsDraft } from "@/hooks/use-task-assistance-model-provider-routing-settings-draft";
 import { previewThemeId, readStoredThemeId, saveThemeId, THEME_GROUPS, THEMES, type ThemeId } from "@/hooks/use-theme";
 import { useLayoutCustomizations } from "@/resize/layout-customizations";
+import type { NotificationIntelligenceSettings } from "@/runtime/notification-intelligence-query";
 import { openFileOnHost } from "@/runtime/runtime-config-query";
 import type {
 	RuntimeAgentId,
@@ -1154,6 +1155,32 @@ function RuntimeSettingsDialogForm({
 								<RadixSwitch.Thumb className="block h-4 w-4 rounded-full bg-white shadow-sm transition-transform translate-x-0.5 data-[state=checked]:translate-x-[18px]" />
 							</RadixSwitch.Root>
 							<span className="text-[13px] text-text-primary">Play a sound</span>
+						</div>
+						<div
+							className="mt-2 flex flex-wrap items-center gap-2"
+							data-verification-anchor="notification-sound-mode"
+						>
+							<label className="text-[13px] text-text-primary" htmlFor="notification-sound-mode">
+								通知声音模式
+							</label>
+							<NativeSelect
+								id="notification-sound-mode"
+								value={notificationSettings.settings?.speechMode ?? ""}
+								disabled={controlsDisabled || !notificationSettings.settings}
+								onChange={(event) => {
+									const speechMode = event.target.value as NotificationIntelligenceSettings["speechMode"];
+									notificationSettings.setSettings((current) =>
+										current ? { ...current, speechMode } : current,
+									);
+								}}
+							>
+								{!notificationSettings.settings && (
+									<option value="">{notificationSettings.loadError ? "读取失败" : "读取中…"}</option>
+								)}
+								<option value="summary">AI 摘要语音</option>
+								<option value="chime">仅提示音</option>
+								<option value="off">静音</option>
+							</NativeSelect>
 						</div>
 						<div className="flex items-center gap-2 mt-2">
 							<p className="text-text-secondary text-[13px] m-0">

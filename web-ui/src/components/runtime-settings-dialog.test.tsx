@@ -558,6 +558,57 @@ describe("RuntimeSettingsDialog", () => {
 		expect(findButtonByText(document.body, "撤销删除密钥")).toBeNull();
 		expect(findButtonByText(document.body, "Save")?.disabled).toBe(true);
 	});
+	it("在通知设置切换声音模式，保存后重开保留选择，取消丢弃修改", async () => {
+		const onOpenChange = vi.fn();
+		notificationSettingsMocks.saveSettings.mockImplementation(async (settings) => {
+			notificationSettingsMocks.getSettings.mockResolvedValue({ settings, providers: savedNotificationProviders });
+			return { ok: true };
+		});
+		const getSoundModeSelect = () => {
+			const select = document.querySelector<HTMLSelectElement>("#notification-sound-mode");
+			if (!select) throw new Error("缺少通知声音模式选项");
+			return select;
+		};
+		async function chooseSoundMode(value: "chime" | "off") {
+			const select = getSoundModeSelect();
+			await act(async () => {
+				select.value = value;
+				select.dispatchEvent(new Event("change", { bubbles: true }));
+			});
+		}
+
+		await renderSettings(true, onOpenChange);
+		const soundModeSelect = getSoundModeSelect();
+		const notificationsAnchor = document.querySelector('[data-settings-section="notifications"]');
+		const taskAnalysisAnchor = document.querySelector('[data-settings-section="task-analysis"]');
+		if (!notificationsAnchor || !taskAnalysisAnchor) throw new Error("缺少设置分区锚点");
+		expect(notificationsAnchor.compareDocumentPosition(soundModeSelect)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+		expect(soundModeSelect.compareDocumentPosition(taskAnalysisAnchor)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+		expect(Array.from(soundModeSelect.options, (option) => option.text)).toEqual(["AI 摘要语音", "仅提示音", "静音"]);
+		expect(soundModeSelect.value).toBe("summary");
+
+		await chooseSoundMode("chime");
+		expect(notificationSettingsMocks.saveSettings).not.toHaveBeenCalled();
+		await act(async () => findButtonByText(document.body, "Save")?.click());
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledWith({
+			...savedNotificationSettings,
+			speechMode: "chime",
+		});
+		expect(notificationSettingsMocks.saveProvider).not.toHaveBeenCalled();
+		expect(onOpenChange).toHaveBeenCalledWith(false);
+		await renderSettings(false);
+		await renderSettings(true, onOpenChange);
+		expect(getSoundModeSelect().value).toBe("chime");
+
+		await chooseSoundMode("off");
+		expect(getSoundModeSelect().value).toBe("off");
+		await act(async () => findButtonByText(document.body, "Cancel")?.click());
+		expect(onOpenChange).toHaveBeenCalledTimes(2);
+		expect(notificationSettingsMocks.saveSettings).toHaveBeenCalledTimes(1);
+		await renderSettings(false);
+		await renderSettings();
+		expect(getSoundModeSelect().value).toBe("chime");
+	});
 	it("已落盘的坏文本绑定显示为已失效而非伪装成默认配置，且不阻止保存其它字段", async () => {
 		const onOpenChange = vi.fn();
 		notificationSettingsMocks.getSettings.mockResolvedValue({
