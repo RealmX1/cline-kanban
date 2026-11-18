@@ -410,23 +410,9 @@ export function NotificationIntelligenceSettingsSection({
 					将通知摘要朗读为音频。浏览器系统语音无需 API Key；第三方语音使用独立的 TTS Provider 配置。
 				</p>
 				<NotificationProviderCredentialsEditor draft={draft} category="speech" disabled={busy || disabled} />
-				<h4 className="border-t border-border pt-4 font-medium">播报设置</h4>
-				<label className="block" htmlFor="notification-intelligence-selection-6">
-					声音模式
-					<NativeSelect
-						id="notification-intelligence-selection-6"
-						value={settings.speechMode}
-						onChange={(event) =>
-							patch({ speechMode: event.target.value as NotificationIntelligenceSettings["speechMode"] })
-						}
-					>
-						<option value="off">关闭</option>
-						<option value="chime">提示音</option>
-						<option value="summary">摘要语音</option>
-					</NativeSelect>
-				</label>
 				{settings.speechMode === "summary" && (
 					<>
+						<h4 className="border-t border-border pt-4 font-medium">播报设置</h4>
 						<label className="block" htmlFor="notification-intelligence-selection-7">
 							语音来源
 							<NativeSelect

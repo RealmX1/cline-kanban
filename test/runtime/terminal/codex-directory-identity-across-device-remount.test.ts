@@ -230,7 +230,11 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			runtimeSessionIncarnationId: randomUUID(),
 		});
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="slow-source-choice"\n');
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();
@@ -288,7 +292,11 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 		remount.secondaryVolumeQueryFails = true;
 		const queriesBeforeSourceChange = remount.secondaryVolumeQueryCount;
 		await writeFile(join(sourceHome, "config.toml"), 'model="global-source-approved-choice"\n');
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();
@@ -316,7 +324,11 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			runtimeSessionIncarnationId: randomUUID(),
 		});
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="retired-local-choice"\n');
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();
@@ -368,7 +380,11 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 			join(secondBinding.configurationHomeDirectoryPath, "config.toml"),
 			'model="source-b-approved-choice"\n',
 		);
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const observed = await service.getState();
@@ -564,7 +580,11 @@ describe("Codex 目录跨设备号变化的持久身份", () => {
 				storageHome,
 				runtimeSessionIncarnationId: randomUUID(),
 			});
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			try {
 				await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="shared-decision"\n');
 				// 隔离输入快照模拟此前已登记的共享决定，不依赖仍存活的原写入者。

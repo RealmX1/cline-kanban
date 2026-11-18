@@ -74,7 +74,11 @@ describe("配置记录的完整比较", () => {
 				targets: [],
 			});
 		});
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const change = requireDefinedTestFixtureValue((await service.getState()).changes[0]);
 			expect(change.fieldLabel).toContain("ponytail@ponytail:hooks/hooks.json");
@@ -153,6 +157,7 @@ describe("配置记录的完整比较", () => {
 		};
 		const onUpdated = vi.fn();
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
 			listSessions: () => [],
 			onUpdated,
 			readTaskSourceContext: async () => context,
@@ -179,6 +184,7 @@ describe("配置记录的完整比较", () => {
 		});
 		const readTaskSourceContext = vi.fn(() => pending);
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
 			listSessions: () => [],
 			onUpdated: () => {},
 			readTaskSourceContext,
@@ -212,6 +218,7 @@ describe("配置记录的完整比较", () => {
 		await writeFile(join(binding.configurationHomeDirectoryPath, "config.toml"), 'model="selected"\n');
 		let context: CodexConfigurationTaskSourceContext = { writerTasks: {}, taskLinks: {} };
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
 			listSessions: () => [],
 			onUpdated: () => {},
 			readTaskSourceContext: async () => context,
@@ -245,6 +252,7 @@ describe("配置记录的完整比较", () => {
 			await service.close();
 		}
 		const restarted = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
 			listSessions: () => [],
 			onUpdated: () => {},
 			readTaskSourceContext: async () => ({ writerTasks: {}, taskLinks: {} }),
@@ -286,7 +294,11 @@ describe("配置记录的完整比较", () => {
 			};
 			mergeObservedCodexConfigurationWriter(store, writer, { [approval]: { value: "never" } });
 		});
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		const change = requireDefinedTestFixtureValue((await service.getState()).changes[0]);
 		const details = await service.getChangeDetails({ changeId: change.changeId, expectedVersion: change.version });
 		expect(details.rows).toEqual(
@@ -305,7 +317,11 @@ describe("配置记录的完整比较", () => {
 			]),
 		);
 		await service.close();
-		const restarted = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const restarted = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			expect(
 				await restarted.getChangeDetails({ changeId: change.changeId, expectedVersion: change.version }),
@@ -369,7 +385,11 @@ describe("配置记录的完整比较", () => {
 				],
 			});
 		});
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const change = requireDefinedTestFixtureValue((await service.getState()).changes[0]);
 			const details = await service.getChangeDetails({
@@ -435,7 +455,11 @@ describe("配置记录的完整比较", () => {
 				targets: [],
 			});
 		});
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const change = requireDefinedTestFixtureValue((await service.getState()).changes[0]);
 			const input = {
@@ -499,7 +523,11 @@ describe("配置记录的完整比较", () => {
 				sharedValueAtConflict: { value: "accepted" },
 			});
 		});
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const change = requireDefinedTestFixtureValue((await service.getState()).changes[0]);
 			expect(change.comparison?.rows[0]?.sharedOrigin).toMatchObject({

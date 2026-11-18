@@ -279,7 +279,15 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			});
 			const otherProfileTarget = await startWriter("other-profile", undefined, otherProfile.profileId);
 			const sync = withExplicitApprovalOfObservedCodexConfigurationProposals(
-				createCodexConfigurationSyncService({ listSessions: () => sessions, onUpdated: () => {} }),
+				createCodexConfigurationSyncService({
+					getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+						sessions.find(
+							(session) =>
+								session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+						)?.summary ?? null,
+					listSessions: () => sessions,
+					onUpdated: () => {},
+				}),
 			);
 			onTestFinished(() => sync.close());
 			const observations = async () => {

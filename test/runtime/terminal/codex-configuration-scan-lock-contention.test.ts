@@ -170,6 +170,10 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 			codexConfigurationWriterBinding: binding,
 		});
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "scan-contention-workspace", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "scan-contention-workspace", summary }],
 			onUpdated: () => {},
 			listTaskProfileBindings: async () => ({
@@ -239,6 +243,10 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		let signaled = false;
 		const boundProfiles: string[] = [];
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "scan-contention-workspace", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "scan-contention-workspace", summary }],
 			onUpdated: () => {},
 			listTaskProfileBindings: async () => {
@@ -351,6 +359,10 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 			[JSON.stringify(["config.toml", "sandbox_mode"])]: { value: "workspace-write" },
 		};
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "scan-contention-workspace", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "scan-contention-workspace", summary }],
 			onUpdated: () => {},
 			listTaskProfileBindings: async () => {
@@ -409,7 +421,11 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const binding = await prepareWriter("observed-session");
 		const barrier = suspendNextConfigurationObservation("");
 		suspendedObservation.hookDefinitionPath = join(binding.configurationHomeDirectoryPath, "hooks.json");
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		const scanning = service.scan();
 		try {
 			await barrier.observationRead;
@@ -487,6 +503,10 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		});
 		const observedPermissions = vi.fn();
 		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "scan-contention-workspace", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "scan-contention-workspace", summary }],
 			onUpdated: () => {},
 			onWriterPermissionsObserved: observedPermissions,
@@ -533,7 +553,11 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 		const independentBinding = await prepareWriter("resuming-session", independentSourceHome);
 		const observedHome = binding.configurationHomeDirectoryPath;
 		await writeFile(join(observedHome, "config.toml"), 'model="independent-observation"\n');
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		const barrier = suspendNextConfigurationObservation(observedHome);
 		const scanning = service.scan();
 		try {
@@ -565,7 +589,11 @@ describe("配置扫描锁外读取与并发决定保护", () => {
 
 	it("writer 的旧观察不覆盖并发 profile 决定，下一次补扫采用新观察", async () => {
 		const binding = await prepareWriter("observed-session");
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		const observedHome = binding.configurationHomeDirectoryPath;
 		const modelFieldKey = JSON.stringify(["config.toml", "model"]);
 		await writeFile(join(observedHome, "config.toml"), 'model="obsolete-observation"\n');

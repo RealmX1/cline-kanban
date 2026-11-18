@@ -305,7 +305,11 @@ describe("Codex 外部配置只导入一次", () => {
 					JSON.stringify({ ...JSON.parse(originalSnapshot), capturedAtMs: 0 }),
 				);
 			await writeFile(join(sourceHome, "config.toml"), 'model = "changed-external-during-recovery"\n');
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			try {
 				await service.scan();
 				expect((await service.getState()).observationProblem).toContain("初始化快照");
@@ -344,7 +348,11 @@ describe("Codex 外部配置只导入一次", () => {
 			configuration.model = `local-choice-${index}`;
 			await writeFile(path, stringify(configuration));
 		}
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const suggestions = (await service.getState()).changes.filter((change) => change.approvalStatus === "pending");
@@ -422,7 +430,11 @@ describe("Codex 外部配置只导入一次", () => {
 		]);
 		expect(change.targets.at(-1)?.settingsIsolationCancellation?.previousStatus).toBe("conflict");
 		expect(change.targets[0]).toMatchObject({ diskSavedAt: 2, ownerReloadedAt: 3, reason: "原始历史" });
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			const input = { changeId, expectedVersion: change.version, idempotencyKey: randomUUID() };
 			expect(
@@ -461,7 +473,11 @@ describe("Codex 外部配置只导入一次", () => {
 				await rename(join(sourceHome, "config.toml"), join(sourceHome, "external-config-preserved.toml"));
 				await mkdir(join(sourceHome, "config.toml"));
 			}
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			try {
 				await service.scan();
 				expect((await service.getState()).changes).toEqual([]);
@@ -499,7 +515,11 @@ describe("Codex 外部配置只导入一次", () => {
 		configuration.model = "internal-choice";
 		await writeFile(configurationPath, stringify(configuration));
 		await rm(join(sourceHome, "config.toml"));
-		const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		try {
 			await service.scan();
 			const state = await service.getState();

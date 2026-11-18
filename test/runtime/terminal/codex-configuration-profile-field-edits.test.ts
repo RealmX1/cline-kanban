@@ -47,7 +47,11 @@ beforeEach(async () => {
 		conversationSessionId: "session",
 		runtimeSessionIncarnationId: randomUUID(),
 	});
-	service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+	service = createCodexConfigurationSyncService({
+		getSessionSummary: () => null,
+		listSessions: () => [],
+		onUpdated: () => {},
+	});
 });
 afterEach(async () => {
 	await service?.close();
