@@ -30,7 +30,7 @@ it("rename 后持久化失败，同内容重试仍须取得目录持久化证明
 	const directory = createTempDir("kanban-durable-retry-");
 	try {
 		const path = join(directory.path, "intent.json");
-		const filesystem = new LockedFileSystem();
+		const filesystem = await LockedFileSystem.forIsolatedTestDirectory(directory.path);
 		directorySyncFailure.directoryPath = directory.path;
 		directorySyncFailure.enabled = true;
 		await expect(filesystem.writeTextFileAtomic(path, "intent", { durable: true, lock: null })).rejects.toThrow(

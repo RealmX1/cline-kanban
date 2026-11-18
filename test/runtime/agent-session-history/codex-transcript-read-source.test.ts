@@ -73,15 +73,72 @@ describe("Codex 普通与压缩转录的共享只读源", () => {
 		}
 		expect(cache.inspect().cachedDecodedBytes).toBeLessThanOrEqual(8 * 1024);
 		expect(cache.inspect().maximumObservedConcurrentDecodes).toBeLessThanOrEqual(2);
-		expect(await readAll(await cache.open(path))).toEqual(contents[0]);
+		expect(cache.readCumulativeMetricsByReadSource().other.snapshotByteBudgetEvictionCount).toBeGreaterThan(0);
+		expect(await readAll(await cache.open(path, "usage_signature_check"))).toEqual(contents[0]);
+		expect(cache.readCumulativeMetricsByReadSource().usage_signature_check).toMatchObject({
+			newDecodeCount: 1,
+			successfulSnapshotWrittenBytes: contents[0]?.length,
+		});
 		await cache.dispose();
 		expect(await readAll(await cache.open(path))).toEqual(contents[0]);
 	});
-	it("超出缓存预算仍能流式范围读取且不常驻快照", async () => {
-		const { cache, path } = await fixture(32);
-		const content = await readAll(await cache.open(path));
-		expect(content.toString("utf8")).toContain("合成历史问题 1");
+	it("单飞等待与缓存命中归给各自来源，只有发起方记录快照写入", async () => {
+		const { cache, path } = await fixture();
+		const nativePath = `${path}.zst`;
+		const handle = await open(nativePath, "r");
+		const { size } = await handle.stat();
+		const occupiedDecoderSlots = [0, 1].map(() => readCodexDecodedTranscriptChunks(handle, nativePath, size));
+		const requests: Promise<Buffer>[] = [];
+		try {
+			await Promise.all(occupiedDecoderSlots.map((decoder) => decoder.next()));
+			requests.push(cache.open(path, "usage_signature_check").then(readAll));
+			await vi.waitFor(() =>
+				expect(cache.readCumulativeMetricsByReadSource().usage_signature_check.newDecodeCount).toBe(1),
+			);
+			requests.push(cache.open(path, "history_pagination").then(readAll));
+			await vi.waitFor(() =>
+				expect(cache.readCumulativeMetricsByReadSource().history_pagination.inFlightDecodeReuseCount).toBe(1),
+			);
+		} finally {
+			await Promise.all(occupiedDecoderSlots.map((decoder) => decoder.return()));
+			await handle.close();
+			await Promise.allSettled(requests);
+		}
+		const [first, waiting] = await Promise.all(requests);
+		expect(waiting).toEqual(first);
+		expect(await readAll(await cache.open(path))).toEqual(first);
+		expect(cache.readCumulativeMetricsByReadSource()).toMatchObject({
+			usage_signature_check: { newDecodeCount: 1, successfulSnapshotWrittenBytes: first?.length },
+			history_pagination: { newDecodeCount: 0, inFlightDecodeReuseCount: 1, successfulSnapshotWrittenBytes: 0 },
+			other: { cacheHitCount: 1, newDecodeCount: 0, successfulSnapshotWrittenBytes: 0 },
+		});
+	});
+	it("放弃超预算快照时保留已写字节归因，随后流读仍可读回正文", async () => {
+		const maximumCachedDecodedBytes = 256 * 1024;
+		const { cache, path } = await fixture(maximumCachedDecodedBytes);
+		await writeFile(`${path}.zst`, compressedCodexTranscriptFixtureBytes("valid-multi-block"));
+		const content = await readAll(await cache.open(path, "history_pagination"));
+		expect(content.toString("utf8")).toContain(compressedCodexTranscriptFixtureNativeSessionId);
+		expect(content.length).toBeGreaterThan(maximumCachedDecodedBytes);
 		expect(cache.inspect().cachedDecodedBytes).toBe(0);
+		const metrics = cache.readCumulativeMetricsByReadSource().history_pagination;
+		expect(metrics).toMatchObject({ newDecodeCount: 1, streamReadCount: 1, overBudgetSnapshotDiscardCount: 1 });
+		expect(metrics.successfulSnapshotWrittenBytes).toBeGreaterThan(0);
+		expect(metrics.successfulSnapshotWrittenBytes).toBeLessThanOrEqual(maximumCachedDecodedBytes);
+		expect(metrics.overBudgetDiscardedSnapshotWrittenBytes).toBe(metrics.successfulSnapshotWrittenBytes);
+	});
+	it("分别记录版本数上限触发的淘汰", async () => {
+		const { cache, path, directory } = await fixture();
+		const compressed = await readFile(`${path}.zst`);
+		for (let index = 0; index < 65; index += 1) {
+			const versionPath = join(directory, `version-${index}.jsonl.zst`);
+			await writeFile(versionPath, compressed);
+			await readAll(await cache.open(versionPath));
+		}
+		expect(cache.readCumulativeMetricsByReadSource().other).toMatchObject({
+			sourceVersionLimitEvictionCount: 1,
+			snapshotByteBudgetEvictionCount: 0,
+		});
 	});
 	it("不同源并发解码最多两个，活跃读取也不能突破总缓存容量", async () => {
 		const { cache, path, directory } = await fixture(4 * 1024);

@@ -418,7 +418,11 @@ async function resolveTaskConversationHistorySummaryForCodexStorageBinding(summa
 		authoritativeTranscriptPath = candidates[0];
 	}
 	if (!authoritativeTranscriptPath) throw new Error("缺少可信原生历史入口。");
-	const resolvedSource = await openCodexTranscriptReadSource(authoritativeTranscriptPath);
+	const resolvedSource = await openCodexTranscriptReadSource(
+		authoritativeTranscriptPath,
+		undefined,
+		"history_pagination",
+	);
 	try {
 		authoritativeTranscriptPath = resolvedSource.nativePath;
 	} finally {
@@ -523,7 +527,11 @@ export async function loadTaskConversationHistoryPage(
 		try {
 			handle =
 				identity.sourceAgentId === "codex"
-					? await openCodexTranscriptReadSource(identity.transcriptPath, identity.nativeSessionId)
+					? await openCodexTranscriptReadSource(
+							identity.transcriptPath,
+							identity.nativeSessionId,
+							"history_pagination",
+						)
 					: await open(identity.transcriptPath, "r");
 		} catch (error) {
 			if (
@@ -674,7 +682,7 @@ export async function loadTaskConversationHistoryPage(
 				if (!parentSegment || ancestorPaths.has(parentSegment.path)) break;
 				const { path: parentPath, nativeSessionId: expectedNativeSessionId } = parentSegment;
 				ancestorPaths.add(parentPath);
-				const ancestorHandle = await openCodexTranscriptReadSource(parentPath);
+				const ancestorHandle = await openCodexTranscriptReadSource(parentPath, undefined, "history_pagination");
 				try {
 					ancestorMetadata = await assertNativeTranscriptIdentity(
 						ancestorHandle,
@@ -733,7 +741,7 @@ export async function loadTaskConversationHistoryPage(
 			visitedSegmentPaths.add(parentPath);
 			await handle.close();
 			handle = null;
-			handle = await openCodexTranscriptReadSource(parentPath);
+			handle = await openCodexTranscriptReadSource(parentPath, undefined, "history_pagination");
 			metadata = await handle.stat();
 			segmentMetadata = await assertNativeTranscriptIdentity(handle, summary, expectedParentNativeSessionId);
 			if (
@@ -863,7 +871,7 @@ export async function loadTaskConversationHistoryPage(
 		const latestMetadata = await handle.stat();
 		const latestRootMetadata =
 			identity.sourceAgentId === "codex"
-				? await statCodexTranscriptReadSource(rootNativePath)
+				? await statCodexTranscriptReadSource(rootNativePath, undefined, "history_pagination")
 				: await stat(identity.transcriptPath);
 		if (
 			!usesStableSnapshot &&
@@ -882,7 +890,9 @@ export async function loadTaskConversationHistoryPage(
 			const path = verifiedSnapshotPaths.get(snapshot.segmentThreadId);
 			if (!path) throw new NativeTranscriptSnapshotInvalidError();
 			const snapshotHandle =
-				identity.sourceAgentId === "codex" ? await openCodexTranscriptReadSource(path) : await open(path, "r");
+				identity.sourceAgentId === "codex"
+					? await openCodexTranscriptReadSource(path, undefined, "history_pagination")
+					: await open(path, "r");
 			try {
 				await assertNativeTranscriptFilePrefixSnapshot(
 					snapshotHandle,
