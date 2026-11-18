@@ -43,6 +43,7 @@ Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official 
 
 - 标准入口将私有 checkout、依赖、源码验证复用、生产构建、备份与八阶段动作交给既有宿主；日常不再编写阶段 adapter，构建前即可登记所属执行。
 - 在线且有可信来源会话时走 `task command-execution`；离线复用独立 supervisor。runtime 恢复后由已有恢复循环发现待接回材料，校验真实归属、启动材料及原生身份后接回，不重发命令。外部 CLI 无会话绑定时只返回持久结果。
+- 需要断联时先核对已登记的独立执行与原会话身份。非托管进程按连续性门禁自然退出，已保存的原生对话可在服务恢复后接回。发起会话的显式 Stop 会撤销部署，退出前把候选、执行目录和待证条件留在持久记录。
 - 同目录再次启动只接续原执行，最终结果就绪或已取消时不重跑。原生退出或真实 boot 变化后可在持久语义预算内恢复；身份未知时不额外派发。`cancel-redeployment` 与通用 Stop 共用持久撤销门禁。
 - tmux session 活着不证明服务已退出。已证无监听后才调用绑定 canonical runner，在既有 session 新建窗口，保留原 pane 与日志；同一执行已有活启动 pane 时只等待。禁止 `respawn-pane -k`，继续使用服务原有的单实例锁。
 - 接管成功时保存独立历史接受回执，绑定实际载入入口、runtime 代际及 session 代际。后续正常回收不抹掉该事实；自然 I/O 连续性仍按实际自然活动取证。

@@ -242,6 +242,101 @@ async function observeBoundProcessNotStarted(
 	return { kind: "bound_command_not_started", stage };
 }
 
+export async function observeInterruptedLocalRedeploymentBackup(
+	frozen: FrozenLocalRedeploymentRequest,
+	failure: LocalDeploymentBlockingFailure | null | undefined,
+) {
+	if (failure?.classification !== "unclassified_failure" || failure.logicalResource !== "state_preservation")
+		return null;
+	const original = failure.originalErrorReference;
+	const directory = dirname(dirname(dirname(original)));
+	try {
+		const interrupted = await readFrozenLocalRedeploymentRequest(directory);
+		const { request } = interrupted;
+		if (
+			JSON.stringify(request.runtimeIdentity) !== JSON.stringify(frozen.request.runtimeIdentity) ||
+			request.distributionDirectoryPath !== frozen.request.distributionDirectoryPath
+		)
+			return null;
+		const record = localDeploymentExecutionRecordSchema.parse(
+			await readLocalRedeploymentJson(join(directory, LOCAL_DEPLOYMENT_EXECUTION_RECORD_FILENAME)),
+		);
+		if (
+			record.manifest.schemaVersion !== 2 ||
+			record.manifest.executionId !== request.executionId ||
+			record.manifest.redeploymentRequestSha256 !== interrupted.requestSha256
+		)
+			return null;
+		const stage = "state_preservation";
+		const intent = record.observations
+			.filter(
+				(observation) => observation.stage === stage && observation.kind === "command_execution_intent_persisted",
+			)
+			.at(-1);
+		if (
+			!intent ||
+			intent.commandOutputDirectory !== original ||
+			original !== join(directory, "stage-command-originals", stage, `attempt-${intent.attemptNumber}`) ||
+			!record.observations.some(
+				(observation) =>
+					observation.stage === stage &&
+					observation.attemptNumber === intent.attemptNumber &&
+					observation.kind === "command_failed" &&
+					observation.commandOutputDirectory === original,
+			)
+		)
+			return null;
+		const command = localDeploymentCommandOriginalSchema.parse(
+			await readLocalRedeploymentJson(join(original, "command-result.json")),
+		);
+		const identity = command.attemptIdentity;
+		if (
+			!command.processWasStarted ||
+			!command.processId ||
+			command.exitCode !== null ||
+			(command.signal !== "SIGTERM" && command.signal !== "SIGKILL") ||
+			identity?.executionId !== request.executionId ||
+			identity.stage !== stage ||
+			identity.attemptNumber !== intent.attemptNumber ||
+			identity.commandOutputDirectory !== original ||
+			command.cwd !== record.manifest.sourceCheckoutPath ||
+			command.cwd !== join(directory, "candidate-source-checkout") ||
+			JSON.stringify(command.command) !==
+				JSON.stringify([
+					request.deploymentNodeBinaryPath,
+					join(directory, "frozen-local-redeployment-executor.mjs"),
+					"redeployment-stage",
+					"--execution-directory",
+					directory,
+					"--stage",
+					stage,
+				])
+		)
+			return null;
+		const checkpoints = join(directory, "runtime-backup-checkpoints");
+		const names = await readdir(checkpoints).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return [];
+			throw error;
+		});
+		const completed: Array<[string, string]> = [];
+		for (const name of names.sort()) {
+			if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+			const receipt = await readLocalRedeploymentJson(join(checkpoints, name));
+			if (
+				receipt &&
+				typeof receipt === "object" &&
+				"preservedFingerprint" in receipt &&
+				typeof receipt.preservedFingerprint === "string" &&
+				/^[a-f0-9]{64}$/u.test(receipt.preservedFingerprint)
+			)
+				completed.push([name, receipt.preservedFingerprint]);
+		}
+		return { directory, completed };
+	} catch {
+		return null;
+	}
+}
+
 async function observeSourceValidationDiscoveryBudgetRecovery(
 	directory: string,
 	frozen: FrozenLocalRedeploymentRequest,
@@ -388,6 +483,10 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 			failure.logicalResource === "candidate_bootstrap"
 				? await observeSourceValidationDiscoveryBudgetRecovery(directory, frozen, failure)
 				: await observeBoundProcessNotStarted(directory, failure);
+	if (!proof) {
+		const interrupted = await observeInterruptedLocalRedeploymentBackup(frozen, failure);
+		if (interrupted) proof = { kind: "bound_interrupted_backup", completed: interrupted.completed };
+	}
 	return {
 		evidenceSha256: localRedeploymentSha256(
 			JSON.stringify({ classification: failure.classification, logicalResource: failure.logicalResource, proof }),

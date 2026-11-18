@@ -13,7 +13,7 @@ import {
 	rename,
 	symlink,
 } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import Database from "better-sqlite3";
 import { getRuntimeFetch } from "../core/runtime-endpoint";
 import { isFilesystemKernelAtomicWriteTemporaryFilePath } from "../fs/locked-file-system";
@@ -303,7 +303,17 @@ export async function captureLocalRedeploymentState(
 export async function backupLocalRedeploymentRuntimeState(
 	request: LocalRedeploymentRequest,
 	directory: string,
+	checkpointReuseDirectory?: string,
 ): Promise<void> {
+	let lastProgressReport = -Infinity;
+	function reportBackupProgress(): void {
+		const now = Date.now();
+		if (process.connected && now - lastProgressReport >= 1_000) {
+			lastProgressReport = now;
+			process.send?.("runtime_state_backup_progress", () => undefined);
+		}
+	}
+	reportBackupProgress();
 	const backupRoot = join(directory, "preserved-runtime-state");
 	const preservedInPlace = new Set([
 		"cross-task-handoff-artifacts",
@@ -343,7 +353,10 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function hashRuntimeStateFileContents(path: string): Promise<string> {
 		const hash = createHash("sha256");
-		for await (const chunk of createReadStream(path)) hash.update(chunk);
+		for await (const chunk of createReadStream(path)) {
+			hash.update(chunk);
+			reportBackupProgress();
+		}
 		return hash.digest("hex");
 	}
 	async function fingerprintRuntimeStateEntry(path: string, recordSkipped = false): Promise<string | null> {
@@ -357,6 +370,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			return null;
 		}
 		const metadata = await lstat(path);
+		reportBackupProgress();
 		if (metadata.isSocket() || path.endsWith("-wal") || path.endsWith("-shm")) {
 			if (recordSkipped) skipped.push(path);
 			return null;
@@ -397,6 +411,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			return;
 		}
 		const metadata = await lstat(source);
+		reportBackupProgress();
 		if (metadata.isSocket() || source.endsWith("-wal") || source.endsWith("-shm")) {
 			skipped.push(source);
 			return;
@@ -410,7 +425,16 @@ export async function backupLocalRedeploymentRuntimeState(
 			await mkdir(dirname(destination), { recursive: true });
 			const database = new Database(source, { readonly: true, fileMustExist: true });
 			try {
-				await database.backup(destination);
+				let fewestRemainingPages = Infinity;
+				await database.backup(destination, {
+					progress: ({ remainingPages }) => {
+						if (remainingPages < fewestRemainingPages) {
+							fewestRemainingPages = remainingPages;
+							reportBackupProgress();
+						}
+						return 100;
+					},
+				});
 			} finally {
 				database.close();
 			}
@@ -451,22 +475,45 @@ export async function backupLocalRedeploymentRuntimeState(
 			continue;
 		}
 		const sourceMetadataBeforeCapture = await lstat(source);
-		const receiptPath = join(directory, "runtime-backup-checkpoints", `${localRedeploymentSha256(name)}.json`);
-		const previous = (await readLocalRedeploymentJson(receiptPath)) as {
+		const receiptRelativePath = join("runtime-backup-checkpoints", `${localRedeploymentSha256(name)}.json`);
+		const receiptPath = join(directory, receiptRelativePath);
+		const localCheckpoint = await readLocalRedeploymentJson(receiptPath);
+		const previous = (localCheckpoint ??
+			(checkpointReuseDirectory &&
+				(await readLocalRedeploymentJson(join(checkpointReuseDirectory, receiptRelativePath))))) as {
+			source?: string;
 			destination?: string;
 			sourceFingerprint?: string;
 			preservedFingerprint?: string;
 		} | null;
 		const sourceFingerprint = await fingerprintRuntimeStateEntry(source, true);
 		if (sourceFingerprint === null) continue;
-		if (previous?.sourceFingerprint === sourceFingerprint && previous.destination) {
-			const preservedFingerprint = await fingerprintRuntimeStateEntry(previous.destination).catch(
-				(error: unknown) => {
-					if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-					throw error;
-				},
-			);
+		if (previous?.source === source && previous.sourceFingerprint === sourceFingerprint && previous.destination) {
+			const previousDestination = previous.destination;
+			const preservedParent =
+				!localCheckpoint && checkpointReuseDirectory
+					? await realpath(dirname(previousDestination)).catch(() => null)
+					: null;
+			const reuseDirectory = !localCheckpoint && checkpointReuseDirectory;
+			const belongsToVerifiedBackup =
+				!reuseDirectory ||
+				preservedParent === join(reuseDirectory, "preserved-runtime-state") ||
+				(preservedParent !== null &&
+					dirname(preservedParent) ===
+						join(reuseDirectory, "preserved-runtime-state-versions", localRedeploymentSha256(name)));
+			const preservedFingerprint =
+				!belongsToVerifiedBackup || basename(previousDestination) !== name
+					? null
+					: await fingerprintRuntimeStateEntry(previousDestination).catch((error: unknown) => {
+							if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+							throw error;
+						});
 			if (preservedFingerprint !== null && preservedFingerprint === previous.preservedFingerprint) {
+				if (reuseDirectory)
+					await writeLocalRedeploymentJson(receiptPath, {
+						...previous,
+						reusedFromExecutionDirectory: reuseDirectory,
+					});
 				currentEntryBackups.push({
 					source,
 					destination: previous.destination,

@@ -33,7 +33,10 @@ import {
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
 import { readLocalDeploymentTargetStageRecoveryBudget } from "./local-deployment-target-stage-recovery-budget";
 import { registerLocalRedeploymentRebuildableArtifact } from "./local-redeployment-failed-attempt-artifact-cleanup";
-import { observeLocalRedeploymentBlockingFailureRecovery } from "./local-redeployment-failure-recovery-evidence";
+import {
+	observeInterruptedLocalRedeploymentBackup,
+	observeLocalRedeploymentBlockingFailureRecovery,
+} from "./local-redeployment-failure-recovery-evidence";
 import {
 	clearLocalRedeploymentFilesystemEvidenceRequests,
 	observeLocalRedeploymentFilesystemEvidence,
@@ -729,7 +732,13 @@ export async function executeStandardLocalRedeploymentStage(
 				attemptNumber,
 				path: join(directory, "preserved-previous-distribution"),
 			});
-		await backupLocalRedeploymentRuntimeState(request, directory);
+		const backupBudget = await readLocalDeploymentTargetStageRecoveryBudget(request, stage);
+		const interruptedBackup = await observeInterruptedLocalRedeploymentBackup(frozen, backupBudget?.blockingFailure);
+		try {
+			await backupLocalRedeploymentRuntimeState(request, directory, interruptedBackup?.directory);
+		} finally {
+			if (process.connected) process.send?.("runtime_state_backup_finished", () => undefined);
+		}
 		if ((await observeLocalRedeploymentRuntimeBaseline(frozen)).state === "verified_online")
 			await writeLocalRedeploymentJson(
 				join(directory, "runtime-config-before.json"),

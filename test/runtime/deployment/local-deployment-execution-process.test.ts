@@ -23,6 +23,31 @@ function commandContext() {
 }
 
 describe("部署 runner 的原生启动事实", () => {
+	it("备份 worker 停止报告进展后只结束该子进程，并保存退出原件", async () => {
+		const context = { ...commandContext(), stage: "state_preservation" as const };
+		await mkdir(context.commandOutputDirectory);
+		const scheduleTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation((callback, delay, ...args) =>
+			scheduleTimeout(callback, delay === 120_000 ? 40 : delay, ...args),
+		);
+		const result = await runLocalDeploymentCommandPreservingOriginalOutput(
+			[process.execPath, "-e", "process.send('runtime_state_backup_progress'); setInterval(() => {}, 1000);"],
+			context,
+		);
+		expect(result).toMatchObject({
+			processWasStarted: true,
+			exitCode: null,
+			stderr: expect.stringContaining("无进展"),
+		});
+		expect(
+			JSON.parse(await readFile(join(context.commandOutputDirectory, "command-result.json"), "utf8")),
+		).toMatchObject({
+			processWasStarted: true,
+			signal: "SIGKILL",
+			backupProgressTimedOut: true,
+			attemptIdentity: { executionId: context.executionId, stage: context.stage, attemptNumber: 1 },
+		});
+	});
 	it("输出文件已经打开后的最后资格复核拒绝启动，真实子进程不产生副作用", async () => {
 		const context = commandContext();
 		await mkdir(context.commandOutputDirectory);

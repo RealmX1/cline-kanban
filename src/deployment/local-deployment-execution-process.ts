@@ -7,6 +7,8 @@ import type { LocalDeploymentCommandRunner } from "./local-deployment-execution"
 
 // 原文完整落盘；超出核验预算的正文保留未知，不截取片段冒充 JSON。
 const MAXIMUM_EFFECT_VERIFICATION_JSON_BYTES = 1_048_576;
+// EXPERIMENT_NODE: 按真实备份的最长无进展间隔校准超时。
+const LOCAL_REDEPLOYMENT_BACKUP_NO_PROGRESS_TIMEOUT_MS = 120_000;
 
 export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentCommandRunner = async (
 	command,
@@ -25,6 +27,8 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 			return { exitCode: null, processWasStarted: false, stdout: "", stderr: String(error) };
 		}
 		const startedAtEpochMs = Date.now();
+		let backupProgressTimedOut = false;
+		const superviseBackupProgress = context.stage === "state_preservation";
 		const result = await new Promise<{
 			exitCode: number | null;
 			signal: NodeJS.Signals | null;
@@ -43,7 +47,12 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 						KANBAN_LOCAL_DEPLOYMENT_STAGE: context.stage,
 						KANBAN_LOCAL_DEPLOYMENT_STAGE_ATTEMPT_NUMBER: String(context.attemptNumber),
 					},
-					stdio: ["ignore", stdout?.fd, stderr?.fd ?? "ignore"],
+					stdio: [
+						"ignore",
+						stdout?.fd,
+						stderr?.fd ?? "ignore",
+						...(superviseBackupProgress ? ["ipc" as const] : []),
+					],
 				});
 			} catch (error) {
 				resolveResult({
@@ -55,19 +64,31 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 				});
 				return;
 			}
+			let backupProgressDeadline: NodeJS.Timeout | undefined;
+			if (superviseBackupProgress) {
+				child.on("message", (message) => {
+					if (message !== "runtime_state_backup_progress" && message !== "runtime_state_backup_finished") return;
+					clearTimeout(backupProgressDeadline);
+					if (message === "runtime_state_backup_progress" && !backupProgressTimedOut)
+						backupProgressDeadline = setTimeout(() => {
+							backupProgressTimedOut = child.kill("SIGKILL");
+						}, LOCAL_REDEPLOYMENT_BACKUP_NO_PROGRESS_TIMEOUT_MS);
+				});
+			}
 			let spawnError: string | undefined;
 			child.once("error", (error) => {
 				spawnError = String(error);
 			});
-			child.once("close", (exitCode, signal) =>
+			child.once("close", (exitCode, signal) => {
+				clearTimeout(backupProgressDeadline);
 				resolveResult({
 					exitCode,
 					signal,
 					processId: child.pid ?? null,
 					processWasStarted: child.pid !== undefined,
 					spawnError,
-				}),
-			);
+				});
+			});
 		});
 		let originalPersistError: string | undefined;
 		try {
@@ -76,6 +97,7 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 				join(context.commandOutputDirectory, "command-result.json"),
 				{
 					...result,
+					...(backupProgressTimedOut ? { backupProgressTimedOut } : {}),
 					command,
 					cwd: context.cwd,
 					attemptIdentity: {
@@ -111,7 +133,10 @@ export const runLocalDeploymentCommandPreservingOriginalOutput: LocalDeploymentC
 			exitCode: result.exitCode,
 			processWasStarted: result.processWasStarted,
 			stdout: stdoutText,
-			stderr: result.spawnError ?? originalPersistError ?? stderrText,
+			stderr:
+				result.spawnError ??
+				originalPersistError ??
+				(backupProgressTimedOut ? `备份 worker 无进展，已退出。${stderrText}` : stderrText),
 		};
 	} finally {
 		// 关闭失败也不能把已知的 spawn 结果改写为未知副作用。
