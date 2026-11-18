@@ -232,6 +232,10 @@ function createNativeOwnerHarness(input: { barrier?: NativeRequestBarrier; loseF
 function createConfigurationService(owner?: ReturnType<typeof createNativeOwnerHarness>) {
 	const service = withExplicitApprovalOfObservedCodexConfigurationProposals(
 		createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				sessionTargets.find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => sessionTargets,
 			onUpdated: () => {},
 			withOwnerConnection: owner?.connect,
@@ -514,6 +518,46 @@ describe("原所有者写入窗口中的并发配置决定", () => {
 		expect(restored.changes.find((item) => item.changeId === change.changeId)?.targets[0].status).toBe("conflict");
 		expect(owner.batchWriteRequests).toHaveLength(2);
 		expect(owner.batchWriteRequests[1].edits).toEqual([expect.objectContaining({ value: newerHookDecision })]);
+	});
+	it("同一 profile 的第三个 writer 在原所有者等待期间更新同字段时，停止把旧决定写入目标", async () => {
+		const barrier = createNativeRequestBarrier("thread/loaded/list");
+		const sourceWriter = await createConfigurationWriter("source-session");
+		const targetWriter = await createConfigurationWriter("target-session");
+		const competingWriter = await createConfigurationWriter("competing-profile-session");
+		await setWriterHookDecision(sourceWriter, propagatedHookDecision);
+		const observer = createConfigurationService();
+		await observer.scan();
+		const change = (await observer.getState()).changes.find((item) => item.sourceWriterId === sourceWriter.writerId);
+		await observer.close();
+		if (!change) throw new Error("缺少待传播的来源 hook 决定");
+		const owner = createNativeOwnerHarness({ barrier });
+		const service = createConfigurationService(owner);
+		const synchronization = service.synchronize({
+			changeId: change.changeId,
+			expectedVersion: change.version,
+			idempotencyKey: randomUUID(),
+			synchronizeExistingSessions: true,
+		});
+		await barrier.reached;
+		try {
+			await setWriterHookDecision(competingWriter, newerHookDecision);
+		} finally {
+			barrier.release();
+		}
+		const result = await synchronization;
+		expect(owner.batchWriteRequests).toHaveLength(0);
+		expectHookDecision(await readWriterConfiguration(targetWriter), targetWriter, originalHookDecision);
+		expectHookDecision(await readWriterConfiguration(competingWriter), competingWriter, newerHookDecision);
+		expect(result.changes.find((item) => item.changeId === change.changeId)?.targets).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					writerId: targetWriter.writerId,
+					status: "conflict",
+					diskSavedAt: null,
+					ownerReloadedAt: null,
+				}),
+			]),
+		);
 	});
 	it("回执丢失跨重启恢复时保留一次字段写入，后续只补重载且不生成目标用户决定", async () => {
 		const { sourceWriter, owner, service, change, request } = await prepareSourceDecision({ loseFirstReceipt: true });

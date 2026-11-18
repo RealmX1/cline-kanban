@@ -136,9 +136,17 @@ function service(
 		summary: RuntimeTaskSessionSummary,
 		operation: (port: CodexAppServerRequestPort) => Promise<T>,
 	) => Promise<T>,
+	getSessionSummary: Parameters<typeof createCodexConfigurationSyncService>[0]["getSessionSummary"] = (
+		workspaceId,
+		conversationSessionId,
+	) =>
+		sessions.find(
+			(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+		)?.summary ?? null,
 ) {
 	const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
 		createCodexConfigurationSyncService({
+			getSessionSummary,
 			listSessions: () => sessions,
 			onUpdated: () => {},
 			withOwnerConnection,
@@ -701,6 +709,10 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 		const first = await writer("first"),
 			second = await writer("second");
 		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				sessions.find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => sessions,
 			onUpdated: () => {},
 			withOwnerConnection: nativeOwnerMock().connect,
@@ -824,6 +836,98 @@ describe("Codex 独立配置 writer 与持久增量同步", () => {
 			ownerReloadedAt: null,
 			appliedAtStartupByWriterId: replacement.writerId,
 		});
+	});
+	it("单目标暂不可见时保留待启动记录，归属恢复后自动核验且不误用其他工作区同名会话", async () => {
+		const first = await writer("first");
+		const second = await writer("second");
+		let targetVisible = true;
+		const lookup = vi.fn((workspaceId: string, conversationSessionId: string) => {
+			if (!targetVisible && conversationSessionId === "second") return null;
+			return (
+				sessions.find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null
+			);
+		});
+		const sync = service(nativeOwnerMock().connect, lookup);
+		await changeConfiguration(first, (configuration) => {
+			configuration.model = "lookup-recovery-model";
+		});
+		await sync.scan();
+		const change = (await sync.getState()).changes[0];
+		await sync.synchronize({
+			changeId: change.changeId,
+			expectedVersion: change.version,
+			idempotencyKey: randomUUID(),
+			synchronizeExistingSessions: true,
+		});
+		const replacement = await writer("second", second);
+		const targetSummary = requireDefinedTestFixtureValue(
+			sessions.find((session) => session.summary.taskId === "second"),
+		).summary;
+		sessions.unshift({ workspaceId: "other-workspace", summary: { ...targetSummary } });
+		targetVisible = false;
+		await sync.scan();
+		const missing = (await sync.getState()).changes.find((entry) => entry.changeId === change.changeId)?.targets[0];
+		expect(missing).toMatchObject({ status: "pending_next_start" });
+		expect(missing?.appliedAtStartupByWriterId).toBeUndefined();
+		expect(
+			(await readCodexConfigurationSyncStore()).changes.find((entry) => entry.changeId === change.changeId)
+				?.targets[0].startupVerificationAttemptCount,
+		).toBeUndefined();
+		targetVisible = true;
+		await sync.scan();
+		expect(lookup).toHaveBeenCalledWith("fixture-workspace", "second");
+		expect(
+			(await sync.getState()).changes.find((entry) => entry.changeId === change.changeId)?.targets[0],
+		).toMatchObject({
+			status: "applied",
+			appliedAtStartupByWriterId: replacement.writerId,
+		});
+	});
+	it.each(["进程代次", "Stop"])("启动配置异步核验期间发生%s时丢弃旧证据，条件恢复后自动继续", async (condition) => {
+		const first = await writer("first");
+		const second = await writer("second");
+		const initial = service(nativeOwnerMock().connect);
+		await changeConfiguration(first, (configuration) => {
+			configuration.model = "await-window-model";
+		});
+		await initial.scan();
+		const change = (await initial.getState()).changes[0];
+		await initial.synchronize({
+			changeId: change.changeId,
+			expectedVersion: change.version,
+			idempotencyKey: randomUUID(),
+			synchronizeExistingSessions: true,
+		});
+		await initial.close();
+		await writer("second", second);
+		const target = requireDefinedTestFixtureValue(sessions.find((session) => session.summary.taskId === "second"));
+		const originalSummary = { ...target.summary };
+		const owner = nativeOwnerMock({
+			beforeFirstConfigurationRead: async () => {
+				target.summary = {
+					...target.summary,
+					...(condition === "进程代次"
+						? { runtimeSessionIncarnationId: randomUUID() }
+						: {
+								turnOwner: "user" as const,
+								liveness: "interrupted" as const,
+								userTurnKind: "interrupted" as const,
+							}),
+				};
+			},
+		});
+		const restarted = service(owner.connect);
+		await restarted.scan();
+		expect(
+			(await restarted.getState()).changes.find((entry) => entry.changeId === change.changeId)?.targets[0].status,
+		).toBe("pending_next_start");
+		target.summary = originalSummary;
+		await restarted.scan();
+		expect(
+			(await restarted.getState()).changes.find((entry) => entry.changeId === change.changeId)?.targets[0].status,
+		).toBe("applied");
 	});
 	it("来源软链与两类 profile 仍保留原来源身份，修改定义后未来 writer 不复用旧信任", async () => {
 		const linkedHome = join(fixture.path, "linked-codex-home");

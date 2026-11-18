@@ -51,7 +51,11 @@ describe("目标冲突处理核验当前来源观测", () => {
 			const targetWriter = await createWriter("target-writer");
 			const sourceFilePath = join(sourceWriter.configurationHomeDirectoryPath, "config.toml");
 			const targetFilePath = join(targetWriter.configurationHomeDirectoryPath, "config.toml");
-			const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+			const service = createCodexConfigurationSyncService({
+				getSessionSummary: () => null,
+				listSessions: () => [],
+				onUpdated: () => {},
+			});
 			try {
 				const sourceConfiguration = parse(await readFile(sourceFilePath, "utf8"));
 				sourceConfiguration.model = "approved-source-model";

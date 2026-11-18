@@ -179,7 +179,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY
 			};
 			const createConfigurationSynchronizationService = () =>
 				withExplicitApprovalOfObservedCodexConfigurationProposals(
-					createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} }),
+					createCodexConfigurationSyncService({
+						getSessionSummary: () => null,
+						listSessions: () => [],
+						onUpdated: () => {},
+					}),
 				);
 			let configurationSynchronizationService = createConfigurationSynchronizationService();
 			try {

@@ -324,7 +324,11 @@ it("历史和传播目标扩大十倍时概览不解码目标，按完整当前�
 		sessions,
 	);
 	expect(second.entries[0]?.conversationSessionId).toBe("session-050");
-	const service = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+	const service = createCodexConfigurationSyncService({
+		getSessionSummary: () => null,
+		listSessions: () => [],
+		onUpdated: () => {},
+	});
 	try {
 		expect((await service.getOverview()).stateResponseScope).toBe("overview");
 	} finally {

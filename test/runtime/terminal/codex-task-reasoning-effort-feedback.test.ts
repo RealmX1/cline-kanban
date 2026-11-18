@@ -112,6 +112,10 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 			updateCodexConfigurationProfileFields(store, profileId, { [effortFieldKey]: { value: "high" } });
 		});
 		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "effort-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "effort-fixture", summary }],
 			onUpdated: () => {},
 		});
@@ -127,7 +131,14 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 	it("登记时 writer 暂不可核验，恢复并重启服务后自动补齐且不延长期限", async () => {
 		const binding = await prepareWriter("ultra");
 		const summary = await successfulLaunchSummary(binding);
-		const dependencies = { listSessions: () => [{ workspaceId: "effort-fixture", summary }], onUpdated: () => {} };
+		const dependencies = {
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "effort-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
+			listSessions: () => [{ workspaceId: "effort-fixture", summary }],
+			onUpdated: () => {},
+		};
 		const unavailableDirectory = `${binding.configurationHomeDirectoryPath}-temporarily-unavailable`;
 		await rename(binding.configurationHomeDirectoryPath, unavailableDirectory);
 		const unavailable = createCodexConfigurationSyncService(dependencies);
@@ -158,11 +169,22 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 		});
 		let summary = await successfulLaunchSummary(binding);
 		const listSessions = () => [{ workspaceId: "effort-fixture", summary }];
-		const failed = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		const failed = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		await failed.scan();
 		await failed.close();
 		expect((await readCodexConfigurationSyncStore()).changes).toHaveLength(0);
-		const sync = createCodexConfigurationSyncService({ listSessions, onUpdated: () => {} });
+		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				listSessions().find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
+			listSessions,
+			onUpdated: () => {},
+		});
 		await sync.scan();
 		await sync.scan();
 		await sync.close();
@@ -178,7 +200,14 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 		const firstLaunchTime = summary.codexTaskReasoningEffortFeedbackLaunch?.startedAtMs;
 		const resumed = await prepareWriter("ultra", binding);
 		summary = await successfulLaunchSummary(resumed, firstLaunchTime);
-		const restarted = createCodexConfigurationSyncService({ listSessions, onUpdated: () => {} });
+		const restarted = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				listSessions().find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
+			listSessions,
+			onUpdated: () => {},
+		});
 		await restarted.scan();
 		await restarted.close();
 		store = await readCodexConfigurationSyncStore();
@@ -191,6 +220,10 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 		const binding = await prepareWriter("max");
 		const summary = await successfulLaunchSummary(binding);
 		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "effort-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "effort-fixture", summary }],
 			onUpdated: () => {},
 		});
@@ -228,6 +261,10 @@ describe("任务创建时的 Codex effort 局部选择与反馈", () => {
 		const binding = await prepareWriter("ultra");
 		const summary = await successfulLaunchSummary(binding, Date.now() - 601_000);
 		const sync = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+				[{ workspaceId: "effort-fixture", summary }].find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
 			listSessions: () => [{ workspaceId: "effort-fixture", summary }],
 			onUpdated: () => {},
 		});

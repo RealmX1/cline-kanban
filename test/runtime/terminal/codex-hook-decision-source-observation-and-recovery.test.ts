@@ -115,7 +115,11 @@ async function decideHook(
 }
 function service() {
 	const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
-		createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} }),
+		createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		}),
 	);
 	services.push(instance);
 	return instance;
@@ -161,6 +165,10 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		let batchWriteCount = 0;
 		const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
 			createCodexConfigurationSyncService({
+				getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+					[{ workspaceId: "fixture-workspace", summary }].find(
+						(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+					)?.summary ?? null,
 				listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
 				onUpdated: () => {},
 				withOwnerConnection: async (_summary, operation) =>
@@ -259,6 +267,10 @@ describe("Codex hook 来源身份与未知定义的恢复", () => {
 		let ownerConnectionAttempts = 0;
 		const instance = withExplicitApprovalOfObservedCodexConfigurationProposals(
 			createCodexConfigurationSyncService({
+				getSessionSummary: (workspaceId: string, conversationSessionId: string) =>
+					[{ workspaceId: "fixture-workspace", summary }].find(
+						(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+					)?.summary ?? null,
 				listSessions: () => [{ workspaceId: "fixture-workspace", summary }],
 				onUpdated: () => {},
 				withOwnerConnection: async () => {
