@@ -36,7 +36,11 @@ beforeEach(async () => {
 		join(sourceHome, "config.toml"),
 		stringify({ model: "initial-model", tui: { alternate_screen: "always" } }),
 	);
-	sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+	sync = createCodexConfigurationSyncService({
+		getSessionSummary: () => null,
+		listSessions: () => [],
+		onUpdated: () => {},
+	});
 });
 afterEach(async () => {
 	await sync.close();
@@ -153,7 +157,11 @@ describe("单次 Codex 配置共享范围", () => {
 			withdrawalStatus: "pending",
 		});
 		await sync.close();
-		sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		for (let retry = 0; retry < 5; retry++) await sync.scan();
 		expect(
 			(await readCodexConfigurationSyncStore()).changes.find((entry) => entry.changeId === change.changeId)
@@ -508,7 +516,11 @@ describe("单次 Codex 配置共享范围", () => {
 		};
 		await sync.setChangeSharingScope(input);
 		await sync.close();
-		sync = createCodexConfigurationSyncService({ listSessions: () => [], onUpdated: () => {} });
+		sync = createCodexConfigurationSyncService({
+			getSessionSummary: () => null,
+			listSessions: () => [],
+			onUpdated: () => {},
+		});
 		expect(
 			await sync.getMutationReceipt({ idempotencyKey: input.idempotencyKey, expectedSharingScopeMutation: input }),
 		).toMatchObject({ changeId: change.changeId });

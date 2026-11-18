@@ -130,7 +130,14 @@ it.skipIf(!process.env.KANBAN_CODEX_NATIVE_CONFIGURATION_SYNC_SMOKE_BINARY)(
 			runtimeSessionIncarnationId: randomUUID(),
 		});
 		const sessions: Array<{ workspaceId: string; summary: RuntimeTaskSessionSummary }> = [];
-		const service = createCodexConfigurationSyncService({ listSessions: () => sessions, onUpdated: () => {} });
+		const service = createCodexConfigurationSyncService({
+			getSessionSummary: (workspaceId, conversationSessionId) =>
+				sessions.find(
+					(session) => session.workspaceId === workspaceId && session.summary.taskId === conversationSessionId,
+				)?.summary ?? null,
+			listSessions: () => sessions,
+			onUpdated: () => {},
+		});
 		test.onTestFinished(() => service.close());
 		let nativeId = "";
 		const summaryFor = (binding: typeof first, transcriptPath: string) =>
