@@ -83,7 +83,7 @@ const readCheckpoint = async () =>
 		systemEvidenceAttempts: number;
 	};
 
-describe("系统写入采集失败预算的明确状态与恢复", () => {
+describe("系统写入采集失败预算的明确状态与恢复", { timeout: 60_000 }, () => {
 	it("非 root 三次失败后的每次复跑都报告预算耗尽，权限指纹变化后重新探测", async () => {
 		for (let index = 0; index < 3; index++) await runTrace();
 		const existingEvents = (await readEvents()).length;

@@ -118,8 +118,9 @@ export function NonModalFloatingFormWindow({
 	const lastHandledCollapseSequence = useRef(session?.collapseSequence ?? 0);
 	const lastReportedRevealSequence = useRef<number | null>(null);
 	useLayoutEffect(() => {
-		if (lastHandledCollapseSequence.current === session?.collapseSequence) return;
-		lastHandledCollapseSequence.current = session?.collapseSequence ?? 0;
+		const collapseSequence = session?.collapseSequence;
+		if (collapseSequence === undefined || lastHandledCollapseSequence.current === collapseSequence) return;
+		lastHandledCollapseSequence.current = collapseSequence;
 		setCollapsed(true);
 	}, [session?.collapseSequence]);
 	useEffect(() => {

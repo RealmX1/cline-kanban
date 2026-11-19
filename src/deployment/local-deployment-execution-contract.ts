@@ -164,6 +164,7 @@ export const localDeploymentCommandOriginalSchema = z.object({
 	processWasStarted: z.boolean(),
 	processId: z.number().int().positive().nullable(),
 	exitCode: z.number().int().nullable(),
+	signal: z.string().nullable().optional(),
 	startedAtEpochMs: z.number().nonnegative(),
 	finishedAtEpochMs: z.number().nonnegative(),
 	attemptIdentity: z

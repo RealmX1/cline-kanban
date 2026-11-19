@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 const REPORT_FILENAME = "source-validation-evidence-reuse-report.json";
 const MAXIMUM_METADATA_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_EVIDENCE_BYTES = 256 * 1024 * 1024;
-const MAXIMUM_DISCOVERY_DIRECTORIES = 8_000;
+const MAXIMUM_DISCOVERY_DIRECTORIES = 16_000;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const sourceValidationPreparerContents = await readFile(new URL(import.meta.url));
@@ -1520,7 +1520,12 @@ async function observeSourceValidationRecoveryEvidence(values, sourceCheckoutPat
 				})),
 		),
 	};
-	process.stdout.write(`${JSON.stringify({ evidenceSha256: sha256(JSON.stringify(semanticObservation)) })}\n`);
+	process.stdout.write(
+		`${JSON.stringify({
+			evidenceSha256: sha256(JSON.stringify(semanticObservation)),
+			sourceValidationDiscoveryCompleted: Boolean(candidateSourceObservation.snapshot),
+		})}\n`,
+	);
 }
 
 async function main() {

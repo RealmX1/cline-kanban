@@ -33,7 +33,10 @@ import {
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
 import { readLocalDeploymentTargetStageRecoveryBudget } from "./local-deployment-target-stage-recovery-budget";
 import { registerLocalRedeploymentRebuildableArtifact } from "./local-redeployment-failed-attempt-artifact-cleanup";
-import { observeLocalRedeploymentBlockingFailureRecovery } from "./local-redeployment-failure-recovery-evidence";
+import {
+	observeInterruptedLocalRedeploymentBackup,
+	observeLocalRedeploymentBlockingFailureRecovery,
+} from "./local-redeployment-failure-recovery-evidence";
 import {
 	clearLocalRedeploymentFilesystemEvidenceRequests,
 	observeLocalRedeploymentFilesystemEvidence,
@@ -45,6 +48,7 @@ import {
 	assertLocalRedeploymentOwnerStillEligible,
 	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH,
 	LocalRedeploymentIdentityMismatch,
 	localRedeploymentRuntimeBaselineSchema,
 	localRedeploymentSha256,
@@ -265,10 +269,7 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 				node: request.deploymentNodeBinaryPath,
 			});
 		}
-		const sourceValidation = join(
-			candidate,
-			".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
-		);
+		const sourceValidation = join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH);
 		const plan = join(directory, "frozen-source-validation-plan.json");
 		await writeLocalRedeploymentJson(plan, {
 			schemaVersion: 1,
@@ -731,7 +732,13 @@ export async function executeStandardLocalRedeploymentStage(
 				attemptNumber,
 				path: join(directory, "preserved-previous-distribution"),
 			});
-		await backupLocalRedeploymentRuntimeState(request, directory);
+		const backupBudget = await readLocalDeploymentTargetStageRecoveryBudget(request, stage);
+		const interruptedBackup = await observeInterruptedLocalRedeploymentBackup(frozen, backupBudget?.blockingFailure);
+		try {
+			await backupLocalRedeploymentRuntimeState(request, directory, interruptedBackup?.directory);
+		} finally {
+			if (process.connected) process.send?.("runtime_state_backup_finished", () => undefined);
+		}
 		if ((await observeLocalRedeploymentRuntimeBaseline(frozen)).state === "verified_online")
 			await writeLocalRedeploymentJson(
 				join(directory, "runtime-config-before.json"),
@@ -1216,10 +1223,7 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			const response = await executeLocalRedeploymentFile(
 				frozen.request.deploymentNodeBinaryPath,
 				[
-					join(
-						candidate,
-						".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
-					),
+					join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH),
 					"--source-checkout-path",
 					candidate,
 					"--candidate-source-commit",

@@ -3,6 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { initializeLocalDeploymentExecution } from "../../../src/deployment/local-deployment-execution";
 import { LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER } from "../../../src/deployment/local-deployment-execution-contract";
+import {
+	recordLocalDeploymentTargetStageFailure,
+	reserveLocalDeploymentTargetStageAttempt,
+} from "../../../src/deployment/local-deployment-target-stage-recovery-budget";
 import { localRedeploymentSha256 } from "../../../src/deployment/local-redeployment-preparation";
 import {
 	executeStandardLocalRedeploymentStage,
@@ -136,10 +140,81 @@ async function createStandardStageFixture(
 			},
 		}),
 	);
-	return { directory, current, reportPath, handoverInvocationsPath };
+	return { directory, current, reportPath, handoverInvocationsPath, request };
 }
 
 describe("标准部署当前代际与恢复语义", () => {
+	it("备份恢复仅接受同一部署阶段的原生退出原件，日志时间变化不刷新预算", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const stage = "state_preservation";
+		const commandOutputDirectory = join(directory, "stage-command-originals", stage, "attempt-1");
+		await mkdir(commandOutputDirectory, { recursive: true });
+		const attempt = { binding: request, stage, executionDirectory: directory, attemptNumber: 1 } as const;
+		await reserveLocalDeploymentTargetStageAttempt({
+			...attempt,
+			recoveryEvidenceReady: false,
+			recoveryEvidenceSha256: null,
+		});
+		await recordLocalDeploymentTargetStageFailure({
+			...attempt,
+			failure: {
+				classification: "unclassified_failure",
+				logicalResource: stage,
+				recoveryCondition: "等待中断原件",
+				originalErrorReference: commandOutputDirectory,
+			},
+		});
+		const executionPath = join(directory, "local-deployment-execution.json");
+		const execution = JSON.parse(await readFile(executionPath, "utf8"));
+		const cwd = join(directory, "candidate-source-checkout");
+		execution.manifest.sourceCheckoutPath = cwd;
+		const observation = {
+			stage,
+			observedAtEpochMs: 1,
+			attemptNumber: 1,
+			recoveryEvidenceSha256: "a".repeat(64),
+			exitCode: null,
+			commandOutputDirectory,
+			detail: "隔离原件",
+		};
+		execution.observations = [
+			{ ...observation, sequence: 1, kind: "command_execution_intent_persisted" },
+			{ ...observation, sequence: 2, kind: "command_failed" },
+		];
+		await writeFile(executionPath, JSON.stringify(execution));
+		const originalPath = join(commandOutputDirectory, "command-result.json");
+		const original = {
+			command: [
+				request.deploymentNodeBinaryPath,
+				join(directory, "frozen-local-redeployment-executor.mjs"),
+				"redeployment-stage",
+				"--execution-directory",
+				directory,
+				"--stage",
+				stage,
+			],
+			cwd,
+			processId: 4004,
+			processWasStarted: true,
+			signal: "SIGTERM",
+			exitCode: null,
+			startedAtEpochMs: 1,
+			finishedAtEpochMs: 2,
+			attemptIdentity: { executionId: request.executionId, stage, attemptNumber: 1, commandOutputDirectory },
+		};
+		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, stage);
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		await writeFile(
+			originalPath,
+			JSON.stringify({ ...original, attemptIdentity: { ...original.attemptIdentity, attemptNumber: 2 } }),
+		);
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		await writeFile(originalPath, JSON.stringify(original));
+		const recovered = await observe();
+		expect(recovered.recoveryEvidenceReady).toBe(true);
+		await writeFile(originalPath, JSON.stringify({ ...original, finishedAtEpochMs: 3 }));
+		expect(await observe()).toEqual(recovered);
+	});
 	it("构建期间 P1 被旧产物 P2 替代后，连续性核验 P2 并交接至本候选 P3", async () => {
 		const fixture = await createStandardStageFixture();
 		await executeStandardLocalRedeploymentStage(fixture.directory, "runtime_restart");

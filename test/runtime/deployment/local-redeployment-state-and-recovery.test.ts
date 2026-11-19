@@ -68,17 +68,14 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 				(entry: { source: string }) => entry.source === source,
 			).destination;
 			const nextDirectory = join(runtimeHomeDirectoryPath, "persistent-executions", "next-redeployment-execution");
-			await filesystem.cp(
-				join(directory, "runtime-backup-checkpoints"),
-				join(nextDirectory, "runtime-backup-checkpoints"),
-				{ recursive: true },
-			);
+			await mkdir(nextDirectory);
 			if (change === "source_changed") await writeFile(source, "新配置");
 			if (change === "preserved_copy_corrupted") await writeFile(preserved, "损坏副本");
 			vi.mocked(filesystem.cp).mockClear();
 			await backupLocalRedeploymentRuntimeState(
 				{ ...request, executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14", candidateSourceCommit: "b".repeat(40) },
 				nextDirectory,
+				directory,
 			);
 			const receipt = JSON.parse(await readFile(join(nextDirectory, "runtime-state-backup-receipt.json"), "utf8"));
 			const accepted = receipt.currentEntryBackups.find((entry: { source: string }) => entry.source === source);
@@ -87,6 +84,11 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 				change !== "unchanged",
 			);
 			expect(accepted.destination === preserved).toBe(change === "unchanged");
+			if (change === "unchanged") {
+				vi.mocked(filesystem.cp).mockClear();
+				await backupLocalRedeploymentRuntimeState(request, nextDirectory);
+				expect(vi.mocked(filesystem.cp).mock.calls.some(([copiedSource]) => copiedSource === source)).toBe(false);
+			}
 		},
 	);
 	it.each(["direct_child", "nested_child"] as const)(
