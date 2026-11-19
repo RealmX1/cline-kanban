@@ -32,7 +32,7 @@
 
 绑定候选目录必须保留，不能直接作为移动式 promote 或收尾清理的来源。把候选复制到独立暂存副本后再发布；原候选用于核对与冻结执行器，暂存副本才可删除。
 
-候选构建仍按现有 skill 完成；`candidate_preparation` 中通过 skill 随包的 `prepare-source-validation-with-evidence-reuse.mjs` 自动核验源码证据并仅补跑冻结计划的缺项，已证明的最终类型检查可复用。它支持同步标准记录、备用路径完整树证据包和 RVF 原生验证；同步没有重跑不使原始验证失效。报告与必要原件路径并入 `recoveryEvidenceFilePaths`，复用已有所属执行的监督和恢复。ABI 与候选产物检查继续执行，源码验证报告不替代它们。`state_preservation` 刷新备份与逐会话门禁；`runtime_validation` 必须实际检查通知档案、agent 检测、工作树与任务映射，不能只查首页。
+标准入口在私有候选中核验已冻结的上游原件引用，只补跑五项计划中的缺项。支持同步标准记录、备用完整树证据包和 RVF 原生验证。ABI 与候选产物分别核验。会话预检在昂贵操作前记录，状态保全等待会话门禁，并逐项保全和补缺。`runtime_validation` 检查通知档案、agent 检测、工作树与任务映射。运行验收持久通过后，登记恢复复用原 executionId。详见[标准入口与离线恢复](local-redeployment-standard-entry-and-offline-recovery.md)。
 
 ## 标准调用
 

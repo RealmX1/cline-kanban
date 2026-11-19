@@ -38,6 +38,7 @@ export const localRedeploymentRequestSchema = z.strictObject({
 	originatingTaskWorktreePath: absolutePath,
 	sourceCheckoutPath: absolutePath,
 	candidateSourceCommit: z.string().regex(/^[a-f0-9]{40}$/u),
+	sourceValidationEvidenceFilePaths: z.array(absolutePath.refine((path) => !path.includes("\0"))).optional(),
 	deploymentNodeBinaryPath: absolutePath,
 	distributionDirectoryPath: absolutePath,
 	runtimeIdentity: z.strictObject({
@@ -62,12 +63,14 @@ export const localRedeploymentRequestSchema = z.strictObject({
 	authorization: z.strictObject({ sourceReference: z.string().min(1), userRequestQuote: z.string().min(1) }),
 });
 export type LocalRedeploymentRequest = z.infer<typeof localRedeploymentRequestSchema>;
-export const LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH =
-	".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs";
+export const LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME =
+	"local-redeployment-source-validation-preparer.mjs";
+export const LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME = "session-continuity-preflight.json";
 const frozenRequestSchema = z.strictObject({
 	request: localRedeploymentRequestSchema,
 	requestSha256: z.string().length(64),
 	executorSha256: z.string().length(64),
+	sourceValidationPreparerSha256: z.string().length(64).optional(),
 	npmCliEntrypointPath: absolutePath,
 	serviceExecutableSha256: z.string().length(64),
 	owner: taskCommandExecutionAdoptExistingSupervisorRequestSchema.shape.expectedOwner.nullable(),
@@ -166,10 +169,14 @@ export async function prepareLocalRedeployment(directory: string, raw: unknown, 
 	await mkdir(directory, { recursive: true });
 	return lockedFileSystem.withLock({ path: join(directory, "redeployment-request-preparation") }, async () => {
 		const source = await readFile(executorPath);
+		const sourceValidationPreparer = await readFile(
+			join(dirname(executorPath), LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
+		);
 		const frozen: FrozenLocalRedeploymentRequest = {
 			request,
 			requestSha256: localRedeploymentSha256(JSON.stringify(request)),
 			executorSha256: localRedeploymentSha256(source),
+			sourceValidationPreparerSha256: localRedeploymentSha256(sourceValidationPreparer),
 			npmCliEntrypointPath: await realpath(join(dirname(request.deploymentNodeBinaryPath), "npm")),
 			serviceExecutableSha256: localRedeploymentSha256(await readFile(request.serviceLaunch.command[0])),
 			owner: await readCurrentBoundLocalRedeploymentOwner(request),
@@ -180,9 +187,19 @@ export async function prepareLocalRedeployment(directory: string, raw: unknown, 
 		const entrypoint = join(directory, "frozen-local-redeployment-executor.mjs");
 		if (existsSync(entrypoint) && localRedeploymentSha256(await readFile(entrypoint)) !== frozen.executorSha256)
 			throw new LocalRedeploymentIdentityMismatch("冻结工具原件发生变化，不能覆盖");
+		const frozenPreparerPath = join(directory, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME);
+		if (
+			existsSync(frozenPreparerPath) &&
+			localRedeploymentSha256(await readFile(frozenPreparerPath)) !== frozen.sourceValidationPreparerSha256
+		)
+			throw new LocalRedeploymentIdentityMismatch("冻结源码验证工具原件发生变化，不能覆盖");
 		await lockedFileSystem.writeTextFileAtomic(entrypoint, source.toString("utf8"), {
 			durable: true,
 			fileMode: 0o700,
+		});
+		await lockedFileSystem.writeTextFileAtomic(frozenPreparerPath, sourceValidationPreparer.toString("utf8"), {
+			durable: true,
+			fileMode: 0o600,
 		});
 		// 仅复制启动所需的原生模块闭包，避免随后 npm ci 或共享依赖漂移影响冻结工具。
 		for (const dependency of ["better-sqlite3", "bindings", "file-uri-to-path"]) {
@@ -211,10 +228,35 @@ export async function readFrozenLocalRedeploymentRequest(directory: string): Pro
 	if (
 		localRedeploymentSha256(JSON.stringify(frozen.request)) !== frozen.requestSha256 ||
 		localRedeploymentSha256(await readFile(join(directory, "frozen-local-redeployment-executor.mjs"))) !==
-			frozen.executorSha256
+			frozen.executorSha256 ||
+		(frozen.sourceValidationPreparerSha256 !== undefined &&
+			localRedeploymentSha256(
+				await readFile(join(directory, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME)),
+			) !== frozen.sourceValidationPreparerSha256)
 	)
 		throw new LocalRedeploymentIdentityMismatch("冻结请求或执行器摘要不匹配");
 	return frozen;
+}
+
+export function createBoundLocalRedeploymentSourceValidationArguments(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+): string[] {
+	return [
+		join(directory, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
+		"--source-checkout-path",
+		join(directory, "candidate-source-checkout"),
+		"--candidate-source-commit",
+		frozen.request.candidateSourceCommit,
+		"--runtime-home-directory",
+		frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
+		"--output-directory",
+		join(directory, "source-validation"),
+		...(frozen.request.sourceValidationEvidenceFilePaths ?? []).flatMap((path) => [
+			"--source-validation-evidence-file-path",
+			path,
+		]),
+	];
 }
 
 export function createLocalRedeploymentOwnedCommandSpecification(

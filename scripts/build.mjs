@@ -179,6 +179,10 @@ try {
 		"src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 		join(stagingDirectoryPath, "inter-work-unit-relation-ledger-database-worker.mjs"),
 	);
+	await copyFile(
+		".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
+		join(stagingDirectoryPath, "local-redeployment-source-validation-preparer.mjs"),
+	);
 	// dereference：task worktree 的 `web-ui/dist` 是软链接，必须复制它指向的真实文件，不能把软链接本身放进产物。
 	await cp(builtWebUiDirectoryPath, join(stagingDirectoryPath, "web-ui"), { recursive: true, dereference: true });
 	await cp("docs/agent-guidance", join(stagingDirectoryPath, "agent-guidance"), { recursive: true });

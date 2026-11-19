@@ -463,7 +463,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			}
 		}
 	}
-	for (const name of await readdir(request.runtimeIdentity.runtimeHomeDirectoryPath)) {
+	async function preserveRuntimeStateEntry(name: string): Promise<void> {
 		const source = join(request.runtimeIdentity.runtimeHomeDirectoryPath, name);
 		if (
 			preservedInPlace.has(name) ||
@@ -472,7 +472,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			resolve(directory).startsWith(`${resolve(source)}/`)
 		) {
 			skipped.push(source);
-			continue;
+			return;
 		}
 		const sourceMetadataBeforeCapture = await lstat(source);
 		const receiptRelativePath = join("runtime-backup-checkpoints", `${localRedeploymentSha256(name)}.json`);
@@ -487,7 +487,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			preservedFingerprint?: string;
 		} | null;
 		const sourceFingerprint = await fingerprintRuntimeStateEntry(source, true);
-		if (sourceFingerprint === null) continue;
+		if (sourceFingerprint === null) return;
 		if (previous?.source === source && previous.sourceFingerprint === sourceFingerprint && previous.destination) {
 			const previousDestination = previous.destination;
 			const preservedParent =
@@ -520,7 +520,7 @@ export async function backupLocalRedeploymentRuntimeState(
 					sourceFingerprint,
 					preservedFingerprint,
 				});
-				continue;
+				return;
 			}
 		}
 		const initialDestination = join(backupRoot, name);
@@ -569,6 +569,42 @@ export async function backupLocalRedeploymentRuntimeState(
 		await writeLocalRedeploymentJson(receiptPath, receipt);
 		currentEntryBackups.push(receipt);
 	}
+	const progressPath = join(directory, "runtime-state-backup-progress.json");
+	const previousProgress = (await readLocalRedeploymentJson(progressPath)) as {
+		activeEntryName?: string | null;
+		pendingEntries?: Array<{ entryName: string; reason: string }>;
+	} | null;
+	const pendingEntries = new Map(
+		(previousProgress?.pendingEntries ?? []).map(({ entryName, reason }) => [entryName, reason]),
+	);
+	if (previousProgress?.activeEntryName)
+		pendingEntries.set(previousProgress.activeEntryName, "原备份进程在本项未完成时退出");
+	const runtimeEntryNames = (await readdir(request.runtimeIdentity.runtimeHomeDirectoryPath)).sort();
+	for (const pendingName of pendingEntries.keys()) {
+		if (!runtimeEntryNames.includes(pendingName)) pendingEntries.delete(pendingName);
+	}
+	runtimeEntryNames.sort((left, right) => Number(pendingEntries.has(left)) - Number(pendingEntries.has(right)));
+	const recordBackupProgress = (activeEntryName: string | null) =>
+		writeLocalRedeploymentJson(progressPath, {
+			activeEntryName,
+			pendingEntries: [...pendingEntries].map(([entryName, reason]) => ({ entryName, reason })),
+			recoveryCondition: pendingEntries.size ? "待保全项恢复可读或可复制后，重新核验并接续原检查点" : null,
+		});
+	const failures: unknown[] = [];
+	for (const name of runtimeEntryNames) {
+		assertLocalRedeploymentNotRevoked(directory);
+		await recordBackupProgress(name);
+		try {
+			await preserveRuntimeStateEntry(name);
+			pendingEntries.delete(name);
+		} catch (error) {
+			assertLocalRedeploymentNotRevoked(directory);
+			pendingEntries.set(name, String(error));
+			failures.push(error);
+			await recordBackupProgress(null);
+		}
+	}
+	await recordBackupProgress(null);
 	const previousBuild = join(directory, "preserved-previous-distribution");
 	if (!(await readLocalRedeploymentJson(join(directory, "previous-distribution-backup.json")))) {
 		await cp(request.distributionDirectoryPath, previousBuild, {
@@ -578,6 +614,7 @@ export async function backupLocalRedeploymentRuntimeState(
 		});
 		await writeLocalRedeploymentJson(join(directory, "previous-distribution-backup.json"), { previousBuild });
 	}
+	if (failures.length) throw failures[0];
 	await writeLocalRedeploymentJson(join(directory, "runtime-state-backup-receipt.json"), {
 		backupRoot,
 		captureConsistency: "individually_verified_files_and_online_sqlite_snapshots",

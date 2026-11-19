@@ -72,6 +72,7 @@ function createValidationFixture() {
 	const runtimeHomeDirectoryPath = join(fixture.fixtureRootDirectoryPath, "isolated-runtime-home");
 	const output = join(fixture.fixtureRootDirectoryPath, "deployment-source-validation");
 	const planPath = join(fixture.fixtureRootDirectoryPath, "frozen-validation-plan.json");
+	const sourceValidationEvidenceFilePaths = new Set<string>();
 	const executedSourceValidationCounterPath = join(fixture.fixtureRootDirectoryPath, "executed-check-counter.txt");
 	const command = {
 		name: "仅缺失时执行的源码检查",
@@ -130,6 +131,7 @@ function createValidationFixture() {
 			plan?: boolean;
 			commit?: string;
 			environment?: Record<string, string>;
+			evidenceFilePaths?: readonly string[];
 		} = {},
 	) {
 		const arguments_ = [
@@ -145,6 +147,10 @@ function createValidationFixture() {
 			...(options.plan === false ? [] : ["--validation-plan", planPath]),
 			...(options.inspectOnly ? ["--inspect-only"] : []),
 			...(options.observeRecovery ? ["--observe-recovery-evidence"] : []),
+			...[...(options.evidenceFilePaths ?? sourceValidationEvidenceFilePaths)].flatMap((path) => [
+				"--source-validation-evidence-file-path",
+				path,
+			]),
 		];
 		const result = spawnSync(process.execPath, arguments_, {
 			env: { ...childProcessEnvironment(), ...options.environment },
@@ -160,6 +166,7 @@ function createValidationFixture() {
 				evidenceSha256?: string;
 				sourceValidationDiscoveryCompleted?: boolean;
 				reusedSourceValidationCheckCount: number;
+				executedMissingSourceValidationCheckCount: number;
 			},
 			report: () =>
 				JSON.parse(
@@ -170,6 +177,7 @@ function createValidationFixture() {
 	function addStandardRecord(
 		options: {
 			failed?: boolean;
+			unstableSourceDuringCommand?: boolean;
 			interruptedExitCode?: 130 | -2;
 			nodeVersion?: string;
 			wrongRepository?: boolean;
@@ -179,8 +187,10 @@ function createValidationFixture() {
 			operationName?: string;
 			startedAt?: string;
 			concludedAt?: string;
+			command?: typeof command;
 		} = {},
 	) {
+		const validationCommand = options.command ?? command;
 		const operationDirectory = join(
 			gitCommonDirectory,
 			"base-branch-sync/durable-operations",
@@ -202,7 +212,12 @@ function createValidationFixture() {
 		writeFileSync(stderrPath, "");
 		const recordPath = join(recordDirectory, "current-tree-validation.json");
 		const commandFingerprint = digest(
-			`{"argv": [${command.argv.map((argument) => JSON.stringify(argument).replace(/[\u007f-\uffff]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)).join(", ")}], "executable": ${JSON.stringify(process.execPath)}, "executableSha256": "${nodeBinarySha256}", "scriptSha256": {}}`,
+			pythonJson({
+				argv: validationCommand.argv,
+				executable: process.execPath,
+				executableSha256: nodeBinarySha256,
+				scriptSha256: {},
+			}),
 		);
 		const identity = {
 			taskId: "isolated-producer-task",
@@ -272,8 +287,8 @@ function createValidationFixture() {
 					),
 			commandEnvironmentFingerprintSha256: commandFingerprint,
 			context: "task-tree",
-			argv: command.argv,
-			coverage: command.coverage,
+			argv: validationCommand.argv,
+			coverage: validationCommand.coverage,
 			status: options.interruptedExitCode !== undefined ? "rejected" : options.failed ? "failed" : "passed",
 			exitCode: options.interruptedExitCode ?? (options.failed ? 1 : 0),
 			startedAtUtc: options.startedAt,
@@ -284,7 +299,8 @@ function createValidationFixture() {
 			stderrSha256: digest(""),
 		});
 		writeJson(join(recordDirectory, "command.json"), {
-			argv: command.argv,
+			argv: validationCommand.argv,
+			...(options.unstableSourceDuringCommand ? { completionObservation: { contentStable: false } } : {}),
 			startedAtUtc: options.startedAt,
 			finishedAtUtc: options.concludedAt,
 		});
@@ -297,13 +313,14 @@ function createValidationFixture() {
 			environmentPreflight: { ...preflight, environmentFingerprintSha256: preflightFingerprint },
 			validationRecords: [...previous, { path: recordPath, sha256: digest(readFileSync(recordPath)) }],
 		});
-		return { recordPath, stdoutPath };
+		sourceValidationEvidenceFilePaths.add(statePath);
+		return { recordPath, stdoutPath, statePath };
 	}
 	function addLegacyBundle(
 		options: {
 			wrongContentManifest?: boolean;
 			interruptedExitCode?: 130 | -2;
-			interruptedPrecommitExitCode?: 130 | -2;
+			precommitExitCode?: 0 | 130 | -2;
 		} = {},
 	) {
 		const bundleDirectory = join(
@@ -344,21 +361,21 @@ function createValidationFixture() {
 			stderrSha256: digest(""),
 		});
 		const precommitLogPath = join(originals, "precommit.stdout");
-		if (options.interruptedPrecommitExitCode !== undefined)
-			writeFileSync(precommitLogPath, "vitest run --project precommit-safe\nSIGINT\n");
+		if (options.precommitExitCode !== undefined)
+			writeFileSync(precommitLogPath, "vitest run --project precommit-safe\n");
 		writeJson(join(bundleDirectory, "final-complete-tree-verification-evidence.json"), {
 			taskId: "isolated-task",
 			taskCommit: commit,
 			completeTree: tree,
 			status: "passed",
-			...(options.interruptedPrecommitExitCode !== undefined
+			...(options.precommitExitCode !== undefined
 				? {
 						precommit: {
 							taskId: "isolated-task",
 							commit,
 							completeTree: tree,
-							status: "interrupted",
-							exitCode: options.interruptedPrecommitExitCode,
+							status: options.precommitExitCode === 0 ? "passed" : "interrupted",
+							exitCode: options.precommitExitCode,
 							rawLog: precommitLogPath,
 							rawLogSha256: digest(readFileSync(precommitLogPath)),
 						},
@@ -373,13 +390,15 @@ function createValidationFixture() {
 				},
 			},
 		});
-		writeJson(join(bundleDirectory, "commit-and-base-branch-sync-result.json"), {
+		const handbackReceiptPath = join(bundleDirectory, "commit-and-base-branch-sync-result.json");
+		writeJson(handbackReceiptPath, {
 			status: "LOCAL_COMMIT_AND_BASE_HANDBACK_COMPLETE",
 			taskId: "isolated-task",
 			taskHead: commit,
 			completeTree: tree,
 			baseWorktree: sourceCheckoutPath,
 		});
+		sourceValidationEvidenceFilePaths.add(handbackReceiptPath);
 		const files = [runnerPath, stdoutPath, stderrPath, recordPath].map((sourcePath) => {
 			const durableCopyPath = join(
 				bundleDirectory,
@@ -418,10 +437,39 @@ function createValidationFixture() {
 		pythonRuntimeIdentity,
 		addStandardRecord,
 		addLegacyBundle,
+		sourceValidationEvidenceFilePaths,
 	};
 }
 
 describe("local deploy 自动复用源码验证证据", () => {
+	it("五项完整时全量复用，未随部署冻结的历史记录不会被扫描", () => {
+		const fixture = createValidationFixture();
+		const commands = ["typecheck", "web:typecheck", "test", "web:test", "lint"].map((name) => ({
+			...fixture.command,
+			name,
+			argv: [...fixture.command.argv, name],
+		}));
+		writeJson(fixture.planPath, { schemaVersion: 1, commands });
+		for (const command of commands) fixture.addStandardRecord({ command, operationName: command.name });
+		expect(fixture.run().summary).toMatchObject({
+			status: "passed",
+			reusedSourceValidationCheckCount: 5,
+			executedMissingSourceValidationCheckCount: 0,
+		});
+		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(false);
+
+		const unreadableEvidencePath = join(fixture.fixture.fixtureRootDirectoryPath, "operation-state.json");
+		writeFileSync(unreadableEvidencePath, "{");
+		const withoutReferences = fixture.run({ evidenceFilePaths: [unreadableEvidencePath] });
+		expect(withoutReferences.summary).toMatchObject({
+			status: "passed",
+			reusedSourceValidationCheckCount: 0,
+			executedMissingSourceValidationCheckCount: 5,
+		});
+		expect(withoutReferences.report().evidenceDiscoveryIssues).toHaveLength(1);
+		expect(withoutReferences.report().evidenceVerificationStatistics).toMatchObject({ discoveryDirectoriesRead: 0 });
+	});
+
 	it("标准记录同候选、命令与环境时自动复用，日志不会输出给 Agent，也不会启动测试", () => {
 		const fixture = createValidationFixture();
 		fixture.addStandardRecord();
@@ -442,6 +490,24 @@ describe("local deploy 自动复用源码验证证据", () => {
 		expect(result.status).toBe(0);
 		expect(result.summary.reusedSourceValidationCheckCount).toBe(2);
 		expect(result.report().evidenceDiscoveryIssues).toEqual([]);
+	});
+
+	it("绑定同一 npm 入口的显式 Node 调用复用上游同命令，通过 precommit 不覆盖全套测试", () => {
+		const fixture = createValidationFixture();
+		fixture.addLegacyBundle({ precommitExitCode: 0 });
+		const npmEntrypoint = realpathSync(join(dirname(process.execPath), "npm"));
+		writeJson(fixture.planPath, {
+			schemaVersion: 1,
+			commands: [
+				{ name: "Web 类型检查", argv: [process.execPath, npmEntrypoint, "run", "web:typecheck"] },
+				{ name: "运行时完整测试", argv: [process.execPath, npmEntrypoint, "run", "test"] },
+			],
+		});
+		const result = fixture.run({ inspectOnly: true });
+		expect(result.report().sourceValidationCheckResults.map((check) => check.decision)).toEqual([
+			"reused_source_evidence",
+			"missing_check",
+		]);
 	});
 
 	it("只执行缺失项，独立调用接续复用完成结果，不重复执行", () => {
@@ -551,9 +617,9 @@ describe("local deploy 自动复用源码验证证据", () => {
 		]);
 	});
 
-	it.each([130, -2] as const)("备用包的 precommit 退出码 %s 也不能作为质量失败", (interruptedPrecommitExitCode) => {
+	it.each([130, -2] as const)("备用包的 precommit 退出码 %s 也不能作为质量失败", (precommitExitCode) => {
 		const fixture = createValidationFixture();
-		fixture.addLegacyBundle({ interruptedPrecommitExitCode });
+		fixture.addLegacyBundle({ precommitExitCode });
 		writeJson(fixture.planPath, {
 			schemaVersion: 1,
 			commands: [{ name: "提交前检查", argv: ["npm", "run", "test:precommit"] }],
@@ -689,7 +755,11 @@ describe("local deploy 自动复用源码验证证据", () => {
 		expect(fixture.repository.runGit(["status", "--porcelain=v1"]).stdout).toBe("");
 	});
 
-	it("base-branch-sync 没有新测试记录时，直接采用同树 RVF 原生验证命令", () => {
+	it.for([
+		{ wrapper: "direct", reuse: true },
+		{ wrapper: "bound-npm", reuse: true },
+		{ wrapper: "different-path", reuse: false },
+	])("采用同树 RVF 原生验证命令时核对绑定的 npm 与 PATH：$wrapper", ({ wrapper, reuse }) => {
 		const fixture = createValidationFixture();
 		const runDirectory = join(
 			fixture.fixture.isolatedHomeDirectoryPath,
@@ -700,8 +770,20 @@ describe("local deploy 自动复用源码验证证据", () => {
 		const executionPlanPath = join(runDirectory, "execution-plan.json");
 		const nativeEnvironment = fixture.childProcessEnvironment();
 		const nativePython = fixture.pythonRuntimeIdentity(nativeEnvironment);
+		const npmCli = realpathSync(join(dirname(process.execPath), "npm"));
+		const plannedArgv = wrapper === "direct" ? fixture.command.argv : [process.execPath, npmCli, "run", "typecheck"];
+		const matchingPath = fixture.currentEnvironmentIdentity().environment.PATH;
+		const historicalArgv =
+			wrapper === "direct"
+				? plannedArgv
+				: [
+						"/usr/bin/env",
+						`PATH=${wrapper === "bound-npm" ? matchingPath : `/unbound-test-tools:${matchingPath}`}`,
+						...plannedArgv,
+					];
+		writeJson(fixture.planPath, { schemaVersion: 1, commands: [{ ...fixture.command, argv: plannedArgv }] });
 		writeJson(executionPlanPath, {
-			validation_commands: [fixture.command.argv],
+			validation_commands: [historicalArgv],
 			machine_context: { task_id: "rvf-producer-task", native_node: process.execPath },
 		});
 		writeJson(join(runDirectory, "run.json"), {
@@ -716,7 +798,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 			returncode: 0,
 			candidate_commit: fixture.commit,
 			tested_tree: fixture.tree,
-			commands: [fixture.command.argv],
+			commands: [historicalArgv],
 			completed_commands: 1,
 			attempt_directory: attemptDirectory,
 			runtime_environment: {
@@ -727,7 +809,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 			},
 		});
 		writeJson(join(commandDirectory, "execution.json"), {
-			argv: fixture.command.argv,
+			argv: historicalArgv,
 			cwd: fixture.sourceCheckoutPath,
 			source_tree_before: fixture.tree,
 			source_tree_after: fixture.tree,
@@ -737,7 +819,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 		writeFileSync(join(commandDirectory, "stdout.txt"), "RVF 原始验证通过\n");
 		writeFileSync(join(commandDirectory, "stderr.txt"), "");
 		writeJson(join(commandDirectory, "command-supervision.json"), {
-			argv: fixture.command.argv,
+			argv: historicalArgv,
 			status: "completed",
 			owned_process_exit_status: "exited",
 			command_execution_started: true,
@@ -745,6 +827,13 @@ describe("local deploy 自动复用源码验证证据", () => {
 			stdout_sha256: digest(readFileSync(join(commandDirectory, "stdout.txt"))),
 			stderr_sha256: digest(""),
 		});
+		fixture.sourceValidationEvidenceFilePaths.add(join(runDirectory, "run.json"));
+		if (!reuse) {
+			expect(fixture.run({ inspectOnly: true }).report().sourceValidationCheckResults[0].decision).toBe(
+				"missing_check",
+			);
+			return;
+		}
 		const result = fixture.run();
 		expect(result.status).toBe(0);
 		expect(result.summary.reusedSourceValidationCheckCount).toBe(1);
@@ -756,6 +845,14 @@ describe("local deploy 自动复用源码验证证据", () => {
 		expect(fixture.run({ inspectOnly: true }).report().sourceValidationCheckResults[0].decision).toBe(
 			"missing_check",
 		);
+	});
+
+	it("上游命令非零退出但源码在验证期间发生变化时补跑固定候选", () => {
+		const fixture = createValidationFixture();
+		fixture.addStandardRecord({ failed: true, unstableSourceDuringCommand: true });
+		const result = fixture.run();
+		expect(result.status).toBe(0);
+		expect(existsSync(fixture.executedSourceValidationCounterPath)).toBe(true);
 	});
 
 	it("只读发现不执行历史 argv，没有验证计划也不会默认启动全量测试", () => {
@@ -1106,6 +1203,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 			stdout_sha256: digest(""),
 			stderr_sha256: digest(stderr),
 		});
+		fixture.sourceValidationEvidenceFilePaths.add(join(runDirectory, "validation.json"));
 		const result = fixture.run();
 		expect(result.status).toBe(environmentUnavailable ? 0 : 1);
 		expect(result.report().sourceValidationCheckResults[0].decision).toBe(

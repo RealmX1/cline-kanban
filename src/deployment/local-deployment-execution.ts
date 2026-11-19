@@ -23,11 +23,18 @@ import {
 import { analyzeLegacyLocalDeploymentExecution } from "./local-deployment-legacy-execution-analysis";
 import {
 	completeLocalDeploymentTargetStageAttempt,
+	type LocalDeploymentRecoveryBudgetStage,
+	type LocalDeploymentTargetStageBinding,
 	localDeploymentBlockingFailureSchema,
 	readLocalDeploymentTargetStageRecoveryBudget,
 	recordLocalDeploymentTargetStageFailure,
 	reserveLocalDeploymentTargetStageAttempt,
 } from "./local-deployment-target-stage-recovery-budget";
+import {
+	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME,
+	readFrozenLocalRedeploymentRequest,
+} from "./local-redeployment-preparation";
 
 export const LOCAL_DEPLOYMENT_EXECUTION_RECORD_FILENAME = "local-deployment-execution.json";
 const MAXIMUM_COMMAND_ATTEMPTS_PER_RECOVERY_EVIDENCE = 2;
@@ -239,11 +246,17 @@ function analysisFingerprint(
 export interface LocalDeploymentExecutionAnalysis {
 	executionDirectory: string;
 	executionId: string;
-	executionIdentityEvidenceKind: "bound_execution_manifest" | "deployment_registration_receipt" | "unknown";
+	executionIdentityEvidenceKind:
+		| "bound_redeployment_request"
+		| "bound_execution_manifest"
+		| "deployment_registration_receipt"
+		| "unknown";
 	candidateSourceCommit: string;
 	candidateDistributionSha256: string;
 	deploymentOutcome:
 		| "succeeded"
+		| "prepared"
+		| "candidate_preparing"
 		| "machine_evidence_pending"
 		| "quality_validation_failed"
 		| "failed"
@@ -255,7 +268,7 @@ export interface LocalDeploymentExecutionAnalysis {
 	analysisFingerprint: string;
 	retrospective: LocalDeploymentExecutionRecord["retrospective"];
 	recovery: {
-		unfinishedStage: LocalDeploymentStage | null;
+		unfinishedStage: LocalDeploymentRecoveryBudgetStage | null;
 		nextCheckAtEpochMs: number | null;
 		condition: string | null;
 	};
@@ -268,6 +281,25 @@ export interface LocalDeploymentExecutionAnalysis {
 		} | null;
 		verifiedCheckpointFilePaths: string[];
 		failedAttemptCleanup: unknown;
+		sessionContinuityPreflight?: {
+			requestSha256: string;
+			status: string;
+			blockingReasons: string[];
+			blockingSessions: unknown[];
+			checkedAtEpochMs: number;
+			nextCheckAtEpochMs: number | null;
+			recoveryCondition: string | null;
+		} | null;
+		sourceValidation?: {
+			evidenceReferenceCount: number;
+			status: string;
+			reusedSourceValidationCheckCount: number | null;
+			executedMissingSourceValidationCheckCount: number | null;
+			reusedPreviousExecutionCheckCount: number | null;
+			blockingReason: string | null;
+			reportPath: string | null;
+		};
+		runtimeStateBackupProgress?: unknown;
 	};
 	metrics: {
 		commandAttempts: number | null;
@@ -289,18 +321,19 @@ export function summarizeLocalDeploymentExecution(
 ): LocalDeploymentExecutionAnalysis {
 	const criticalStages = LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER.slice(0, 6);
 	const deploymentSucceeded = criticalStages.every((stage) => stageSucceeded(record, stage));
+	const hasAcceptedRuntimeValidation =
+		record.manifest.schemaVersion === 2 && stageSucceeded(record, "runtime_validation");
 	const unfinishedStage =
 		criticalStages.find((stage) => {
+			if (!stageSucceeded(record, stage)) return true;
+			if (hasAcceptedRuntimeValidation && stage !== "deployment_record") return false;
 			const latestVerified = record.observations
 				.filter((item) => item.stage === stage && item.kind === "effect_verified")
 				.at(-1);
 			const latestRejected = record.observations
 				.filter((item) => item.stage === stage && item.kind === "effect_verification_failed")
 				.at(-1);
-			return (
-				!stageSucceeded(record, stage) ||
-				(!!latestRejected && (!latestVerified || latestRejected.sequence > latestVerified.sequence))
-			);
+			return !!latestRejected && (!latestVerified || latestRejected.sequence > latestVerified.sequence);
 		}) ?? null;
 	const ancillaryFailures = record.manifest.stages
 		.filter(
@@ -425,11 +458,13 @@ export function summarizeLocalDeploymentExecution(
 
 async function readLocalDeploymentOperationalProgress(
 	directory: string,
-	record: LocalDeploymentExecutionRecord,
+	binding: LocalDeploymentTargetStageBinding,
+	stage: LocalDeploymentRecoveryBudgetStage | null,
+	frozen?: FrozenLocalRedeploymentRequest,
 ): Promise<NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>> {
+	const standardProgress = frozen ? await readFrozenLocalRedeploymentOperationalProgress(directory, frozen) : {};
 	try {
-		const stage = summarizeLocalDeploymentExecution(record).recovery.unfinishedStage;
-		const budget = stage ? await readLocalDeploymentTargetStageRecoveryBudget(record.manifest, stage) : null;
+		const budget = stage ? await readLocalDeploymentTargetStageRecoveryBudget(binding, stage) : null;
 		const verifiedCheckpointFilePaths: string[] = [];
 		for (const root of ["verification-checkpoints", "runtime-backup-checkpoints"]) {
 			for (const name of await readdir(join(directory, root)).catch((error: unknown) => {
@@ -439,6 +474,7 @@ async function readLocalDeploymentOperationalProgress(
 				if (name.endsWith(".json")) verifiedCheckpointFilePaths.push(join(directory, root, name));
 		}
 		return {
+			...standardProgress,
 			targetStageBudget: budget
 				? {
 						stage: budget.stage,
@@ -452,11 +488,128 @@ async function readLocalDeploymentOperationalProgress(
 		};
 	} catch (error) {
 		return {
+			...standardProgress,
 			targetStageBudget: null,
 			verifiedCheckpointFilePaths: [],
 			failedAttemptCleanup: { status: "unknown", reason: String(error) },
 		};
 	}
+}
+
+async function readFrozenLocalRedeploymentOperationalProgress(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+) {
+	const reportPath = join(directory, "source-validation", "source-validation-evidence-reuse-report.json");
+	const [continuity, report, backupProgress] = await Promise.allSettled([
+		readJsonIfPresent(join(directory, LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME)),
+		readJsonIfPresent(reportPath),
+		readJsonIfPresent(join(directory, "runtime-state-backup-progress.json")),
+	]);
+	const sessionContinuityPreflight =
+		continuity.status === "fulfilled"
+			? (continuity.value as NonNullable<
+					LocalDeploymentExecutionAnalysis["operationalProgress"]
+				>["sessionContinuityPreflight"])
+			: null;
+	const sourceReport =
+		report.status === "fulfilled"
+			? (report.value as {
+					candidateSourceCommit?: string;
+					status?: string;
+					reason?: string;
+					sourceValidationCheckResults?: Array<{ decision: string }>;
+				} | null)
+			: null;
+	const boundReport =
+		sourceReport?.candidateSourceCommit === frozen.request.candidateSourceCommit ? sourceReport : null;
+	const checkResults = Array.isArray(boundReport?.sourceValidationCheckResults)
+		? boundReport.sourceValidationCheckResults
+		: null;
+	return {
+		sessionContinuityPreflight:
+			sessionContinuityPreflight?.requestSha256 === frozen.requestSha256 ? sessionContinuityPreflight : null,
+		sourceValidation: {
+			evidenceReferenceCount: frozen.request.sourceValidationEvidenceFilePaths?.length ?? 0,
+			status: boundReport?.status ?? (report.status === "rejected" ? "unavailable" : "pending"),
+			reusedSourceValidationCheckCount:
+				checkResults?.filter((check) => check.decision === "reused_source_evidence").length ?? null,
+			executedMissingSourceValidationCheckCount:
+				checkResults?.filter((check) => check.decision === "executed_missing_check").length ?? null,
+			reusedPreviousExecutionCheckCount:
+				checkResults?.filter((check) => check.decision === "reused_previous_execution").length ?? null,
+			blockingReason: boundReport?.reason ?? null,
+			reportPath: boundReport ? reportPath : null,
+		},
+		runtimeStateBackupProgress: backupProgress.status === "fulfilled" ? backupProgress.value : null,
+	};
+}
+
+async function readPreparedLocalRedeploymentAnalysis(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+): Promise<LocalDeploymentExecutionAnalysis> {
+	const [operationalProgress, businessResult, revocation, bootstrap] = await Promise.all([
+		readLocalDeploymentOperationalProgress(directory, frozen.request, "candidate_bootstrap", frozen),
+		readJsonIfPresent(join(directory, "owned-command-business-result.json")) as Promise<{
+			disposition?: string;
+			error?: string;
+		} | null>,
+		readJsonIfPresent(join(directory, "redeployment-revocation.json")),
+		readJsonIfPresent(join(directory, "runtime-starting-state-evidence.json")),
+	]);
+	const deploymentOutcome =
+		revocation || businessResult?.disposition === "cancelled"
+			? "permission_revoked"
+			: businessResult?.disposition === "agent_review_ready"
+				? "quality_validation_failed"
+				: businessResult?.disposition === "agent_judgment_required"
+					? "human_decision_required"
+					: businessResult?.disposition === "machine_evidence_pending"
+						? "machine_evidence_pending"
+						: bootstrap
+							? "candidate_preparing"
+							: "prepared";
+	const preflight = operationalProgress.sessionContinuityPreflight;
+	const blockingFailure = localDeploymentBlockingFailureSchema.safeParse(
+		operationalProgress.targetStageBudget?.blockingFailure,
+	);
+	return {
+		executionDirectory: directory,
+		executionId: frozen.request.executionId,
+		executionIdentityEvidenceKind: "bound_redeployment_request",
+		candidateSourceCommit: frozen.request.candidateSourceCommit,
+		candidateDistributionSha256: "unknown",
+		deploymentOutcome,
+		ancillaryFailures: [],
+		analysisFingerprint: frozen.requestSha256,
+		retrospective: { status: "not_requested", analysisFingerprint: null, independentFindingsFilePath: null },
+		recovery: {
+			unfinishedStage: "candidate_bootstrap",
+			nextCheckAtEpochMs:
+				deploymentOutcome === "permission_revoked" ? null : (preflight?.nextCheckAtEpochMs ?? null),
+			condition:
+				deploymentOutcome === "permission_revoked"
+					? "本次执行已有持久撤销"
+					: (preflight?.recoveryCondition ??
+						(blockingFailure.success ? blockingFailure.data.recoveryCondition : null) ??
+						businessResult?.error ??
+						(deploymentOutcome === "prepared" ? "冻结请求已就绪，等待标准入口启动" : null)),
+		},
+		operationalProgress,
+		metrics: {
+			commandAttempts: null,
+			failedCommandAttempts: null,
+			verifiedStageEffects: null,
+			recoveredEffects: null,
+			commandElapsedByStageMs: {},
+			httpDowntimeMs: null,
+			nativeModelUsage: null,
+			unknownMetricReasons: { commandAttempts: "构建前执行尚未生成部署阶段清单" },
+		},
+		deepAnalysisReasons: [],
+		observedStageFailures: [],
+	};
 }
 
 async function materializeRetrospectiveRequest(
@@ -575,7 +728,14 @@ async function executeOneStage(
 ): Promise<boolean> {
 	const previouslySucceeded = stageSucceeded(record, stage.stage);
 	const hasUnfinishedCriticalStage = summarizeLocalDeploymentExecution(record).recovery.unfinishedStage !== null;
-	if (previouslySucceeded && (!LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage) || !hasUnfinishedCriticalStage))
+	const hasAcceptedRuntimeValidation =
+		record.manifest.schemaVersion === 2 && stageSucceeded(record, "runtime_validation");
+	if (
+		previouslySucceeded &&
+		(!LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES.has(stage.stage) ||
+			!hasUnfinishedCriticalStage ||
+			(hasAcceptedRuntimeValidation && stage.stage !== "deployment_record"))
+	)
 		return true;
 	let previousAttempts = record.observations.filter(
 		(item) => item.stage === stage.stage && item.kind === "command_execution_intent_persisted",
@@ -968,7 +1128,12 @@ export async function executeLocalDeploymentStages(
 				const summary = summarizeLocalDeploymentExecution(record, restriction);
 				return {
 					...summary,
-					operationalProgress: await readLocalDeploymentOperationalProgress(directory, record),
+					operationalProgress: await readLocalDeploymentOperationalProgress(
+						directory,
+						record.manifest,
+						summary.recovery.unfinishedStage,
+						await readFrozenLocalRedeploymentRequest(directory).catch(() => undefined),
+					),
 					executionDirectory: resolve(directory),
 				};
 			}),
@@ -1084,18 +1249,44 @@ export async function analyzeLocalDeploymentExecutions(directories: string[]) {
 	const results = await Promise.allSettled(
 		uniqueDirectories.map(async (directory) => {
 			const original = await readJsonIfPresent(recordPath(directory));
-			if (original === null) return await analyzeLegacyLocalDeploymentExecution(directory);
+			if (original === null) {
+				if (await readJsonIfPresent(join(directory, "frozen-redeployment-request.json")))
+					return readPreparedLocalRedeploymentAnalysis(
+						directory,
+						await readFrozenLocalRedeploymentRequest(directory),
+					);
+				return analyzeLegacyLocalDeploymentExecution(directory);
+			}
+			const record = localDeploymentExecutionRecordSchema.parse(original);
+			const frozen = await readFrozenLocalRedeploymentRequest(directory).catch(() => undefined);
 			const summary = summarizeLocalDeploymentExecution(
-				localDeploymentExecutionRecordSchema.parse(original),
+				record,
 				await readLocalDeploymentExecutionRestriction(directory),
 			);
+			const operationalProgress = await readLocalDeploymentOperationalProgress(
+				directory,
+				record.manifest,
+				summary.recovery.unfinishedStage,
+				record.manifest.schemaVersion === 2 && record.manifest.redeploymentRequestSha256 === frozen?.requestSha256
+					? frozen
+					: undefined,
+			);
+			const preflight = operationalProgress.sessionContinuityPreflight;
+			const failure = localDeploymentBlockingFailureSchema.safeParse(
+				operationalProgress.targetStageBudget?.blockingFailure,
+			);
+			if (summary.deploymentOutcome === "machine_evidence_pending") {
+				if (failure.success && failure.data.logicalResource !== "session-readiness")
+					summary.recovery.condition = failure.data.recoveryCondition;
+				else if (preflight?.recoveryCondition) {
+					summary.recovery.condition = preflight.recoveryCondition;
+					summary.recovery.nextCheckAtEpochMs = preflight.nextCheckAtEpochMs;
+				}
+			}
 			return {
 				...summary,
 				executionDirectory: directory,
-				operationalProgress: await readLocalDeploymentOperationalProgress(
-					directory,
-					localDeploymentExecutionRecordSchema.parse(original),
-				),
+				operationalProgress,
 			};
 		}),
 	);

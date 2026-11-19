@@ -15,6 +15,7 @@
   "originatingTaskWorktreePath": "/所属任务工作树",
   "sourceCheckoutPath": "/已有本地源码checkout",
   "candidateSourceCommit": "完整40位本地commit",
+  "sourceValidationEvidenceFilePaths": ["/已绑定上游原件/operation-state.json"],
   "deploymentNodeBinaryPath": "/实际服务Node/bin/node",
   "distributionDirectoryPath": "/已授权目标/dist",
   "runtimeIdentity": {
@@ -42,7 +43,9 @@
 
 准备只冻结请求、工具摘要和统一命令规格。启动后在私有 checkout 固定 commit、独立安装根与 Web 依赖、复用源码验证证据、显式指定私有生产输出。每个实际命令保存意图、stdout、stderr 和退出事实。请求是数据文件，八阶段脚本与观察器由程序生成。
 
-标准源码验证计划同时包含运行时与 Web 类型检查、各自测试以及源码 lint。复用按冻结命令及候选绑定的证据；缺项补跑，已确认的质量失败禁止继续发布。
+标准源码验证计划同时包含运行时与 Web 类型检查、各自测试以及源码 lint。可选字段 `sourceValidationEvidenceFilePaths` 只引用已绑定候选的上游回执或原件。部署使用随执行器冻结的验证工具、逐项核对原命令与候选完整树；读不到的原件直接在私有候选补验，已确认的质量失败禁止继续发布。支持的原件入口见[源码验证证据交接](../.codex/skills/cline-kanban-local-deploy/references/source-validation-evidence-reuse.md)。
+
+`kanban deployment analyze --execution-directory <持久目录>` 可在准备完成后读取执行身份。启动后沿同一目录呈现源码复用／补跑数、会话阻塞、最近核验时间、重查条件和备份检查点。
 
 ## 质量失败后的部署分支修复
 
@@ -63,13 +66,13 @@
 
 `deployment-repair-continuation.json` 关联新旧执行、根执行、分支、失败报告摘要和候选；根目录的 `deployment-repair-continuations/` 保存持久预算。同一原授权最多三次修复候选，重复准备不增加次数，新目录和新分支不重置预算。原失败和验证原件继续保留；新树重新消费既有验证工具，仅复用实际匹配的证据。不覆盖失败、不跳过检查，不把既有生产缺陷误写成验证通过。
 
-旧 runtime 只因 strict schema 不认识 `postProcessExitCleanupCommand` 而明确拒绝在线登记时，入口保存拒绝回执及待补清理命令，仅省略该可选字段，以同一幂等键和完整 owner 重试一次。其它拒绝、网络超时或结果未知不降级，也不另起离线执行；原冻结规格保留。
+旧 runtime 只因 strict schema 不认识 `postProcessExitCleanupCommand` 而明确拒绝在线登记时，入口保存拒绝回执及待补清理命令，仅省略该可选字段，以同一幂等键和完整 owner 重试一次。其它拒绝、网络超时或结果未知继续依据原受理事实处理。原冻结规格保留。对同一已完成执行再次调用 `start-redeployment` 时，可凭原监督者退出确认接续兼容清理；已登记部署的失败备注用同一评论 ID 补做。
 
 ## 归属与恢复
 
 在线且有可信来源会话时经 `task command-execution` 登记。离线只调用通用独立 supervisor primitive，不伪造所属执行索引。通用恢复循环发现待接回请求，校验真实 task/session/worktree、材料摘要和原生进程后登记；存活执行与已完成结果均不重发命令。没有会话绑定的外部调用只提供持久结果。
 
-重复启动同目录只接续原执行；已完成或取消不重跑。原生退出或真实 boot 变化后，外部调用者也可用相同入口在持久语义预算内恢复。机器等待使用原 `machine_evidence_pending` 合同与等价证据；相同证据预算跨重启保存，时间戳和 nonce 不算新证据。明确取消使用 `cancel-redeployment`；原 session 的持久 Stop 在启动、接回和后续动作前仍有效。
+重复启动同目录只接续原执行；已完成或取消不重跑。原生退出或真实 boot 变化后，外部调用者也可用相同入口在持久语义预算内恢复。机器等待使用原 `machine_evidence_pending` 合同与等价证据。首次复查已经具备阶段恢复证据时也能接续，阶段预算仍按语义指纹去重，跨重启保持。明确取消使用 `cancel-redeployment`；原 session 的持久 Stop 在启动、接回和后续动作前仍有效。
 
 在线受理须原子核对准备时冻结的任务、主会话、native/runtime-session 代际与工作树实体。已登记执行的监督者确证退出且实例离线时，同一入口接续原登记身份。离线监督者在 worker 等待机器证据后继续观察，只在持久语义预算允许且原归属与 Stop 门禁仍通过时恢复派发；实例恢复后接回同一监督者。
 
@@ -77,13 +80,15 @@
 
 v2 manifest 在候选完成后固定产物摘要。`runtimeStartingState` 区分 `verified_online` 与 `verified_offline`；离线 `runtimeBefore=null` 并引用原生无监听、连接拒绝与 boot 原件。HTTP 超时保留 unknown，不填虚拟 PID。此前的构建也已由同一所属执行托管。
 
-`deployment record --execution-directory` 按冻结 manifest 的 `workspaceId` 定位已注册项目，私有 `sourceCheckoutPath` 仅用于候选与提交核验，不需另补 `--project-path`。显式项目参数仍须匹配冻结归属；未注册或不匹配时拒绝登记，不自动注册候选。普通登记和 `recover-deployment-record` 复用同一入口及原回执，不重复建组、发布或重启。不带执行目录的旧入口仍按显式项目或源码路径解析。
+`deployment record --execution-directory` 按冻结 manifest 的 `workspaceId` 定位已注册项目，私有 `sourceCheckoutPath` 用于候选与提交核验。显式项目参数须匹配冻结归属。运行验收已持久接受后，监督进程只恢复同一 `executionId` 的登记。已存在组或回执可参与补证；回执中断时用持久组恢复已知字段。清理、备注和结果通知分别记录。旧入口仍按显式项目或源码路径解析。
 
 ## 状态保全与效果核验
 
+私有检出后、安装依赖和构建前执行会话预检，保存初次观察及最新结果。私有候选准备继续进行；状态保全启动前须通过当前会话门禁。发布和停止旧进程前再次核验当前代际。
+
 保全配置、SQLite online backup、一致性工作区快照、任务映射、Git binary/full-index 补丁以及真实 staged/unstaged/untracked 内容。Git 只读查询不取 optional locks。逐项目缓存成功核验，快照指纹变化只使相关结果失效；API 超时或不可达时，使用 `loadPersistedWorkspaceStateById` 读取一致性持久快照。前后变化保存在 `state-preservation-comparison.json`，并行改动不自动归因于部署丢失。
 
-运行目录备份排除执行目录本身和包含它的目录，避免将备份输出复制进源遍历。每项按内容指纹复用并核验副本；源内容变化时保留首份历史原件，另存当前版本。阶段恢复预算同时绑定当前阶段的语义机器证据，会话自然结束或 API 恢复可自动解锁，不靠修改冻结的源码验证报告。
+运行目录备份排除执行目录本身和包含它的目录。单项失败时继续保全独立项，保留待补原因及已成功项。接续按内容指纹重验已有副本并补缺，源内容变化时保留首份历史原件，另存当前版本。阶段恢复预算绑定当前阶段的语义机器证据；会话自然结束、文件恢复可读或 API 恢复可自动解锁。
 
 活动目录备份按普通文件逐项核验、SQLite 在线快照保全，不承诺整个目录的全局同一时点快照。已核验文件随后更新不使整目录副本作废；复制期间普通文件不一致仍拒绝。回执保留源目录前后指纹与并发变化事实，发生变化的目录不作为当前源状态的可复用检查点。
 

@@ -55,6 +55,7 @@ import {
 	LocalRedeploymentIdentityMismatch,
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
+	readLocalRedeploymentJson,
 	writeLocalRedeploymentJson,
 } from "./local-redeployment-preparation";
 import { prepareLocalRedeploymentRepairContinuation } from "./local-redeployment-repair-continuation";
@@ -140,7 +141,8 @@ async function runLocalDeploymentExecutionAndWriteBusinessResult(directory: stri
 						action: "resume_same_run",
 						trigger: result.recovery.condition,
 						retry_not_before_epoch_ms: result.recovery.nextCheckAtEpochMs,
-						maximum_unchanged_retries: 0,
+						maximum_unchanged_retries: execution.manifest.schemaVersion === 2 ? 1 : 0,
+						require_ready_recovery_evidence: execution.manifest.schemaVersion === 2,
 						evidence_paths: execution.manifest.stages.flatMap((stage) => stage.recoveryEvidenceFilePaths ?? []),
 						equivalent_evidence_sources: [
 							"bound_stage_effect_probe",
@@ -314,7 +316,8 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 									action: "resume_same_run",
 									trigger: "绑定实例、源码验证或依赖的语义证据变化",
 									retry_not_before_epoch_ms: Date.now() + 30_000,
-									maximum_unchanged_retries: 0,
+									maximum_unchanged_retries: 1,
+									require_ready_recovery_evidence: true,
 									evidence_paths: [],
 									equivalent_evidence_sources: [
 										"consistent_workspace_snapshot",
@@ -643,6 +646,14 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 						);
 				}
 				if (operation === "recover-deployment-record") {
+					if (
+						manifest.schemaVersion === 2 &&
+						existsSync(join(options.executionDirectory, "frozen-redeployment-request.json"))
+					)
+						await assertLocalRedeploymentOwnerStillEligible(
+							options.executionDirectory,
+							await readFrozenLocalRedeploymentRequest(options.executionDirectory),
+						);
 					await executeDeploymentEffectVerificationOrRecoveryCommand(
 						process.execPath,
 						[
@@ -685,6 +696,21 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 						deploymentGroups: state.deploymentGroups,
 						marker,
 					});
+					if (ok && manifest.schemaVersion === 2) {
+						const receipt = (await readLocalRedeploymentJson(
+							join(options.executionDirectory, "deployment-record-receipt.json"),
+						)) as {
+							ok?: boolean;
+							deploymentId?: string;
+							workspaceId?: string;
+							deployedSourceCommit?: string;
+						} | null;
+						ok =
+							receipt?.ok === true &&
+							receipt.deploymentId === manifest.executionId &&
+							receipt.workspaceId === manifest.workspaceId &&
+							receipt.deployedSourceCommit === manifest.candidateSourceCommit;
+					}
 				}
 				printResult({
 					ok,

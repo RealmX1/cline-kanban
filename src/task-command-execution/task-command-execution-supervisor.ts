@@ -418,6 +418,7 @@ if(owner.pid===process.pid) {
   const log=await open(join(cleanupDirectory,'supervisor-'+nonce+'.log'),'a',0o600);
   try{const cleanup=spawn(process.execPath,[process.argv[1],cleanupMaterialsFile],{cwd:materials.workingDirectory,detached:true,stdio:['ignore',log.fd,log.fd],env:{...process.env,...materials.environment}});cleanup.unref();}finally{await log.close();}
  }
+ let persistSemanticResumeDispatchBudget=null;
  async function waitForSemanticBusinessRecovery(permitResumeWithoutBusinessResult=false) {
   if(!materials.semanticRecovery)return false;
   let result;try{result=JSON.parse(await readFile(materials.semanticRecovery.resultFile,'utf8'));}catch(error){return permitResumeWithoutBusinessResult&&error.code==='ENOENT';}
@@ -431,21 +432,23 @@ if(owner.pid===process.pid) {
    await launchPostProcessExitCleanup();
    semanticRecoveryObservationCount++;
    const observed=spawnSync(materials.semanticRecovery.observationCommand[0],materials.semanticRecovery.observationCommand.slice(1),{cwd:materials.workingDirectory,encoding:'utf8',timeout:15000,maxBuffer:1048576,stdio:['ignore','pipe','ignore']});
-   let fingerprint;try{if(observed.status===0){const observation=JSON.parse(observed.stdout);if(/^[a-f0-9]{64}$/.test(observation.evidenceSha256))fingerprint=observation.evidenceSha256;}}catch{}
+   let fingerprint;let recoveryEvidenceReady=false;try{if(observed.status===0){const observation=JSON.parse(observed.stdout);if(/^[a-f0-9]{64}$/.test(observation.evidenceSha256)){fingerprint=observation.evidenceSha256;recoveryEvidenceReady=observation.recoveryEvidenceReady===true;}}}catch{}
    const maximumUnchangedRetries=typeof result.recovery.maximum_unchanged_retries==='number'?Math.max(0,Math.min(3,Math.floor(result.recovery.maximum_unchanged_retries))):1;
    if(fingerprint&&!budgets[fingerprint])budgets[fingerprint]={resumeAttemptsUsed:0,includesEvidenceTransitionLaunch:baselineEvidence!==null&&baselineEvidence!==fingerprint};
    if(fingerprint&&baselineEvidence===null)baselineEvidence=fingerprint;
    const budget=fingerprint?budgets[fingerprint]:null;
    const maximumResumeAttempts=budget?Math.min(3,maximumUnchangedRetries+(budget.includesEvidenceTransitionLaunch?1:0)):0;
    await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
-   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'machine_evidence_pending',ownedProcesses:[],semanticRecoveryObservationCount,semanticRecoveryEvidenceSha256:fingerprint??null,semanticRecoveryBudget:budget,maximumResumeAttempts,updatedAtEpochMs:Date.now()});
+   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'machine_evidence_pending',ownedProcesses:[],businessDispatchQuiescent:true,semanticRecoveryObservationCount,semanticRecoveryEvidenceSha256:fingerprint??null,semanticRecoveryBudget:budget,maximumResumeAttempts,updatedAtEpochMs:Date.now()});
    if(cancelled||await revoked()){cancelled=true;return false;}
    if(materials.deadlineAtEpochMs&&Date.now()>=materials.deadlineAtEpochMs){timedOut=true;return false;}
-   if(budget&&budget.resumeAttemptsUsed<maximumResumeAttempts&&Date.now()>=(result.recovery.retry_not_before_epoch_ms??0)) {
+   if(budget&&budget.resumeAttemptsUsed<maximumResumeAttempts&&Date.now()>=(result.recovery.retry_not_before_epoch_ms??0)&&(result.recovery.require_ready_recovery_evidence!==true||recoveryEvidenceReady)) {
     const validation=spawnSync(materials.semanticRecovery.validationCommand[0],materials.semanticRecovery.validationCommand.slice(1),{cwd:materials.workingDirectory,timeout:15000,maxBuffer:1048576,stdio:'ignore'});
     if(validation.status===0&&!cancelled&&!await revoked()) {
-     budget.resumeAttemptsUsed++;
-     await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
+     persistSemanticResumeDispatchBudget=async()=>{
+      budget.resumeAttemptsUsed++;
+      await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
+     };
      materials.command=materials.semanticRecovery.resumeCommand;
      return true;
     }
@@ -469,6 +472,7 @@ if(owner.pid===process.pid) {
  if(!timedOut && !cancelled && !await revoked()) {
   businessDispatchSequenceNumber++;
   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'dispatch_committed',ownedProcesses:[],dispatchCommittedAtEpochMs:Date.now(),updatedAtEpochMs:Date.now()});
+  if(persistSemanticResumeDispatchBudget){await persistSemanticResumeDispatchBudget();persistSemanticResumeDispatchBudget=null;}
   const stdout=await open(join(directory,'command-'+nonce+'.stdout.txt'),'a',0o600); const stderr=await open(join(directory,'command-'+nonce+'.stderr.txt'),'a',0o600);
   child=spawn(materials.command[0],materials.command.slice(1),{cwd:materials.workingDirectory,env:{...process.env,...materials.environment,...(materials.superviseProcessGroup?{NODE_OPTIONS:materials.commandNodeOptions??undefined}:{}),...(materials.superviseProcessGroup?{[OWNED_COMMAND_EXECUTION_OWNERSHIP_ENVIRONMENT_KEY]:nonce}:{}),KANBAN_COMMAND_EXECUTION_ID:materials.executionId,KANBAN_COMMAND_EXECUTION_REVOCATION_FILE:materials.revocationFile},detached:!materials.superviseProcessGroup,stdio:materials.outputTailMaxChars?['ignore','pipe','pipe']:['ignore',stdout.fd,stderr.fd]});
   if(materials.outputTailMaxChars){child.stdout?.on('data',captureOutput);child.stderr?.on('data',captureOutput);}
@@ -594,7 +598,12 @@ export async function inspectOwnedCommandSupervisor(
 		if (currentBoot && materials.systemBootIdentity && currentBoot !== materials.systemBootIdentity) return "exited";
 		const progress = JSON.parse(
 			await readFile(join(directory, `supervisor-progress-${record.launchNonce}.json`), "utf8"),
-		) as { status: string; ownedProcesses: OwnedProcessIdentity[] };
+		) as {
+			launchNonce?: string;
+			status: string;
+			ownedProcesses: OwnedProcessIdentity[];
+			businessDispatchQuiescent?: boolean;
+		};
 		for (const { expected: process, current } of await observeOwnedProcessGenerations(
 			progress.ownedProcesses,
 			launchMaterials.darwinOriginalParentGenerationProbePath,
@@ -607,6 +616,20 @@ export async function inspectOwnedCommandSupervisor(
 			)
 				return "unknown";
 			if (hasSameProcessGeneration(current, process)) return "running";
+		}
+		if (
+			progress.launchNonce === record.launchNonce &&
+			progress.status === "machine_evidence_pending" &&
+			progress.businessDispatchQuiescent === true &&
+			progress.ownedProcesses.length === 0
+		) {
+			// 从静止等待派发前先写 dispatch_committed，所以只有等待原件仍在且监督者确证退出时才能接续。
+			if (current) return "exited";
+			try {
+				process.kill(owner.pid, 0);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ESRCH") return "exited";
+			}
 		}
 		// 过期快照可能遗漏失联前刚派生的孤儿；只有终结原件或开机代际变化才能证明全部退出。
 		return progress.status === "exited" || progress.status === "cancelled" ? "exited" : "unknown";

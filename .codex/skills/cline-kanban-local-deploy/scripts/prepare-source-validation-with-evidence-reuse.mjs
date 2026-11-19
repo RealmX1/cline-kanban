@@ -2,7 +2,7 @@
 // 源码验证只复用已证明的覆盖；本次产物、ABI 和运行实例仍由部署流程核验。
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, realpathSync } from "node:fs";
 import {
 	chmod,
 	copyFile,
@@ -11,21 +11,19 @@ import {
 	mkdir,
 	open,
 	readFile,
-	readdir,
 	readlink,
 	realpath,
 	rename,
 	unlink,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { homedir, uptime } from "node:os";
+import { uptime } from "node:os";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
 
 const REPORT_FILENAME = "source-validation-evidence-reuse-report.json";
 const MAXIMUM_METADATA_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_EVIDENCE_BYTES = 256 * 1024 * 1024;
-const MAXIMUM_DISCOVERY_DIRECTORIES = 16_000;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const OBJECT_ID_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const sourceValidationPreparerContents = await readFile(new URL(import.meta.url));
@@ -216,23 +214,6 @@ async function captureVerifiedCandidateSourceSnapshot(sourceCheckoutPath, commit
 	return { treeOid, contentManifestSha256: manifest.digest("hex") };
 }
 
-async function listEvidenceSubdirectoryNamesWithinBudget(path) {
-	try {
-		assert(
-			evidenceVerificationStatistics.discoveryDirectoriesRead < MAXIMUM_DISCOVERY_DIRECTORIES,
-			"证据目录发现预算已用完",
-		);
-		evidenceVerificationStatistics.discoveryDirectoriesRead++;
-		return (await readdir(path, { withFileTypes: true }))
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => entry.name)
-			.sort();
-	} catch (error) {
-		if (error.code === "ENOENT") return [];
-		throw error;
-	}
-}
-
 // Python 原生产方的指纹使用 ensure_ascii 与默认分隔符；不能换成另一种 JSON 序列化后声称相等。
 function serializePythonCompatibleCommandFingerprintJson(value) {
 	if (Array.isArray(value)) return `[${value.map(serializePythonCompatibleCommandFingerprintJson).join(", ")}]`;
@@ -250,6 +231,34 @@ function serializePythonCompatibleCommandFingerprintJson(value) {
 	);
 }
 
+function normalizeBoundNpmCommand(argv) {
+	try {
+		const selectedNpmCli = realpathSync(join(dirname(process.execPath), "npm"));
+		if (isAbsolute(argv[0]) && basename(argv[0]) === "npm" && realpathSync(argv[0]) === selectedNpmCli)
+			return ["npm", ...argv.slice(1)];
+		if (
+			isAbsolute(argv[0]) && realpathSync(argv[0]) === realpathSync(process.execPath) &&
+			isAbsolute(argv[1] || "") && realpathSync(argv[1]) === selectedNpmCli
+		)
+			return ["npm", ...argv.slice(2)];
+	} catch {
+		// 缺失的历史可执行文件不能被当作当前 npm。
+	}
+	return argv;
+}
+
+function unwrapRvfBoundNpmCommandWithEquivalentPath(argv) {
+	const [envExecutable, validationPathAssignment, ...wrappedCommand] = argv;
+	if (
+		envExecutable === "/usr/bin/env" &&
+		validationPathAssignment === `PATH=${currentSourceValidationProcessEnvironment().PATH}` &&
+		isAbsolute(wrappedCommand[0] || "") &&
+		normalizeBoundNpmCommand(wrappedCommand)[0] === "npm"
+	)
+		return wrappedCommand;
+	return argv;
+}
+
 function createSourceValidationCommandIdentityKey(argv, sourceCheckoutPath) {
 	assert(stringArray(argv), "命令必须是非空 argv 数组");
 	const command = [...argv];
@@ -261,10 +270,10 @@ function createSourceValidationCommandIdentityKey(argv, sourceCheckoutPath) {
 			validationEnvironmentIdentity.push(assignment);
 		}
 	}
-	if (basename(command[0] || "") === "npm") command[0] = "npm";
+	const normalizedCommand = normalizeBoundNpmCommand(command);
 	return JSON.stringify([
 		validationEnvironmentIdentity.sort(),
-		command.map((argument) =>
+		normalizedCommand.map((argument) =>
 			isAbsolute(argument) && isPathInsideDirectory(sourceCheckoutPath, argument)
 				? `<source>/${relative(sourceCheckoutPath, argument)}`
 				: argument,
@@ -541,113 +550,124 @@ function extractStaticallyBoundLegacyNpmCommands(runner, phase) {
 	]);
 }
 
-async function discoverReusableSourceValidationChecks(
+async function readReferencedSourceValidationChecks(
 	sourceCheckoutPath,
 	gitCommonDirectory,
 	treeOid,
 	contentManifestSha256,
-	runtimeHomeDirectoryPath,
+	sourceValidationEvidenceFilePaths,
 	currentEnvironment,
 ) {
 	const sourceValidationCheckResults = [];
 	let legacyPythonContentManifestSha256;
 	const addIssue = (path, error) =>
 		evidenceDiscoveryIssues.push({ evidencePath: path, reason: String(error.message || error) });
-	const operationDirectories = [join(gitCommonDirectory, "base-branch-sync/durable-operations")];
-	for (const name of await listEvidenceSubdirectoryNamesWithinBudget(join(gitCommonDirectory, "worktrees")))
-		operationDirectories.push(join(gitCommonDirectory, "worktrees", name, "base-branch-sync/durable-operations"));
-	for (const operations of operationDirectories) {
-		for (const name of await listEvidenceSubdirectoryNamesWithinBudget(operations)) {
-			const statePath = join(operations, name, "operation-state.json");
+	async function readStandardOperation(statePath, selectedRecordPath) {
+		const state = await readBoundedJsonEvidenceFile(statePath);
+		assert(resolve(state.gitCommonDirectory || "/") === gitCommonDirectory, "交回回执不属于当前仓库");
+		for (const reference of state.validationRecords || []) {
+			if (selectedRecordPath && resolve(reference.path) !== selectedRecordPath) continue;
 			try {
-				const state = await readOptionalJsonEvidenceFile(statePath);
-				if (!state || resolve(state.gitCommonDirectory || "/") !== gitCommonDirectory) continue;
-				for (const reference of state.validationRecords || []) {
-					try {
-						assert(
-							isPathInsideDirectory(join(operations, name), resolve(reference.path)),
-							"验证原件越出所属 operation",
-						);
-						const record = await readBoundedJsonEvidenceFile(reference.path);
-						if (record.treeOid !== treeOid) continue;
-						assert(
-							(await computeEvidenceFileSha256Once(reference.path)) === reference.sha256,
-							"验证记录摘要不匹配",
-						);
-						assert(
-							record.contentManifestSha256 === contentManifestSha256,
-							"验证对应相同 HEAD 下的其他工作目录内容，不能仅凭 tree 复用",
-						);
-						assert(
-							record.kind === "base-branch-sync-current-tree-validation" && record.schemaVersion === 1,
-							"验证记录版本不支持",
-						);
-						assert(
-							["taskId", "sessionId", "gitCommonDirectory", "worktree"].every(
-								(key) => record[key] === state[key],
-							) &&
-								record.taskId &&
-								record.sessionId,
-							"验证归属不匹配",
-						);
-						assert(
-							record.context === "task-tree" &&
-								SHA256_PATTERN.test(record.contentManifestSha256) &&
-								SHA256_PATTERN.test(record.environmentFingerprintSha256),
-							"记录不属于源码树验证或缺少内容与环境身份",
-						);
-						assert(
-							(await computeSourceValidationCommandEnvironmentFingerprint(record.argv, record.worktree)) ===
-								record.commandEnvironmentFingerprintSha256,
-							"命令或包装脚本指纹不匹配",
-						);
-						const proofFiles = [];
-						for (const stream of ["stdout", "stderr"])
-							proofFiles.push(
-								await verifyAndSnapshotEvidenceFile(
-									record[`${stream}Path`],
-									record[`${stream}Sha256`],
-									gitCommonDirectory,
-								),
-							);
-						proofFiles.push(
-							await verifyAndSnapshotEvidenceFile(reference.path, reference.sha256, gitCommonDirectory),
-						);
-						const commandRecord = await readOptionalJsonEvidenceFile(join(dirname(reference.path), "command.json"));
-						if (commandRecord)
-							assert(JSON.stringify(commandRecord.argv) === JSON.stringify(record.argv), "验证与执行原件命令不一致");
-						const key = createSourceValidationCommandIdentityKey(record.argv, record.worktree);
-						sourceValidationCheckResults.push({
-							commandKeys: [key],
-							argv: record.argv,
-							coverage: record.coverage,
-							taskId: record.taskId,
-							evidencePath: reference.path,
-							evidenceSha256: reference.sha256,
-							proofFiles,
-							environmentCompatible: await isStandardRecordEnvironmentCompatible(record, state, currentEnvironment),
-							status: isSourceValidationInterruptedExitCode(record.exitCode)
-								? "interrupted"
-								: record.status === "passed" && record.exitCode === 0
-									? "passed"
-									: "failed",
-							sourceFormat: record.kind,
-							startedAt: record.startedAtUtc || record.startedAt || commandRecord?.startedAtUtc,
-							concludedAt: record.finishedAtUtc || record.completedAtUtc || commandRecord?.finishedAtUtc,
-						});
-					} catch (error) {
-						addIssue(reference.path, error);
-					}
+				assert(
+					isPathInsideDirectory(dirname(statePath), resolve(reference.path)),
+					"验证原件越出所属 operation",
+				);
+				const record = await readBoundedJsonEvidenceFile(reference.path);
+				if (record.treeOid !== treeOid) continue;
+				assert(
+					(await computeEvidenceFileSha256Once(reference.path)) === reference.sha256,
+					"验证记录摘要不匹配",
+				);
+				assert(
+					record.contentManifestSha256 === contentManifestSha256,
+					"验证对应相同 HEAD 下的其他工作目录内容，不能仅凭 tree 复用",
+				);
+				assert(
+					record.kind === "base-branch-sync-current-tree-validation" && record.schemaVersion === 1,
+					"验证记录版本不支持",
+				);
+				assert(
+					["taskId", "sessionId", "gitCommonDirectory", "worktree"].every(
+						(key) => record[key] === state[key],
+					) &&
+						record.taskId &&
+						record.sessionId,
+					"验证归属不匹配",
+				);
+				assert(
+					record.context === "task-tree" &&
+						SHA256_PATTERN.test(record.contentManifestSha256) &&
+						SHA256_PATTERN.test(record.environmentFingerprintSha256),
+					"记录不属于源码树验证或缺少内容与环境身份",
+				);
+				assert(
+					(await computeSourceValidationCommandEnvironmentFingerprint(record.argv, record.worktree)) ===
+						record.commandEnvironmentFingerprintSha256,
+					"命令或包装脚本指纹不匹配",
+				);
+				const proofFiles = [];
+				for (const stream of ["stdout", "stderr"])
+					proofFiles.push(
+						await verifyAndSnapshotEvidenceFile(
+							record[`${stream}Path`],
+							record[`${stream}Sha256`],
+							gitCommonDirectory,
+						),
+					);
+				proofFiles.push(
+					await verifyAndSnapshotEvidenceFile(reference.path, reference.sha256, gitCommonDirectory),
+				);
+				const commandRecordPath = join(dirname(reference.path), "command.json");
+				const commandRecord = await readOptionalJsonEvidenceFile(commandRecordPath);
+				if (commandRecord)
+					assert(JSON.stringify(commandRecord.argv) === JSON.stringify(record.argv), "验证与执行原件命令不一致");
+				if (record.sourceCommandRecordPath) {
+					assert(
+						resolve(record.sourceCommandRecordPath) === commandRecordPath &&
+							commandRecord?.returncode === record.exitCode &&
+							(record.status !== "passed" || commandRecord.completionObservation?.contentStable === true),
+						"原执行未证明同一命令、退出结果与稳定候选内容",
+					);
+					proofFiles.push(
+						await verifyAndSnapshotEvidenceFile(
+							commandRecordPath,
+							record.sourceCommandRecordSha256,
+							gitCommonDirectory,
+						),
+					);
 				}
+				const key = createSourceValidationCommandIdentityKey(record.argv, record.worktree);
+				sourceValidationCheckResults.push({
+					commandKeys: [key],
+					argv: record.argv,
+					coverage: record.coverage,
+					taskId: record.taskId,
+					evidencePath: reference.path,
+					evidenceSha256: reference.sha256,
+					proofFiles,
+					environmentCompatible: await isStandardRecordEnvironmentCompatible(record, state, currentEnvironment),
+					status: commandRecord?.completionObservation?.contentStable === false
+						? "unproven"
+						: isSourceValidationInterruptedExitCode(record.exitCode)
+						? "interrupted"
+						: record.status === "passed" && record.exitCode === 0
+							? "passed"
+							: Number.isInteger(record.exitCode) && record.exitCode !== 0
+							? "failed"
+							: "unproven",
+					sourceFormat: record.kind,
+					startedAt: record.startedAtUtc || record.startedAt || commandRecord?.startedAtUtc,
+					concludedAt: record.finishedAtUtc || record.completedAtUtc || commandRecord?.finishedAtUtc,
+				});
 			} catch (error) {
-				addIssue(statePath, error);
+				addIssue(reference.path, error);
 			}
 		}
 	}
-	async function discoverBundles(directory, remainingDepth) {
+
+	async function readHandbackEvidenceBundle(directory) {
 		const bundlePath = join(directory, "final-complete-tree-verification-evidence.json");
-		try {
-			const bundle = await readOptionalJsonEvidenceFile(bundlePath);
+			const bundle = await readBoundedJsonEvidenceFile(bundlePath);
 			if (bundle?.completeTree === treeOid) {
 				assert(bundle.status === "passed", "备用证据包尚未通过最终验证");
 				const receipt = await readBoundedJsonEvidenceFile(
@@ -792,33 +812,16 @@ async function discoverReusableSourceValidationChecks(
 					});
 				}
 			}
-		} catch (error) {
-			addIssue(bundlePath, error);
-		}
-		if (remainingDepth > 0) {
-			for (const name of await listEvidenceSubdirectoryNamesWithinBudget(directory)) {
-				if (!name.startsWith(".") && !["node_modules", "validation-and-recovery-audit"].includes(name))
-					await discoverBundles(join(directory, name), remainingDepth - 1);
-			}
-		}
 	}
-	for (const root of ["cross-task-handoff-artifacts", "task-cross-task-handoff-artifacts", "task-handoff-artifacts"])
-		await discoverBundles(join(runtimeHomeDirectoryPath, root), 3);
-	// 同步可直接采用 RVF 原件；没有新同步测试记录并不意味着原验证不存在。
-	const rvfRuns = join(
-		process.env.RVF_USER_LOCAL_DATA_ROOT || join(homedir(), ".rvf/user-local-data"),
-		"task-snapshot-reviews",
-	);
-	for (const runName of await listEvidenceSubdirectoryNamesWithinBudget(rvfRuns)) {
-		const runDirectory = join(rvfRuns, runName);
-		try {
-			const run = await readOptionalJsonEvidenceFile(join(runDirectory, "run.json"));
-			if (!run || run.schema_version !== 1 || resolve(run.git_common_directory || "/") !== gitCommonDirectory)
-				continue;
-			const validation = await readOptionalJsonEvidenceFile(join(runDirectory, "validation.json"));
-			if (!validation || validation.tested_tree !== treeOid) continue;
+
+	async function readNativeRvfValidation(runDirectory) {
+			const run = await readBoundedJsonEvidenceFile(join(runDirectory, "run.json"));
+			assert(run.schema_version === 1 && resolve(run.git_common_directory || "/") === gitCommonDirectory, "RVF 原件版本或仓库不匹配");
+			const validation = await readBoundedJsonEvidenceFile(join(runDirectory, "validation.json"));
+			if (validation.tested_tree !== treeOid) return;
 			assert(
-				validation.candidate_commit === run.validated_candidate_commit &&
+				OBJECT_ID_PATTERN.test(validation.candidate_commit || "") &&
+					validation.candidate_commit === run.validated_candidate_commit &&
 					runReadOnlyGitCommand(sourceCheckoutPath, [
 						"rev-parse",
 						`${validation.candidate_commit}^{tree}`,
@@ -846,12 +849,16 @@ async function discoverReusableSourceValidationChecks(
 			const nativeNode = executionPlan.machine_context?.native_node;
 			for (let index = 0; index < validation.commands.length; index++) {
 				const directory = join(validation.attempt_directory, `command-${String(index + 1).padStart(3, "0")}`);
-				const execution = await readOptionalJsonEvidenceFile(join(directory, "execution.json"));
+				const executionPath = join(directory, "execution.json");
+				try {
+				const execution = await readOptionalJsonEvidenceFile(executionPath);
 				if (!execution) continue;
 				const supervision = await readBoundedJsonEvidenceFile(join(directory, "command-supervision.json"));
 				assert(
 					JSON.stringify(execution.argv) === JSON.stringify(validation.commands[index]) &&
-						JSON.stringify(supervision.argv) === JSON.stringify(execution.argv),
+						JSON.stringify(supervision.argv) === JSON.stringify(execution.argv) &&
+						Number.isInteger(execution.returncode) &&
+						execution.returncode === supervision.returncode,
 					"RVF 命令身份不一致",
 				);
 				assert(
@@ -863,6 +870,13 @@ async function discoverReusableSourceValidationChecks(
 					"RVF 原生命令未证明同树完成与子进程退出",
 				);
 				const proofFiles = [];
+				for (const metadataPath of [join(runDirectory, "run.json"), join(runDirectory, "validation.json"), planPath]) {
+					proofFiles.push(await verifyAndSnapshotEvidenceFile(
+						metadataPath,
+						await computeEvidenceFileSha256Once(metadataPath),
+						runDirectory,
+					));
+				}
 				for (const stream of ["stdout", "stderr"])
 					proofFiles.push(
 						await verifyAndSnapshotEvidenceFile(
@@ -879,7 +893,9 @@ async function discoverReusableSourceValidationChecks(
 							runDirectory,
 						),
 					);
-				const externalWrapper = execution.argv
+				const comparableCommandArgv = unwrapRvfBoundNpmCommandWithEquivalentPath(execution.argv);
+				const normalizedNpmArgv = normalizeBoundNpmCommand(comparableCommandArgv);
+				const externalWrapper = normalizedNpmArgv
 					.slice(1)
 					.some(
 						(argument) =>
@@ -887,7 +903,7 @@ async function discoverReusableSourceValidationChecks(
 							isAbsolute(argument) &&
 							!isPathInsideDirectory(execution.cwd, argument),
 					);
-				const actualNode = nativeNode || (basename(execution.argv[0]) === "node" ? execution.argv[0] : null);
+				const actualNode = nativeNode || (basename(comparableCommandArgv[0]) === "node" ? comparableCommandArgv[0] : null);
 				const environmentCompatible =
 					!externalWrapper &&
 					Boolean(actualNode) &&
@@ -900,7 +916,7 @@ async function discoverReusableSourceValidationChecks(
 						await readFile(join(directory, "stderr.txt"), "utf8"),
 					);
 				sourceValidationCheckResults.push({
-					commandKeys: [createSourceValidationCommandIdentityKey(execution.argv, execution.cwd)],
+					commandKeys: [createSourceValidationCommandIdentityKey(comparableCommandArgv, execution.cwd)],
 					argv: execution.argv,
 					coverage: ["rvf-original-validation-command"],
 					taskId: executionPlan.machine_context?.task_id || null,
@@ -909,7 +925,9 @@ async function discoverReusableSourceValidationChecks(
 					proofFiles,
 					environmentCompatible: Boolean(environmentCompatible),
 					status:
-						validationToolUnavailable
+						isSourceValidationInterruptedExitCode(execution.returncode)
+							? "interrupted"
+							: validationToolUnavailable
 							? "validation_environment_unavailable"
 							: execution.status === "passed" && execution.returncode === 0 && supervision.returncode === 0
 								? "passed"
@@ -924,9 +942,38 @@ async function discoverReusableSourceValidationChecks(
 							? { ineligibleReason: "原记录未冻结仓库外包装脚本，不能假定其内容始终不变" }
 							: {}),
 				});
+				} catch (error) {
+					addIssue(executionPath, error);
+				}
 			}
+	}
+
+	const consumedPaths = new Set();
+	for (const evidencePath of new Set(sourceValidationEvidenceFilePaths.map((path) => resolve(path)))) {
+		try {
+			const filename = basename(evidencePath);
+			const directory = dirname(evidencePath);
+			const checkCountBefore = sourceValidationCheckResults.length;
+			if (filename === "operation-state.json") {
+				await readStandardOperation(evidencePath);
+			} else if (filename === "current-tree-validation.json") {
+				await readStandardOperation(join(directory, "../../operation-state.json"), evidencePath);
+			} else if (
+				["final-complete-tree-verification-evidence.json", "commit-and-base-branch-sync-result.json"].includes(filename)
+			) {
+				if (consumedPaths.has(directory)) continue;
+				consumedPaths.add(directory);
+				await readHandbackEvidenceBundle(directory);
+			} else if (filename === "run.json" || filename === "validation.json") {
+				if (consumedPaths.has(directory)) continue;
+				consumedPaths.add(directory);
+				await readNativeRvfValidation(directory);
+			} else {
+				throw new Error("不支持的源码验证原件入口；等待本次候选补验");
+			}
+			for (const check of sourceValidationCheckResults.slice(checkCountBefore)) check.boundEvidencePath = evidencePath;
 		} catch (error) {
-			addIssue(join(runDirectory, "validation.json"), error);
+			addIssue(evidencePath, error);
 		}
 	}
 	return sourceValidationCheckResults;
@@ -1485,12 +1532,12 @@ async function observeSourceValidationRecoveryEvidence(values, sourceCheckoutPat
 	const validationEnvironmentIdentity = await readSourceValidationEnvironmentIdentity(sourceCheckoutPath);
 	try {
 		const snapshot = await captureVerifiedCandidateSourceSnapshot(sourceCheckoutPath, commit);
-		const available = await discoverReusableSourceValidationChecks(
+		const available = await readReferencedSourceValidationChecks(
 			sourceCheckoutPath,
 			gitCommonDirectory,
 			snapshot.treeOid,
 			snapshot.contentManifestSha256,
-			values["runtime-home-directory"],
+			values["source-validation-evidence-file-path"],
 			validationEnvironmentIdentity,
 		);
 		candidateSourceObservation = {
@@ -1536,12 +1583,17 @@ async function main() {
 			"runtime-home-directory": { type: "string" },
 			"output-directory": { type: "string" },
 			"validation-plan": { type: "string" },
+			"source-validation-evidence-file-path": { type: "string", multiple: true, default: [] },
 			"inspect-only": { type: "boolean", default: false },
 			"observe-recovery-evidence": { type: "boolean", default: false },
 		},
 	});
 	for (const key of ["source-checkout-path", "runtime-home-directory", "output-directory"])
 		assert(values[key] && isAbsolute(values[key]), `必须提供绝对路径 --${key}`);
+	assert(
+		values["source-validation-evidence-file-path"].every((path) => isAbsolute(path) && !path.includes("\0")),
+		"源码验证原件必须使用绝对文件路径",
+	);
 	const sourceCheckoutPath = await realpath(values["source-checkout-path"]);
 	const commit = values["candidate-source-commit"];
 	assert(OBJECT_ID_PATTERN.test(commit || ""), "候选必须是完整 commit SHA，不能使用 HEAD/latest 等浮动引用");
@@ -1589,6 +1641,7 @@ async function main() {
 			"--output-directory",
 			sourceValidationOutputDirectory,
 			...(values["validation-plan"] ? ["--validation-plan", resolve(values["validation-plan"])] : []),
+			...values["source-validation-evidence-file-path"].flatMap((path) => ["--source-validation-evidence-file-path", path]),
 		];
 		const gitCommonDirectory = resolve(
 			sourceCheckoutPath,
@@ -1599,12 +1652,12 @@ async function main() {
 			commit,
 		);
 		const validationEnvironmentIdentity = await readSourceValidationEnvironmentIdentity(sourceCheckoutPath);
-		const availableSourceValidationChecks = await discoverReusableSourceValidationChecks(
+		const availableSourceValidationChecks = await readReferencedSourceValidationChecks(
 			sourceCheckoutPath,
 			gitCommonDirectory,
 			treeOid,
 			contentManifestSha256,
-			values["runtime-home-directory"],
+			values["source-validation-evidence-file-path"],
 			validationEnvironmentIdentity,
 		);
 		const plan = values["validation-plan"] ? await readBoundedJsonEvidenceFile(values["validation-plan"]) : null;
@@ -1618,11 +1671,16 @@ async function main() {
 				validationEnvironmentIdentity,
 			}),
 		);
+		const boundEvidencePaths = new Set(values["source-validation-evidence-file-path"].map((path) => resolve(path)));
 		const statePath = join(sourceValidationOutputDirectory, "source-validation-execution-state.json");
 		const state = (await readOptionalJsonEvidenceFile(statePath)) || { schemaVersion: 1, attempts: [] };
 		assert(state.schemaVersion === 1 && Array.isArray(state.attempts), "验证接续记录格式不合法");
 		for (const imported of state.importedEvidence || []) {
-			if (imported.contextFingerprintSha256 !== contextFingerprint) continue;
+			if (
+				imported.contextFingerprintSha256 !== contextFingerprint ||
+				!boundEvidencePaths.has(imported.check?.boundEvidencePath)
+			)
+				continue;
 			try {
 				assert(sha256(JSON.stringify(imported.check)) === imported.checkSha256, "已接受证据的接续记录摘要不匹配");
 				try {
@@ -1661,7 +1719,11 @@ async function main() {
 				sourceCheckoutPath,
 			);
 			const checkKey = sha256(`${fingerprint}:${commandIdentity}:${commandFingerprint}`);
-			const matches = availableSourceValidationChecks.filter((record) => record.commandKeys.includes(commandIdentity));
+			const matches = availableSourceValidationChecks.filter(
+				(record) =>
+					record.commandKeys.includes(commandIdentity) &&
+					(record.status !== "passed" || record.environmentCompatible),
+			);
 			const previousConclusion = state.attempts.findLast(
 				(attempt) =>
 					attempt.contextFingerprintSha256 === contextFingerprint &&
@@ -1751,6 +1813,7 @@ async function main() {
 			currentDeploymentEnvironmentVerification: "required_separately",
 			availableSourceValidationChecks,
 			sourceValidationCheckResults: sourceValidationCheckResults,
+			sourceValidationEvidenceFilePaths: [...boundEvidencePaths],
 			evidenceDiscoveryIssues,
 			consumedEvidenceSnapshots: [...evidenceSnapshots.values()],
 			evidenceVerificationStatistics,

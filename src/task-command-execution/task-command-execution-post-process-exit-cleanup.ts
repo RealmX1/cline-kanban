@@ -18,8 +18,10 @@ export async function recoverOwnedCommandPostProcessExitCleanup(
 		TaskCommandExecutionRecord,
 		"workspaceId" | "executionId" | "launchNonce" | "revocationFile" | "launchAttemptCount" | "specification"
 	>,
+	authorizedDeferredPostProcessExitCleanupCommand?: string[],
 ): Promise<void> {
-	const command = record.specification.postProcessExitCleanupCommand;
+	const registeredCleanupCommand = record.specification.postProcessExitCleanupCommand;
+	const command = registeredCleanupCommand ?? authorizedDeferredPostProcessExitCleanupCommand;
 	if (!command || record.launchAttemptCount === 0 || (await inspectOwnedCommandSupervisor(record)) !== "exited")
 		return;
 	const directory = taskCommandExecutionArtifactDirectory(record.workspaceId, record.executionId);
@@ -39,7 +41,7 @@ export async function recoverOwnedCommandPostProcessExitCleanup(
 		launch.executionId !== record.executionId ||
 		launch.launchNonce !== record.launchNonce ||
 		launch.materialSha256 !== record.specification.materialSha256 ||
-		JSON.stringify(launch.postProcessExitCleanupCommand) !== JSON.stringify(command)
+		JSON.stringify(launch.postProcessExitCleanupCommand) !== JSON.stringify(registeredCleanupCommand)
 	)
 		throw new Error("退出后清理命令与原生启动材料不匹配");
 	const businessProgress = JSON.parse(

@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
+import { fingerprintLocalDeploymentDistribution } from "../../../src/deployment/local-deployment-distribution-manifest";
 import { initializeLocalDeploymentExecution } from "../../../src/deployment/local-deployment-execution";
 import { LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER } from "../../../src/deployment/local-deployment-execution-contract";
 import {
@@ -12,7 +13,10 @@ import {
 	executeStandardLocalRedeploymentStage,
 	observeStandardLocalRedeploymentStageRecoveryEvidence,
 } from "../../../src/deployment/local-redeployment-standard-execution";
-import { queryLocalRedeploymentRuntime } from "../../../src/deployment/local-redeployment-state-preservation";
+import {
+	backupLocalRedeploymentRuntimeState,
+	queryLocalRedeploymentRuntime,
+} from "../../../src/deployment/local-redeployment-state-preservation";
 import { readProcessIdentity } from "../../../src/task-command-execution/task-command-execution-supervisor";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -116,7 +120,8 @@ async function createStandardStageFixture(
 		...manifestRequestFields,
 		schemaVersion: 2,
 		previousDeployedSourceCommit: null,
-		candidateDistributionSha256: "c".repeat(64),
+		candidateDistributionSha256: (await fingerprintLocalDeploymentDistribution(join(candidate, "dist")))
+			.candidateDistributionSha256,
 		candidateDistributionDirectoryPath: join(candidate, "dist"),
 		runtimeBefore: options.currentMatchesFrozenBaseline
 			? { processId: current.runtimeProcessId, processStartTimeText: current.runtimeProcessStartTimeText }
@@ -140,10 +145,135 @@ async function createStandardStageFixture(
 			},
 		}),
 	);
-	return { directory, current, reportPath, handoverInvocationsPath, request };
+	return { directory, candidateBytes, current, reportPath, handoverInvocationsPath, request };
 }
 
 describe("标准部署当前代际与恢复语义", () => {
+	it("历史运行验收之后已换候选，禁止补做首次部署登记", async () => {
+		const { directory, current, reportPath } = await createStandardStageFixture({ candidateAlreadyLoaded: true });
+		const executionPath = join(directory, "local-deployment-execution.json");
+		const execution = JSON.parse(await readFile(executionPath, "utf8"));
+		execution.observations.push({
+			stage: "runtime_validation",
+			sequence: 1,
+			kind: "command_succeeded",
+			observedAtEpochMs: 1,
+			attemptNumber: 1,
+			recoveryEvidenceSha256: "a".repeat(64),
+			exitCode: 0,
+			commandOutputDirectory: directory,
+			detail: "原候选已通过运行验收",
+		});
+		await writeFile(executionPath, JSON.stringify(execution));
+		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, "deployment_record");
+		expect((await observe()).recoveryEvidenceReady).toBe(true);
+		await writeFile(reportPath, JSON.stringify({ ...current, runtimeLoadedEntrypointSha256: "b".repeat(64) }));
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		await expect(executeStandardLocalRedeploymentStage(directory, "deployment_record")).rejects.toThrow(
+			"等待核对当前候选",
+		);
+	});
+
+	it("从派发前就绪到阶段内阻塞再恢复就绪时获得一次新证据", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const stage = "state_preservation";
+		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, stage);
+		const before = await observe();
+		const attempt = { binding: request, stage, executionDirectory: directory, attemptNumber: 1 } as const;
+		await reserveLocalDeploymentTargetStageAttempt({
+			...attempt,
+			recoveryEvidenceReady: before.recoveryEvidenceReady,
+			recoveryEvidenceSha256: before.evidenceSha256,
+		});
+		await recordLocalDeploymentTargetStageFailure({
+			...attempt,
+			failure: {
+				classification: "verification_evidence_pending",
+				logicalResource: "session-readiness",
+				recoveryCondition: "等待会话自然结束",
+				originalErrorReference: directory,
+			},
+		});
+		const recovered = await observe();
+		expect(recovered.recoveryEvidenceReady).toBe(true);
+		expect(recovered.evidenceSha256).not.toBe(before.evidenceSha256);
+		expect(await observe()).toEqual(recovered);
+	});
+
+	it("已提交的备注失败打开一次独立恢复条件", async () => {
+		const { directory } = await createStandardStageFixture();
+		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, "task_comment");
+		const before = await observe();
+		const executionPath = join(directory, "local-deployment-execution.json");
+		const execution = JSON.parse(await readFile(executionPath, "utf8"));
+		execution.observations.push({
+			stage: "task_comment",
+			sequence: 1,
+			kind: "command_failed",
+			observedAtEpochMs: 1,
+			attemptNumber: 1,
+			recoveryEvidenceSha256: before.evidenceSha256,
+			exitCode: 1,
+			commandOutputDirectory: directory,
+			detail: "隔离备注提交中断",
+		});
+		await writeFile(executionPath, JSON.stringify(execution));
+		const after = await observe();
+		expect(after.recoveryEvidenceReady).toBe(true);
+		expect(after.evidenceSha256).not.toBe(before.evidenceSha256);
+		expect(await observe()).toEqual(after);
+	});
+	it("会话阻塞时先保存恢复条件，在门禁解除前不启动备份", async () => {
+		const fixture = await createStandardStageFixture();
+		await writeFile(
+			fixture.reportPath,
+			JSON.stringify({
+				...fixture.current,
+				ok: false,
+				failures: ["会话尚未自然退出"],
+				blockingSessions: [{ processId: 4004 }],
+			}),
+		);
+		await expect(executeStandardLocalRedeploymentStage(fixture.directory, "state_preservation")).rejects.toThrow(
+			"会话连续性门禁",
+		);
+		expect(backupLocalRedeploymentRuntimeState).not.toHaveBeenCalled();
+		expect(
+			JSON.parse(await readFile(join(fixture.directory, "session-continuity-preflight.json"), "utf8")),
+		).toMatchObject({
+			status: "blocked",
+			blockingReasons: ["会话尚未自然退出"],
+			blockingSessions: [{ processId: 4004 }],
+			recoveryCondition: expect.any(String),
+			nextCheckAtEpochMs: expect.any(Number),
+		});
+	});
+	it("恢复时已发布同一候选，重连 CLI 前仍重新核验运行代际和会话", async () => {
+		const { directory, candidateBytes, current, reportPath, request } = await createStandardStageFixture();
+		await writeFile(
+			join(request.sourceCheckoutPath, "package.json"),
+			JSON.stringify({
+				name: "kanban",
+				bin: { kanban: "dist/cli.js" },
+			}),
+		);
+		await writeFile(join(request.distributionDirectoryPath, "cli.js"), candidateBytes);
+		await writeFile(join(directory, "runtime-state-backup-receipt.json"), "{}");
+		await mkdir(join(directory, "preserved-previous-distribution"));
+		await writeFile(join(directory, "preserved-previous-distribution/cli.js"), "原版入口");
+		await writeFile(
+			reportPath,
+			JSON.stringify({
+				...current,
+				ok: false,
+				failures: ["原生会话仍在使用当前实例"],
+				blockingSessions: [{ processId: 4004 }],
+			}),
+		);
+		await expect(executeStandardLocalRedeploymentStage(directory, "build_publication")).rejects.toThrow(
+			"会话连续性门禁",
+		);
+	});
 	it("备份恢复仅接受同一部署阶段的原生退出原件，日志时间变化不刷新预算", async () => {
 		const { directory, request } = await createStandardStageFixture();
 		const stage = "state_preservation";

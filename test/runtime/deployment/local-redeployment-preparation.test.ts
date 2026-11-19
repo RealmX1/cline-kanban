@@ -1,8 +1,10 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { describe, expect, it, onTestFinished } from "vitest";
+import { analyzeLocalDeploymentExecutions } from "../../../src/deployment/local-deployment-execution";
 import { localDeploymentExecutionManifestSchema } from "../../../src/deployment/local-deployment-execution-contract";
 import {
+	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME,
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
 } from "../../../src/deployment/local-redeployment-preparation";
@@ -22,6 +24,10 @@ describe("构建前准备标准重部署", () => {
 		const directory = join(fixture.fixtureRootDirectoryPath, "persistent-request");
 		const executor = join(fixture.fixtureRootDirectoryPath, "bound-executor.mjs");
 		await writeFile(executor, "// 冻结工具原件\n");
+		await copyFile(
+			resolve(".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs"),
+			join(fixture.fixtureRootDirectoryPath, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
+		);
 		const request = {
 			schemaVersion: 1,
 			executionId: "032609d8-7508-4bdc-b202-1d7bd7da8a14",
@@ -30,6 +36,7 @@ describe("构建前准备标准重部署", () => {
 			originatingTaskWorktreePath: repository.repositoryPath,
 			sourceCheckoutPath: repository.repositoryPath,
 			candidateSourceCommit: commit,
+			sourceValidationEvidenceFilePaths: [join(fixture.fixtureRootDirectoryPath, "upstream", "validation.json")],
 			deploymentNodeBinaryPath: process.execPath,
 			distributionDirectoryPath: join(repository.repositoryPath, "dist"),
 			runtimeIdentity: {
@@ -44,7 +51,17 @@ describe("构建前准备标准重部署", () => {
 		expect(result.specification.command).toContain("run-redeployment");
 		expect(result.specification.resumeCommand).toEqual(result.specification.command);
 		await expect(readFile(join(repository.repositoryPath, "dist/cli.js"))).rejects.toThrow();
-		expect((await readFrozenLocalRedeploymentRequest(directory)).request.candidateSourceCommit).toBe(commit);
+		expect((await readFrozenLocalRedeploymentRequest(directory)).request).toMatchObject({
+			candidateSourceCommit: commit,
+			sourceValidationEvidenceFilePaths: request.sourceValidationEvidenceFilePaths,
+		});
+		expect((await analyzeLocalDeploymentExecutions([directory])).executions[0]).toMatchObject({
+			executionId: request.executionId,
+			executionIdentityEvidenceKind: "bound_redeployment_request",
+			candidateSourceCommit: commit,
+			deploymentOutcome: "prepared",
+			operationalProgress: { sourceValidation: { evidenceReferenceCount: 1, status: "pending" } },
+		});
 		await expect(
 			prepareLocalRedeployment(
 				directory,

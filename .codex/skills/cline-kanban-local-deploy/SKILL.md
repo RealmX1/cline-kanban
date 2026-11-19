@@ -3,138 +3,39 @@ name: cline-kanban-local-deploy
 description: Project-local workflow for safely deploying this Cline Kanban running instance from an already-present local source checkout while preserving runtime state, task metadata, worktrees, dirty diffs, CLI links, PATH, and agent detection. Use in this project when asked to deploy locally, rebuild, relink, reinstall, restart, or switch the running local instance to code that is already in this checkout (the "local deploy"). Do not use for fetching, rebasing, cherry-picking, or taking new code from official upstream; use this project's cline-kanban-upstream-update skill for official source integration first.
 ---
 
-# Cline Kanban Local Deploy
+# Cline Kanban 本地部署
 
-## Core Rule
+日常部署按同一次执行推进。选定本地完整提交，准备并启动标准执行，最后读取该执行的结果。
 
-Treat a local runtime update as a state migration, not just a build. Protect three things before changing builds, links, or processes:
+## 授权与候选
 
-1. The current local source checkout and any dirty source diffs.
-2. Runtime data: config, databases, task metadata, sessions, patches, caches.
-3. Live work: worktrees, dirty diffs, running process state, and agent/tool PATH.
+- 用户主动要求执行本 skill、部署或重启本机 Kanban，即可按本次明确范围准备和启动。修改本 skill 或批准实现方案只授权相应实现。Agent 发起生产部署须先取得匹配目标、候选和影响的本次用户授权；普通继续、交接文本和自动投递不产生部署授权。
+- Agent 默认不主动请求生产重部署。只有紧急故障阻塞全部既有工作，且修复已审阅、验证并进入本地 `main` 后，才可考虑请求。
+- 默认用已存在的本地提交，核对来源工作区、实际服务 Node、canonical runner、目标运行目录和当前运行版本。保留源码 WIP；候选由执行器独立检出。官方上游集成使用 `cline-kanban-upstream-update`。
+- 已授权 local deploy 覆盖范围内的必要修复和本地部署分支提交。显式 Stop 与禁止提交、同步、推送或部署的限制继续有效。
 
-If the runtime manages tasks or worktrees, read `references/kanban-runtime-upgrades.md` before stopping or restarting it.
+## 启动标准执行
 
-默认用用户偏好的主要语言回复；如果当前项目要求中文，就用中文描述计划、风险、验证结果和后续操作。
+1. 读取[标准请求与恢复合同](../../../docs/local-redeployment-standard-entry-and-offline-recovery.md)及[会话连续性要求](references/kanban-runtime-upgrades.md)。为本次执行分配 UUID，准备持久执行目录和请求 JSON，其中保留用户授权原话和来源。已知上游原件时按[验证证据交接](references/source-validation-evidence-reuse.md)填入 `sourceValidationEvidenceFilePaths`。
+2. 用实际服务 Node 调用已经打包的执行器。准备冻结请求、归属与工具；启动交给所属命令执行或既有独立 supervisor。
 
-## Boundary
+   ```sh
+   "$DEPLOYMENT_NODE" "$INSTALLED_DEPLOYMENT_EXECUTOR" prepare-redeployment \
+     --execution-directory "$EXECUTION_DIRECTORY" --request-file "$REQUEST_FILE"
+   "$DEPLOYMENT_NODE" "$INSTALLED_DEPLOYMENT_EXECUTOR" start-redeployment \
+     --execution-directory "$EXECUTION_DIRECTORY"
+   ```
 
-This skill is only for making a running local instance use code that already exists on disk.
+3. 用会话绑定的 Kanban CLI 读取同一执行。目录指向本轮已冻结、可跨重启读取的材料。
 
-Do not fetch, pull, rebase, cherry-pick, merge, or otherwise integrate official upstream code in this skill. Do not bump version files as part of this skill. If the user asks to take a new official Cline/Kanban upstream update, use this project's `cline-kanban-upstream-update` skill first, then return here only if the running instance must be rebuilt, relinked, or restarted.
+   ```sh
+   "$KANBAN_RUNTIME_BOUND_CLI_EXECUTABLE_PATH" deployment analyze --execution-directory "$EXECUTION_DIRECTORY"
+   ```
 
-## 部署请求与确认
+   从准备起可看本次候选及验证复用数。会话暂不可交接时，私有候选可继续验证和构建，状态保全等待门禁。可恢复缺口由 supervisor 按条件接续；同目录的 `start-redeployment` 复用原执行，显式取消使用 `cancel-redeployment`。历史执行继续读取其原件，并由其冻结工具接续。
 
-- **开发者主动触发**：开发者主动要求执行本 skill，或直接要求“现在部署／重启本机 Kanban”，无需增加本节要求的额外确认；既有备份、预检与状态保护仍须执行。仅提及或要求修改本 skill 不算触发部署。
-- **部署内必要修复默认授权**：已授权 local deploy 时，Agent 可自主修复阻塞部署的测试准备、环境兼容或部署工具缺陷，创建本地部署修复分支与必要提交，再从该分支固定候选继续部署，无需再次等待提交或部署确认。不得通过跳过失败检查、削弱门禁或改写失败历史放行；本次明确禁止提交／部署的限制继续优先，扩大产品范围、改变部署目标、推送远端等仍按各自授权处理。
-- **Agent 默认不请求 redeploy**：请求本身也会阻塞开发者。只有非常紧急且阻塞所有既有工作，并且本任务全部工作完成、必要审阅与验证完成、经 `base-branch-sync` 实际进入本地 `main` 后，才可考虑请求。先核对审阅与验证结果、提交已被 `main` 包含，且候选不夹带未提交补丁；不得提前询问、预约或排队部署，也没有紧急绕过例外。单个任务完成、想验修复、刷新版本或所有 agent 闲置均不足以请求。
-- **先准备，再确认**：Agent 发起时，先完成独立验证、隔离候选构建／预检、备份与现场盘点，说明本次目标、候选 commit、影响与回滚方式，再取得针对本次部署的明确人工确认。确认前不得更新共享构建产物（包括经符号链接写入的 `dist`）、relink、重启，或启动能执行部署的后台／定时执行器；不能先启动执行器再等待确认。
-- **核查授权来源**：Agent 自行读取／调用 skill、前期范围问答、计划批准、普通“继续”、Agent 生成的 handoff 或 user-role 投递，均不等于开发者主动触发或本次部署确认。跨会话续接只复用可核查且仍匹配本次目标、候选与影响的确认；发生实质变化须重新确认。
+## 处理结果
 
-满足上述授权后，默认重建／重链当前本地 CLI，再以保留状态的参数重启；源码修改不会自动更新运行中的 build。
-
-## 持久执行、恢复与独立复盘
-
-准备本次执行时读取仓库的 [执行与复盘合同](../../../docs/local-deployment-execution-and-retrospective.md)。候选构建中的 `local-deployment-execution.js` 提供冻结 manifest、阶段原件、补证核验和复盘请求；不要再手写一套发布监督者、恢复循环或 launchd 作业。旧材料仅经 `kanban deployment analyze --execution-directory <精确持久目录>` 只读分析，不重放部署。
-
-新部署按 [标准入口与离线恢复](../../../docs/local-redeployment-standard-entry-and-offline-recovery.md) 使用 `prepare-redeployment`、`start-redeployment`。准备命令冻结请求，不构建或部署；启动命令必须已有本次真实部署授权。实现方案获批不产生新的生产部署授权。
-
-源码质量失败交回后，先读取原报告，在本地 `deployment-repair/<taskId>-<来源执行短ID>` 分支修复并提交；同一授权最多三次修复候选。准备新候选时继续使用 `prepare-redeployment`，额外传 `--repair-of-execution-directory <失败原目录> --deployment-branch <本地修复分支>`；新请求仅改变 executionId 与 candidateSourceCommit。入口核对失败、任务归属、Stop、提交祖先和分支，持久关联新旧执行；之后调用新目录的 `start-redeployment`。原目录和旧失败不重写，未变化的失败不重跑。源码验证已通过后，服务启动、PATH 或工作树的质量失败使用同一接续，并只重跑失败阶段；发布身份不匹配交回判断，不占用修复名额。超出修复范围或预算时保存证据与原因，由 Agent 明确区分产品取舍、权限缺口和机器问题。
-
-- 标准入口将私有 checkout、依赖、源码验证复用、生产构建、备份与八阶段动作交给既有宿主；日常不再编写阶段 adapter，构建前即可登记所属执行。
-- 在线且有可信来源会话时走 `task command-execution`；离线复用独立 supervisor。runtime 恢复后由已有恢复循环发现待接回材料，校验真实归属、启动材料及原生身份后接回，不重发命令。外部 CLI 无会话绑定时只返回持久结果。
-- 需要断联时先核对已登记的独立执行与原会话身份。非托管进程按连续性门禁自然退出，已保存的原生对话可在服务恢复后接回。发起会话的显式 Stop 会撤销部署，退出前把候选、执行目录和待证条件留在持久记录。
-- 同目录再次启动只接续原执行，最终结果就绪或已取消时不重跑。原生退出或真实 boot 变化后可在持久语义预算内恢复；身份未知时不额外派发。`cancel-redeployment` 与通用 Stop 共用持久撤销门禁。
-- tmux session 活着不证明服务已退出。已证无监听后才调用绑定 canonical runner，在既有 session 新建窗口，保留原 pane 与日志；同一执行已有活启动 pane 时只等待。禁止 `respawn-pane -k`，继续使用服务原有的单实例锁。
-- 接管成功时保存独立历史接受回执，绑定实际载入入口、runtime 代际及 session 代际。后续正常回收不抹掉该事实；自然 I/O 连续性仍按实际自然活动取证。
-- 每次正常成功仅交回一次轻量终审；普通阶段与机器等待只更新持久状态。真实质量失败交回 Agent 修复，保留未知与补证条件。
-
-- 隔离构建和盘点仍可在部署确认前完成；没有确认时不得用虚构授权填写 manifest 或启动部署执行器。取得本次授权后绑定任务、候选完整 SHA、产物清单摘要、实际 Node、原实例 PID/启动身份和原话来源。
-- 保留绑定候选目录；发布时先复制到可删除的暂存副本，再执行移动式 promotion。不能清理掉恢复所需的候选原件。
-- 旧 v1 执行仍使用原始 `initialize`、`prepare-owned-command` 与冻结命令，不迁移、不重放。新标准入口生成 v2 manifest，区别真实在线进程与已证离线起点；未知起点自动补证，不伪造 PID。准备规格不等于已启动，登记受理不等于部署完成。
-- 每个命令意图先落盘。发布、重启、登记结果未知时先核验同一执行、候选与产物效果；后续动作前重新核对当前资格，不覆盖原失败或原接受事实。普通命令在相同补证下有界重试；条件真实变化后自动接续，不把机器缺口交给人补。
-- 新标准阶段明确待证后立即等待，目标级预算跨执行目录和新候选保存；无关报告、会话或清理变化不取得新资格。相对链接等复制语义错误须核验实际冻结执行器的相关隔离回归，源稳定本身不能放行。
-- 默认仅清理本次预先登记且不再使用的失败副本和暂存，先持久保存证据并确认所属子进程退出；日志、冻结工具、候选、必要备份与可复用检查点保留。检查现场时使用冻结执行器的 `set-redeployment-cleanup --automatic-cleanup disabled --inspection-reason …`；设置持久化，重新开启不会恢复已删除内容。清理失败单独待证，不重启部署，也不批量处理历史目录。
-- 部署登记使用 `deployment record --execution-directory <本次目录>`；同一次执行重试返回原回执，相同 commit 的另一次部署仍使用新 executionId。若丢失原统计，只汇报可证明事实与未知项，不用当前 PDV 清单重建历史计数。
-- 清理、评论或复盘材料准备失败分别记录；先核对正式登记与实际效果，不能把附属失败改写为部署失败，也不能因此重复发布或重启。正式 promotion CLI 会处理自己的空暂存目录，调用方不再另做一次 `rmdir`。
-- 主 Agent 收到所属执行结果后，**每次自动做轻量复盘**：成功经验、重复工作、成本、风险；单次严重异常或跨次复发即深入分析。先用 `freeze-independent-findings` 固化绑定版本的独立发现，再查询已有 Issues；没有问题也保存空 findings 的复盘结论。
-- 发现的性质、主要修复仓库、证据状态、采用状态及其与来源 Task 的范围关系分别记录。重复投递不增加独立支持，Affirmation 不自动表示采纳。GitHub 的既定策略为同根因追加新证据、必要时新建；共用消费者尚未接入时保留待投递原件，不把 RVF 作为部署依赖，不阻断已完成部署。
-
-## Workflow
-
-1. Snapshot the current situation.
-   - Run `git status --short --branch`, `git log --oneline --decorate -n 12`, `git remote -v`.
-   - Identify the running process, cwd, command, and environment: use `lsof`, `ps`, and `ps eww` where appropriate.
-   - Identify global links: `readlink $(command -v <cli>)`, `npm ls -g --depth=0 <pkg>`, or equivalent.
-   - 读取部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json`(runtime home 见 `src/config/runtime-config.ts` 的 `getRuntimeHomePath()`),取其中 `deployedSourceCommit` 作为「上一次运行 build 对应的源 commit」(本次 delta 的 OLD 基线)。
-   - 若标记不存在(首次启用本流程)或字段缺失,如实记为「无基线」。不要用当前 `git rev-parse HEAD` 假冒 OLD:运行 build 是无 git SHA 的构建产物(`dist/cli.js` 经 `npm link` 软链回源 checkout),当源码已前移时当前 HEAD 即是 NEW、并非运行 build 反映的 commit;`package.json` 是纯 semver、`kanban --version` 也无法反推 commit。
-   - 同时记录 CLI/API 暴露的运行版本号(如 `kanban --version`)作为辅助信息,但版本号不替代 commit。
-
-2. Preserve rollback points before mutation.
-   - If the source checkout has local edits, preserve a patch or create a backup branch at the current commit using the repo's branch-prefix convention when known.
-   - Copy runtime state directories with timestamped names.
-   - For task/worktree runtimes, inventory every active worktree and dirty diff before shutdown.
-   - Do not rely on app metadata backups alone; preserve dirty worktree content or patch files too.
-
-3. 满足上述部署授权后，构建、安装与发布。
-   - **共享存储锁协议切换硬闸**：候选首次从 `proper-lockfile` 切换到 SQLite 内核锁，或回退到旧锁时，先按 `docs/filesystem-kernel-write-locks-and-workspace-state-snapshot-commits.md` 运行 `scripts/verify-filesystem-lock-protocol-transition-preflight.ts`。隔离候选构建可以继续；在门禁放行前，不得替换共享产物、更新 CLI 链接或让任何 runtime/CLI/hook 载入新写入协议。清单绑定本次候选、runtime home 和真实退休写入者，覆盖仍可能启动旧 hook/CLI 的会话；只有 `ready_for_protocol_switch` 才切换。未知或存活仅延后切换，保留机器可重验的持久证据，不强杀会话；回退先完成全部待投影日志。实际切换前再次核验，不能消费过期回执。
-   - 安装、构建和启动必须使用同一 Node 二进制及其对应的 npm。先从实际启动命令确认 Node 的绝对路径，再固定 PATH；不要把当前 shell 的 `node` 当成服务的 Node。本项目依赖 `better-sqlite3`：Node 22 安装的原生模块不能直接交给 Node 24 服务加载。
-   - Install dependencies using the repo's documented command.
-   - Git 依赖构建陈旧时，先核对 lockfile 的精确 commit。可从已有本地对象用 `git archive <精确 SHA>` 导出到持久隔离目录，再用服务所用 Node 构建，并只调整当前 task 的私有依赖映射；不要用依赖仓库的浮动 HEAD 或改写主仓库共享 `node_modules`。恢复回执保存来源 SHA、构建命令和隔离路径。
-   - **源码检查先自动复用**：固定候选后按 [自动复用源码验证证据](references/source-validation-evidence-reuse.md) 调用随包工具，自动发现同仓库、同完整树的 base-branch-sync／RVF 原件并校验，按本次冻结计划只补跑缺项。正常路径只读取工具摘要；不要要求 Agent 逐条人工核对证据包。没有新增同步测试记录不等于没有验证，须追溯被采用的 RVF 原件。源码目录含背景 WIP 时改用干净隔离候选，不把 WIP 纳入已测树。
-   - Build using the repo's production build command.
-   - Link or install the CLI only after a successful build.
-   - Confirm the executable path and version after link/install.
-   - Do not assume a symlinked global CLI hot-reloads source edits. Running processes keep the build they already loaded; source changes usually require rebuild plus process restart.
-
-4. Restart with state-preserving flags.
-   - **首次部署即生效**：候选须包含持久偏好实现及下述 handover 实现；新 runtime 首次启动就读取持久偏好，受支持的固定端口实例在字段和环境覆盖均缺失时默认启用，无需再部署一次。显式关闭继续有效。首次没有 hosted 基线只影响跨重启连续性的取证，不推迟功能启用；仍须先等待旧非托管会话自然结束，并在启动后核验实际模式。
-   - **会话连续性硬闸**：停止旧 runtime 前，按 `references/kanban-runtime-upgrades.md` 用 `verify-agent-session-pty-host-runtime-readiness.mjs --before-runtime-restart` 生成本次候选绑定的持久基线，并在停止前再次核验。非托管活会话默认等待自然结束；不得自动 Stop/resume 或使用中断会话的 override。旧诊断接口不存在时仅允许经旧 API 与原生进程交叉证明无活会话后首次切换，不能把它写成连续性通过。
-   - 使用 dbfe4 的 `runtime handover-restart` 契约（候选须实际包含该实现），不在部署 skill 重建 handover、离线全停或 host 回收。重启后核对原 session PID/启动身份/native ID、host 实例、持续输出及自然新输入；只读观察器不自行部署。没有 hosted 基线或自然输入时如实保留待验。禁止无条件 SIGKILL 后只查 HTTP 便宣告成功。
-   - **tmux 启动归属**：session 存在不代表服务或 pane 已退出；服务退出后原 pane 可能仍运行 shell。复用 canonical service runner 及其单实例锁，在既有 session 的新窗口启动，保留原 pane 日志；不得仅凭 session 存在就执行 `respawn-pane`，也不得用 `-k` 强制替换未知活 pane。隔离演练须覆盖「原 pane 仍活着」的启动情形。
-   - **离线恢复闭环**：发布后的启动失败须由仍存活的独立执行宿主核对监听、启动原件与 Stop，再有界尝试等价启动入口；不能把已停止 runtime 的恢复轮询当作当前可用执行者。若接手时 runtime 已离线，记录此事实，直接使用绑定候选的既有部署执行器保存阶段原件和效果核验，不伪造在线任务会话或另建调度器。
-   - **重启前硬闸**：在即将部署的源 checkout 内，用实际启动服务的 Node 绝对路径执行 `scripts/verify-notification-archive-native-runtime.mjs`。脚本只操作内存 SQLite；非零退出立即停止部署，保留旧服务。即使 `npm run build` 的预检通过，也不能省略这一步（构建 Node 与启动 Node 可能不同）。失败时用目标 Node 对应的 npm 执行 `npm rebuild better-sqlite3` 并重新预检；禁止仅换一个能通过的 Node 测试后仍用原来的不匹配 Node 启动。
-   - Before stopping the old process, check whether shutdown cleanup mutates worktrees or task state.
-   - Prefer `--skip-shutdown-cleanup` or the tool's equivalent for upgrade restarts.
-   - Preserve the user's PATH when launching via service managers. GUI/launchd/launchctl environments often miss `~/.local/bin`, nvm, asdf, pyenv, Homebrew, or custom tool directories.
-   - Expect terminal/websocket clients to disconnect during restart. Treat this as separate from worktree preservation: disconnects are normal; missing dirty diffs are not.
-   - After restart, verify HTTP/API health, CLI version, global link path, and detected agent/tool commands.
-
-5. Validate behavior and state.
-   - 永久通知档案是部署健康检查的一部分：对实际运行实例调用 `notificationIntelligence.listArchive`，要求 HTTP 成功且返回有效分页结果；500 或原生模块加载失败即部署验证失败，不能仅以首页可打开 / CLI 版本正确宣告成功。复用任务已登记的档案 API 自动验证，不读取或更改 BYOK 密钥。
-   - 源码检查消费准备阶段的 `source-validation-evidence-reuse-report.json`；已覆盖项不重跑。候选、计划或相关环境变化时由同一工具重验并只补缺项。报告不替代本次构建、ABI 或真实实例验证。
-   - Verify runtime data counts and task/worktree mappings before declaring success.
-   - For task systems, inspect a known task's worktree and session metadata, not just the card list.
-   - Confirm installed agents are detected through the runtime API/UI, not only through the interactive shell.
-
-6. 实际部署后:汇总本次运行 build 新反映的源 commit,并记录本次部署点。
-   - 门控:仅在步骤 3 的 build/link、步骤 4 的 restart、步骤 5 的 Validate 都成功后执行;若在上述任一边界中止、运行 build 并未真正切换,跳过本汇总。
-   - 取两端 commit:OLD = 步骤 1.4 读到的基线(可能为「无基线」);NEW = 本次构建所用源 checkout 的 `git rev-parse HEAD`。
-   - 逐条汇报 commit 级 delta(commit 级,不要只报 old/new 版本字符串):
-     - 正向新增:`git log --oneline --no-decorate <OLD>..<NEW>` —— 列为「本次新投入使用的 N 个源 commit」。
-     - 反向兜底:`git log --oneline --no-decorate <NEW>..<OLD>` —— 若非空说明发生回滚/分叉,标为「⚠️ M 个 commit 被回退」并如实给出方向,别只报单向。
-   - 诚实覆盖三类边界:① OLD 为「无基线」→ 报「无基线(首次/不可知),仅列出本次 NEW 所在的源 commit」;② 正向与反向区间皆空 → 报「与上次部署为同一 commit,无新增」;③ 区间命令失败(OLD 已不在本 repo,git 报 `unknown revision`)→ 退化为直接给出 OLD/NEW 两个 SHA、不做区间。
-   - 汇报后**唯一经 CLI 记录部署**:跑 `kanban deployment record --execution-directory <本次持久目录>`(在源 checkout 目录内运行,或传 `--source-checkout-path <源 checkout 绝对路径>` 与 `--new-commit <NEW SHA>`;`--project-path` 可选；绑定 execution directory 时缺省按冻结 manifest 的 `workspaceId` 定位已注册项目，旧入口仍按 source checkout 路径匹配)。该命令写/覆盖部署标记 `~/.cline/kanban/last-deployed-source-commit.json`(含 `deploymentId`(本次 executionId)、`deployedSourceCommit`(NEW)、`deployedAtIso`、`sourceCheckoutPath`、`packageVersion`),**并**创建本次部署的 Post-Deploy Verification 组:按任务提交来历匹配本次 delta,把任务归入三区(本次上线 / 早先部署已上线待核对 / 未上线或无从归属),上一组未结案任务连同勾选进度延续进新组(机制见 `docs/post-deploy-verification.md`)。NEW 即成为下一次部署的 OLD 基线。**绝不手写标记文件**——绕过 `record` 不会生成 `deploymentId`、不会创建 verification 组,同 commit 重部署时前端检测键会失效。命令返回 JSON(含本次 `deploymentId`、deploy SHA、`tasksShippedInThisDeploymentCount` 与 `tasksShippedInThisDeployment` 明细、积压与未归属计数),并入本步汇报——**重点报「本次部署上线」的那几个任务**,积压只报计数。`tasksShippedInThisDeployment` 明细与 `tasksShippedInThisDeploymentCount` 同口径,只含本次上线、待核对的任务;提交也随本次上线、但建组时已在 Done 的任务是只读展示,不在明细里,只计入 `tasksAlreadyInDoneShownReadOnlyCount`。旧执行没有 execution directory 时仍可使用原入口，但不能据此声称具备新执行的幂等恢复证据。
-   - 措辞锚在 runtime 语义:「现在运行的 build 反映了这些源 commit」,不要写成「源码集成了这些 commit」(那是 upstream-update skill 的语义)。
-   - Post-Deploy Verification 只汇报 `record` 返回 JSON 里已有的字段:计数字段(`totalVerificationTaskCount`、`tasksShippedInThisDeploymentCount`、`tasksDeployedOnlyInEarlierDeploymentsAwaitingVerificationCount`、`tasksNotYetDeployedOrUnattributableCount`、`tasksCarriedForwardWithVerificationProgressCount`、`tasksAlreadyInDoneShownReadOnlyCount`、`authoredVerificationItemCount`)合成一行;`tasksShippedInThisDeployment` 里的任务逐个列出(只列 taskId 与匹配到的 commit,不展开验证项),条数应等于 `tasksShippedInThisDeploymentCount`。**不要**再跑 `kanban deployment verification-state`,也不要逐条列出积压任务或任何验证项——积压任务会随每次部署延续进新组,逐条列出动辄上百条。用户明确要求看明细时,才按需跑 `kanban deployment verification-state --active-only --project-path <repo>`,或请用户到 Web UI 的验证面板查看。
-
-7. If something looks wiped, stop and recover from artifacts.
-   - Do not move cards, trash tasks, run cleanup, or reset worktrees again.
-   - Look for saved task patches, checkpoints, stashes, and timestamped runtime backups.
-   - Use `git apply --check` before applying any recovered patch.
-   - Restore the worktree dirty diff as uncommitted work unless the user asks for a commit.
-
-## Output Expectations
-
-Report:
-
-- 本次相对上一次部署、现在运行的 build 新反映的源 commit:逐条列出 old→new 之间新投入使用的 commit(commit 级,而非仅 old/new 版本字符串),并按三类边界如实标注(无基线 / 无新增 / 有回退)。运行版本号(semver)可附带,但不替代 commit 列表。
-- Whether any source files or version files were intentionally changed; normally this skill should not change version files.
-- Where runtime backups were saved.
-- Which service/process is now running and how it was launched.
-- 现在运行的 build 对应的源 commit(NEW),以及 `kanban deployment record` 的记录结果:部署标记文件 `~/.cline/kanban/last-deployed-source-commit.json` 的更新情况(供下次部署作 OLD 基线)、本次 `deploymentId`、本次部署上线的任务(逐个列出),以及本次 Post-Deploy Verification 组的一行计数摘要(验证任务总数 / 本次上线 / 早先已上线待核对 / 未上线或无从归属 / 延续 / 已在 Done 只读展示 / authored 验证项数,均取自 `record` 输出,积压不逐条列出)。
-- Validation commands and results.
-- 源码验证工具的复用／补跑／待证计数及持久报告路径；未出现缺口时不逐条展开原始记录或完整测试日志。
-- Any residual risk, especially tasks that lost live processes and need manual resume.
-
-Never say uncommitted work is safe just because task metadata was restored. Verify the actual worktree diff.
+- 质量失败保留原件。在原授权内于 `deployment-repair/<taskId>-<来源执行短ID>` 修复、验证并提交，再带 `--repair-of-execution-directory` 和 `--deployment-branch` 准备新候选。同一授权最多三次修复候选；其他接续均使用原执行目录。
+- 运行验收后，登记用同一 `executionId` 补齐 marker、PDV 组和回执。执行器核对已有登记效果，清理、任务备注和终审交回的结果单独记录。默认只清理本次登记且确认退出的可重建暂存与失败副本；保留候选、原件和检查点。需要保留现场时用冻结执行器的 `set-redeployment-cleanup --automatic-cleanup disabled --inspection-reason …`。
+- 用本次登记回执汇报当前服务版本、上次到本次的已部署 commit、上线任务和 PDV 计数。旧提交对象不可读时保留两端 SHA；反向区间非空时单列回退。缺失的历史统计保持未知。完成后读原执行终审材料并固化轻量复盘。详见[执行与复盘合同](../../../docs/local-deployment-execution-and-retrospective.md)。
