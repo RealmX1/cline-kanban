@@ -144,6 +144,17 @@ describe("通知领取失败后的去重边界", () => {
 		expect(deliveryMocks.playNotificationSound).toHaveBeenCalledTimes(1);
 	});
 
+	it.each([
+		["chime", 1],
+		["off", 0],
+	] as const)("声音模式 %s 保留通知横幅且不请求语音合成", async (speechMode, expectedChimes) => {
+		deliveryMocks.getSettings.mockResolvedValue({ settings: { speechMode } });
+		await renderEvents([event]);
+		expect(browserNotification).toHaveBeenCalledTimes(1);
+		expect(deliveryMocks.playNotificationSound).toHaveBeenCalledTimes(expectedChimes);
+		expect(deliveryMocks.playSummarySpeech).not.toHaveBeenCalled();
+	});
+
 	it("领取后的语音与回退声音失败不释放去重，不重复已发起的付费操作", async () => {
 		await renderEvents([]);
 		deliveryMocks.playSummarySpeech.mockRejectedValueOnce(new Error("语音播放失败"));

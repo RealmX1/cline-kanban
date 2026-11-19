@@ -4,6 +4,8 @@
 
 锁数据库位于 OS 账号持久 home 下的专用目录，不随 `HOME` 覆盖或 workspace 删除而改变。路径经过可解析父链的 `realpath`、NFD，并反复做大写展开和小写转换直到稳定，避免 `Σ/ς`、`ß/ss`、`ẞ/ss`、`ﬀ/ff` 等实际文件系统别名取得两把锁；大小写敏感卷上仅大小写不同的资源会保守串行。不能拿会随原子替换改变的目标文件 inode 作为锁身份，也不能在线删除或替换锁数据库。
 
+锁专项测试用 `LockedFileSystem.forIsolatedTestDirectory` 显式绑定夹具根目录。父子进程共享该绑定，目标与显式锁路径须位于根目录内。锁数据库固定在根目录直属的 `filesystem-kernel-write-locks` 中，供工作目录删除重建后继续使用。夹具等所有自有进程退出和所有锁句柄关闭后清理。
+
 `board.json`、`sessions.json`、`meta.json` 保留为兼容投影。完整快照日志持久提交后即为已提交状态，每次持久修改都有唯一 `workspaceStateSnapshotCommitId`，包括不增加业务 revision 的身份观察。投影暂时失败不撤销已提交日志；读取优先提供日志中的完整快照，后续写入先恢复投影，再检查 `expectedRevision`，不重做业务回调。
 
 只修改 sessions 或原生身份时，在同一锁内保留权威 board 原始字节，完整日志及恢复投影均沿用它。不能把解析后的 board 重新序列化，因为旧字段、键序或空白变化会破坏关系账本核对悬挂批次的文件指纹。

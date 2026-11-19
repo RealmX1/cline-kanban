@@ -41,7 +41,7 @@ describe("LockedFileSystem with a slow live lock holder", () => {
 		const pendingLockWaiterSettlements: Promise<LockWaiterSettlement>[] = [];
 		try {
 			const lockedFilePath = join(tempDir.path, "state.json");
-			const lockedFileSystem = new LockedFileSystem();
+			const lockedFileSystem = await LockedFileSystem.forIsolatedTestDirectory(tempDir.path);
 			let markSlowHolderAcquired: () => void = () => {};
 			const slowHolderAcquired = new Promise<void>((resolve) => {
 				markSlowHolderAcquired = resolve;
@@ -52,7 +52,7 @@ describe("LockedFileSystem with a slow live lock holder", () => {
 					releaseSlowHolder = resolve;
 				});
 			});
-			await slowHolderAcquired;
+			await Promise.race([slowHolderAcquired, slowHolder]);
 			const slowHolderAcquiredAtMs = performance.now();
 
 			const lockEventOrder: string[] = [];

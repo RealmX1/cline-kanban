@@ -12,6 +12,7 @@ import {
 	reconcileCodexPromptSubmissionAcceptance,
 	submittedPromptSha256,
 } from "../../../src/agent-session-history/codex-prompt-submission-acceptance-reconciliation";
+import { readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource } from "../../../src/agent-session-history/codex-transcript-read-source";
 import { createCodexUserQuestionPendingAndHistoryFileChangeCache } from "../../../src/agent-session-history/codex-user-question-pending-and-history-file-change-cache";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../../../src/agent-session-history/codex-user-question-transcript-recovery";
 import { probePersistedAgentTranscriptLastConversationProgress } from "../../../src/agent-session-history/persisted-agent-transcript-last-conversation-progress-probe";
@@ -28,6 +29,7 @@ import {
 	createEmptyTaskUserPromptStatisticsCursor,
 	readTaskUserPromptStatisticsTranscriptIncrement,
 } from "../../../src/daily-work-progress-statistics/task-user-prompt-statistics-transcript-reader";
+import { buildKanbanRuntimeProcessSelfResourceSamplePayload } from "../../../src/diagnostics/kanban-runtime-process-self-resource-sample-monitor";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -214,6 +216,38 @@ async function relocateTranscriptWithTrustedNativePointer(f: Awaited<ReturnType<
 }
 
 describe("Codex 压缩历史的所有只读消费者", () => {
+	it("运行时资源摘要按触发方归因冷读，后续签名和分页复用快照", async () => {
+		const signatureFixture = await fixture("zstandard");
+		const paginationFixture = await fixture("zstandard");
+		const sample = () =>
+			buildKanbanRuntimeProcessSelfResourceSamplePayload({
+				memoryUsage: process.memoryUsage(),
+				resourceUsage: process.resourceUsage(),
+				previousResourceUsage: null,
+				processUptimeSeconds: process.uptime(),
+				liveSessionWithOsProcessCount: 0,
+			});
+		const previous = readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource();
+		const usage = createAgentConversationModelTokenUsageIncrementalReader();
+		const signature = await usage.readTranscriptFileSignature(signatureFixture.path, nativeSessionId);
+		expect(signature).not.toBeNull();
+		expect(await usage.readTranscriptFileSignature(signatureFixture.path, nativeSessionId)).toBe(signature);
+		expect((await loadTaskConversationHistoryPage(paginationFixture.input)).availability).toBe("available");
+		const current = readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource();
+		expect(sample()).toMatchObject({
+			sampleIntervalMs: 300_000,
+			cumulativeCodexCompressedTranscriptCacheMetricsByReadSource: current,
+		});
+		for (const readSource of ["usage_signature_check", "history_pagination"] as const) {
+			expect(current[readSource].newDecodeCount - previous[readSource].newDecodeCount).toBe(1);
+			expect(current[readSource].cacheHitCount).toBeGreaterThan(previous[readSource].cacheHitCount);
+			expect(
+				current[readSource].successfulSnapshotWrittenBytes - previous[readSource].successfulSnapshotWrittenBytes,
+			).toBe(Number(signature?.split(":")[0]));
+		}
+		expect(current.other).toEqual(previous.other);
+	});
+
 	it.each(["jsonl", "zstandard"] as const)("%s：默认查询保留尾部半行之前的完整历史", async (format) => {
 		const f = await fixture(format);
 		const nativePath = format === "jsonl" ? f.path : `${f.path}.zst`;

@@ -97,7 +97,7 @@ export async function assertNativeTranscriptFilePrefixSnapshot(
 			(await hashTranscriptFilePrefix(handle, snapshot.endByteOffset)) !== snapshot.prefixSha256
 		)
 			throw new NativeTranscriptSnapshotInvalidError();
-		const current = await openCodexTranscriptReadSource(path);
+		const current = await openCodexTranscriptReadSource(path, undefined, "history_pagination");
 		try {
 			if (
 				(await current.stat()).size < snapshot.endByteOffset ||

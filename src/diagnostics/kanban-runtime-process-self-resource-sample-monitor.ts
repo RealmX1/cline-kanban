@@ -6,6 +6,7 @@
 //   - 进程内 Cline SDK 会话唯一可见的资源面：它与 Kanban 同进程，无法按 OS 进程拆分，只能从这条基线的
 //     heap / CPU 走势间接观察（配合同一条记录里的活跃会话数）。
 
+import { readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource } from "../agent-session-history/codex-transcript-read-source";
 import { appendDiagnosticEventToRotatingJsonlJournal } from "./rotating-jsonl-diagnostic-event-journal";
 
 const KANBAN_RUNTIME_PROCESS_SELF_RESOURCE_SAMPLE_INTERVAL_MS = 5 * 60_000;
@@ -39,6 +40,8 @@ export function buildKanbanRuntimeProcessSelfResourceSamplePayload(input: {
 			previousCpuMicrosecondsTotal === null ? null : (cpuMicrosecondsTotal - previousCpuMicrosecondsTotal) / 1e6,
 		processUptimeSeconds: Math.round(input.processUptimeSeconds),
 		liveSessionWithOsProcessCount: input.liveSessionWithOsProcessCount,
+		cumulativeCodexCompressedTranscriptCacheMetricsByReadSource:
+			readCumulativeCodexCompressedTranscriptCacheMetricsByReadSource(),
 		sampleIntervalMs: KANBAN_RUNTIME_PROCESS_SELF_RESOURCE_SAMPLE_INTERVAL_MS,
 	};
 }
