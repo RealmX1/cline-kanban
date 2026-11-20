@@ -1,5 +1,8 @@
 # Codex profiles、自动共享与原进程采用
 
+> 历史实现记录。当前产品路径与旧数据的保全方式见 [Codex profiles 退役](codex-profile-retirement-and-storage-preservation.md)。
+
+
 每代看板 Codex 原生进程持有独立、持久的 `codexConfigurationWriterBinding`。运行时重启接管同一绑定；原生进程替换时创建新的 writer，并保留旧副本与尚未合并的本地决定。旧共享目录只初始化一次，之后不再刷新其 `config.toml`，避免最终检查与原子替换之间覆盖原生 `/hooks` 保存结果。
 
 配置目录在运行时 HOME 下的 `codex-configuration-writer-bindings-and-sync/writers/<writerId>/configuration-home`。绑定清单记录配置来源、历史和 SQLite 目录的物理身份、启动基线摘要与共享版本。`sessions`、`archived_sessions`、`thread-writer-locks` 使用核验归属的目录桥接；SQLite 继续使用原目录，认证仍引用原来源。配置文件本身必须是普通文件。历史查询、fork/resume、原生写锁与存储迁移继续依据历史归属，不从配置副本反推另一段对话。

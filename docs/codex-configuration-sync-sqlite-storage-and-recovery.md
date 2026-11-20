@@ -1,5 +1,8 @@
 # 配置同步 SQLite 存储与恢复
 
+> 历史实现记录。当前产品路径与旧数据的保全方式见 [Codex profiles 退役](codex-profile-retirement-and-storage-preservation.md)。
+
+
 配置同步的权威状态位于 runtime HOME 下的 `codex-configuration-writer-bindings-and-sync/codex-configuration-sync.sqlite`。`better-sqlite3` 仅在专用 worker 内执行配置同步 SQL；数据库使用 WAL、`synchronous=FULL`、5 秒 SQLite 锁等待及独立只读连接。原有跨进程目录写锁仍保护锁外文件和原生协议取证，SQL 事务只覆盖持久提交。
 
 ## 读取边界

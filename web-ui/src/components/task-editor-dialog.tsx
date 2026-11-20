@@ -116,9 +116,7 @@ const DEFAULT_PRIMARY_START_ACTION: TaskCreateStartAction = "start";
  * 仅在 create 模式下用于二次确认；edit 模式关闭是存草稿而非丢弃，不走此守卫。
  */
 export interface TaskCreateFormSnapshot {
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	prompt: string;
 	taskDescription?: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
@@ -155,9 +153,7 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 		current.imageCount !== baseline.imageCount ||
 		current.startInPlanMode !== baseline.startInPlanMode ||
 		current.taskAgentPermissionMode !== baseline.taskAgentPermissionMode ||
-		current.codexConfigurationProfileId !== baseline.codexConfigurationProfileId ||
 		current.codexReasoningEffortOverride !== baseline.codexReasoningEffortOverride ||
-		current.codexConfigurationPermissionSelectionSource !== baseline.codexConfigurationPermissionSelectionSource ||
 		current.taskConversationMode !== baseline.taskConversationMode ||
 		current.autoReviewEnabled !== baseline.autoReviewEnabled ||
 		current.autoReviewMode !== baseline.autoReviewMode ||
@@ -251,12 +247,8 @@ export function TaskEditorDialogForm({
 	onStartInPlanModeChange,
 	taskAgentPermissionMode,
 	onTaskAgentPermissionModeChange,
-	codexConfigurationProfileId,
 	codexReasoningEffortOverride,
-	codexConfigurationPermissionSelectionSource,
-	onCodexConfigurationProfileIdChange,
 	onCodexReasoningEffortOverrideChange,
-	onCodexConfigurationPermissionSelectionSourceChange,
 	taskConversationMode,
 	onTaskConversationModeChange,
 	autoReviewEnabled,
@@ -321,12 +313,8 @@ export function TaskEditorDialogForm({
 	onStartInPlanModeChange: (value: boolean) => void;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
-	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
 	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
-	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	taskConversationMode: RuntimeTaskConversationMode;
 	onTaskConversationModeChange: (value: RuntimeTaskConversationMode) => void;
 	autoReviewEnabled: boolean;
@@ -665,9 +653,7 @@ export function TaskEditorDialogForm({
 		images,
 		startInPlanMode,
 		taskAgentPermissionMode,
-		codexConfigurationProfileId,
 		codexReasoningEffortOverride,
-		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
 		autoReviewMode,
@@ -1399,9 +1385,7 @@ export function TaskEditorDialogForm({
 		imageCount: images.length,
 		startInPlanMode,
 		taskAgentPermissionMode,
-		codexConfigurationProfileId,
 		codexReasoningEffortOverride,
-		codexConfigurationPermissionSelectionSource,
 		taskConversationMode,
 		autoReviewEnabled,
 		autoReviewMode,
@@ -1807,9 +1791,7 @@ export function TaskEditorDialogForm({
 														images,
 														startInPlanMode,
 														taskAgentPermissionMode,
-														codexConfigurationProfileId,
 														codexReasoningEffortOverride,
-														codexConfigurationPermissionSelectionSource,
 														autoReviewEnabled,
 														autoReviewMode,
 														branchRef,
@@ -1970,18 +1952,9 @@ export function TaskEditorDialogForm({
 											startInPlanModeDisabled={startInPlanModeDisabled}
 											taskAgentPermissionMode={taskAgentPermissionMode}
 											onTaskAgentPermissionModeChange={onTaskAgentPermissionModeChange}
-											codexConfigurationProfileId={codexConfigurationProfileId}
 											codexReasoningEffortOverride={codexReasoningEffortOverride}
 											onCodexReasoningEffortOverrideChange={onCodexReasoningEffortOverrideChange}
 											onCodexReasoningEffortValidationErrorChange={setCodexReasoningEffortValidationError}
-											onCodexConfigurationProfileIdChange={onCodexConfigurationProfileIdChange}
-											codexConfigurationPermissionSelectionSource={
-												codexConfigurationPermissionSelectionSource
-											}
-											onCodexConfigurationPermissionSelectionSourceChange={
-												onCodexConfigurationPermissionSelectionSourceChange
-											}
-											automaticallyChooseDefaultProfile={taskEditorMode !== "edit"}
 											additionalSettings={commonTaskEditorSettings}
 										/>
 									}
@@ -2031,7 +2004,6 @@ export function TaskEditorDialogForm({
 										{ key: "plan_mode", label: "Plan Mode" },
 										{ key: "conversation_mode", label: "会话模式" },
 										{ key: "permissions", label: "Agent 权限" },
-										{ key: "codex_configuration_profile", label: "Codex profile" },
 										{ key: "auto_review_enabled", label: "自动评审" },
 										{ key: "auto_review_mode", label: "收尾方式" },
 										{ key: "relations", label: "关系建模" },

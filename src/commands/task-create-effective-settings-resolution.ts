@@ -65,7 +65,6 @@ export interface TaskCreateResolvedSetting<TValue> {
 
 export interface TaskCreateRequestedSettings {
 	modelId?: string;
-	codexConfigurationProfileId?: string;
 	requestedAgentSessionTransport?: RuntimeAgentSessionTransport;
 	title?: string | undefined;
 	prompt: string;
@@ -232,15 +231,8 @@ export async function resolveTaskCreateEffectiveSettings(
 	if (requested.modelId && !["claude", "codex", "cursor", "kimi", "omp"].includes(effectiveAgentId))
 		throw new Error("所选 Agent 暂不支持单次模型覆盖。");
 	const defaultModel = await readCreationAgentDefaultModelWithoutBlockingBacklogCard(
-		() =>
-			readCreationAgentDefaultModel(
-				effectiveAgentId,
-				input.workspaceRepoPath,
-				requested.codexConfigurationProfileId,
-				requested.modelId,
-			),
+		() => readCreationAgentDefaultModel(effectiveAgentId, input.workspaceRepoPath, requested.modelId),
 		{
-			codexConfigurationProfileId: requested.codexConfigurationProfileId,
 			taskAgentSessionInitialization: requested.taskAgentSessionInitialization,
 		},
 	);
@@ -250,11 +242,7 @@ export async function resolveTaskCreateEffectiveSettings(
 		agentSelectionSource: requested.agentId ? "explicit_request" : "workspace_config_default",
 		taskAgentPermissionMode: requested.taskAgentPermissionMode,
 		modelId: requested.modelId,
-		defaultCodexConfigurationProfileId: defaultModel.codexConfigurationProfileId,
 		defaultModelId: defaultModel.modelId,
-		codexConfigurationProfileId: requested.codexConfigurationProfileId,
-		codexConfigurationPermissionSelectionSource:
-			requested.codexConfigurationProfileId && !requested.taskAgentPermissionMode ? "profile" : "task_local",
 		requestedAgentSessionTransport: requested.requestedAgentSessionTransport,
 		defaultSessionTransport:
 			effectiveAgentId === "omp" ? runtimeConfig.ompAgentSessionTransportForNewTasks : undefined,

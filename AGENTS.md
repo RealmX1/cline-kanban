@@ -64,7 +64,7 @@ npm run build && npm run dogfood -- --project <repo> --port auto   # 验证打�
 - **任务命令和普通启动不得隐式登记项目**：仅解析已有归属；Agent 显式新增须有路径预览、用户授权原话及来源。重复项目先保全迁移任务与会话，再注销索引，禁止用永久删除代替合并。见 `docs/duplicate-project-registration-and-task-preserving-consolidation.md`。
 
 - **独立 PTY host 的偏好与实际归属分开**：关闭新托管仍须接回存量；只读诊断不能抢 controller，Codex 控制宿主不等于 PTY 独立保活。部署前逐会话核验，非托管活会话默认等自然结束。见 `docs/agent-session-pty-host-persistent-enablement-and-deployment-continuity.md`。
-- **Codex 插件共享安装按实际能力默认启用**：版本只作诊断，不能把已测版本写成白名单。隔离核验的暂时缺证须持久重试；确证不兼容才用完整独立目录，禁止共享插件与私有安装记录混用。见 `docs/codex-source-shared-plugin-installation-and-native-update-coordination.md`。
+- **Codex 原生配置和会话存储分开**：看板桥接用户原生配置，保持历史与 SQLite 隔离。旧 writer 只作兼容与证据保全，禁止按目录年龄清除。见 [profiles 退役](docs/codex-profile-retirement-and-storage-preservation.md)。
 - **facet 模型**：`turnOwner` / `liveness` / `userTurnKind` 三 facet 是写时主真相，legacy `state` 是纯派生投影。① 绝不手写 `state:` 进 summary patch（一切写入走终端与 ACP 的 `updateSummary` 漏斗）；② 每次 facet 写入必须是完整三元组（残缺的会在广播/持久化边界的 Zod superRefine 炸开）；③ 消费者经 `resolveSessionFacets` 读 facet，决策**绝不**读 `summary.state`。全文：`docs/session-facet-model.md`。
 - **模态待答判据**集中在 `session-activity.ts` 的 `MODAL_USER_DECISION_TURN_KINDS`：有意只收 question / plan_review / permission / needs_input，**绝不含 `review`**——review 是程序化投递的目标态，算进去 = 每次投递让位、永不落地。
 - **卡片历史时间与进程待命时间分开**：药丸只读 `lastAgentConversationUserHandoffObservation` / `lastEffectiveAgentConversationActivityObservation`；恢复进程不刷新历史交棒。`currentAgentProcessUserTurnIdleRetentionStarted` 只驱动本代回收，旧四字段仅兼容读，缺可信历史就隐藏。全文：`docs/agent-output-timestamps.md`。

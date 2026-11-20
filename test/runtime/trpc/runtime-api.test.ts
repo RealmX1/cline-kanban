@@ -1312,16 +1312,29 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 		});
 
 		it.each([
-			{ sessionTransport: "pty_terminal", isCurrentMain: false },
-			{ sessionTransport: "acp_stdio_subprocess", isCurrentMain: false },
-			{ sessionTransport: "pty_terminal", isCurrentMain: true },
+			{ sessionTransport: "pty_terminal", isCurrentMain: false, isLegacyMain: false },
+			{ sessionTransport: "acp_stdio_subprocess", isCurrentMain: false, isLegacyMain: false },
+			{ sessionTransport: "pty_terminal", isCurrentMain: true, isLegacyMain: false },
+			{ sessionTransport: "pty_terminal", isCurrentMain: true, isLegacyMain: true },
 		] as const)(
-			"$sessionTransport 冷恢复后把已保存答案投回自身原生对话，已接任main=$isCurrentMain",
-			async ({ sessionTransport, isCurrentMain }) => {
+			"$sessionTransport 冷恢复后投递原生答案，当前主会话=$isCurrentMain 旧主会话=$isLegacyMain",
+			async ({ sessionTransport, isCurrentMain, isLegacyMain }) => {
 				const { persisted, terminalManager, acpService, workspaceScope, api, spawnPty } = createColdRuntimeFixture(
 					sessionTransport,
 					isCurrentMain,
 				);
+				if (isLegacyMain) {
+					const board = await workspaceStateMocks.loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const task = board.columns[0].cards[0];
+					task.mainTaskConversationSessionId = undefined;
+					task.taskMainSessionHandover = undefined;
+					task.codexConfigurationPermissionSelectionSource = "profile";
+					task.codexReasoningEffortOverride = undefined;
+					task.codexReasoningEffortFollowsNativeConfiguration = true;
+					persisted.taskId = task.id;
+					persisted.taskConversationSessionMetadata = undefined;
+					terminalManager.hydrateFromRecord(JSON.parse(JSON.stringify({ [persisted.taskId]: persisted })));
+				}
 				const nativeIdentity = persisted.agentNativeConversationSessionIdentity;
 				agentRegistryMocks.resolveAgentCommand.mockReturnValue({
 					agentId: persisted.agentId,
@@ -1460,13 +1473,24 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 					} else {
 						expect(startPty).toHaveBeenCalledWith(
 							expect.objectContaining({
-								workspaceTaskId: "task-1",
 								cwd: "/tmp/worktree",
 								taskAgentPermissionMode: "ask_for_every_tool_use",
 								startInPlanMode: undefined,
-								terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "collaborator-model" },
+								...(isLegacyMain
+									? {
+											taskId: "task-1",
+											usesLegacyCodexProfilePermissions: true,
+											codexReasoningEffortFollowsNativeConfiguration: true,
+										}
+									: {
+											workspaceTaskId: "task-1",
+											terminalAgentModelOverrideSettings: {
+												agentId: "codex",
+												modelId: "collaborator-model",
+											},
+										}),
 							}),
-							expect.any(String),
+							isLegacyMain ? "durable_record_rebuilt_resume" : expect.any(String),
 						);
 						expect(terminalManager.getSummary(persisted.taskId)?.agentNativeConversationSessionIdentity).toEqual(
 							nativeIdentity,

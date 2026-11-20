@@ -9,7 +9,6 @@ import {
 	notifyAgentSessionPtyHostDiagnosticsUpdated,
 } from "@/runtime/agent-session-pty-host-diagnostics-query";
 import { reloadBrowserIfServedBuildAssetsChanged } from "@/runtime/browser-build-asset-refresh";
-import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { observeDailyWorkProgressStatisticsUpdated } from "@/runtime/daily-work-progress-statistics-invalidation-events";
 import {
 	isWebSocketClosedBecauseKanbanRuntimeIsHotRestarting,
@@ -666,7 +665,6 @@ export function useRuntimeStateStream(
 					),
 				);
 				notifyAgentSessionPtyHostDiagnosticsUpdated();
-				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
 				detachTaskVisualizationStreamSender = attachTaskVisualizationRuntimeStreamSender(
 					requestedWorkspaceForConnection,
 					(message) => {
@@ -697,10 +695,6 @@ export function useRuntimeStateStream(
 					}
 					if (payload.type === "agent_session_pty_host_diagnostics_updated") {
 						notifyAgentSessionPtyHostDiagnosticsUpdated();
-						return;
-					}
-					if (payload.type === "codex_configuration_sync_updated") {
-						notifyCodexConfigurationSyncUpdated();
 						return;
 					}
 					if (payload.type === "daily_work_progress_statistics_updated") {

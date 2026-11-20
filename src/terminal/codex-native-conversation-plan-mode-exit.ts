@@ -176,7 +176,7 @@ export async function exitCodexNativeConversationPlanMode(input: {
 						return resultWhenModeExitCannotBeConfirmed("原生状态尚未确认退出计划模式，请重试以读取当前状态。");
 					return { status: "exited" };
 				},
-				{ socketPath: endpoint.socketPath, writerBinding: summary.codexConfigurationWriterBinding ?? undefined },
+				{ socketPath: endpoint.socketPath },
 			);
 		} catch (error) {
 			if (connectionAttempt === 1)

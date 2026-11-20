@@ -193,7 +193,6 @@ export function createSideSessionCreationDraft(
 			images: [],
 			creationReason: "用户在共享创建工作台中创建侧会话",
 			taskAgentPermissionMode: "bypass_all_permission_prompts",
-			codexConfigurationPermissionSelectionSource: "task_local",
 		},
 	};
 }

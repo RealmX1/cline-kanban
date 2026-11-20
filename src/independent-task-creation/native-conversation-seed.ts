@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
 	inferCodexHomeDirectoryPathFromTranscriptPath,
 	resolveRecordedCodexConversationHome,
+	resolveVerifiedSeparateCodexSqliteHomeForAuxiliaryProcess,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import {
@@ -24,14 +25,19 @@ export async function freezeIndependentTaskConversationSeed(summary: RuntimeTask
 	if (!identity || !summary.workspacePath)
 		return { seed: null, unavailableReason: "缺少可靠原生会话身份或工作目录，无法完整继承。" };
 	if (identity.sourceAgentId === "codex") {
+		const transcriptHome = resolveRecordedCodexConversationHome({
+			...summary,
+			transcriptPath: identity.transcriptPath,
+		});
 		return await withCodexAppServerRequestConnection(
 			{
 				workingDirectory: summary.workspacePath,
 				codexConversationStorageNativeSessionId: identity.nativeSessionId,
-				codexConversationStorageHomeDirectoryPath: resolveRecordedCodexConversationHome({
-					...summary,
-					transcriptPath: identity.transcriptPath,
-				}),
+				codexConversationStorageHomeDirectoryPath: transcriptHome,
+				codexSqliteHomeDirectoryPath: await resolveVerifiedSeparateCodexSqliteHomeForAuxiliaryProcess(
+					transcriptHome,
+					summary.codexRetiredWriterResumeSettings ?? summary.codexConfigurationWriterBinding,
+				),
 			},
 			async (port) => {
 				const turns = await readCodexConversationTurns(port, identity.nativeSessionId);

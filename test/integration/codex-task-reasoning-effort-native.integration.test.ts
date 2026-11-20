@@ -1,8 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readCodexConfigurationSyncStore } from "../../src/codex-configuration-sync/codex-configuration-sync-store";
-import { prepareCodexConfigurationWriterBinding } from "../../src/codex-configuration-sync/codex-configuration-writer-binding";
+import { prepareManagedCodexConversationStorageHome } from "../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { inspectCodexNativeSessionControlHostArguments } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { withCodexAppServerRequestConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import { prepareAgentLaunch } from "../../src/terminal/agent-session-adapters";
@@ -26,19 +25,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY)(
 			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 			vi.stubEnv("CODEX_HOME", sourceHome);
 			vi.stubEnv("CODEX_SQLITE_HOME", sourceHome);
-			const binding = await prepareCodexConfigurationWriterBinding({
-				purpose: "native_session",
-				storageHome: sourceHome,
-				workspaceId: "effort-fixture",
-				conversationSessionId: "abcde",
-				runtimeSessionIncarnationId: "00000000-0000-4000-8000-000000000001",
-				sessionReasoningEffortOverride: effort,
-			});
+			const managedHome = await prepareManagedCodexConversationStorageHome(sourceHome);
 			const environment = fixture.createIsolatedChildProcessEnvironment({
-				CODEX_HOME: binding.configurationHomeDirectoryPath,
-				CODEX_SQLITE_HOME: binding.sqliteHomeDirectoryPath,
+				CODEX_HOME: managedHome,
+				CODEX_SQLITE_HOME: managedHome,
 			});
-			const fields = (await readCodexConfigurationSyncStore()).writers[binding.writerId].launchBaselineFields;
 			const launch = await prepareAgentLaunch({
 				taskId: "abcde",
 				workspaceId: "effort-fixture",
@@ -48,7 +39,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY)(
 				cwd: fixture.fixtureRootDirectoryPath,
 				prompt: "",
 				env: environment,
-				codexConfigurationProfileLaunchFields: fields,
+				codexConversationStorageHomeDirectoryPath: managedHome,
 				codexReasoningEffortOverride: effort,
 			});
 			try {

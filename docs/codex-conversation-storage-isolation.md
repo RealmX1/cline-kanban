@@ -16,10 +16,10 @@
 - 全新上下文使用专用目录。显式复用、从旧会话分叉以及旧 Task 续接，先跟随来源目录；它们可以在之后停止时受控迁移。
 - 主会话、侧会话、历史选择器、独立任务种子及 RVF 原生历史操作都传递存储目录。summary 的 `codexConversationStorageHomeDirectoryPath` 记录实际启动目录；原生转录路径能证明更近一次 fork 的实际目录时，使用该路径。正式迁移记录决定最终权威副本。
 - 子进程清掉 `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`，父进程不变。新目录同时设置 `CODEX_HOME`、`CODEX_SQLITE_HOME` 和 CLI `sqlite_home`；旧目录不重写其既有 SQLite 选择。
-- 全新上下文开局准备时复制 `config.toml` 和现有 `*.config.toml`，保留模型、MCP、插件设置，把 SQLite 指到专用目录。主配置、外置及内联 profile 的指令、compact prompt、模型目录和 `agents.<role>.config_file` 等已知文件引用保留原解析基址；角色配置仍引用原文件，其内部相对路径继续由原文件位置解释。已运行进程不会因刷新快照而重启。
-- 现有 `auth.json`、`.credentials.json`、`AGENTS.md`、`skills`、`plugins`、`rules`、`hooks.json`、`prompts`、`marketplaces` 用软链共享。原用户配置不被改写。共享登录入口意味着从专用目录执行登录操作可能更新同一账号文件；它不是独立账号。
-- 配置刷新保留专用目录已保存的 `hooks.state`，并把共享 `hooks.json`、复制的主配置及外置 profile 的文件来源键映射到专用目录；旧内联 profile 同样处理。来源键沿用 Codex 的真实 home 路径，再附加文件名，因此 home 或父目录为软链时仍能匹配；不对共享文件本身取真实路径，账号绑定与共享入口校验仍使用原有规则。已有本目录记录优先，缺失项继承原目录记录，任一明确禁用继续有效。只映射已共享或复制的文件，不映射其他项目或插件身份，也不重新计算 `trusted_hash`；新增或修改的定义仍由 Codex 原生信任门禁审查。
-- 语义相同的配置不重写，原生保存的格式和注释也保留。需要更新时，在现有目录锁内合并信任记录并原子替换；检测到写入前的并发变更会重读，最多三次。持续冲突或目标信任状态无法解析时保留现场并返回明确错误，下次启动可重试；不把坏配置覆盖为来源快照。
+- 看板启动时桥接原生 config.toml、hooks.json 与已存在的原生 *.config.toml，配置由 Codex 读取和保存。配置相对文件引用通过本次启动的绝对路径参数保留原基址，SQLite 参数仍指向已核验的会话存储目录。
+- 认证、skills、插件等共享入口仍按物理来源核验。原生设置的保存作用于原文件，Kanban 不运行配置同步、逐进程 writer、配置广播或自动替换。看板原生缓存随绑定目录复用。
+- hooks 信任只映射同一来源配置文件的身份。原生保存的哈希与禁用决定逐字保留，修改后的 hook 由原生门禁重新审查。
+- 原有持久目录中的配置快照转换前归档。旧 writer 清单只用于核验历史和 SQLite 归属，旧输入草稿按原生会话核对后保全，不回放可能已提交的输入。退役及历史备份边界见 [profiles 退役](codex-profile-retirement-and-storage-preservation.md)。
 - 专用目录保存来源标记，拒绝混用第二个账号目录。显式 `cli_auth_credentials_store="keyring"` 暂不支持配置桥接，会拒绝新启动。系统 OAuth/keyring 的实际可用性仍由原生客户端决定。
 - 配置可以共享软链；可写的会话、数据库、WAL 和 SHM 路径不允许软链逃逸回原库。
 

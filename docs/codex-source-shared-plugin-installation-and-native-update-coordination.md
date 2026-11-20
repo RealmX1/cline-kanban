@@ -1,5 +1,8 @@
 # Codex 同源插件安装与原生更新协调
 
+> 历史实现记录。当前产品路径与旧数据的保全方式见 [Codex profiles 退役](codex-profile-retirement-and-storage-preservation.md)。
+
+
 新 writer 与原来源共同持有 `plugins` 和 `.tmp/marketplaces`。前者包含最终插件，后者包含原生 marketplace 安装树及 `.codex-marketplace-install.json`。只共享前者会让新进程把已有插件误判为需要重新安装：隔离复现中，同一 revision 的三个插件有效载荷完全相同，最终目录 inode 却全部变化，原生内容指纹随之变化。
 
 本实现保留可变的原生安装树、真实更新和原生哈希算法，不建立活会话不可变分发，也不自动签回失效的批准。`60208` 已落地的定义／内容双哈希、禁用、撤销和原所有者实际采用门禁继续生效。

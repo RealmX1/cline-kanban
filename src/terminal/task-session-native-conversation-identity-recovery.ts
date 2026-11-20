@@ -16,7 +16,6 @@ import {
 	runtimeTaskConversationSessionMetadataSchema,
 	runtimeTaskTerminalAgentModelOverrideSettingsSchema,
 } from "../core/api-contract";
-import { codexConfigurationPermissionSelectionSourceSchema } from "../core/codex-configuration-sync-contract";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { StartTaskSessionRequest } from "./session-manager";
 
@@ -32,10 +31,13 @@ const persistedResumeRequestSchema = z.object({
 		args: z.array(z.string()),
 		cwd: z.string().min(1),
 		env: z.record(z.string(), z.string().optional()).optional(),
+		codexReasoningEffortOverride: z.string().optional(),
+		codexReasoningEffortFollowsNativeConfiguration: z.literal(true).optional(),
 		taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
+		usesLegacyCodexProfilePermissions: z.boolean().optional(),
+		// 升级前的恢复请求用这个字段表示权限来自旧 profile。新写入只保留布尔标记。
+		codexConfigurationPermissionSelectionSource: z.enum(["profile", "task_local"]).optional(),
 		additionalAgentStartupArgumentsForThisRestart: z.array(z.string()).optional(),
-		codexConfigurationProfileId: z.string().optional(),
-		codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 		taskConversationMode: runtimeTaskConversationModeSchema.optional(),
 		taskConversationSessionMetadata: runtimeTaskConversationSessionMetadataSchema.optional(),
 		terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
@@ -121,8 +123,17 @@ export async function readTaskSessionResumeRequestWaitingForNativeConversationId
 			summary.taskConversationSessionMetadata,
 		);
 		if (!options && !metadataMatchesForRecovery) return null;
+		const { codexConfigurationPermissionSelectionSource, ...persistedRequest } = record.request;
+		const usesLegacyCodexProfilePermissions =
+			codexConfigurationPermissionSelectionSource === "task_local"
+				? undefined
+				: persistedRequest.usesLegacyCodexProfilePermissions === true ||
+						codexConfigurationPermissionSelectionSource === "profile"
+					? true
+					: undefined;
 		return {
-			...record.request,
+			...persistedRequest,
+			usesLegacyCodexProfilePermissions,
 			workspaceTaskId: persistedRequestWorkspaceTaskId,
 			taskConversationSessionMetadata: metadataMatchesForRecovery
 				? summary.taskConversationSessionMetadata

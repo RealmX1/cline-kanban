@@ -475,31 +475,7 @@ import {
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
 import { projectWorkspaceStateForBrowser } from "../core/browser-task-session-summary-projection";
-import {
-	type CodexConfigurationProfileAutomaticAdoptionGuard,
-	type CodexConfigurationSyncApi,
-	codexConfigurationBatchActionRequestSchema,
-	codexConfigurationBatchActionResultSchema,
-	codexConfigurationChangeDetailsRequestSchema,
-	codexConfigurationChangeDetailsSchema,
-	codexConfigurationChangeMutationRequestSchema,
-	codexConfigurationMutationReceiptRequestSchema,
-	codexConfigurationMutationReceiptSchema,
-	codexConfigurationProfileMutationRequestSchema,
-	codexConfigurationResolveConflictRequestSchema,
-	codexConfigurationResolveTargetConflictRequestSchema,
-	codexConfigurationSessionAdoptionProgressPageSchema,
-	codexConfigurationSessionAdoptionProgressRequestSchema,
-	codexConfigurationSetChangeSharingScopeRequestSchema,
-	codexConfigurationSourceObservationRequestSchema,
-	codexConfigurationSourceObservationSchema,
-	codexConfigurationSyncActiveStateSchema,
-	codexConfigurationSyncHistoryPageSchema,
-	codexConfigurationSyncHistoryRequestSchema,
-	codexConfigurationSynchronizeRequestSchema,
-	codexConfigurationSyncOverviewSchema,
-	codexConfigurationSyncStateSchema,
-} from "../core/codex-configuration-sync-contract";
+
 import {
 	type RuntimeCodexConversationStorageOperationRequest,
 	type RuntimeCodexConversationStorageOperationResponse,
@@ -720,7 +696,6 @@ export interface RuntimeTrpcWorkspaceScope {
 export interface RuntimeTrpcContext {
 	taskEditorCreationSubmissionApi?: TaskEditorCreationSubmissionService;
 	taskCommandExecutionApi?: TaskCommandExecutionService;
-	codexConfigurationSyncApi?: CodexConfigurationSyncApi;
 	dailyWorkProgressStatisticsApi?: Pick<DailyWorkProgressStatisticsService, "getSummary" | "claimCelebrations">;
 	taskVisualizationArtifactApi?: TaskVisualizationArtifactService;
 	taskLookupConversationApi?: TaskLookupConversationService;
@@ -916,7 +891,6 @@ export interface RuntimeTrpcContext {
 		refreshTaskTerminal: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskTerminalRefreshRequest,
-			configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard,
 		) => Promise<RuntimeTaskTerminalRefreshResponse>;
 		sendTaskSessionInput: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -1487,14 +1461,6 @@ const gitSyncActionInputSchema = z.object({
 	action: runtimeGitSyncActionSchema,
 });
 
-const codexConfigurationProfileMutationProcedure = procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-	.input(codexConfigurationProfileMutationRequestSchema)
-	.output(codexConfigurationSyncStateSchema)
-	.mutation(({ ctx, input }) => {
-		if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-		return ctx.codexConfigurationSyncApi.mutateProfile(input);
-	});
-
 function buildTaskEditorCreationRouter() {
 	return t.router({
 		recoverLegacyDraft: workspaceProcedure
@@ -1974,103 +1940,6 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.output(runtimeConfigResponseSchema)
 		.query(async ({ ctx }) => {
 			return await ctx.runtimeApi.loadConfig(ctx.workspaceScope);
-		}),
-	getCodexConfigurationSyncOverview: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(codexConfigurationSyncOverviewSchema)
-		.query(({ ctx }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.getOverview();
-		}),
-	listCodexConfigurationSessionAdoptionProgress: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationSessionAdoptionProgressRequestSchema)
-		.output(codexConfigurationSessionAdoptionProgressPageSchema)
-		.query(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.listSessionAdoptionProgress(input);
-		}),
-	getCodexConfigurationSyncActiveState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(codexConfigurationSyncActiveStateSchema)
-		.query(({ ctx }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.getActiveState();
-		}),
-	listCodexConfigurationSyncHistory: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationSyncHistoryRequestSchema)
-		.output(codexConfigurationSyncHistoryPageSchema)
-		.query(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.listHistory(input);
-		}),
-	getCodexConfigurationSourceObservation: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationSourceObservationRequestSchema)
-		.output(codexConfigurationSourceObservationSchema.nullable())
-		.query(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.getSourceObservation(input);
-		}),
-	getCodexConfigurationMutationReceipt: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationMutationReceiptRequestSchema)
-		.output(codexConfigurationMutationReceiptSchema)
-		.query(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.getMutationReceipt(input);
-		}),
-	getCodexConfigurationSyncState: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.output(codexConfigurationSyncStateSchema)
-		.query(({ ctx }) => {
-			if (!ctx.codexConfigurationSyncApi)
-				throw new TRPCError({ code: "NOT_IMPLEMENTED", message: "Codex 配置同步服务未启用。" });
-			return ctx.codexConfigurationSyncApi.getState();
-		}),
-	mutateCodexConfigurationProfile: codexConfigurationProfileMutationProcedure,
-	setCodexConfigurationChangeSharingScope: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationSetChangeSharingScopeRequestSchema)
-		.output(codexConfigurationSyncStateSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.setChangeSharingScope(input);
-		}),
-	getCodexConfigurationChangeDetails: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationChangeDetailsRequestSchema)
-		.output(codexConfigurationChangeDetailsSchema)
-		.query(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.getChangeDetails(input);
-		}),
-	batchCodexConfigurationAction: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationBatchActionRequestSchema)
-		.output(codexConfigurationBatchActionResultSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.batchAction(input);
-		}),
-	synchronizeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationSynchronizeRequestSchema)
-		.output(codexConfigurationSyncStateSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.synchronize(input);
-		}),
-	resolveCodexConfigurationConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationResolveConflictRequestSchema)
-		.output(codexConfigurationSyncStateSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.resolveConflict(input);
-		}),
-	acknowledgeCodexConfigurationChange: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationChangeMutationRequestSchema)
-		.output(codexConfigurationSyncStateSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.acknowledge(input);
-		}),
-	resolveCodexConfigurationTargetConflict: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
-		.input(codexConfigurationResolveTargetConflictRequestSchema)
-		.output(codexConfigurationSyncStateSchema)
-		.mutation(({ ctx, input }) => {
-			if (!ctx.codexConfigurationSyncApi) throw new TRPCError({ code: "NOT_IMPLEMENTED" });
-			return ctx.codexConfigurationSyncApi.resolveTargetConflict(input);
 		}),
 	saveConfig: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.input(runtimeConfigSaveRequestSchema)

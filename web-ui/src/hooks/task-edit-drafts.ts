@@ -18,9 +18,7 @@ import { resolveTaskAutoReviewMode } from "@/types";
 // 与契约的 runtimeTaskEditDraftSchema 一一对应（store 就用那个 schema 校验磁盘/镜像数据）。
 // 这里保留一个本地 interface 只是为了让 web-ui 侧引用 TaskImage / TaskAutoReviewMode 这两个前端别名。
 export interface TaskEditDraft {
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskTitleOverride?: string;
 	taskDescription?: string;
 	taskId: string;
@@ -108,9 +106,7 @@ export function areTaskEditDraftFormValuesEqual(
 		left.startInPlanMode === right.startInPlanMode &&
 		(left.taskConversationMode ?? "operational") === (right.taskConversationMode ?? "operational") &&
 		left.taskAgentPermissionMode === right.taskAgentPermissionMode &&
-		left.codexConfigurationProfileId === right.codexConfigurationProfileId &&
 		left.codexReasoningEffortOverride === right.codexReasoningEffortOverride &&
-		left.codexConfigurationPermissionSelectionSource === right.codexConfigurationPermissionSelectionSource &&
 		left.autoReviewEnabled === right.autoReviewEnabled &&
 		left.autoReviewMode === right.autoReviewMode &&
 		left.branchRef === right.branchRef &&
@@ -158,9 +154,7 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 		draft.startInPlanMode === task.startInPlanMode &&
 		(draft.taskConversationMode ?? "operational") === (task.taskConversationMode ?? "operational") &&
 		draft.taskAgentPermissionMode === task.taskAgentPermissionMode &&
-		draft.codexConfigurationProfileId === task.codexConfigurationProfileId &&
 		draft.codexReasoningEffortOverride === task.codexReasoningEffortOverride &&
-		draft.codexConfigurationPermissionSelectionSource === task.codexConfigurationPermissionSelectionSource &&
 		draft.autoReviewEnabled === (task.autoReviewEnabled === true) &&
 		draft.autoReviewMode === resolveTaskAutoReviewMode(task.autoReviewMode) &&
 		draft.branchRef === task.baseRef &&

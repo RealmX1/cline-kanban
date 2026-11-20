@@ -44,7 +44,6 @@ it("隔离打包实例经真实 API 更新部署覆盖，raw worktree 缓存命�
 	await writeFile(join(packagedDirectory, "web-ui/index.html"), "<!doctype html><title>隔离部署覆盖验证</title>");
 	await symlink(resolve("node_modules"), join(packagedDirectory, "node_modules"), "dir");
 	for (const worker of [
-		"codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
 		"notifications/notification-lifecycle-database-worker.mjs",
 		"inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 	]) {

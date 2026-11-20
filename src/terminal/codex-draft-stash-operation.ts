@@ -111,67 +111,6 @@ export async function saveCapturedCodexDraftPrompt(operation: CodexDraftStashOpe
 	});
 }
 
-export async function captureCodexDraftForProfileAdoption(input: {
-	bridge: CodexDraftStashEditorBridge;
-	taskId: string;
-	operationId: string;
-	isCurrent: () => boolean;
-	triggerExport: () => void;
-	confirmOriginalComposerRestored: () => Promise<boolean>;
-	persistCapturedDraft: (text: string) => void;
-}): Promise<{ text: string } | null> {
-	const createdAtMs = Date.now();
-	const operation = codexDraftStashOperationSpecificationSchema.parse({
-		...input.bridge,
-		taskId: input.taskId,
-		operationId: input.operationId,
-		purpose: "profile_adoption_capture",
-		promptId: randomUUID(),
-		createdAtMs,
-		captureDeadlineAtMs: createdAtMs + CODEX_DRAFT_CAPTURE_WAIT_MS,
-		writeDeadlineAtMs: createdAtMs + CODEX_DRAFT_CAPTURE_WAIT_MS,
-	});
-	if (!reserveCodexDraftEditorInvocation(input.bridge, { origin: "stash", operation })) return null;
-	try {
-		mkdirSync(getCodexDraftStashOperationDirectory(operation.workspaceId, operation.operationId), {
-			recursive: true,
-			mode: 0o700,
-		});
-		persistOperationFile(operation, "operation.json", operation);
-		writeCodexDraftStashJsonDurably(join(input.bridge.directoryPath, "most-recent-stash-operation.json"), operation);
-		try {
-			input.triggerExport();
-			while (
-				!existsSync(operationFile(operation, "editor-finished.json")) &&
-				Date.now() < operation.captureDeadlineAtMs
-			)
-				await delay(40);
-			const finished = readCodexDraftStashJson(operationFile(operation, "editor-finished.json"));
-			if (!finished) return null;
-			const confirmationDeadline = Date.now() + 3_000;
-			while (Date.now() < confirmationDeadline && !(await input.confirmOriginalComposerRestored())) await delay(40);
-			if (!(await input.confirmOriginalComposerRestored())) return null;
-			persistOperationFile(operation, "input-box-restored-after-editor-failure.json", {
-				confirmedAtMs: Date.now(),
-			});
-			const captured = readCodexDraftStashJson(operationFile(operation, "captured-draft.json"));
-			if (!captured || !input.isCurrent()) return null;
-			const { text } = capturedDraftSchema.parse(captured);
-			input.persistCapturedDraft(text);
-			persistOperationFile(operation, "profile-adoption-draft-persisted.json", { savedAtMs: Date.now() });
-			return { text };
-		} catch (error) {
-			persistOperationFile(operation, "failure.json", {
-				outcome: "codex_draft_export_failed",
-				error: String(error),
-			});
-			return null;
-		}
-	} finally {
-		releaseCodexDraftEditorReservation(input.bridge, operation.operationId);
-	}
-}
-
 export async function runCodexDraftStashOperation(input: {
 	bridge: CodexDraftStashEditorBridge;
 	taskId: string;

@@ -35,9 +35,7 @@ export {
 
 export interface RuntimeCreateTaskInput {
 	taskDescription?: string;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskId?: string;
 	title?: string;
 	prompt: string;
@@ -71,9 +69,7 @@ export interface RuntimeCreateTaskInput {
 export interface RuntimeUpdateTaskInput {
 	externalWorkflowRunBinding?: RuntimeBoardCard["externalWorkflowRunBinding"];
 	taskDescription?: string | null;
-	codexConfigurationProfileId?: string | null;
 	codexReasoningEffortOverride?: string | null;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local" | null;
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
@@ -246,10 +242,6 @@ export function addTaskToColumn(
 	const task: RuntimeBoardCard = {
 		...(input.codexReasoningEffortOverride
 			? { codexReasoningEffortOverride: input.codexReasoningEffortOverride.trim() }
-			: {}),
-		...(input.codexConfigurationProfileId ? { codexConfigurationProfileId: input.codexConfigurationProfileId } : {}),
-		...(input.codexConfigurationPermissionSelectionSource
-			? { codexConfigurationPermissionSelectionSource: input.codexConfigurationPermissionSelectionSource }
 			: {}),
 		id: explicitTaskId || createUniqueTaskId(existingIds, randomUuid),
 		title: resolveTaskTitle(input.title, prompt),
@@ -613,14 +605,12 @@ export function updateTask(
 					input.codexReasoningEffortOverride === undefined
 						? card.codexReasoningEffortOverride
 						: input.codexReasoningEffortOverride?.trim() || undefined,
-				codexConfigurationProfileId:
-					input.codexConfigurationProfileId === undefined
-						? card.codexConfigurationProfileId
-						: (input.codexConfigurationProfileId ?? undefined),
-				codexConfigurationPermissionSelectionSource:
-					input.codexConfigurationPermissionSelectionSource === undefined
-						? card.codexConfigurationPermissionSelectionSource
-						: (input.codexConfigurationPermissionSelectionSource ?? undefined),
+				codexReasoningEffortFollowsNativeConfiguration:
+					input.codexReasoningEffortOverride === undefined
+						? card.codexReasoningEffortFollowsNativeConfiguration
+						: input.codexReasoningEffortOverride?.trim()
+							? undefined
+							: true,
 				title: resolveTaskTitle(input.title, prompt),
 				taskNameVersion:
 					(card.taskNameVersion ?? 0) + (resolveTaskTitle(input.title, prompt) !== card.title ? 1 : 0),
@@ -635,6 +625,10 @@ export function updateTask(
 				// （CLI 恰好传 undefined，因为卡片本来就没有该字段），它就被永久钉成「全部工具自动放行」——
 				// 用户从未选过、UI 也不会打降级星标，正是本轮明令禁止的「静默放宽权限」。
 				// 前端 board-state.ts 的 updateTask 用 Object.hasOwn 保留缺失，这里必须与之同语义。
+				codexConfigurationPermissionSelectionSource:
+					input.taskAgentPermissionMode === undefined
+						? card.codexConfigurationPermissionSelectionSource
+						: "task_local",
 				taskAgentPermissionMode:
 					input.taskAgentPermissionMode === undefined
 						? card.taskAgentPermissionMode

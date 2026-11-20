@@ -1,13 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type * as FileSystemPromises from "node:fs/promises";
 import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import type * as OperatingSystem from "node:os";
 import { dirname, join } from "node:path";
-import { parse, stringify } from "smol-toml";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getCodexConfigurationSyncDirectory } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
-import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { createTempDir } from "../../utilities/temp-dir";
 
@@ -74,7 +70,7 @@ vi.mock("node:fs/promises", async (original) => {
 		readFile: (...parameters: Parameters<typeof filesystem.readFile>) => {
 			if (`${parameters[0]}` === markerRace.markerPath && markerRace.markerHasBeenTruncated)
 				markerRace.readsDuringTruncationStoreLockHeld.push(
-					existsSync(`${getCodexConfigurationSyncDirectory()}.lock`),
+					existsSync(`${join(fixture.path, "unused-legacy-configuration")}.lock`),
 				);
 			return filesystem.readFile(...parameters);
 		},
@@ -141,60 +137,7 @@ afterEach(() => {
 	vi.unstubAllEnvs();
 	fixture.cleanup();
 });
-function prepareWriter() {
-	return prepareCodexConfigurationWriterBinding({
-		purpose: "native_session",
-		storageHome,
-		runtimeSessionIncarnationId: randomUUID(),
-	});
-}
-
 describe("Codex canonical 来源标记的并发读取", () => {
-	it("已有原归属在重复准备与 writer 并发启动时始终可读，保留原生决定和账号归属", async () => {
-		const originalBinding = await prepareWriter();
-		const originalConfigurationPath = join(originalBinding.configurationHomeDirectoryPath, "config.toml");
-		const nativeConfiguration = parse(await readFile(originalConfigurationPath, "utf8"));
-		nativeConfiguration.model = "native-local-decision";
-		await writeFile(originalConfigurationPath, stringify(nativeConfiguration));
-		const originalConfigurationText = await readFile(originalConfigurationPath, "utf8");
-		const originalMarkerText = await readFile(markerRace.markerPath, "utf8");
-		const originalMarkerMetadata = await lstat(markerRace.markerPath, { bigint: true });
-		await writeFile(join(sourceHome, "config.toml"), 'model="new-user-default"\n');
-		const markerTruncated = new Promise<"marker_truncated">((resolve) => {
-			markerRace.onMarkerTruncated = () => resolve("marker_truncated");
-		});
-		markerRace.interceptCanonicalMarkerRewrite = true;
-		const repeatedPreparation = prepareManagedCodexConversationStorageHome(sourceHome);
-		try {
-			await Promise.race([markerTruncated, repeatedPreparation.then(() => "preparation_completed")]);
-			const startup = await prepareWriter().then(
-				(binding) => ({ kind: "prepared", sourceHome: binding.sourceHomeDirectoryPath }),
-				(error: Error) => ({
-					kind: "failed",
-					errorName: error.name,
-					message: error.message,
-					readsDuringTruncationStoreLockHeld: markerRace.readsDuringTruncationStoreLockHeld,
-				}),
-			);
-			expect(startup).toEqual({ kind: "prepared", sourceHome });
-			expect(await readFile(originalConfigurationPath, "utf8")).toBe(originalConfigurationText);
-			expect(parse(await readFile(join(storageHome, "config.toml"), "utf8")).model).toBe("original-model");
-		} finally {
-			markerRace.releaseMarkerWrite?.();
-			markerRace.releaseAtomicMarkerPublication?.();
-			await repeatedPreparation;
-			markerRace.interceptCanonicalMarkerRewrite = false;
-			markerRace.markerHasBeenTruncated = false;
-		}
-		expect(await readFile(markerRace.markerPath, "utf8")).toBe(originalMarkerText);
-		const markerMetadataAfterRepeatedPreparation = await lstat(markerRace.markerPath, { bigint: true });
-		expect(markerMetadataAfterRepeatedPreparation.ino).toBe(originalMarkerMetadata.ino);
-		expect(markerMetadataAfterRepeatedPreparation.mtimeNs).toBe(originalMarkerMetadata.mtimeNs);
-		const wrongSource = join(fixture.path, "different-account-home");
-		await mkdir(wrongSource);
-		await expect(prepareManagedCodexConversationStorageHome(wrongSource)).rejects.toThrow("不能混用账号");
-	});
-
 	it("首次发布标记时并发读取只见不存在或完整JSON，发布后 writer 能核验原来源", async () => {
 		await rm(markerRace.markerPath);
 		const markerTruncated = new Promise<"marker_truncated">((resolve) => {
@@ -218,12 +161,16 @@ describe("Codex canonical 来源标记的并发读取", () => {
 			);
 			if (publicationStage === "preparation_completed") {
 				if (markerVisibility.kind !== "present") throw new Error("发布完成后原归属标记仍不可读。");
-				expect(JSON.parse(markerVisibility.text)).toEqual({ sourceHomeDirectoryPath: sourceHome });
+				expect(JSON.parse(markerVisibility.text)).toEqual({
+					sourceHomeDirectoryPath: sourceHome,
+					physicalSourceHomeDirectoryPath: sourceHome,
+				});
 			} else {
 				expect(markerVisibility).toEqual({ kind: "absent", code: "ENOENT" });
 				if (markerRace.pendingMarkerPublicationPath)
 					expect(JSON.parse(await readFile(markerRace.pendingMarkerPublicationPath, "utf8"))).toEqual({
 						sourceHomeDirectoryPath: sourceHome,
+						physicalSourceHomeDirectoryPath: sourceHome,
 					});
 			}
 		} finally {
@@ -235,8 +182,9 @@ describe("Codex canonical 来源标记的并发读取", () => {
 		}
 		expect(JSON.parse(await readFile(markerRace.markerPath, "utf8"))).toEqual({
 			sourceHomeDirectoryPath: sourceHome,
+			physicalSourceHomeDirectoryPath: sourceHome,
 		});
-		await expect(prepareWriter()).resolves.toHaveProperty("sourceHomeDirectoryPath", sourceHome);
+		await expect(prepareManagedCodexConversationStorageHome(sourceHome)).resolves.toBe(storageHome);
 	});
 
 	it("已有标记损坏仍拒绝且不覆盖未知归属", async () => {
@@ -254,6 +202,7 @@ describe("Codex canonical 来源标记的并发读取", () => {
 		expect(markerRace.completedMarkerPublicationRenames).toBe(1);
 		expect(JSON.parse(await readFile(markerRace.markerPath, "utf8"))).toEqual({
 			sourceHomeDirectoryPath: sourceHome,
+			physicalSourceHomeDirectoryPath: sourceHome,
 		});
 		const publishedMarkerMetadata = await lstat(markerRace.markerPath, { bigint: true });
 		markerRace.markerSynchronizationPaths = [];
@@ -269,7 +218,7 @@ describe("Codex canonical 来源标记的并发读取", () => {
 		const recoveredMarkerMetadata = await lstat(markerRace.markerPath, { bigint: true });
 		expect(recoveredMarkerMetadata.ino).toBe(publishedMarkerMetadata.ino);
 		expect(recoveredMarkerMetadata.mtimeNs).toBe(publishedMarkerMetadata.mtimeNs);
-		await expect(prepareWriter()).resolves.toHaveProperty("sourceHomeDirectoryPath", sourceHome);
+		await expect(prepareManagedCodexConversationStorageHome(sourceHome)).resolves.toBe(storageHome);
 	});
 
 	it("Windows 首次发布与同内容重试使用可写文件句柄同步，不打开父目录", async () => {
@@ -283,6 +232,7 @@ describe("Codex canonical 来源标记的并发读取", () => {
 		expect(markerRace.markerSynchronizationPaths).toEqual([markerRace.markerOpenRequests[0]?.path]);
 		expect(JSON.parse(await readFile(markerRace.markerPath, "utf8"))).toEqual({
 			sourceHomeDirectoryPath: sourceHome,
+			physicalSourceHomeDirectoryPath: sourceHome,
 		});
 		const publishedMarkerMetadata = await lstat(markerRace.markerPath, { bigint: true });
 		markerRace.markerOpenRequests = [];
@@ -294,7 +244,7 @@ describe("Codex canonical 来源标记的并发读取", () => {
 		const retriedMarkerMetadata = await lstat(markerRace.markerPath, { bigint: true });
 		expect(retriedMarkerMetadata.ino).toBe(publishedMarkerMetadata.ino);
 		expect(retriedMarkerMetadata.mtimeNs).toBe(publishedMarkerMetadata.mtimeNs);
-		await expect(prepareWriter()).resolves.toHaveProperty("sourceHomeDirectoryPath", sourceHome);
+		await expect(prepareManagedCodexConversationStorageHome(sourceHome)).resolves.toBe(storageHome);
 	});
 
 	it("Windows 可写文件句柄的真实同步故障仍拒绝，恢复后重试成功", async () => {

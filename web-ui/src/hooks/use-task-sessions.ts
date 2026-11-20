@@ -56,7 +56,6 @@ interface StartTaskSessionResult {
 }
 
 export interface CreateTaskConversationSessionInput {
-	codexConfigurationProfileId?: string;
 	task: BoardCard;
 	agentId: RuntimeAgentId;
 	sessionRole?: "by_the_way" | "task_collaborator";
@@ -242,8 +241,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					startInPlanMode: options?.resumeFromTrash ? undefined : task.startInPlanMode,
 					// 权限档位在续跑时同样适用（与 startInPlanMode 不同：那是「开局」语义，续跑没有开局）。
 					taskAgentPermissionMode: task.taskAgentPermissionMode,
-					codexConfigurationProfileId: task.codexConfigurationProfileId,
-					codexConfigurationPermissionSelectionSource: task.codexConfigurationPermissionSelectionSource,
 					// 会话模式是「下次启动生效」的卡片声明（蓝图 §A.1）：本条就是一次启动，
 					// 从卡片原值显式回填；漏传 = 服务端静默掉回 operational 缺省。
 					taskConversationMode: task.taskConversationMode,
@@ -333,7 +330,6 @@ export function useTaskSessions({ currentProjectId, setSessions }: UseTaskSessio
 					: {}),
 				creatorTaskConversationSessionId:
 					input.contextSourceTaskConversationSessionId ?? resolveMainTaskConversationSessionId(input.task),
-				codexConfigurationProfileId: input.codexConfigurationProfileId,
 			};
 			const fingerprint = JSON.stringify(request);
 			const previous = sideSessionCreationRequestsRef.current.get(input.task.id);

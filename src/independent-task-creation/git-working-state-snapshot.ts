@@ -1,7 +1,19 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readdir, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	copyFile,
+	lchmod,
+	lstat,
+	mkdir,
+	readdir,
+	readFile,
+	readlink,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
@@ -275,8 +287,12 @@ export async function restoreSourceGitWorkingState(targetPath: string, artifactD
 		if (fingerprint(content) !== entry.hash) throw new Error("持久 Git 快照校验失败。");
 		await mkdir(dirname(target), { recursive: true });
 		await rm(target, { force: true, recursive: true });
-		if (entry.kind === "symlink") await symlink(content.toString(), target);
-		else {
+		if (entry.kind === "symlink") {
+			await symlink(content.toString(), target);
+			// macOS 创建软链时采用当前进程的 umask，原归档的权限可能不同。
+			// 0o777 会丢掉 sticky/setuid/setgid。macOS 软链的 lstat 保留这些位，归档核对按完整 mode 比较。
+			if ((await lstat(target)).mode !== entry.mode) await lchmod(target, entry.mode & 0o7777);
+		} else {
 			await writeFile(target, content);
 			await chmod(target, entry.mode & 0o777);
 		}

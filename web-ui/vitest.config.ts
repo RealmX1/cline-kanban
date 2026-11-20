@@ -16,10 +16,6 @@ export default defineConfig({
 	},
 	resolve: {
 		alias: {
-			"@runtime-codex-configuration-profile-field-editing": resolve(
-				__dirname,
-				"../src/core/codex-configuration-profile-field-editing.ts",
-			),
 			"@runtime-contract": resolve(__dirname, "../src/core/api-contract.ts"),
 			"@runtime-state-stream-entity-synchronization": resolve(
 				__dirname,

@@ -8,7 +8,6 @@ import {
 	useTaskAgentModelPicker,
 } from "@/components/task-agent-model-picker";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { notifyCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import type { RuntimeAgentId, RuntimeTaskTerminalAgentModelOverrideSettings } from "@/runtime/types";
 import { notifyTaskVisualizationStreamReconnected } from "@/stores/task-visualization-browser-bridge";
 
@@ -684,7 +683,7 @@ describe("TaskAgentModelPicker – selected model that is no longer listed", () 
 });
 
 describe("Codex 模型目录在运行时重连后重验", () => {
-	it("三次重试耗尽后，运行时或可视化流重连会再次读取目录", async () => {
+	it("三次重试耗尽后，可视化流重连会再次读取目录", async () => {
 		vi.useFakeTimers();
 		const unavailable = {
 			agentId: "codex" as const,
@@ -729,7 +728,7 @@ describe("Codex 模型目录在运行时重连后重验", () => {
 			expect(fetchTerminalAgentModelSelectionOptionsMock).toHaveBeenCalledTimes(4);
 			fetchTerminalAgentModelSelectionOptionsMock.mockResolvedValue(available);
 			await act(async () => {
-				notifyCodexConfigurationSyncUpdated("runtime_reconnected");
+				notifyTaskVisualizationStreamReconnected("reviewer-workspace");
 			});
 			expect(fetchTerminalAgentModelSelectionOptionsMock).toHaveBeenCalledTimes(5);
 			expect(latest?.terminalAgentModelCatalogWarning).toBeNull();

@@ -8,10 +8,6 @@ import { BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoar
 import { BugReportTriggerButton } from "@/components/bug-report/bug-report-trigger-button";
 import { CardDetailView } from "@/components/card-detail-view";
 import { ClearTrashDialog } from "@/components/clear-trash-dialog";
-import {
-	CodexConfigurationSyncNotice,
-	CodexConfigurationSyncSummaryButton,
-} from "@/components/codex-configuration-sync";
 import type { ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import {
 	DailyWorkProgressExpandedRegion,
@@ -75,7 +71,6 @@ import { useAllProjectsFocusViewAdjacentTaskKeyboardNavigation } from "@/hooks/u
 import { useAppHotkeys } from "@/hooks/use-app-hotkeys";
 import { useBoardInteractions } from "@/hooks/use-board-interactions";
 import { useCacheWarmTaskFocusNavigationAfterValidationMove } from "@/hooks/use-cache-warm-task-focus-navigation-after-validation-move";
-import { useCodexConfigurationSyncNotice } from "@/hooks/use-codex-configuration-sync-notice";
 import { useCreatePostDeployVerificationFollowUpTask } from "@/hooks/use-create-post-deploy-verification-follow-up-task";
 import { useCrossProjectRecentlyActiveTaskSwitcherHost } from "@/hooks/use-cross-project-recently-active-task-switcher-host";
 import { useCrossProjectRecentlyActiveTaskSwitcherSections } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
@@ -759,11 +754,7 @@ export default function App(): ReactElement {
 		setNewTaskImages,
 		newTaskStartInPlanMode,
 		setNewTaskStartInPlanMode,
-		newTaskCodexConfigurationProfileId,
 		newTaskCodexReasoningEffortOverride,
-		newTaskCodexConfigurationPermissionSelectionSource,
-		setNewTaskCodexConfigurationPermissionSelectionSource,
-		setNewTaskCodexConfigurationProfileId,
 		setNewTaskCodexReasoningEffortOverride,
 		newTaskAgentPermissionMode,
 		setNewTaskAgentPermissionMode,
@@ -793,11 +784,7 @@ export default function App(): ReactElement {
 		setEditTaskImages,
 		editTaskStartInPlanMode,
 		setEditTaskStartInPlanMode,
-		editTaskCodexConfigurationProfileId,
 		editTaskCodexReasoningEffortOverride,
-		editTaskCodexConfigurationPermissionSelectionSource,
-		setEditTaskCodexConfigurationPermissionSelectionSource,
-		setEditTaskCodexConfigurationProfileId,
 		setEditTaskCodexReasoningEffortOverride,
 		editTaskAgentPermissionMode,
 		setEditTaskAgentPermissionMode,
@@ -1728,11 +1715,6 @@ export default function App(): ReactElement {
 		focusedTaskIdentity: JSON.stringify([currentProjectId, selectedCardRenderedInFocusView?.card.id ?? null]),
 		isDocumentVisible,
 	});
-	const codexConfigurationNotice = useCodexConfigurationSyncNotice({
-		workspaceId: currentProjectId,
-		isPresentationAvailable:
-			!mobileFocusViewControls.isEnabled || mobileFocusViewControls.upperNavigationAndToolsExpanded,
-	});
 	const latestSelectedTaskChatMessage = selectLatestTaskChatMessageForTask(
 		selectedCard?.card.id,
 		latestTaskChatMessage,
@@ -1811,9 +1793,6 @@ export default function App(): ReactElement {
 					>
 						<TopBar
 							workspaceId={projectRuntimeWorkspaceId}
-							codexConfigurationNoticeSummaryControl={
-								<CodexConfigurationSyncSummaryButton notice={codexConfigurationNotice} />
-							}
 							dailyWorkProgressSummaryControl={
 								<DailyWorkProgressSummaryButton progress={dailyWorkProgressStatistics} />
 							}
@@ -2255,11 +2234,6 @@ export default function App(): ReactElement {
 								/>
 							</div>
 						) : null}
-						{/* 同一覆盖层级按 DOM 顺序绘制，通知须覆盖手机首页终端。 */}
-						<CodexConfigurationSyncNotice
-							notice={codexConfigurationNotice}
-							onOpenSettings={() => handleOpenSettings("codex-configuration-sync")}
-						/>
 					</div>
 				</div>
 				<TaskProjectAssignmentPreflightHost />
@@ -2351,22 +2325,6 @@ export default function App(): ReactElement {
 					}
 					startInPlanMode={editingTaskId ? editTaskStartInPlanMode : newTaskStartInPlanMode}
 					onStartInPlanModeChange={editingTaskId ? setEditTaskStartInPlanMode : setNewTaskStartInPlanMode}
-					codexConfigurationPermissionSelectionSource={
-						editingTaskId
-							? editTaskCodexConfigurationPermissionSelectionSource
-							: newTaskCodexConfigurationPermissionSelectionSource
-					}
-					onCodexConfigurationPermissionSelectionSourceChange={
-						editingTaskId
-							? setEditTaskCodexConfigurationPermissionSelectionSource
-							: setNewTaskCodexConfigurationPermissionSelectionSource
-					}
-					codexConfigurationProfileId={
-						editingTaskId ? editTaskCodexConfigurationProfileId : newTaskCodexConfigurationProfileId
-					}
-					onCodexConfigurationProfileIdChange={
-						editingTaskId ? setEditTaskCodexConfigurationProfileId : setNewTaskCodexConfigurationProfileId
-					}
 					taskAgentPermissionMode={editingTaskId ? editTaskAgentPermissionMode : newTaskAgentPermissionMode}
 					onTaskAgentPermissionModeChange={
 						editingTaskId ? setEditTaskAgentPermissionMode : setNewTaskAgentPermissionMode

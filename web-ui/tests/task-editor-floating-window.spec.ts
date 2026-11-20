@@ -114,7 +114,7 @@ async function openEditorHarness(
 						}
 					: {
 							agentId: "codex",
-							defaultModelId: null,
+							defaultModelId: "fixture-model",
 							defaultLabel: "默认",
 							options: [
 								{
@@ -132,40 +132,6 @@ async function openEditorHarness(
 								},
 							],
 						};
-			} else if (name === "runtime.getCodexConfigurationSyncState") {
-				value = {
-					revision: 1,
-					changes: [],
-					sourceObservations: [],
-					observationProblem: null,
-					defaultCodexConfigurationProfileId: "fixture-profile",
-					profiles: [
-						{
-							profileId: "fixture-profile",
-							name: "默认配置",
-							sourceIdentity: "source",
-							version: 1,
-							fields: [
-								{
-									fieldKey: JSON.stringify(["config.toml", "model"]),
-									fieldLabel: "model",
-									value: "fixture-model",
-									valueSummary: "fixture-model",
-									version: 1,
-									exceptionGroup: "model",
-								},
-								{
-									fieldKey: JSON.stringify(["config.toml", "model_reasoning_effort"]),
-									fieldLabel: "effort",
-									value: "high",
-									valueSummary: "high",
-									version: 1,
-									exceptionGroup: "reasoning_effort",
-								},
-							],
-						},
-					],
-				};
 			} else if (name === "workUnit.resolveKanbanBoardCardIdentityByBareTaskId")
 				value = {
 					kanbanBoardCardIdentityCandidates: [
@@ -239,6 +205,7 @@ for (const mode of ["create", "edit"] as const) {
 		await openEditorHarness(page, { mode });
 		await page.getByRole("button", { name: /模型与参数：/ }).click();
 		const effort = page.getByLabel("推理强度", { exact: true });
+		await expect(page.getByText("Codex profile", { exact: false })).toHaveCount(0);
 		await expect(effort).toHaveValue("");
 		await expect(effort.locator("option").first()).toHaveText("沿用 Codex 配置（high）");
 		await effort.selectOption("ultra");
@@ -263,7 +230,6 @@ test("目录读取失败后自动重验，手机上可选 max 和 ultra", async 
 	await page.setViewportSize({ width: 390, height: 844 });
 	const observations = await openEditorHarness(page, { failFirstModelCatalogRead: true });
 	await page.getByRole("button", { name: /模型与参数：/ }).click();
-	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
 	await expect.poll(() => observations.modelCatalogReadCount).toBeGreaterThan(1);
 	const effort = page.getByLabel("推理强度", { exact: true });
 	await effort.selectOption("max");
@@ -271,9 +237,9 @@ test("目录读取失败后自动重验，手机上可选 max 和 ultra", async 
 	await expect(effort).toHaveValue("ultra");
 	observations.remainingModelCatalogFailures = 1;
 	await page.evaluate(() => window.dispatchEvent(new Event("online")));
-	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toBeVisible();
+	await expect(page.getByRole("status").filter({ hasText: "推理档位未能加载" })).toBeVisible();
 	await expect(effort).toHaveValue("ultra");
-	await expect(page.getByRole("status").filter({ hasText: "暂时无法核验此模型" })).toHaveCount(0);
+	await expect(page.getByRole("status").filter({ hasText: "推理档位未能加载" })).toHaveCount(0);
 	await expect(effort).toHaveValue("ultra");
 	await expect(page.locator("body")).toHaveJSProperty("scrollWidth", 390);
 	await effort.scrollIntoViewIfNeeded();

@@ -24,7 +24,6 @@ describe("已有监听实例时的 CLI 启动边界", { timeout: 65_000 }, () =>
 		await writeFile(join(packagedDirectory, "web-ui/index.html"), "<!doctype html><title>隔离启动边界</title>");
 		await symlink(resolve("node_modules"), join(packagedDirectory, "node_modules"), "dir");
 		for (const worker of [
-			"codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
 			"notifications/notification-lifecycle-database-worker.mjs",
 			"inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 		]) {

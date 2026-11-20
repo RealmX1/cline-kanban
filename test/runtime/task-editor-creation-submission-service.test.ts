@@ -257,20 +257,16 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 		}
 	});
 
-	it("创建提交契约与持久卡片保留独立 Codex effort 和所属 profile", async () => {
+	it("创建提交契约与持久卡片保留独立 Codex effort ", async () => {
 		const test = await scenario();
 		const request = test.request("eff01", false);
 		Object.assign(request.newTaskCard, {
 			agentId: "codex",
 			codexReasoningEffortOverride: "ultra",
-			codexConfigurationProfileId: "selected-profile",
-			codexConfigurationPermissionSelectionSource: "profile",
 		});
 		const parsed = taskEditorCreationSubmissionRequestSchema.parse(request);
 		expect(parsed.newTaskCard).toMatchObject({
 			codexReasoningEffortOverride: "ultra",
-			codexConfigurationProfileId: "selected-profile",
-			codexConfigurationPermissionSelectionSource: "profile",
 		});
 		await test.service.submit(test.source, parsed, evidence);
 		await test.service.settle();
@@ -279,7 +275,6 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 			.find((entry) => entry.id === "eff01");
 		expect(card).toMatchObject({
 			codexReasoningEffortOverride: "ultra",
-			codexConfigurationProfileId: "selected-profile",
 			taskDescription: request.newTaskCard.taskDescription,
 			prompt: request.newTaskCard.prompt,
 		});
@@ -291,18 +286,15 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 				agentId: "codex",
 				startInPlanMode: false,
 				defaultModelId: "creation-default-model",
-				codexConfigurationProfileId: "explicit-profile",
 			}),
 		);
 		const service = test.makeService(defaults);
 		const input = test.request("new01", false);
-		input.newTaskCard.codexConfigurationProfileId = "explicit-profile";
 		test.persist.mockRejectedValueOnce(new Error("写盘暂不可用"));
 		await service.submit(test.source, input, evidence);
 		await service.settle();
 		expect(defaults).toHaveBeenCalledTimes(1);
 		expect(test.persist.mock.calls.at(-1)?.[1]).toMatchObject({
-			codexConfigurationProfileId: "explicit-profile",
 			startInPlanMode: false,
 			taskAgentPermissionMode: "bypass_all_permission_prompts",
 			terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "creation-default-model" },

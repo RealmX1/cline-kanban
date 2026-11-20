@@ -1,8 +1,7 @@
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { prepareCodexConfigurationWriterBinding } from "../../../src/codex-configuration-sync/codex-configuration-writer-binding";
 import { prepareCodexMainSessionHandoverNativeForkWithPort } from "../../../src/server/codex-main-session-handover-native-fork";
 
 const directories: string[] = [];
@@ -28,35 +27,6 @@ async function fixture() {
 	return { directory, input };
 }
 describe("交接前固定完整 Codex 原生分支", () => {
-	it("接受已核验 writer 历史桥接返回的分支路径，保持真实历史目录绑定", async () => {
-		const { directory, input } = await fixture();
-		const isolatedHome = await realpath(directory);
-		vi.stubEnv("HOME", isolatedHome);
-		vi.stubEnv("CODEX_HOME", join(isolatedHome, ".codex"));
-		vi.stubEnv("CODEX_SQLITE_HOME", join(isolatedHome, "sqlite"));
-		await mkdir(join(isolatedHome, ".codex"));
-		await writeFile(join(isolatedHome, ".codex", "config.toml"), 'model="synthetic"\n');
-		const binding = await prepareCodexConfigurationWriterBinding({
-			purpose: "auxiliary_process",
-			storageHome: input.codexConversationStorageHomeDirectoryPath,
-			sqliteHome: join(isolatedHome, "sqlite"),
-			runtimeSessionIncarnationId: "77777777-7777-4777-8777-777777777777",
-		});
-		const request = vi.fn(async (method: string) =>
-			method === "thread/fork"
-				? {
-						thread: {
-							id: "verified-child",
-							cwd: directory,
-							path: join(binding.configurationHomeDirectoryPath, "sessions", "child.jsonl"),
-						},
-					}
-				: { data: turns, nextCursor: null },
-		);
-		const result = await prepareCodexMainSessionHandoverNativeForkWithPort({ request }, input);
-		expect(result.codexConversationStorageHomeDirectoryPath).toBe(input.codexConversationStorageHomeDirectoryPath);
-		expect(request.mock.calls.filter(([method]) => method === "thread/fork")).toHaveLength(1);
-	});
 	it("子身份先持久化，校验中断后复验原分支，不再 fork 或启动模型", async () => {
 		const { directory, input } = await fixture();
 		let rejectChildRead = true;

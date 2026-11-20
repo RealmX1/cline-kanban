@@ -33,6 +33,20 @@ describe("自动压缩阶段 hook 的保守启用", () => {
 		if (key !== "hooks.PreCompact")
 			expect(args.some((argument) => argument.startsWith("hooks.PreCompact="))).toBe(false);
 	});
+	it("合并受管目录的整表 hooks.state，保留用户禁用且只签发实际注入的 hook", () => {
+		const args = [
+			'--config=hooks.state={"/source/config.toml:stop:0:0"={trusted_hash="sha256:user",enabled=false}}',
+			"-c",
+			'hooks.PermissionRequest=[{hooks=[{type="command",command="user-owned"}]}]',
+		];
+		configureCodexHooks(args);
+		const state = args.find((argument) => argument.startsWith("--config=hooks.state="));
+		expect(state).toContain('"/source/config.toml:stop:0:0"');
+		expect(state).toMatch(/"enabled"\s*=\s*false/);
+		expect(state).toContain("/<session-flags>/config.toml:session_start:0:0");
+		expect(state).toContain("/<session-flags>/config.toml:stop:0:0");
+		expect(state).not.toContain("/<session-flags>/config.toml:permission_request:0:0");
+	});
 	it("未验收的实际二进制不能按版本号大小猜测能力", async () => {
 		expect(await supportsVerifiedCodexAutomaticCompactionPhaseHooks(process.execPath, process.env)).toBe(false);
 		expect(

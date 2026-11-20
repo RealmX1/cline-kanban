@@ -50,16 +50,8 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			props.taskAgentPermissionMode,
 		);
 		(editing
-			? controller.setEditTaskCodexConfigurationProfileId
-			: controller.setNewTaskCodexConfigurationProfileId)?.(props.codexConfigurationProfileId);
-		(editing
 			? controller.setEditTaskCodexReasoningEffortOverride
 			: controller.setNewTaskCodexReasoningEffortOverride)?.(props.codexReasoningEffortOverride);
-		(editing
-			? controller.setEditTaskCodexConfigurationPermissionSelectionSource
-			: controller.setNewTaskCodexConfigurationPermissionSelectionSource)?.(
-			props.codexConfigurationPermissionSelectionSource,
-		);
 		(editing ? controller.setEditTaskConversationMode : controller.setNewTaskConversationMode)?.(
 			props.taskConversationMode,
 		);
@@ -143,24 +135,6 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			}
 			onTaskAgentPermissionModeChange={
 				editing ? controller.setEditTaskAgentPermissionMode : controller.setNewTaskAgentPermissionMode
-			}
-			codexConfigurationProfileId={
-				editing ? controller.editTaskCodexConfigurationProfileId : controller.newTaskCodexConfigurationProfileId
-			}
-			onCodexConfigurationProfileIdChange={
-				editing
-					? controller.setEditTaskCodexConfigurationProfileId
-					: controller.setNewTaskCodexConfigurationProfileId
-			}
-			codexConfigurationPermissionSelectionSource={
-				editing
-					? controller.editTaskCodexConfigurationPermissionSelectionSource
-					: controller.newTaskCodexConfigurationPermissionSelectionSource
-			}
-			onCodexConfigurationPermissionSelectionSourceChange={
-				editing
-					? controller.setEditTaskCodexConfigurationPermissionSelectionSource
-					: controller.setNewTaskCodexConfigurationPermissionSelectionSource
 			}
 			taskConversationMode={editing ? controller.editTaskConversationMode : controller.newTaskConversationMode}
 			onTaskConversationModeChange={

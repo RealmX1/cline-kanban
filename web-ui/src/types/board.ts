@@ -94,8 +94,8 @@ export interface BoardCard {
 	externalWorkflowRunBinding?: RuntimeExternalWorkflowRunBinding;
 	taskDescription?: string;
 	taskNameVersion?: number;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
+	codexReasoningEffortFollowsNativeConfiguration?: true;
 	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	id: string;
 	mainTaskConversationSessionId?: string;

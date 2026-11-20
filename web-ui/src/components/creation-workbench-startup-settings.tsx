@@ -3,7 +3,6 @@ import { getRuntimeAgentCatalogEntry } from "@runtime-agent-catalog";
 import { Check } from "lucide-react";
 import type { ComponentProps, ReactNode } from "react";
 import { useEffect, useId } from "react";
-import { CodexConfigurationProfileSelect } from "@/components/codex-configuration-profile-select";
 import { CodexTaskReasoningEffortSelect } from "@/components/codex-task-reasoning-effort-select";
 import { TaskAgentModelPicker, useTaskAgentModelPicker } from "@/components/task-agent-model-picker";
 import { TaskAgentPermissionModeControl } from "@/components/task-agent-permission-mode-control";
@@ -11,7 +10,6 @@ import { TaskAgentSessionInitializationControl } from "@/components/task-agent-s
 import { type TaskEditorSetting, TaskEditorSettingGroup } from "@/components/task-editor-setting-groups";
 import { NativeSelect } from "@/components/ui/native-select";
 import { resolveCodexTaskReasoningEffortSelection } from "@/hooks/codex-task-reasoning-effort-selection";
-import { useCodexConfigurationSync } from "@/hooks/use-codex-configuration-sync";
 import type { RuntimeTaskAgentPermissionMode } from "@/runtime/types";
 
 type AgentModelPickerProps = ComponentProps<typeof TaskAgentModelPicker>;
@@ -26,15 +24,10 @@ export interface CreationWorkbenchStartupSettingsProps
 	startInPlanModeDisabled?: boolean;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
 	onTaskAgentPermissionModeChange: (value: RuntimeTaskAgentPermissionMode) => void;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
 	onCodexReasoningEffortOverrideChange?: (value: string | undefined) => void;
 	onCodexReasoningEffortValidationErrorChange?: (value: string | null) => void;
-	onCodexConfigurationProfileIdChange?: (value: string | undefined) => void;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
-	onCodexConfigurationPermissionSelectionSourceChange?: (value: "profile" | "task_local") => void;
 	roleReadOnly?: boolean;
-	automaticallyChooseDefaultProfile?: boolean;
 	additionalSettings?: TaskEditorSetting[];
 	allowAgentSelection?: boolean;
 }
@@ -51,16 +44,7 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 	});
 	const planCheckboxId = useId();
 	const agentId = props.agentId ?? props.defaultAgentId ?? null;
-	const codexConfiguration = useCodexConfigurationSync(
-		props.workspaceId,
-		props.active && agentId === "codex" && Boolean(props.onCodexReasoningEffortOverrideChange),
-	);
 	const codexReasoningEffortSelection = resolveCodexTaskReasoningEffortSelection({
-		profile: codexConfiguration.state?.profiles?.find(
-			(profile) =>
-				profile.profileId ===
-				(props.codexConfigurationProfileId ?? codexConfiguration.state?.defaultCodexConfigurationProfileId),
-		),
 		explicitModelId:
 			props.terminalAgentModelOverrideSettings?.agentId === "codex"
 				? props.terminalAgentModelOverrideSettings.modelId
@@ -108,25 +92,17 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 			label: "Agent 权限",
 			summary: props.roleReadOnly
 				? "持续只读"
-				: props.codexConfigurationPermissionSelectionSource === "profile"
-					? "跟随 profile"
-					: {
-							ask_for_every_tool_use: "每次询问",
-							auto_approve_file_edits_only: "允许编辑文件",
-							bypass_all_permission_prompts: "全部允许",
-						}[props.taskAgentPermissionMode],
+				: {
+						ask_for_every_tool_use: "每次询问",
+						auto_approve_file_edits_only: "允许编辑文件",
+						bypass_all_permission_prompts: "全部允许",
+					}[props.taskAgentPermissionMode],
 			content: props.roleReadOnly ? (
-				<p className="text-xs text-text-secondary">By the way 持续只读，Plan 和 profile 选择均不能解除此限制。</p>
+				<p className="text-xs text-text-secondary">By the way 持续只读，Plan Mode均不能解除此限制。</p>
 			) : (
 				<TaskAgentPermissionModeControl
 					value={props.taskAgentPermissionMode}
-					onChange={(value) => {
-						props.onTaskAgentPermissionModeChange(value);
-						props.onCodexConfigurationPermissionSelectionSourceChange?.("task_local");
-					}}
-					selectionComesFromCodexProfile={
-						agentId === "codex" && props.codexConfigurationPermissionSelectionSource === "profile"
-					}
+					onChange={props.onTaskAgentPermissionModeChange}
 					selectedAgentId={agentId}
 					selectedAgentLabel={getRuntimeAgentCatalogEntry(agentId ?? "codex")?.label ?? "Agent"}
 					startInPlanMode={props.startInPlanMode}
@@ -134,29 +110,6 @@ export function CreationWorkbenchStartupSettings(props: CreationWorkbenchStartup
 				/>
 			),
 		},
-		...(agentId === "codex" && props.onCodexConfigurationProfileIdChange
-			? [
-					{
-						key: "codex_configuration_profile",
-						label: "Codex profile",
-						summary: props.codexConfigurationProfileId ? "已绑定" : "默认配置",
-						content: (
-							<CodexConfigurationProfileSelect
-								workspaceId={props.workspaceId}
-								value={props.codexConfigurationProfileId}
-								onChange={props.onCodexConfigurationProfileIdChange}
-								enabled={props.active}
-								automaticallyChooseDefaultProfile={props.automaticallyChooseDefaultProfile ?? false}
-								adoptDefaultProfilePermissions={props.codexConfigurationPermissionSelectionSource === "profile"}
-								onPermissionModeChange={(value) => {
-									props.onTaskAgentPermissionModeChange(value);
-									props.onCodexConfigurationPermissionSelectionSourceChange?.("profile");
-								}}
-							/>
-						),
-					},
-				]
-			: []),
 		...(props.additionalSettings ?? []),
 	];
 	return (
