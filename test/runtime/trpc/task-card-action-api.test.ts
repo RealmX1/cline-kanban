@@ -1,4 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type * as LockedFileSystemModule from "../../../src/fs/locked-file-system";
+
+// 保留真实 SQLite 互斥与 fsync，只把锁数据库绑定到 guarded runner 独占的测试目录。
+vi.mock("../../../src/fs/locked-file-system", async (importOriginal) => {
+	const actual = await importOriginal<typeof LockedFileSystemModule>();
+	const guardedTestDirectory = process.env.TMPDIR;
+	if (!guardedTestDirectory) throw new Error("必须通过 guarded runner 提供独占测试目录。");
+	return {
+		...actual,
+		lockedFileSystem: await actual.LockedFileSystem.forIsolatedTestDirectory(`${guardedTestDirectory}/..`),
+	};
+});
+
 import type {
 	RuntimeBoardCard,
 	RuntimeBoardColumnId,
@@ -17,6 +30,7 @@ import type { KanbanRequestOriginActorEvidence } from "../../../src/inter-work-u
 import type * as TaskMutationCapturePort from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskMutationIntentWithResolvedActor } from "../../../src/state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
 import type { TaskClosureOperation } from "../../../src/task-closure/task-closure-operation-store";
+import * as ProcessSupervisor from "../../../src/task-command-execution/task-command-execution-supervisor";
 
 // taskCardAction.* 的单元测试：board 持久化漏斗换成内存假实现（照样执行 mutate 回调、尊重 save:false），
 // 会话 / worktree 副作用换成记录调用顺序的桩，草稿 / 排队 prompt / checkpoint ref 清理同样只记顺序。
@@ -27,6 +41,9 @@ const harness = vi.hoisted(() => ({
 	closureOperations: new Map<string, TaskClosureOperation>(),
 	closureHistory: [] as TaskClosureRecord[],
 	archiveFailure: null as string | null,
+	archiveWait: null as Promise<void> | null,
+	beforeOperationWrite: null as ((operation: TaskClosureOperation) => Promise<void>) | null,
+	cancelledLifecycleRequests: new Set<string>(),
 	historyWriteFailure: false,
 	workspaceState: {
 		board: { columns: [] } as unknown,
@@ -47,9 +64,43 @@ vi.mock(
 	}),
 );
 vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
+	assertTaskClosureLifecycleNotCancelled: vi.fn(async (operation: TaskClosureOperation) => {
+		if (
+			harness.cancelledLifecycleRequests.has(
+				operation.reopening?.reopeningRequestId ?? operation.progress.closureRequestId,
+			)
+		)
+			throw new Error("任务生命周期请求已取消");
+	}),
+	isTaskClosureLifecycleCancellationRequested: vi.fn(async (operation: TaskClosureOperation) =>
+		harness.cancelledLifecycleRequests.has(
+			operation.reopening?.reopeningRequestId ?? operation.progress.closureRequestId,
+		),
+	),
+	requestTaskClosureLifecycleCancellation: vi.fn(async (operation: TaskClosureOperation) => {
+		harness.cancelledLifecycleRequests.add(
+			operation.reopening?.reopeningRequestId ?? operation.progress.closureRequestId,
+		);
+	}),
+	withTaskClosureLifecycleCancellationGuards: async (
+		operations: TaskClosureOperation[],
+		action: () => Promise<unknown>,
+	) => {
+		for (const operation of operations) {
+			if (
+				harness.cancelledLifecycleRequests.has(
+					operation.reopening?.reopeningRequestId ?? operation.progress.closureRequestId,
+				)
+			)
+				throw new Error("任务生命周期请求已取消");
+		}
+		return action();
+	},
+	writeTaskClosureAutomaticAttemptReceipt: vi.fn(async () => undefined),
 	withTaskClosureLifecycleLocks: async (_workspaceId: string, _ids: string[], action: () => Promise<unknown>) =>
 		await action(),
 	writeTaskClosureOperation: async (operation: TaskClosureOperation) => {
+		await harness.beforeOperationWrite?.(operation);
 		harness.closureOperations.set(operation.progress.closureRequestId, structuredClone(operation));
 	},
 	readTaskClosureOperation: async (_identity: unknown, id: string) =>
@@ -70,9 +121,25 @@ vi.mock("../../../src/task-closure/task-closure-operation-store", () => ({
 		operations: [...harness.closureOperations.values()].map((op) => op.progress),
 	}),
 }));
+// API 用例的 PID 来自会话端口桩，进程代际同样由端口桩提供；真实退出证明由监督器测试负责。
+vi.mock("../../../src/task-command-execution/task-command-execution-supervisor", async (importOriginal) => ({
+	...(await importOriginal<typeof ProcessSupervisor>()),
+	readSystemBootIdentity: vi.fn(async () => "isolated-current-system-boot"),
+	readProcessIdentity: vi.fn(async (pid: number) => ({ pid, startAndCommand: `isolated-process-generation-${pid}` })),
+}));
+vi.mock("../../../src/task-closure/task-closure-failure-recovery-evidence", () => ({
+	readTaskClosureOwnedProcessExitEvidence: vi.fn(async () => []),
+	readTaskClosureRecoveryEvidence: vi.fn(async () => ({
+		fingerprint: harness.archiveFailure ?? "相关修复已经核验",
+		prerequisiteSatisfied: !harness.archiveFailure,
+		provesRelevantRepair: !harness.archiveFailure,
+	})),
+}));
 vi.mock("../../../src/task-closure/task-closure-archive", () => ({
+	reconcileTaskClosureVerifiedArchivePublication: vi.fn(async () => false),
 	captureAndVerifyTaskClosureArchive: async () => {
 		harness.callOrder.push("verifyRecoverableArchive");
+		await harness.archiveWait;
 		if (harness.archiveFailure) throw new Error(harness.archiveFailure);
 		return {
 			archiveDirectory: "/isolated-archive",
@@ -552,6 +619,9 @@ beforeEach(() => {
 	harness.closureOperations.clear();
 	harness.closureHistory.length = 0;
 	harness.archiveFailure = null;
+	harness.archiveWait = null;
+	harness.beforeOperationWrite = null;
+	harness.cancelledLifecycleRequests.clear();
 	harness.historyWriteFailure = false;
 	harness.capturedTaskMutationIntents.length = 0;
 	seedWorkspace(createBoard({}));
@@ -947,6 +1017,237 @@ describe("结构化结案的失败恢复和追加历史", () => {
 		},
 		selectedArtifactRelativePaths: [],
 	});
+	it("并发取消先持久撤销而不等复制锁，正在进行的保全完成后也不能移列或删除", async () => {
+		seedWorkspace(createBoard({ review: [createCard("cancel-during-preservation")] }));
+		let releaseArchive = () => {};
+		harness.archiveWait = new Promise<void>((resolve) => {
+			releaseArchive = resolve;
+		});
+		const { api, workspaceApi } = createApiForTest();
+		const closing = api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+			WORKSPACE_SCOPE,
+			{ taskId: "cancel-during-preservation", closure: closure() },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		const rejectedClosing = expect(closing).rejects.toThrow("已取消");
+		await vi.waitFor(() => expect(harness.callOrder).toContain("verifyRecoverableArchive"));
+		const cancellation = api.cancelTaskClosureOperation(
+			WORKSPACE_SCOPE,
+			{ taskId: "cancel-during-preservation", expectedTaskIncarnationCreatedAtEpochMs: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		await vi.waitFor(() => expect(harness.cancelledLifecycleRequests.has(closure().closureRequestId)).toBe(true));
+		releaseArchive();
+		await rejectedClosing;
+		await cancellation;
+		expect(readColumnTaskIds("review")).toEqual(["cancel-during-preservation"]);
+		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+		expect(harness.closureOperations.get(closure().closureRequestId)?.progress.phase).toBe("cancelled");
+	});
+	it.each(["close", "permanent_delete", "batch_permanent_delete"] as const)(
+		"%s 在最终看板写入前持久取消时保留卡片、草稿与源树",
+		async (action) => {
+			seedWorkspace(createBoard({ review: [createCard("cancel-final-a"), createCard("cancel-final-b")] }));
+			const reachedFinalWrite = createDeferred<void>();
+			const releaseFinalWrite = createDeferred<void>();
+			harness.beforeOperationWrite = async (operation) => {
+				if (
+					operation.taskIdentity.taskId === "cancel-final-a" &&
+					operation.progress.phase === "closed_cleanup_pending"
+				) {
+					reachedFinalWrite.resolve();
+					await releaseFinalWrite.promise;
+				}
+			};
+			const { api, workspaceApi } = createApiForTest();
+			const closing =
+				action === "close"
+					? api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+							WORKSPACE_SCOPE,
+							{ taskId: "cancel-final-a", closure: closure() },
+							KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+						)
+					: api.permanentlyDeleteTaskCardsWithFullResourceCleanup(
+							WORKSPACE_SCOPE,
+							{
+								permanentlyDeletedTaskCardSelection: {
+									permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+									selectedTaskIds:
+										action === "batch_permanent_delete"
+											? ["cancel-final-a", "cancel-final-b"]
+											: ["cancel-final-a"],
+								},
+							},
+							KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+						);
+			const rejectedClosing = expect(closing).rejects.toThrow("已取消");
+			await reachedFinalWrite.promise;
+			const cancellation = api.cancelTaskClosureOperation(
+				WORKSPACE_SCOPE,
+				{
+					taskId: "cancel-final-a",
+					expectedTaskIncarnationCreatedAtEpochMs: 1,
+				},
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			);
+			await vi.waitFor(() => expect(harness.cancelledLifecycleRequests.size).toBe(1));
+			releaseFinalWrite.resolve();
+			await rejectedClosing;
+			await cancellation;
+			expect(readColumnTaskIds("review")).toEqual(["cancel-final-a", "cancel-final-b"]);
+			expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
+			expect(harness.callOrder.some((entry) => entry.startsWith("discardTaskEditDrafts:"))).toBe(false);
+		},
+	);
+	it.each(["failed_session_start", "interrupted_session_start"] as const)(
+		"归档已恢复后的 %s 重读仍保留启动预算",
+		async (scenario) => {
+			seedWorkspace(createBoard({ review: [createCard("bounded-reopening")] }));
+			const { api, runtimeApi, liveTaskSessionSummaryByTaskId } = createApiForTest();
+			await api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "bounded-reopening", closure: closure() },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			);
+			const card = readBoard()
+				.columns.flatMap((column) => column.cards)
+				.find((entry) => entry.id === "bounded-reopening");
+			if (!card?.taskClosureSummary) throw new Error("缺少测试归档");
+			card.taskClosureSummary.archiveManifest.availability = "verified_recoverable";
+			runtimeApi.startTaskSession.mockResolvedValue({ ok: false, summary: null, error: "No space left on device" });
+			const request = { taskId: card.id, reopeningRequestId: "33333333-3333-4333-8333-333333333333" };
+			await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			);
+			if (scenario === "interrupted_session_start") {
+				const state = harness.closureOperations.get(request.reopeningRequestId)?.reopening?.automaticRecovery;
+				if (!state) throw new Error("缺少启动预算");
+				Object.assign(state, {
+					automaticAttemptCount: 3,
+					pendingSideEffect: "resume_session",
+					failureClassification: null,
+				});
+			}
+			for (let replay = 0; replay < 4; replay += 1) {
+				liveTaskSessionSummaryByTaskId.clear();
+				await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+					WORKSPACE_SCOPE,
+					request,
+					KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+				);
+			}
+			expect(runtimeApi.startTaskSession).toHaveBeenCalledTimes(scenario === "failed_session_start" ? 3 : 1);
+			expect(
+				harness.closureOperations.get(request.reopeningRequestId)?.reopening?.automaticRecovery
+					?.automaticAttemptCount,
+			).toBe(3);
+		},
+	);
+	it("未显式传入复开 ID 时也冻结后台重放身份，取消后不能生成新请求", async () => {
+		seedWorkspace(createBoard({ trash: [createCard("frozen-reopening")] }));
+		const { api, runtimeApi } = createApiForTest();
+		runtimeApi.startTaskSession.mockResolvedValue({ ok: false, summary: null, error: "No space left on device" });
+		await api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+			WORKSPACE_SCOPE,
+			{ taskId: "frozen-reopening" },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		const stale = structuredClone([...harness.closureOperations.values()][0]);
+		expect(stale.reopening?.request.reopeningRequestId).toBe(stale.reopening?.reopeningRequestId);
+		await api.cancelTaskClosureOperation(
+			WORKSPACE_SCOPE,
+			{ taskId: "frozen-reopening", expectedTaskIncarnationCreatedAtEpochMs: 1 },
+			KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+		);
+		if (!stale.reopening) throw new Error("复开请求缺失");
+		await expect(
+			api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+				WORKSPACE_SCOPE,
+				stale.reopening.request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("已取消");
+		expect(runtimeApi.startTaskSession).toHaveBeenCalledTimes(1);
+	});
+	it("独立重开 ID 只启动一次，完成后参数仍绑定，后续结案不能复活旧重开", async () => {
+		seedWorkspace(createBoard({ review: [createCard("reopen-idempotency")] }));
+		const { api, runtimeApi } = createApiForTest();
+		const closeTask = (requestId: string) =>
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				{ taskId: "reopen-idempotency", closure: { ...closure(), closureRequestId: requestId } },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			);
+		const reopen = { taskId: "reopen-idempotency", reopeningRequestId: "33333333-3333-4333-8333-333333333333" };
+		const reopenTask = (request: typeof reopen) =>
+			api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			);
+		await closeTask(closure().closureRequestId);
+		await reopenTask(reopen);
+		await reopenTask(reopen);
+		expect(runtimeApi.startTaskSession).toHaveBeenCalledTimes(1);
+		await expect(
+			api.restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+				WORKSPACE_SCOPE,
+				{ ...reopen, insertAtIndexWithinReviewBoardColumn: 2 },
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("已绑定其他参数");
+		await closeTask("44444444-4444-4444-8444-444444444444");
+		await expect(reopenTask(reopen)).rejects.toThrow("旧重开请求不能重放");
+		await reopenTask({ ...reopen, reopeningRequestId: "55555555-5555-4555-8555-555555555555" });
+		expect(runtimeApi.startTaskSession).toHaveBeenCalledTimes(2);
+		expect(harness.closureOperations.get(reopen.reopeningRequestId)?.reopening?.phase).toBe("completed");
+		expect(harness.closureHistory.map((record) => record.eventKind)).toEqual([
+			"closed",
+			"reopened",
+			"closed",
+			"reopened",
+		]);
+	});
+	it("跨开机重试捕获当前 PID 时丢弃旧等待集合，不能沿用旧 boot 退出证明", async () => {
+		seedWorkspace(createBoard({ review: [createCard("boot-generation-task")] }));
+		vi.spyOn(ProcessSupervisor, "readSystemBootIdentity").mockResolvedValue("current-system-boot");
+		vi.spyOn(ProcessSupervisor, "readProcessIdentity").mockImplementation(async (pid) => ({
+			pid,
+			startAndCommand: `current-generation-${pid}`,
+		}));
+		const { api, runtimeApi, liveTaskSessionSummaryByTaskId } = createApiForTest();
+		const request = { taskId: "boot-generation-task", closure: closure() };
+		runtimeApi.stopTaskSession.mockResolvedValue({ ok: false, summary: null, error: "所属 Agent 等待退出" } as never);
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("所属 Agent 等待退出");
+		const old = harness.closureOperations.get(closure().closureRequestId);
+		if (!old) throw new Error("缺少原结案请求");
+		old.systemBootIdentityAtProcessCapture = "previous-system-boot";
+		old.processIdsAwaitingExit = [101];
+		old.ownedProcessIdentitiesAwaitingExit = [{ pid: 101, startAndCommand: "previous-generation" }];
+		liveTaskSessionSummaryByTaskId.set(request.taskId, createSummary(request.taskId, { pid: 202 }));
+		await expect(
+			api.moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+				WORKSPACE_SCOPE,
+				request,
+				KANBAN_REQUEST_ORIGIN_ACTOR_EVIDENCE_FROM_KANBAN_CLI,
+			),
+		).rejects.toThrow("所属 Agent 等待退出");
+		expect(harness.closureOperations.get(closure().closureRequestId)).toMatchObject({
+			systemBootIdentityAtProcessCapture: "current-system-boot",
+			processIdsAwaitingExit: [202],
+			ownedProcessIdentitiesAwaitingExit: [{ pid: 202, startAndCommand: "current-generation-202" }],
+		});
+		expect(harness.callOrder).not.toContain("verifyRecoverableArchive");
+		vi.restoreAllMocks();
+	});
 	it("停止失败仍持久保存所有所属活体 PID，重试前不归档或删除", async () => {
 		seedWorkspace(createBoard({ review: [createCard("retire")] }));
 		const { api, runtimeApi, liveTaskSessionSummaryByTaskId, workspaceApi } = createApiForTest();
@@ -980,7 +1281,7 @@ describe("结构化结案的失败恢复和追加历史", () => {
 		expect(harness.callOrder).not.toContain("verifyRecoverableArchive");
 		expect(workspaceApi.deleteWorktree).not.toHaveBeenCalled();
 	});
-	it("三次归档失败保留原列与工作树，重建 API 后同请求可恢复且不重复结案", async () => {
+	it("归档失败只尝试一次并保留原列与工作树，相关修复确证后同请求可恢复且不重复结案", async () => {
 		seedWorkspace(createBoard({ review: [createCard("retire")] }));
 		harness.archiveFailure = "磁盘不可写";
 		const request = { taskId: "retire", expectedTaskIncarnationCreatedAtEpochMs: 1, closure: closure() };
@@ -996,7 +1297,7 @@ describe("结构化结案的失败恢复和追加历史", () => {
 		expect(readColumnTaskIds("review")).toEqual(["retire"]);
 		expect(harness.closureOperations.get(request.closure.closureRequestId)?.progress).toMatchObject({
 			phase: "preservation_waiting_for_recovery",
-			attemptCount: 3,
+			attemptCount: 1,
 			lastError: "磁盘不可写",
 		});
 		harness.archiveFailure = null;

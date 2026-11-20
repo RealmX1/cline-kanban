@@ -51,7 +51,7 @@
     "prebuild": "node scripts/verify-notification-archive-native-runtime.mjs",
     "build": "npm run web:build && node scripts/build.mjs",
     "dogfood": "node scripts/dogfood.mjs",
-    "link": "npm run build && npm link",
+    "link": "npm run build && node --import tsx scripts/link-source-distribution-after-storage-protocol-check.ts",
     "unlink": "npm unlink -g kanban",
     "dev": "NODE_ENV=development tsx watch src/cli.ts",
     "dev:full": "node scripts/dev-full.mjs",

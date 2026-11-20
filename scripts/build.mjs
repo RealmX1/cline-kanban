@@ -171,6 +171,7 @@ try {
 		"src/notifications/notification-lifecycle-database-worker.mjs",
 		join(stagingDirectoryPath, "notification-lifecycle-database-worker.mjs"),
 	);
+	await copyFile("src/task-closure/task-closure-storage-protocol-capabilities.json", join(stagingDirectoryPath, "task-closure-storage-protocol-capabilities.json"));
 	await copyFile(
 		"src/inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 		join(stagingDirectoryPath, "inter-work-unit-relation-ledger-database-worker.mjs"),

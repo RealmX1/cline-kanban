@@ -2206,6 +2206,7 @@ export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTa
 // 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
 export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	reopeningRequestId: z.string().uuid().optional(),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
