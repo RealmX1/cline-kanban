@@ -10,7 +10,6 @@ import {
 	type AcpTaskSessionService,
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
-
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentSessionCountsAffectedByRuntimeExit,
@@ -101,6 +100,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { observePendingUserDecisionAnswerDeliveryStateChanges } from "../state/agent-raised-pending-user-decision-store";
 import {
 	beginManagedTaskPromptDelivery,
 	observeManagedTaskPromptDeliveryChanges,
@@ -184,6 +184,7 @@ import {
 	countAcpTaskSessionsInterruptedByRuntimeExit,
 	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
+import { reconcilePendingUserDecisionAnswerDeliveriesForWorkspace } from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
@@ -304,6 +305,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const webUiDir = getWebUiDir();
 	let verificationExecutionRecoveryLifecycle: ReturnType<typeof startVerificationExecutionRecoveryLifecycle> | null =
 		null;
+	// ACP 的接受证据由所属服务持有；启动补证也必须读实际 transport。
+	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
 
 	try {
 		await readFile(join(webUiDir, "index.html"));
@@ -321,15 +324,29 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			sweepAllWorkspacesOnce: () =>
 				sweepStalePendingTaskMessageInjectionsForAllWorkspaces({
 					getSummary: (workspaceId, conversationSessionId) =>
+						acpTaskSessionServiceByWorkspaceId.get(workspaceId)?.getSummary(conversationSessionId) ??
 						deps.workspaceRegistry
 							.getTerminalManagerForWorkspace(workspaceId)
-							?.getSummary(conversationSessionId) ?? null,
+							?.getSummary(conversationSessionId) ??
+						null,
 					onAutomaticFailureContinuationDeliveryObserved: (workspaceId, conversationSessionId, ...observation) =>
 						deps.workspaceRegistry
 							.getTerminalManagerForWorkspace(workspaceId)
 							?.reconcileHistoricalAutomaticFailureContinuationDelivery(conversationSessionId, ...observation),
 				}),
 		});
+
+	const stopObservingPendingUserDecisionAnswerDeliveryChanges = observePendingUserDecisionAnswerDeliveryStateChanges(
+		(_workspaceId, records) => {
+			for (const record of records) {
+				if (record.answerHandledConfirmation || record.answerDeliveryState === "delivered") continue;
+				const next =
+					record.answerDeliveryReconciliation?.nextReconciliationAt ??
+					record.answerDeliveryAttempts?.at(-1)?.nextReconciliationAt;
+				if (typeof next === "number") stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.requestSweepAt(next);
+			}
+		},
+	);
 
 	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
 	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
@@ -425,6 +442,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	deps.runtimeStateHub.attachTaskVisualizationArtifactService?.(taskVisualizationArtifactApi);
 	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
 		({ workspaceId, summary, submittedPromptText }) => {
+			void reconcilePendingUserDecisionAnswerDeliveriesForWorkspace({
+				workspaceId,
+				taskId: summary.taskId,
+				getSummary: (id) =>
+					deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId)?.getSummary(id) ?? null,
+			}).catch((error) => deps.warn(String(error)));
 			promptDraftUsageService.notifyUserPromptSubmitted({
 				workspaceId,
 				taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId,
@@ -468,7 +491,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 每次请求新建会让每次看图都从头重读整份 transcript。
 	const explorationThreadGraphReadOnlyTurnSource = new ClaudeCodeTranscriptCompletedTurnSource();
 	// ACP（omp 等）会话按 workspace 作用域持有。
-	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
 	// 关服 / 重置时也要遍历「只跑过 ACP 会话」的 workspace，
 	// 它们未必在 workspaceRegistry 中出现过。
 	const acpWorkspacePathByWorkspaceId = new Map<string, string>();
@@ -481,6 +503,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			});
 			service.setUserPromptSubmittedListener((taskId, text) => {
 				const summary = service?.getSummary(taskId);
+				if (summary)
+					void reconcilePendingUserDecisionAnswerDeliveriesForWorkspace({
+						workspaceId: scope.workspaceId,
+						taskId,
+						getSummary: (id) => (id === taskId ? summary : null),
+					}).catch((error) => deps.warn(String(error)));
 				promptDraftUsageService.notifyUserPromptSubmitted({
 					workspaceId: scope.workspaceId,
 					taskId: summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
@@ -2348,6 +2376,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		clearInterval(workspaceLifecycleOperationRecoveryTimer);
 		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
+		stopObservingPendingUserDecisionAnswerDeliveryChanges();
 		agentSessionInactivityReclamationScheduler.stop();
 		// 计划内 handover 先停止新认领，给已进入写链的投递保留同一个有界排空窗口。
 		// 窗口结束后必须硬停，防止尚在 await 身份复核的操作在 detach 后写入。

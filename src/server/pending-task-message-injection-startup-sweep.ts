@@ -42,6 +42,7 @@ import { logTuiFreezeError, logTuiFreezeWarning } from "../diagnostics/tui-freez
 import { getThisRuntimeProcessInstanceId } from "../state/runtime-process-instance-heartbeat-registry";
 import { getWorkspaceDirectoryPath, listWorkspaceIndexEntries } from "../state/workspace-state";
 import { TASK_CHAT_INPUT_DELIVERY_WORST_CASE_SETTLEMENT_BUDGET_MS } from "../terminal/session-manager";
+import { reconcilePendingUserDecisionAnswerDeliveriesForWorkspace } from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 
 // 判超期时在契约上界之外再多等这点余量，吸收账本时间戳的取整、受理前的那一跳 RPC，以及定时器抖动。
@@ -93,6 +94,18 @@ export async function sweepStalePendingTaskMessageInjectionsForAllWorkspaces(
 					onAutomaticFailureContinuationDeliveryObserved: (...observation) =>
 						deps.onAutomaticFailureContinuationDeliveryObserved?.(workspaceEntry.workspaceId, ...observation),
 				});
+			const nextAnswerDeliveryCheck = deps.getSummary
+				? await reconcilePendingUserDecisionAnswerDeliveriesForWorkspace({
+						workspaceId: workspaceEntry.workspaceId,
+						getSummary: (id) => deps.getSummary?.(workspaceEntry.workspaceId, id) ?? null,
+					})
+				: null;
+			if (nextAnswerDeliveryCheck !== null)
+				earliestSkippedPendingBecomesStaleAtEpochMs = Math.min(
+					earliestSkippedPendingBecomesStaleAtEpochMs ?? Infinity,
+					nextAnswerDeliveryCheck,
+				);
+
 			const result = await sweepStalePendingTaskMessageInjectionsAfterRuntimeRestart({
 				ledgerPath: getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceEntry.workspaceId)),
 				nowIso: new Date().toISOString(),
@@ -133,6 +146,7 @@ export interface StalePendingTaskMessageInjectionSweepsForRuntimeLifetimeDepende
 }
 
 export interface StalePendingTaskMessageInjectionSweepsForRuntimeLifetimeHandle {
+	requestSweepAt: (epochMs: number) => void;
 	stop: () => void;
 }
 
@@ -144,7 +158,28 @@ export function startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime(
 	const sweepAllWorkspacesOnce = deps.sweepAllWorkspacesOnce ?? sweepStalePendingTaskMessageInjectionsForAllWorkspaces;
 	let stopped = false;
 	let nextSweepTimer: NodeJS.Timeout | null = null;
+	let scheduledSweepAt = Infinity;
+	let sweeping = false;
+	let requestedSweepAt = Infinity;
+	const requestSweepAt = (epochMs: number) => {
+		if (stopped) return;
+		requestedSweepAt = Math.min(requestedSweepAt, epochMs);
+		if (sweeping || epochMs >= scheduledSweepAt) return;
+		if (nextSweepTimer) clearTimeout(nextSweepTimer);
+		scheduledSweepAt = epochMs;
+		nextSweepTimer = setTimeout(
+			() => {
+				void sweepThenScheduleNextSweep();
+			},
+			Math.max(0, epochMs - Date.now()),
+		);
+		nextSweepTimer.unref();
+	};
 	const sweepThenScheduleNextSweep = async (): Promise<void> => {
+		if (stopped || sweeping) return;
+		sweeping = true;
+		requestedSweepAt = Infinity;
+		scheduledSweepAt = Infinity;
 		nextSweepTimer = null;
 		let earliestSkippedPendingBecomesStaleAtEpochMs: number | null = null;
 		try {
@@ -154,6 +189,7 @@ export function startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime(
 			// 一趟意外抛错不能把整条链掐断——掐断就退回「下次重启才收敛」。下一趟按周期兜底照排。
 			logTuiFreezeError("[tui-freeze] pending-injection-sweep-pass-failed", error);
 		}
+		sweeping = false;
 		if (stopped) {
 			return;
 		}
@@ -164,14 +200,11 @@ export function startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime(
 						STALE_PENDING_SWEEP_PERIODIC_BACKSTOP_INTERVAL_MS,
 						Math.max(0, earliestSkippedPendingBecomesStaleAtEpochMs - Date.now()),
 					);
-		// unref：清扫是纠偏动作，不该把一个本该退出的进程按在事件循环里。
-		nextSweepTimer = setTimeout(() => {
-			void sweepThenScheduleNextSweep();
-		}, nextSweepDelayMs);
-		nextSweepTimer.unref();
+		requestSweepAt(Math.min(requestedSweepAt, Date.now() + nextSweepDelayMs));
 	};
 	void sweepThenScheduleNextSweep();
 	return {
+		requestSweepAt,
 		stop: () => {
 			stopped = true;
 			if (nextSweepTimer !== null) {

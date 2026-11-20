@@ -1128,6 +1128,8 @@ export function CardDetailView({
 		workspaceId: isDoneTaskReadOnly ? null : currentProjectId,
 		taskId: selectedTaskConversationSessionId,
 		runtimeSessionLatestHookActivity: activeTaskConversationSessionSummary?.latestHookActivity ?? null,
+		runtimeSessionPromptSubmissionAcceptance:
+			activeTaskConversationSessionSummary?.agentConversationPromptSubmissionAcceptance,
 	});
 	const lastTurnViewKey =
 		diffMode === "last_turn"
@@ -1941,6 +1943,8 @@ export function CardDetailView({
 					isSubmitting={pendingUserDecision.isSubmitting}
 					onAnswer={pendingUserDecision.answer}
 					onDismiss={pendingUserDecision.dismiss}
+					onReconcileDelivery={pendingUserDecision.reconcileDelivery}
+					onConfirmHandled={pendingUserDecision.confirmHandled}
 					onDecisionNoLongerPending={() => void pendingUserDecision.refresh()}
 					agentResponseGenerationTurnSequence={
 						activeTaskConversationSessionSummary?.agentResponseGenerationTurnSequence ?? 0
