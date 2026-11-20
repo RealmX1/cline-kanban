@@ -27,6 +27,8 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
+	RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequest,
+	RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponse,
 	RuntimeConfirmExploratoryFindingRequest,
 	RuntimeConfirmExploratoryFindingResponse,
 	// Post-Deploy Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
@@ -106,6 +108,8 @@ import type {
 	RuntimePromptLibraryResponse,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
+	RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequest,
+	RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponse,
 	RuntimeRecordCurrentTaskProgressRequest,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
@@ -259,6 +263,8 @@ import {
 	runtimeConditionalWorkspaceChangesResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema,
+	runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema,
 	runtimeConfirmExploratoryFindingRequestSchema,
 	runtimeConfirmExploratoryFindingResponseSchema,
 	// Post-Deploy Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
@@ -346,6 +352,8 @@ import {
 	runtimeReadTaskCardsForPostDeployVerificationResponseSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
+	runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema,
+	runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema,
 	runtimeRecordCurrentTaskProgressRequestSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
 	runtimeRecordTaskOpenedByUserResponseSchema,
@@ -856,6 +864,15 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeAnswerAgentRaisedPendingUserDecisionResponse>;
+		reconcileAgentRaisedPendingUserDecisionAnswerDelivery: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequest,
+		) => Promise<RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponse>;
+		confirmAgentRaisedPendingUserDecisionAnswerHandled: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequest,
+		) => Promise<RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponse>;
+
 		saveAgentRaisedPendingUserDecisionAnswerDraft: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
@@ -2067,6 +2084,19 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.query(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
 		}),
+	reconcileAgentRaisedPendingUserDecisionAnswerDelivery: workspaceProcedure
+		.input(runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema)
+		.output(runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema)
+		.mutation(async ({ ctx, input }) =>
+			ctx.runtimeApi.reconcileAgentRaisedPendingUserDecisionAnswerDelivery(ctx.workspaceScope, input),
+		),
+	confirmAgentRaisedPendingUserDecisionAnswerHandled: workspaceProcedure
+		.input(runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema)
+		.output(runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema)
+		.mutation(async ({ ctx, input }) =>
+			ctx.runtimeApi.confirmAgentRaisedPendingUserDecisionAnswerHandled(ctx.workspaceScope, input),
+		),
+
 	saveAgentRaisedPendingUserDecisionAnswerDraft: workspaceProcedure
 		.input(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema)
 		.output(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema)

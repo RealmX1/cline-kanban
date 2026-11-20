@@ -19,6 +19,7 @@ const HISTORY_RESOLUTION_LABEL: Record<RuntimeAgentRaisedUserDecisionHistoryReso
 	interrupted_without_answer: "提问已中断，仍未作答",
 	failed_without_answer: "提问工具失败，仍未作答",
 	answered_in_kanban_panel: "在面板作答",
+	user_confirmed_answer_handled: "用户确认已处理",
 	answered_in_agent_terminal: "在终端作答",
 	declined_in_agent_terminal: "在终端拒答",
 	dismissed_in_kanban_panel: "在面板取消",
@@ -30,6 +31,7 @@ const HISTORY_RESOLUTION_TONE_CLASS: Record<RuntimeAgentRaisedUserDecisionHistor
 	interrupted_without_answer: "bg-surface-2 text-text-secondary",
 	failed_without_answer: "bg-surface-2 text-text-secondary",
 	answered_in_kanban_panel: "bg-status-green/10 text-status-green",
+	user_confirmed_answer_handled: "bg-surface-2 text-text-secondary",
 	answered_in_agent_terminal: "bg-status-green/10 text-status-green",
 	declined_in_agent_terminal: "bg-surface-2 text-text-secondary",
 	dismissed_in_kanban_panel: "bg-surface-2 text-text-secondary",
@@ -42,6 +44,7 @@ const HISTORY_RESOLVED_AT_PREFIX_LABEL: Record<RuntimeAgentRaisedUserDecisionHis
 	interrupted_without_answer: "中断于",
 	failed_without_answer: "失败于",
 	answered_in_kanban_panel: "作答于",
+	user_confirmed_answer_handled: "确认于",
 	answered_in_agent_terminal: "作答于",
 	declined_in_agent_terminal: "拒答于",
 	dismissed_in_kanban_panel: "取消于",
@@ -85,6 +88,8 @@ function describeAnswerDeliveryState(
 			return "已送达 agent";
 		case "delivery_failed":
 			return "未送达 agent";
+		case "delivery_unconfirmed":
+			return "答案已保存，送达待确认";
 		case "answer_recorded":
 		case "delivery_in_progress":
 			return "投递中";
