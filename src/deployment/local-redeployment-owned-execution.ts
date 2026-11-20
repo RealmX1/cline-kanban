@@ -30,7 +30,13 @@ import {
 	readProcessIdentity,
 	readSystemBootIdentity,
 } from "../task-command-execution/task-command-execution-supervisor";
-import { restrictLocalDeploymentExecution } from "./local-deployment-execution";
+import {
+	executeLocalDeploymentStages,
+	readLocalDeploymentExecution,
+	restrictLocalDeploymentExecution,
+	summarizeLocalDeploymentExecution,
+} from "./local-deployment-execution";
+import { runLocalDeploymentCommandPreservingOriginalOutput } from "./local-deployment-execution-process";
 import {
 	assertLocalRedeploymentNotRevoked,
 	assertLocalRedeploymentOwnerStillEligible,
@@ -86,6 +92,7 @@ export async function startPreparedLocalRedeployment(directory: string) {
 	}
 	await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
 	const idempotencyKey = `local-redeployment:${request.executionId}`;
+	const legacyCleanupCompatibilityPath = join(directory, "online-registration-optional-cleanup-compatibility.json");
 	return lockedFileSystem.withLock({ path: join(directory, "redeployment-start-single-flight") }, async () => {
 		const readExistingRegistration = async () => {
 			const registered = (await readTaskCommandExecutions(request.workspaceId)).find(
@@ -112,9 +119,60 @@ export async function startPreparedLocalRedeployment(directory: string) {
 			executionId: registered?.executionId,
 			resultFile: specification.resultFile,
 		});
+		if (
+			registered &&
+			!registered.specification.postProcessExitCleanupCommand &&
+			specification.postProcessExitCleanupCommand
+		) {
+			const compatibility = (await readLocalRedeploymentJson(legacyCleanupCompatibilityPath)) as {
+				requestSha256?: string;
+				idempotencyKey?: string;
+				deferredCleanupCommand?: string[];
+			} | null;
+			if (
+				compatibility?.requestSha256 === frozen.requestSha256 &&
+				compatibility.idempotencyKey === idempotencyKey &&
+				JSON.stringify(compatibility.deferredCleanupCommand) ===
+					JSON.stringify(specification.postProcessExitCleanupCommand)
+			) {
+				try {
+					await recoverOwnedCommandPostProcessExitCleanup(registered, specification.postProcessExitCleanupCommand);
+				} catch (error) {
+					await writeLocalRedeploymentJson(join(directory, "deferred-cleanup-recovery-failure.json"), {
+						executionId: request.executionId,
+						error: String(error),
+					}).catch(() => undefined);
+				}
+			}
+		}
 		const businessResult = (await readLocalRedeploymentJson(specification.resultFile)) as {
 			disposition?: string;
+			analysis?: { deploymentOutcome?: string; ancillaryFailures?: string[] };
 		} | null;
+		if (
+			businessResult?.analysis?.deploymentOutcome === "succeeded" &&
+			businessResult.analysis.ancillaryFailures?.includes("task_comment") &&
+			(!registered || registered.revokedAtEpochMs === null)
+		) {
+			try {
+				const execution = await readLocalDeploymentExecution(directory);
+				const analysis = summarizeLocalDeploymentExecution(execution);
+				if (
+					execution.manifest.schemaVersion === 2 &&
+					execution.manifest.redeploymentRequestSha256 === frozen.requestSha256 &&
+					analysis.deploymentOutcome === "succeeded" &&
+					analysis.ancillaryFailures.includes("task_comment")
+				)
+					await executeLocalDeploymentStages(directory, {
+						runCommand: runLocalDeploymentCommandPreservingOriginalOutput,
+					});
+			} catch (error) {
+				await writeLocalRedeploymentJson(join(directory, "task-comment-recovery-failure.json"), {
+					executionId: request.executionId,
+					error: String(error),
+				}).catch(() => undefined);
+			}
+		}
 		const terminalResult = ["agent_review_ready", "agent_judgment_required", "cancelled"].includes(
 			businessResult?.disposition ?? "",
 		);
@@ -211,15 +269,12 @@ export async function startPreparedLocalRedeployment(directory: string) {
 				}
 				if (rejectsOnlyOptionalCleanup) {
 					const { postProcessExitCleanupCommand, ...compatibleSpecification } = specification;
-					await writeLocalRedeploymentJson(
-						join(directory, "online-registration-optional-cleanup-compatibility.json"),
-						{
-							requestSha256: frozen.requestSha256,
-							idempotencyKey,
-							rejection,
-							deferredCleanupCommand: postProcessExitCleanupCommand,
-						},
-					);
+					await writeLocalRedeploymentJson(legacyCleanupCompatibilityPath, {
+						requestSha256: frozen.requestSha256,
+						idempotencyKey,
+						rejection,
+						deferredCleanupCommand: postProcessExitCleanupCommand,
+					});
 					await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
 					assertLocalRedeploymentNotRevoked(directory);
 					response = await sendRegistration(compatibleSpecification);

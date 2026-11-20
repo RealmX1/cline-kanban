@@ -46,9 +46,10 @@ import {
 import {
 	assertLocalRedeploymentNotRevoked,
 	assertLocalRedeploymentOwnerStillEligible,
+	createBoundLocalRedeploymentSourceValidationArguments,
 	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
-	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH,
+	LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME,
 	LocalRedeploymentIdentityMismatch,
 	localRedeploymentRuntimeBaselineSchema,
 	localRedeploymentSha256,
@@ -79,12 +80,16 @@ const normalizeStart = (value: string): string => value.trim().replace(/\s+/gu, 
 const candidateCheckout = (directory: string) => join(directory, "candidate-source-checkout");
 const frozenExecutor = (directory: string) => join(directory, "frozen-local-redeployment-executor.mjs");
 
-export async function observeLocalRedeploymentRuntimeBaseline(frozen: FrozenLocalRedeploymentRequest) {
+export async function observeLocalRedeploymentRuntimeBaseline(
+	frozen: FrozenLocalRedeploymentRequest,
+	expectedLoadedEntrypointSha256?: string,
+) {
 	const request = frozen.request;
 	try {
 		const report = (await queryLocalRedeploymentRuntime(request, "runtime.getAgentSessionPtyHostDiagnostics")) as {
 			runtimeProcessId: number;
 			runtimeProcessStartTimeText: string;
+			runtimeLoadedEntrypointSha256?: string;
 			runtimeIdentity: { runtimeHomeDirectoryPath: string; runtimePort: number };
 		};
 		if (
@@ -92,6 +97,15 @@ export async function observeLocalRedeploymentRuntimeBaseline(frozen: FrozenLoca
 			report.runtimeIdentity.runtimePort !== request.runtimeIdentity.runtimePort
 		)
 			throw new Error("监听实例 home 或端口与冻结目标不匹配");
+		if (
+			expectedLoadedEntrypointSha256 !== undefined &&
+			report.runtimeLoadedEntrypointSha256 !== expectedLoadedEntrypointSha256
+		)
+			return localRedeploymentRuntimeBaselineSchema.parse({
+				state: "unknown",
+				runtimeBefore: null,
+				reason: "监听实例已加载的入口与待登记候选不一致",
+			});
 		const current = await readProcessIdentity(report.runtimeProcessId);
 		if (
 			!current ||
@@ -148,6 +162,120 @@ export async function observeLocalRedeploymentRuntimeBaseline(frozen: FrozenLoca
 			reason: String(error),
 		});
 	}
+}
+
+type ObservedLocalRedeploymentRuntimeBaseline = Awaited<ReturnType<typeof observeLocalRedeploymentRuntimeBaseline>>;
+
+async function observeLocalRedeploymentSessionContinuity(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	baseline: ObservedLocalRedeploymentRuntimeBaseline,
+) {
+	const { request } = frozen;
+	if (baseline.state !== "verified_online")
+		return {
+			status: baseline.state === "verified_offline" ? "offline" : "unavailable",
+			blockingReasons: baseline.state === "unknown" ? [baseline.reason] : [],
+			blockingSessions: [],
+			readiness: null,
+		};
+	let output: string;
+	let readinessCommandSucceeded = false;
+	try {
+		output = (
+			await executeLocalRedeploymentFile(
+				request.deploymentNodeBinaryPath,
+				[
+					join(candidateCheckout(directory), "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
+					"--candidate-source-commit",
+					request.candidateSourceCommit,
+					"--before-runtime-restart",
+					"--expected-runtime-process-id",
+					String(baseline.runtimeBefore.processId),
+				],
+				{
+					timeout: 10_000,
+					maxBuffer: 4_194_304,
+					env: {
+						...process.env,
+						KANBAN_RUNTIME_HOST: request.runtimeIdentity.runtimeHost,
+						KANBAN_RUNTIME_PORT: String(request.runtimeIdentity.runtimePort),
+					},
+				},
+			)
+		).stdout;
+		readinessCommandSucceeded = true;
+	} catch (error) {
+		output = error instanceof Error && "stdout" in error && typeof error.stdout === "string" ? error.stdout : "";
+	}
+	try {
+		const readiness = JSON.parse(output) as Record<string, unknown>;
+		const runtimeIdentity = readiness.runtimeIdentity as Partial<typeof request.runtimeIdentity> | undefined;
+		const currentGenerationMatches =
+			readiness.runtimeProcessId === baseline.runtimeBefore.processId &&
+			normalizeStart(String(readiness.runtimeProcessStartTimeText)) ===
+				normalizeStart(baseline.runtimeBefore.processStartTimeText) &&
+			runtimeIdentity?.runtimeHomeDirectoryPath === request.runtimeIdentity.runtimeHomeDirectoryPath &&
+			runtimeIdentity.runtimePort === request.runtimeIdentity.runtimePort;
+		const blockingSessions = Array.isArray(readiness.blockingSessions) ? readiness.blockingSessions : [];
+		const blockingReasons = Array.isArray(readiness.failures)
+			? readiness.failures.filter((reason: unknown): reason is string => typeof reason === "string")
+			: [];
+		if (!currentGenerationMatches) blockingReasons.push("连续性诊断尚未核对当前运行代际");
+		if (readiness.ok === true && !readinessCommandSucceeded) blockingReasons.push("连续性诊断未成功退出");
+		const ready = currentGenerationMatches && readiness.ok === true && readinessCommandSucceeded;
+		return {
+			status: ready ? "ready" : currentGenerationMatches && readiness.ok === false ? "blocked" : "unavailable",
+			blockingReasons,
+			blockingSessions,
+			readiness: ready ? readiness : null,
+		};
+	} catch {
+		return {
+			status: "unavailable",
+			blockingReasons: ["会话连续性诊断暂不可读"],
+			blockingSessions: [],
+			readiness: null,
+		};
+	}
+}
+
+async function recordLocalRedeploymentSessionContinuity(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	baseline: ObservedLocalRedeploymentRuntimeBaseline,
+) {
+	const observation = await observeLocalRedeploymentSessionContinuity(directory, frozen, baseline);
+	const checkedAtEpochMs = Date.now();
+	const waiting = observation.status === "blocked" || observation.status === "unavailable";
+	const receipt = {
+		requestSha256: frozen.requestSha256,
+		runtimeBaseline: baseline,
+		status: observation.status,
+		blockingReasons: observation.blockingReasons,
+		blockingSessions: observation.blockingSessions,
+		checkedAtEpochMs,
+		nextCheckAtEpochMs: waiting ? checkedAtEpochMs + 30_000 : null,
+		recoveryCondition: waiting ? "阻塞会话自然退出或当前实例诊断恢复后，重新核验会话与运行代际" : null,
+	};
+	const firstObservationPath = join(directory, "initial-session-continuity-preflight.json");
+	if (!existsSync(firstObservationPath)) await writeLocalRedeploymentJson(firstObservationPath, receipt);
+	await writeLocalRedeploymentJson(join(directory, LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME), receipt);
+	return observation;
+}
+
+async function requireLocalRedeploymentSessionContinuity(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	baseline: ObservedLocalRedeploymentRuntimeBaseline,
+) {
+	const observation = await recordLocalRedeploymentSessionContinuity(directory, frozen, baseline);
+	await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
+	if (observation.status !== "ready" && observation.status !== "offline")
+		throw Object.assign(new Error("会话连续性门禁待证，等待会话自然结束或诊断恢复"), {
+			verificationCheckKey: "session-readiness",
+		});
+	return observation.readiness;
 }
 
 export async function runLocalRedeploymentStandardCommand(
@@ -247,6 +375,11 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 			await executeLocalRedeploymentFile("git", ["--no-optional-locks", "-C", candidate, "rev-parse", "HEAD"])
 		).stdout.trim();
 		if (head !== request.candidateSourceCommit) throw new Error("私有源码候选与冻结 commit 不一致");
+		await recordLocalRedeploymentSessionContinuity(
+			directory,
+			frozen,
+			await observeLocalRedeploymentRuntimeBaseline(frozen),
+		);
 		for (const path of ["dist", "web-ui/dist", "node_modules", "web-ui/node_modules"]) {
 			if (existsSync(join(candidate, path)) && (await lstat(join(candidate, path))).isSymbolicLink())
 				throw new Error(`私有构建拒绝共享软链接：${path}`);
@@ -269,7 +402,6 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 				node: request.deploymentNodeBinaryPath,
 			});
 		}
-		const sourceValidation = join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH);
 		const plan = join(directory, "frozen-source-validation-plan.json");
 		await writeLocalRedeploymentJson(plan, {
 			schemaVersion: 1,
@@ -303,15 +435,7 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 			"source-validation",
 			[
 				request.deploymentNodeBinaryPath,
-				sourceValidation,
-				"--source-checkout-path",
-				candidate,
-				"--candidate-source-commit",
-				request.candidateSourceCommit,
-				"--runtime-home-directory",
-				request.runtimeIdentity.runtimeHomeDirectoryPath,
-				"--output-directory",
-				join(directory, "source-validation"),
+				...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen),
 				"--validation-plan",
 				plan,
 			],
@@ -371,7 +495,11 @@ export async function initializeStandardLocalRedeployment(directory: string): Pr
 		join(frozen.request.runtimeIdentity.runtimeHomeDirectoryPath, "last-deployed-source-commit.json"),
 	)) as { deployedSourceCommit?: string } | null;
 	const candidateDistributionDirectoryPath = join(candidateCheckout(directory), "dist");
-	const { serviceLaunch: _serviceLaunch, ...manifestFields } = frozen.request;
+	const {
+		serviceLaunch: _serviceLaunch,
+		sourceValidationEvidenceFilePaths: _sourceEvidence,
+		...manifestFields
+	} = frozen.request;
 	const manifest = localDeploymentExecutionManifestSchema.parse({
 		...manifestFields,
 		schemaVersion: 2,
@@ -481,10 +609,9 @@ async function verifyBoundFilesystemLockProtocolBeforePublication(
 		});
 }
 
-async function verifyReadiness(
+async function verifyCandidateRuntimeReadiness(
 	directory: string,
 	frozen: FrozenLocalRedeploymentRequest,
-	before: boolean,
 ): Promise<Record<string, unknown>> {
 	const arguments_ = [
 		frozen.request.deploymentNodeBinaryPath,
@@ -492,11 +619,10 @@ async function verifyReadiness(
 		"--candidate-source-commit",
 		frozen.request.candidateSourceCommit,
 	];
-	if (before) arguments_.push("--before-runtime-restart");
 	const output = await runLocalRedeploymentStandardCommand(
 		directory,
 		frozen,
-		before ? "before-runtime-restart-readiness" : "current-runtime-readiness",
+		"current-runtime-readiness",
 		arguments_,
 		candidateCheckout(directory),
 	).catch((error: unknown) => {
@@ -510,9 +636,8 @@ async function verifyReadiness(
 			verificationCheckKey: "session-readiness",
 		});
 	if (
-		!before &&
 		evidence.runtimeLoadedEntrypointSha256 !==
-			localRedeploymentSha256(await readFile(join(candidateCheckout(directory), "dist/cli.js")))
+		localRedeploymentSha256(await readFile(join(candidateCheckout(directory), "dist/cli.js")))
 	)
 		throw new Error("监听进程实际载入的入口与候选产物不一致");
 	return evidence;
@@ -717,6 +842,11 @@ export async function executeStandardLocalRedeploymentStage(
 			throw new Error("候选产物变化");
 	}
 	if (stage === "state_preservation") {
+		await requireLocalRedeploymentSessionContinuity(
+			directory,
+			frozen,
+			await observeLocalRedeploymentRuntimeBaseline(frozen),
+		);
 		const attemptNumber = Number(process.env.KANBAN_LOCAL_DEPLOYMENT_STAGE_ATTEMPT_NUMBER ?? "1");
 		if (!Number.isSafeInteger(attemptNumber) || attemptNumber < 1) throw new Error("复制产物缺少合法尝试身份");
 		await registerLocalRedeploymentRebuildableArtifact(directory, {
@@ -745,13 +875,12 @@ export async function executeStandardLocalRedeploymentStage(
 				await queryLocalRedeploymentRuntime(request, "runtime.getConfig"),
 			);
 		await captureLocalRedeploymentState(request, directory, "before-publication", true);
-		const current = await observeLocalRedeploymentRuntimeBaseline(frozen);
-		if (current.state === "unknown") throw new Error("实例当前身份待补");
-		if (current.state === "verified_online")
-			await writeLocalRedeploymentJson(
-				join(directory, "before-runtime-restart.json"),
-				await verifyReadiness(directory, frozen, true),
-			);
+		const readiness = await requireLocalRedeploymentSessionContinuity(
+			directory,
+			frozen,
+			await observeLocalRedeploymentRuntimeBaseline(frozen),
+		);
+		if (readiness) await writeLocalRedeploymentJson(join(directory, "before-runtime-restart.json"), readiness);
 		await run("immediate-candidate-abi", [
 			node,
 			join(candidate, "scripts/verify-notification-archive-native-runtime.mjs"),
@@ -771,14 +900,10 @@ export async function executeStandardLocalRedeploymentStage(
 				"当前源码 package 的 CLI 名称或链接目标与授权发布目录不一致，禁止发布或 relink",
 			);
 		if (!existsSync(join(directory, "runtime-state-backup-receipt.json"))) throw new Error("发布前缺少持久备份");
-		const current = await observeLocalRedeploymentRuntimeBaseline(frozen);
-		if (current.state === "unknown") throw new Error("发布前监听归属未知");
-		if (!existsSync(join(directory, "publication-runtime-baseline.json")))
-			await writeLocalRedeploymentJson(join(directory, "publication-runtime-baseline.json"), current);
-		if (current.state === "verified_online") await verifyReadiness(directory, frozen, true);
 		await verifyBoundFilesystemLockProtocolBeforePublication(directory, frozen);
-		if (!(await verifyLocalDeploymentPublishedFiles(manifest))) {
-			const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
+		const needsCandidatePublication = !(await verifyLocalDeploymentPublishedFiles(manifest));
+		const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
+		if (needsCandidatePublication) {
 			await registerLocalRedeploymentRebuildableArtifact(directory, {
 				kind: "publication_staging_copy",
 				stage,
@@ -792,6 +917,12 @@ export async function executeStandardLocalRedeploymentStage(
 				await mkdir(dirname(destination), { recursive: true });
 				await cp(join(manifest.candidateDistributionDirectoryPath, file.relativeFilePath), destination);
 			}
+		}
+		const current = await observeLocalRedeploymentRuntimeBaseline(frozen);
+		await requireLocalRedeploymentSessionContinuity(directory, frozen, current);
+		if (!existsSync(join(directory, "publication-runtime-baseline.json")))
+			await writeLocalRedeploymentJson(join(directory, "publication-runtime-baseline.json"), current);
+		if (needsCandidatePublication) {
 			await run("promote-bound-candidate", [
 				node,
 				join(candidate, "scripts/promote-staged-kanban-build-output-into-distribution-directory.mjs"),
@@ -802,6 +933,7 @@ export async function executeStandardLocalRedeploymentStage(
 			]);
 			if (!(await verifyLocalDeploymentPublishedFiles(manifest))) throw new Error("发布文件清单尚未完整");
 		}
+		await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
 		await run(
 			"preserve-global-cli-link",
 			[node, frozen.npmCliEntrypointPath, "link", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
@@ -842,13 +974,8 @@ export async function executeStandardLocalRedeploymentStage(
 					localRedeploymentSha256(await readFile(join(candidate, "dist/cli.js")))
 			) {
 				restartBaseline = current.runtimeBefore;
-				const readiness = await verifyReadiness(directory, frozen, true);
-				if (
-					readiness.runtimeProcessId !== restartBaseline.processId ||
-					normalizeStart(String(readiness.runtimeProcessStartTimeText)) !==
-						normalizeStart(restartBaseline.processStartTimeText)
-				)
-					throw new Error("连续性门禁所见代际已变化，禁止交接未核验实例");
+				const readiness = await requireLocalRedeploymentSessionContinuity(directory, frozen, current);
+				if (!readiness) throw new Error("原监听实例未通过当前代际核验");
 				await writeLocalRedeploymentJson(join(directory, "runtime-restart-target-baseline.json"), current);
 				await writeLocalRedeploymentJson(join(directory, "before-runtime-restart.json"), readiness);
 				try {
@@ -871,7 +998,7 @@ export async function executeStandardLocalRedeploymentStage(
 		const successor = await observeLocalRedeploymentRuntimeBaseline(frozen);
 		if (successor.state === "verified_offline") await startBoundLocalRedeploymentService(directory, frozen);
 		else if (successor.state !== "verified_online") throw new Error("重启效果仍未知，禁止重复停止或启动");
-		const after = await verifyReadiness(directory, frozen, false);
+		const after = await verifyCandidateRuntimeReadiness(directory, frozen);
 		if (
 			restartBaseline &&
 			after.runtimeProcessId === restartBaseline.processId &&
@@ -882,7 +1009,7 @@ export async function executeStandardLocalRedeploymentStage(
 		await preserveLocalRedeploymentRuntimeRestartAcceptance(directory, manifest, after);
 	}
 	if (stage === "runtime_validation") {
-		const current = await verifyReadiness(directory, frozen, false);
+		const current = await verifyCandidateRuntimeReadiness(directory, frozen);
 		const runtimeFingerprint = localRedeploymentSha256(
 			JSON.stringify([
 				current.runtimeProcessId,
@@ -986,12 +1113,21 @@ export async function executeStandardLocalRedeploymentStage(
 			historicalAcceptanceAndCurrentStateSeparated: true,
 		});
 	}
-	if (stage === "deployment_record")
+	if (stage === "deployment_record") {
+		if (!(await observeLocalRedeploymentRegistrationRecovery(directory, frozen)).recoveryEvidenceReady)
+			throw Object.assign(new Error("等待核对当前候选与本次登记身份"), {
+				verificationCheckKey: "deployment-registration",
+			});
 		await run(
 			"record-deployment",
 			[node, cli, "deployment", "record", "--execution-directory", directory],
 			request.sourceCheckoutPath,
-		);
+		).catch((error: unknown) => {
+			throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+				verificationCheckKey: "deployment-registration",
+			});
+		});
+	}
 	// 清理意图已在复制前登记；实际删除由通用退出后 argv 核验全部子进程退出后接续。
 	if (stage === "task_comment") {
 		await lockedFileSystem.writeTextFileAtomic(
@@ -1017,7 +1153,11 @@ export async function executeStandardLocalRedeploymentStage(
 					request.sourceCheckoutPath,
 				],
 				request.sourceCheckoutPath,
-			);
+			).catch((error: unknown) => {
+				throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+					verificationCheckKey: "task-comment",
+				});
+			});
 	}
 }
 
@@ -1073,6 +1213,65 @@ export async function observeStandardLocalRedeploymentRecoveryEvidence(
 	return await observeStandardLocalRedeploymentStageRecoveryEvidence(directory, "candidate_bootstrap");
 }
 
+async function observeLocalRedeploymentRegistrationRecovery(directory: string, frozen: FrozenLocalRedeploymentRequest) {
+	let recoveryEvidenceReady = false;
+	let recoveryEvidence: unknown = "unavailable";
+	const { manifest, observations } = await readLocalDeploymentExecution(directory);
+	if (
+		manifest.schemaVersion === 2 &&
+		manifest.executionId === frozen.request.executionId &&
+		manifest.redeploymentRequestSha256 === frozen.requestSha256 &&
+		observations.some((item) => item.stage === "runtime_validation" && item.kind === "command_succeeded")
+	) {
+		try {
+			const runtimeHome = frozen.request.runtimeIdentity.runtimeHomeDirectoryPath;
+			const marker = (await readLocalRedeploymentJson(join(runtimeHome, "last-deployed-source-commit.json"))) as {
+				deploymentId?: string;
+				deployedSourceCommit?: string;
+			} | null;
+			const state = (await readLocalRedeploymentJson(join(runtimeHome, "post-deploy-verification-state.json"))) as {
+				deploymentGroups: Array<{
+					deploymentId: string;
+					workspaceId: string;
+					deployedSourceCommit: string;
+					previousDeployedSourceCommit: string | null;
+				}>;
+			} | null;
+			const sameExecutionGroup = state?.deploymentGroups.find(
+				(group) => group.deploymentId === manifest.executionId,
+			);
+			const expectedGroup =
+				sameExecutionGroup?.workspaceId === manifest.workspaceId &&
+				sameExecutionGroup.deployedSourceCommit === manifest.candidateSourceCommit &&
+				sameExecutionGroup.previousDeployedSourceCommit === manifest.previousDeployedSourceCommit;
+			const hasPreviousMarker = (marker?.deployedSourceCommit ?? null) === manifest.previousDeployedSourceCommit;
+			const liveCandidateMatches =
+				!sameExecutionGroup && hasPreviousMarker
+					? (
+							await observeLocalRedeploymentRuntimeBaseline(
+								frozen,
+								localRedeploymentSha256(await readFile(join(candidateCheckout(directory), "dist/cli.js"))),
+							)
+						).state === "verified_online"
+					: null;
+			recoveryEvidenceReady = sameExecutionGroup ? expectedGroup : liveCandidateMatches === true;
+			recoveryEvidence = {
+				runtimeValidationAccepted: true,
+				liveCandidateMatches,
+				markerIdentity: marker ? [marker.deploymentId, marker.deployedSourceCommit] : null,
+				sameExecutionRegistration: sameExecutionGroup ? (expectedGroup ? "accepted" : "conflicting") : "absent",
+				// 原登记可能已经启动，同一 ID 可在效果探测后补做一次。
+				registrationAttempted: observations.some(
+					(item) => item.stage === "deployment_record" && item.kind === "command_execution_intent_persisted",
+				),
+			};
+		} catch {
+			/* 持久登记状态不可读时维持同一未知条件。 */
+		}
+	}
+	return { evidenceSha256: localRedeploymentSha256(JSON.stringify(recoveryEvidence)), recoveryEvidenceReady };
+}
+
 export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 	directory: string,
 	activeStage: LocalDeploymentStage | "candidate_bootstrap",
@@ -1083,6 +1282,7 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		existsSync(join(directory, "local-deployment-execution-restriction.json"));
 	if (revoked)
 		return { evidenceSha256: localRedeploymentSha256("persistently_revoked"), recoveryEvidenceReady: false };
+	if (activeStage === "deployment_record") return observeLocalRedeploymentRegistrationRecovery(directory, frozen);
 	const targetBudget = await readLocalDeploymentTargetStageRecoveryBudget(frozen.request, activeStage);
 	const failure = targetBudget?.blockingFailure;
 	if (failure) {
@@ -1106,6 +1306,16 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		};
 	}
 	const baseline = await observeLocalRedeploymentRuntimeBaseline(frozen);
+	if (activeStage === "task_comment") {
+		const execution = await readLocalDeploymentExecution(directory);
+		const previouslyAttempted = execution.observations.some(
+			(item) => item.stage === "task_comment" && item.kind === "command_failed",
+		);
+		return {
+			evidenceSha256: localRedeploymentSha256(JSON.stringify({ baseline, previouslyAttempted })),
+			recoveryEvidenceReady: baseline.state === "verified_online",
+		};
+	}
 	const originalDirectory = failure?.originalErrorReference.includes(
 		`${join("stage-failure-originals", activeStage)}/`,
 	)
@@ -1179,21 +1389,20 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 	);
 	const semantic = {
 		activeStage,
+		sessionContinuityWaitRecorded: failure?.logicalResource === "session-readiness",
 		machineEvidence,
 		baseline: { state: baseline.state },
 		sourceValidation: "unknown",
 		sessionReadiness: "not_applicable",
 	};
 	const candidate = candidateCheckout(directory);
-	if (
-		baseline.state === "verified_online" &&
-		["state_preservation", "build_publication", "runtime_restart", "runtime_validation"].includes(activeStage)
-	) {
+	if (["state_preservation", "build_publication", "runtime_restart"].includes(activeStage))
+		semantic.sessionReadiness = (await observeLocalRedeploymentSessionContinuity(directory, frozen, baseline)).status;
+	if (baseline.state === "verified_online" && activeStage === "runtime_validation") {
 		const command = [
 			join(candidate, "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
 			"--candidate-source-commit",
 			frozen.request.candidateSourceCommit,
-			...(activeStage === "runtime_validation" ? [] : ["--before-runtime-restart"]),
 		];
 		let output = "";
 		try {
@@ -1223,15 +1432,7 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			const response = await executeLocalRedeploymentFile(
 				frozen.request.deploymentNodeBinaryPath,
 				[
-					join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH),
-					"--source-checkout-path",
-					candidate,
-					"--candidate-source-commit",
-					frozen.request.candidateSourceCommit,
-					"--runtime-home-directory",
-					frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
-					"--output-directory",
-					join(directory, "source-validation"),
+					...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen),
 					"--observe-recovery-evidence",
 				],
 				{ timeout: 7_000, maxBuffer: 1024 * 1024 },

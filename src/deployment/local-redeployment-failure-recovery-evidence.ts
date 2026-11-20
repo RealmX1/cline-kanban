@@ -18,9 +18,9 @@ import {
 	readLocalRedeploymentMachineEvidenceRequests,
 } from "./local-redeployment-persistent-checks";
 import {
+	createBoundLocalRedeploymentSourceValidationArguments,
 	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
-	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH,
 	localRedeploymentSha256,
 	readFrozenLocalRedeploymentRequest,
 	readLocalRedeploymentJson,
@@ -370,34 +370,14 @@ async function observeSourceValidationDiscoveryBudgetRecovery(
 			originalOutput?.reason !== "证据目录发现预算已用完"
 		)
 			return null;
-		const candidate = join(directory, "candidate-source-checkout");
-		const preparer = join(candidate, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH);
-		const committedPreparer = await executeLocalRedeploymentFile("git", [
-			"--no-optional-locks",
-			"-C",
-			frozen.request.sourceCheckoutPath,
-			"show",
-			`${frozen.request.candidateSourceCommit}:${LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_PATH}`,
-		]);
-		if (committedPreparer.stdout !== (await readFile(preparer, "utf8"))) return null;
+		if (!frozen.sourceValidationPreparerSha256) return null;
 		const result = await executeLocalRedeploymentFile(
 			frozen.request.deploymentNodeBinaryPath,
-			[
-				preparer,
-				"--source-checkout-path",
-				candidate,
-				"--candidate-source-commit",
-				frozen.request.candidateSourceCommit,
-				"--runtime-home-directory",
-				frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
-				"--output-directory",
-				join(directory, "source-validation"),
-				"--observe-recovery-evidence",
-			],
+			[...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen), "--observe-recovery-evidence"],
 			{ timeout: 7_000, maxBuffer: 1024 * 1024 },
 		);
 		if (JSON.parse(result.stdout).sourceValidationDiscoveryCompleted === true)
-			return { sourceValidationPreparerSha256: localRedeploymentSha256(committedPreparer.stdout) };
+			return { sourceValidationPreparerSha256: frozen.sourceValidationPreparerSha256 };
 	} catch {
 		/* 缺少原件或候选发现失败时不消费重试资格。 */
 	}
@@ -448,8 +428,10 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 		try {
 			const path = failure.logicalResource;
 			const original = (await readLocalRedeploymentJson(failure.originalErrorReference)) as {
+				stage?: LocalDeploymentRecoveryBudgetStage;
 				code?: string;
 				syscall?: string;
+				sourcePath?: string;
 			} | null;
 			if (failure.classification === "filesystem_unavailable" && original?.code === "ENOSPC") {
 				const filesystem = await statfs(dirname(path));
@@ -465,14 +447,25 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 				proof = { logicalResource: dirname(path), writable: true };
 			}
 			if (!proof) {
-				const metadata = await lstat(path);
-				if (metadata.isFile() || metadata.isDirectory()) await access(path, constants.R_OK);
-				else if (metadata.isSymbolicLink()) await readlink(path);
-				proof = {
-					logicalResource: path,
-					kind: metadata.isFile() ? "file" : metadata.isDirectory() ? "directory" : "symbolic_link",
-					readable: true,
-				};
+				const runtimeHome = resolve(frozen.request.runtimeIdentity.runtimeHomeDirectoryPath);
+				if (
+					original?.stage === "state_preservation" &&
+					original?.code === "ENOENT" &&
+					original.sourcePath === path &&
+					dirname(resolve(path)) === runtimeHome &&
+					!(await readdir(runtimeHome)).includes(relative(runtimeHome, resolve(path)))
+				) {
+					proof = { logicalResource: path, absentFromRuntimeHomeInventory: true };
+				} else {
+					const metadata = await lstat(path);
+					if (metadata.isFile() || metadata.isDirectory()) await access(path, constants.R_OK);
+					else if (metadata.isSymbolicLink()) await readlink(path);
+					proof = {
+						logicalResource: path,
+						kind: metadata.isFile() ? "file" : metadata.isDirectory() ? "directory" : "symbolic_link",
+						readable: true,
+					};
+				}
 			}
 		} catch {
 			/* 观察失败保持未知，不消费预算。 */

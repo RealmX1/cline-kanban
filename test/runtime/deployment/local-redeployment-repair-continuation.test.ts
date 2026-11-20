@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { copyFile, mkdir, readdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import {
 	recordLocalDeploymentTargetStageFailure,
@@ -8,6 +8,7 @@ import {
 } from "../../../src/deployment/local-deployment-target-stage-recovery-budget";
 import * as preparation from "../../../src/deployment/local-redeployment-preparation";
 import {
+	LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME,
 	LocalRedeploymentIdentityMismatch,
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
@@ -35,6 +36,10 @@ async function createFailedDeploymentFixture(options?: { symlinkDistribution?: b
 	});
 	const executor = join(fixture.fixtureRootDirectoryPath, "executor.mjs");
 	await writeFile(executor, "// 隔离执行器\n");
+	await copyFile(
+		resolve(".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs"),
+		join(fixture.fixtureRootDirectoryPath, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
+	);
 	let distributionDirectoryPath = join(repository.repositoryPath, "dist");
 	if (options?.symlinkDistribution) {
 		const realParent = join(fixture.fixtureRootDirectoryPath, "real-distribution-parent");

@@ -1,14 +1,29 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { copyFile, cp, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	copyFile,
+	cp,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	realpath,
+	rm,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME } from "../../src/deployment/local-redeployment-preparation";
 import {
 	cancelOwnedCommandProcesses,
+	hasSameProcessGeneration,
 	inspectOwnedCommandSupervisor,
+	readProcessIdentity,
 } from "../../src/task-command-execution/task-command-execution-supervisor";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { createIsolatedTestOwnedTmuxServer } from "../utilities/isolated-test-owned-tmux-server";
@@ -87,18 +102,12 @@ const program = new Command(); registerDeploymentCommand(program); await program
 			);
 		await mkdir(join(repository.repositoryPath, "scripts"));
 		await mkdir(join(repository.repositoryPath, "web-ui"));
-		await mkdir(join(repository.repositoryPath, ".codex/skills/cline-kanban-local-deploy/scripts"), {
-			recursive: true,
-		});
 		await copyFile(
 			join(
 				repositoryRoot,
 				".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
 			),
-			join(
-				repository.repositoryPath,
-				".codex/skills/cline-kanban-local-deploy/scripts/prepare-source-validation-with-evidence-reuse.mjs",
-			),
+			join(executionDirectory, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
 		);
 		await copyFile(
 			join(repositoryRoot, "scripts/promote-staged-kanban-build-output-into-distribution-directory.mjs"),
@@ -151,18 +160,28 @@ const program = new Command(); registerDeploymentCommand(program); await program
 		);
 		await writeFile(
 			join(repository.repositoryPath, "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
-			`const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data; process.stdout.write(JSON.stringify({...data,ok:true,validatedHostedSessions:[],failures:[]}));`,
+			`const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data; const blocked=process.argv.includes('--before-runtime-restart')&&data.fixtureContinuityBlocked; process.stdout.write(JSON.stringify({...data,ok:!blocked,validatedHostedSessions:[],blockingSessions:blocked?[{conversationSessionId:'active-fixture-session'}]:[],failures:blocked?['等待隔离会话自然退出']:[]})); process.exitCode=blocked?2:0;`,
 		);
 		await writeFile(
 			join(repository.repositoryPath, "fixture-cli.mjs"),
 			`#!/usr/bin/env node
-import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,appendFileSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os';
+import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,appendFileSync,existsSync,unlinkSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os';
 const runtimeHome=join(homedir(),'.cline/kanban'); const args=process.argv.slice(2);
 if(args[0]==='serve') { const loaded=createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'); const start=execFileSync('ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8',env:{...process.env,LC_ALL:'C'}}).trim();
-createServer((request,response)=>{response.setHeader('content-type','application/json'); const procedure=request.url.split('?')[0].split('/').pop(); let data;
-if(procedure==='runtime.getAgentSessionPtyHostDiagnostics') data={runtimeIdentity:{runtimeHomeDirectoryPath:runtimeHome,runtimePort:Number(process.env.KANBAN_RUNTIME_PORT)},runtimeProcessId:process.pid,runtimeProcessStartTimeText:start,runtimeLoadedEntrypointSha256:loaded};
+const server=createServer((request,response)=>{response.setHeader('content-type','application/json'); const procedure=request.url.split('?')[0].split('/').pop(); let data;
+if(procedure==='fixture-shutdown'&&request.method==='POST'){response.end(JSON.stringify({ok:true})); server.close(); server.closeAllConnections();return;}
+if(procedure==='runtime.getAgentSessionPtyHostDiagnostics') data={runtimeIdentity:{runtimeHomeDirectoryPath:runtimeHome,runtimePort:Number(process.env.KANBAN_RUNTIME_PORT)},runtimeProcessId:process.pid,runtimeProcessStartTimeText:start,runtimeLoadedEntrypointSha256:loaded,fixtureContinuityBlocked:existsSync(join(runtimeHome,'fixture-blocking-session'))};
 else if(procedure==='notificationIntelligence.listArchive') data={entries:[],totalCount:0,nextBeforeSequence:null}; else if(procedure==='runtime.getConfig')data={detectedCommands:['node']}; else {response.setHeader('content-type','text/html');response.end('<html>隔离服务</html>');return;}response.end(JSON.stringify({result:{data}}));}).listen(Number(process.env.KANBAN_RUNTIME_PORT),'127.0.0.1');
-} else if(args[0]==='deployment'&&args[1]==='record') {const directory=args[args.indexOf('--execution-directory')+1];const receipt=execFileSync(process.execPath,[join(import.meta.dirname,'deployment-cli-for-fixture.mjs'),...args],{encoding:'utf8',env:process.env});appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(receipt);}
+} else if(args[0]==='runtime'&&args[1]==='handover-restart') {
+const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/fixture-shutdown',{method:'POST'});
+if(!(await response.json()).ok) throw new Error('隔离服务未接受交接');
+} else if(args[0]==='deployment'&&args[1]==='record') {
+const directory=args[args.indexOf('--execution-directory')+1];
+const receipt=execFileSync(process.execPath,[join(import.meta.dirname,'deployment-cli-for-fixture.mjs'),...args],{encoding:'utf8',env:process.env});
+const interruptAfterRegistration=join(directory,'fixture-interrupt-after-registration');
+if(existsSync(interruptAfterRegistration)){unlinkSync(interruptAfterRegistration);unlinkSync(join(directory,'deployment-record-receipt.json'));process.exitCode=75;}
+else {appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(receipt);}
+}
 `,
 		);
 		if (repairAfterQualityFailure)
@@ -176,6 +195,8 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 		const runtimeHome = join(fixture.isolatedHomeDirectoryPath, ".cline/kanban");
 		await mkdir(runtimeHome, { recursive: true });
 		await writeFile(join(runtimeHome, "config.json"), JSON.stringify({ retained: true }));
+		const blockingSessionPath = join(runtimeHome, "fixture-blocking-session");
+		const unavailableBackupEntry = join(runtimeHome, "a-temporarily-unreadable.json");
 		const server = createServer();
 		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
 		const address = server.address();
@@ -278,6 +299,13 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			);
 			const prepared = await invoke("prepare-redeployment", ["--request-file", requestFile]);
 			expect(prepared.code, prepared.stdout + prepared.stderr).toBe(0);
+			const preparedAnalysis = await invokePackagedCommand(deploymentCli, [
+				"deployment",
+				"analyze",
+				"--execution-directory",
+				executionDirectory,
+			]);
+			expect(JSON.parse(preparedAnalysis.stdout).executions[0].deploymentOutcome).toBe("prepared");
 			expect(await readFile(join(repository.repositoryPath, "dist/cli.js"), "utf8")).toBe("旧版隔离入口");
 			if (repairAfterQualityFailure) {
 				const failedDirectory = executionDirectory;
@@ -354,15 +382,133 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 					failedResult,
 				);
 			}
+			if (!repairAfterQualityFailure) {
+				const previousCli = join(repository.repositoryPath, "dist/cli.js");
+				await writeFile(
+					previousCli,
+					(await readFile(join(repository.repositoryPath, "fixture-cli.mjs"), "utf8")) + "\n// 原实例入口\n",
+				);
+				await writeFile(blockingSessionPath, "等待自然退出");
+				await writeFile(join(executionDirectory, "fixture-interrupt-after-registration"), "模拟登记回执写入中断");
+				if (process.getuid?.() !== 0) {
+					await writeFile(unavailableBackupEntry, "{}");
+					await chmod(unavailableBackupEntry, 0o000);
+				}
+				children.register(
+					spawn(node, [previousCli, "serve"], {
+						env: { ...environment, KANBAN_RUNTIME_PORT: String(port) },
+						stdio: "ignore",
+					}),
+				);
+				await vi.waitFor(
+					async () => {
+						expect(
+							(await fetch("http://127.0.0.1:" + port + "/api/trpc/runtime.getAgentSessionPtyHostDiagnostics"))
+								.ok,
+						).toBe(true);
+					},
+					{ timeout: 10_000 },
+				);
+			}
 			const executed = await invoke("start-redeployment");
 			expect(executed.code, executed.stdout + executed.stderr).toBe(0);
+			if (!repairAfterQualityFailure) {
+				const continuityPath = join(executionDirectory, "session-continuity-preflight.json");
+				await vi.waitFor(
+					async () => {
+						expect(JSON.parse(await readFile(continuityPath, "utf8"))).toMatchObject({
+							status: "blocked",
+							blockingSessions: [{ conversationSessionId: "active-fixture-session" }],
+						});
+						await readFile(join(executionDirectory, "candidate-build-receipt.json"));
+					},
+					{ timeout: 45_000 },
+				);
+				const blockedAnalysis = await invokePackagedCommand(deploymentCli, [
+					"deployment",
+					"analyze",
+					"--execution-directory",
+					executionDirectory,
+				]);
+				expect(JSON.parse(blockedAnalysis.stdout).executions[0]).toMatchObject({
+					operationalProgress: {
+						sessionContinuityPreflight: { status: "blocked", recoveryCondition: expect.any(String) },
+						sourceValidation: {
+							reusedSourceValidationCheckCount: 0,
+							executedMissingSourceValidationCheckCount: 5,
+						},
+					},
+				});
+				await expect(
+					readFile(join(executionDirectory, "runtime-state-backup-progress.json")),
+				).rejects.toMatchObject({ code: "ENOENT" });
+				const originalSupervisor = JSON.parse(
+					await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
+				);
+				const supervisorDirectory = join(
+					runtimeHome,
+					"workspaces",
+					workspaceId,
+					"task-command-executions",
+					originalSupervisor.executionId,
+				);
+				const inspectOriginalSupervisor = () =>
+					inspectOwnedCommandSupervisor(originalSupervisor, { artifactDirectory: supervisorDirectory });
+				await vi.waitFor(
+					async () => {
+						const progress = JSON.parse(
+							await readFile(
+								join(supervisorDirectory, `supervisor-progress-${originalSupervisor.launchNonce}.json`),
+								"utf8",
+							),
+						);
+						expect(progress).toMatchObject({ status: "machine_evidence_pending", ownedProcesses: [] });
+					},
+					{ timeout: 20_000 },
+				);
+				const supervisorIdentity = JSON.parse(
+					await readFile(
+						join(supervisorDirectory, `supervisor-identity-${originalSupervisor.launchNonce}.json`),
+						"utf8",
+					),
+				);
+				expect(await inspectOriginalSupervisor()).toBe("running");
+				expect(supervisorIdentity.launchNonce).toBe(originalSupervisor.launchNonce);
+				const currentSupervisor = await readProcessIdentity(supervisorIdentity.pid);
+				expect(hasSameProcessGeneration(currentSupervisor, supervisorIdentity)).toBe(true);
+				expect(currentSupervisor?.startAndCommand).toContain(supervisorDirectory);
+				process.kill(supervisorIdentity.pid, "SIGKILL");
+				await vi.waitFor(async () => expect(await inspectOriginalSupervisor()).toBe("exited"), { timeout: 10_000 });
+				const resumed = await invoke("start-redeployment");
+				expect(resumed.code, resumed.stdout + resumed.stderr).toBe(0);
+				expect(JSON.parse(resumed.stdout)).toMatchObject({
+					executionId: originalSupervisor.executionId,
+					launchAttemptCount: 2,
+				});
+				await rm(blockingSessionPath);
+				if (process.getuid?.() !== 0) {
+					await vi.waitFor(
+						async () => {
+							const progress = JSON.parse(
+								await readFile(join(executionDirectory, "runtime-state-backup-progress.json"), "utf8"),
+							);
+							expect(progress.pendingEntries).toContainEqual(
+								expect.objectContaining({ entryName: "a-temporarily-unreadable.json" }),
+							);
+							await readFile(join(executionDirectory, "preserved-runtime-state/config.json"));
+						},
+						{ timeout: 55_000 },
+					);
+					await chmod(unavailableBackupEntry, 0o600);
+				}
+			}
 			await vi.waitFor(
 				async () =>
 					expect(
 						JSON.parse(await readFile(join(executionDirectory, "owned-command-business-result.json"), "utf8"))
 							.analysis?.deploymentOutcome,
 					).toBe("succeeded"),
-				{ timeout: 60_000, interval: 200 },
+				{ timeout: 100_000, interval: 200 },
 			);
 			const sourceValidationPlan = JSON.parse(
 				await readFile(join(executionDirectory, "frozen-source-validation-plan.json"), "utf8"),
@@ -448,6 +594,7 @@ else if(procedure==='notificationIntelligence.listArchive') data={entries:[],tot
 			expect(await readFile(verificationStatePath, "utf8")).toBe(verificationState);
 			expect(JSON.parse(verificationState).deploymentGroups).toHaveLength(1);
 			const standardCommandOriginals = await readdir(join(executionDirectory, "standard-command-originals"));
+			expect(standardCommandOriginals.filter((name) => name.startsWith("production-build-"))).toHaveLength(1);
 			expect(standardCommandOriginals.filter((name) => name.startsWith("promote-bound-candidate-"))).toHaveLength(1);
 			expect(
 				standardCommandOriginals.filter((name) => name.startsWith("start-bound-service-in-new-tmux-window-")),

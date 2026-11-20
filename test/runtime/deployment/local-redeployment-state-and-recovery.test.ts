@@ -366,6 +366,36 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 			code: "ENOENT",
 		});
 	});
+	it("先保全独立项，失败项恢复后只补缺失副本", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const temporarilyUnreadablePath = join(runtimeHomeDirectoryPath, "a-temporarily-unreadable.json");
+		const independentConfigurationPath = join(runtimeHomeDirectoryPath, "z-independent-configuration.json");
+		await writeFile(temporarilyUnreadablePath, "待恢复的状态");
+		await writeFile(independentConfigurationPath, "可立即保全的状态");
+		const originalCopy = vi.mocked(filesystem.cp).getMockImplementation();
+		if (!originalCopy) throw new Error("缺少真实复制实现");
+		onTestFinished(() => {
+			vi.mocked(filesystem.cp).mockImplementation(originalCopy);
+		});
+		vi.mocked(filesystem.cp).mockImplementation(async (source, ...arguments_) => {
+			if (source === temporarilyUnreadablePath)
+				throw Object.assign(new Error("暂时不能复制"), { code: "EACCES", path: source });
+			return originalCopy(source, ...arguments_);
+		});
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toThrow("暂时不能复制");
+		const preservedConfiguration = join(directory, "preserved-runtime-state", "z-independent-configuration.json");
+		expect(await readFile(preservedConfiguration, "utf8")).toBe("可立即保全的状态");
+		await expect(readFile(join(directory, "runtime-state-backup-receipt.json"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+		vi.mocked(filesystem.cp).mockClear();
+		vi.mocked(filesystem.cp).mockImplementation(originalCopy);
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		expect(vi.mocked(filesystem.cp).mock.calls.map(([source]) => source)).toEqual([temporarilyUnreadablePath]);
+		expect(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8")).toContain(
+			"z-independent-configuration.json",
+		);
+	});
 	it("恢复旧版名称检查点时保留旧原件，副本内容损坏后重新保全当前状态", async () => {
 		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
 		await writeFile(join(runtimeHomeDirectoryPath, "config.json"), "当前配置");

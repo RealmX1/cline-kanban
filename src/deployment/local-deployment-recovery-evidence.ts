@@ -12,7 +12,10 @@ import {
 import { localDeploymentEffectProofSchema } from "./local-deployment-execution-contract";
 
 const executeReadOnlyEffectObservation = promisify(execFile);
-const stageRecoveryEvidenceObservationSchema = z.object({ evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/) });
+const stageRecoveryEvidenceObservationSchema = z.object({
+	evidenceSha256: z.string().regex(/^[a-f0-9]{64}$/),
+	recoveryEvidenceReady: z.boolean().optional(),
+});
 const runtimeProcessRecoveryObservationSchema = z.object({
 	result: z.object({
 		data: z.object({
@@ -24,14 +27,14 @@ const runtimeProcessRecoveryObservationSchema = z.object({
 });
 
 /** 只提供唤醒证据，动作资格仍由冻结执行器重新核验；不把采样时间、日志或 nonce 纳入指纹。 */
-export async function observeLocalDeploymentRecoveryEvidence(directory: string): Promise<{ evidenceSha256: string }> {
+export async function observeLocalDeploymentRecoveryEvidence(directory: string) {
 	const record = await readLocalDeploymentExecution(directory);
 	const restriction = await readLocalDeploymentExecutionRestriction(directory);
 	const analysis = summarizeLocalDeploymentExecution(record, restriction);
 	const stage = record.manifest.stages.find((item) => item.stage === analysis.recovery.unfinishedStage);
-	const stageRecoveryEvidenceObservation = (async (): Promise<string> => {
+	const stageRecoveryEvidenceObservation = (async () => {
 		if (restriction || record.finishedOutcome || !stage?.readOnlyRecoveryEvidenceObservationCommand)
-			return "not_applicable";
+			return { evidenceSha256: "not_applicable", recoveryEvidenceReady: false };
 		try {
 			const command = stage.readOnlyRecoveryEvidenceObservationCommand;
 			const { stdout } = await executeReadOnlyEffectObservation(command[0], command.slice(1), {
@@ -40,10 +43,11 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 				maxBuffer: 1_048_576,
 			});
 			const observation = stageRecoveryEvidenceObservationSchema.safeParse(JSON.parse(stdout));
-			return observation.success ? observation.data.evidenceSha256 : "unavailable";
+			if (observation.success) return observation.data;
 		} catch {
-			return "unavailable";
+			/* 只读观察暂不可用，继续保留待证。 */
 		}
+		return { evidenceSha256: "unavailable", recoveryEvidenceReady: false };
 	})();
 	let effectObservation = "not_applicable";
 	let runtimeProcessIdentity: unknown = "not_observed";
@@ -111,8 +115,9 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 				}
 			}),
 	);
-	const stageRecoveryEvidenceSha256 = await stageRecoveryEvidenceObservation;
+	const stageRecoveryEvidence = await stageRecoveryEvidenceObservation;
 	return {
+		recoveryEvidenceReady: stageRecoveryEvidence.recoveryEvidenceReady === true || effectObservation === "verified",
 		evidenceSha256: createHash("sha256")
 			.update(
 				JSON.stringify({
@@ -122,7 +127,7 @@ export async function observeLocalDeploymentRecoveryEvidence(directory: string):
 					unfinishedStage: analysis.recovery.unfinishedStage,
 					restriction,
 					effectObservation,
-					stageRecoveryEvidenceSha256,
+					stageRecoveryEvidenceSha256: stageRecoveryEvidence.evidenceSha256,
 					...(stage?.recoveryEvidenceObservationMode === "semantic_observation_only"
 						? {}
 						: { runtimeProcessIdentity }),

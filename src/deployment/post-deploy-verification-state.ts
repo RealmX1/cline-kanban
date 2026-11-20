@@ -449,6 +449,7 @@ export async function createDeploymentGroup(
 
 	return await lockedFileSystem.withLock(getPostDeployVerificationStateLockRequest(), async () => {
 		const state = await readPostDeployVerificationStateCorruptionTolerant(nowIso);
+		const currentMarker = await readDeployMarker();
 		const existingGroup = state.deploymentGroups.find((group) => group.deploymentId === input.deploymentId);
 		if (existingGroup) {
 			if (
@@ -459,11 +460,13 @@ export async function createDeploymentGroup(
 				throw new Error("部署执行身份已绑定不同 workspace、候选或前驱，不能重复建组");
 			}
 			const existingMarker = { ...marker, deployedAtIso: existingGroup.deployedAtIso };
-			const currentMarker = await readDeployMarker();
 			// 折叠表示同 workspace 已有后来的登记。时间戳在时钟回拨时会把后来的组看成更旧，不能用来决定是否回写 marker。
 			if (
 				currentMarker?.deploymentId === existingGroup.deploymentId ||
-				(currentMarker === null && existingGroup.foldedAtIso === null)
+				(existingGroup.foldedAtIso === null &&
+					(currentMarker === null ||
+						(currentMarker.deploymentId === existingGroup.previousDeploymentMarkerIdObservedAtGroupCreation &&
+							currentMarker.deployedSourceCommit === existingGroup.previousDeployedSourceCommit)))
 			) {
 				await writeDeployMarker(existingMarker, { lock: null });
 			}
@@ -471,7 +474,7 @@ export async function createDeploymentGroup(
 		}
 		if (
 			input.expectedCurrentDeployedSourceCommit !== undefined &&
-			((await readDeployMarker())?.deployedSourceCommit ?? null) !== input.expectedCurrentDeployedSourceCommit
+			(currentMarker?.deployedSourceCommit ?? null) !== input.expectedCurrentDeployedSourceCommit
 		) {
 			throw new Error("部署前驱已变化，不能覆盖其他执行的登记");
 		}
@@ -517,6 +520,7 @@ export async function createDeploymentGroup(
 			workspaceId: input.workspaceId,
 			deployedSourceCommit: input.deployedSourceCommit,
 			previousDeployedSourceCommit: input.previousDeployedSourceCommit,
+			previousDeploymentMarkerIdObservedAtGroupCreation: currentMarker?.deploymentId ?? null,
 			deployedAtIso: nowIso,
 			foldedAtIso: null,
 			tasks: tasksOfNewGroup,

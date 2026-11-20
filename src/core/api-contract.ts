@@ -6770,6 +6770,7 @@ export const runtimePostDeployVerificationDeploymentGroupSchema = z.object({
 	workspaceId: z.string(),
 	deployedSourceCommit: z.string(),
 	previousDeployedSourceCommit: z.string().nullable(),
+	previousDeploymentMarkerIdObservedAtGroupCreation: z.string().uuid().nullable().optional(),
 	deployedAtIso: z.string(),
 	foldedAtIso: z.string().nullable(),
 	tasks: z.array(runtimePostDeployVerificationTaskSchema),
