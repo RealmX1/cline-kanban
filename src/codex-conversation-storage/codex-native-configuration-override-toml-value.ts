@@ -1,8 +1,6 @@
-import { configurationTable } from "./codex-configuration-field-projection";
-
 export function formatCodexConfigurationOverrideTomlValue(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(formatCodexConfigurationOverrideTomlValue).join(", ")}]`;
-	if (configurationTable(value))
+	if (value !== null && typeof value === "object" && !(value instanceof Date))
 		return `{ ${Object.entries(value)
 			.map(([key, child]) => `${JSON.stringify(key)} = ${formatCodexConfigurationOverrideTomlValue(child)}`)
 			.join(", ")} }`;

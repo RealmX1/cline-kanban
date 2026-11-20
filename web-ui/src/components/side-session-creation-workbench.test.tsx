@@ -21,10 +21,6 @@ import {
 } from "@/state/side-session-creation-workbench-store";
 import { LocalStorageKey } from "@/storage/local-storage-store";
 
-vi.mock("@/hooks/use-codex-configuration-sync", () => ({
-	useCodexConfigurationSync: () => ({ state: null, error: null }),
-}));
-
 function target(agentId: RuntimeAgentId = "codex"): SideSessionCreationWorkbenchTarget {
 	const main = {
 		taskId: "abcde",
@@ -58,7 +54,6 @@ function target(agentId: RuntimeAgentId = "codex"): SideSessionCreationWorkbench
 			baseRef: "main",
 			startInPlanMode: true,
 			terminalAgentModelOverrideSettings: { agentId: "codex", modelId: "host-temporary-model" },
-			codexConfigurationProfileId: "host-temporary-profile",
 		},
 		mainSessionSummary: main,
 		taskSessions: { abcde: main },
@@ -275,7 +270,6 @@ describe("共享侧会话创建工作台", () => {
 			);
 			const request = vi.mocked(creationQueries.submitOrRecoverTaskConversationSessionCreation).mock.calls[0]?.[1];
 			expect(request?.terminalAgentModelOverrideSettings).toBeUndefined();
-			expect(request?.codexConfigurationProfileId).toBeUndefined();
 		},
 	);
 	it.each(["claude", "codex"] as const)("%s 的 By the way 可空启动并保持角色只读", async (agentId) => {

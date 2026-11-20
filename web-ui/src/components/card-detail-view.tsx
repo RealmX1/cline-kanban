@@ -900,7 +900,6 @@ export function CardDetailView({
 	isDocumentVisible?: boolean;
 	isTaskChangesSidebarOpen?: boolean;
 	onCreateTaskConversationSession?: (input: {
-		codexConfigurationProfileId?: string;
 		agentId: RuntimeAgentId;
 		sessionRole?: "by_the_way" | "task_collaborator";
 		initialUserQuestion: string;
@@ -1624,14 +1623,12 @@ export function CardDetailView({
 					sessionRole,
 					initialUserQuestion,
 					contextSource,
-					codexConfigurationProfileId,
 					expectedTaskIncarnationCreatedAtEpochMs,
 					contextSourceTaskConversationSessionId,
 				}) => {
 					if (isDoneTaskReadOnly || !onCreateTaskConversationSession)
 						return { ok: false, message: "请先恢复任务，再创建会话。" };
 					const result = await onCreateTaskConversationSession({
-						...(codexConfigurationProfileId ? { codexConfigurationProfileId } : {}),
 						agentId,
 						sessionRole,
 						initialUserQuestion,

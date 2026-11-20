@@ -26,7 +26,6 @@ type TaskOriginalPromptCard = Pick<BoardCard, "title" | "prompt" | "images" | "c
 type NewTaskConversationSessionContextSource = "started_from_scratch" | "forked_from_main_current_turn";
 
 interface CreateTaskConversationSessionRequest {
-	codexConfigurationProfileId?: string;
 	agentId: RuntimeAgentId;
 	sessionRole: "by_the_way" | "task_collaborator";
 	initialUserQuestion: string;

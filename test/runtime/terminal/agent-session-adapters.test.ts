@@ -332,7 +332,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:pre_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_tool_use:0:0"');
 		expect(hookTrustState[0]).toContain('"/<session-flags>/config.toml:post_compact:0:0"');
-		expect(hookTrustState[0]).toContain('trusted_hash="sha256:');
+		expect(hookTrustState[0]).toMatch(/"trusted_hash"\s*=\s*"sha256:/);
 		expect(launchCommand).toContain("timeout=8");
 		expect(launchCommand).not.toContain("codex-wrapper");
 		expect(launchCommand).not.toContain("notify=");
@@ -1932,7 +1932,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		}
 	});
 
-	it("omits bypass flags for the ask tier without stripping explicitly provided ones", async () => {
+	it("显式纯命令行权限保留各 harness 既有规则，Codex 任务受限档覆盖全局放行", async () => {
 		setupTempHome();
 
 		const explicitFlagByAgentId: ReadonlyArray<{
@@ -1946,12 +1946,6 @@ describe("prepareAgentLaunch hook strategies", () => {
 				binary: "claude",
 				args: ["--dangerously-skip-permissions"],
 				flag: "--dangerously-skip-permissions",
-			},
-			{
-				agentId: "codex",
-				binary: "codex",
-				args: ["--dangerously-bypass-approvals-and-sandbox"],
-				flag: "--dangerously-bypass-approvals-and-sandbox",
 			},
 			{ agentId: "gemini", binary: "gemini", args: ["--yolo"], flag: "--yolo" },
 			{ agentId: "kiro", binary: "kiro-cli", args: ["chat", "--trust-all-tools"], flag: "--trust-all-tools" },
@@ -1983,20 +1977,22 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(claudeLaunch.args).not.toContain("--dangerously-skip-permissions");
 		expect(claudeLaunch.args).not.toContain("--permission-mode");
 
-		// codex 相反：它的默认审批策略取自用户自己的 ~/.codex/config.toml（可能是 never），
-		// 所以 ask 档必须显式钉死最严的 untrusted，否则选了「每次询问」也可能什么都不问。
+		// 任务权限优先于全局启动参数。受限档在原生沙箱外操作时询问。
 		const codexAskLaunch = await prepareAgentLaunch({
 			taskId: "task-codex-ask-clean",
 			agentId: "codex",
 			binary: "codex",
-			args: [],
+			args: ["--dangerously-bypass-approvals-and-sandbox", "--approve-for-me"],
 			taskAgentPermissionMode: "ask_for_every_tool_use",
 			cwd: "/tmp",
 			prompt: "",
 		});
 		expect(codexAskLaunch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
 		expect(codexAskLaunch.args).toContain("--ask-for-approval");
-		expect(codexAskLaunch.args).toContain("untrusted");
+		expect(codexAskLaunch.args).toContain("on-request");
+		expect(codexAskLaunch.args).toContain("read-only");
+		expect(codexAskLaunch.args).not.toContain("--approve-for-me");
+		expect(codexAskLaunch.args).toContain('approvals_reviewer="user"');
 	});
 
 	it("expresses the middle tier natively where supported and degrades to ask elsewhere", async () => {
@@ -2015,10 +2011,7 @@ describe("prepareAgentLaunch hook strategies", () => {
 		expect(claudeLaunch.args).toContain("acceptEdits");
 		expect(claudeLaunch.args).not.toContain("--dangerously-skip-permissions");
 
-		// codex 表达不出中间档：on-request 会让普通 shell 命令不经询问就跑（语义是「由模型决定
-		// 何时询问」），并不满足本档承诺的「跑命令仍会询问」；untrusted 又连改文件也一律询问。
-		// 于是必须保守降级到 ask，并显式推 untrusted——什么都不推等于把档位交给用户的
-		// ~/.codex/config.toml 决定，那同样是静默放宽。
+		// Codex 无法原生表达中间档，使用只读沙箱和沙箱外审批。
 		const codexLaunch = await prepareAgentLaunch({
 			taskId: "task-codex-accept-edits",
 			agentId: "codex",
@@ -2028,10 +2021,10 @@ describe("prepareAgentLaunch hook strategies", () => {
 			cwd: "/tmp",
 			prompt: "",
 		});
-		expect(codexLaunch.args).not.toContain("on-request");
 		expect(codexLaunch.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
 		expect(codexLaunch.args).toContain("--ask-for-approval");
-		expect(codexLaunch.args).toContain("untrusted");
+		expect(codexLaunch.args).toContain("on-request");
+		expect(codexLaunch.args).toContain("read-only");
 
 		// cursor / kimi 无法表达中间档：必须保守降级到 ask，绝不回落成全放行。
 		for (const { agentId, binary, forbiddenFlag } of [

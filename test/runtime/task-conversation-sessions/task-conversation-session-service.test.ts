@@ -1033,28 +1033,6 @@ describe("Agent 侧会话创建与回报", () => {
 		expect(f.startSession).toHaveBeenCalledTimes(1);
 	});
 
-	it("显式 Codex profile 采用 profile 权限，未选择时不继承宿主 profile", async () => {
-		const f = await fixture();
-		f.card.codexConfigurationProfileId = "card-profile";
-		f.card.codexConfigurationPermissionSelectionSource = "task_local";
-		const explicit = await f.service.create(
-			scope,
-			request({ idempotencyKey: "explicit-profile", codexConfigurationProfileId: "chosen-profile" }),
-			human,
-		);
-		expect(explicit.ok).toBe(true);
-		expect(f.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
-			codexConfigurationProfileId: "chosen-profile",
-			codexConfigurationPermissionSelectionSource: "profile",
-		});
-		const inherited = await f.service.create(scope, request({ idempotencyKey: "inherited-profile" }), human);
-		expect(inherited.ok).toBe(true);
-		expect(f.startSession.mock.calls.at(-1)?.[1]).toMatchObject({
-			codexConfigurationProfileId: undefined,
-			codexConfigurationPermissionSelectionSource: "task_local",
-		});
-	});
-
 	it("直接从当前主会话创建时保留主会话轮号，peer 来源保持未知", async () => {
 		const f = await fixture();
 		f.state.sessions["host-task"] = summary("host-task", {

@@ -12,15 +12,15 @@ import type { BoardCard, TaskAutoReviewMode, TaskImage } from "@/types";
 
 // 编辑对话框点保存时，表单里的全部字段值（baseRef 已按默认分支补齐、prompt 已 trim）。
 export interface TaskEditorSubmittedTaskCardFieldValues {
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	taskTitleOverride?: string;
 	taskDescription?: string;
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
 	taskAgentPermissionMode: RuntimeTaskAgentPermissionMode;
+	// 旧 profile 占位值与表单显示的档位可以相同。用户再次点选该档位时，保存必须把它写成任务的显式权限。
+	taskAgentPermissionModeExplicitlySelected?: boolean;
 	taskConversationMode: RuntimeTaskConversationMode;
 	autoReviewEnabled: boolean;
 	autoReviewMode: TaskAutoReviewMode;
@@ -55,10 +55,6 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 	const patch: RuntimeTaskCardFieldValuePatch = {};
 	if (submitted.codexReasoningEffortOverride !== seed.codexReasoningEffortOverride)
 		patch.codexReasoningEffortOverride = submitted.codexReasoningEffortOverride ?? null;
-	if (submitted.codexConfigurationPermissionSelectionSource !== seed.codexConfigurationPermissionSelectionSource)
-		patch.codexConfigurationPermissionSelectionSource = submitted.codexConfigurationPermissionSelectionSource ?? null;
-	if (submitted.codexConfigurationProfileId !== seed.codexConfigurationProfileId)
-		patch.codexConfigurationProfileId = submitted.codexConfigurationProfileId ?? null;
 	if (submitted.taskTitleOverride !== undefined && submitted.taskTitleOverride.trim() !== seed.title) {
 		patch.title = submitted.taskTitleOverride.trim() || null;
 	}
@@ -74,7 +70,11 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 	if (submitted.startInPlanMode !== seed.startInPlanMode) {
 		patch.startInPlanMode = submitted.startInPlanMode;
 	}
-	if (submitted.taskAgentPermissionMode !== seed.taskAgentPermissionMode) {
+	if (
+		submitted.taskAgentPermissionMode !== seed.taskAgentPermissionMode ||
+		(submitted.taskAgentPermissionModeExplicitlySelected === true &&
+			seed.codexConfigurationPermissionSelectionSource === "profile")
+	) {
 		patch.taskAgentPermissionMode = submitted.taskAgentPermissionMode;
 	}
 	if (submitted.taskConversationMode !== seed.taskConversationMode) {

@@ -652,7 +652,6 @@ async function getTaskFromRuntimeWorkspace(
 
 interface TaskCreateCommandInput {
 	modelId?: string;
-	codexConfigurationProfileId?: string;
 	cwd: string;
 	title?: string;
 	taskDescription?: string;
@@ -675,7 +674,6 @@ interface TaskCreateCommandInput {
 function toTaskCreateRequestedSettings(input: TaskCreateCommandInput): TaskCreateRequestedSettings {
 	return {
 		modelId: input.modelId,
-		codexConfigurationProfileId: input.codexConfigurationProfileId,
 		title: input.title,
 		prompt: input.prompt,
 		baseRef: input.baseRef,
@@ -813,9 +811,6 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 			// 「工作区默认是 omp」的新卡不落通道，之后改全局默认会反向改掉它。
 			workspaceDefaultAgentIdForNewTasks: runtimeConfig.selectedAgentId,
 			taskAgentPermissionMode: effectiveSettings.resolvedSettings.requestedTaskAgentPermissionMode.value,
-			codexConfigurationProfileId: effectiveSettings.resolvedSettings.codexConfigurationProfileId.value ?? undefined,
-			codexConfigurationPermissionSelectionSource:
-				input.codexConfigurationProfileId && !input.taskAgentPermissionMode ? "profile" : "task_local",
 			terminalAgentModelOverrideSettings:
 				effectiveSettings.resolvedSettings.modelId.value &&
 				["claude", "codex", "cursor", "kimi", "omp"].includes(
@@ -2271,7 +2266,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		.option("--title <text>", "Task title.")
 		.option("--description <text>", "独立任务简介：问题、范围与当前方案。")
 		.option("--model <id>", "单次模型覆盖，缺省采用 Agent 当前默认配置。")
-		.option("--profile <id>", "Codex profile；未显式覆盖权限时采用其完整权限。")
 		.requiredOption("--prompt <text>", "Task prompt text.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Task base branch/ref.")
@@ -2302,7 +2296,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		.action(
 			async (options: {
 				model?: string;
-				profile?: string;
 				title?: string;
 				description?: string;
 				prompt: string;
@@ -2324,7 +2317,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				await runTaskCommand(async () => {
 					const taskCreateCommandInput: TaskCreateCommandInput = {
 						modelId: options.model,
-						codexConfigurationProfileId: options.profile,
 						cwd: process.cwd(),
 						title: options.title,
 						taskDescription: options.description,

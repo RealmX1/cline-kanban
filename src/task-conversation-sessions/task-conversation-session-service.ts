@@ -80,12 +80,10 @@ export interface TaskConversationSessionServiceDependencies {
 	readCreationDefaults?(
 		scope: TaskConversationSessionWorkspaceScope,
 		agentId: RuntimeAgentId,
-		codexConfigurationProfileId?: string,
 		explicitModelId?: string,
 	): Promise<{
 		modelId: string | null;
 		sessionTransport?: RuntimeAgentSessionTransport;
-		codexConfigurationProfileId?: string;
 	}>;
 	readDefaultTaskAgentPermissionMode?(
 		scope: TaskConversationSessionWorkspaceScope,
@@ -318,23 +316,15 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 		const defaults = await deps.readCreationDefaults?.(
 			scope,
 			agentId,
-			input.codexConfigurationProfileId,
 			input.modelId ?? input.terminalAgentModelOverrideSettings?.modelId,
 		);
 		const settings = resolveCreationStartupSettings({
 			...input,
-			codexConfigurationPermissionSelectionSource:
-				input.codexConfigurationPermissionSelectionSource ??
-				(input.codexConfigurationProfileId && input.taskAgentPermissionMode === undefined
-					? "profile"
-					: "task_local"),
 			agentId,
 			agentSelectionSource: input.agentId ? "explicit_request" : "creator_session_agent",
 			modelId: input.modelId ?? input.terminalAgentModelOverrideSettings?.modelId,
 			defaultModelId: defaults?.modelId,
 			defaultSessionTransport: defaults?.sessionTransport,
-			codexConfigurationProfileId: input.codexConfigurationProfileId,
-			defaultCodexConfigurationProfileId: defaults?.codexConfigurationProfileId,
 		});
 		if (!doesAgentSupportSessionTransport(agentId, settings.sessionTransport.value))
 			throw new Error("所选 Agent 不支持该会话通道。");
@@ -1444,12 +1434,6 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 				const sessionId = `task-conversation-session-${randomUUID()}`;
 				const resolvedSettings = await resolveStartupSettings(scope, input, agentId);
 				const taskAgentPermissionMode = resolvedSettings.effectiveTaskAgentPermissionMode.value;
-				const codexConfigurationProfileId = resolvedSettings.codexConfigurationProfileId.value ?? undefined;
-				const codexConfigurationPermissionSelectionSource =
-					input.codexConfigurationPermissionSelectionSource ??
-					(input.codexConfigurationProfileId && input.taskAgentPermissionMode === undefined
-						? "profile"
-						: "task_local");
 				const terminalAgentModelOverrideSettings =
 					resolvedSettings.modelId.value && ["claude", "codex", "cursor", "kimi", "omp"].includes(agentId)
 						? {
@@ -1475,8 +1459,6 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 					rows: input.rows ?? 30,
 					taskAgentPermissionMode,
 					startInPlanMode: input.startInPlanMode,
-					codexConfigurationProfileId,
-					codexConfigurationPermissionSelectionSource,
 					requestedAgentSessionTransport: resolvedSettings.sessionTransport.value,
 					taskConversationSessionMetadata: {
 						conversationSessionName: input.conversationSessionName || undefined,
@@ -1517,8 +1499,6 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 						creationReason: input.creationReason,
 						creationRequestId: requestId,
 						taskConversationSessionLaunchSettings: {
-							codexConfigurationProfileId,
-							codexConfigurationPermissionSelectionSource,
 							taskAgentPermissionMode,
 							startInPlanMode: input.startInPlanMode,
 							sessionTransport: resolvedSettings.sessionTransport.value,

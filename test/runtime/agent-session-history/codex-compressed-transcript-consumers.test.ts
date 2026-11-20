@@ -17,12 +17,6 @@ import { createCodexUserQuestionPendingAndHistoryFileChangeCache } from "../../.
 import { recoverCodexUserQuestionsFromKnownConversation } from "../../../src/agent-session-history/codex-user-question-transcript-recovery";
 import { probePersistedAgentTranscriptLastConversationProgress } from "../../../src/agent-session-history/persisted-agent-transcript-last-conversation-progress-probe";
 import { loadTaskConversationHistoryPage } from "../../../src/agent-session-history/task-conversation-history-page";
-import {
-	codexNativeTurnPermissionTranscriptFingerprintOf,
-	codexNativeTurnPermissionTranscriptFingerprintStillCurrent,
-	readCodexNativeTurnPermissionEvidence,
-} from "../../../src/codex-configuration-sync/codex-native-turn-permission-evidence";
-import { readCodexProfileAdoptionNativeTurnCompletionEvidence } from "../../../src/codex-configuration-sync/codex-profile-adoption-native-turn-completion-evidence";
 import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { createCodexStatisticsVerifiedHistoryReadCache } from "../../../src/daily-work-progress-statistics/codex-statistics-verified-history-read-cache";
 import {
@@ -386,20 +380,6 @@ describe("Codex 压缩历史的所有只读消费者", () => {
 					agentNativeConversationSessionIdentity: f.summary.agentNativeConversationSessionIdentity,
 				}),
 			).toEqual(expectedProgress);
-			const permission = await readCodexNativeTurnPermissionEvidence({
-				summary: f.summary,
-				configurationChangedAtMs: attemptedAtMs,
-				selectedFields: { [JSON.stringify(["config.toml", "approval_policy"])]: { value: "on-request" } },
-			});
-			expect(permission).not.toBeNull();
-			if (!permission) throw new Error("缺少权限证据");
-			const fingerprint = codexNativeTurnPermissionTranscriptFingerprintOf(permission);
-			expect(fingerprint).not.toBeNull();
-			if (!fingerprint) throw new Error("缺少权限转录指纹");
-			expect(await codexNativeTurnPermissionTranscriptFingerprintStillCurrent(f.path, fingerprint)).toBe(true);
-			expect((await readCodexProfileAdoptionNativeTurnCompletionEvidence(f.summary))?.nativeTurnId).toBe(
-				"completed-native-turn",
-			);
 		},
 	);
 	it("混合分片继续追加时保留输入接受扫描水位，不能因文件增长从头扫描", async () => {

@@ -83,7 +83,6 @@ const startupSettingLabels = [
 	{ key: "model", label: "模型与参数" },
 	{ key: "plan_mode", label: "Plan Mode" },
 	{ key: "permissions", label: "Agent 权限" },
-	{ key: "codex_configuration_profile", label: "Codex profile" },
 	{ key: "session_initialization", label: "会话上下文" },
 ];
 
@@ -409,7 +408,6 @@ function SideSessionCreationWorkbenchForm({
 								update({
 									agentId: nextAgentId ?? defaultAgentId,
 									terminalAgentModelOverrideSettings: undefined,
-									codexConfigurationProfileId: undefined,
 									requestedAgentSessionTransport: undefined,
 								})
 							}
@@ -426,14 +424,6 @@ function SideSessionCreationWorkbenchForm({
 							}}
 							taskAgentPermissionMode={request.taskAgentPermissionMode ?? "bypass_all_permission_prompts"}
 							onTaskAgentPermissionModeChange={(taskAgentPermissionMode) => update({ taskAgentPermissionMode })}
-							codexConfigurationProfileId={request.codexConfigurationProfileId}
-							onCodexConfigurationProfileIdChange={(codexConfigurationProfileId) =>
-								update({ codexConfigurationProfileId, codexConfigurationPermissionSelectionSource: "profile" })
-							}
-							codexConfigurationPermissionSelectionSource={request.codexConfigurationPermissionSelectionSource}
-							onCodexConfigurationPermissionSelectionSourceChange={(
-								codexConfigurationPermissionSelectionSource,
-							) => update({ codexConfigurationPermissionSelectionSource })}
 							roleReadOnly={role === "by_the_way"}
 						/>
 						<TaskEditorSettingGroup

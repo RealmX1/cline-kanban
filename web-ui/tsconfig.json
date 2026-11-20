@@ -22,7 +22,6 @@
       "@runtime-agent-conversation-tool-call-display": ["../src/agent-conversation/agent-conversation-tool-call-display.ts"],
       "@runtime-task-editor-creation-submission-contract": ["../src/core/task-editor-creation-submission-contract.ts"],
       "@runtime-agent-session-pty-host-diagnostics-contract": ["../src/core/agent-session-pty-host-diagnostics-contract.ts"],
-      "@runtime-codex-configuration-profile-field-editing": ["../src/core/codex-configuration-profile-field-editing.ts"],
       "@runtime-contract": ["../src/core/api-contract.ts"],
       "@runtime-home-agent-session": ["../src/core/home-agent-session.ts"],
       "@runtime-inter-work-unit-recorded-relation-projection-contract": [

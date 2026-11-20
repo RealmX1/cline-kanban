@@ -1,9 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as CodexTranscriptInspection from "../../../src/agent-session-history/codex-native-conversation-transcript-location-for-resume";
-import * as CodexNativePluginInstallationCapabilityVerification from "../../../src/codex-configuration-sync/codex-native-plugin-installation-capability-verification";
 import { prepareManagedCodexConversationStorageHome } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import { type RuntimeTaskSessionSummary, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import {
@@ -18,7 +17,10 @@ import {
 	type TerminalSessionManagerOptions,
 } from "../../../src/terminal/session-manager";
 import type * as IdentityRecovery from "../../../src/terminal/task-session-native-conversation-identity-recovery";
-import { readTaskSessionResumeRequestWaitingForNativeConversationIdentity } from "../../../src/terminal/task-session-native-conversation-identity-recovery";
+import {
+	persistTaskSessionResumeRequestWaitingForNativeConversationIdentity,
+	readTaskSessionResumeRequestWaitingForNativeConversationIdentity,
+} from "../../../src/terminal/task-session-native-conversation-identity-recovery";
 import type { HostedTerminalPtyProcessSpawnRequest } from "../../../src/terminal/terminal-pty-process-handle";
 import {
 	compressedCodexTranscriptFixtureBytes,
@@ -178,6 +180,48 @@ afterEach(async () => {
 });
 
 describe("任务会话的原生身份补证恢复", () => {
+	it.each([
+		{ codexReasoningEffortOverride: "high" },
+		{ codexReasoningEffortFollowsNativeConfiguration: true },
+	] as const)("恢复请求保留推理强度选择 %o", async (reasoningEffortSelection) => {
+		const summary = createAwaitingIdentitySummary();
+		await persistTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary, {
+			...resumeRequest(summary),
+			...reasoningEffortSelection,
+		});
+		await expect(readTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary)).resolves.toMatchObject(
+			reasoningEffortSelection,
+		);
+	});
+
+	it("恢复请求保留旧 profile 权限标记，并识别升级前写入的来源字段", async () => {
+		const summary = createAwaitingIdentitySummary();
+		const request = {
+			...resumeRequest(summary),
+			usesLegacyCodexProfilePermissions: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts" as const,
+		};
+		await persistTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary, request);
+		await expect(readTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary)).resolves.toMatchObject({
+			usesLegacyCodexProfilePermissions: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+		const directory = join(isolatedHome, ".cline", "kanban", "side-session-native-identity-recovery");
+		const [fileName] = await readdir(directory);
+		const recordPath = join(directory, fileName ?? "");
+		const persisted = JSON.parse(await readFile(recordPath, "utf8")) as {
+			request: Record<string, unknown>;
+		};
+		delete persisted.request.usesLegacyCodexProfilePermissions;
+		persisted.request.codexConfigurationPermissionSelectionSource = "profile";
+		persisted.request.taskAgentPermissionMode = "bypass_all_permission_prompts";
+		await writeFile(recordPath, JSON.stringify(persisted));
+		await expect(readTaskSessionResumeRequestWaitingForNativeConversationIdentity(summary)).resolves.toMatchObject({
+			usesLegacyCodexProfilePermissions: true,
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+	});
+
 	it.each([
 		{ additionalArguments: undefined },
 		{ additionalArguments: ["--model", "retained-model", "resume", parentId] },
@@ -862,10 +906,7 @@ describe("任务会话的原生身份补证恢复", () => {
 				`#!${process.execPath}\nif (process.argv[2] === '--version') process.stdout.write('codex-cli identity-recovery-fixture'); else process.exitCode = 1;\n`,
 				{ mode: 0o700 },
 			);
-			vi.spyOn(
-				CodexNativePluginInstallationCapabilityVerification,
-				"verifyCodexNativeSharedPluginInstallationCapability",
-			).mockResolvedValue({ status: "unsupported", reason: "身份恢复测试替身不提供插件安装能力" });
+
 			const userCodexHome = join(isolatedHome, ".codex");
 			const managedStorageHome = await prepareManagedCodexConversationStorageHome(userCodexHome);
 			const childNativeSessionId = compressed ? compressedCodexTranscriptFixtureNativeSessionId : childId;

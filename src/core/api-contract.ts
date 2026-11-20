@@ -27,15 +27,9 @@ import {
 
 export * from "./task-visualization-artifact-contract";
 
-import {
-	codexConfigurationPermissionSelectionSourceSchema,
-	codexConfigurationWriterBindingSchema,
-} from "./codex-configuration-sync-contract";
 import { codexNativeSessionControlEndpointSchema } from "./codex-native-session-control-endpoint-contract";
-
-export * from "./codex-configuration-sync-contract";
-
 import { independentTaskCreationProvenanceSchema } from "./independent-task-creation-contract.js";
+import { legacyCodexConfigurationWriterBindingSchema } from "./legacy-codex-configuration-writer-binding-schema";
 
 export * from "./independent-task-creation-contract.js";
 
@@ -501,9 +495,10 @@ export const runtimeBoardCardSchema = z
 		// agentAutonomousModeEnabled 推导（见 resolveTaskAgentPermissionModeFromLegacyAutonomousFlag），
 		// 因为 schema 层看不到 runtime config。
 		taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
-		codexConfigurationProfileId: z.string().min(1).optional(),
 		codexReasoningEffortOverride: z.string().trim().min(1).optional(),
-		codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
+		// 显式选择「沿用 Codex 配置」后为 true。字段缺省仍表示尚未做选择，续跑可以沿用归档档位。
+		codexReasoningEffortFollowsNativeConfiguration: z.literal(true).optional(),
+		codexConfigurationPermissionSelectionSource: z.enum(["profile", "task_local"]).optional(),
 		autoReviewEnabled: z.boolean().optional(),
 		autoReviewMode: runtimeTaskAutoReviewModeSchema.optional(),
 		images: z.array(runtimeTaskImageSchema).optional(),
@@ -758,8 +753,6 @@ export const runtimeCreationStartupSettingsRequestSchema = z.object({
 	modelId: runtimeTrimmedNonEmptyStringSchema.optional(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema.optional(),
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
-	codexConfigurationProfileId: z.string().min(1).optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	requestedAgentSessionTransport: runtimeAgentSessionTransportSchema.optional(),
 });
 export type RuntimeCreationStartupSettingsRequest = z.infer<typeof runtimeCreationStartupSettingsRequestSchema>;
@@ -785,7 +778,6 @@ export const runtimeCreationResolvedSettingsSchema = z.object({
 	harnessPermissionMode: creationResolvedSetting(runtimeTaskAgentPermissionModeSchema.nullable()),
 	roleReadOnlyConstraint: creationResolvedSetting(z.boolean()),
 	modelId: creationResolvedSetting(z.string().nullable()),
-	codexConfigurationProfileId: creationResolvedSetting(z.string().nullable()),
 	sessionTransport: creationResolvedSetting(runtimeAgentSessionTransportSchema),
 });
 export type RuntimeCreationResolvedSettings = z.infer<typeof runtimeCreationResolvedSettingsSchema>;
@@ -820,9 +812,7 @@ export const taskEditorCreationSubmissionStatusSchema = z.object({
 export type TaskEditorCreationSubmissionStatus = z.infer<typeof taskEditorCreationSubmissionStatusSchema>;
 // 侧会话不能借主卡片的下次启动配置恢复：两者可能使用不同 agent、模型和通道。
 export const runtimeTaskConversationSessionLaunchSettingsSchema = z.object({
-	codexConfigurationProfileId: z.string().min(1).optional(),
 	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
 	startInPlanMode: z.boolean().optional(),
 	sessionTransport: runtimeAgentSessionTransportSchema,
@@ -1638,13 +1628,19 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 		.optional(),
 	// 会话进程的存储归属；缺省的旧记录按原生转录路径回填，不能按新增会话的默认值解释。
 	codexConversationStorageHomeDirectoryPath: z.string().trim().min(1).optional(),
-	codexConfigurationWriterBinding: codexConfigurationWriterBindingSchema.nullable().optional(),
-	codexConfigurationProfileId: z.string().min(1).optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
-	codexEffectivePermissionMode: runtimeTaskAgentPermissionModeSchema.nullable().optional(),
-	codexTaskReasoningEffortFeedbackLaunch: z
-		.object({ selectionId: z.string().uuid(), startedAtMs: z.number() })
+	codexConfigurationWriterBinding: legacyCodexConfigurationWriterBindingSchema.nullable().optional(),
+	codexConfigurationPermissionSelectionSource: z.enum(["profile", "task_local"]).optional(),
+	codexRetiredWriterResumeSettings: z
+		.object({
+			model: z.string().optional(),
+			reasoningEffort: z.string().optional(),
+			permissionArguments: z.array(z.string()),
+			sqliteHomeDirectoryPath: z.string(),
+			sqliteDirectoryIdentity: z.string().min(1),
+		})
+		.nullable()
 		.optional(),
+	codexEffectivePermissionMode: runtimeTaskAgentPermissionModeSchema.nullable().optional(),
 	codexConfigurationProfileRetainedInputRecovery: z
 		.object({
 			retainedInputRecordPath: z.string(),
@@ -1653,7 +1649,6 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 		})
 		.nullable()
 		.optional(),
-	codexConfigurationProfileAutomaticProcessReplacementCancelled: z.boolean().optional(),
 	// 「对话有没有真的落进 agent 自己的会话存储」观测（见 runtimeAgentNativeConversationPersistenceObservationSchema）。
 	// 每次真实 spawn 清为 null，由看门狗 / 退出核对 / 续跑预检 / hydrate 回填写入。
 	agentNativeConversationPersistenceObservation: runtimeAgentNativeConversationPersistenceObservationSchema
@@ -1914,8 +1909,6 @@ export type RuntimePersistNewBacklogTaskCardsCreatedFromWebUiBeforeAgentSessionS
 // CLI 已在本进程解析完 effective settings（含 --expect-resolved-settings-fingerprint 校验）之后的建卡字段。
 // task id 由 runtime 在 board 锁内分配。
 export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema = z.object({
-	codexConfigurationProfileId: z.string().optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	title: z.string().optional(),
 	taskDescription: z.string().trim().max(4000).optional(),
@@ -2284,9 +2277,7 @@ export type RuntimeTaskCardActionPermanentlyDeleteResponse = z.infer<
 // `kanban task update` 的原始输入（尚未与卡片现值合并）。三态字段：缺省 = 保留卡片现值，null = 清除，
 // 具体值 = 改成该值。clineReasoningEffort 的 "default" = 显式回落默认推理档（保留空覆盖）。
 export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
-	codexConfigurationProfileId: z.string().min(1).nullable().optional(),
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().optional(),
 	taskDescription: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
@@ -2313,9 +2304,7 @@ export type RuntimeKanbanCliTaskCardFieldUpdateRawInput = z.infer<
 // 否则卡片 schema 会从遗留 parentSessionId 重新派生出刚被清掉的初始化（与浏览器 updateTask 同语义）。
 export const runtimeTaskCardFieldValuePatchSchema = z.object({
 	externalWorkflowRunBinding: runtimeExternalWorkflowRunBindingSchema.optional(),
-	codexConfigurationProfileId: z.string().min(1).nullable().optional(),
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.nullable().optional(),
 	title: z.string().nullable().optional(),
 	taskDescription: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
@@ -3744,7 +3733,6 @@ export const runtimeStateStreamMessageSchema = z.discriminatedUnion("type", [
 		type: z.literal("agent_session_pty_host_diagnostics_updated"),
 		revision: z.number().int().nonnegative(),
 	}),
-	z.object({ type: z.literal("codex_configuration_sync_updated"), revision: z.number().int().nonnegative() }),
 	runtimeStateStreamDailyWorkProgressStatisticsUpdatedMessageSchema,
 	runtimeStateStreamSystemLoadAndRuntimeStatusUpdatedMessageSchema,
 	taskVisualizationArtifactsUpdatedMessageSchema,
@@ -4508,9 +4496,7 @@ export type RuntimeTaskSessionStartOriginDeclaredByClient = z.infer<
 
 export const runtimeTaskSessionStartRequestSchema = z
 	.object({
-		codexConfigurationProfileId: z.string().min(1).optional(),
 		codexReasoningEffortOverride: z.string().trim().min(1).optional(),
-		codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 		taskId: z.string(),
 		// 省略时 taskId 按任务入口跟随当前主绑定；显式传入时按会话寻址。
 		// 前主会话的 taskId 等于宿主卡片 ID，仍用 workspaceTaskId 显式区分恢复目标。
@@ -5328,6 +5314,7 @@ export const promptLibraryEntryOriginSchema = z.enum([
 	"manual",
 	// 用户自己在终端里按了 Ctrl+S，把打了一半的输入存进库。
 	"terminal_stash_by_user",
+	"terminal_stash_from_retired_codex_configuration",
 	// W1 争用抢占：程序化投递需要输入框，运行时先把人类的未提交内容无损存进库再放行。
 	"terminal_stash_preempted_by_programmatic_delivery",
 ]);
@@ -5525,9 +5512,7 @@ export type RuntimePromptLibraryMutateRequest = z.infer<typeof runtimePromptLibr
 // **不进 board.json**：草稿带内联 base64 图片，而 board.json 是每次看板改动都整体读写 + 广播的最热
 // 路径，把易膨胀数据塞进去等于把膨胀直接打在那条链上。
 export const runtimeTaskEditDraftSchema = z.object({
-	codexConfigurationProfileId: z.string().min(1).optional(),
 	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
-	codexConfigurationPermissionSelectionSource: codexConfigurationPermissionSelectionSourceSchema.optional(),
 	taskTitleOverride: z.string().optional(),
 	taskDescription: z.string().max(4000).optional(),
 	taskId: z.string(),

@@ -12,7 +12,6 @@ window.__vite_plugin_react_preamble_installed__ = true;
 import React from '/node_modules/.vite/deps/react.js';
 import ReactDOMClient from '/node_modules/.vite/deps/react-dom_client.js';
 import { TopBar } from '/src/components/top-bar.tsx';
-import { CodexConfigurationSyncSummaryButton } from '/src/components/codex-configuration-sync.tsx';
 import { BugReportTriggerButton } from '/src/components/bug-report/bug-report-trigger-button.tsx';
 import { PostDeployVerificationController } from '/src/components/post-deploy-verification/post-deploy-verification-controller.tsx';
 import { usePostDeployVerification } from '/src/hooks/use-post-deploy-verification.ts';
@@ -23,13 +22,10 @@ import '/src/styles/globals.css';
 const h = React.createElement;
 function Fixture() {
  const verification = usePostDeployVerification('isolated-browser-fixture');
- const [isExpanded, setIsExpanded] = React.useState(false);
- const configurationNotice = { hasReminders: true, pendingApprovalCount: 2, sourceUpdateCount: 1, isExpanded, summaryButtonRef: React.useRef(null), contentId: 'isolated-configuration-notice', toggleExpanded: () => setIsExpanded(value => !value), controller: { state: null } };
  return h(TooltipProvider, null,
   h(TopBar, { openTargetOptions: [], selectedOpenTargetId:'vscode', onSelectOpenTarget() {}, onOpenWorkspace() {}, canOpenWorkspace:false, isOpeningWorkspace:false,
    onToggleSidebar() {}, onBack() {}, workspacePath:'/fixture/cline-kanban', onOpenTaskSpotlightSearch() {}, onToggleTerminal() {},
    onToggleTaskChangesSidebar() {}, onToggleFindings() {}, onToggleBetweenBoardScopeAllProjectsAndSingleProjectScope() {},
-   codexConfigurationNoticeSummaryControl:h(CodexConfigurationSyncSummaryButton, { notice:configurationNotice }),
    postDeployVerificationPendingCount:verification.pendingVerificationTaskCount, onOpenPostDeployVerification:()=>verification.setCollapsed(false),
    bugReportTriggerButton:h(BugReportTriggerButton, { projects:[], currentProjectId:null, activeView:'task:fixture' }),
    notificationCenter:h(Button, { 'aria-label':'Notifications', className:'min-w-[44px] min-h-[44px]', icon:h('span', null, 'N') }) }),
@@ -106,13 +102,7 @@ for (const viewport of [
 		await mountIsolatedFixture(page);
 		const verification = page.getByTestId("open-post-deploy-verification-button");
 		await expect(verification.locator("svg.lucide-clipboard-check")).toBeVisible();
-		const configuration = page.getByRole("button", { name: "配置提醒，可选反馈 2 项 · 来源更新 1 条", exact: true });
-		await expect(configuration.locator("svg.lucide-sliders-horizontal")).toBeVisible();
-		await expect(configuration).toContainText("3");
-		await configuration.click();
-		await expect(configuration).toHaveAttribute("aria-expanded", "true");
-		await configuration.click();
-		await expect(configuration).toHaveAttribute("aria-expanded", "false");
+		await expect(page.getByRole("button", { name: /配置提醒/ })).toHaveCount(0);
 		await page.screenshot({ path: test.info().outputPath(`top-bar-distinct-icons-${viewport.width}.png`) });
 		const appearance = await verification.evaluate((element) => {
 			const style = getComputedStyle(element);

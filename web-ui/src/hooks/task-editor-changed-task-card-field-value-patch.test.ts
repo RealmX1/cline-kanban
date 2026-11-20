@@ -77,6 +77,27 @@ describe("buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor", 
 			),
 		).toEqual({ codexReasoningEffortOverride: null });
 	});
+	it("旧 profile 占位档位被再次点选时写成显式权限，只改其他字段则保留来源", () => {
+		const card = seededTaskCard({
+			codexConfigurationPermissionSelectionSource: "profile",
+			taskAgentPermissionMode: "ask_for_every_tool_use",
+		});
+		const submitted = submittedValuesMatching(card);
+		expect(buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, submitted)).toEqual({});
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskAgentPermissionModeExplicitlySelected: true,
+			}),
+		).toEqual({ taskAgentPermissionMode: "ask_for_every_tool_use" });
+		expect(
+			buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEditor(card, {
+				...submitted,
+				taskTitleOverride: "新名称",
+			}),
+		).toEqual({ title: "新名称" });
+	});
+
 	it("表单与铺表单时的卡片完全一致：patch 为空（标题也不发）", () => {
 		const card = seededTaskCard({ prompt: "  Do the thing  " });
 		expect(

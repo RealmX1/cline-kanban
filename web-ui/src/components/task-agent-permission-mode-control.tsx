@@ -66,7 +66,12 @@ function findTaskAgentPermissionModeOptionLabel(permissionMode: RuntimeTaskAgent
 	return TASK_AGENT_PERMISSION_MODE_OPTIONS.find((option) => option.value === permissionMode)?.label ?? permissionMode;
 }
 
-function findTaskAgentPermissionModeOptionDescription(permissionMode: RuntimeTaskAgentPermissionMode): string {
+function findTaskAgentPermissionModeOptionDescription(
+	permissionMode: RuntimeTaskAgentPermissionMode,
+	selectedAgentId: RuntimeAgentId | null,
+): string {
+	if (selectedAgentId === "codex" && permissionMode === "ask_for_every_tool_use")
+		return "Codex 使用只读沙箱，并在请求沙箱外操作时交由用户审批。";
 	return TASK_AGENT_PERMISSION_MODE_OPTIONS.find((option) => option.value === permissionMode)?.description ?? "";
 }
 
@@ -74,12 +79,16 @@ function buildOptionTooltipContent(
 	description: string,
 	degradation: TaskAgentPermissionModeDegradationForOption | null,
 	selectedAgentLabel: string,
+	selectedAgentId: RuntimeAgentId | null,
 ): string {
 	if (degradation === null) {
 		return description;
 	}
 	const effectiveLabel = findTaskAgentPermissionModeOptionLabel(degradation.effectivePermissionMode);
-	const effectiveDescription = findTaskAgentPermissionModeOptionDescription(degradation.effectivePermissionMode);
+	const effectiveDescription = findTaskAgentPermissionModeOptionDescription(
+		degradation.effectivePermissionMode,
+		selectedAgentId,
+	);
 	if (degradation.widensPermissionsBeyondRequest) {
 		return `${description}\n\nWarning: ${selectedAgentLabel} cannot enforce this tier and will actually run with "${effectiveLabel}" — ${effectiveDescription}`;
 	}
@@ -94,7 +103,6 @@ export function TaskAgentPermissionModeControl({
 	startInPlanMode,
 	disabled = false,
 	idPrefix,
-	selectionComesFromCodexProfile = false,
 }: {
 	value: RuntimeTaskAgentPermissionMode;
 	onChange: (value: RuntimeTaskAgentPermissionMode) => void;
@@ -106,7 +114,6 @@ export function TaskAgentPermissionModeControl({
 	startInPlanMode: boolean;
 	disabled?: boolean;
 	idPrefix: string;
-	selectionComesFromCodexProfile?: boolean;
 }): ReactElement {
 	// droid 的 autonomyMode 是单轴（spec / normal / auto-high）：勾了 plan 起步就写 spec，
 	// 这里选的档位根本不会被写入。这一点必须当场说出来。
@@ -123,12 +130,17 @@ export function TaskAgentPermissionModeControl({
 				)}
 			>
 				{TASK_AGENT_PERMISSION_MODE_OPTIONS.map((option) => {
-					const isSelected = !selectionComesFromCodexProfile && option.value === value;
+					const isSelected = option.value === value;
 					const degradation = resolveDegradationForOption(selectedAgentId, option.value);
 					return (
 						<Tooltip
 							key={option.value}
-							content={buildOptionTooltipContent(option.description, degradation, selectedAgentLabel)}
+							content={buildOptionTooltipContent(
+								findTaskAgentPermissionModeOptionDescription(option.value, selectedAgentId),
+								degradation,
+								selectedAgentLabel,
+								selectedAgentId,
+							)}
 						>
 							<button
 								id={`${idPrefix}-${option.value}`}

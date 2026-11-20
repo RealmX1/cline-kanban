@@ -38,7 +38,6 @@ interface TaskConversationSessionCommandOptions {
 	startInPlanMode?: boolean | string;
 	taskAgentPermissionMode?: string;
 	model?: string;
-	profile?: string;
 	transport?: string;
 	name?: string;
 	preview?: boolean;
@@ -77,7 +76,6 @@ async function readCreationRequest(
 			"startInPlanMode",
 			"taskAgentPermissionMode",
 			"model",
-			"profile",
 			"transport",
 			"name",
 			"taskIncarnation",
@@ -109,12 +107,6 @@ async function readCreationRequest(
 		startInPlanMode,
 		taskAgentPermissionMode: options.taskAgentPermissionMode,
 		modelId: options.model,
-		codexConfigurationProfileId: options.profile,
-		codexConfigurationPermissionSelectionSource: options.taskAgentPermissionMode
-			? "task_local"
-			: options.profile
-				? "profile"
-				: undefined,
 		requestedAgentSessionTransport: options.transport,
 		conversationSessionName: options.name,
 		initialMessage: await readMessage(options),
@@ -353,7 +345,6 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 			.option("--start-in-plan-mode [value]", "必须显式选择 true 或 false；单独旗标表示 true。")
 			.option("--task-agent-permission-mode <mode>", "单次权限档位，缺省全部允许。")
 			.option("--model <id>", "单次模型选择；缺省使用所选 Agent 当前默认配置。")
-			.option("--profile <id>", "Codex profile；显式选择沿用其完整权限。")
 			.option("--transport <transport>", "pty_terminal 或 acp_stdio_subprocess。")
 			.option("--name <text>", "会话主题名，缺省异步命名。")
 			.option("--preview", "只预览启动设置，不创建会话。")

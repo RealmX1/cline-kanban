@@ -84,7 +84,6 @@ describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
 				agentId: "codex",
 				startInPlanMode: false,
 				defaultModelId: "frozen-creation-model",
-				codexConfigurationProfileId: "frozen-creation-profile",
 			}),
 			submissionId: "00000000-0000-4000-8000-000000000001",
 			workspaceId: "project",

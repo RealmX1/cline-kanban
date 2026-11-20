@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, copyFile, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lchmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { build } from "esbuild";
@@ -107,7 +107,6 @@ describe(
 			await writeFile(join(packagedDirectory, "package.json"), '{"type":"module"}');
 			await symlink(resolve("node_modules"), join(packagedDirectory, "node_modules"), "dir");
 			for (const worker of [
-				"codex-configuration-sync/codex-configuration-sync-database-worker.mjs",
 				"notifications/notification-lifecycle-database-worker.mjs",
 				"inter-work-unit-relation-ledger/inter-work-unit-relation-ledger-database-worker.mjs",
 			])
@@ -172,6 +171,9 @@ describe(
 			});
 			if (!cliPreservationWorktree.path) throw new Error("CLI 保全测试工作树缺失");
 			await mkdir(join(cliPreservationWorktree.path, "reports"));
+			const preservedSymlink = join(cliPreservationWorktree.path, "repo-release-reference");
+			await symlink("reports/accepted-ignored.md", preservedSymlink);
+			if (process.platform === "darwin") await lchmod(preservedSymlink, 0o755);
 			await writeFile(
 				join(cliPreservationWorktree.path, "reports", "accepted-ignored.md"),
 				"CLI 显式选择的 ignored 成果",
@@ -185,6 +187,8 @@ describe(
 						"done",
 						"--task-id",
 						"aa510",
+						"--project-path",
+						repo.repositoryPath,
 						"--preserve-path",
 						"reports/accepted-ignored.md",
 					],
@@ -199,14 +203,19 @@ describe(
 					},
 				),
 			);
-			preservationCli.stdout?.resume();
-			preservationCli.stderr?.resume();
-			expect(
-				await new Promise<number | null>((resolveExit, reject) => {
-					preservationCli.once("error", reject);
-					preservationCli.once("exit", resolveExit);
-				}),
-			).toBe(0);
+			let preservationCliOutput = "";
+			preservationCli.stdout?.on("data", (chunk) => {
+				preservationCliOutput += String(chunk);
+			});
+			preservationCli.stderr?.on("data", (chunk) => {
+				preservationCliOutput += String(chunk);
+			});
+			const preservationCliExitCode = await new Promise<number | null>((resolveExit, reject) => {
+				preservationCli.once("error", reject);
+				preservationCli.once("close", resolveExit);
+			});
+			expect(preservationCliExitCode, preservationCliOutput).toBe(0);
+			expect(preservationCliOutput).toContain('"ok": true');
 			const cliPreservationHistory = await runtime.client.taskCardAction.readTaskClosureHistory.query({
 				taskId: "aa510",
 				expectedTaskIncarnationCreatedAtEpochMs: 100,
@@ -219,6 +228,9 @@ describe(
 					"utf8",
 				),
 			).toBe("CLI 显式选择的 ignored 成果");
+			expect(
+				await readFile(join(cliArchive?.archiveDirectory ?? "", "working-files", "repo-release-reference"), "utf8"),
+			).toBe("reports/accepted-ignored.md");
 			expect(existsSync(cliPreservationWorktree.path)).toBe(false);
 			const close = (
 				taskId: string,

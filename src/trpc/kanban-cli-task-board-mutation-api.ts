@@ -62,8 +62,6 @@ export async function applyKanbanCliTaskBoardMutation(
 					"backlog",
 					{
 						title: fieldValues.title,
-						codexConfigurationProfileId: fieldValues.codexConfigurationProfileId,
-						codexConfigurationPermissionSelectionSource: fieldValues.codexConfigurationPermissionSelectionSource,
 						terminalAgentModelOverrideSettings: fieldValues.terminalAgentModelOverrideSettings,
 						prompt: fieldValues.prompt,
 						startInPlanMode: fieldValues.startInPlanMode,

@@ -69,8 +69,6 @@ function areSettingsEqual(left: TaskEditDraftComparableValues, right: TaskEditDr
 	return (
 		left.startInPlanMode === right.startInPlanMode &&
 		left.taskAgentPermissionMode === right.taskAgentPermissionMode &&
-		left.codexConfigurationProfileId === right.codexConfigurationProfileId &&
-		left.codexConfigurationPermissionSelectionSource === right.codexConfigurationPermissionSelectionSource &&
 		left.autoReviewEnabled === right.autoReviewEnabled &&
 		left.autoReviewMode === right.autoReviewMode &&
 		left.branchRef === right.branchRef &&

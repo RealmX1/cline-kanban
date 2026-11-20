@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
-import { persistCodexConfigurationProfileBindingForMainTaskSession } from "../codex-configuration-sync/task-card-codex-configuration-profile-binding";
+
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { assertRuntimeAgentIsNotRetired, CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "../core/agent-catalog";
@@ -139,7 +139,7 @@ import {
 	resolveTaskChatMessageTargetConversationSessionSummary,
 } from "../core/task-main-conversation-session-binding";
 import { getTaskMessageInjectionLedgerPath } from "../core/task-message-injection-ledger";
-import { isTaskCardShelved } from "../core/task-shelving-state";
+
 import { parseTaskCardIdFromTaskCardDetailUserShellTerminalSessionTaskId } from "../core/user-shell-terminal-session-task-id";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
 import {
@@ -526,7 +526,6 @@ async function persistResolvedTerminalAgentSessionModelOverrideSettingsOntoCard(
 					prompt: card.prompt,
 					baseRef: card.baseRef,
 					startInPlanMode: card.startInPlanMode,
-					taskAgentPermissionMode: card.taskAgentPermissionMode,
 					autoReviewEnabled: card.autoReviewEnabled === true,
 					autoReviewMode: card.autoReviewMode ?? "commit",
 					terminalAgentModelOverrideSettings: resolvedTerminalAgentModelOverrideSettings,
@@ -657,16 +656,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			prompt: "",
 			baseRef: card.baseRef,
 			worktreeMode: card.worktreeMode,
-			taskAgentPermissionMode: settings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
-			codexConfigurationProfileId:
-				settings?.codexConfigurationProfileId ??
-				summary.codexConfigurationProfileId ??
-				card.codexConfigurationProfileId,
+			taskAgentPermissionMode:
+				metadata?.taskConversationSessionRole === "main" &&
+				card.codexConfigurationPermissionSelectionSource === "task_local"
+					? card.taskAgentPermissionMode
+					: (settings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode),
 			codexReasoningEffortOverride: settings
 				? settings.codexReasoningEffortOverride
 				: card.codexReasoningEffortOverride,
-			codexConfigurationPermissionSelectionSource:
-				settings?.codexConfigurationPermissionSelectionSource ?? card.codexConfigurationPermissionSelectionSource,
 			requestedAgentSessionTransport:
 				settings?.sessionTransport ?? resolveRuntimeAgentSessionTransportFromSummary(summary),
 			// 原子切主时已预留、但从未启动的新 Codex 必须全新开局，不能误续同目录的其他 Codex。
@@ -719,6 +716,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		if (!resolved) {
 			return false;
 		}
+		const usesLegacyCodexProfilePermissions =
+			resolved.agentId === "codex" && card.codexConfigurationPermissionSelectionSource === "profile";
 		const taskCwd = isHomeAgentSessionId(taskId)
 			? workspaceScope.workspacePath
 			: await resolveExistingTaskCwdOrEnsure({
@@ -733,8 +732,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				agentId: resolved.agentId,
 				binary: resolved.binary,
 				args: resolved.args,
+				...(usesLegacyCodexProfilePermissions ? { usesLegacyCodexProfilePermissions: true } : {}),
 				taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-					card.taskAgentPermissionMode,
+					usesLegacyCodexProfilePermissions ? "ask_for_every_tool_use" : card.taskAgentPermissionMode,
 					scopedRuntimeConfig.agentAutonomousModeEnabled,
 				),
 				autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
@@ -757,6 +757,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						? card.terminalAgentModelOverrideSettings
 						: undefined,
 				codexReasoningEffortOverride: card.codexReasoningEffortOverride,
+				...(card.codexReasoningEffortFollowsNativeConfiguration
+					? { codexReasoningEffortFollowsNativeConfiguration: true }
+					: {}),
 			},
 			// 刻意不复用 resume_reclaimed_…：那条走的是内存里还在的 restartRequest，本条是内存态已随进程
 			// 重启丢光、从 durable board 重新拼出来的。两者的成因与修法都不同，混记就白设这个枚举了。
@@ -861,8 +864,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			if (result.value) await deps.broadcastRuntimeWorkspaceStateUpdated?.(scope.workspaceId, scope.workspacePath);
 			return result.value;
 		},
-		readCreationDefaults: async (scope, agentId, profileId, explicitModelId) => ({
-			...(await readCreationAgentDefaultModel(agentId, scope.workspacePath, profileId, explicitModelId)),
+		readCreationDefaults: async (scope, agentId, explicitModelId) => ({
+			...(await readCreationAgentDefaultModel(agentId, scope.workspacePath, explicitModelId)),
 			sessionTransport:
 				agentId === "omp"
 					? (await deps.loadScopedRuntimeConfig(scope)).ompAgentSessionTransportForNewTasks
@@ -1542,6 +1545,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					};
 				}
 				const isByTheWaySession = taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way";
+				const usesLegacyCodexProfilePermissions =
+					effectiveAgentId === "codex" &&
+					(taskConversationSessionMetadata &&
+					taskConversationSessionMetadata.taskConversationSessionRole !== "main"
+						? terminalManager.getSummary(body.taskId)?.codexConfigurationPermissionSelectionSource
+						: owningCard?.codexConfigurationPermissionSelectionSource) === "profile";
+				if (usesLegacyCodexProfilePermissions) body.taskAgentPermissionMode = "ask_for_every_tool_use";
 				if (
 					taskConversationSessionMetadata &&
 					(creationRole === "main") !==
@@ -1712,9 +1722,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						...taskConversationSessionMetadata,
 						taskConversationSessionLaunchSettings: {
 							...taskConversationSessionMetadata.taskConversationSessionLaunchSettings,
-							codexConfigurationProfileId: body.codexConfigurationProfileId,
 							codexReasoningEffortOverride: body.codexReasoningEffortOverride,
-							codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
 							taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
 								body.taskAgentPermissionMode,
 								scopedRuntimeConfig.agentAutonomousModeEnabled,
@@ -1942,9 +1950,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				await revalidateMainContextForkSourceBeforeLaunch?.();
 				const summary = await terminalManager.startTaskSession(
 					{
-						codexConfigurationProfileId: body.codexConfigurationProfileId,
 						codexReasoningEffortOverride: body.codexReasoningEffortOverride,
-						codexConfigurationPermissionSelectionSource: body.codexConfigurationPermissionSelectionSource,
+						...(owningCard?.codexReasoningEffortFollowsNativeConfiguration
+							? { codexReasoningEffortFollowsNativeConfiguration: true }
+							: {}),
 						taskId: body.taskId,
 						beforeAgentProcessLaunch,
 						workspaceTaskId,
@@ -1953,6 +1962,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						agentId: resolved.agentId,
 						binary: resolved.binary,
 						args: resolved.args,
+						...(usesLegacyCodexProfilePermissions ? { usesLegacyCodexProfilePermissions: true } : {}),
 						taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
 							body.taskAgentPermissionMode,
 							scopedRuntimeConfig.agentAutonomousModeEnabled,
@@ -2007,14 +2017,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 
 				let nextSummary = summary;
 				enterStartPhase("capture_initial_turn_checkpoint");
-				if (summary.codexConfigurationProfileId)
-					await persistCodexConfigurationProfileBindingForMainTaskSession({
-						workspaceId: workspaceScope.workspaceId,
-						workspacePath: workspaceScope.workspacePath,
-						conversationSessionId: body.taskId,
-						profileId: summary.codexConfigurationProfileId,
-						broadcastWorkspaceUpdated: deps.broadcastRuntimeWorkspaceStateUpdated,
-					});
 				if (shouldCaptureTurnCheckpoint) {
 					try {
 						const nextTurn = (summary.latestTurnCheckpoint?.turn ?? 0) + 1;
@@ -2059,7 +2061,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 			}
 		},
-		refreshTaskTerminal: async (workspaceScope, input, configurationProfileAutomaticAdoptionGuard) => {
+		refreshTaskTerminal: async (workspaceScope, input) => {
 			const receivedAtMs = Date.now();
 			try {
 				const body = parseTaskTerminalRefreshRequest(input);
@@ -2094,24 +2096,13 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				// 「解析工作目录」；任何**写回**一律以会话自身的 body.taskId 为键，否则侧问会话会把 agent 身份
 				// 与模型污染到主卡上。
 				const workspaceTaskId = currentSummary?.taskConversationSessionMetadata?.workspaceTaskId ?? body.taskId;
+				const sessionRole = currentSummary?.taskConversationSessionMetadata?.taskConversationSessionRole;
 				const sideSessionLaunchSettings =
-					currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings;
+					sessionRole && sessionRole !== "main"
+						? currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+						: undefined;
 				const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
 				const card = findWorkspaceBoardCard(board, workspaceTaskId);
-				if (
-					configurationProfileAutomaticAdoptionGuard &&
-					((card && isTaskCardShelved(card)) ||
-						card?.taskClosureSummary?.isCurrentlyClosed ||
-						board.columns.some(
-							(column) =>
-								column.id === "trash" && column.cards.some((candidate) => candidate.id === workspaceTaskId),
-						))
-				)
-					return {
-						ok: false,
-						summary: null,
-						error: "任务已结案、搁置或在垃圾桶中，配置广播保留待采用，不自动续接。",
-					};
 				if (!card) {
 					return {
 						ok: false,
@@ -2151,6 +2142,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				//   硬中断后没有活体 summary ⇒ 按「下次启动该走哪条通道」解析（卡片固化 → 全局默认 →
 				//   catalog 默认），与 card-detail-view 无活会话时的面板分流同一套优先级。
 				assertRuntimeAgentIsNotRetired(effectiveAgentId);
+				const usesLegacyCodexProfilePermissions =
+					effectiveAgentId === "codex" &&
+					(sessionRole && sessionRole !== "main"
+						? currentSummary?.codexConfigurationPermissionSelectionSource
+						: card.codexConfigurationPermissionSelectionSource) === "profile";
+				const recordedSessionPermissionMode =
+					currentSummary?.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings
+						?.taskAgentPermissionMode;
 				const effectiveSessionTransport =
 					sideSessionLaunchSettings?.sessionTransport ??
 					(currentSummary
@@ -2221,34 +2220,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									assertAutomaticResumeNotExplicitlyStopped,
 							}
 						: {}),
-					configurationProfileAutomaticAdoptionGuard: configurationProfileAutomaticAdoptionGuard
-						? {
-								...configurationProfileAutomaticAdoptionGuard,
-								readTaskExecutionEligibilityFingerprint: async () => {
-									const latestBoard = await loadWorkspaceBoardById(workspaceScope.workspaceId);
-									const latestCard = findWorkspaceBoardCard(latestBoard, workspaceTaskId);
-									if (
-										!latestCard ||
-										latestCard.createdAt !== card.createdAt ||
-										isTaskCardShelved(latestCard) ||
-										latestCard.taskClosureSummary?.isCurrentlyClosed ||
-										latestBoard.columns.some(
-											(column) =>
-												column.id === "trash" &&
-												column.cards.some((candidate) => candidate.id === workspaceTaskId),
-										)
-									)
-										return null;
-									return JSON.stringify([
-										workspaceScope.workspaceId,
-										workspaceTaskId,
-										latestCard.createdAt,
-										latestCard.taskShelvingState,
-										latestCard.taskClosureSummary,
-									]);
-								},
-							}
-						: undefined,
+					...(card.codexReasoningEffortFollowsNativeConfiguration
+						? { codexReasoningEffortFollowsNativeConfiguration: true }
+						: {}),
 					taskId: body.taskId,
 					...(body.additionalAgentStartupArgumentsForThisRestart !== undefined
 						? {
@@ -2268,24 +2242,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					agentId: resolved.agentId,
 					binary: resolved.binary,
 					args: resolved.args,
+					...(usesLegacyCodexProfilePermissions ? { usesLegacyCodexProfilePermissions: true } : {}),
 					taskAgentPermissionMode: resolveEffectiveTaskAgentPermissionMode(
-						sideSessionLaunchSettings?.taskAgentPermissionMode ?? card.taskAgentPermissionMode,
+						usesLegacyCodexProfilePermissions
+							? "ask_for_every_tool_use"
+							: sessionRole === "main" && card.codexConfigurationPermissionSelectionSource === "task_local"
+								? card.taskAgentPermissionMode
+								: (recordedSessionPermissionMode ?? card.taskAgentPermissionMode),
 						scopedRuntimeConfig.agentAutonomousModeEnabled,
 					),
 					autoContinueOnConnectionDropEnabled: scopedRuntimeConfig.autoContinueOnConnectionDropEnabled,
 					codexModelCapacityErrorAutoContinuationEnabled:
 						scopedRuntimeConfig.codexModelCapacityErrorAutoContinuationEnabled,
-					codexConfigurationProfileId:
-						configurationProfileAutomaticAdoptionGuard?.profileId ??
-						sideSessionLaunchSettings?.codexConfigurationProfileId ??
-						currentSummary?.codexConfigurationProfileId ??
-						card.codexConfigurationProfileId,
 					codexReasoningEffortOverride: sideSessionLaunchSettings
 						? sideSessionLaunchSettings.codexReasoningEffortOverride
 						: card.codexReasoningEffortOverride,
-					codexConfigurationPermissionSelectionSource:
-						sideSessionLaunchSettings?.codexConfigurationPermissionSelectionSource ??
-						card.codexConfigurationPermissionSelectionSource,
 					cwd: taskCwd,
 					prompt: "",
 					images: undefined,
@@ -2301,9 +2272,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				};
 				// 客户端未声明即按「人点的刷新」记账。前端的陈旧会话自动续跑打的是同一个入口，
 				// 靠它显式声明 stale_session_client_auto_resume 才分得开。
-				const refreshTaskSessionStartOrigin = configurationProfileAutomaticAdoptionGuard
-					? ("codex_configuration_profile_safe_auto_resume" as const)
-					: (body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal");
+				const refreshTaskSessionStartOrigin =
+					body.taskSessionStartOriginDeclaredByClient ?? "refresh_task_terminal";
 				// 「从既有对话迁入」（只有人在终端面板上选定后才会带）：先迁入、钉身份，再按 id 续跑。
 				// 「从既有对话迁入」与「停止后台会话并在这里续跑」都只有人在终端面板上选定 / 确认后才会带：前者先迁入、
 				// 钉身份再按 id 续跑；后者在对话被 Claude 后台会话占着又不能安全收回时，不再看是否安全，停掉后续跑。

@@ -256,7 +256,6 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 									agentId,
 									startInPlanMode: settings.startInPlanMode.value,
 									taskAgentPermissionMode: settings.effectiveTaskAgentPermissionMode.value,
-									codexConfigurationProfileId: settings.codexConfigurationProfileId.value ?? undefined,
 									ompAgentSessionTransport:
 										agentId === "omp"
 											? (settings.sessionTransport.value as "pty_terminal" | "acp_stdio_subprocess")

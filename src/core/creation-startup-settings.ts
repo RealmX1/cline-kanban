@@ -13,10 +13,7 @@ export function resolveCreationStartupSettings(input: {
 	taskAgentPermissionMode?: RuntimeTaskAgentPermissionMode;
 	modelId?: string;
 	defaultModelId?: string | null;
-	defaultCodexConfigurationProfileId?: string;
 	agentSelectionSource?: "explicit_request" | "creator_session_agent" | "workspace_config_default";
-	codexConfigurationProfileId?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	sessionRole?: "by_the_way" | "task_collaborator";
 	requestedAgentSessionTransport?: RuntimeAgentSessionTransport;
 	defaultSessionTransport?: RuntimeAgentSessionTransport;
@@ -24,7 +21,6 @@ export function resolveCreationStartupSettings(input: {
 	const requested = input.taskAgentPermissionMode ?? "bypass_all_permission_prompts";
 	const permission = resolveTaskAgentPermissionModeForAgent(input.agentId, requested);
 	const permissionSource = input.taskAgentPermissionMode === undefined ? "built_in_default" : "explicit_request";
-	const followsProfile = input.agentId === "codex" && input.codexConfigurationPermissionSelectionSource === "profile";
 	return {
 		effectiveAgentId: { value: input.agentId, source: input.agentSelectionSource ?? "explicit_request" },
 		startInPlanMode: { value: input.startInPlanMode, source: "explicit_request" },
@@ -36,22 +32,13 @@ export function resolveCreationStartupSettings(input: {
 				: permissionSource,
 		},
 		harnessPermissionMode: {
-			value: followsProfile || input.sessionRole === "by_the_way" ? null : permission.effectivePermissionMode,
-			source:
-				input.sessionRole === "by_the_way"
-					? "session_role_constraint"
-					: followsProfile
-						? "codex_profile"
-						: "harness_permission_mapping",
+			value: input.sessionRole === "by_the_way" ? null : permission.effectivePermissionMode,
+			source: input.sessionRole === "by_the_way" ? "session_role_constraint" : "harness_permission_mapping",
 		},
 		roleReadOnlyConstraint: { value: input.sessionRole === "by_the_way", source: "session_role_constraint" },
 		modelId: {
 			value: input.modelId ?? input.defaultModelId ?? null,
 			source: input.modelId === undefined ? "agent_default_configuration" : "explicit_request",
-		},
-		codexConfigurationProfileId: {
-			value: input.codexConfigurationProfileId ?? input.defaultCodexConfigurationProfileId ?? null,
-			source: input.codexConfigurationProfileId ? "explicit_request" : "agent_default_configuration",
 		},
 		sessionTransport: {
 			value:

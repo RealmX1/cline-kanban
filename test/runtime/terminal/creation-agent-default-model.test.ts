@@ -1,8 +1,5 @@
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mutateCodexConfigurationSyncStore } from "../../../src/codex-configuration-sync/codex-configuration-sync-store";
 import * as CodexAppServerRequestConnections from "../../../src/codex-native-session-protocol/codex-app-server-request-connection";
-import type { CodexAppServerRequestPort } from "../../../src/codex-native-session-protocol/codex-native-conversation-history";
 import {
 	readCreationAgentDefaultModel,
 	readCreationAgentDefaultModelWithoutBlockingBacklogCard,
@@ -18,88 +15,31 @@ describe("创建时的 Agent 默认配置", () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		vi.stubEnv("PATH", fixture.fixtureRootDirectoryPath);
 		expect(
-			await readCreationAgentDefaultModel(
-				"omp",
-				fixture.fixtureRootDirectoryPath,
-				undefined,
-				"provider/chosen-model",
-			),
+			await readCreationAgentDefaultModel("omp", fixture.fixtureRootDirectoryPath, "provider/chosen-model"),
 		).toEqual({ modelId: "provider/chosen-model" });
 		expect(await readCreationAgentDefaultModel("claude", fixture.fixtureRootDirectoryPath)).toEqual({
 			modelId: "default",
 		});
 	});
-	it("Codex 显式模型仍冻结默认 profile；缺少显式 profile 时不能静默换用其他配置", async () => {
+	it("新建 Codex 卡片保留原生模型选择，避免探测启动并写入用户 SQLite", async () => {
+		const connection = vi.spyOn(CodexAppServerRequestConnections, "withCodexAppServerRequestConnection");
 		const fixture = createIsolatedGitTestWorkspaceFixture();
-		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
-		vi.stubEnv("CODEX_HOME", join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration"));
-		vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.isolatedHomeDirectoryPath, "isolated-codex-storage"));
-		vi.stubEnv("PATH", fixture.fixtureRootDirectoryPath);
-		await mutateCodexConfigurationSyncStore((store) => {
-			store.defaultCodexConfigurationProfileId = "default-profile";
-			store.profiles["default-profile"] = {
-				profileId: "default-profile",
-				name: "默认配置",
-				sourceIdentity: "isolated",
-				version: 1,
-				fields: {},
-				fieldVersions: {},
-			};
+		await expect(readCreationAgentDefaultModel("codex", fixture.fixtureRootDirectoryPath)).resolves.toEqual({
+			modelId: null,
 		});
-		expect(
-			await readCreationAgentDefaultModel("codex", fixture.fixtureRootDirectoryPath, undefined, "chosen-model"),
-		).toEqual({ modelId: "chosen-model", codexConfigurationProfileId: "default-profile" });
 		await expect(
-			readCreationAgentDefaultModel("codex", fixture.fixtureRootDirectoryPath, "missing-profile", "chosen-model"),
-		).rejects.toThrow("不存在");
+			readCreationAgentDefaultModel("codex", fixture.fixtureRootDirectoryPath, "chosen-model"),
+		).resolves.toEqual({
+			modelId: "chosen-model",
+		});
+		expect(connection).not.toHaveBeenCalled();
 	});
-	it.each(["configured-default", null])(
-		"Codex 配置模型为 %s 时，经统一辅助连接读取实际默认值",
-		async (configuredModel) => {
-			const fixture = createIsolatedGitTestWorkspaceFixture();
-			const configurationHome = join(fixture.isolatedHomeDirectoryPath, "isolated-codex-configuration");
-			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
-			vi.stubEnv("CODEX_HOME", configurationHome);
-			vi.stubEnv("CODEX_SQLITE_HOME", join(fixture.isolatedHomeDirectoryPath, "isolated-codex-storage"));
-			const request = vi.fn<CodexAppServerRequestPort["request"]>(async (method) =>
-				method === "config/read"
-					? { config: { model: configuredModel } }
-					: { data: [{ model: "catalog-default", isDefault: true }] },
-			);
-			const connection = vi
-				.spyOn(CodexAppServerRequestConnections, "withCodexAppServerRequestConnection")
-				.mockImplementation(async (_input, operation) => operation({ request }));
-			expect(await readCreationAgentDefaultModel("codex", fixture.fixtureRootDirectoryPath)).toEqual({
-				modelId: configuredModel ?? "catalog-default",
-				codexConfigurationProfileId: undefined,
-			});
-			expect(connection).toHaveBeenCalledExactlyOnceWith(
-				expect.objectContaining({
-					workingDirectory: fixture.fixtureRootDirectoryPath,
-					codexConversationStorageHomeDirectoryPath: configurationHome,
-					environment: expect.objectContaining({ CODEX_HOME: configurationHome }),
-				}),
-				expect.any(Function),
-			);
-			expect(request.mock.calls.map(([method]) => method)).toEqual(
-				configuredModel ? ["config/read"] : ["config/read", "model/list"],
-			);
-		},
-	);
-	it("未绑定 profile 且未要求原生初始化时，默认模型探测失败不阻止建卡", async () => {
+	it("未要求原生初始化时，默认模型探测失败不阻止建卡", async () => {
 		await expect(
 			readCreationAgentDefaultModelWithoutBlockingBacklogCard(async () => {
 				throw new Error("OMP 默认模型读取超时");
 			}, {}),
 		).resolves.toEqual({ modelId: null });
-		await expect(
-			readCreationAgentDefaultModelWithoutBlockingBacklogCard(
-				async () => {
-					throw new Error("所选 Codex profile 不存在。");
-				},
-				{ codexConfigurationProfileId: "missing-profile" },
-			),
-		).rejects.toThrow("不存在");
 		await expect(
 			readCreationAgentDefaultModelWithoutBlockingBacklogCard(
 				async () => {

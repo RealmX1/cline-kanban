@@ -44,9 +44,7 @@ import {
 
 export interface TaskDraft {
 	taskDescription?: string;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
 	title?: string;
 	prompt: string;
 	startInPlanMode?: boolean;
@@ -269,8 +267,8 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	prompt: true,
 	startInPlanMode: true,
 	taskAgentPermissionMode: true,
-	codexConfigurationProfileId: true,
 	codexReasoningEffortOverride: true,
+	codexReasoningEffortFollowsNativeConfiguration: true,
 	codexConfigurationPermissionSelectionSource: true,
 	autoReviewEnabled: true,
 	autoReviewMode: true,
@@ -440,8 +438,8 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 		...(typeof card.codexReasoningEffortOverride === "string" && card.codexReasoningEffortOverride.trim()
 			? { codexReasoningEffortOverride: card.codexReasoningEffortOverride.trim() }
 			: {}),
-		...(typeof card.codexConfigurationProfileId === "string" && card.codexConfigurationProfileId
-			? { codexConfigurationProfileId: card.codexConfigurationProfileId }
+		...(card.codexReasoningEffortFollowsNativeConfiguration === true
+			? { codexReasoningEffortFollowsNativeConfiguration: true }
 			: {}),
 		...(card.codexConfigurationPermissionSelectionSource === "profile" ||
 		card.codexConfigurationPermissionSelectionSource === "task_local"
@@ -587,9 +585,7 @@ export function addTaskToColumnWithResult(
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
 			taskAgentPermissionMode: draft.taskAgentPermissionMode,
-			codexConfigurationProfileId: draft.codexConfigurationProfileId,
 			codexReasoningEffortOverride: draft.codexReasoningEffortOverride,
-			codexConfigurationPermissionSelectionSource: draft.codexConfigurationPermissionSelectionSource,
 			autoReviewEnabled: draft.autoReviewEnabled,
 			autoReviewMode: draft.autoReviewMode,
 			images: draft.images,
@@ -869,15 +865,6 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				codexReasoningEffortOverride: Object.hasOwn(draft, "codexReasoningEffortOverride")
 					? draft.codexReasoningEffortOverride
 					: card.codexReasoningEffortOverride,
-				codexConfigurationProfileId: Object.hasOwn(draft, "codexConfigurationProfileId")
-					? draft.codexConfigurationProfileId
-					: card.codexConfigurationProfileId,
-				codexConfigurationPermissionSelectionSource: Object.hasOwn(
-					draft,
-					"codexConfigurationPermissionSelectionSource",
-				)
-					? draft.codexConfigurationPermissionSelectionSource
-					: card.codexConfigurationPermissionSelectionSource,
 				autoReviewEnabled: Boolean(draft.autoReviewEnabled),
 				autoReviewMode: resolveTaskAutoReviewMode(draft.autoReviewMode ?? DEFAULT_TASK_AUTO_REVIEW_MODE),
 				images: nextImages,

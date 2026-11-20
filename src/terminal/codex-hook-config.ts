@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
+import { parse } from "smol-toml";
+import { formatCodexConfigurationOverrideTomlValue } from "../codex-conversation-storage/codex-native-configuration-override-toml-value";
 
 import type { RuntimeHookEvent } from "../core/api-contract";
 import { buildKanbanAgentHookCommandParts } from "../core/kanban-command";
@@ -195,11 +197,27 @@ function buildCodexHookTrustEntry(config: CodexHookConfig): CodexHookTrustEntry 
 	};
 }
 
-function buildCodexHookTrustStateConfigValue(entries: CodexHookTrustEntry[]): string {
-	const states = entries.map(
-		(entry) => `${JSON.stringify(entry.key)}={trusted_hash=${JSON.stringify(entry.trustedHash)}}`,
-	);
-	return `{${states.join(",")}}`;
+function mergeCodexSessionHookTrustIntoLaunchArguments(args: string[], entries: CodexHookTrustEntry[]): void {
+	let existing: { index: number; prefix: string; value: string } | undefined;
+	for (let index = 0; index < args.length; index++) {
+		const argument = args[index];
+		if (argument === "--") break;
+		const usesSeparateValue = argument === "-c" || argument === "--config";
+		const targetIndex = usesSeparateValue ? ++index : index;
+		const value = args[targetIndex];
+		const match = value?.match(
+			usesSeparateValue ? /^(hooks\.state\s*=\s*)(.*)$/s : /^((?:-c=?|--config=)hooks\.state\s*=\s*)(.*)$/s,
+		);
+		if (match) existing = { index: targetIndex, prefix: match[1], value: match[2] };
+	}
+	const state = existing ? parse(`value=${existing.value}`).value : {};
+	if (state === null || typeof state !== "object" || Array.isArray(state) || state instanceof Date) return;
+	for (const entry of entries) {
+		if (!Object.hasOwn(state, entry.key)) state[entry.key] = { trusted_hash: entry.trustedHash };
+	}
+	const merged = formatCodexConfigurationOverrideTomlValue(state);
+	if (existing) args[existing.index] = `${existing.prefix}${merged}`;
+	else args.unshift("-c", `hooks.state=${merged}`);
 }
 
 const readCodexVersion = promisify(execFile);
@@ -282,18 +300,18 @@ export function configureCodexHooks(args: string[], enableVerifiedAutomaticCompa
 		eventName: "PreCompact",
 		command: buildCodexHookCommand("main_agent_conversation_context_compaction_started"),
 	};
-	const trustStateConfigValue = buildCodexHookTrustStateConfigValue(
-		[
-			sessionStartHook,
-			inProgressHook,
-			reviewHook,
-			permissionRequestHook,
-			preToolUseActivityHook,
-			postToolUseActivityHook,
-			postCompactHook,
-			...(enablesCompactionPhaseHooks ? [preCompactHook] : []),
-		].map(buildCodexHookTrustEntry),
-	);
+	const installedHookTrust = [
+		sessionStartHook,
+		inProgressHook,
+		reviewHook,
+		permissionRequestHook,
+		preToolUseActivityHook,
+		postToolUseActivityHook,
+		postCompactHook,
+		...(enablesCompactionPhaseHooks ? [preCompactHook] : []),
+	]
+		.filter((hook) => !hasCodexConfigOverride(args, `hooks.${hook.eventName}`))
+		.map(buildCodexHookTrustEntry);
 
 	addCodexConfigOverrideBeforeSubcommand(
 		args,
@@ -301,7 +319,7 @@ export function configureCodexHooks(args: string[], enableVerifiedAutomaticCompa
 		buildCodexHookConfigValue(sessionStartHook.command),
 	);
 	addCodexConfigOverrideBeforeSubcommand(args, "features.hooks", "true");
-	addCodexConfigOverrideBeforeSubcommand(args, "hooks.state", trustStateConfigValue);
+	mergeCodexSessionHookTrustIntoLaunchArguments(args, installedHookTrust);
 	addCodexConfigOverrideBeforeSubcommand(
 		args,
 		"hooks.UserPromptSubmit",

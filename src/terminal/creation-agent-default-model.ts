@@ -1,9 +1,7 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { z } from "zod";
-import { readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore } from "../codex-configuration-sync/codex-configuration-sync-store";
-import { resolveUserCodexHomeDirectoryPath } from "../codex-conversation-storage/codex-conversation-storage-home";
-import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
+
 import type { RuntimeAgentId } from "../core/api-contract";
 import { getTerminalAgentModelSelectionOptions } from "./terminal-agent-model-selection";
 
@@ -62,39 +60,12 @@ async function readOmpDefaultModelWithoutStartingModelTurn(workingDirectory: str
 export async function readCreationAgentDefaultModel(
 	agentId: RuntimeAgentId,
 	workingDirectory: string,
-	codexConfigurationProfileId?: string,
 	explicitModelId?: string,
-): Promise<{ modelId: string | null; codexConfigurationProfileId?: string }> {
+): Promise<{ modelId: string | null }> {
 	if (agentId === "claude") return { modelId: explicitModelId ?? "default" };
-	if (agentId === "codex") {
-		const store = await readCodexConfigurationSyncStore();
-		const profileId = codexConfigurationProfileId ?? store.defaultCodexConfigurationProfileId ?? undefined;
-		const profile = profileId ? store.profiles[profileId] : undefined;
-		if (codexConfigurationProfileId && !profile) throw new Error("所选 Codex profile 不存在。");
-		if (explicitModelId) return { modelId: explicitModelId, codexConfigurationProfileId: profileId };
-		const profileModel = profile?.fields[JSON.stringify(["config.toml", "model"])]?.value;
-		if (typeof profileModel === "string") return { modelId: profileModel, codexConfigurationProfileId: profileId };
-		const modelId = await withCodexAppServerRequestConnection(
-			{
-				workingDirectory,
-				environment: process.env,
-				codexConversationStorageHomeDirectoryPath: resolveUserCodexHomeDirectoryPath(process.env, workingDirectory),
-			},
-			async (port) => {
-				const config = z
-					.object({ config: z.looseObject({ model: z.string().nullish() }) })
-					.parse(await port.request("config/read", { includeLayers: false, cwd: workingDirectory }));
-				if (config.config.model) return config.config.model;
-				const models = z
-					.object({ data: z.array(z.object({ model: z.string(), isDefault: z.boolean() })) })
-					.parse(await port.request("model/list", {}));
-				const selected = models.data.find((model) => model.isDefault);
-				if (!selected) throw new Error("Codex 默认模型暂不可核验，保留创建草稿。");
-				return selected.model;
-			},
-		);
-		return { modelId, codexConfigurationProfileId: profileId };
-	}
+	// Codex 的原生 profile、项目层和启动参数共同决定模型，建卡时只物化明确的模型选择。
+	if (agentId === "codex") return { modelId: explicitModelId ?? null };
+
 	if (explicitModelId) return { modelId: explicitModelId };
 	if (agentId === "omp") {
 		return { modelId: await readOmpDefaultModelWithoutStartingModelTurn(workingDirectory) };
@@ -105,17 +76,17 @@ export async function readCreationAgentDefaultModel(
 }
 
 /**
- * 默认模型探测失败时，未显式绑定 Codex profile、也未要求原生会话初始化的建卡继续进行。
+ * 默认模型探测失败时，未要求原生会话初始化的建卡继续进行。
  * 显式模型由调用方另传；这里只避免离线探测挡住 Backlog。
  */
 export async function readCreationAgentDefaultModelWithoutBlockingBacklogCard(
-	readDefaultModel: () => Promise<{ modelId: string | null; codexConfigurationProfileId?: string }>,
-	input: { codexConfigurationProfileId?: string; taskAgentSessionInitialization?: unknown },
-): Promise<{ modelId: string | null; codexConfigurationProfileId?: string }> {
+	readDefaultModel: () => Promise<{ modelId: string | null }>,
+	input: { taskAgentSessionInitialization?: unknown },
+): Promise<{ modelId: string | null }> {
 	try {
 		return await readDefaultModel();
 	} catch (error) {
-		if (input.codexConfigurationProfileId || input.taskAgentSessionInitialization) throw error;
+		if (input.taskAgentSessionInitialization) throw error;
 		return { modelId: null };
 	}
 }

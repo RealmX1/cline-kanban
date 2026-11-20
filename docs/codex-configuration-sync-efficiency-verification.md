@@ -1,5 +1,8 @@
 # Codex profile 同步效率与规模核验
 
+> 历史实现记录。当前产品路径与旧数据的保全方式见 [Codex profiles 退役](codex-profile-retirement-and-storage-preservation.md)。
+
+
 核验日期：2026-10-29。优化前固定候选为 `b9d389f86331e5d2cf3e1fa1a7e257151abbcffa`，原工作区 62 个变更文件与其逐字一致。本轮只实现恢复目标过滤、无变化观察免写盘和查询/执行分离；不增加索引、分页或接口字段。
 
 ## 方法与证据

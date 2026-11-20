@@ -351,6 +351,24 @@ export async function backupLocalRedeploymentRuntimeState(
 			isFilesystemKernelAtomicWriteTemporaryFilePath(path)
 		);
 	}
+	function isRebuildableCodexCatalogCacheFile(path: string): boolean {
+		const segments = relative(request.runtimeIdentity.runtimeHomeDirectoryPath, path).split(sep);
+		const cachePath =
+			segments[0] === "codex-conversation-storage-home"
+				? segments.slice(1)
+				: segments[0] === "codex-configuration-writer-bindings-and-sync" &&
+						segments[1] === "writers" &&
+						/^[a-f0-9-]{36}$/.test(segments[2] ?? "") &&
+						segments[3] === "configuration-home"
+					? segments.slice(4)
+					: [];
+		return (
+			cachePath.length === 3 &&
+			cachePath[0] === "cache" &&
+			(cachePath[1] === "remote_plugin_catalog" || cachePath[1] === "codex_apps_tools") &&
+			/^[a-f0-9]+\.json$/.test(cachePath[2] ?? "")
+		);
+	}
 	async function hashRuntimeStateFileContents(path: string): Promise<string> {
 		const hash = createHash("sha256");
 		for await (const chunk of createReadStream(path)) {
@@ -371,7 +389,12 @@ export async function backupLocalRedeploymentRuntimeState(
 		}
 		const metadata = await lstat(path);
 		reportBackupProgress();
-		if (metadata.isSocket() || path.endsWith("-wal") || path.endsWith("-shm")) {
+		if (
+			metadata.isSocket() ||
+			path.endsWith("-wal") ||
+			path.endsWith("-shm") ||
+			(metadata.isFile() && isRebuildableCodexCatalogCacheFile(path))
+		) {
 			if (recordSkipped) skipped.push(path);
 			return null;
 		}
@@ -412,7 +435,12 @@ export async function backupLocalRedeploymentRuntimeState(
 		}
 		const metadata = await lstat(source);
 		reportBackupProgress();
-		if (metadata.isSocket() || source.endsWith("-wal") || source.endsWith("-shm")) {
+		if (
+			metadata.isSocket() ||
+			source.endsWith("-wal") ||
+			source.endsWith("-shm") ||
+			(metadata.isFile() && isRebuildableCodexCatalogCacheFile(source))
+		) {
 			skipped.push(source);
 			return;
 		}

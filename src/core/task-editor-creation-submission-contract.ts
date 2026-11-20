@@ -44,8 +44,6 @@ export const taskEditorCreationSubmissionRequestSchema: z.ZodType<TaskEditorCrea
 			taskConversationMode: true,
 			terminalAgentModelOverrideSettings: true,
 			codexReasoningEffortOverride: true,
-			codexConfigurationProfileId: true,
-			codexConfigurationPermissionSelectionSource: true,
 			taskAgentSessionInitialization: true,
 			baseRef: true,
 			worktreeMode: true,

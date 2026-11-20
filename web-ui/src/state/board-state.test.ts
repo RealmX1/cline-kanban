@@ -1053,8 +1053,8 @@ describe("normalizeBoardData 的白名单铁律（水合后的 board 会被整�
 	// BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION 处失败；登记后把它也填进这里。
 	const fullyPopulatedRuntimeBoardCard: Required<RuntimeBoardCard> = {
 		taskNameVersion: 2,
-		codexConfigurationProfileId: "fixture-codex-profile",
 		codexReasoningEffortOverride: "ultra",
+		codexReasoningEffortFollowsNativeConfiguration: true,
 		codexConfigurationPermissionSelectionSource: "profile",
 		taskClosureSummary: {
 			closureRequestId: "11111111-1111-4111-8111-111111111111",

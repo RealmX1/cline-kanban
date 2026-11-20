@@ -4,12 +4,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { probeClaudeConversationPlanModeStateBeforeResume } from "../agent-session-history/persisted-agent-transcript-plan-mode-still-open-probe";
-import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
-import {
-	buildCodexArgumentsUsingCompleteProfilePermissions,
-	formatCodexConfigurationOverrideTomlValue,
-} from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
-import { isManagedCodexConversationStorageHome } from "../codex-conversation-storage/codex-conversation-storage-home";
+import { resolveManagedCodexNativeConfigurationArguments } from "../codex-conversation-storage/codex-conversation-storage-home";
+import { formatCodexConfigurationOverrideTomlValue } from "../codex-conversation-storage/codex-native-configuration-override-toml-value";
 import { CLINE_AGENT_RETIRED_EXECUTION_ERROR, isKanbanCursorAgentModelId } from "../core/agent-catalog";
 import type {
 	RuntimeAgentId,
@@ -72,7 +68,8 @@ import { prepareTaskPromptWithImages } from "./task-image-prompt";
 import { resolveCursorLaunchDefaultModelId } from "./terminal-agent-model-selection";
 
 export interface AgentAdapterLaunchInput {
-	codexConfigurationProfileLaunchFields?: CodexConfigurationFields;
+	codexRetiredWriterPermissionArguments?: string[];
+	codexRetiredWriterSqliteHomeDirectoryPath?: string;
 	codexReasoningEffortOverride?: string;
 	taskId: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
@@ -1526,16 +1523,16 @@ const codexAdapter: AgentSessionAdapter = {
 			!input.taskConversationSessionMetadata?.taskConversationSessionLaunchSettings?.resolvedSettings
 				? removeCliOptionsWithValues(input.args, ["--model", "-m"])
 				: input.args;
-		let codexArgs = explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : [...modelBaseArgs];
-		const profilePermissionArguments =
-			input.codexConfigurationProfileLaunchFields &&
-			buildCodexArgumentsUsingCompleteProfilePermissions(codexArgs, input.codexConfigurationProfileLaunchFields);
-		if (profilePermissionArguments) codexArgs = profilePermissionArguments;
-		const profileReasoningEffort =
-			input.codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model_reasoning_effort"])];
-		const selectedReasoningEffort = input.codexConfigurationProfileLaunchFields
-			? profileReasoningEffort?.value
-			: input.codexReasoningEffortOverride;
+		const configurationArguments = await resolveManagedCodexNativeConfigurationArguments(
+			input.codexConversationStorageHomeDirectoryPath,
+			[...modelBaseArgs, ...(input.additionalAgentStartupArgumentsForThisRestart ?? [])],
+		);
+		const codexArgs = [
+			...configurationArguments,
+			...(explicitModelId ? setModelCliOption(modelBaseArgs, explicitModelId) : modelBaseArgs),
+		];
+
+		const selectedReasoningEffort = input.codexReasoningEffortOverride;
 		if (selectedReasoningEffort !== undefined)
 			codexArgs.push(
 				"-c",
@@ -1543,12 +1540,6 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		const env: Record<string, string | undefined> = {};
 		const binary = input.binary;
-		if (
-			input.codexConversationStorageHomeDirectoryPath &&
-			isManagedCodexConversationStorageHome(input.codexConversationStorageHomeDirectoryPath)
-		) {
-			codexArgs.push("-c", `sqlite_home=${JSON.stringify(input.codexConversationStorageHomeDirectoryPath)}`);
-		}
 		let deferredStartupPromptText: string | undefined;
 		const appendedSystemPrompt = resolveAgentAppendSystemPrompt(input);
 
@@ -1556,28 +1547,42 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", "check_for_update_on_startup=false");
 		}
 
-		// codex 的放权是 sandbox × approval 两个正交旗标，但它表达不出「改文件放行、执行命令仍询问」
-		// 这一中间档（理由见 task-agent-permission-mode.ts 里 codex 那段注释），所以中间档已在领域层
-		// 保守降级成「每次询问」，这里只剩两档要落地。
-		// 「每次询问」必须显式推 --ask-for-approval untrusted：codex 的默认审批策略来自用户自己的
-		// config.toml，什么都不推等于把档位交给用户全局配置决定——那会静默放宽用户在本任务上选的档。
-		// 与 startInPlanMode 无关——codex 的 plan 起步走 deferred `/plan` 斜杠命令，不占用这两个旗标。
-		const codexPermissionMode = resolveLaunchPermissionMode(input);
-		const hasExplicitCodexApprovalPolicy =
-			hasCliOption(codexArgs, "--ask-for-approval") || hasCliOption(codexArgs, "-a");
-		if (
+		// 原生新版本不再支持 untrusted。只读沙箱外的操作须经 on-request 询问。
+		const retiredWriterPermissionArguments = input.readOnlyQuestionSession
+			? []
+			: (input.codexRetiredWriterPermissionArguments ?? []);
+		const storageSqliteHome =
+			input.codexRetiredWriterSqliteHomeDirectoryPath ??
+			(configurationArguments.length ? input.codexConversationStorageHomeDirectoryPath : undefined);
+		const codexPermissionMode = retiredWriterPermissionArguments.length
+			? undefined
+			: resolveLaunchPermissionMode(input);
+		if (codexPermissionMode === "ask_for_every_tool_use" || retiredWriterPermissionArguments.length) {
+			const scopedArguments = removeCliOptionsWithValues(
+				codexArgs.filter(
+					(argument) =>
+						argument !== "--dangerously-bypass-approvals-and-sandbox" &&
+						argument !== "--full-auto" &&
+						argument !== "--approve-for-me",
+				),
+				["--sandbox", "-s", "--ask-for-approval", "-a"],
+			);
+			codexArgs.splice(0, codexArgs.length, ...scopedArguments);
+			if (codexPermissionMode === "ask_for_every_tool_use")
+				codexArgs.push(
+					"--sandbox",
+					"read-only",
+					"--ask-for-approval",
+					"on-request",
+					"-c",
+					'approvals_reviewer="user"',
+				);
+			else codexArgs.push(...retiredWriterPermissionArguments);
+		} else if (
 			codexPermissionMode === "bypass_all_permission_prompts" &&
-			!profilePermissionArguments &&
 			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
 		) {
 			codexArgs.push("--dangerously-bypass-approvals-and-sandbox");
-		} else if (
-			codexPermissionMode === "ask_for_every_tool_use" &&
-			!profilePermissionArguments &&
-			!hasExplicitCodexApprovalPolicy &&
-			!hasCliOption(codexArgs, "--dangerously-bypass-approvals-and-sandbox")
-		) {
-			codexArgs.push("--ask-for-approval", "untrusted");
 		}
 		const parentSessionId = normalizeParentSessionId(input.parentSessionId);
 		const continuesWithoutNewPrompt = Boolean(
@@ -1655,6 +1660,14 @@ const codexAdapter: AgentSessionAdapter = {
 			codexArgs.push("-c", `developer_instructions=${JSON.stringify(appendedSystemPrompt)}`);
 		}
 
+		codexArgs.splice(
+			0,
+			codexArgs.length,
+			...mergeCodexAdditionalStartupArgumentsForRestart(
+				codexArgs,
+				input.additionalAgentStartupArgumentsForThisRestart ?? [],
+			),
+		);
 		const hooks = resolveHookContext(input);
 		let codexAutomaticCompactionPhaseHooksConfigured = false;
 		if (hooks) {
@@ -1674,14 +1687,13 @@ const codexAdapter: AgentSessionAdapter = {
 			);
 		}
 
-		codexArgs.splice(
-			0,
-			codexArgs.length,
-			...mergeCodexAdditionalStartupArgumentsForRestart(
-				codexArgs,
-				input.additionalAgentStartupArgumentsForThisRestart ?? [],
-			),
-		);
+		if (storageSqliteHome) {
+			const isolatedArguments = mergeCodexAdditionalStartupArgumentsForRestart(codexArgs, [
+				"-c",
+				`sqlite_home=${JSON.stringify(storageSqliteHome)}`,
+			]);
+			codexArgs.splice(0, codexArgs.length, ...isolatedArguments);
+		}
 		normalizeCodexConfigOverridesBeforeSubcommand(codexArgs);
 		const trimmed = continuesWithoutNewPrompt ? "" : input.prompt.trim();
 		if (input.startInPlanMode && !continuesWithoutNewPrompt) {

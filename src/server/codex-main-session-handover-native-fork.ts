@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
 	resolveMigratedCodexConversationHome,
 	resolveRecordedCodexConversationHome,
+	resolveVerifiedSeparateCodexSqliteHomeForAuxiliaryProcess,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { withCodexAppServerRequestConnection } from "../codex-native-session-protocol/codex-app-server-request-connection";
 import {
@@ -199,6 +200,10 @@ export async function prepareCodexMainSessionHandoverNativeFork(input: {
 		{
 			workingDirectory: workingDirectoryPath,
 			codexConversationStorageHomeDirectoryPath,
+			codexSqliteHomeDirectoryPath: await resolveVerifiedSeparateCodexSqliteHomeForAuxiliaryProcess(
+				codexConversationStorageHomeDirectoryPath,
+				input.sourceSummary.codexRetiredWriterResumeSettings ?? input.sourceSummary.codexConfigurationWriterBinding,
+			),
 			codexConversationStorageNativeSessionId: identity.nativeSessionId,
 		},
 		async (port) => {

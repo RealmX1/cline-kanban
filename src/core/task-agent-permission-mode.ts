@@ -19,13 +19,8 @@ const AGENT_IDS_SUPPORTING_AUTO_APPROVE_FILE_EDITS_ONLY: ReadonlySet<RuntimeAgen
 	"gemini",
 ]);
 
-// codex 刻意**不在**上面的集合里。它的放权是 sandbox × approval 两个旗标，但没有任何组合
-// 能表达「改文件放行、执行命令仍询问」（据 codex --help 0.145 与 codex-rs 的 assess_patch_safety）：
-//   --ask-for-approval on-request：「由模型决定何时询问」——普通 shell 命令在沙箱内直接跑，
-//     不满足「跑命令仍会询问」，属于静默放宽用户选定的中间档；
-//   --ask-for-approval untrusted：连 apply_patch 也一律 AskUser，等于「每次询问」档，
-//     给不出「改文件放行」。
-// 于是 codex 只能落到「每次询问」——按只收紧不放宽的铁律保守降级，并由 UI 明示。
+// Codex 无法同时放行编辑并要求每条 shell 命令审批。它的受限档使用只读沙箱和人类审批，
+// 原生 on-request 只在需要时请求审批。
 
 // 只能全放行的 agent：原生 Cline SDK 走进程内 requestToolApproval，Kanban 目前恒批准，
 // 于是「每次询问」与「只放行编辑」两档对它都表达不出来。这必须在 UI 上明示——沉默地把

@@ -1,13 +1,13 @@
+import { prepareCodexPersistentDirectoryIdentity } from "../codex-conversation-storage/codex-persistent-directory-identity";
+import { readLegacyCodexWriterResumeSettings } from "../codex-conversation-storage/legacy-codex-configuration-writer-binding";
+import { preserveRetiredCodexWriterInputForSession } from "../codex-conversation-storage/legacy-codex-retained-terminal-input";
 import type { RuntimePtySessionProcessOwnership } from "../core/agent-session-pty-host-diagnostics-contract";
 import {
 	preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot,
 	projectLegacyWorkPhaseGoalIntoExistingProgress,
 } from "../core/agent-work-progress";
 import type { RuntimeAutomaticAgentFailureContinuation } from "../core/api-contract";
-import {
-	measureTaskSessionStartupPhase,
-	recordTaskSessionStartDiagnostic,
-} from "../diagnostics/task-session-start-diagnostics-logger";
+import { recordTaskSessionStartDiagnostic } from "../diagnostics/task-session-start-diagnostics-logger";
 import {
 	persistAutomaticAgentFailureContinuation,
 	readAutomaticAgentFailureContinuations,
@@ -24,6 +24,10 @@ import {
 	buildAutomaticAgentFailureContinuationPrompt,
 	deliverAutomaticAgentFailureContinuationNativePrompt,
 } from "./automatic-agent-failure-continuation-native-delivery";
+import {
+	createCodexCapturedDraftPromptRecoveryCoordinator,
+	runCodexDraftStashOperation,
+} from "./codex-draft-stash-operation";
 import { persistHostedSessionRuntimeAdoptionAcceptanceReceipt } from "./hosted-session-runtime-adoption-acceptance-receipt";
 // PTY-backed runtime for non-Cline task sessions and the workspace shell terminal.
 // It owns process lifecycle, terminal protocol filtering, and summary updates
@@ -31,41 +35,19 @@ import { persistHostedSessionRuntimeAdoptionAcceptanceReceipt } from "./hosted-s
 
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync } from "node:fs";
-import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
 import { inspectCodexNativeConversationTranscriptBeforeResume } from "../agent-session-history/codex-native-conversation-transcript-location-for-resume";
 import {
 	type CodexPromptSubmissionAcceptanceReconciliation,
-	reconcileCodexPromptSubmissionAcceptance,
 	requiresLegacyHookPromptTextNormalizationReconciliation,
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import { readNativeAgentConversationActivity } from "../agent-session-history/native-agent-conversation-activity-reader";
 import { AgentSessionPtyHostUnreachableError } from "../agent-session-pty-host/runtime-client/agent-session-pty-host-controller-connection";
 import { serializeHostedSessionTerminalModes } from "../agent-session-pty-host/wire-protocol/hosted-session-terminal-mode-checkpoint";
-import type { CodexConfigurationFields } from "../codex-configuration-sync/codex-configuration-field-projection";
-import { configurationDigest } from "../codex-configuration-sync/codex-configuration-field-projection";
-import { codexConfigurationPermissionMode } from "../codex-configuration-sync/codex-configuration-profile-launch-settings";
-import {
-	readCodexConfigurationSyncLookupStore,
-	readCodexConfigurationSyncActiveStore as readCodexConfigurationSyncStore,
-} from "../codex-configuration-sync/codex-configuration-sync-store";
-import {
-	buildCodexConfigurationWriterEnvironment,
-	prepareCodexConfigurationWriterBinding,
-	recordCodexConfigurationWriterLaunchArguments,
-} from "../codex-configuration-sync/codex-configuration-writer-binding";
-import { readCodexProfileAdoptionNativeTurnCompletionEvidence } from "../codex-configuration-sync/codex-profile-adoption-native-turn-completion-evidence";
-import {
-	appendCodexProfileAdoptionRetainedInput,
-	createCodexProfileAdoptionRetainedInput,
-	listUnrestoredCodexProfileAdoptionRetainedInput,
-	readCodexProfileAdoptionRetainedInput,
-	saveCodexProfileAdoptionRetainedInput,
-} from "../codex-configuration-sync/codex-profile-adoption-retained-terminal-input";
-import { prepareCodexSharedPluginInstallationForNativeLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
+
 import {
 	buildCodexConversationStorageEnvironment,
 	getManagedCodexConversationStorageHomeDirectoryPath,
@@ -140,10 +122,6 @@ import type {
 	TerminalInputBoxStashOutcome,
 } from "../core/api-contract";
 import { runtimeTaskSessionSummarySchema } from "../core/api-contract";
-import type {
-	CodexConfigurationProfileAutomaticAdoptionGuard,
-	CodexConfigurationWriterBinding,
-} from "../core/codex-configuration-sync-contract";
 import {
 	buildCodexNativeAgentTurnExecutionIdentity,
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
@@ -250,11 +228,6 @@ import {
 	writeCodexDraftStashJsonDurably,
 } from "./codex-draft-stash-editor-bridge";
 import {
-	captureCodexDraftForProfileAdoption,
-	createCodexCapturedDraftPromptRecoveryCoordinator,
-	runCodexDraftStashOperation,
-} from "./codex-draft-stash-operation";
-import {
 	buildCodexModelCapacityErrorDetectionTurnIdentity,
 	createCodexModelCapacityErrorDetector,
 } from "./codex-model-capacity-error-detection";
@@ -264,6 +237,7 @@ import {
 	hasCodexStartupPromptReady,
 	hasCodexUnsubmittedProgrammaticPrompt,
 } from "./codex-readiness";
+import { resolveResumedCodexReasoningEffortOverride } from "./codex-reasoning-effort-resume-selection";
 import { readCodexTerminalComposerOccupancy } from "./codex-terminal-composer-occupancy";
 import { hasCodexWorkspaceTrustPrompt, shouldAutoConfirmCodexWorkspaceTrust } from "./codex-workspace-trust";
 import {
@@ -809,17 +783,16 @@ interface SessionEntry {
 }
 
 export interface StartTaskSessionRequest {
-	codexConfigurationPermissionSelectionSource?: "profile" | "task_local";
-	configurationProfileAutomaticAdoptionGuard?: CodexConfigurationProfileAutomaticAdoptionGuard;
-	codexAutomaticProcessReplacementMustRemainRenderingOnly?: boolean;
-	codexConfigurationProfileId?: string;
 	codexReasoningEffortOverride?: string;
+	codexReasoningEffortFollowsNativeConfiguration?: boolean;
 	taskId: string;
 	automaticFailureContinuationEpisodeId?: string;
 	workspaceTaskId?: string;
 	taskConversationSessionMetadata?: RuntimeTaskConversationSessionMetadata;
 	agentId: AgentAdapterLaunchInput["agentId"];
 	binary: string;
+	codexRetiredWriterResumeSettings?: NonNullable<RuntimeTaskSessionSummary["codexRetiredWriterResumeSettings"]>;
+	usesLegacyCodexProfilePermissions?: boolean;
 	args: string[];
 	additionalAgentStartupArgumentsForThisRestart?: string[];
 	taskAgentPermissionMode?: AgentAdapterLaunchInput["taskAgentPermissionMode"];
@@ -1470,7 +1443,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		typeof createCodexCapturedDraftPromptRecoveryCoordinator
 	> | null;
 	private humanTerminalInputMutationSequenceNumber = 0;
-	private readonly terminalInputRetainedDuringCodexProfileReplacement = new Map<string, string>();
 	private readonly humanTerminalInputMutationSequenceNumbersByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		number
@@ -6170,8 +6142,54 @@ export class TerminalSessionManager implements TerminalSessionService {
 					storageHome = migrated;
 				} else throw new Error("未在用户目录或看板专用目录找到指定 Codex 会话，未改接其它对话。");
 			}
+			const storageHomeBeforeNativeMigration = storageHome;
 			if (sourceId && !entry.active) storageHome = await resolveMigratedCodexConversationHome(storageHome, sourceId);
-			request = { ...request, env: { ...request.env, ...buildCodexConversationStorageEnvironment(storageHome) } };
+			const legacyBinding = resumesExistingConversation ? entry.summary.codexConfigurationWriterBinding : null;
+			const previousRetiredWriterSettings = resumesExistingConversation
+				? (entry.summary.codexRetiredWriterResumeSettings ??
+					(legacyBinding
+						? await readLegacyCodexWriterResumeSettings({
+								binding: legacyBinding,
+								workspaceId: request.workspaceId,
+								conversationSessionId: request.taskId,
+								runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId ?? undefined,
+								storageHome: storageHomeBeforeNativeMigration,
+								preserveProfilePermissions:
+									request.usesLegacyCodexProfilePermissions === true &&
+									entry.summary.codexConfigurationPermissionSelectionSource !== "task_local",
+							})
+						: undefined))
+				: undefined;
+			let retiredWriterSettings = previousRetiredWriterSettings;
+			if (previousRetiredWriterSettings && storageHome !== storageHomeBeforeNativeMigration) {
+				retiredWriterSettings = {
+					...previousRetiredWriterSettings,
+					sqliteHomeDirectoryPath: storageHome,
+					sqliteDirectoryIdentity: await prepareCodexPersistentDirectoryIdentity(storageHome),
+				};
+			} else if (resumesExistingConversation && entry.summary.codexRetiredWriterResumeSettings) {
+				const { sqliteHomeDirectoryPath, sqliteDirectoryIdentity } = entry.summary.codexRetiredWriterResumeSettings;
+				await prepareCodexPersistentDirectoryIdentity(sqliteHomeDirectoryPath, {
+					expectedIdentity: sqliteDirectoryIdentity,
+				});
+			}
+			request = {
+				...request,
+				env: {
+					...request.env,
+					...buildCodexConversationStorageEnvironment(storageHome),
+					...(retiredWriterSettings ? { CODEX_SQLITE_HOME: retiredWriterSettings.sqliteHomeDirectoryPath } : {}),
+				},
+				codexRetiredWriterResumeSettings: retiredWriterSettings,
+				codexReasoningEffortOverride: resolveResumedCodexReasoningEffortOverride({
+					requestedOverride: request.codexReasoningEffortOverride,
+					followsNativeConfiguration: request.codexReasoningEffortFollowsNativeConfiguration,
+					retiredWriterEffort: retiredWriterSettings?.reasoningEffort,
+				}),
+				terminalAgentModelOverrideSettings:
+					request.terminalAgentModelOverrideSettings ??
+					(retiredWriterSettings?.model ? { agentId: "codex", modelId: retiredWriterSettings.model } : undefined),
+			};
 		}
 		return request;
 	}
@@ -6335,9 +6353,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (isTaskSessionStartCancelled()) throw new Error("侧会话恢复请求已取消");
 		};
 		const runtimeSessionIncarnationId = randomUUID();
-		let codexConfigurationWriterBinding: CodexConfigurationWriterBinding | null = null;
-		let codexTaskReasoningEffortFeedbackSelectionId: string | undefined;
-		let codexConfigurationProfileLaunchFields: CodexConfigurationFields | undefined;
 		const codexConversationStorageHomeDirectoryPath =
 			request.agentId === "codex" ? request.env?.CODEX_HOME : undefined;
 		let kanbanAssignedAgentNativeConversationSessionIdForFreshStart: string | undefined;
@@ -6351,74 +6366,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			kanbanAssignedAgentNativeConversationSessionIdForFreshStart =
 				await this.establishKanbanAssignedAgentNativeConversationSessionIdentityBeforeLaunch(entry, request);
 			throwIfTaskSessionStartWasCancelled();
-			if (
-				request.agentId === "codex" &&
-				request.workspaceId &&
-				this.terminalSessionManagerOptions.enableManagedCodexConversationStorageForNewSessions
-			) {
-				codexConfigurationWriterBinding = await measureTaskSessionStartupPhase(
-					{
-						workspaceId: request.workspaceId ?? "(unknown)",
-						taskId: request.taskId,
-						requestedAgentId: request.agentId,
-						effectiveAgentId: request.agentId,
-						runtimeSessionIncarnationId,
-						phase: "codex_configuration_writer_binding",
-					},
-					() =>
-						prepareCodexConfigurationWriterBinding({
-							nativeLaunchArguments: request.args,
-							sessionModelId:
-								request.terminalAgentModelOverrideSettings?.agentId === "codex"
-									? request.terminalAgentModelOverrideSettings.modelId
-									: undefined,
-							sessionReasoningEffortOverride: request.codexReasoningEffortOverride,
-							allowTaskReasoningEffortFeedback:
-								!taskConversationSessionMetadataForLaunch ||
-								taskConversationSessionMetadataForLaunch.taskConversationSessionRole === "main",
-							sessionPermissionMode: request.taskAgentPermissionMode,
-							sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
-							codexConfigurationProfileId:
-								request.codexConfigurationProfileId ?? entry.summary.codexConfigurationProfileId,
-							purpose: "native_session",
-							storageHome: request.env?.CODEX_HOME ?? resolveUserCodexHomeDirectoryPath(),
-							sqliteHome: request.env?.CODEX_SQLITE_HOME,
-							workspaceId: request.workspaceId,
-							conversationSessionId: request.taskId,
-							runtimeSessionIncarnationId,
-							previousBinding:
-								request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt
-									? entry.summary.codexConfigurationWriterBinding
-									: null,
-							binary: request.binary,
-							environment: { ...process.env, ...request.env },
-							workingDirectory: request.cwd,
-							revalidateNativeCapabilityRetryStillAuthorized: throwIfTaskSessionStartWasCancelled,
-							automaticProcessReplacementMustRemainRenderingOnly:
-								request.codexAutomaticProcessReplacementMustRemainRenderingOnly,
-						}),
-				);
-				throwIfTaskSessionStartWasCancelled();
-				request = {
-					...request,
-					env: { ...request.env, ...buildCodexConfigurationWriterEnvironment(codexConfigurationWriterBinding) },
-				};
-				const preparedCodexWriter = (
-					await readCodexConfigurationSyncLookupStore({ writerIds: [codexConfigurationWriterBinding.writerId] })
-				).writers[codexConfigurationWriterBinding.writerId];
-				codexConfigurationProfileLaunchFields = preparedCodexWriter?.launchBaselineFields;
-				codexTaskReasoningEffortFeedbackSelectionId =
-					preparedCodexWriter?.taskReasoningEffortFeedbackSelection?.selectionId;
-				const effectiveModel =
-					codexConfigurationProfileLaunchFields?.[JSON.stringify(["config.toml", "model"])]?.value;
-				if (typeof effectiveModel === "string")
-					request = {
-						...request,
-						terminalAgentModelOverrideSettings: { agentId: "codex", modelId: effectiveModel },
-					};
-			}
 			launch = await prepareAgentLaunch({
-				codexConfigurationProfileLaunchFields,
 				taskId: request.taskId,
 				taskConversationSessionMetadata: taskConversationSessionMetadataForLaunch,
 				agentId: request.agentId,
@@ -6459,33 +6407,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 						"forked_from_conversation_session",
 				terminalAgentModelOverrideSettings: request.terminalAgentModelOverrideSettings,
 				codexReasoningEffortOverride: request.codexReasoningEffortOverride,
+				codexRetiredWriterPermissionArguments: request.usesLegacyCodexProfilePermissions
+					? request.codexRetiredWriterResumeSettings?.permissionArguments
+					: undefined,
+				codexRetiredWriterSqliteHomeDirectoryPath:
+					request.codexRetiredWriterResumeSettings?.sqliteHomeDirectoryPath,
 			});
-			throwIfTaskSessionStartWasCancelled();
-			if (codexConfigurationWriterBinding) {
-				const pluginLaunchPreparationInput = {
-					binding: codexConfigurationWriterBinding,
-					binary: launch.binary ?? request.binary,
-					environment: { ...process.env, ...request.env, ...launch.env },
-					nativeLaunchArguments: launch.args,
-					workingDirectory: request.cwd,
-					deferRemotePluginUpdatesUntilAfterConversationResume: Boolean(
-						request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt,
-					),
-				};
-				const preparedPluginInstallation = await measureTaskSessionStartupPhase(
-					{
-						workspaceId: request.workspaceId ?? "(unknown)",
-						taskId: request.taskId,
-						requestedAgentId: request.agentId,
-						effectiveAgentId: request.agentId,
-						runtimeSessionIncarnationId,
-						phase: "codex_shared_plugin_launch_preparation",
-					},
-					() => prepareCodexSharedPluginInstallationForNativeLaunch(pluginLaunchPreparationInput),
-				);
-				launch.args = preparedPluginInstallation.arguments;
-				await recordCodexConfigurationWriterLaunchArguments(codexConfigurationWriterBinding, launch.args);
-			}
 			throwIfTaskSessionStartWasCancelled();
 			// adapter 可能等待信任配置与启动扩展准备；真正 spawn 前再核对来源。
 			await request.revalidateExistingMainSessionHandoverTargetBeforeLaunch?.();
@@ -6991,29 +6918,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 							nextProbeAtMs: now(),
 						}
 					: null,
-			codexConfigurationWriterBinding,
-			codexTaskReasoningEffortFeedbackLaunch: codexTaskReasoningEffortFeedbackSelectionId
-				? {
-						selectionId: codexTaskReasoningEffortFeedbackSelectionId,
-						startedAtMs:
-							entry.summary.codexTaskReasoningEffortFeedbackLaunch?.selectionId ===
-							codexTaskReasoningEffortFeedbackSelectionId
-								? entry.summary.codexTaskReasoningEffortFeedbackLaunch.startedAtMs
-								: startedAt,
-					}
-				: undefined,
-			...(request.agentId === "codex"
-				? { codexConfigurationProfileAutomaticProcessReplacementCancelled: false }
-				: {}),
-			codexConfigurationProfileId:
-				codexConfigurationWriterBinding?.codexConfigurationProfileId ?? request.codexConfigurationProfileId,
-			codexConfigurationPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
-			codexEffectivePermissionMode:
-				taskConversationSessionMetadataForLaunch?.taskConversationSessionRole === "by_the_way"
-					? "ask_for_every_tool_use"
-					: codexConfigurationProfileLaunchFields
-						? codexConfigurationPermissionMode(codexConfigurationProfileLaunchFields)
-						: null,
+			codexConfigurationWriterBinding: null,
+			codexRetiredWriterResumeSettings: request.codexRetiredWriterResumeSettings ?? null,
 			agentConversationPromptSubmissionAcceptance: null,
 			codexNativeDirectInputReadinessReconciliation: null,
 			...(request.agentId === "codex" ? { codexConversationStorageHomeDirectoryPath } : {}),
@@ -7057,6 +6963,28 @@ export class TerminalSessionManager implements TerminalSessionService {
 			listener.onState?.(cloneSummary(entry.summary));
 		}
 		this.emitSummary(entry.summary);
+		const nativeSessionIdForRetiredInput = entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId;
+		if (
+			request.agentId === "codex" &&
+			request.workspaceId &&
+			nativeSessionIdForRetiredInput &&
+			request.codexRetiredWriterResumeSettings
+		) {
+			void preserveRetiredCodexWriterInputForSession({
+				workspaceId: request.workspaceId,
+				taskId:
+					request.workspaceTaskId ?? taskConversationSessionMetadataForLaunch?.workspaceTaskId ?? request.taskId,
+				conversationSessionId: request.taskId,
+				nativeSessionId: nativeSessionIdForRetiredInput,
+			})
+				.then((recovery) => {
+					if (recovery && entry.summary.runtimeSessionIncarnationId === runtimeSessionIncarnationId)
+						this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: recovery }));
+				})
+				.catch(() => {
+					logTuiFreezeWarning("Codex 旧续接草稿保存待补证，下次续跑自动重验，原始记录仍保留。");
+				});
+		}
 		// hosted 会话一装载就推一份接管记录，不等去抖：runtime 若在这之后立刻崩溃，新 runtime 仍有记录可用。
 		this.publishTerminalSessionAdoptionRecordForRuntimeRestart(request.taskId);
 		for (const chunk of preActiveOutputChunks) {
@@ -7763,24 +7691,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			/^(?:\u001b\[(?:\??\d+;\d+R|[?>][\d;]*c|\??[\d;]+n|\?[\d;]+\$y|[\d;]+t|[IO]|<[\d;]+[Mm]|M[\x20-\xff]{3})|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001bP[^\u001b]*\u001b\\)+(?![\s\S])/.test(
 				data.toString("latin1"),
 			);
-		const retainedInput = this.terminalInputRetainedDuringCodexProfileReplacement.get(taskId);
-		if (entry && retainedInput && data.length > 0 && !isTerminalProtocolResponseOnly) {
-			appendCodexProfileAdoptionRetainedInput(retainedInput, data);
-			const retainedByteCount = Buffer.from(
-				readCodexProfileAdoptionRetainedInput(retainedInput).bytesBase64,
-				"base64",
-			).length;
-			this.emitSummary(
-				updateSummary(entry, {
-					codexConfigurationProfileRetainedInputRecovery: {
-						retainedInputRecordPath: retainedInput,
-						retainedByteCount,
-						reason: "正在安全续接，新的终端输入已持久保留，等待原生输入框就绪。",
-					},
-				}),
-			);
-			return cloneSummary(entry.summary);
-		}
 		if (!entry?.active) {
 			return null;
 		}
@@ -9920,272 +9830,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return cloneSummary(summary);
 	}
 
-	applyCodexConfigurationProfileBinding(taskId: string, profileId: string): void {
-		const entry = this.entries.get(taskId);
-		if (!entry || entry.summary.agentId !== "codex") return;
-		if (entry.restartRequest?.kind === "task") {
-			entry.restartRequest.request.codexConfigurationProfileId = profileId;
-			entry.restartRequest.request.codexConfigurationPermissionSelectionSource = "profile";
-		}
-		const metadata = entry.summary.taskConversationSessionMetadata;
-		const summary = updateSummary(entry, {
-			codexConfigurationProfileId: profileId,
-			codexConfigurationPermissionSelectionSource: "profile",
-			...(metadata?.taskConversationSessionLaunchSettings
-				? {
-						taskConversationSessionMetadata: {
-							...metadata,
-							taskConversationSessionLaunchSettings: {
-								...metadata.taskConversationSessionLaunchSettings,
-								codexConfigurationProfileId: profileId,
-								codexConfigurationPermissionSelectionSource: "profile",
-							},
-						},
-					}
-				: {}),
-		});
-		this.emitSummary(summary);
-	}
-
-	getPendingCodexProfileProcessReplacementRetainedInputRecordPath(taskId: string): string | undefined {
-		const summary = this.entries.get(taskId)?.summary;
-		if (summary?.codexConfigurationProfileAutomaticProcessReplacementCancelled) return;
-		return listUnrestoredCodexProfileAdoptionRetainedInput().find(
-			({ record }) =>
-				record.conversationSessionId === taskId &&
-				record.nativeSessionId === summary?.agentNativeConversationSessionIdentity?.nativeSessionId &&
-				record.automaticProcessReplacementContinuationStatus === "pending_automatic_start",
-		)?.path;
-	}
-
-	private cancelPendingCodexProfileProcessReplacement(taskId: string): void {
-		const entry = this.entries.get(taskId);
-		if (
-			entry &&
-			(entry.summary.codexConfigurationProfileRetainedInputRecovery ||
-				this.terminalInputRetainedDuringCodexProfileReplacement.has(taskId))
-		)
-			this.emitSummary(
-				updateSummary(entry, { codexConfigurationProfileAutomaticProcessReplacementCancelled: true }),
-			);
-		try {
-			for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput()) {
-				if (
-					record.conversationSessionId !== taskId ||
-					record.automaticProcessReplacementContinuationStatus !== "pending_automatic_start" ||
-					(record.nativeSessionId !== entry?.summary.agentNativeConversationSessionIdentity?.nativeSessionId &&
-						path !== entry?.summary.codexConfigurationProfileRetainedInputRecovery?.retainedInputRecordPath)
-				)
-					continue;
-				record.automaticProcessReplacementContinuationStatus = "cancelled_by_explicit_stop";
-				saveCodexProfileAdoptionRetainedInput(path, record);
-				this.terminalInputRetainedDuringCodexProfileReplacement.delete(taskId);
-			}
-		} catch {
-			/* 记录不可读不能阻止 Stop；summary 中的取消事实仍拦截自动恢复。 */
-		}
-	}
-
-	async restoreTerminalInputRetainedDuringCodexProfileAdoption(): Promise<void> {
-		for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput()) {
-			const entry = this.entries.get(record.conversationSessionId);
-			if (
-				!entry ||
-				(entry.restartRequest?.kind === "task"
-					? entry.restartRequest.request.workspaceId
-					: entry.summary.codexNativeSessionControlEndpoint?.workspaceId) !== record.workspaceId ||
-				entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.nativeSessionId
-			)
-				continue;
-			if (
-				record.capturedDraftText !== undefined &&
-				record.capturedFromRuntimeSessionIncarnationId === entry.summary.runtimeSessionIncarnationId
-			)
-				continue;
-			if (
-				!entry.active &&
-				!entry.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled &&
-				record.automaticProcessReplacementContinuationStatus === "pending_automatic_start"
-			) {
-				this.terminalInputRetainedDuringCodexProfileReplacement.set(record.conversationSessionId, path);
-				if (entry.summary.codexConfigurationProfileRetainedInputRecovery?.retainedInputRecordPath !== path)
-					this.emitSummary(
-						updateSummary(entry, {
-							codexConfigurationProfileRetainedInputRecovery: {
-								retainedInputRecordPath: path,
-								retainedByteCount: Buffer.from(record.bytesBase64, "base64").length,
-								reason: "已恢复持久的 profile 启动记录，条件满足后自动继续同一原生会话。",
-							},
-						}),
-					);
-			}
-			if (record.status === "restore_submission_started") {
-				const retainedText = Buffer.from(record.bytesBase64, "base64")
-					.toString("utf8")
-					.replaceAll("\u001b[200~", "")
-					.replaceAll("\u001b[201~", "");
-				if (
-					record.capturedDraftText !== undefined &&
-					!["\r", "\u001b", "\b"].some((character) => retainedText.includes(character))
-				) {
-					const active = entry.active;
-					const bridge = this.readCodexDraftStashBridgeForTask(record.conversationSessionId);
-					const inputSequence = this.getTaskTerminalInputSideMutationSnapshot(
-						record.conversationSessionId,
-					)?.humanTerminalInputMutationSequenceNumber;
-					const fingerprint = configurationDigest([
-						entry.summary.runtimeSessionIncarnationId,
-						record.nativeSessionId,
-						inputSequence,
-					]);
-					const facets = resolveSessionFacets(entry.summary);
-					if (
-						active &&
-						bridge &&
-						facets.turnOwner === "user" &&
-						(facets.userTurnKind === "review" || facets.userTurnKind === null) &&
-						(await this.resolveInteractivePromptReadiness(entry)) === "prompt" &&
-						(record.draftRestoreVerificationEvidenceFingerprint !== fingerprint ||
-							(record.draftRestoreVerificationAttemptCount ?? 0) < 3)
-					) {
-						record.draftRestoreVerificationAttemptCount =
-							record.draftRestoreVerificationEvidenceFingerprint === fingerprint
-								? (record.draftRestoreVerificationAttemptCount ?? 0) + 1
-								: 1;
-						record.draftRestoreVerificationEvidenceFingerprint = fingerprint;
-						saveCodexProfileAdoptionRetainedInput(path, record);
-						const operationId = randomUUID();
-						const capture = await captureCodexDraftForProfileAdoption({
-							bridge,
-							taskId: record.conversationSessionId,
-							operationId,
-							isCurrent: () =>
-								entry.active === active &&
-								this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId)
-									?.humanTerminalInputMutationSequenceNumber === inputSequence,
-							triggerExport: () => {
-								this.writeInput(record.conversationSessionId, Buffer.from([0x07]), operationId);
-							},
-							confirmOriginalComposerRestored: async () => {
-								const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
-								return Boolean(
-									entry.active === active &&
-										snapshot?.lines.some((line) => /^›(?: |$)/u.test(line.text)) &&
-										!snapshot.lines.some((line) => line.text.includes("Save and close external editor")),
-								);
-							},
-							persistCapturedDraft: () => {},
-						});
-						await this.resumeCodexDraftStashRetainedInput(record.conversationSessionId);
-						if (capture?.text === record.capturedDraftText + retainedText) {
-							record.status = "restored";
-							record.capturedDraftRestoreStatus = "restored";
-							saveCodexProfileAdoptionRetainedInput(path, record);
-							this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
-							continue;
-						}
-					}
-				}
-				if (record.acceptanceCandidate && entry.summary.runtimeSessionIncarnationId) {
-					const reconciliation = await reconcileCodexPromptSubmissionAcceptance({
-						summary: {
-							...entry.summary,
-							agentConversationPromptSubmissionAcceptance: {
-								...record.acceptanceCandidate,
-								runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
-							},
-						},
-						observedAtMs: Date.now(),
-					});
-					if (reconciliation) {
-						record.acceptanceCandidate.verification = reconciliation.verification;
-						if (reconciliation.accepted) {
-							record.status = "restored";
-							saveCodexProfileAdoptionRetainedInput(path, record);
-							this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
-							continue;
-						}
-						saveCodexProfileAdoptionRetainedInput(path, record);
-					}
-				}
-				this.emitSummary(
-					updateSummary(entry, {
-						codexConfigurationProfileRetainedInputRecovery: {
-							retainedInputRecordPath: path,
-							retainedByteCount: Buffer.from(record.bytesBase64, "base64").length,
-							reason:
-								"恢复可能已开始，回执未知；保留原稿，不重复回放。原生编辑器或接受记录恢复、代际或人工输入变化后自动补证，同一证据最多三次。",
-						},
-					}),
-				);
-				continue;
-			}
-			const active = entry.active;
-			const inputSnapshot = this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId);
-			if (!active || (await this.resolveInteractivePromptReadiness(entry)) !== "prompt") continue;
-			const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(record.conversationSessionId);
-			if (
-				entry.active !== active ||
-				!occupancy ||
-				occupancy.hasUncommittedInput ||
-				occupancy.screenReadingSaysNonEmpty !== false ||
-				inputSnapshot?.humanTerminalInputMutationSequenceNumber !==
-					this.getTaskTerminalInputSideMutationSnapshot(record.conversationSessionId)
-						?.humanTerminalInputMutationSequenceNumber
-			)
-				continue;
-			const current = readCodexProfileAdoptionRetainedInput(path);
-			if (current.status !== "capturing") continue;
-			current.status = "restore_submission_started";
-			if (current.capturedDraftText !== undefined) current.capturedDraftRestoreStatus = "submission_started";
-			const bytes = Buffer.from(current.bytesBase64, "base64");
-			// 仅可还原成一条正文提交的输入才做转录补证；编辑按键与草稿保留未知，不猜测提交事实。
-			const submittedText =
-				(current.capturedDraftText ?? "") +
-				bytes.toString("utf8").replaceAll("\u001b[200~", "").replaceAll("\u001b[201~", "");
-			if (
-				submittedText.endsWith("\r") &&
-				!["\r", "\u001b", "\b"].some((character) => submittedText.slice(0, -1).includes(character)) &&
-				entry.summary.runtimeSessionIncarnationId
-			)
-				current.acceptanceCandidate = {
-					status: "pending",
-					attemptedAtMs: Date.now(),
-					runtimeSessionIncarnationId: entry.summary.runtimeSessionIncarnationId,
-					nativeSessionId: record.nativeSessionId,
-					submittedPromptSha256: submittedPromptSha256(submittedText.slice(0, -1)),
-					predecessorAcceptedEventId: entry.summary.agentConversationPromptSubmissionAcceptance?.eventId,
-				};
-			saveCodexProfileAdoptionRetainedInput(path, current);
-			this.terminalInputRetainedDuringCodexProfileReplacement.delete(record.conversationSessionId);
-			if (current.capturedDraftText !== undefined) {
-				this.writeInput(
-					record.conversationSessionId,
-					Buffer.from(`\u001b[200~${current.capturedDraftText}\u001b[201~`, "utf8"),
-				);
-			}
-			if (bytes.length) this.writeInput(record.conversationSessionId, bytes);
-			if (current.capturedDraftText !== undefined) continue;
-			current.status = "restored";
-			saveCodexProfileAdoptionRetainedInput(path, current);
-			this.emitSummary(updateSummary(entry, { codexConfigurationProfileRetainedInputRecovery: null }));
-		}
-	}
-
-	applyCodexEffectivePermissionMode(taskId: string, fields: CodexConfigurationFields | null): void {
-		const entry = this.entries.get(taskId);
-		if (!entry || entry.summary.agentId !== "codex") return;
-		const mode =
-			entry.summary.taskConversationSessionMetadata?.taskConversationSessionRole === "by_the_way"
-				? "ask_for_every_tool_use"
-				: fields
-					? codexConfigurationPermissionMode(fields)
-					: null;
-		if (entry.summary.codexEffectivePermissionMode === mode) return;
-		const summary = updateSummary(entry, { codexEffectivePermissionMode: mode });
-		this.emitSummary(summary);
-	}
-
 	applyTaskConversationSessionMetadata(
 		taskId: string,
 		metadata: RuntimeTaskSessionSummary["taskConversationSessionMetadata"],
@@ -10257,7 +9901,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
-		this.cancelPendingCodexProfileProcessReplacement(taskId);
 		this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
@@ -10312,13 +9955,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		gracefulTimeoutMs = 2_000,
 		preservesPendingNativeIdentityRecovery = false,
-		preservesPendingCodexProfileProcessReplacement = false,
 	): Promise<void> {
 		const entry = this.entries.get(taskId);
 		if (!entry) {
 			return;
 		}
-		if (!preservesPendingCodexProfileProcessReplacement) this.cancelPendingCodexProfileProcessReplacement(taskId);
 		if (!preservesPendingNativeIdentityRecovery)
 			this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		// 同 stopTaskSession：必须掐在早退之前，理由见那边的注释。
@@ -10517,7 +10158,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 				reclaimedOutcome.survivingDescendantPids.length === 0 &&
 				(request.resumeFromTrash || request.resumePriorAgentConversationWithoutResendingPrompt) &&
 				reclaimedOutcome.failureReason === null &&
-				!request.configurationProfileAutomaticAdoptionGuard &&
 				!forceStopHarnessBackgroundSessionHoldingResumeTargetConfirmedByUser &&
 				(request.additionalAgentStartupArgumentsForThisRestart?.length ?? 0) === 0,
 		);
@@ -10573,277 +10213,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const pendingUserDecisionKindBeforeProcessRestart = summaryBeforeProcessStop
 			? resolveSessionFacets(summaryBeforeProcessStop).userTurnKind
 			: undefined;
-		const configurationAdoption = request.configurationProfileAutomaticAdoptionGuard;
-		const automaticReplacementLaunchSelection = {
-			sessionModelId:
-				request.terminalAgentModelOverrideSettings?.agentId === "codex"
-					? request.terminalAgentModelOverrideSettings.modelId
-					: undefined,
-			sessionReasoningEffortOverride: request.codexReasoningEffortOverride,
-			sessionPermissionMode: request.taskAgentPermissionMode,
-			sessionPermissionSelectionSource: request.codexConfigurationPermissionSelectionSource,
-		};
-		if (
-			configurationAdoption?.readConfigurationSafetyFingerprint &&
-			!(await configurationAdoption.readConfigurationSafetyFingerprint(automaticReplacementLaunchSelection))
-		)
-			throw new Error("完整配置存在 cache 风险或尚未核验，等待后续正常启动。");
-		const continuesPendingProcessReplacement = Boolean(
-			configurationAdoption?.pendingProcessReplacementRetainedInputRecordPath &&
-				!this.entries.get(request.taskId)?.active,
-		);
-		if (configurationAdoption && continuesPendingProcessReplacement) {
-			const path = configurationAdoption.pendingProcessReplacementRetainedInputRecordPath;
-			if (!path || this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) !== path)
-				throw new Error("续接启动已取消或原生身份已变化，未自动启动。");
-			const record = readCodexProfileAdoptionRetainedInput(path);
-			const entry = this.entries.get(request.taskId);
-			if (
-				!entry ||
-				record.workspaceId !== request.workspaceId ||
-				record.nativeSessionId !== configurationAdoption.expectedNativeSessionId ||
-				entry.summary.runtimeSessionIncarnationId !== configurationAdoption.expectedRuntimeSessionIncarnationId
-			)
-				throw new Error("待恢复启动的原工作区、代际或原生身份尚未恢复。");
-			const eligibility = await configurationAdoption.readTaskExecutionEligibilityFingerprint?.();
-			if (configurationAdoption.readTaskExecutionEligibilityFingerprint && !eligibility)
-				throw new Error("Task 当前不能继续自动启动，保留输入与恢复条件。");
-			const store = await readCodexConfigurationSyncStore();
-			const writer = store.writers[entry.summary.codexConfigurationWriterBinding?.writerId ?? ""];
-			const binaryMetadata = await stat(writer?.nativeExecutableRealPath ?? request.binary).then(
-				(metadata) => [metadata.dev, metadata.ino, metadata.size, metadata.mtimeMs, metadata.mode],
-				() => null,
-			);
-			const fingerprint = configurationDigest([
-				path,
-				record.nativeSessionId,
-				configurationAdoption.profileId,
-				store.profiles[configurationAdoption.profileId]?.version,
-				binaryMetadata,
-				request.binary,
-				store.observationProblem,
-				eligibility,
-			]);
-			if (
-				record.automaticProcessReplacementEvidenceFingerprint === fingerprint &&
-				(record.automaticProcessReplacementAttemptCount ?? 0) >= 3
-			)
-				throw new Error("同一持久启动证据已达三次；profile、原生二进制或来源恢复后自动重验。");
-			if (!(await configurationAdoption.onBeforeProcessReplacement(fingerprint)))
-				throw new Error("同一启动证据已达三次；profile、原生二进制或来源证据变化后自动重验。");
-			if (
-				configurationAdoption.readTaskExecutionEligibilityFingerprint &&
-				(await configurationAdoption.readTaskExecutionEligibilityFingerprint()) !== eligibility
-			)
-				throw new Error("启动登记期间 Task 资格变化，未自动启动。");
-			if (
-				entry.active ||
-				this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) !== path ||
-				entry.summary.runtimeSessionIncarnationId !== configurationAdoption.expectedRuntimeSessionIncarnationId
-			)
-				throw new Error("出现新活体、Stop 或代际变化，未重复启动。");
-			const claimed = readCodexProfileAdoptionRetainedInput(path);
-			claimed.automaticProcessReplacementAttemptCount =
-				claimed.automaticProcessReplacementEvidenceFingerprint === fingerprint
-					? (claimed.automaticProcessReplacementAttemptCount ?? 0) + 1
-					: 1;
-			claimed.automaticProcessReplacementEvidenceFingerprint = fingerprint;
-			saveCodexProfileAdoptionRetainedInput(path, claimed);
-			this.terminalInputRetainedDuringCodexProfileReplacement.set(request.taskId, path);
-		} else if (configurationAdoption) {
-			const entry = this.entries.get(request.taskId);
-			if (!entry) throw new Error("原会话已退出，等待下次启动采用 profile。");
-			const configurationSafetyFingerprint = await configurationAdoption.readConfigurationSafetyFingerprint?.(
-				automaticReplacementLaunchSelection,
-			);
-			if (configurationAdoption.readConfigurationSafetyFingerprint && !configurationSafetyFingerprint)
-				throw new Error("完整配置存在 cache 风险或尚未核验，等待后续正常启动。");
-			const active = entry?.active;
-			const nativeSemanticGuardBeforeRead = buildCodexNativeAgentTurnExecutionSemanticGuard(entry.summary);
-			const inputSnapshot = this.getTaskTerminalInputSideMutationSnapshot(request.taskId);
-			const stillSafe = () => {
-				const current = this.entries.get(request.taskId);
-				const facets = current && resolveSessionFacets(current.summary);
-				return Boolean(
-					current &&
-						current === entry &&
-						current.active === active &&
-						active &&
-						buildCodexNativeAgentTurnExecutionSemanticGuard(current.summary) === nativeSemanticGuardBeforeRead &&
-						current.summary.agentId === "codex" &&
-						current.summary.runtimeSessionIncarnationId ===
-							configurationAdoption.expectedRuntimeSessionIncarnationId &&
-						current.summary.agentNativeConversationSessionIdentity?.nativeSessionId ===
-							configurationAdoption.expectedNativeSessionId &&
-						facets?.liveness === "live" &&
-						facets.turnOwner === "user" &&
-						(facets.userTurnKind === "review" || facets.userTurnKind === null) &&
-						!current.suppressAutoRestartOnExit &&
-						!current.summary.codexConfigurationProfileAutomaticProcessReplacementCancelled &&
-						!current.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover &&
-						active.deferredStartupPromptText === null &&
-						active.programmaticDeliveryReceipt === null &&
-						!current.summary.awaitingDispatchedBackgroundWork &&
-						this.getTaskTerminalInputSideMutationSnapshot(request.taskId)
-							?.humanTerminalInputMutationSequenceNumber ===
-							inputSnapshot?.humanTerminalInputMutationSequenceNumber,
-				);
-			};
-			if (!stillSafe()) throw new Error("等待回合结束、待答问题解除或明确的 Stop 限制撤销后再采用 profile。");
-			const taskExecutionEligibilityFingerprint =
-				await configurationAdoption.readTaskExecutionEligibilityFingerprint?.();
-			if (configurationAdoption.readTaskExecutionEligibilityFingerprint && !taskExecutionEligibilityFingerprint)
-				throw new Error("Task 执行资格已变化，保留待采用；恢复资格后自动重验。");
-			const nativeTurn = await this.readCurrentCodexNativeTurnExecution(entry);
-			const transcriptCompletion = nativeTurn
-				? null
-				: await readCodexProfileAdoptionNativeTurnCompletionEvidence(entry.summary);
-			const occupancy = await this.resolveTaskTerminalInputBoxOccupancy(request.taskId);
-			if (
-				!stillSafe() ||
-				(nativeTurn?.observation.executionStatus !== "finished" && !transcriptCompletion) ||
-				!occupancy ||
-				occupancy.screenReadingSaysNonEmpty === null ||
-				(await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({
-					workspaceId: request.workspaceId ?? "",
-					taskId: request.taskId,
-				}))
-			)
-				throw new Error("原生回合或空输入框尚未确证，保留待采用并自动重验。");
-			let capturedDraftText: string | undefined;
-			const evidenceFingerprint = configurationDigest([
-				configurationAdoption.expectedRuntimeSessionIncarnationId,
-				configurationAdoption.expectedNativeSessionId,
-				inputSnapshot,
-				taskExecutionEligibilityFingerprint,
-				entry.summary.lastHookAt,
-				nativeTurn?.observation.executionStatus ?? transcriptCompletion?.evidenceFingerprint,
-			]);
-			let captureAttemptClaimed = false;
-			if (
-				inputSnapshot?.hasUncommittedInput ||
-				occupancy.hasUncommittedInput ||
-				occupancy.screenReadingSaysNonEmpty !== false
-			) {
-				const bridge = this.readCodexDraftStashBridgeForTask(request.taskId);
-				if (!bridge || occupancy.unrecoverablePasteCount > 0)
-					throw new Error("原生草稿桥接尚不可用或附件无法完整保全，保留原进程。 ");
-				if (!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint)) || !stillSafe())
-					throw new Error("同一草稿捕获证据已达三次或输入已变化，等待条件变化后自动重验。");
-				captureAttemptClaimed = true;
-				const operationId = randomUUID();
-				const capture = await captureCodexDraftForProfileAdoption({
-					bridge,
-					taskId: request.taskId,
-					operationId,
-					isCurrent: stillSafe,
-					triggerExport: () => {
-						this.writeInput(request.taskId, Buffer.from([0x07]), operationId);
-					},
-					confirmOriginalComposerRestored: async () => {
-						const snapshot = await entry.terminalStateMirror?.getScreenSnapshot();
-						return Boolean(
-							entry.active === active &&
-								snapshot?.lines.some((line) => /^›(?: |$)/u.test(line.text)) &&
-								!snapshot.lines.some((line) => line.text.includes("Save and close external editor")),
-						);
-					},
-					persistCapturedDraft: (text) => {
-						capturedDraftText = text;
-					},
-				});
-				await this.resumeCodexDraftStashRetainedInput(request.taskId);
-				if (!capture || !stillSafe())
-					throw new Error("完整草稿尚未确认或捕获期间出现新输入，保留原进程后自动重验。");
-			}
-			if (
-				(!captureAttemptClaimed &&
-					!(await configurationAdoption.onBeforeProcessReplacement(evidenceFingerprint))) ||
-				!stillSafe()
-			)
-				throw new Error("续接证据已变化或同一证据已达三次，保留待采用状态。");
-			if (
-				transcriptCompletion &&
-				(await readCodexProfileAdoptionNativeTurnCompletionEvidence(entry.summary))?.evidenceFingerprint !==
-					transcriptCompletion.evidenceFingerprint
-			)
-				throw new Error("原生转录在续接登记期间变化，保留待采用并自动重验。");
-			if (!stillSafe()) throw new Error("新输入或会话代际已变化，未停止原进程。");
-			if (
-				configurationAdoption.readTaskExecutionEligibilityFingerprint &&
-				(await configurationAdoption.readTaskExecutionEligibilityFingerprint()) !==
-					taskExecutionEligibilityFingerprint
-			)
-				throw new Error("Task 在预检期间已搁置、结案或改变归属，未停止原进程。");
-			if (!stillSafe()) throw new Error("资格重验期间出现新输入，未停止原进程。");
-			if (
-				configurationAdoption.readConfigurationSafetyFingerprint &&
-				(await configurationAdoption.readConfigurationSafetyFingerprint(automaticReplacementLaunchSelection)) !==
-					configurationSafetyFingerprint
-			)
-				throw new Error("完整启动配置已变化，未停止原进程；按最新 cache 风险自动重验。");
-			if (!stillSafe()) throw new Error("配置重验期间出现新输入，未停止原进程。");
-			if (
-				await hasSessionOwnedBackgroundAgentExecutionRequiringRetention({
-					workspaceId: request.workspaceId ?? "",
-					taskId: request.taskId,
-				})
-			)
-				throw new Error("后台执行仍存活或退出证据未知，保留原进程并自动重验。");
-			if (!stillSafe()) throw new Error("后台归属重验期间会话已变化，未停止原进程。");
-			const retainedInputRecordPath = createCodexProfileAdoptionRetainedInput({
-				workspaceId: request.workspaceId ?? "",
-				conversationSessionId: request.taskId,
-				nativeSessionId: configurationAdoption.expectedNativeSessionId,
-				profileId: configurationAdoption.profileId,
-				capturedDraftText,
-				capturedFromRuntimeSessionIncarnationId:
-					capturedDraftText === undefined ? undefined : (entry.summary.runtimeSessionIncarnationId ?? undefined),
-				capturedDraftRestoreStatus: capturedDraftText === undefined ? undefined : "pending",
-			});
-			this.terminalInputRetainedDuringCodexProfileReplacement.set(request.taskId, retainedInputRecordPath);
-			this.emitSummary(
-				updateSummary(entry, {
-					codexConfigurationProfileRetainedInputRecovery: {
-						retainedInputRecordPath,
-						retainedByteCount: Buffer.byteLength(capturedDraftText ?? "", "utf8"),
-						reason: "完整草稿与安全续接窗口中的新输入将持久保留。",
-					},
-				}),
-			);
-		}
-		const configurationAdoptionRetainedInputRecordPath = configurationAdoption
-			? this.terminalInputRetainedDuringCodexProfileReplacement.get(request.taskId)
-			: undefined;
-		const isTaskSessionRefreshStillRequested = () =>
-			isPendingNativeIdentityRecoveryStillCurrent?.() !== false &&
-			(!configurationAdoption ||
-				Boolean(
-					configurationAdoptionRetainedInputRecordPath &&
-						this.getPendingCodexProfileProcessReplacementRetainedInputRecordPath(request.taskId) ===
-							configurationAdoptionRetainedInputRecordPath,
-				));
-		if (!continuesPendingProcessReplacement) {
-			if (configurationAdoption)
-				await this.forceStopTaskSession(
-					request.taskId,
-					2_000,
-					isPendingNativeIdentityRecoveryStillCurrent !== undefined,
-					true,
-				);
-			else
-				await this.forceStopTaskSession(
-					request.taskId,
-					2_000,
-					isPendingNativeIdentityRecoveryStillCurrent !== undefined,
-				);
-		}
+		const isTaskSessionRefreshStillRequested = () => isPendingNativeIdentityRecoveryStillCurrent?.() !== false;
+		await this.forceStopTaskSession(request.taskId, 2_000, isPendingNativeIdentityRecoveryStillCurrent !== undefined);
 		if (!isTaskSessionRefreshStillRequested()) return cloneSummary(this.ensureEntry(request.taskId).summary);
-		request = {
-			...request,
-			configurationProfileAutomaticAdoptionGuard: undefined,
-			codexAutomaticProcessReplacementMustRemainRenderingOnly: Boolean(configurationAdoption),
-		};
 		const summary = await this.startTaskSessionHoldingPerTaskStartAndCodexStorageExclusivity(
 			request,
 			taskSessionStartOrigin,
@@ -10852,31 +10224,6 @@ export class TerminalSessionManager implements TerminalSessionService {
 			isTaskSessionRefreshStillRequested,
 		);
 		// startTaskSession disposes the old terminal state mirror and creates a fresh one,
-		if (configurationAdoption) {
-			// 停旧之后到新输入框就绪之间的击键属于下一代，不写进正在退出的 PTY。
-			const entry = this.entries.get(request.taskId);
-			if (
-				entry?.active &&
-				entry.summary.agentNativeConversationSessionIdentity?.nativeSessionId ===
-					configurationAdoption.expectedNativeSessionId
-			) {
-				for (const { path, record } of listUnrestoredCodexProfileAdoptionRetainedInput())
-					if (
-						record.conversationSessionId === request.taskId &&
-						record.workspaceId === request.workspaceId &&
-						record.nativeSessionId === configurationAdoption.expectedNativeSessionId &&
-						record.automaticProcessReplacementContinuationStatus === "pending_automatic_start"
-					) {
-						record.automaticProcessReplacementContinuationStatus = "started";
-						saveCodexProfileAdoptionRetainedInput(path, record);
-					}
-			}
-			for (let readinessAttempt = 0; readinessAttempt < 60; readinessAttempt++) {
-				if (!entry?.active || (await this.resolveInteractivePromptReadiness(entry)) === "prompt") break;
-				await new Promise<void>((resolveReady) => setTimeout(resolveReady, 100));
-			}
-			await this.restoreTerminalInputRetainedDuringCodexProfileAdoption();
-		}
 		// so the banner must be written AFTER the new mirror exists. Otherwise late-attach
 		// viewers reattaching via the control socket would receive a restore snapshot from
 		// the new mirror that never saw the banner.

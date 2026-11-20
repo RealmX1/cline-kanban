@@ -6,6 +6,7 @@ import {
 	buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch,
 	resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard,
 } from "../../../src/core/task-card-field-patch-resolution";
+import { resolveResumedCodexReasoningEffortOverride } from "../../../src/terminal/codex-reasoning-effort-resume-selection";
 
 function createCard(overrides: Partial<RuntimeBoardCard> = {}): RuntimeBoardCard {
 	return {
@@ -78,6 +79,51 @@ describe("buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch", () 
 });
 
 describe("resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard", () => {
+	it("CLI 仅改标题时保留旧 profile 的权限来源，明确选择才替换它", () => {
+		const legacyCard = createCard({
+			codexConfigurationPermissionSelectionSource: "profile",
+			taskAgentPermissionMode: "bypass_all_permission_prompts",
+		});
+		const board = { columns: [{ id: "review" as const, title: "Review", cards: [legacyCard] }] };
+		const update = (fields: { title: string; taskAgentPermissionMode?: "ask_for_every_tool_use" }) =>
+			updateTask(
+				board,
+				legacyCard.id,
+				resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard(legacyCard, {
+					taskCardFieldUpdateInputKind: "kanban_cli_task_update_command_raw_arguments",
+					kanbanCliTaskCardFieldUpdateRawInput: fields,
+				}),
+				99,
+			).task;
+		expect(update({ title: "改标题" })?.codexConfigurationPermissionSelectionSource).toBe("profile");
+		const restricted = update({ title: "编辑权限", taskAgentPermissionMode: "ask_for_every_tool_use" });
+		expect(restricted?.codexConfigurationPermissionSelectionSource).toBe("task_local");
+		expect(restricted?.taskAgentPermissionMode).toBe("ask_for_every_tool_use");
+	});
+
+	it("显式改回沿用 Codex 配置后，续跑不再套用归档推理强度", () => {
+		const card = createCard({ codexReasoningEffortOverride: "high" });
+		const cleared = applyPatch(card, { codexReasoningEffortOverride: null });
+		expect(cleared.codexReasoningEffortOverride).toBeUndefined();
+		expect(cleared.codexReasoningEffortFollowsNativeConfiguration).toBe(true);
+		expect(
+			resolveResumedCodexReasoningEffortOverride({
+				requestedOverride: cleared.codexReasoningEffortOverride,
+				followsNativeConfiguration: cleared.codexReasoningEffortFollowsNativeConfiguration,
+				retiredWriterEffort: "high",
+			}),
+		).toBeUndefined();
+		const selectedAgain = applyPatch(cleared, { codexReasoningEffortOverride: "low" });
+		expect(selectedAgain.codexReasoningEffortOverride).toBe("low");
+		expect(selectedAgain.codexReasoningEffortFollowsNativeConfiguration).toBeUndefined();
+		expect(
+			resolveResumedCodexReasoningEffortOverride({
+				requestedOverride: undefined,
+				retiredWriterEffort: "high",
+			}),
+		).toBe("high");
+	});
+
 	it("按输入种类分派：三态 patch", () => {
 		const resolved = resolveRuntimeUpdateTaskInputFromTaskCardFieldUpdateAgainstLatestTaskCard(createCard(), {
 			taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",

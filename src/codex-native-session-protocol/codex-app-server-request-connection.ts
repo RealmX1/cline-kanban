@@ -1,13 +1,14 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+
 import { z } from "zod";
-import { prepareAuxiliaryCodexConfigurationLaunch } from "../codex-configuration-sync/codex-source-shared-plugin-installation-coordinator";
+
 import {
 	buildCodexConversationStorageEnvironment,
+	resolveManagedCodexNativeConfigurationArguments,
 	resolveMigratedCodexConversationHome,
 	withCodexConversationStorageOperationLock,
 } from "../codex-conversation-storage/codex-conversation-storage-home";
-import { recordKnownCodexConfigurationNativeRequest } from "../diagnostics/codex-configuration-and-plugin-cache-initiator-trace";
+
 import { createCodexAppServerLfDelimitedUtf8ResponseDecoder } from "./codex-app-server-lf-delimited-utf8-response-decoder";
 import type { CodexAppServerRequestPort } from "./codex-native-conversation-history";
 
@@ -24,6 +25,7 @@ export async function withCodexAppServerRequestConnection<T>(
 		environment?: NodeJS.ProcessEnv;
 		argumentsBeforeSubcommand?: string[];
 		codexConversationStorageHomeDirectoryPath?: string;
+		codexSqliteHomeDirectoryPath?: string;
 		codexConversationStorageNativeSessionId?: string;
 		experimentalApi?: boolean;
 	},
@@ -46,23 +48,22 @@ export async function withCodexAppServerRequestConnection<T>(
 			),
 		);
 	// 这是本次操作自己的 stdio 子进程，不连接或停止共享 daemon。它只读取/分支原生历史，绝不 turn/start。
-	let environment = {
+	const sqliteHome = input.codexSqliteHomeDirectoryPath ?? home;
+	const environment = {
 		...(input.environment ?? process.env),
 		...(home ? buildCodexConversationStorageEnvironment(home) : {}),
+		...(sqliteHome ? { CODEX_SQLITE_HOME: sqliteHome } : {}),
 	};
-	// 显式历史归属的运行时 helper 使用独立配置副本；原生隔离探针可直接持有其自行创建的测试 writer。
 	const binary = input.binary ?? "codex";
-	let nativeLaunchArguments = [...(input.argumentsBeforeSubcommand ?? []), "app-server", "--stdio"];
-	if (home) {
-		const launch = await prepareAuxiliaryCodexConfigurationLaunch({
-			environment,
-			cwd: input.workingDirectory,
-			binary,
-			nativeLaunchArguments,
-		});
-		environment = launch.environment;
-		nativeLaunchArguments = launch.nativeLaunchArguments;
-	}
+	const explicitArguments = input.argumentsBeforeSubcommand ?? [];
+	const nativeConfigurationArguments = await resolveManagedCodexNativeConfigurationArguments(home, explicitArguments);
+	const nativeLaunchArguments = [
+		...nativeConfigurationArguments.slice(0, -2),
+		...explicitArguments,
+		...(sqliteHome ? ["-c", `sqlite_home=${JSON.stringify(sqliteHome)}`] : []),
+		"app-server",
+		"--stdio",
+	];
 	const child = spawn(binary, nativeLaunchArguments, {
 		cwd: input.workingDirectory,
 		env: environment,
@@ -74,7 +75,6 @@ export async function withCodexAppServerRequestConnection<T>(
 		{ method: string; resolve: (value: unknown) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }
 	>();
 	let sequence = 0;
-	const connectionIdentity = randomUUID();
 	let closed = false;
 	const rejectPending = (error: Error) => {
 		closed = true;
@@ -141,13 +141,6 @@ export async function withCodexAppServerRequestConnection<T>(
 					return;
 				}
 				const id = ++sequence;
-				recordKnownCodexConfigurationNativeRequest({
-					requestId: `${connectionIdentity}:${id}`,
-					method,
-					purpose: "kanban_auxiliary_native_history_request",
-					targetProcessId: child.pid,
-					configurationHomeDirectoryPath: environment.CODEX_HOME,
-				});
 				const timer = setTimeout(() => {
 					pending.delete(id);
 					rejectRequest(new Error(`Codex 原生请求超时：${method}`));

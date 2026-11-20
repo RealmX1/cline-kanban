@@ -11,7 +11,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { getAgentVisual } from "@/components/agent-visual";
 import { cn } from "@/components/ui/cn";
 import { Tooltip } from "@/components/ui/tooltip";
-import { subscribeCodexConfigurationSyncUpdated } from "@/runtime/codex-configuration-sync-query";
 import { fetchTerminalAgentModelSelectionOptions } from "@/runtime/runtime-config-query";
 import { readTaskAgentModelListCache, writeTaskAgentModelListCache } from "@/runtime/task-agent-model-list-cache";
 import type {
@@ -313,12 +312,6 @@ export function useTaskAgentModelPicker({
 		const recoverWhenVisible = () => {
 			if (document.visibilityState === "visible") recoverAfterConnectionRestored();
 		};
-		const unsubscribeRuntimeReconnected =
-			effectiveAgentId === "codex"
-				? subscribeCodexConfigurationSyncUpdated((reason) => {
-						if (reason === "runtime_reconnected") recoverAfterConnectionRestored();
-					})
-				: undefined;
 		const unsubscribeStreamReconnected =
 			effectiveAgentId === "codex"
 				? subscribeToTaskVisualizationBrowserEvents((event) => {
@@ -333,7 +326,6 @@ export function useTaskAgentModelPicker({
 		return () => {
 			cancelled = true;
 			clearTimeout(recoveryTimer);
-			unsubscribeRuntimeReconnected?.();
 			unsubscribeStreamReconnected?.();
 			window.removeEventListener("online", recoverAfterConnectionRestored);
 			document.removeEventListener("visibilitychange", recoverWhenVisible);

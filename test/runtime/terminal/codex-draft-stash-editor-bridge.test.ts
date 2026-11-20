@@ -11,7 +11,6 @@ import {
 import {
 	getCodexDraftStashOperationDirectory,
 	prepareCodexDraftStashEditorBridge,
-	readCodexDraftEditorReservation,
 	readCodexDraftStashEditorBridge,
 	readCodexDraftStashJson,
 	reserveCodexDraftEditorInvocation,
@@ -19,7 +18,6 @@ import {
 	writeCodexDraftStashJsonDurably,
 } from "../../../src/terminal/codex-draft-stash-editor-bridge";
 import {
-	captureCodexDraftForProfileAdoption,
 	createCodexCapturedDraftPromptRecoveryCoordinator,
 	readCodexDraftStashOperationStatus,
 	recoverCapturedCodexDraftStashOperations,
@@ -55,45 +53,6 @@ async function prepareInvocationFixture(text: string) {
 }
 
 describe("Codex 原生草稿暂存协议", () => {
-	it("配置安全续接捕获完整草稿而不清框或写入 Prompts，恢复扫描也不会写库", async () => {
-		const text = "完整文字\n包含中文、emoji 🐈 与末尾空白  \n";
-		const fixture = await prepareInvocationFixture(text);
-		const captured = vi.fn();
-		const result = await captureCodexDraftForProfileAdoption({
-			bridge: fixture.bridge,
-			taskId: "isolated-task",
-			operationId: randomUUID(),
-			isCurrent: () => true,
-			triggerExport: fixture.triggerExport,
-			confirmOriginalComposerRestored: async () => (await fixture.editorCompletion()) === 1,
-			persistCapturedDraft: captured,
-		});
-		expect(result?.text).toBe(text);
-		expect(captured).toHaveBeenCalledExactlyOnceWith(text);
-		expect(await readFile(fixture.nativeEditorFilePath, "utf8")).toBe(text);
-		await recoverCapturedCodexDraftStashOperations("isolated-workspace");
-		expect(
-			(await readWorkspacePromptLibrarySnapshot("isolated-workspace")).taskScopedPromptsByTaskId["isolated-task"],
-		).toBeUndefined();
-	});
-	it("配置安全续接遇到附件或保存失败保留原始 composer", async () => {
-		for (const text of ["正文 [Image #1]", "保存失败也保留正文  "]) {
-			const fixture = await prepareInvocationFixture(text);
-			const result = await captureCodexDraftForProfileAdoption({
-				bridge: fixture.bridge,
-				taskId: "isolated-task",
-				operationId: randomUUID(),
-				isCurrent: () => true,
-				triggerExport: fixture.triggerExport,
-				confirmOriginalComposerRestored: async () => (await fixture.editorCompletion()) === 1,
-				persistCapturedDraft: () => {
-					throw new Error("隔离模拟保存失败");
-				},
-			});
-			expect(result).toBeNull();
-			expect(await readFile(fixture.nativeEditorFilePath, "utf8")).toBe(text);
-		}
-	});
 	it("存量非 UUID 代际按桥接未就绪读取，但不能用它创建新桥接", async () => {
 		const identity = {
 			workspaceId: "isolated-workspace",
@@ -187,66 +146,6 @@ describe("Codex 原生草稿暂存协议", () => {
 		expect(
 			(await readWorkspacePromptLibrarySnapshot("isolated-workspace")).taskScopedPromptsByTaskId["isolated-task"],
 		).toHaveLength(1);
-	});
-
-	it("配置安全续接捕获超时或确认失败后释放预约，随后可再次捕获", async () => {
-		const fixture = await prepareInvocationFixture("超时后仍可再次捕获的原稿");
-		vi.useFakeTimers();
-		try {
-			const timedOut = captureCodexDraftForProfileAdoption({
-				bridge: fixture.bridge,
-				taskId: "isolated-task",
-				operationId: randomUUID(),
-				isCurrent: () => true,
-				triggerExport: () => {},
-				confirmOriginalComposerRestored: async () => false,
-				persistCapturedDraft: () => {
-					throw new Error("超时路径不应保存");
-				},
-			});
-			await vi.advanceTimersByTimeAsync(15_000);
-			expect(await timedOut).toBeNull();
-			expect(readCodexDraftEditorReservation(fixture.bridge)).toBeNull();
-
-			const unconfirmedOperationId = randomUUID();
-			const unconfirmed = captureCodexDraftForProfileAdoption({
-				bridge: fixture.bridge,
-				taskId: "isolated-task",
-				operationId: unconfirmedOperationId,
-				isCurrent: () => true,
-				triggerExport: () => {
-					writeCodexDraftStashJsonDurably(
-						join(
-							getCodexDraftStashOperationDirectory("isolated-workspace", unconfirmedOperationId),
-							"editor-finished.json",
-						),
-						{ exitCode: 1, finishedAtMs: Date.now() },
-					);
-				},
-				confirmOriginalComposerRestored: async () => false,
-				persistCapturedDraft: () => {
-					throw new Error("未确认路径不应保存");
-				},
-			});
-			await vi.advanceTimersByTimeAsync(5_000);
-			expect(await unconfirmed).toBeNull();
-			expect(readCodexDraftEditorReservation(fixture.bridge)).toBeNull();
-
-			const captured = captureCodexDraftForProfileAdoption({
-				bridge: fixture.bridge,
-				taskId: "isolated-task",
-				operationId: randomUUID(),
-				isCurrent: () => true,
-				triggerExport: fixture.triggerExport,
-				confirmOriginalComposerRestored: async () => (await fixture.editorCompletion()) === 1,
-				persistCapturedDraft: () => {},
-			});
-			await vi.advanceTimersByTimeAsync(5_000);
-			expect((await captured)?.text).toBe("超时后仍可再次捕获的原稿");
-			expect(readCodexDraftEditorReservation(fixture.bridge)).toBeNull();
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 
 	it("编辑器回执缺失导致失败后释放预约，后续暂存无需重启会话", async () => {

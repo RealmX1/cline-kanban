@@ -1,6 +1,8 @@
 import {
 	chmodSync,
 	existsSync,
+	lchmodSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	readlinkSync,
@@ -14,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
 	assertSourceGitWorkingStateMatchesSnapshot,
 	captureSourceGitWorkingState,
+	readSourceGitWorkingStateSnapshot,
 	restoreSourceGitWorkingState,
 } from "../../../src/independent-task-creation/git-working-state-snapshot";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -97,6 +100,7 @@ describe("独立任务的 Git 工作状态复制", () => {
 		repo.runGit(["mv", "rename-source", "renamed"]);
 		chmodSync(join(repo.repositoryPath, "executable"), 0o755);
 		symlinkSync("renamed", join(repo.repositoryPath, "symbolic-link"));
+		lchmodSync(join(repo.repositoryPath, "symbolic-link"), 0o1755);
 		writeFileSync(join(repo.repositoryPath, "ignored.secret"), "不可复制");
 		repo.runGit(["add", "."]);
 		repo.runGit(["update-index", "--split-index"]);
@@ -114,6 +118,12 @@ describe("独立任务的 Git 工作状态复制", () => {
 		);
 		expect(repo.runGit(["status", "--porcelain=v1"]).stdout).toBe(before);
 		expect(readlinkSync(join(target.worktreePath, "symbolic-link"))).toBe("renamed");
+		const restoredSymlink = lstatSync(join(target.worktreePath, "symbolic-link"));
+		const symlinkEntry = (await readSourceGitWorkingStateSnapshot(artifact)).entries.find(
+			(entry) => entry.path === "symbolic-link",
+		);
+		expect(restoredSymlink.mode & 0o7777).toBe(0o1755);
+		expect(restoredSymlink.mode).toBe(symlinkEntry?.mode);
 		expect(readFileSync(join(target.worktreePath, "file-to-directory", "new"), "utf8")).toBe("nested");
 		expect(readFileSync(join(target.worktreePath, "directory-to-file"), "utf8")).toBe("replacement");
 		expect(statSync(join(target.worktreePath, "executable")).mode & 0o111).toBe(0o111);
