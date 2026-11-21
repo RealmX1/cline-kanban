@@ -43,6 +43,8 @@
 
 准备只冻结请求、工具摘要和统一命令规格。启动后在私有 checkout 固定 commit、独立安装根与 Web 依赖、复用源码验证证据、显式指定私有生产输出。每个实际命令保存意图、stdout、stderr 和退出事实。请求是数据文件，八阶段脚本与观察器由程序生成。
 
+状态保全使用准备时冻结的执行器。若已安装执行器早于所需的备份范围修复，用包含该修复且已验证的打包执行器准备经授权的新一轮部署。
+
 标准源码验证计划同时包含运行时与 Web 类型检查、各自测试以及源码 lint。可选字段 `sourceValidationEvidenceFilePaths` 只引用已绑定候选的上游回执或原件。部署使用随执行器冻结的验证工具、逐项核对原命令与候选完整树；读不到的原件直接在私有候选补验，已确认的质量失败禁止继续发布。支持的原件入口见[源码验证证据交接](../.codex/skills/cline-kanban-local-deploy/references/source-validation-evidence-reuse.md)。
 
 `kanban deployment analyze --execution-directory <持久目录>` 可在准备完成后读取执行身份。启动后沿同一目录呈现源码复用／补跑数、会话阻塞、最近核验时间、重查条件和备份检查点。
@@ -72,6 +74,8 @@
 
 在线且有可信来源会话时经 `task command-execution` 登记。离线只调用通用独立 supervisor primitive，不伪造所属执行索引。通用恢复循环发现待接回请求，校验真实 task/session/worktree、材料摘要和原生进程后登记；存活执行与已完成结果均不重发命令。没有会话绑定的外部调用只提供持久结果。
 
+新部署登记 `ownerSessionInterruptPolicy: "preserve_execution"`。当前回合打断时后台部署继续，明确取消部署或停止整个任务仍会撤销执行。会话换代仍按当前归属门禁核验。
+
 重复启动同目录只接续原执行；已完成或取消不重跑。原生退出或真实 boot 变化后，外部调用者也可用相同入口在持久语义预算内恢复。机器等待使用原 `machine_evidence_pending` 合同与等价证据。首次复查已经具备阶段恢复证据时也能接续，阶段预算仍按语义指纹去重，跨重启保持。明确取消使用 `cancel-redeployment`；原 session 的持久 Stop 在启动、接回和后续动作前仍有效。
 
 在线受理须原子核对准备时冻结的任务、主会话、native/runtime-session 代际与工作树实体。已登记执行的监督者确证退出且实例离线时，同一入口接续原登记身份。离线监督者在 worker 等待机器证据后继续观察，只在持久语义预算允许且原归属与 Stop 门禁仍通过时恢复派发；实例恢复后接回同一监督者。
@@ -95,6 +99,8 @@ v2 manifest 在候选完成后固定产物摘要。`runtimeStartingState` 区分
 备份 worker 报告读取、复制与 SQLite 页面进展。进展中断时，已绑定的父进程结束该 worker，保存原生退出原件。接续验证目标、阶段、命令与尝试身份，才允许按已完成检查点的内容领取恢复预算。接续可读取前一执行的检查点，当前的源和副本仍逐项重验。会话门禁解除后重新核对备份，由原发布与停止门禁再次核验现场。
 
 `workspaces/<workspaceId>/task-command-executions/` 的持久执行原件按产物目录原地保留，并在备份回执中列明，避免监督进度和原子写临时文件使备份自阻塞；同级 `task-command-executions.json` 索引及其他工作区状态仍备份。
+
+`codex-configuration-writer-bindings-and-sync/` 是退役的 Codex 配置写入器历史目录，本地部署整棵目录原地保留并在备份回执中列明。`codex-conversation-storage-home/` 的原生会话与 SQLite 仍按运行状态保全。
 
 发布、重启和登记结果未知时先核验原生效果。v2 可显式声明 `idempotentEffectRecoveryCommand`，只补齐同一清单、同一启动或同一登记；v1 不获得该恢复资格。副作用动作之后立即重查效果，不沿用先前失败探测的冷却状态。发布同时验证 CLI 链接，重启验证进程启动时实际载入的入口摘要。
 

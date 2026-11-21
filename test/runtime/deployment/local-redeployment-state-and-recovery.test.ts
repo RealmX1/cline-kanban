@@ -56,26 +56,40 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		};
 		return { request, directory, runtimeHomeDirectoryPath };
 	}
-	it("保全 Codex 配置和未知缓存，仅跳过已知可重建目录 JSON", async () => {
+	it("保全 Codex 会话和未知缓存，原地保留退役配置写入器目录", async () => {
 		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
-		const writerHome = join(
-			"codex-configuration-writer-bindings-and-sync",
+		const retiredWriterDirectoryName = "codex-configuration-writer-bindings-and-sync";
+		const retiredWriterConfigurationPath = join(
+			runtimeHomeDirectoryPath,
+			retiredWriterDirectoryName,
 			"writers",
 			"77777777-7777-4777-8777-777777777777",
 			"configuration-home",
+			"config.toml",
 		);
-		const catalogFile = join(writerHome, "cache", "remote_plugin_catalog", "abcd.json");
-		const unknownCacheFile = join(writerHome, "cache", "remote_plugin_catalog", "unknown-facts.json");
+		await mkdir(dirname(retiredWriterConfigurationPath), { recursive: true });
+		await writeFile(retiredWriterConfigurationPath, 'model="fixture"');
+		const conversationStorage = "codex-conversation-storage-home";
+		const catalogFile = join(conversationStorage, "cache", "remote_plugin_catalog", "abcd.json");
+		const unknownCacheFile = join(conversationStorage, "cache", "remote_plugin_catalog", "unknown-facts.json");
+		const transcriptFile = join(conversationStorage, "sessions", "rollout.jsonl");
 		await mkdir(dirname(join(runtimeHomeDirectoryPath, catalogFile)), { recursive: true });
+		await mkdir(dirname(join(runtimeHomeDirectoryPath, transcriptFile)), { recursive: true });
 		await writeFile(join(runtimeHomeDirectoryPath, catalogFile), "{}");
 		await writeFile(join(runtimeHomeDirectoryPath, unknownCacheFile), '{"preserve":true}');
-		await writeFile(join(runtimeHomeDirectoryPath, writerHome, "config.toml"), 'model="fixture"');
+		await writeFile(join(runtimeHomeDirectoryPath, transcriptFile), '{"type":"session_meta"}\n');
 		await backupLocalRedeploymentRuntimeState(request, directory);
 		const preserved = join(directory, "preserved-runtime-state");
-		expect(await readFile(join(preserved, writerHome, "config.toml"), "utf8")).toBe('model="fixture"');
+		expect(await readdir(preserved)).toEqual([conversationStorage]);
+		expect(await readFile(retiredWriterConfigurationPath, "utf8")).toBe('model="fixture"');
+		expect(await readFile(join(preserved, transcriptFile), "utf8")).toBe('{"type":"session_meta"}\n');
 		expect(await readFile(join(preserved, unknownCacheFile), "utf8")).toBe('{"preserve":true}');
 		await expect(readFile(join(preserved, catalogFile))).rejects.toMatchObject({ code: "ENOENT" });
 		expect(await readFile(join(runtimeHomeDirectoryPath, catalogFile), "utf8")).toBe("{}");
+		const receipt = JSON.parse(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8"));
+		expect(receipt.preservedInPlaceOrTransientEndpoints).toContain(
+			join(runtimeHomeDirectoryPath, retiredWriterDirectoryName),
+		);
 	});
 	it.each(["unchanged", "source_changed", "preserved_copy_corrupted"] as const)(
 		"另一执行导入原生备份检查点后仍重验源和副本：%s",

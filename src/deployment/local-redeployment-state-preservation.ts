@@ -316,6 +316,7 @@ export async function backupLocalRedeploymentRuntimeState(
 	reportBackupProgress();
 	const backupRoot = join(directory, "preserved-runtime-state");
 	const preservedInPlace = new Set([
+		"codex-configuration-writer-bindings-and-sync",
 		"cross-task-handoff-artifacts",
 		"task-cross-task-handoff-artifacts",
 		"task-handoff-artifacts",
@@ -352,17 +353,11 @@ export async function backupLocalRedeploymentRuntimeState(
 		);
 	}
 	function isRebuildableCodexCatalogCacheFile(path: string): boolean {
-		const segments = relative(request.runtimeIdentity.runtimeHomeDirectoryPath, path).split(sep);
-		const cachePath =
-			segments[0] === "codex-conversation-storage-home"
-				? segments.slice(1)
-				: segments[0] === "codex-configuration-writer-bindings-and-sync" &&
-						segments[1] === "writers" &&
-						/^[a-f0-9-]{36}$/.test(segments[2] ?? "") &&
-						segments[3] === "configuration-home"
-					? segments.slice(4)
-					: [];
+		const [storageDirectory, ...cachePath] = relative(request.runtimeIdentity.runtimeHomeDirectoryPath, path).split(
+			sep,
+		);
 		return (
+			storageDirectory === "codex-conversation-storage-home" &&
 			cachePath.length === 3 &&
 			cachePath[0] === "cache" &&
 			(cachePath[1] === "remote_plugin_catalog" || cachePath[1] === "codex_apps_tools") &&

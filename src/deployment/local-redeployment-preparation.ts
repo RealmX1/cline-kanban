@@ -274,6 +274,7 @@ export function createLocalRedeploymentOwnedCommandSpecification(
 		command,
 		resumeCommand: command,
 		resumeCommandPreservesBusinessSingleFlight: true,
+		ownerSessionInterruptPolicy: "preserve_execution",
 		supervisorMaintainsSemanticRecovery: true,
 		beforeSupervisorRecoveryDispatchValidationCommand: [
 			frozen.request.deploymentNodeBinaryPath,
