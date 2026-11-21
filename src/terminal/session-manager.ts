@@ -593,6 +593,7 @@ interface TaskChatInputDeliveryAttemptPlan {
 	requiresCodexStartupPromptReady: boolean;
 	// 调用方的领域核验；每次实际粘贴或提交前重读，不缓存入队时结论。
 	validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
+	owningCommandExecutionId: string | null;
 	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
 	// 在受理时捕获而不是每次重探重读配置：一条投递最多活 ~196s，用同一份策略走完全程，
 	// 好过让它在半途因为用户改了设置而换一套语义。
@@ -3116,6 +3117,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			text,
 			codexNativeClientUserMessageId: randomUUID(),
 			codexNativeDeliveryLedgerBinding: options?.codexNativeDeliveryLedgerBinding ?? null,
+			owningCommandExecutionId: options?.owningCommandExecutionId ?? null,
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
@@ -3513,6 +3515,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		const capturedHumanInputAt = active.lastUserInputAt;
 		const receipt = active.programmaticDeliveryReceipt;
+		const ownedResultWriteValidator = plan.owningCommandExecutionId ? plan.validateBeforeTerminalWrite : null;
+		const composerStillAllowsSubmission = () =>
+			active.lastUserInputAt === capturedHumanInputAt &&
+			!this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId);
+		let ownedResultWriteRejection: string | undefined;
 		const sender =
 			this.terminalSessionManagerOptions.deliverCodexNativePromptWithoutChangingComposer ??
 			deliverCodexNativePromptWithoutChangingComposer;
@@ -3533,13 +3540,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					now() < plan.deadlineAt
 				)
 					await new Promise<void>((resolve) => setTimeout(resolve, 50));
+				if (!bindingStillMatches() || !composerStillAllowsSubmission()) return false;
 				if (
-					!bindingStillMatches() ||
-					active.lastUserInputAt !== capturedHumanInputAt ||
-					this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
-				)
-					return false;
-				if (
+					!ownedResultWriteValidator &&
 					plan.validateBeforeTerminalWrite &&
 					!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
 						plan.taskId,
@@ -3549,12 +3552,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 					))
 				)
 					return false;
-				return (
-					bindingStillMatches() &&
-					active.lastUserInputAt === capturedHumanInputAt &&
-					!this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
-				);
+				return bindingStillMatches() && composerStillAllowsSubmission();
 			},
+			...(ownedResultWriteValidator
+				? {
+						validateImmediatelyBeforeNativeTurnStartRequest: async () => {
+							if (!bindingStillMatches() || !composerStillAllowsSubmission()) return false;
+							try {
+								await ownedResultWriteValidator("before_first_transport_write");
+								return true;
+							} catch (error) {
+								ownedResultWriteRejection = error instanceof Error ? error.message : String(error);
+								return false;
+							}
+						},
+						mayInvokeNativeTurnStartRequest: composerStillAllowsSubmission,
+					}
+				: {}),
 			onRequestAttempted: async (_observation) => {
 				if (!bindingStillMatches()) return;
 				if (receipt) {
@@ -3571,6 +3585,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return true;
 		}
 		if (result.status === "unavailable") return false;
+		if (result.status === "cancelled" && ownedResultWriteRejection !== undefined) {
+			settleActiveProgrammaticDelivery(
+				active,
+				"delivery_failed",
+				"cancelled_before_delivery",
+				undefined,
+				ownedResultWriteRejection,
+			);
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			return true;
+		}
 		if (result.status === "confirmed") {
 			clearResumeSubstantiveGuard(active);
 			this.disarmRestorationContinuationGuard(plan.taskId);
@@ -3906,7 +3931,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 						? "cancelled_before_delivery"
 						: "submit_confirmation_budget_exhausted",
 				undefined,
-				error instanceof NativeIndependentUserTurnDeliveryError ? error.message : undefined,
+				error instanceof NativeIndependentUserTurnDeliveryError || originalReceipt?.phase === "awaiting_readiness"
+					? error instanceof Error
+						? error.message
+						: String(error)
+					: undefined,
 			);
 			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 			logTuiFreezeWarning(`[tui-freeze] terminal-write-validation-rejected taskId=${taskId} error=${String(error)}`);
@@ -4488,6 +4517,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 			promptText,
 			validateBeforeTerminalWrite,
 		);
+	}
+
+	async observeCodexProgrammaticWriteReadinessForOwnedResultRecovery(taskId: string): Promise<{
+		terminalPromptReady: boolean;
+		terminalComposerClearForProgrammaticDelivery: boolean;
+	} | null> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active || entry.summary.agentId !== "codex") return null;
+		const readiness = await this.resolveInteractivePromptReadiness(entry, true);
+		const contention = await this.resolveProgrammaticDeliveryInputBoxContentionForTask(taskId, active);
+		return this.entries.get(taskId)?.active === active
+			? {
+					terminalPromptReady: readiness !== null && active.deferredStartupPromptText === null,
+					terminalComposerClearForProgrammaticDelivery:
+						contention?.verdict === "input_box_clear_for_programmatic_delivery",
+				}
+			: null;
 	}
 
 	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的

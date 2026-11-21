@@ -3,7 +3,9 @@ import type {
 	CodexNativePromptAcceptanceHistoryQueryProgress,
 	CodexNativePromptDeliveryEvidence,
 	CodexNativePromptDeliveryOperation,
+	InjectionLedgerTerminalDeliveryReceipt,
 } from "./api-contract";
+import type { TaskCommandExecutionRecord } from "./task-command-execution-contract";
 import {
 	findTaskMessageInjectionRecord,
 	type TaskMessageInjectionRecord,
@@ -44,20 +46,79 @@ export interface CodexNativePromptDeliveryJournal {
 	recordAcceptance: (evidence: CodexNativePromptDeliveryEvidence) => Promise<void>;
 }
 
+function isOwnedCommandResultTerminalContentionTimeout(record: TaskMessageInjectionRecord): boolean {
+	return (
+		record.source === "owned_command_execution_result" &&
+		record.terminal_delivery_status === "delivery_failed" &&
+		(record.terminal_delivery_failure_reason === "human_terminal_contention_timeout" ||
+			record.terminal_delivery_failure_reason === "terminal_input_box_contended_but_unstashable")
+	);
+}
+
 export function isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(record: TaskMessageInjectionRecord): boolean {
 	const operation = record.codex_native_prompt_delivery_operation;
 	return (
 		record.source === "owned_command_execution_result" &&
 		record.terminal_delivery_status === "delivery_failed" &&
-		[
-			"no_active_terminal_session",
-			"human_terminal_contention_timeout",
-			"terminal_input_box_contended_but_unstashable",
-			"agent_awaiting_user_decision_timeout",
-		].some((reason) => reason === record.terminal_delivery_failure_reason) &&
+		(isOwnedCommandResultTerminalContentionTimeout(record) ||
+			record.terminal_delivery_failure_reason === "no_active_terminal_session" ||
+			record.terminal_delivery_failure_reason === "terminal_prompt_readiness_timeout" ||
+			record.terminal_delivery_failure_reason === "agent_awaiting_user_decision_timeout") &&
 		operation?.sendPhase === "registered" &&
-		operation.actualSendAttemptCount === 0
+		operation.actualSendAttemptCount === 0 &&
+		!operation.historicalAcceptanceEvidence
 	);
+}
+
+export function getOwnedCommandResultReadinessTimeout(
+	record: TaskMessageInjectionRecord | null | undefined,
+): { observedAtIso: string; receipt: InjectionLedgerTerminalDeliveryReceipt } | undefined {
+	const laterTimeout = record?.codex_native_prompt_delivery_operation?.firstTerminalPromptReadinessTimeout;
+	if (
+		record?.source === "owned_command_execution_result" &&
+		record.terminal_delivery_status === "delivery_failed" &&
+		(record.terminal_delivery_failure_reason === "terminal_prompt_readiness_timeout" || laterTimeout)
+	)
+		return {
+			observedAtIso: laterTimeout?.observedAtIso ?? record.terminal_delivery_status_updated_at,
+			receipt: {
+				status: "delivery_failed",
+				reason: "terminal_prompt_readiness_timeout",
+				failureNote: laterTimeout ? laterTimeout.failureNote : record.terminal_delivery_failure_detail,
+			},
+		};
+}
+
+export function isOwnedCommandResultInjectionBoundToExecution(
+	record: TaskMessageInjectionRecord | null,
+	execution: TaskCommandExecutionRecord,
+): record is TaskMessageInjectionRecord {
+	const operation = record?.codex_native_prompt_delivery_operation;
+	return (
+		record?.source === "owned_command_execution_result" &&
+		record.task_id === execution.taskId &&
+		record.idempotency_key === execution.resultDelivery?.resultId &&
+		record.attempt_id === execution.originatingConversationSessionId &&
+		record.prompt_sha256 === execution.resultDelivery?.textSha256 &&
+		(!operation ||
+			(operation.workspaceId === execution.workspaceId &&
+				operation.conversationSessionId === execution.originatingConversationSessionId &&
+				operation.nativeSessionId === execution.originatingNativeSessionId &&
+				operation.workingDirectoryPath === execution.worktreeIdentity.realPath &&
+				operation.promptSha256 === record.prompt_sha256))
+	);
+}
+
+export function getMatchingCodexNativePromptHistoricalAcceptance(
+	operation: CodexNativePromptDeliveryOperation | undefined,
+) {
+	const acceptance = operation?.historicalAcceptanceEvidence;
+	if (
+		operation?.sendPhase === "native_accepted" &&
+		acceptance?.clientUserMessageId === operation.clientUserMessageId &&
+		acceptance.nativeSessionId === operation.nativeSessionId
+	)
+		return acceptance;
 }
 
 export function createCodexNativePromptDeliveryJournal(
@@ -144,7 +205,10 @@ export function createCodexNativePromptDeliveryJournal(
 						current.workingDirectoryPath !== identity.workingDirectoryPath)
 				)
 					throw new Error("持久原生发送身份或正文已改变");
-				if (!current && settled) throw new Error("已终结的历史投递不能重新登记发送");
+				// 首次争用可发生在 Codex 登记前。此回执仅允许补登记原身份，写入仍须通过所属资格核验。
+				const mayRegisterAfterInitialContention = !current && isOwnedCommandResultTerminalContentionTimeout(record);
+				if (!current && settled && !mayRegisterAfterInitialContention)
+					throw new Error("已终结的历史投递不能重新登记发送");
 				const next: CodexNativePromptDeliveryOperation = current ?? {
 					...(binding.requestOriginRuntimeProcessInstanceId
 						? { requestOriginRuntimeProcessInstanceId: binding.requestOriginRuntimeProcessInstanceId }
@@ -165,7 +229,8 @@ export function createCodexNativePromptDeliveryJournal(
 					next,
 					result: {
 						clientUserMessageId: next.clientUserMessageId,
-						requestMayHaveBeenSent: next.sendPhase !== "registered" || settled,
+						requestMayHaveBeenSent:
+							next.sendPhase !== "registered" || (settled && !mayRegisterAfterInitialContention),
 						previousTurnId: next.previousTurnId,
 						returnedTurnId: next.returnedTurnId,
 						...(next.acceptanceHistoryQueryProgress

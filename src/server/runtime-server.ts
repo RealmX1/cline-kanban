@@ -24,7 +24,6 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
-import { isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports } from "../core/codex-native-prompt-delivery-journal";
 import { resolveCreationStartupSettings } from "../core/creation-startup-settings";
 import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
@@ -52,11 +51,9 @@ import {
 	resolveMainTaskConversationSessionId,
 } from "../core/task-main-conversation-session-binding";
 import {
-	createPendingTaskMessageInjectionRecord,
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
-	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { isTaskCardShelved } from "../core/task-shelving-state";
 import { createDailyWorkProgressStatisticsCollector } from "../daily-work-progress-statistics/daily-work-progress-statistics-collector";
@@ -101,10 +98,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
-import {
-	beginManagedTaskPromptDelivery,
-	observeManagedTaskPromptDeliveryChanges,
-} from "../state/managed-task-prompt-delivery-coordinator";
+import { observeManagedTaskPromptDeliveryChanges } from "../state/managed-task-prompt-delivery-coordinator";
 import { recordProgrammaticReviewExplicitUserStopObservations } from "../state/programmatic-review-explicit-user-stop-observations";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import {
@@ -184,12 +178,16 @@ import {
 } from "./active-runtime-session-shutdown";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
-import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { createDuplicateProjectConsolidationService } from "./duplicate-project-consolidation";
 import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
 import { withCompressedHttpResponses } from "./http-response-compression";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
+import {
+	deliverOwnedCommandResultToActiveSession,
+	readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+	reconcileOwnedCommandResultPromptDelivery,
+} from "./owned-command-result-prompt-delivery";
 import {
 	startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime,
 	sweepStalePendingTaskMessageInjectionsForAllWorkspaces,
@@ -1383,123 +1381,34 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				)
 					throw new Error("原主会话尚未通过持久恢复入口恢复到同一原生身份");
 			}
-			const result = record.resultDelivery;
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => {
-				const existing = findTaskMessageInjectionRecord(records, record.taskId, result.resultId);
-				if (
-					existing &&
-					(existing.prompt_sha256 !== result.textSha256 ||
-						existing.attempt_id !== record.originatingConversationSessionId)
-				)
-					throw new Error("所属结果的原生发送意图与冻结身份不符");
-				return {
-					records: existing
-						? records
-						: [
-								...records,
-								createPendingTaskMessageInjectionRecord({
-									taskId: record.taskId,
-									attemptId: record.originatingConversationSessionId,
-									source: "owned_command_execution_result",
-									idempotencyKey: result.resultId,
-									promptSha256: result.textSha256,
-									nowIso: new Date().toISOString(),
-								}),
-							],
-					result: undefined,
-				};
-			});
-			const managed = await beginManagedTaskPromptDelivery({
-				workspaceId: record.workspaceId,
-				taskId: record.originatingConversationSessionId,
-				workspaceTaskId: record.taskId,
-				text: result.text,
-				deliveryRequestId: result.resultId,
-				idempotencyKey: result.resultId,
-				injectionLedgerTaskId: record.taskId,
-				origin: { messageType: "programmatic_injection", sourceLabel: record.specification.label },
+			return deliverOwnedCommandResultToActiveSession({
+				record,
+				scope,
 				summary,
-			});
-			const response = await sendTaskChatMessageAcrossSessionTransports(
-				{
+				transport: {
 					getScopedTerminalManager,
 					getScopedAcpTaskSessionService,
 					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-					programmaticInjectionLedgerTaskId: record.taskId,
-					validateBeforeTerminalWrite,
-					preserveExistingComposerDraft: true,
-					owningCommandExecutionId: record.executionId,
-					programmaticSubmissionAttemptId: result.attemptId ?? undefined,
-					onProgrammaticTerminalDeliverySettled: (receipt) => {
-						void managed.handle.settle(receipt);
-						void settled(receipt);
-					},
 				},
-				scope,
-				{
-					taskId: record.originatingConversationSessionId,
-					text: result.text,
-					source: "owned_command_execution_result",
-					idempotencyKey: result.resultId,
-					deliveryRequestId: result.resultId,
-					promptSha256: result.textSha256,
-				},
-			);
-			if (response.terminalDelivery && response.terminalDelivery.status !== "accepted_pending_submit_confirmation")
-				await managed.handle.settle(response.terminalDelivery);
-			return response;
-		},
-		reconcileDelivery: async (record) => {
-			if (!record.resultDelivery) return "unknown";
-			const summary = findRuntimeSessionSummary(record.workspaceId, record.originatingConversationSessionId);
-			const acceptance = summary?.agentConversationPromptSubmissionAcceptance;
-			if (
-				acceptance?.status === "accepted" &&
-				acceptance.eventId === record.resultDelivery.resultId &&
-				acceptance.nativeSessionId === record.originatingNativeSessionId
-			)
-				return "native_accepted";
-			const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
-				record.originatingConversationSessionId
-			]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
-			const notStarted = managed?.managedDelivery?.terminalDeliveryReceipt?.nativePromptSubmissionNotStartedEvidence;
-			const managedReceipt = managed?.managedDelivery?.terminalDeliveryReceipt;
-			if (
-				managed?.text === record.resultDelivery.text &&
-				managed.workspaceTaskId === record.taskId &&
-				(managedReceipt?.status === "delivered_and_submit_confirmed" ||
-					managedReceipt?.status === "delivered_queued_behind_active_agent_turn")
-			)
-				return "native_accepted";
-			if (
-				notStarted?.clientUserMessageId === record.resultDelivery.resultId &&
-				notStarted.submissionAttemptId === record.resultDelivery.attemptId &&
-				notStarted.nativeSessionId === record.originatingNativeSessionId
-			)
-				return "known_not_submitted";
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			await reconcileWorkspaceCodexNativePromptDeliveryAcceptances({
-				workspaceId: record.workspaceId,
-				ledgerPath,
-				getSummary: (sessionId) => findRuntimeSessionSummary(record.workspaceId, sessionId),
+				validateBeforeTerminalWrite,
+				settled,
+				warn: deps.warn,
 			});
-			const entry = findTaskMessageInjectionRecord(
-				await readTaskMessageInjectionLedger(ledgerPath),
-				record.taskId,
-				record.resultDelivery.resultId,
-			);
-			if (
-				entry?.terminal_delivery_status === "delivered_and_submit_confirmed" ||
-				entry?.terminal_delivery_status === "delivered_queued_behind_active_agent_turn" ||
-				entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence
-			)
-				return "native_accepted";
-			if (entry && isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(entry)) return "known_not_submitted";
-			return "unknown";
 		},
-		readDeliveryRecoveryEvidenceSha256: async (record) => {
+		reconcileDelivery: (record) =>
+			reconcileOwnedCommandResultPromptDelivery(record, (sessionId) =>
+				findRuntimeSessionSummary(record.workspaceId, sessionId),
+			),
+		readReadinessTimeoutObservedAtEpochMs: readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+		readDeliveryRecoveryEvidenceSha256: async (record, purpose) => {
 			const summary = findRuntimeSessionSummary(record.workspaceId, record.originatingConversationSessionId);
+			const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(record.workspaceId);
+			const observesCodexPromptReadiness = purpose === "retry_before_write" && summary?.agentId === "codex";
+			const codexProgrammaticWriteReadiness = observesCodexPromptReadiness
+				? ((await terminalManager?.observeCodexProgrammaticWriteReadinessForOwnedResultRecovery(
+						record.originatingConversationSessionId,
+					)) ?? null)
+				: undefined;
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(record.workspaceId) ??
 				(await listWorkspaceIndexEntries()).find((entry) => entry.workspaceId === record.workspaceId)?.repoPath;
@@ -1509,17 +1418,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 							await getScopedAcpTaskSessionService({ workspaceId: record.workspaceId, workspacePath })
 						).getTaskSessionInputSubmissionReadiness(record.originatingConversationSessionId)
 					: null;
-			const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
-				record.originatingConversationSessionId
-			]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			const entry = record.resultDelivery
-				? findTaskMessageInjectionRecord(
-						await readTaskMessageInjectionLedger(ledgerPath),
-						record.taskId,
-						record.resultDelivery.resultId,
-					)
-				: null;
+			let submissionEvidence: unknown = null;
+			if (purpose === "reconcile_submission" && record.resultDelivery) {
+				const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
+					record.originatingConversationSessionId
+				]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
+				const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
+				const entry = findTaskMessageInjectionRecord(
+					await readTaskMessageInjectionLedger(ledgerPath),
+					record.taskId,
+					record.resultDelivery.resultId,
+				);
+				submissionEvidence = {
+					sendPhase: entry?.codex_native_prompt_delivery_operation?.sendPhase,
+					acceptance: entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence,
+					receipt: entry?.terminal_delivery_status,
+					managedReceipt: managed?.managedDelivery?.terminalDeliveryReceipt,
+				};
+			}
 			const transcriptPath = summary?.agentNativeConversationSessionIdentity?.transcriptPath;
 			let transcriptObservation: { size: number; modifiedAtEpochMs: number } | null = null;
 			if (transcriptPath) {
@@ -1533,20 +1449,27 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			return createHash("sha256")
 				.update(
 					JSON.stringify({
-						nativeIdentity: summary?.agentNativeConversationSessionIdentity,
-						humanInputMutationSequence: deps.workspaceRegistry
-							.getTerminalManagerForWorkspace(record.workspaceId)
-							?.getTaskHumanTerminalInputMutationSequenceNumber(record.originatingConversationSessionId),
-						runtimeSessionIncarnationId: summary?.runtimeSessionIncarnationId,
+						nativeSessionId: summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+						// Codex 使用当前可写状态，管理器重建不会因输入计数重置而补发预算。
+						...(observesCodexPromptReadiness
+							? {
+									codexProgrammaticWriteReadiness,
+									nativeControlAvailable: summary.codexNativeSessionControlEndpoint != null,
+								}
+							: {
+									humanInputMutationSequence: terminalManager?.getTaskHumanTerminalInputMutationSequenceNumber(
+										record.originatingConversationSessionId,
+									),
+									runtimeSessionIncarnationId: summary?.runtimeSessionIncarnationId,
+									endpoint: summary?.codexNativeSessionControlEndpoint,
+								}),
 						sessionFacets: summary ? resolveSessionFacets(summary) : null,
 						acpInputSubmissionReadiness,
-						endpoint: summary?.codexNativeSessionControlEndpoint,
 						transcriptObservation,
-						acceptedPrompt: summary?.agentConversationPromptSubmissionAcceptance,
-						sendPhase: entry?.codex_native_prompt_delivery_operation?.sendPhase,
-						acceptance: entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence,
-						receipt: entry?.terminal_delivery_status,
-						managedReceipt: managed?.managedDelivery?.terminalDeliveryReceipt,
+						acceptedPrompt: observesCodexPromptReadiness
+							? summary.agentConversationPromptSubmissionAcceptance?.eventId
+							: summary?.agentConversationPromptSubmissionAcceptance,
+						submissionEvidence,
 					}),
 				)
 				.digest("hex");

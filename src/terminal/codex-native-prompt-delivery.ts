@@ -75,6 +75,7 @@ export interface CodexNativePromptDeliveryInput {
 	clientUserMessageId: string;
 	isCurrent: () => boolean;
 	beforeSubmit: () => Promise<boolean>;
+	validateImmediatelyBeforeNativeTurnStartRequest?: () => Promise<boolean>;
 	mayInvokeNativeTurnStartRequest?: () => boolean;
 	onRequestAttempted: (observation?: { predecessorNativeTurnId: string | null }) => void | Promise<void>;
 	// 只改变等待策略；真实 userMessage 核验与“不重复 turn/start”仍由本模块负责。
@@ -285,7 +286,13 @@ export async function deliverCodexNativePromptWithoutChangingComposer(
 						if (!input.isCurrent()) return { status: "unconfirmed" };
 						await input.onRequestAttempted({ predecessorNativeTurnId: previousTurnId });
 						if (!input.isCurrent()) return { status: "unconfirmed" };
-						if (input.mayInvokeNativeTurnStartRequest?.() === false) {
+						// 意图落盘和回执登记期间，生产方可能已撤下本次通知。
+						if (
+							(input.validateImmediatelyBeforeNativeTurnStartRequest &&
+								!(await input.validateImmediatelyBeforeNativeTurnStartRequest())) ||
+							!input.isCurrent() ||
+							input.mayInvokeNativeTurnStartRequest?.() === false
+						) {
 							if (input.deliveryJournal && !input.deliveryJournal.recordRequestNotInvoked)
 								return { status: "unconfirmed" };
 							// 本进程仍持有调用栈，确定尚未调用原生请求时才能撤回写前意图。

@@ -54,6 +54,7 @@ function fixture(
 ) {
 	const summary = {
 		taskId: "task-session",
+		agentId: "codex",
 		turnOwner: "agent",
 		liveness: "live",
 		userTurnKind: null,
@@ -1810,6 +1811,130 @@ describe("所属执行与一次逻辑交回", () => {
 		expect(deliver).toHaveBeenCalledTimes(1);
 		expect((await service.inspect("workspace", record)).resultDelivery?.state).toBe("submission_unknown");
 		expect(summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds).toContain(record.executionId);
+	});
+
+	it("就绪超时先补证，证据往返和重建服务也不重复领取补试资格", async () => {
+		let now = Date.now();
+		let readinessEvidence = "evidence-a";
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const firstRuntime = fixture(async () => readinessEvidence);
+		const restartedRuntime = fixture(async (_record, purpose) =>
+			purpose === "reconcile_submission" ? "unchanged-ledger" : readinessEvidence,
+		);
+		const timedOut = { status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" } as const;
+		const readyResponse = { ok: false, summary: null, terminalDelivery: timedOut };
+		firstRuntime.deliver.mockResolvedValue(readyResponse);
+		restartedRuntime.deliver.mockResolvedValue(readyResponse);
+		try {
+			const execution = await firstRuntime.service.start("workspace", firstRuntime.request);
+			await writeFile(
+				firstRuntime.request.specification.resultFile,
+				JSON.stringify({ disposition: "agent_review_ready" }),
+			);
+			await firstRuntime.service.sweepExecution("workspace", execution.executionId);
+			firstRuntime.service.stop();
+			const originalAttemptReceipt = firstRuntime.deliver.mock.calls[0]?.[2];
+			await restartedRuntime.service.sweepExecution("workspace", execution.executionId);
+			expect(restartedRuntime.reconcileDelivery).toHaveBeenCalledOnce();
+			expect(restartedRuntime.deliver).not.toHaveBeenCalled();
+
+			restartedRuntime.reconcileDelivery.mockResolvedValue("known_not_submitted");
+			now += 30_001;
+			await restartedRuntime.service.sweepExecution("workspace", execution.executionId);
+			expect(restartedRuntime.deliver).toHaveBeenCalledOnce();
+			const oldAttemptReceipt = restartedRuntime.deliver.mock.calls[0]?.[2];
+			readinessEvidence = "evidence-b";
+			await restartedRuntime.service.sweepExecution("workspace", execution.executionId);
+			expect(restartedRuntime.deliver).toHaveBeenCalledTimes(2);
+			readinessEvidence = "evidence-a";
+			now += 30_001;
+			await restartedRuntime.service.sweepExecution("workspace", execution.executionId);
+			expect(restartedRuntime.deliver).toHaveBeenCalledTimes(2);
+			readinessEvidence = "evidence-c";
+			await restartedRuntime.service.sweepExecution("workspace", execution.executionId);
+			expect(restartedRuntime.deliver).toHaveBeenCalledTimes(3);
+			const lateConfirmation = { status: "delivered_and_submit_confirmed", reason: null } as const;
+			expect(await originalAttemptReceipt?.(lateConfirmation)).toBe(false);
+			expect(await oldAttemptReceipt?.(lateConfirmation)).toBe(false);
+			expect(restartedRuntime.unpark).not.toHaveBeenCalled();
+		} finally {
+			firstRuntime.service.stop();
+			restartedRuntime.service.stop();
+			clock.mockRestore();
+		}
+	});
+
+	it("Claude 写前就绪超时后沿原结果补送，无需 Codex 未写入账本", async () => {
+		let readinessEvidence = "loading";
+		const { service, request, deliver, summary, reconcileDelivery } = fixture(async () => readinessEvidence);
+		summary.agentId = "claude";
+		deliver.mockResolvedValueOnce({
+			ok: false,
+			summary: null,
+			terminalDelivery: { status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" },
+		});
+		try {
+			const execution = await service.start("workspace", request);
+			await writeFile(request.specification.resultFile, JSON.stringify({ disposition: "agent_review_ready" }));
+			await service.sweepExecution("workspace", execution.executionId);
+			const timedOut = (await service.inspect("workspace", execution)).resultDelivery;
+			expect(timedOut?.state).toBe("known_not_submitted");
+			readinessEvidence = "interactive-prompt";
+			await service.sweepExecution("workspace", execution.executionId);
+			expect(reconcileDelivery).not.toHaveBeenCalled();
+			expect(deliver).toHaveBeenCalledTimes(2);
+			expect((await service.inspect("workspace", execution)).resultDelivery).toMatchObject({
+				resultId: timedOut?.resultId,
+				state: "native_accepted",
+			});
+		} finally {
+			service.stop();
+		}
+	});
+
+	it("同一冻结通知撤下再恢复后保留已用预算，变化的证据仍可补送", async () => {
+		let now = Date.now();
+		let readinessEvidence = "same-viewport";
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const { service, request, deliver, reconcileDelivery } = fixture(async () => readinessEvidence);
+		const terminalDelivery = { status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" } as const;
+		deliver.mockResolvedValueOnce({ ok: false, summary: null, terminalDelivery });
+		deliver.mockResolvedValueOnce({ ok: false, summary: null, terminalDelivery });
+		reconcileDelivery.mockResolvedValue("known_not_submitted");
+		const result = {
+			disposition: "agent_review_ready",
+			agentContinuationNotice: { noticeId: "same-notice", stage: "final_agent_review", text: "原正文" },
+		};
+		try {
+			const execution = await service.start("workspace", request);
+			const sweep = () => service.sweepExecution("workspace", execution.executionId);
+			await writeFile(request.specification.resultFile, JSON.stringify(result));
+			await sweep();
+			now += 30_001;
+			await sweep();
+			await sweep();
+			expect(deliver).toHaveBeenCalledTimes(2);
+			const beforeWithdrawal = (await service.inspect("workspace", execution)).resultDelivery;
+			expect(beforeWithdrawal?.readinessTimeoutRecoveryAttemptedEvidenceSha256s).toHaveLength(1);
+			await writeFile(request.specification.resultFile, JSON.stringify({ disposition: "machine_evidence_pending" }));
+			await sweep();
+			expect((await service.inspect("workspace", execution)).resultDelivery).toBeNull();
+			now += 30_001;
+			await writeFile(request.specification.resultFile, JSON.stringify(result));
+			await sweep();
+			expect(deliver).toHaveBeenCalledTimes(2);
+			expect((await service.inspect("workspace", execution)).resultDelivery).toEqual(beforeWithdrawal);
+			readinessEvidence = "composer-cleared";
+			await sweep();
+			expect(deliver).toHaveBeenCalledTimes(3);
+			expect(await service.inspect("workspace", execution)).toMatchObject({
+				logicalResultCount: 1,
+				resultDelivery: { resultId: beforeWithdrawal?.resultId, state: "native_accepted" },
+			});
+		} finally {
+			service.stop();
+			clock.mockRestore();
+		}
 	});
 
 	it("精确绑定尝试的 ACP 未派发证据允许有界重投", async () => {

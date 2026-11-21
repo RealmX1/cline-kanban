@@ -699,6 +699,11 @@ function SettledQueuedPromptRow({
 			{projection.deliveryState === "settled_failed" && projection.lastDeliveryFailureNote ? (
 				<p className="mt-1 text-[11px] leading-4 text-status-red">{projection.lastDeliveryFailureNote}</p>
 			) : null}
+			{projection.deliveryState === "cancelled" &&
+			projection.lastDeliveryFailureNote &&
+			projection.lastDeliveryFailureNote !== "cancelled_before_delivery" ? (
+				<p className="mt-1 text-[11px] leading-4 text-text-secondary">{projection.lastDeliveryFailureNote}</p>
+			) : null}
 			{projection.deliveryState === "expired" && isProgrammaticInjectionProjection(projection) ? (
 				<p className="mt-1 text-[11px] leading-4 text-text-tertiary">
 					The agent never became idle before the automation's deadline, so it was not sent.
