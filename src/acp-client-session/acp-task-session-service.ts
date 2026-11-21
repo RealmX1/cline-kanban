@@ -320,6 +320,10 @@ export class AcpTaskSessionService {
 		return this.connectionRuntime.getConnection(taskId) !== null;
 	}
 
+	getStartingTaskSessionProcessOwnership(taskId: string) {
+		return this.connectionRuntime.getStartingTaskSessionProcessOwnership?.(taskId) ?? null;
+	}
+
 	listSummaries(): RuntimeTaskSessionSummary[] {
 		return this.registry.listSummaries();
 	}
@@ -448,6 +452,7 @@ export class AcpTaskSessionService {
 					this.registry.getEntry(request.taskId) === entry &&
 					entry.summary.runtimeSessionIncarnationId === runtimeSessionIncarnationId,
 				taskId: request.taskId,
+				runtimeSessionIncarnationId,
 				agentId: request.agentId,
 				cwd: request.cwd,
 				permissionMode: request.permissionMode,

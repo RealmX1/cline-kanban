@@ -160,7 +160,7 @@ const program = new Command(); registerDeploymentCommand(program); await program
 		);
 		await writeFile(
 			join(repository.repositoryPath, "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
-			`const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data; const blocked=process.argv.includes('--before-runtime-restart')&&data.fixtureContinuityBlocked; process.stdout.write(JSON.stringify({...data,ok:!blocked,validatedHostedSessions:[],blockingSessions:blocked?[{conversationSessionId:'active-fixture-session'}]:[],failures:blocked?['等待隔离会话自然退出']:[]})); process.exitCode=blocked?2:0;`,
+			`const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data; const blocked=process.argv.includes('--before-runtime-restart')&&data.fixtureContinuityBlocked; const blockingSession={workspaceId:'isolated-workspace',conversationSessionId:'active-fixture-session',processId:1,sessionTransport:'acp_stdio_subprocess'}; process.stdout.write(JSON.stringify({...data,ok:!blocked,validatedHostedSessions:[],blockingSessions:data.fixtureContinuityBlocked?[blockingSession]:[],failures:blocked?['等待隔离会话自然退出']:[]})); process.exitCode=blocked?2:0;`,
 		);
 		await writeFile(
 			join(repository.repositoryPath, "fixture-cli.mjs"),
@@ -170,9 +170,14 @@ const runtimeHome=join(homedir(),'.cline/kanban'); const args=process.argv.slice
 if(args[0]==='serve') { const loaded=createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'); const start=execFileSync('ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8',env:{...process.env,LC_ALL:'C'}}).trim();
 const server=createServer((request,response)=>{response.setHeader('content-type','application/json'); const procedure=request.url.split('?')[0].split('/').pop(); let data;
 if(procedure==='fixture-shutdown'&&request.method==='POST'){response.end(JSON.stringify({ok:true})); server.close(); server.closeAllConnections();return;}
-if(procedure==='runtime.getAgentSessionPtyHostDiagnostics') data={runtimeIdentity:{runtimeHomeDirectoryPath:runtimeHome,runtimePort:Number(process.env.KANBAN_RUNTIME_PORT)},runtimeProcessId:process.pid,runtimeProcessStartTimeText:start,runtimeLoadedEntrypointSha256:loaded,fixtureContinuityBlocked:existsSync(join(runtimeHome,'fixture-blocking-session'))};
+if(procedure==='runtime.getAgentSessionPtyHostDiagnostics') data={runtimeIdentity:{runtimeHomeDirectoryPath:runtimeHome,runtimePort:Number(process.env.KANBAN_RUNTIME_PORT)},runtimeProcessId:process.pid,runtimeProcessStartTimeText:start,runtimeLoadedEntrypointSha256:loaded,enforcesAuthorizedUnretainableSessionHandoverBinding:true,acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions:true,fixtureContinuityBlocked:existsSync(join(runtimeHome,'fixture-blocking-session'))};
 else if(procedure==='notificationIntelligence.listArchive') data={entries:[],totalCount:0,nextBeforeSequence:null}; else if(procedure==='runtime.getConfig')data={detectedCommands:['node']}; else {response.setHeader('content-type','text/html');response.end('<html>隔离服务</html>');return;}response.end(JSON.stringify({result:{data}}));}).listen(Number(process.env.KANBAN_RUNTIME_PORT),'127.0.0.1');
 } else if(args[0]==='runtime'&&args[1]==='handover-restart') {
+if(args.includes('--allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host')) throw new Error('隔离标准部署禁止退回布尔中断授权');
+if(existsSync(join(runtimeHome,'fixture-blocking-session'))) {
+const index=args.indexOf('--authorized-unretainable-session-handover');
+if(index<0||JSON.parse(args[index+1]).interruptedSessions[0]?.conversationSessionId!=='active-fixture-session') throw new Error('隔离交接缺少绑定会话中断授权');
+}
 const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/fixture-shutdown',{method:'POST'});
 if(!(await response.json()).ok) throw new Error('隔离服务未接受交接');
 } else if(args[0]==='deployment'&&args[1]==='record') {
@@ -489,7 +494,18 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					executionId: originalSupervisor.executionId,
 					launchAttemptCount: 2,
 				});
-				await rm(blockingSessionPath);
+				const authorizationFile = join(executionDirectory, "session-interruption-approval.json");
+				const interruptionAuthorization = {
+					sourceReference: "test:isolated-session-interruption",
+					userRequestQuote: "允许中断无法跨重启保留的隔离会话",
+				};
+				await writeFile(authorizationFile, JSON.stringify(interruptionAuthorization));
+				const approved = await invoke("authorize-redeployment-session-interruption", [
+					"--authorization-file",
+					authorizationFile,
+				]);
+				expect(approved.code, approved.stdout + approved.stderr).toBe(0);
+				expect(JSON.parse(approved.stdout).authorization).toEqual(interruptionAuthorization);
 				if (process.getuid?.() !== 0) {
 					await vi.waitFor(
 						async () => {
@@ -617,6 +633,15 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 				await readFile(join(executionDirectory, "owned-command-specification.json"), "utf8"),
 			);
 			expect(ownedCommandSpecification.ownerSessionInterruptPolicy).toBe("preserve_execution");
+			if (!repairAfterQualityFailure)
+				expect(
+					JSON.parse(await readFile(join(executionDirectory, "before-runtime-restart.json"), "utf8")),
+				).toMatchObject({
+					blockingSessions: [{ conversationSessionId: "active-fixture-session" }],
+					nonPreservableSessionInterruptionAuthorization: {
+						sourceReference: "test:isolated-session-interruption",
+					},
+				});
 			expect(runtimeStateBackupReceipt.preservedInPlaceOrTransientEndpoints).toContain(retiredWriterDirectory);
 			expect(await readdir(join(executionDirectory, "preserved-runtime-state"))).not.toContain(
 				retiredWriterDirectoryName,

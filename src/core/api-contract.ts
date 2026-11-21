@@ -4331,11 +4331,37 @@ export type RuntimeAgentSessionCountsAffectedByRuntimeExit = z.infer<
 	typeof runtimeAgentSessionCountsAffectedByRuntimeExitSchema
 >;
 
-// `kanban runtime handover-restart` 的请求。**输入从首版起冻结**：新 build 的 CLI 会对仍在跑的旧 runtime 发它，
-// 只许追加可选字段。
+// 正式交接可以中断的会话。身份必须和预检清单一致；理解该绑定的 runtime 发现代际变化，
+// 或当前会被退出打断的会话不在这份清单里时，拒绝重启。
+export const authorizedUnretainableHandoverSessionSchema = z.object({
+	workspaceId: z.string().min(1),
+	conversationSessionId: z.string().min(1),
+	processId: z.number().int().positive().nullable(),
+	nativeConversationSessionId: z.string().nullable(),
+	runtimeSessionIncarnationId: z.string().nullable(),
+	sessionKind: z.enum([
+		"runtime_process_pty",
+		"ownership_unknown_pty",
+		"acp_stdio_subprocess",
+		"in_process_cline_sdk",
+	]),
+});
+export type AuthorizedUnretainableHandoverSession = z.infer<typeof authorizedUnretainableHandoverSessionSchema>;
+
+export const authorizedUnretainableSessionHandoverSchema = z.object({
+	runtimeProcessId: z.number().int().positive(),
+	runtimeProcessStartTimeText: z.string().min(1),
+	interruptedSessions: z.array(authorizedUnretainableHandoverSessionSchema),
+});
+export type AuthorizedUnretainableSessionHandover = z.infer<typeof authorizedUnretainableSessionHandoverSchema>;
+
+// `kanban runtime handover-restart` 的请求。新 CLI 对旧 runtime 只发布尔字段；旧 runtime 会丢弃未知字段。
+// 已验收 CLI 会把预检绑定和布尔值一起发到这个入口，本 runtime 必须继续核验该绑定，不能降成无条件布尔中断。
+// 标准部署的预检绑定改走专用 procedure，不把新请求发到旧入口。
 export const runtimePlannedHandoverRestartRequestSchema = z.object({
 	// 默认拒绝：有 agent 会话不在 host 里（handover 会打断它们）时不重启，只把数量报回去。
 	allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost: z.boolean().optional(),
+	authorizedUnretainableSessionHandover: authorizedUnretainableSessionHandoverSchema.optional(),
 });
 export type RuntimePlannedHandoverRestartRequest = z.infer<typeof runtimePlannedHandoverRestartRequestSchema>;
 
@@ -4349,6 +4375,10 @@ export const runtimePlannedHandoverRestartResponseSchema = z.object({
 	runtimeProcessId: z.number().int(),
 	agentSessionPtyHostModeEnabled: z.boolean(),
 	agentSessionCountsAffectedByRuntimeExit: runtimeAgentSessionCountsAffectedByRuntimeExitSchema,
+	// 旧 runtime 不返回这两项。调用方不能只凭 outcome 和 PID 认定授权中断已经落在预检代际上。
+	runtimeProcessStartTimeText: z.string().optional(),
+	authorizedUnretainableSessionHandoverBound: z.literal(true).optional(),
+	authorizedUnretainableSessionsAtHandoverAcceptance: z.array(authorizedUnretainableHandoverSessionSchema).optional(),
 });
 export type RuntimePlannedHandoverRestartResponse = z.infer<typeof runtimePlannedHandoverRestartResponseSchema>;
 

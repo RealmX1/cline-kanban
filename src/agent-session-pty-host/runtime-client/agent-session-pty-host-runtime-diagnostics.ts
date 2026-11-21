@@ -55,6 +55,9 @@ export async function queryCurrentRuntimeAgentSessionPtyHostDiagnostics(): Promi
 	const report = await runtimeDiagnosticsProvider();
 	return await withCurrentPersistentPreference({
 		...report,
+		// 只有正在应答的本 build 能做这个承诺。离线快照不补写，避免把旧证据看成新能力。
+		enforcesAuthorizedUnretainableSessionHandoverBinding: true,
+		acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions: true,
 		runtimePtySessions: runtimePtySessionOwnershipProvider?.() ?? report.runtimePtySessions,
 		nonPtyAgentSessionsPreventingContinuity:
 			nonPtyAgentSessionOwnershipProvider?.() ?? report.nonPtyAgentSessionsPreventingContinuity,

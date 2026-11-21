@@ -9,6 +9,7 @@
 
 import type { Command } from "commander";
 import { terminateEveryHostedSessionThroughAgentSessionPtyHostsWhileKanbanRuntimeIsOffline } from "../agent-session-pty-host/runtime-client/terminate-every-hosted-session-while-kanban-runtime-is-offline";
+import { authorizedUnretainableSessionHandoverSchema } from "../core/api-contract";
 import { DEFAULT_CLI_RUNTIME_HANDOVER_SUCCESSOR_WAIT_SECONDS } from "../core/cli-process-guards";
 import { buildKanbanRuntimeUrl, getKanbanRuntimePort, getRuntimeFetch } from "../core/runtime-endpoint";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
@@ -85,6 +86,7 @@ function toErrorMessage(error: unknown): string {
 async function runHandoverRestartCommand(options: {
 	waitForSuccessorSeconds: string;
 	allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost?: boolean;
+	authorizedUnretainableSessionHandover?: string;
 }): Promise<void> {
 	const waitForSuccessorSeconds = Number(options.waitForSuccessorSeconds);
 	if (!Number.isFinite(waitForSuccessorSeconds) || waitForSuccessorSeconds < 0) {
@@ -92,18 +94,26 @@ async function runHandoverRestartCommand(options: {
 			`--wait-for-successor-seconds must be a non-negative number, got "${options.waitForSuccessorSeconds}"`,
 		);
 	}
-	const response = await createRuntimeTrpcClient(
-		null,
-	).runtime.requestPlannedHandoverRestartPreservingHostedAgentSessions.mutate({
-		allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost:
-			options.allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost === true,
-	});
+	const authorizedUnretainableSessionHandover =
+		options.authorizedUnretainableSessionHandover === undefined
+			? undefined
+			: authorizedUnretainableSessionHandoverSchema.parse(JSON.parse(options.authorizedUnretainableSessionHandover));
+	const runtime = createRuntimeTrpcClient(null).runtime;
+	const response = authorizedUnretainableSessionHandover
+		? await runtime.requestPlannedHandoverRestartWithAuthorizedUnretainableSessions.mutate(
+				authorizedUnretainableSessionHandover,
+			)
+		: await runtime.requestPlannedHandoverRestartPreservingHostedAgentSessions.mutate({
+				allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost:
+					options.allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost === true,
+			});
 	if (response.outcome !== "handover_restart_started") {
 		printJson({
 			ok: false,
 			...response,
-			...(response.outcome ===
-			"refused_because_agent_sessions_not_preserved_by_agent_session_pty_host_would_be_interrupted"
+			...(!authorizedUnretainableSessionHandover &&
+			response.outcome ===
+				"refused_because_agent_sessions_not_preserved_by_agent_session_pty_host_would_be_interrupted"
 				? {
 						hint: "Some agent sessions are owned by the runtime process itself and would end. Re-run with --allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host to restart anyway.",
 					}
@@ -200,10 +210,15 @@ export function registerRuntimeCommand(program: Command): void {
 			"--allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host",
 			"restart even if some agent sessions are owned by the runtime process itself and will end",
 		)
+		.option(
+			"--authorized-unretainable-session-handover <json>",
+			"JSON binding of the verified runtime generation and the sessions this restart may interrupt",
+		)
 		.action(
 			async (options: {
 				waitForSuccessorSeconds: string;
 				allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost?: boolean;
+				authorizedUnretainableSessionHandover?: string;
 			}) => {
 				try {
 					await runHandoverRestartCommand(options);

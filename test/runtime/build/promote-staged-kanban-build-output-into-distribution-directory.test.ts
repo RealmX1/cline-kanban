@@ -32,22 +32,33 @@ function createStagingAndDistributionDirectories(): {
 	return { stagingDirectoryPath, distributionDirectoryPath };
 }
 
-function runPromotionScript(stagingDirectoryPath: string, distributionDirectoryPath: string): PromotionScriptResult {
+function runPromotionScript(
+	stagingDirectoryPath: string,
+	distributionDirectoryPath: string,
+	scriptPath = promotionScriptPath,
+): PromotionScriptResult {
 	const stdout = execFileSync(
 		process.execPath,
-		[
-			promotionScriptPath,
-			"--staging-directory",
-			stagingDirectoryPath,
-			"--distribution-directory",
-			distributionDirectoryPath,
-		],
+		[scriptPath, "--staging-directory", stagingDirectoryPath, "--distribution-directory", distributionDirectoryPath],
 		{ encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 	);
 	return JSON.parse(stdout) as PromotionScriptResult;
 }
 
 describe("promote-staged-kanban-build-output-into-distribution-directory", () => {
+	it("候选检出目录是软链接时仍执行入口并换入产物", () => {
+		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
+		const candidateScriptsLink = join(dirname(distributionDirectoryPath), "candidate-scripts");
+		symlinkSync(dirname(promotionScriptPath), candidateScriptsLink);
+		writeFileSync(join(stagingDirectoryPath, "cli.js"), "绑定候选入口");
+		const result = runPromotionScript(
+			stagingDirectoryPath,
+			distributionDirectoryPath,
+			join(candidateScriptsLink, "promote-staged-kanban-build-output-into-distribution-directory.mjs"),
+		);
+		expect(result.promotedRelativeFilePathsInPromotionOrder).toEqual(["cli.js"]);
+		expect(readFileSync(join(distributionDirectoryPath, "cli.js"), "utf8")).toBe("绑定候选入口");
+	});
 	it("拒绝软链接暂存根目录，候选文件和空目录都完整保留", () => {
 		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
 		const candidateDirectoryPath = join(dirname(distributionDirectoryPath), "immutable-candidate-distribution");
@@ -130,6 +141,36 @@ describe("promote-staged-kanban-build-output-into-distribution-directory", () =>
 		);
 		expect(readFileSync(join(symbolicLinkTargetDirectoryPath, "index.html"), "utf8")).toBe("must survive");
 		expect(existsSync(join(distributionDirectoryPath, "web-ui"))).toBe(false);
+	});
+
+	it("refuses to follow a destination directory symlink and leaves the retained file unchanged", () => {
+		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
+		const retainedDirectoryPath = join(dirname(distributionDirectoryPath), "retained-web-ui");
+		writeFileCreatingParentDirectories(join(retainedDirectoryPath, "index.html"), "retained-original");
+		symlinkSync(retainedDirectoryPath, join(distributionDirectoryPath, "web-ui"));
+		writeFileCreatingParentDirectories(join(stagingDirectoryPath, "web-ui/index.html"), "candidate-replacement");
+
+		expect(() => runPromotionScript(stagingDirectoryPath, distributionDirectoryPath)).toThrow(
+			/拒绝沿目标目录软链接发布/,
+		);
+		expect(readFileSync(join(retainedDirectoryPath, "index.html"), "utf8")).toBe("retained-original");
+		expect(readFileSync(join(stagingDirectoryPath, "web-ui/index.html"), "utf8")).toBe("candidate-replacement");
+	});
+
+	it("refuses to follow a nested destination directory symlink before replacing any file", () => {
+		const { stagingDirectoryPath, distributionDirectoryPath } = createStagingAndDistributionDirectories();
+		const retainedAssetsPath = join(dirname(distributionDirectoryPath), "retained-assets");
+		writeFileCreatingParentDirectories(join(retainedAssetsPath, "shared.js"), "retained-shared");
+		mkdirSync(join(distributionDirectoryPath, "web-ui"));
+		symlinkSync(retainedAssetsPath, join(distributionDirectoryPath, "web-ui/assets"));
+		writeFileCreatingParentDirectories(join(stagingDirectoryPath, "web-ui/index.html"), "candidate-page");
+		writeFileCreatingParentDirectories(join(stagingDirectoryPath, "web-ui/assets/shared.js"), "candidate-shared");
+
+		expect(() => runPromotionScript(stagingDirectoryPath, distributionDirectoryPath)).toThrow(
+			/拒绝沿目标目录软链接发布/,
+		);
+		expect(readFileSync(join(retainedAssetsPath, "shared.js"), "utf8")).toBe("retained-shared");
+		expect(existsSync(join(distributionDirectoryPath, "web-ui/index.html"))).toBe(false);
 	});
 
 	it("skips stale-file cleanup when the owned web-ui directory in dist is a symbolic link", () => {

@@ -220,6 +220,7 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	authorizedUnretainableSessionHandoverSchema,
 	globalMarkdownDraftCreateInputSchema,
 	globalMarkdownDraftDeleteInputSchema,
 	globalMarkdownDraftDeleteResultSchema,
@@ -2389,6 +2390,15 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.mutation(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.requestPlannedHandoverRestartPreservingHostedAgentSessions(input);
 		}),
+	requestPlannedHandoverRestartWithAuthorizedUnretainableSessions:
+		procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+			.input(authorizedUnretainableSessionHandoverSchema)
+			.output(runtimePlannedHandoverRestartResponseSchema)
+			.mutation(async ({ ctx, input }) => {
+				return await ctx.runtimeApi.requestPlannedHandoverRestartPreservingHostedAgentSessions({
+					authorizedUnretainableSessionHandover: input,
+				});
+			}),
 	// `kanban runtime stop --terminate-hosted-agent-sessions`：停 runtime 并终止全部 hosted 会话（含未接管的）。
 	requestRuntimeStopTerminatingHostedAgentSessions: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
 		.output(runtimeStopTerminatingHostedAgentSessionsResponseSchema)

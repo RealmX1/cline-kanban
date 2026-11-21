@@ -7,6 +7,7 @@ import {
 	isAgentActivelyProducingOutput,
 	isAgentOutputQuiet,
 	isAgentOutputWithinActiveWindow,
+	nonPtySessionWouldEndWhenRuntimeExits,
 	type SessionFacets,
 	VALIDATION_KEEP_WHILE_AGENT_OUTPUT_QUIET_MS,
 } from "../../../src/core/session-activity";
@@ -206,5 +207,43 @@ describe("deriveDisplayLiveness（展示叠加：live → computing / quiet）",
 			// 即便 lastOutputAt 很新鲜，非 live 也不会被叠加成 computing。
 			expect(deriveDisplayLiveness(facets, NOW, NOW)).toBe(liveness);
 		}
+	});
+});
+
+describe("nonPtySessionWouldEndWhenRuntimeExits", () => {
+	const abortedAcpSession = makeSummary({
+		agentId: "omp",
+		sessionTransport: "acp_stdio_subprocess",
+		state: "interrupted",
+		turnOwner: "user",
+		liveness: "interrupted",
+		userTurnKind: "interrupted",
+		pid: null,
+	});
+
+	it.each(["starting", "retrying"] as const)("ACP %s 时尚未登记连接仍计入交接", (liveness) => {
+		const launchingAcpSession = makeSummary({
+			agentId: "omp",
+			sessionTransport: "acp_stdio_subprocess",
+			turnOwner: "agent",
+			liveness,
+			userTurnKind: null,
+		});
+		expect(nonPtySessionWouldEndWhenRuntimeExits(launchingAcpSession, { hasLiveConnection: false })).toBe(true);
+	});
+
+	it("连接仍在时计入，即使回合已取消且进程号还没写上", () => {
+		expect(nonPtySessionWouldEndWhenRuntimeExits(abortedAcpSession, { hasLiveConnection: true })).toBe(true);
+	});
+
+	it("连接已释放时不计入，即使 summary 还留着旧进程号", () => {
+		expect(
+			nonPtySessionWouldEndWhenRuntimeExits({ ...abortedAcpSession, pid: 40 }, { hasLiveConnection: false }),
+		).toBe(false);
+	});
+
+	it("没有连接账本时，已取消且进程号仍在的 ACP 仍计入", () => {
+		expect(nonPtySessionWouldEndWhenRuntimeExits({ ...abortedAcpSession, pid: 40 })).toBe(true);
+		expect(nonPtySessionWouldEndWhenRuntimeExits(abortedAcpSession)).toBe(false);
 	});
 });

@@ -52,6 +52,7 @@ import {
 } from "./local-redeployment-persistent-checks";
 import {
 	assertLocalRedeploymentOwnerStillEligible,
+	authorizeLocalRedeploymentSessionInterruption,
 	LocalRedeploymentIdentityMismatch,
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
@@ -217,6 +218,19 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 				);
 			},
 		);
+	program
+		.command("authorize-redeployment-session-interruption")
+		.requiredOption("--execution-directory <path>")
+		.requiredOption("--authorization-file <path>")
+		.action(async (options: { executionDirectory: string; authorizationFile: string }) => {
+			const directory = await assertPersistentExecutionDirectory(options.executionDirectory);
+			printResult(
+				await authorizeLocalRedeploymentSessionInterruption(
+					directory,
+					await readLocalRedeploymentJson(options.authorizationFile),
+				),
+			);
+		});
 	for (const operation of ["start-redeployment", "cancel-redeployment", "observe-redeployment"] as const) {
 		program
 			.command(operation)

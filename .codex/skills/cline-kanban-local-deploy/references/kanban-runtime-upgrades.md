@@ -50,11 +50,11 @@ KANBAN_RUNTIME_HOST=127.0.0.1 KANBAN_RUNTIME_PORT=3484 \
   --evidence-file "$KANBAN_DEPLOY_PERSISTENT_DIRECTORY/before-runtime-restart.json"
 ```
 
-脚本交叉核对所属 runtime 的当前诊断、OS 进程启动身份、逐会话宿主和待接管记录。关闭偏好仍须接回旧 hosted 会话。环境变量、HTTP 200、socket 文件和历史日志均不能单独放行。遇到非托管会话，保留旧 runtime，每 30 秒只读复查，默认最多等待 30 分钟；预算耗尽保留证据，可在同一授权仍有效时重新检查。不得自动 Stop、resume、强制迁移或使用中断会话的 override。
+脚本交叉核对所属 runtime 的当前诊断、OS 进程启动身份、逐会话宿主和待接管记录。关闭偏好仍须接回旧 hosted 会话。环境变量、HTTP 200、socket 文件和历史日志均不能单独放行。遇到非托管会话且缺少中断授权时，保留旧 runtime，每 30 秒只读复查，默认最多等待 30 分钟；预算耗尽保留证据，可在同一授权仍有效时重新检查。明确授权记录在当前部署中，由执行器重验后在正式交接使用。
 
 旧 runtime 若明确返回新诊断 procedure 不存在，脚本改用旧 API 全项目会话 facet、两次原生进程树、固定端口监听 PID/启动命令及 generation 监听检查。已迁移项目可用持久 sessions 与原生进程交叉补证；缺证保留 unknown。此路径只允许无活会话的首次切换，不证明连续性；不响应的旧 host 不能通过新建 controller 连接检查。
 
-3. 即将停止前重新运行上述预检，重新核对同一个监听 PID 与 `lstart`。发布 build/link 后使用 dbfe4 已落入 local main 的 `kanban runtime handover-restart --wait-for-successor-seconds 60`（该命令默认输出 JSON，没有 `--json`）。它在服务端再次原子核对是否有不能保留的活会话。禁止传 `--allow-interrupting-agent-sessions-not-preserved-by-agent-session-pty-host`，禁止用 `runtime stop --terminate-hosted-agent-sessions` 代替部署交接；离线全停、host 回收继续由 dbfe4 的统一契约负责。
+3. 即将停止前重新运行上述预检，重新核对同一个监听 PID 与 `lstart`。发布 build/link 后使用 `kanban runtime handover-restart --wait-for-successor-seconds 60`（该命令默认输出 JSON）。它在服务端再次原子核对是否有不能保留的活会话。仅当本执行有明确中断授权，且当前 runtime 诊断的 `acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions` 为 true 时，执行器才使用 `--authorized-unretainable-session-handover`，传入刚核验的 runtime 代际和不可保留会话身份。该选项走专用 RPC。已验收基线会报告 `enforcesAuthorizedUnretainableSessionHandoverBinding`，但没有这个 procedure，不能用旧字段代替。旧 runtime 不识别该入口，调用失败后保留原件，禁止改走布尔中断。仍有无法保留的会话且缺少专用入口时，只读等待至这些会话退出；会话已经退出后使用默认受保护交接，不传布尔中断。接收端发现代际变化或有未核验会话时拒绝交接。正式交接使用该原生入口保留已托管会话。只有回执的 `outcome` 为 `handover_restart_started`，`runtimeProcessId` 与启动时刻都属于该代际，且接收端确认绑定并在接受清单中列出发起会话时，才把该会话的退出记作本次授权中断。
 4. 首次运行的旧 build 若不支持 `runtime handover-restart`，只在上述旧版静默盘点通过、停止前再次通过且监听 PID/启动身份仍一致时，按原 supervisor 的退出契约进行受控停止并重新启动持久服务入口。SIGTERM 可能让旧 supervisor 一并退出；此时显式启动 canonical service runner。不要把 `kill -9` 当作部署成功条件，也不要因为有 Codex 控制宿主或旧 socket 就声称 PTY 已独立托管。
 5. 新 runtime 首次启动即读取持久偏好；受支持的固定端口实例在无持久选择、无环境覆盖时默认启用，无需第二次部署。先运行以下只读检查核对当前启动意图、实际模式与逐会话归属；若明确关闭则按关闭意图核验，不能为部署擅自覆盖用户选择。
 

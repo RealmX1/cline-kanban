@@ -5,6 +5,7 @@ import { cp, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
+import { authorizedUnretainableHandoverSessionSchema } from "../core/api-contract";
 import {
 	taskCommandExecutionAdoptExistingSupervisorRequestSchema,
 	taskCommandExecutionSpecificationSchema,
@@ -30,6 +31,15 @@ const processBaseline = z.strictObject({
 	processId: z.number().int().positive(),
 	processStartTimeText: z.string().min(1),
 });
+const nonPreservableSessionInterruptionAuthorizationSchema = z.strictObject({
+	sourceReference: z.string().trim().min(1),
+	userRequestQuote: z.string().trim().min(1),
+});
+const storedSessionInterruptionAuthorizationSchema = z.strictObject({
+	requestSha256: z.string().length(64),
+	authorization: nonPreservableSessionInterruptionAuthorizationSchema,
+});
+const sessionInterruptionAuthorizationFilename = "non-preservable-session-interruption-authorization.json";
 export const localRedeploymentRequestSchema = z.strictObject({
 	schemaVersion: z.literal(1),
 	executionId: z.uuid(),
@@ -61,6 +71,7 @@ export const localRedeploymentRequestSchema = z.strictObject({
 			.optional(),
 	}),
 	authorization: z.strictObject({ sourceReference: z.string().min(1), userRequestQuote: z.string().min(1) }),
+	nonPreservableSessionInterruptionAuthorization: nonPreservableSessionInterruptionAuthorizationSchema.optional(),
 });
 export type LocalRedeploymentRequest = z.infer<typeof localRedeploymentRequestSchema>;
 export const LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME =
@@ -101,6 +112,135 @@ export async function writeLocalRedeploymentJson(path: string, value: unknown): 
 export function assertLocalRedeploymentNotRevoked(directory: string): void {
 	for (const name of ["redeployment-revocation.json", "local-deployment-execution-restriction.json"])
 		if (existsSync(join(directory, name))) throw new Error("本次重部署已有持久撤销或执行限制");
+}
+
+export async function readLocalRedeploymentSessionInterruptionAuthorization(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+) {
+	const stored = await readLocalRedeploymentJson(join(directory, sessionInterruptionAuthorizationFilename));
+	if (stored === null) return frozen.request.nonPreservableSessionInterruptionAuthorization ?? null;
+	const receipt = storedSessionInterruptionAuthorizationSchema.parse(stored);
+	if (receipt.requestSha256 !== frozen.requestSha256)
+		throw new LocalRedeploymentIdentityMismatch("会话中断授权与本次冻结请求不匹配");
+	if (
+		frozen.request.nonPreservableSessionInterruptionAuthorization &&
+		JSON.stringify(receipt.authorization) !==
+			JSON.stringify(frozen.request.nonPreservableSessionInterruptionAuthorization)
+	)
+		throw new LocalRedeploymentIdentityMismatch("补充授权与冻结请求中的会话中断授权不匹配");
+	return receipt.authorization;
+}
+
+export async function authorizeLocalRedeploymentSessionInterruption(directory: string, raw: unknown) {
+	const authorization = nonPreservableSessionInterruptionAuthorizationSchema.parse(raw);
+	const path = join(directory, sessionInterruptionAuthorizationFilename);
+	return lockedFileSystem.withLock(
+		{ path: join(directory, "redeployment-session-interruption-authorization") },
+		async () => {
+			const frozen = await readFrozenLocalRedeploymentRequest(directory);
+			await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
+			const previous = await readLocalRedeploymentSessionInterruptionAuthorization(directory, frozen);
+			if (previous && JSON.stringify(previous) !== JSON.stringify(authorization))
+				throw new LocalRedeploymentIdentityMismatch("本轮已绑定另一条会话中断授权");
+			assertLocalRedeploymentNotRevoked(directory);
+			if (!previous) await writeLocalRedeploymentJson(path, { requestSha256: frozen.requestSha256, authorization });
+			return { ok: true, executionId: frozen.request.executionId, authorization };
+		},
+	);
+}
+
+export const LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME =
+	"authorized-owner-session-interruption-at-restart.json";
+
+export const localRedeploymentAuthorizedOwnerInterruptionSchema = z
+	.object({
+		requestSha256: z.string(),
+		dispatchedAtEpochMs: z.number(),
+		runtimeBefore: processBaseline,
+		nativeHandover: z.object({
+			outcome: z.literal("handover_restart_started"),
+			runtimeProcessId: z.number().int().positive(),
+			runtimeProcessStartTimeText: z.string().min(1),
+			authorizedUnretainableSessionHandoverBound: z.literal(true),
+			authorizedUnretainableSessionsAtHandoverAcceptance: z.array(authorizedUnretainableHandoverSessionSchema),
+		}),
+		authorizedOwnerSession: z.object({
+			workspaceId: z.string().min(1),
+			conversationSessionId: z.string().min(1),
+			nativeConversationSessionId: z.string().min(1),
+			runtimeSessionIncarnationId: z.string().nullable(),
+		}),
+	})
+	.refine(({ authorizedOwnerSession, nativeHandover }) =>
+		nativeHandover.authorizedUnretainableSessionsAtHandoverAcceptance.some(
+			(session) =>
+				session.workspaceId === authorizedOwnerSession.workspaceId &&
+				session.conversationSessionId === authorizedOwnerSession.conversationSessionId &&
+				session.nativeConversationSessionId === authorizedOwnerSession.nativeConversationSessionId &&
+				session.runtimeSessionIncarnationId === authorizedOwnerSession.runtimeSessionIncarnationId,
+		),
+	);
+
+async function deploymentRestartAcceptedAfterAuthorizedOwnerInterruption(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+): Promise<boolean> {
+	const interruption = localRedeploymentAuthorizedOwnerInterruptionSchema.safeParse(
+		await readLocalRedeploymentJson(join(directory, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME)),
+	);
+	const authorizedOwner = interruption.success ? interruption.data.authorizedOwnerSession : null;
+	if (
+		!interruption.success ||
+		!authorizedOwner ||
+		!frozen.owner ||
+		interruption.data.requestSha256 !== frozen.requestSha256 ||
+		interruption.data.nativeHandover.runtimeProcessId !== interruption.data.runtimeBefore.processId ||
+		interruption.data.nativeHandover.runtimeProcessStartTimeText.trim().replace(/\s+/gu, " ") !==
+			interruption.data.runtimeBefore.processStartTimeText.trim().replace(/\s+/gu, " ") ||
+		authorizedOwner.workspaceId !== frozen.request.workspaceId ||
+		authorizedOwner.conversationSessionId !== frozen.owner.conversationSessionId ||
+		authorizedOwner.nativeConversationSessionId !== frozen.owner.nativeSessionId ||
+		authorizedOwner.runtimeSessionIncarnationId !== frozen.owner.runtimeSessionIncarnationId ||
+		!(await readLocalRedeploymentSessionInterruptionAuthorization(directory, frozen))
+	)
+		return false;
+	const deployment = z
+		.object({
+			manifest: z.object({
+				executionId: z.string(),
+				redeploymentRequestSha256: z.string(),
+				candidateDistributionSha256: z.string(),
+			}),
+		})
+		.safeParse(await readLocalRedeploymentJson(join(directory, "local-deployment-execution.json")));
+	if (
+		!deployment.success ||
+		deployment.data.manifest.executionId !== frozen.request.executionId ||
+		deployment.data.manifest.redeploymentRequestSha256 !== frozen.requestSha256
+	)
+		return false;
+	const acceptance = z
+		.object({
+			executionId: z.string(),
+			candidateDistributionSha256: z.string(),
+			observedAtEpochMs: z.number(),
+			runtime: z.object({
+				ok: z.literal(true),
+				runtimeProcessId: z.number(),
+				runtimeProcessStartTimeText: z.string(),
+			}),
+		})
+		.safeParse(await readLocalRedeploymentJson(join(directory, "runtime-restart-acceptance.json")));
+	return (
+		acceptance.success &&
+		acceptance.data.executionId === frozen.request.executionId &&
+		acceptance.data.candidateDistributionSha256 === deployment.data.manifest.candidateDistributionSha256 &&
+		acceptance.data.observedAtEpochMs >= interruption.data.dispatchedAtEpochMs &&
+		(acceptance.data.runtime.runtimeProcessId !== interruption.data.runtimeBefore.processId ||
+			acceptance.data.runtime.runtimeProcessStartTimeText.trim().replace(/\s+/gu, " ") !==
+				interruption.data.runtimeBefore.processStartTimeText.trim().replace(/\s+/gu, " "))
+	);
 }
 
 export async function readCurrentBoundLocalRedeploymentOwner(
@@ -349,13 +489,13 @@ export async function assertLocalRedeploymentOwnerStillEligible(
 	const summary = (
 		await loadPersistedWorkspaceSessionsById(frozen.request.workspaceId, { requireCompleteRead: true })
 	)[frozen.owner.conversationSessionId];
-	if (
+	const ownerSessionChanged =
 		!summary ||
 		summary.agentNativeConversationSessionIdentity?.nativeSessionId !== frozen.owner.nativeSessionId ||
 		(summary.runtimeSessionIncarnationId ?? null) !== frozen.owner.runtimeSessionIncarnationId ||
 		!summary.workspacePath ||
-		(await realpath(summary.workspacePath)) !== frozen.owner.worktreeIdentity.realPath
-	)
+		(await realpath(summary.workspacePath)) !== frozen.owner.worktreeIdentity.realPath;
+	if (ownerSessionChanged && !(await deploymentRestartAcceptedAfterAuthorizedOwnerInterruption(directory, frozen)))
 		throw new LocalRedeploymentIdentityMismatch("原主会话、原生会话或运行时代际已变化");
 	const metadata = await stat(frozen.request.originatingTaskWorktreePath);
 	if (

@@ -48,6 +48,7 @@ function readAgentSessionUpdatedAtMs(session: { updatedAt?: unknown }): number {
 export interface AcpTaskConnectionStartInput {
 	modelId?: string;
 	taskId: string;
+	runtimeSessionIncarnationId?: string;
 	agentId: RuntimeAgentId;
 	// 必须是绝对路径：ACP 的 session/new 要求绝对 cwd，omp 会直接拒收相对路径。
 	cwd: string;
@@ -102,9 +103,23 @@ export interface AcpTaskConnection {
 	close(): void;
 }
 
-interface AcpTaskConnectionRecord extends AcpTaskConnection {
+interface AcpTaskConnectionProcess {
 	child: ChildProcessByStdio<Writable, Readable, Readable>;
 	connection: AcpClientConnection;
+}
+
+export interface AcpStartingTaskSessionProcessOwnership {
+	processId: number;
+	runtimeSessionIncarnationId: string | null;
+	nativeConversationSessionId: string | null;
+}
+
+interface AcpStartingTaskConnection extends AcpTaskConnectionProcess {
+	runtimeSessionIncarnationId: string | null;
+	requestedNativeConversationSessionId: string | null;
+}
+
+interface AcpTaskConnectionRecord extends AcpTaskConnection, AcpTaskConnectionProcess {
 	// dispose 与子进程 exit 事件之间隔着一次事件循环，必须先记下意图，退出回调才认得出
 	// 「这是我自己拆的」而不是「agent 崩了」。
 	disposedByKanban: boolean;
@@ -112,6 +127,7 @@ interface AcpTaskConnectionRecord extends AcpTaskConnection {
 
 export class AcpClientConnectionRuntime {
 	private readonly connectionsByTaskId = new Map<string, AcpTaskConnectionRecord>();
+	private readonly startingConnectionsByTaskId = new Map<string, AcpStartingTaskConnection>();
 	// 原生 sessionId 可以被多个连接加载；事件与清理必须以来源连接为所有权边界。
 	private readonly sessionIdByConnection = new Map<AcpClientConnection, string>();
 	// 正在跑 session/load 的 task。协议层分不出「历史重播」与「agent 此刻在产出」——两者都是
@@ -129,6 +145,20 @@ export class AcpClientConnectionRuntime {
 
 	getConnection(taskId: string): AcpTaskConnection | null {
 		return this.connectionsByTaskId.get(taskId) ?? null;
+	}
+
+	getStartingTaskSessionProcessOwnership(taskId: string): AcpStartingTaskSessionProcessOwnership | null {
+		const startingConnection = this.startingConnectionsByTaskId.get(taskId);
+		if (!startingConnection) return null;
+		const { child, connection, runtimeSessionIncarnationId, requestedNativeConversationSessionId } =
+			startingConnection;
+		if (child.exitCode !== null || child.signalCode !== null || child.pid === undefined) return null;
+		return {
+			processId: child.pid,
+			runtimeSessionIncarnationId,
+			nativeConversationSessionId:
+				this.sessionIdByConnection.get(connection) ?? requestedNativeConversationSessionId,
+		};
 	}
 
 	// 该 task 此刻是否正在重播 session/load 的历史。会话服务据此挂重播守卫
@@ -156,6 +186,9 @@ export class AcpClientConnectionRuntime {
 		await input.beforeAgentProcessLaunch?.();
 		if (input.isRuntimeSessionIncarnationCurrent?.() === false)
 			throw new Error("启动已被停止或替换，未创建 ACP 子进程。");
+		const establishedDuringLaunchChecks = this.connectionsByTaskId.get(input.taskId);
+		if (establishedDuringLaunchChecks) return establishedDuringLaunchChecks;
+		this.disposeStartingTaskConnection(input.taskId);
 		const child = spawn(spawnCommand.binary, spawnCommand.args, {
 			cwd: input.cwd,
 			env: { ...process.env, ...input.env, ...spawnCommand.env },
@@ -199,6 +232,15 @@ export class AcpClientConnectionRuntime {
 				return await this.handlers.onElicitationRequest(input.taskId, request);
 			},
 		});
+		const startingConnection = {
+			child,
+			connection,
+			runtimeSessionIncarnationId: input.runtimeSessionIncarnationId ?? null,
+			requestedNativeConversationSessionId: input.resumePriorAgentConversationWithoutResendingPrompt
+				? (input.observedAgentNativeSessionId ?? null)
+				: null,
+		};
+		this.startingConnectionsByTaskId.set(input.taskId, startingConnection);
 
 		try {
 			const initializeResponse = await connection.agent.request(ACP_AGENT_METHODS.initialize, {
@@ -284,9 +326,13 @@ export class AcpClientConnectionRuntime {
 				}
 			}
 
-			if (input.isRuntimeSessionIncarnationCurrent?.() === false) {
+			if (
+				this.startingConnectionsByTaskId.get(input.taskId) !== startingConnection ||
+				input.isRuntimeSessionIncarnationCurrent?.() === false
+			) {
 				throw new Error("ACP connection startup belongs to a stopped or superseded runtime session.");
 			}
+			this.startingConnectionsByTaskId.delete(input.taskId);
 			this.connectionsByTaskId.set(input.taskId, record);
 			this.sessionIdByConnection.set(connection, newSessionResponse.sessionId);
 
@@ -304,8 +350,9 @@ export class AcpClientConnectionRuntime {
 			return record;
 		} catch (error) {
 			this.sessionIdByConnection.delete(connection);
-			connection.close();
-			terminateAcpChildProcessTree(child, { force: false });
+			if (this.startingConnectionsByTaskId.get(input.taskId) === startingConnection) {
+				this.disposeStartingTaskConnection(input.taskId);
+			}
 			throw enrichAcpStartupError(error, spawnCommand.binary, stderrDiagnostics);
 		}
 	}
@@ -450,7 +497,17 @@ export class AcpClientConnectionRuntime {
 		this.connectionsByTaskId.delete(record.taskId);
 	}
 
+	private disposeStartingTaskConnection(taskId: string): void {
+		const startingConnection = this.startingConnectionsByTaskId.get(taskId);
+		if (!startingConnection) return;
+		this.startingConnectionsByTaskId.delete(taskId);
+		this.sessionIdByConnection.delete(startingConnection.connection);
+		startingConnection.connection.close();
+		terminateAcpChildProcessTree(startingConnection.child, { force: false });
+	}
+
 	disposeTaskConnection(taskId: string): void {
+		this.disposeStartingTaskConnection(taskId);
 		const record = this.connectionsByTaskId.get(taskId);
 		if (!record) {
 			return;
@@ -469,19 +526,15 @@ export class AcpClientConnectionRuntime {
 		taskId: string,
 		options: { gracefulTimeoutMs?: number; forcefulTimeoutMs?: number } = {},
 	): Promise<{ rootPid: number | null; rootProcessExitConfirmed: boolean; usedForcefulEscalation: boolean }> {
-		const record = this.connectionsByTaskId.get(taskId);
-		if (!record) {
+		const child = (this.connectionsByTaskId.get(taskId) ?? this.startingConnectionsByTaskId.get(taskId))?.child;
+		if (!child) {
 			return { rootPid: null, rootProcessExitConfirmed: true, usedForcefulEscalation: false };
 		}
 		const gracefulTimeoutMs = options.gracefulTimeoutMs ?? 2_000;
 		const forcefulTimeoutMs = options.forcefulTimeoutMs ?? 500;
-		const child = record.child;
 		const rootPid = typeof child.pid === "number" ? child.pid : null;
 
-		record.disposedByKanban = true;
-		this.forgetTaskConnection(record);
-		record.connection.close();
-		terminateAcpChildProcessTree(child, { force: false });
+		this.disposeTaskConnection(taskId);
 
 		const hasExited = () => child.exitCode !== null || child.signalCode !== null;
 		await waitUntil(hasExited, gracefulTimeoutMs);
@@ -494,7 +547,7 @@ export class AcpClientConnectionRuntime {
 	}
 
 	disposeAllTaskConnections(): void {
-		for (const taskId of [...this.connectionsByTaskId.keys()]) {
+		for (const taskId of new Set([...this.connectionsByTaskId.keys(), ...this.startingConnectionsByTaskId.keys()])) {
 			this.disposeTaskConnection(taskId);
 		}
 	}

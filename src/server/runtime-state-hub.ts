@@ -21,15 +21,17 @@ import {
 import { getNotificationLifecycleArchive } from "../notifications/notification-lifecycle-archive";
 import { persistCodexNativeDirectInputReadinessReconciliation } from "../state/persist-codex-native-direct-input-readiness-reconciliation";
 import { listWorkspaceIndexEntries, loadPersistedWorkspaceStateById } from "../state/workspace-state";
+import {
+	type ConversationRuntimeExitSessionSource,
+	listConversationSessionsInterruptedByRuntimeExit,
+} from "./active-runtime-session-shutdown";
 
 // 「会话型」任务来源：Kanban 直接持有结构化消息、在卡片详情里渲染成会话面板的那一类 agent。
 // 目前是 Cline SDK（进程内）与 ACP（stdio 子进程）两种。
 export type ConversationTaskSessionSourceKind = "acp";
 const CONVERSATION_TASK_SESSION_SOURCE_KINDS: readonly ConversationTaskSessionSourceKind[] = ["acp"];
 
-// 推流只需要这三件事，故按结构订阅而不是绑死某个具体 service 类。
-export interface ConversationTaskSessionSubscriptionSource {
-	listSummaries(): RuntimeTaskSessionSummary[];
+export interface ConversationTaskSessionSubscriptionSource extends ConversationRuntimeExitSessionSource {
 	onSummary(listener: (summary: RuntimeTaskSessionSummary) => void): () => void;
 	onMessage(listener: (taskId: string, message: RuntimeTaskChatMessage) => void): () => void;
 }
@@ -144,6 +146,10 @@ export interface RuntimeStateHub {
 	// 本 hub 订阅着的 Cline SDK / ACP 服务当前仍持有的 summary。workspace-registry 拼跨项目视图时用它补齐
 	// TerminalSessionManager 看不到的两种 transport。
 	listTrackedConversationTaskSessionSummaries: (workspaceId: string) => RuntimeTaskSessionSummary[];
+	// 包含尚未登记 PTY workspace、也包含 ACP 握手中的会话。
+	listTrackedConversationSessionsInterruptedByRuntimeExit: () => ReturnType<
+		typeof listConversationSessionsInterruptedByRuntimeExit
+	>;
 	handleUpgrade: (
 		request: IncomingMessage,
 		socket: Parameters<WebSocketServer["handleUpgrade"]>[1],
@@ -403,6 +409,18 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				// 边沿缓存含已弃置条目；只有服务当前持有的账本条目才有资格覆盖整板快照。
 				conversationSessionSourcesBySubscriptionKey.get(key)?.listSummaries() ?? [],
 		);
+	const listTrackedConversationSessionsInterruptedByRuntimeExit = () => {
+		const sessions: ReturnType<typeof listConversationSessionsInterruptedByRuntimeExit> = [];
+		for (const sourceKind of CONVERSATION_TASK_SESSION_SOURCE_KINDS) {
+			const suffix = `::${sourceKind}`;
+			for (const [subscriptionKey, source] of conversationSessionSourcesBySubscriptionKey) {
+				if (!subscriptionKey.endsWith(suffix)) continue;
+				const workspaceId = subscriptionKey.slice(0, -suffix.length);
+				sessions.push(...listConversationSessionsInterruptedByRuntimeExit(workspaceId, source));
+			}
+		}
+		return sessions;
+	};
 	const pendingTaskSessionSummariesByWorkspaceId = new Map<string, Map<string, RuntimeTaskSessionSummary>>();
 	// 三 transport 共用的「停止生成响应」边沿观察器（见 queueTaskSessionSummaryBroadcast 的挂载点注释）。
 	let queuedTaskPromptDeliveryDispatchObserver: QueuedTaskPromptDeliveryDispatchObserver | null = null;
@@ -1781,6 +1799,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		broadcastTaskChatCleared,
 		listTrackedConversationTaskSessionSummaries: collectTrackedConversationSummaries,
+		listTrackedConversationSessionsInterruptedByRuntimeExit,
 		handleUpgrade: (request, socket, head, context) => {
 			runtimeStateWebSocketServer.handleUpgrade(request, socket, head, (ws) => {
 				if (new URL(request.url ?? "/", "http://localhost").searchParams.get("stateProtocolVersion") === "2")
