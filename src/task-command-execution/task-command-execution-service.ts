@@ -67,12 +67,16 @@ export interface TaskCommandExecutionDependencies {
 	deliver: (
 		record: TaskCommandExecutionRecord,
 		validate: TaskChatDeliveryWriteValidator,
-		settled: (receipt: InjectionLedgerTerminalDeliveryReceipt) => Promise<void>,
+		settled: (receipt: InjectionLedgerTerminalDeliveryReceipt) => Promise<boolean>,
 	) => Promise<RuntimeTaskChatSendResponse>;
 	reconcileDelivery: (
 		record: TaskCommandExecutionRecord,
 	) => Promise<"native_accepted" | "known_not_submitted" | "unknown">;
-	readDeliveryRecoveryEvidenceSha256?: (record: TaskCommandExecutionRecord) => Promise<string>;
+	readReadinessTimeoutObservedAtEpochMs?: (record: TaskCommandExecutionRecord) => Promise<number | null>;
+	readDeliveryRecoveryEvidenceSha256?: (
+		record: TaskCommandExecutionRecord,
+		purpose: "reconcile_submission" | "retry_before_write",
+	) => Promise<string>;
 	readCancellationRecoveryEvidenceSha256?: (record: TaskCommandExecutionRecord) => Promise<string>;
 	listWorkspaceIds: () => Promise<string[]>;
 	warn: (message: string) => void;
@@ -325,13 +329,16 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		await deps.unpark(record);
 		return update(record.workspaceId, record.executionId, (value) => ({ ...value, parkOwned: false }));
 	};
-	const readDeliveryRecoveryEvidenceSha256 = async (record: TaskCommandExecutionRecord) => {
+	const readDeliveryRecoveryEvidenceSha256 = async (
+		record: TaskCommandExecutionRecord,
+		purpose: "reconcile_submission" | "retry_before_write",
+	) => {
 		const owner = await deps.readOwner(record.workspaceId, record.taskId, record);
 		const park = owner?.summary?.awaitingDispatchedBackgroundWork;
 		return sha256(
 			JSON.stringify({
 				nativeEvidence:
-					(await deps.readDeliveryRecoveryEvidenceSha256?.(record)) ?? record.originatingNativeSessionId,
+					(await deps.readDeliveryRecoveryEvidenceSha256?.(record, purpose)) ?? record.originatingNativeSessionId,
 				// 自身 park 的重建、时间戳与标签不代表可写状态改变，不能补发已消耗的预算。
 				otherOwningCommandExecutionIds: (park?.owningCommandExecutionIds ?? [])
 					.filter((id) => id !== record.executionId)
@@ -1225,39 +1232,44 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					},
 					nextNotice,
 				);
-				record = await update(workspaceId, executionId, (value) =>
-					value.resultDelivery
-						? value
-						: {
-								...value,
-								businessDisposition:
-									disposition === "agent_review_ready" || disposition === "agent_judgment_required"
-										? disposition
-										: value.businessDisposition,
-								progress: result,
-								logicalResultCount: value.logicalResultCount + 1,
-								resultDelivery: {
-									resultId: nextNotice
-										? `command-execution-result-${executionId}-${sha256(nextNotice.noticeId)}`
-										: `command-execution-result-${executionId}`,
-									producerNoticeId: nextNotice?.noticeId ?? null,
-									stage: nextNotice?.stage ?? "final_agent_review",
-									text,
-									textSha256: sha256(text),
-									state: "known_not_submitted",
-									attemptCount: 0,
-									attemptId: null,
-									nativeReceipt: null,
-									awaitingTransportReceipt: false,
-									lastPreflightFailureEvidenceSha256: null,
-									unchangedPreflightRetryCount: 0,
-									retryPreflightNotBeforeEpochMs: null,
-									reconciliationAttemptCount: 0,
-									lastReconciliationEvidenceSha256: null,
-									nextReconciliationAtEpochMs: null,
-								},
-							},
-				);
+				record = await update(workspaceId, executionId, (value) => {
+					if (value.resultDelivery) return value;
+					const restoredNoticeDelivery = nextNotice
+						? [...value.resultDeliveryHistory]
+								.reverse()
+								.find((delivery) => delivery.producerNoticeId === nextNotice.noticeId && delivery.text === text)
+						: undefined;
+					// 同一冻结通知重获资格时，沿用原回执、退避和已经消耗的预算。
+					return {
+						...value,
+						businessDisposition:
+							disposition === "agent_review_ready" || disposition === "agent_judgment_required"
+								? disposition
+								: value.businessDisposition,
+						progress: result,
+						logicalResultCount: value.logicalResultCount + (restoredNoticeDelivery ? 0 : 1),
+						resultDelivery: restoredNoticeDelivery ?? {
+							resultId: nextNotice
+								? `command-execution-result-${executionId}-${sha256(nextNotice.noticeId)}`
+								: `command-execution-result-${executionId}`,
+							producerNoticeId: nextNotice?.noticeId ?? null,
+							stage: nextNotice?.stage ?? "final_agent_review",
+							text,
+							textSha256: sha256(text),
+							state: "known_not_submitted",
+							attemptCount: 0,
+							attemptId: null,
+							nativeReceipt: null,
+							awaitingTransportReceipt: false,
+							lastPreflightFailureEvidenceSha256: null,
+							unchangedPreflightRetryCount: 0,
+							retryPreflightNotBeforeEpochMs: null,
+							reconciliationAttemptCount: 0,
+							lastReconciliationEvidenceSha256: null,
+							nextReconciliationAtEpochMs: null,
+						},
+					};
+				});
 			}
 			if (
 				record.resultDelivery?.producerNoticeId === null &&
@@ -1329,20 +1341,19 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					});
 				}
 			}
-			if (
-				record.resultDelivery?.state === "known_not_submitted" &&
-				(await deps.readOwner(record.workspaceId, record.taskId, record))?.isNativeInputSubmissionBusy
-			) {
-				await retainOwnedWait(record);
-				return;
-			}
 			if (record.resultDelivery?.state === "native_accepted") {
 				if (record.parkOwned) await releaseOwnedWait(record);
 				return;
 			}
 			if (record.resultDelivery?.awaitingTransportReceipt) return;
+			const deliveryOwner = await deps.readOwner(record.workspaceId, record.taskId, record);
+			const requiresCodexReadinessTimeoutProof = deliveryOwner?.summary?.agentId === "codex";
+			if (record.resultDelivery?.state === "known_not_submitted" && deliveryOwner?.isNativeInputSubmissionBusy) {
+				await retainOwnedWait(record);
+				return;
+			}
 			if (record.resultDelivery?.state === "submission_unknown") {
-				const fingerprint = await readDeliveryRecoveryEvidenceSha256(record);
+				const fingerprint = await readDeliveryRecoveryEvidenceSha256(record, "reconcile_submission");
 				const changed = fingerprint !== record.resultDelivery.lastReconciliationEvidenceSha256;
 				if (
 					!changed &&
@@ -1361,41 +1372,88 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				}));
 				const recovered = await deps.reconcileDelivery(record);
 				if (recovered === "unknown") return;
-				record = await update(workspaceId, executionId, (value) => ({
-					...value,
-					resultDelivery: value.resultDelivery && { ...value.resultDelivery, state: recovered },
-				}));
-				if (recovered === "native_accepted") {
+				record = await update(workspaceId, executionId, (value) =>
+					!stopped &&
+					value.revokedAtEpochMs === null &&
+					value.custodianRuntimeProcessInstanceId === getThisRuntimeProcessInstanceId() &&
+					value.resultDelivery?.resultId === record.resultDelivery?.resultId &&
+					value.resultDelivery?.attemptId === record.resultDelivery?.attemptId &&
+					value.resultDelivery?.state === "submission_unknown"
+						? { ...value, resultDelivery: { ...value.resultDelivery, state: recovered } }
+						: value,
+				);
+				if (record.resultDelivery?.state === "native_accepted") {
 					await releaseOwnedWait(record);
 					return;
 				}
+				if (record.resultDelivery?.state !== "known_not_submitted") return;
 			}
 			try {
 				await assertOwnership(record, true);
 			} catch {
 				return;
 			}
-			const preflightEvidence = await readDeliveryRecoveryEvidenceSha256(record);
+			const preflightEvidence = await readDeliveryRecoveryEvidenceSha256(record, "retry_before_write");
+			const readinessTimeoutRecoveryEvidence =
+				record.resultDelivery?.readinessTimeoutRecoveryAttemptedEvidenceSha256s;
+			const hasRecordedReadinessTimeout =
+				(requiresCodexReadinessTimeoutProof &&
+					record.resultDelivery?.nativeReceipt?.reason === "terminal_prompt_readiness_timeout") ||
+				readinessTimeoutRecoveryEvidence !== undefined;
+			const journalReadinessTimeoutObservedAtEpochMs =
+				!hasRecordedReadinessTimeout && record.resultDelivery?.attemptId != null
+					? await deps.readReadinessTimeoutObservedAtEpochMs?.(record)
+					: null;
+			const recoveringReadinessTimeout =
+				hasRecordedReadinessTimeout || journalReadinessTimeoutObservedAtEpochMs != null;
 			const unchangedPreflightFailure =
 				record.resultDelivery?.lastPreflightFailureEvidenceSha256 === preflightEvidence;
 			if (
-				unchangedPreflightFailure &&
-				((record.resultDelivery?.unchangedPreflightRetryCount ?? 0) >= 1 ||
-					(record.resultDelivery?.retryPreflightNotBeforeEpochMs ?? 0) > Date.now())
+				readinessTimeoutRecoveryEvidence?.includes(preflightEvidence) ||
+				(journalReadinessTimeoutObservedAtEpochMs != null &&
+					journalReadinessTimeoutObservedAtEpochMs + 30_000 > Date.now()) ||
+				(unchangedPreflightFailure &&
+					((record.resultDelivery?.unchangedPreflightRetryCount ?? 0) >= 1 ||
+						(record.resultDelivery?.retryPreflightNotBeforeEpochMs ?? 0) > Date.now()))
 			)
 				return;
 			const attemptId = randomUUID();
-			record = await update(workspaceId, executionId, (value) => ({
-				...value,
-				resultDelivery: value.resultDelivery && {
-					...value.resultDelivery,
-					attemptId,
-					awaitingTransportReceipt: true,
-					unchangedPreflightRetryCount: unchangedPreflightFailure
-						? value.resultDelivery.unchangedPreflightRetryCount + 1
-						: 0,
-				},
-			}));
+			record = await update(workspaceId, executionId, (value) => {
+				const delivery = value.resultDelivery;
+				if (
+					stopped ||
+					value.revokedAtEpochMs !== null ||
+					value.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId() ||
+					delivery?.state !== "known_not_submitted" ||
+					delivery.awaitingTransportReceipt ||
+					delivery.resultId !== record.resultDelivery?.resultId ||
+					delivery.attemptId !== record.resultDelivery?.attemptId
+				)
+					return value;
+				return {
+					...value,
+					resultDelivery: {
+						...delivery,
+						attemptId,
+						awaitingTransportReceipt: true,
+						reconciliationAttemptCount: 0,
+						lastReconciliationEvidenceSha256: null,
+						nextReconciliationAtEpochMs: null,
+						unchangedPreflightRetryCount: unchangedPreflightFailure
+							? delivery.unchangedPreflightRetryCount + 1
+							: 0,
+						...(recoveringReadinessTimeout
+							? {
+									readinessTimeoutRecoveryAttemptedEvidenceSha256s: [
+										...(readinessTimeoutRecoveryEvidence ?? []),
+										preflightEvidence,
+									],
+								}
+							: {}),
+					},
+				};
+			});
+			if (record.resultDelivery?.attemptId !== attemptId) return;
 			const revertUnwrittenSubmissionAttempt = async (incrementedAttempt: boolean) => {
 				await update(workspaceId, executionId, (value) => {
 					if (value.resultDelivery?.attemptId !== attemptId || value.resultDelivery.state !== "submission_unknown")
@@ -1448,9 +1506,11 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 				}
 			};
 			const settled = async (receipt: InjectionLedgerTerminalDeliveryReceipt) => {
-				if (await readExecutionRevocationIntent(record)) return;
+				if (stopped || (await readExecutionRevocationIntent(record))) return false;
+				let matchedCurrentAttempt = false;
 				const current = await update(workspaceId, executionId, (value) => {
 					if (
+						stopped ||
 						value.revokedAtEpochMs !== null ||
 						value.resultDelivery?.attemptId !== attemptId ||
 						value.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId()
@@ -1468,6 +1528,12 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 						notStarted?.clientUserMessageId === value.resultDelivery.resultId &&
 						notStarted.submissionAttemptId === attemptId &&
 						notStarted.nativeSessionId === value.originatingNativeSessionId;
+					// Codex 需回读原生账本。其他 PTY 保留本次写前门禁记录的提交状态。
+					const requiresReadinessTimeoutReconciliation =
+						requiresCodexReadinessTimeoutProof &&
+						receipt.status === "delivery_failed" &&
+						receipt.reason === "terminal_prompt_readiness_timeout";
+					matchedCurrentAttempt = true;
 					return {
 						...value,
 						resultDelivery: {
@@ -1475,7 +1541,9 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 							nativeReceipt: receipt,
 							awaitingTransportReceipt: receipt.status === "accepted_pending_submit_confirmation",
 							...(receipt.status === "delivery_failed" &&
-							(value.resultDelivery.state === "known_not_submitted" || provenNotStarted)
+							(value.resultDelivery.state === "known_not_submitted" ||
+								requiresReadinessTimeoutReconciliation ||
+								provenNotStarted)
 								? {
 										lastPreflightFailureEvidenceSha256: preflightEvidence,
 										retryPreflightNotBeforeEpochMs: Date.now() + 30_000,
@@ -1485,9 +1553,11 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 								receipt.status === "delivered_and_submit_confirmed" ||
 								receipt.status === "delivered_queued_behind_active_agent_turn"
 									? "native_accepted"
-									: provenNotStarted
-										? "known_not_submitted"
-										: value.resultDelivery.state,
+									: requiresReadinessTimeoutReconciliation
+										? "submission_unknown"
+										: provenNotStarted
+											? "known_not_submitted"
+											: value.resultDelivery.state,
 						},
 					};
 				});
@@ -1496,9 +1566,10 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 					current.custodianRuntimeProcessInstanceId !== getThisRuntimeProcessInstanceId() ||
 					current.revokedAtEpochMs !== null
 				)
-					return;
+					return false;
 				if (current.resultDelivery?.state === "native_accepted") await releaseOwnedWait(current);
 				else await retainOwnedWait(current);
+				return matchedCurrentAttempt;
 			};
 			try {
 				await validate();

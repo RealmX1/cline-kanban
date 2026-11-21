@@ -67,7 +67,7 @@ it("补充登记只写完业务待证状态时，写前核验仍会阻止旧清�
 	await expect(assertTaskCommandContinuationNoticeStillEligible(record)).resolves.toBeUndefined();
 	await writeFile(record.specification.resultFile, JSON.stringify({ disposition: "machine_evidence_pending" }));
 	await expect(assertTaskCommandContinuationNoticeStillEligible(record)).rejects.toThrow(
-		"事件已被新补充或结果修订替代",
+		"原后台通知已从当前可投递清单撤下",
 	);
 });
 

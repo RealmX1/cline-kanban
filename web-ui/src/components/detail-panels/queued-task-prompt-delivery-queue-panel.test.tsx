@@ -721,6 +721,10 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		const controller = createControllerDouble([
 			projection("q1"),
 			projection("done", { deliveryState: "settled_delivered" }),
+			projection("withdrawn-owned-result", {
+				deliveryState: "cancelled",
+				lastDeliveryFailureNote: "后台通知已被消费，投递资格已撤下。",
+			}),
 			projection("failed", {
 				deliveryState: "settled_failed",
 				lastDeliveryFailureNote: "It may still be sitting in the input box.",
@@ -728,6 +732,7 @@ describe("QueuedTaskPromptDeliveryQueuePanel", () => {
 		]);
 		render(controller);
 		expect(container.textContent).toContain("最近结果");
+		expect(container.textContent).toContain("后台通知已被消费，投递资格已撤下。");
 		expect(container.textContent).toContain("It may still be sitting in the input box.");
 		const requeueButtons = buttonsWithLabel(container, "重新排队");
 		expect(requeueButtons).toHaveLength(1);

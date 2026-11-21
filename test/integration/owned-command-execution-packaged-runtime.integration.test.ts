@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
 import { runtimeTaskSessionSummarySchema } from "../../src/core/api-contract";
+import { KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME } from "../../src/core/kanban-web-ui-page-load-request-origin-nonce";
 import { loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -115,12 +116,17 @@ it.skipIf(!cli)(
 			await waitForRuntimeServerStartupBannerOrSigkillChild(child);
 			return child;
 		};
-		const client = (workspaceId?: string) =>
+		const client = (workspaceId?: string, webUiPageLoadNonce?: string) =>
 			createTRPCProxyClient<RuntimeAppRouter>({
 				links: [
 					httpLink({
 						url: `http://127.0.0.1:${port}/api/trpc`,
-						headers: workspaceId ? { "x-kanban-workspace-id": workspaceId } : {},
+						headers: {
+							...(workspaceId ? { "x-kanban-workspace-id": workspaceId } : {}),
+							...(webUiPageLoadNonce
+								? { [KANBAN_WEB_UI_PAGE_LOAD_REQUEST_ORIGIN_NONCE_REQUEST_HEADER_NAME]: webUiPageLoadNonce }
+								: {}),
+						},
 					}),
 				],
 			});
@@ -135,6 +141,13 @@ it.skipIf(!cli)(
 		}
 		let runtime = await startRuntime("owned-command-before-restart");
 		try {
+			const { kanbanWebUiPageLoadIssuedRequestOriginNonce } =
+				await client().runtime.issueKanbanWebUiPageLoadRequestOriginNonce.mutate();
+			const added = await client(undefined, kanbanWebUiPageLoadIssuedRequestOriginNonce).projects.add.mutate({
+				path: project.repositoryPath,
+			});
+			const workspaceId = added.project?.id;
+			if (!workspaceId) throw new Error("隔离工作区未登记");
 			const created = await runCli([
 				"task",
 				"create",

@@ -3144,6 +3144,9 @@ export const codexNativePromptDeliveryOperationSchema = z.object({
 	returnedTurnId: z.string().nullable(),
 	acceptanceHistoryQueryProgress: codexNativePromptAcceptanceHistoryQueryProgressSchema.optional(),
 	historicalAcceptanceEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
+	firstTerminalPromptReadinessTimeout: z
+		.object({ observedAtIso: z.string(), failureNote: z.string().optional() })
+		.optional(),
 	lastAcceptanceReconciliationAtIso: z.string().optional(),
 	lastAcceptanceReconciliationStatus: z.enum(["confirmed", "unknown"]).optional(),
 	currentExecutionQualification: z

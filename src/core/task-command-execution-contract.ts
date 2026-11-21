@@ -116,6 +116,7 @@ const taskCommandExecutionResultDeliverySchema = z.object({
 	lastPreflightFailureEvidenceSha256: z.string().nullable(),
 	unchangedPreflightRetryCount: z.number(),
 	retryPreflightNotBeforeEpochMs: z.number().nullable(),
+	readinessTimeoutRecoveryAttemptedEvidenceSha256s: z.array(z.string().length(64)).optional(),
 	reconciliationAttemptCount: z.number(),
 	lastReconciliationEvidenceSha256: z.string().nullable(),
 	nextReconciliationAtEpochMs: z.number().nullable(),

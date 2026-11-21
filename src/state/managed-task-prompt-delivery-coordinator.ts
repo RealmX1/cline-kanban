@@ -8,6 +8,11 @@ import type {
 	RuntimeTaskSessionSummary,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
+import { injectionLedgerTerminalDeliveryReceiptSchema } from "../core/api-contract";
+import {
+	getMatchingCodexNativePromptHistoricalAcceptance,
+	getOwnedCommandResultReadinessTimeout,
+} from "../core/codex-native-prompt-delivery-journal";
 import { isManagedTaskPromptDeliveryScheduledAfterAgentTurn } from "../core/managed-task-prompt-delivery";
 import { isRetiredRvfAutomaticQueuedDelivery } from "../core/retired-rvf-automatic-message-history";
 import {
@@ -15,6 +20,7 @@ import {
 	readTaskMessageInjectionLedger,
 } from "../core/task-message-injection-ledger";
 import { logAgentSessionRetentionWarning } from "../diagnostics/agent-session-retention-logger";
+import { readTaskCommandExecutionsForObservation } from "../task-command-execution/task-command-execution-store";
 import {
 	computeQueuedTaskPromptDeliveryTextSha256,
 	getTaskEntries,
@@ -161,53 +167,88 @@ export async function registerManagedTaskPromptDeliveryBeforeDispatch(
 	return result;
 }
 
+function applyManagedTaskPromptDeliveryTerminalReceipt(
+	entry: QueuedTaskPromptDeliveryEntry,
+	receipt: InjectionLedgerTerminalDeliveryReceipt,
+	nowEpochMs: number,
+	failureNote?: string,
+	ownedCommandResultReadinessTimeoutReceipt?: InjectionLedgerTerminalDeliveryReceipt,
+): QueuedTaskPromptDeliveryEntry {
+	const managedDelivery = entry.managedDelivery;
+	if (!managedDelivery) return entry;
+	const delivered = receipt.status !== "delivery_failed";
+	const cancelled = receipt.reason === "cancelled_before_delivery";
+	const previousReceipt = managedDelivery.terminalDeliveryReceipt;
+	const nonTerminal = isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState);
+	const awaitingLateConfirmation = isManagedTaskPromptDeliveryAwaitingLateConfirmation(entry);
+	const recoversOwnedReadinessTimeout =
+		ownedCommandResultReadinessTimeoutReceipt &&
+		(delivered || cancelled) &&
+		(nonTerminal || entry.deliveryState === "settled_failed");
+	const recoversPreviousReceipt = recoversOwnedReadinessTimeout || (delivered && awaitingLateConfirmation);
+	if (!nonTerminal && !recoversPreviousReceipt) return entry;
+	const recoveredFromReceipt =
+		recoversOwnedReadinessTimeout && previousReceipt?.reason !== "terminal_prompt_readiness_timeout"
+			? ownedCommandResultReadinessTimeoutReceipt
+			: previousReceipt;
+	return {
+		...entry,
+		deliveryState: delivered ? "settled_delivered" : cancelled ? "cancelled" : "settled_failed",
+		settledAt: nowEpochMs,
+		lastDeliveryFailureNote: delivered
+			? null
+			: (receipt.failureNote ?? failureNote ?? receipt.reason ?? "未能确认消息已送达。"),
+		managedDelivery: {
+			...managedDelivery,
+			terminalDeliveryReceipt: receipt,
+			...(recoversPreviousReceipt
+				? {
+						recoveredTerminalReceiptAtEpochMs: nowEpochMs,
+						previousUnconfirmedTerminalDeliveryReceipt: recoveredFromReceipt,
+						previousUnconfirmedDeliveryFailureNote:
+							recoveredFromReceipt === previousReceipt
+								? entry.lastDeliveryFailureNote
+								: (recoveredFromReceipt?.failureNote ?? recoveredFromReceipt?.reason ?? null),
+					}
+				: {}),
+		},
+	};
+}
+
 export async function settleManagedTaskPromptDelivery(input: {
 	workspaceId: string;
 	taskId: string;
 	deliveryId: string;
 	receipt: InjectionLedgerTerminalDeliveryReceipt;
 	failureNote?: string;
+	ownedCommandResultReadinessTimeoutReceipt?: InjectionLedgerTerminalDeliveryReceipt;
+	expectedRegisteredEntry?: QueuedTaskPromptDeliveryEntry;
 }): Promise<void> {
 	if (input.receipt.status === "accepted_pending_submit_confirmation") return;
 	const nowEpochMs = Date.now();
+	const expectedIdentity = input.expectedRegisteredEntry
+		? buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(input.expectedRegisteredEntry)
+		: null;
 	await updateWorkspaceQueuedTaskPromptDeliveriesUnderLock(
 		input.workspaceId,
 		(current) => {
 			let changed = false;
 			const entries = getTaskEntries(current, input.taskId).map((entry) => {
-				const delivered = input.receipt.status !== "delivery_failed";
-				const recoversLateConfirmation = delivered && isManagedTaskPromptDeliveryAwaitingLateConfirmation(entry);
 				if (
 					entry.queueEntryId !== input.deliveryId ||
-					!entry.managedDelivery ||
-					(!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState) && !recoversLateConfirmation)
+					(expectedIdentity &&
+						expectedIdentity !== buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry))
 				)
 					return entry;
-				changed = true;
-				return {
-					...entry,
-					deliveryState: delivered
-						? ("settled_delivered" as const)
-						: input.receipt.reason === "cancelled_before_delivery"
-							? ("cancelled" as const)
-							: ("settled_failed" as const),
-					settledAt: nowEpochMs,
-					lastDeliveryFailureNote: delivered
-						? null
-						: (input.failureNote ?? input.receipt.reason ?? "未能确认消息已送达。"),
-					managedDelivery: {
-						...entry.managedDelivery,
-						terminalDeliveryReceipt: input.receipt,
-						...(recoversLateConfirmation
-							? {
-									recoveredTerminalReceiptAtEpochMs: nowEpochMs,
-									previousUnconfirmedTerminalDeliveryReceipt:
-										entry.managedDelivery.terminalDeliveryReceipt ?? null,
-									previousUnconfirmedDeliveryFailureNote: entry.lastDeliveryFailureNote,
-								}
-							: {}),
-					},
-				};
+				const updated = applyManagedTaskPromptDeliveryTerminalReceipt(
+					entry,
+					input.receipt,
+					nowEpochMs,
+					input.failureNote,
+					input.ownedCommandResultReadinessTimeoutReceipt,
+				);
+				if (updated !== entry) changed = true;
+				return updated;
 			});
 			return {
 				next: changed
@@ -279,6 +320,7 @@ export function settleManagedTaskPromptDeliveryWithoutBlocking(
 function buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry: QueuedTaskPromptDeliveryEntry): string {
 	return JSON.stringify([
 		entry.taskId,
+		entry.workspaceTaskId,
 		entry.queueEntryId,
 		computeQueuedTaskPromptDeliveryTextSha256(entry.text),
 		entry.dispatchIdempotencyKey,
@@ -313,32 +355,104 @@ export async function reconcileManagedTaskPromptDeliveryReceipts(
 				getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(workspaceId)),
 			).catch(() => [])
 		: [];
-	const receiptsByDeliveryIdentity = new Map<string, InjectionLedgerTerminalDeliveryReceipt>();
+	const receiptsByDeliveryIdentity = new Map<
+		string,
+		{
+			receipt: InjectionLedgerTerminalDeliveryReceipt;
+			ownedCommandResultReadinessTimeoutReceipt?: InjectionLedgerTerminalDeliveryReceipt;
+		}
+	>();
+	let ownedCommandExecutions: ReturnType<typeof readTaskCommandExecutionsForObservation> | undefined;
 	for (const entry of candidates) {
 		const reference = entry.managedDelivery?.injectionLedgerReference;
 		// 注入账本只有正文摘要，不能据此证明附件内容；有图请求保留 transport 的直接确认。
-		const record =
+		const promptSha256 =
 			reference && entry.managedDelivery?.imageAttachmentCount === 0
+				? computeQueuedTaskPromptDeliveryTextSha256(entry.text)
+				: null;
+		const record =
+			reference && promptSha256
 				? records.find(
 						(candidate) =>
 							candidate.task_id === reference.taskId &&
 							candidate.idempotency_key === reference.idempotencyKey &&
 							candidate.attempt_id === entry.taskId &&
-							candidate.prompt_sha256 === computeQueuedTaskPromptDeliveryTextSha256(entry.text),
+							candidate.prompt_sha256 === promptSha256,
 					)
 				: null;
+		const operation = record?.codex_native_prompt_delivery_operation;
+		const ownedCommandResultReadinessTimeoutReceipt =
+			operation?.workspaceId === workspaceId &&
+			operation.conversationSessionId === entry.taskId &&
+			operation.nativeSessionId === entry.managedDelivery?.targetNativeSessionId &&
+			operation.promptSha256 === promptSha256 &&
+			reference !== undefined &&
+			entry.workspaceTaskId === reference.taskId &&
+			entry.queueEntryId === reference.idempotencyKey &&
+			entry.dispatchIdempotencyKey === reference.idempotencyKey
+				? getOwnedCommandResultReadinessTimeout(record)?.receipt
+				: undefined;
+		if (ownedCommandResultReadinessTimeoutReceipt && operation) {
+			const nativeAcceptance = getMatchingCodexNativePromptHistoricalAcceptance(operation);
+			let receipt: InjectionLedgerTerminalDeliveryReceipt | undefined;
+			if (nativeAcceptance) {
+				receipt = {
+					status: "delivered_and_submit_confirmed",
+					reason: null,
+					codexNativePromptDeliveryEvidence: nativeAcceptance,
+				};
+			} else {
+				// 所属执行先持久保存真实接受或撤下回执，重启后的 Queue 可补核同一结果。
+				ownedCommandExecutions ??= readTaskCommandExecutionsForObservation(workspaceId).catch(() => []);
+				const execution = (await ownedCommandExecutions).find(
+					(execution) =>
+						execution.taskId === entry.workspaceTaskId &&
+						execution.originatingConversationSessionId === entry.taskId &&
+						execution.originatingNativeSessionId === operation.nativeSessionId &&
+						execution.worktreeIdentity.realPath === operation.workingDirectoryPath &&
+						[execution.resultDelivery, ...execution.resultDeliveryHistory].some(
+							(delivery) => delivery?.resultId === entry.queueEntryId,
+						),
+				);
+				const delivery =
+					execution &&
+					[execution.resultDelivery, ...execution.resultDeliveryHistory].find(
+						(delivery) => delivery?.resultId === entry.queueEntryId && delivery.textSha256 === promptSha256,
+					);
+				const parsedReceipt = injectionLedgerTerminalDeliveryReceiptSchema.safeParse(delivery?.nativeReceipt);
+				if (
+					parsedReceipt.success &&
+					((parsedReceipt.data.status === "delivery_failed" &&
+						parsedReceipt.data.reason === "cancelled_before_delivery") ||
+						(delivery?.state === "native_accepted" &&
+							operation.sendPhase !== "registered" &&
+							(parsedReceipt.data.status === "delivered_and_submit_confirmed" ||
+								parsedReceipt.data.status === "delivered_queued_behind_active_agent_turn")))
+				)
+					receipt = parsedReceipt.data;
+			}
+			if (receipt) {
+				receiptsByDeliveryIdentity.set(buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry), {
+					receipt,
+					ownedCommandResultReadinessTimeoutReceipt,
+				});
+				continue;
+			}
+		}
 		if (record && record.terminal_delivery_status !== "accepted_pending_submit_confirmation")
 			receiptsByDeliveryIdentity.set(buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry), {
-				status: record.terminal_delivery_status,
-				reason: record.terminal_delivery_failure_reason ?? null,
-				...(record.codex_native_prompt_delivery_evidence
-					? { codexNativePromptDeliveryEvidence: record.codex_native_prompt_delivery_evidence }
-					: {}),
+				receipt: {
+					status: record.terminal_delivery_status,
+					reason: record.terminal_delivery_failure_reason ?? null,
+					failureNote: record.terminal_delivery_failure_detail,
+					...(record.codex_native_prompt_delivery_evidence
+						? { codexNativePromptDeliveryEvidence: record.codex_native_prompt_delivery_evidence }
+						: {}),
+				},
 			});
 		else if (isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState) && nowEpochMs >= entry.expiresAt)
 			receiptsByDeliveryIdentity.set(buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry), {
-				status: "delivery_failed",
-				reason: "runtime_restarted_before_confirmation",
+				receipt: { status: "delivery_failed", reason: "runtime_restarted_before_confirmation" },
 			});
 	}
 	if (receiptsByDeliveryIdentity.size === 0) return snapshot;
@@ -350,42 +464,21 @@ export async function reconcileManagedTaskPromptDeliveryReceipts(
 				Object.entries(current.entriesByTaskId).map(([taskId, entries]) => [
 					taskId,
 					entries.map((entry) => {
-						const receipt = receiptsByDeliveryIdentity.get(
+						const recovered = receiptsByDeliveryIdentity.get(
 							buildManagedTaskPromptDeliveryReceiptReconciliationIdentity(entry),
 						);
-						if (!receipt || !entry.managedDelivery) return entry;
-						const delivered =
-							receipt.status === "delivered_and_submit_confirmed" ||
-							receipt.status === "delivered_queued_behind_active_agent_turn";
-						const previousIsUnconfirmed = isManagedTaskPromptDeliveryAwaitingLateConfirmation(entry);
-						if (
-							!isNonTerminalQueuedTaskPromptDeliveryState(entry.deliveryState) &&
-							!(delivered && previousIsUnconfirmed)
-						)
-							return entry;
-						changed = true;
-						return {
-							...entry,
-							deliveryState: delivered
-								? ("settled_delivered" as const)
-								: receipt.reason === "cancelled_before_delivery"
-									? ("cancelled" as const)
-									: ("settled_failed" as const),
-							settledAt: nowEpochMs,
-							lastDeliveryFailureNote: delivered ? null : "未能核实消息送达，保留原始记录，不自动重发。",
-							managedDelivery: {
-								...entry.managedDelivery,
-								terminalDeliveryReceipt: receipt,
-								...(delivered && previousIsUnconfirmed
-									? {
-											recoveredTerminalReceiptAtEpochMs: nowEpochMs,
-											previousUnconfirmedTerminalDeliveryReceipt:
-												entry.managedDelivery.terminalDeliveryReceipt ?? null,
-											previousUnconfirmedDeliveryFailureNote: entry.lastDeliveryFailureNote,
-										}
-									: {}),
-							},
-						};
+						if (!recovered) return entry;
+						const updated = applyManagedTaskPromptDeliveryTerminalReceipt(
+							entry,
+							recovered.receipt,
+							nowEpochMs,
+							recovered.receipt.reason === "cancelled_before_delivery"
+								? undefined
+								: "未能核实消息送达，保留原始记录。",
+							recovered.ownedCommandResultReadinessTimeoutReceipt,
+						);
+						if (updated !== entry) changed = true;
+						return updated;
 					}),
 				]),
 			);
