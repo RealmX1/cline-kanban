@@ -108,6 +108,7 @@ it("Done 和干净工作树仍需共享落地证明；dirty 与清理后补丁�
 	mocked.board.mockResolvedValue({ columns: [{ id: "in_progress", cards: [{ id: "source" }] }] });
 	await expect(check()).rejects.toThrow("尚未完成");
 	mocked.board.mockResolvedValue({ columns: [{ id: "trash", cards: [{ id: "source" }] }] });
+	mocked.probe.mockResolvedValue({ taskCommitIntegrationTrackingStatus: "complete" });
 	mocked.landingReady.mockResolvedValue(false);
 	await expect(check()).rejects.toThrow("尚无来源任务成果");
 	writeFileSync(join(repository.repositoryPath, "dirty.txt"), "未提交");
@@ -123,6 +124,10 @@ it("Done 和干净工作树仍需共享落地证明；dirty 与清理后补丁�
 	writeFileSync(join(patchDirectory, "source.abc.patch"), "来源未落地补丁");
 	await expect(check()).rejects.toThrow("仍保留未落地");
 	unlinkSync(join(patchDirectory, "source.abc.patch"));
+	mocked.probe.mockResolvedValueOnce({
+		taskCommitIntegrationTrackingStatus: "task_commit_ownership_history_incomplete",
+	});
+	await expect(check()).rejects.toThrow("尚无来源任务成果");
 	await expect(check()).resolves.toBeUndefined();
 	mocked.board.mockResolvedValue({ columns: [] });
 	await expect(check()).resolves.toBeUndefined();

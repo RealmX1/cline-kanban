@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog } from "../../../src/workspace/task-worktree-head-reflog-fast-forward-only-evidence";
+import { readContinuousTaskHeadReflogFromCreation } from "../../../src/workspace/task-worktree-head-reflog-commit-ownership-evidence";
 
 const ZERO = "0".repeat(40);
 const CREATION = "a".repeat(40);
@@ -13,49 +13,27 @@ function reflogLine(previous: string, next: string, message?: string): string {
 	return message === undefined ? `${previous} ${next} ${IDENTITY}` : `${previous} ${next} ${IDENTITY}\t${message}`;
 }
 
-describe("extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog", () => {
-	it("创建后只有 fast-forward（merge <sha> / merge main / pull）时返回全部步骤", () => {
+describe("readContinuousTaskHeadReflogFromCreation", () => {
+	it("读取与任务创建锚点和观测 HEAD 一致的连续记录", () => {
 		const rawHeadReflog = [
 			reflogLine(ZERO, CREATION),
-			reflogLine(CREATION, BASE_ONE, `merge ${BASE_ONE}: Fast-forward`),
+			reflogLine(CREATION, BASE_ONE, "commit: 任务提交"),
 			reflogLine(BASE_ONE, BASE_TWO, "merge main: Fast-forward"),
 			"",
 		].join("\n");
 		expect(
-			extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog({
+			readContinuousTaskHeadReflogFromCreation({
 				rawHeadReflog,
 				initialBaseCommit: CREATION,
 				headCommit: BASE_TWO,
 			}),
 		).toEqual([
-			{ previousHeadCommit: CREATION, nextHeadCommit: BASE_ONE },
-			{ previousHeadCommit: BASE_ONE, nextHeadCommit: BASE_TWO },
+			{ previousHeadCommit: CREATION, nextHeadCommit: BASE_ONE, reflogMessage: "commit: 任务提交" },
+			{ previousHeadCommit: BASE_ONE, nextHeadCommit: BASE_TWO, reflogMessage: "merge main: Fast-forward" },
 		]);
-		expect(
-			extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog({
-				rawHeadReflog: [reflogLine(ZERO, CREATION), reflogLine(CREATION, BASE_ONE, "pull: Fast-forward")].join(
-					"\n",
-				),
-				initialBaseCommit: CREATION,
-				headCommit: BASE_ONE,
-			}),
-		).toHaveLength(1);
 	});
 
 	it.each([
-		[
-			"出现过 task commit（即便随后被 handback 再 FF）",
-			[
-				reflogLine(ZERO, CREATION),
-				reflogLine(CREATION, TASK_COMMIT, "commit: task change"),
-				reflogLine(TASK_COMMIT, BASE_ONE, `merge ${BASE_ONE}: Fast-forward`),
-			],
-		],
-		[
-			"出现非 fast-forward 的 merge",
-			[reflogLine(ZERO, CREATION), reflogLine(CREATION, BASE_ONE, "merge main: Merge made by the 'ort' strategy.")],
-		],
-		["出现 reset / checkout", [reflogLine(ZERO, CREATION), reflogLine(CREATION, BASE_ONE, "reset: moving to main")]],
 		["reflog 被截断（首条不是从零对象创建）", [reflogLine(CREATION, BASE_ONE, "merge main: Fast-forward")]],
 		["链条断开", [reflogLine(ZERO, CREATION), reflogLine(BASE_TWO, BASE_ONE, "merge main: Fast-forward")]],
 		[
@@ -69,8 +47,8 @@ describe("extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog", () => {
 		["reflog 为空", []],
 	])("%s 时不成立", (_caseName, lines) => {
 		expect(
-			extractFastForwardOnlyStepsFromTaskWorktreeHeadReflog({
-				rawHeadReflog: lines.join("\n"),
+			readContinuousTaskHeadReflogFromCreation({
+				rawHeadReflog: [...lines, ""].join("\n"),
 				initialBaseCommit: CREATION,
 				headCommit: BASE_ONE,
 			}),

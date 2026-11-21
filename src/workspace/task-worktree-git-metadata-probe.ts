@@ -68,6 +68,7 @@ export interface CachedTaskWorkspaceMetadata {
 	data: RuntimeTaskWorkspaceMetadata;
 	stateToken: string | null;
 	cheapChangeToken: string | null;
+	headReflogChangeToken?: string;
 	// 上次算出这份数据时 base 分支的 tip commit。**门控必读**：廉价 fs-stat token 与 probe 的 stateToken
 	// 都只反映 worktree 自身，捕获不到 base 分支单方面推进；不比对这一项，commitsBehindBaseRef 会被永久冻结。
 	baseRefTipCommit: string | null;
@@ -151,6 +152,7 @@ function isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid(input: {
 		cached.commitsAheadOfBaseRef !== null &&
 		cached.commitsBehindBaseRef !== null &&
 		cached.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
+		cached.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "task_commit_ownership_history_incomplete" &&
 		!cached.taskRetainedCommittedLineChangeSummary?.unavailableReason?.startsWith("commit_statistics_")
 	);
 }
@@ -160,8 +162,12 @@ function isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid(input: {
  * 该提交稳定不随 base 分支推进而变（base 前进时公共祖先不变）。inplace 任务 HEAD 即在 base 上，
  * merge-base 退化为当前 HEAD，符合预期。任何失败（baseRef 不可解析、git 出错）→ null，优雅降级。
  */
-async function loadTaskForkPointCommit(workspacePath: string, baseRef: string): Promise<string | null> {
-	const result = await runGit(workspacePath, ["merge-base", "HEAD", baseRef]);
+async function loadTaskForkPointCommit(
+	workspacePath: string,
+	baseRevision: string,
+	headRevision: string,
+): Promise<string | null> {
+	const result = await runGit(workspacePath, ["merge-base", headRevision, baseRevision]);
 	return result.ok && result.stdout ? result.stdout : null;
 }
 
@@ -184,8 +190,17 @@ const UNKNOWN_TASK_BASE_REF_DIVERGENCE: TaskBaseRefDivergence = {
  * 所以这条命令**顶替**了原先的 rev-list，per-task git spawn 数不增加。
  * baseRef 不可解析 / git 失败 / 输出不合预期 → 两项皆 null，优雅降级。
  */
-async function loadTaskBaseRefDivergence(workspacePath: string, baseRef: string): Promise<TaskBaseRefDivergence> {
-	const result = await runGit(workspacePath, ["rev-list", "--left-right", "--count", `${baseRef}...HEAD`]);
+async function loadTaskBaseRefDivergence(
+	workspacePath: string,
+	baseRevision: string,
+	headRevision: string,
+): Promise<TaskBaseRefDivergence> {
+	const result = await runGit(workspacePath, [
+		"rev-list",
+		"--left-right",
+		"--count",
+		`${baseRevision}...${headRevision}`,
+	]);
 	if (!result.ok || !result.stdout) {
 		return UNKNOWN_TASK_BASE_REF_DIVERGENCE;
 	}
@@ -204,6 +219,11 @@ async function loadTaskBaseRefDivergence(workspacePath: string, baseRef: string)
  * `rev-parse`，与任务数无关。`rev-parse` 不读 index、不扫工作树，是最廉价的 git 命令之一。
  * 该 tip 只用于门控失效判定（见 CachedTaskWorkspaceMetadata.baseRefTipCommit），不直接下发前端。
  */
+async function readBaseRefTipCommit(workspacePath: string, baseRef: string): Promise<string | null> {
+	const result = await runGit(workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
+	return result.ok && result.stdout ? result.stdout : null;
+}
+
 export function createBaseRefTipResolver(workspacePath: string): (baseRef: string) => Promise<string | null> {
 	const tipByBaseRef = new Map<string, Promise<string | null>>();
 	return (baseRef: string) => {
@@ -211,10 +231,7 @@ export function createBaseRefTipResolver(workspacePath: string): (baseRef: strin
 		if (cached) {
 			return cached;
 		}
-		const pending = workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
-			const result = await runGit(workspacePath, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
-			return result.ok && result.stdout ? result.stdout : null;
-		});
+		const pending = workspaceMetadataGitSpawnConcurrencyLimiter(() => readBaseRefTipCommit(workspacePath, baseRef));
 		tipByBaseRef.set(baseRef, pending);
 		return pending;
 	};
@@ -323,7 +340,10 @@ export async function loadTaskWorkspaceMetadata(
 		// 不比对 tip 就会把 commitsBehindBaseRef 永久冻结在首次算出的值。按 baseRef 去重后每周期仅 1 次 spawn。
 		const baseRefTipCommit = await resolveBaseRefTip(pathInfo.baseRef);
 		// 第一层门控（不 spawn git）：廉价 token 与 base tip 均未变、路径/baseRef 一致且未超兜底窗口 → 复用缓存。
-		const cheapTokenBeforeProbe = await computeWorktreeGitChangeToken(pathInfo.path);
+		let headReflogTokenBeforeProbe: string | undefined;
+		const cheapTokenBeforeProbe = await computeWorktreeGitChangeToken(pathInfo.path, (token) => {
+			headReflogTokenBeforeProbe = token;
+		});
 		const fullRefreshIntervalMs = resolveGitMetadataFullRefreshIntervalForTaskWorktreeMs({
 			task,
 			lastObservedTaskWorktreeGitChangeAtMs: current?.lastObservedTaskWorktreeGitChangeAtMs ?? null,
@@ -348,7 +368,15 @@ export async function loadTaskWorkspaceMetadata(
 		return await workspaceMetadataGitSpawnConcurrencyLimiter(async () => {
 			const probe = await probeGitWorkspaceState(pathInfo.path, { knownRepoRoot: pathInfo.path });
 			// 真探针可能刷新 index 的 stat 缓存，故其后重算 token 存下，保证后续跳过判定稳定。
-			const cheapTokenAfterProbe = await computeWorktreeGitChangeToken(pathInfo.path);
+			let headReflogChangeToken: string | undefined;
+			const cheapTokenAfterProbe = await computeWorktreeGitChangeToken(pathInfo.path, (token) => {
+				headReflogChangeToken = token;
+			});
+			const headReflogStayedStableDuringProbe =
+				task.worktreeMode === "inplace" || headReflogTokenBeforeProbe === headReflogChangeToken;
+			const headReflogUnchangedSinceCachedProbe =
+				task.worktreeMode === "inplace" ||
+				(headReflogStayedStableDuringProbe && current?.headReflogChangeToken === headReflogChangeToken);
 			const lastObservedTaskWorktreeGitChangeAtMs =
 				current === null
 					? null
@@ -357,7 +385,10 @@ export async function loadTaskWorkspaceMetadata(
 						: current.lastObservedTaskWorktreeGitChangeAtMs;
 			if (
 				current &&
+				headReflogUnchangedSinceCachedProbe &&
 				current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !== "git_probe_unavailable" &&
+				current.data.workspaceGitStatus.taskCommitIntegrationTrackingStatus !==
+					"task_commit_ownership_history_incomplete" &&
 				current.stateToken === probe.stateToken &&
 				current.baseRefTipCommit === baseRefTipCommit &&
 				current.data.path === pathInfo.path &&
@@ -374,6 +405,7 @@ export async function loadTaskWorkspaceMetadata(
 			const summary = await getGitSyncSummary(pathInfo.path, { probe });
 			if (
 				current &&
+				headReflogUnchangedSinceCachedProbe &&
 				isCommitDerivedTaskWorktreeGitMetadataInCacheStillValid({
 					current,
 					pathOfTaskWorktree: pathInfo.path,
@@ -398,8 +430,23 @@ export async function loadTaskWorkspaceMetadata(
 					lastObservedTaskWorktreeGitChangeAtMs,
 				};
 			}
-			const baseCommit = await loadTaskForkPointCommit(pathInfo.path, pathInfo.baseRef);
-			const divergence = await loadTaskBaseRefDivergence(pathInfo.path, pathInfo.baseRef);
+			// 门控用的 tip 可能早于 HEAD。需要重算归属时，在读 HEAD 后重新取 tip，再用固定 SHA 求拓扑。
+			const sampledBaseTip =
+				task.worktreeMode === "inplace"
+					? baseRefTipCommit
+					: await readBaseRefTipCommit(workspacePath, pathInfo.baseRef);
+			const revisionPair =
+				task.worktreeMode === "inplace"
+					? { base: pathInfo.baseRef, head: "HEAD" }
+					: { base: sampledBaseTip, head: probe.headCommit };
+			const baseCommit =
+				revisionPair.base && revisionPair.head
+					? await loadTaskForkPointCommit(pathInfo.path, revisionPair.base, revisionPair.head)
+					: null;
+			const divergence =
+				revisionPair.base && revisionPair.head
+					? await loadTaskBaseRefDivergence(pathInfo.path, revisionPair.base, revisionPair.head)
+					: UNKNOWN_TASK_BASE_REF_DIVERGENCE;
 			const workspaceGitStatus = await refreshTaskCommitIntegrationProvenance({
 				workspaceId,
 				taskId: task.taskId,
@@ -409,7 +456,8 @@ export async function loadTaskWorkspaceMetadata(
 				...(task.worktreeMode ? { worktreeMode: task.worktreeMode } : {}),
 				worktreeExists: true,
 				headCommit: probe.headCommit,
-				baseRefTipCommit,
+				headReflogChangeToken: headReflogStayedStableDuringProbe ? headReflogChangeToken : undefined,
+				baseRefTipCommit: sampledBaseTip,
 				commitsAheadOfBaseRef: divergence.commitsAheadOfBaseRef,
 				commitsBehindBaseRef: divergence.commitsBehindBaseRef,
 				isDetached: probe.headCommit !== null && probe.currentBranch === null,
@@ -445,8 +493,10 @@ export async function loadTaskWorkspaceMetadata(
 						stateVersion: Date.now(),
 					},
 					stateToken: probe.stateToken,
-					cheapChangeToken: cheapTokenAfterProbe,
-					baseRefTipCommit,
+					// 新 token 不能给已经读取的旧 HEAD 背书，下一轮按原刷新入口重新取样。
+					cheapChangeToken: headReflogStayedStableDuringProbe ? cheapTokenAfterProbe : null,
+					headReflogChangeToken,
+					baseRefTipCommit: sampledBaseTip,
 					lastFullRefreshAtMs: now,
 					lastObservedTaskWorktreeGitChangeAtMs,
 				},

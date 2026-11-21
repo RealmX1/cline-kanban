@@ -30,7 +30,7 @@ import {
 	createUnavailableTaskRetainedCommittedLineChangeHistory,
 	refreshTaskRetainedCommittedLineChangeStatistics,
 } from "./task-retained-committed-line-change-statistics";
-import { proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation } from "./task-worktree-head-reflog-fast-forward-only-evidence";
+import { recoverTaskCreatedCommitShasFromHeadReflog } from "./task-worktree-head-reflog-commit-ownership-evidence";
 
 const TASK_COMMIT_INTEGRATION_PROVENANCE_FILENAME = "task-commit-integration-provenance.json";
 const TASK_COMMIT_INTEGRATION_PROVENANCE_SCHEMA_VERSION = 1;
@@ -98,12 +98,16 @@ const taskCommitProvenanceIncarnationSchema = z.object({
 	captureSource: z.enum(["worktree_creation", "live_pre_handback_backfill"]),
 	startedAt: z.number(),
 	observedTaskCommits: z.array(observedTaskCommitSchema),
+	taskCommitShasRecoveredFromHeadReflog: z.array(z.string()).optional(),
+	taskHeadCommitWithVerifiedBaseOverlapOwnership: z.string().optional(),
 });
 type TaskCommitProvenanceIncarnation = z.infer<typeof taskCommitProvenanceIncarnationSchema>;
 
 const persistedTaskWorkspaceGitSnapshotSchema = z.object({
 	path: z.string(),
 	headCommit: z.string(),
+	taskCommitProvenanceIncarnationId: z.string().optional(),
+	headReflogChangeToken: z.string().optional(),
 	baseRefTipCommit: z.string(),
 	commitsAheadOfBaseRef: z.number().int().nonnegative(),
 	commitsBehindBaseRef: z.number().int().nonnegative(),
@@ -317,13 +321,13 @@ async function listCommitShas(cwd: string, revisionRange: string, firstParent = 
 async function listCommitShasWithMergeCommitFlag(
 	cwd: string,
 	revisionRange: string,
-	commitsReachableFromExcludedCommit?: string,
+	...commitsReachableFromExcludedCommits: string[]
 ): Promise<Array<{ commitSha: string; isMergeCommit: boolean }> | null> {
 	const result = await runGit(cwd, [
 		"rev-list",
 		"--reverse",
 		"--parents",
-		...(commitsReachableFromExcludedCommit ? [`^${commitsReachableFromExcludedCommit}`] : []),
+		...commitsReachableFromExcludedCommits.map((commitSha) => `^${commitSha}`),
 		revisionRange,
 	]);
 	if (!result.ok) {
@@ -557,6 +561,8 @@ function snapshotFactsEqual(
 		left !== null &&
 		left.path === right.path &&
 		left.headCommit === right.headCommit &&
+		left.taskCommitProvenanceIncarnationId === right.taskCommitProvenanceIncarnationId &&
+		left.headReflogChangeToken === right.headReflogChangeToken &&
 		left.baseRefTipCommit === right.baseRefTipCommit &&
 		left.commitsAheadOfBaseRef === right.commitsAheadOfBaseRef &&
 		left.commitsBehindBaseRef === right.commitsBehindBaseRef &&
@@ -580,6 +586,7 @@ export interface RefreshTaskCommitIntegrationProvenanceInput {
 	worktreeMode?: RuntimeTaskWorktreeMode;
 	worktreeExists: boolean;
 	headCommit: string | null;
+	headReflogChangeToken?: string;
 	baseRefTipCommit: string | null;
 	commitsAheadOfBaseRef: number | null;
 	commitsBehindBaseRef: number | null;
@@ -794,11 +801,18 @@ export async function refreshTaskCommitIntegrationProvenance(
 				commitsBehindBaseRef: input.commitsBehindBaseRef,
 			});
 		}
-		const mergeBaseResult = await runGit(input.worktreePath, ["merge-base", "HEAD", input.baseRef]);
+		const mergeBaseResult = await runGit(input.worktreePath, [
+			"merge-base",
+			input.headCommit,
+			input.baseRefTipCommit,
+		]);
 		if (!mergeBaseResult.ok || !mergeBaseResult.stdout) {
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 		}
-		const observedCommitShas = await listCommitShas(input.worktreePath, `${input.baseRef}..HEAD`);
+		const observedCommitShas = await listCommitShas(
+			input.worktreePath,
+			`${input.baseRefTipCommit}..${input.headCommit}`,
+		);
 		if (observedCommitShas === null) {
 			return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 		}
@@ -833,56 +847,92 @@ export async function refreshTaskCommitIntegrationProvenance(
 	const observedTaskCommitsBySha = new Map(
 		deduplicateObservedTaskCommits(entry.incarnations).map((commit) => [commit.commitSha, commit]),
 	);
+	const creationAnchor = activeIncarnation.initialBaseCommit;
+	const verifiedHead = activeIncarnation.taskHeadCommitWithVerifiedBaseOverlapOwnership;
+	const previouslyObservedActiveTaskCommitShas = new Set(
+		activeIncarnation.observedTaskCommits.map(({ commitSha }) => commitSha),
+	);
 	const candidateCommitsWithMergeFlag = await listCommitShasWithMergeCommitFlag(
 		input.worktreePath,
-		`${input.baseRef}..HEAD`,
-		activeIncarnation.initialBaseCommit,
+		`${input.baseRefTipCommit}..${input.headCommit}`,
+		creationAnchor,
+		...(verifiedHead ? [verifiedHead] : []),
 	);
 	if (candidateCommitsWithMergeFlag === null) {
 		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 	}
-	const candidateCommitShas = candidateCommitsWithMergeFlag.map((commit) => commit.commitSha);
-	// 从未观察到 task commit 时，baseRef..HEAD 为空无法区分「task commits 已 handback」与
-	// 「worktree 只是 fast-forward 吸收了 base」。creation floor 只能证明提交在何时出现，不能证明所有权；
-	// 唯有「单一创建 incarnation + HEAD reflog 自创建起只有 fast-forward」能证明是后者，回流计数如实为 0。
+	const candidateCommitShas = new Set(candidateCommitsWithMergeFlag.map(({ commitSha }) => commitSha));
+	let recoveredTaskCommitShas: Set<string> | null = null;
+	const liveSnapshot = entry.lastWorkspaceGitSnapshot;
+	const baseCanContainNewlyLandedTaskCommits =
+		input.baseRefTipCommit !== (activeIncarnation.baseRefCommitHistoryProbeFloorCommit ?? creationAnchor);
 	if (
-		candidateCommitShas.length === 0 &&
-		observedTaskCommitsBySha.size === 0 &&
-		input.headCommit !== activeIncarnation.initialBaseCommit
+		activeIncarnation.captureSource === "worktree_creation" &&
+		((input.headCommit !== creationAnchor && input.headCommit !== verifiedHead) ||
+			(baseCanContainNewlyLandedTaskCommits &&
+				(verifiedHead !== input.headCommit ||
+					liveSnapshot?.baseRefTipCommit !== input.baseRefTipCommit ||
+					input.headReflogChangeToken !== liveSnapshot?.headReflogChangeToken ||
+					input.headReflogChangeToken === undefined)))
 	) {
-		const worktreeHeadMovedOnlyByFastForwardSinceCreation =
-			entry.incarnations.length === 1 &&
-			activeIncarnation.captureSource === "worktree_creation" &&
-			(await proveTaskWorktreeHeadMovedOnlyByFastForwardSinceCreation({
-				worktreePath: input.worktreePath,
-				initialBaseCommit: activeIncarnation.initialBaseCommit,
-				headCommit: input.headCommit,
-			}));
-		if (!worktreeHeadMovedOnlyByFastForwardSinceCreation) {
-			establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
-			return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete", {
-				commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
-				commitsBehindBaseRef: input.commitsBehindBaseRef,
-			});
+		recoveredTaskCommitShas = await recoverTaskCreatedCommitShasFromHeadReflog({
+			worktreePath: input.worktreePath,
+			initialBaseCommit: creationAnchor,
+			headCommit: input.headCommit,
+			baseTipCommit: input.baseRefTipCommit,
+			isDetached: input.isDetached,
+		});
+		if (recoveredTaskCommitShas === null && baseCanContainNewlyLandedTaskCommits) {
+			const unverifiedCommits = await listCommitShasWithMergeCommitFlag(
+				input.worktreePath,
+				`${creationAnchor}..${input.headCommit}`,
+				...(verifiedHead ? [verifiedHead] : []),
+			);
+			if (unverifiedCommits === null)
+				return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
+			const hasUnverifiedOverlap = unverifiedCommits.some(
+				({ commitSha, isMergeCommit }) =>
+					!isMergeCommit &&
+					!candidateCommitShas.has(commitSha) &&
+					!previouslyObservedActiveTaskCommitShas.has(commitSha),
+			);
+			if (
+				hasUnverifiedOverlap ||
+				(!verifiedHead && candidateCommitShas.size === 0 && previouslyObservedActiveTaskCommitShas.size === 0)
+			) {
+				establishTaskCommitIntegrationProvenanceVersionIfUnset(entry);
+				return createUnavailableWorkspaceGitStatus(input.baseRef, "task_commit_ownership_history_incomplete", {
+					commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
+					commitsBehindBaseRef: input.commitsBehindBaseRef,
+				});
+			}
+		} else if (recoveredTaskCommitShas !== null) {
+			for (const { commitSha, isMergeCommit } of candidateCommitsWithMergeFlag) {
+				if (!isMergeCommit && !recoveredTaskCommitShas.has(commitSha)) candidateCommitShas.delete(commitSha);
+			}
+			if (!baseCanContainNewlyLandedTaskCommits) {
+				recoveredTaskCommitShas = new Set(
+					[...recoveredTaskCommitShas].filter((commitSha) => candidateCommitShas.has(commitSha)),
+				);
+			}
 		}
 	}
-	const newCommitShas = candidateCommitShas.filter((commitSha) => !observedTaskCommitsBySha.has(commitSha));
-	const newCommitIdentities = await resolveCommitIdentities(input.worktreePath, newCommitShas);
-	for (const commit of newCommitIdentities) {
+	// reflog 的先后顺序也覆盖已离开 HEAD 的提交，保留相同提交时间的父子顺序。
+	const orderedTaskCommitShas = [
+		...new Set([
+			...[...previouslyObservedActiveTaskCommitShas].filter((commitSha) => !recoveredTaskCommitShas?.has(commitSha)),
+			...(recoveredTaskCommitShas ?? []),
+			...candidateCommitShas,
+		]),
+	];
+	const newCommitShas = orderedTaskCommitShas.filter((commitSha) => !observedTaskCommitsBySha.has(commitSha));
+	for (const commit of await resolveCommitIdentities(input.worktreePath, newCommitShas)) {
 		observedTaskCommitsBySha.set(commit.commitSha, commit);
 	}
-	// 本次探测排除创建锚点可达历史后，`baseRef..HEAD` 的全部候选都归当前活动世（含旧世已观测过、又出现在本世的，例如复用了旧分支），身份复用
-	// 已有观测、不重算 patch-id。从 base 吸收进来的提交从不出现在 `baseRef..HEAD`，因此不会被记成任何一世的自有提交。
-	const candidateCommitIdentities = candidateCommitShas.flatMap((commitSha) => {
+	const taskOwnedCommitsObservedInActiveIncarnation = orderedTaskCommitShas.flatMap((commitSha) => {
 		const identity = observedTaskCommitsBySha.get(commitSha);
 		return identity ? [identity] : [];
 	});
-	const taskOwnedCommitsObservedInActiveIncarnationBySha = new Map(
-		[...activeIncarnation.observedTaskCommits, ...candidateCommitIdentities].map((commit) => [
-			commit.commitSha,
-			commit,
-		]),
-	);
 
 	const firstIncarnation = entry.incarnations[0];
 	const provenanceFloorCommit =
@@ -903,20 +953,12 @@ export async function refreshTaskCommitIntegrationProvenance(
 			commitsBehindBaseRef: input.commitsBehindBaseRef,
 		});
 	}
-	const integration = countTaskCommitsIntegratedIntoBaseRef({
-		observedTaskCommits: [...observedTaskCommitsBySha.values()],
-		baseRefCommits,
-	});
-	const candidateTaskCommitsIntegratedIntoBaseRef = Math.max(
-		entry.lastWorkspaceGitSnapshot?.taskCommitsIntegratedIntoBaseRef ?? 0,
-		integration.integratedTaskCommitCount,
-	);
 	const taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead =
 		await resolveTaskOwnedNonMergeCommitsReachableFromTaskHead({
 			gitCwd: input.worktreePath,
 			taskHeadCommit: input.headCommit,
-			latestTaskCommitProvenanceIncarnationInitialBaseCommit: activeIncarnation.initialBaseCommit,
-			taskOwnedCommitsObservedInLatestIncarnation: [...taskOwnedCommitsObservedInActiveIncarnationBySha.values()],
+			latestTaskCommitProvenanceIncarnationInitialBaseCommit: creationAnchor,
+			taskOwnedCommitsObservedInLatestIncarnation: taskOwnedCommitsObservedInActiveIncarnation,
 			commitsAlreadyKnownReachableFromTaskHeadWithMergeCommitFlag: candidateCommitsWithMergeFlag,
 		});
 	if (taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead === null) {
@@ -925,20 +967,45 @@ export async function refreshTaskCommitIntegrationProvenance(
 			commitsBehindBaseRef: input.commitsBehindBaseRef,
 		});
 	}
-	// 此投影只选择仍可达或已落地的自有提交，不删除 provenance 的历史观测，避免改变部署/关系账本的判据。
+	const orderedObservedTaskCommits = deduplicateObservedTaskCommits([
+		...entry.incarnations.slice(0, -1),
+		{ ...activeIncarnation, observedTaskCommits: taskOwnedCommitsObservedInActiveIncarnation },
+	]);
+	const retainedCommitShas = resolveRetainedTaskCommitShasForCommittedLineChangeStatistics({
+		observedTaskCommits: orderedObservedTaskCommits,
+		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
+		baseRefCommits,
+	});
+	// 离开 HEAD 且未匹配落地的补采版本不进入共享归属记录。
+	const retainedCommitShaSet = new Set(retainedCommitShas);
+	const confirmedActiveTaskCommits = taskOwnedCommitsObservedInActiveIncarnation.filter(
+		({ commitSha }) =>
+			candidateCommitShas.has(commitSha) ||
+			retainedCommitShaSet.has(commitSha) ||
+			previouslyObservedActiveTaskCommitShas.has(commitSha),
+	);
+	const integration = countTaskCommitsIntegratedIntoBaseRef({
+		observedTaskCommits: deduplicateObservedTaskCommits([
+			...entry.incarnations.slice(0, -1),
+			{ ...activeIncarnation, observedTaskCommits: confirmedActiveTaskCommits },
+		]),
+		baseRefCommits,
+	});
+	const candidateTaskCommitsIntegratedIntoBaseRef = Math.max(
+		entry.lastWorkspaceGitSnapshot?.taskCommitsIntegratedIntoBaseRef ?? 0,
+		integration.integratedTaskCommitCount,
+	);
 	const retainedLineStatistics = await refreshTaskRetainedCommittedLineChangeStatistics({
 		repoPath: input.repoPath,
-		retainedCommitShas: resolveRetainedTaskCommitShasForCommittedLineChangeStatistics({
-			observedTaskCommits: [...observedTaskCommitsBySha.values()],
-			taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
-			baseRefCommits,
-		}),
+		retainedCommitShas,
 		cachedStatisticsByCommitSha: entry.committedLineChangeStatisticsByCommitSha ?? {},
 	});
 	const candidateSnapshotFacts: Omit<PersistedTaskWorkspaceGitSnapshot, "observedAt"> = {
 		taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead,
 		path: input.worktreePath,
 		headCommit: input.headCommit,
+		taskCommitProvenanceIncarnationId: activeIncarnation.incarnationId,
+		headReflogChangeToken: input.headReflogChangeToken,
 		baseRefTipCommit: input.baseRefTipCommit,
 		commitsAheadOfBaseRef: input.commitsAheadOfBaseRef,
 		commitsBehindBaseRef: input.commitsBehindBaseRef,
@@ -950,22 +1017,40 @@ export async function refreshTaskCommitIntegrationProvenance(
 		: liveObservationTimestamp;
 
 	const persistedSnapshot = await mutateProvenanceFile(input.workspaceId, (nextFile) => {
-		const nextEntry = nextFile.tasks[input.taskId] ?? entry;
-		const nextActiveIncarnation = nextEntry.incarnations.at(-1);
-		if (nextActiveIncarnation) {
-			const freshObservedTaskCommitsBySha = new Map(
-				nextActiveIncarnation.observedTaskCommits.map((commit) => [commit.commitSha, commit]),
-			);
-			for (const commit of candidateCommitIdentities) {
-				freshObservedTaskCommitsBySha.set(commit.commitSha, commit);
-			}
-			nextActiveIncarnation.observedTaskCommits = [...freshObservedTaskCommitsBySha.values()];
+		const nextEntry = nextFile.tasks[input.taskId];
+		const nextActiveIncarnation = nextEntry?.incarnations.at(-1);
+		if (
+			nextEntry?.baseRef !== input.baseRef ||
+			nextActiveIncarnation?.incarnationId !== activeIncarnation.incarnationId
+		) {
+			return null;
 		}
-		nextEntry.baseRef = input.baseRef;
 		const existingSnapshot = nextEntry.lastWorkspaceGitSnapshot;
 		const candidateIsOlderThanPersistedSnapshot =
 			existingSnapshot !== null && candidateObservedAt < existingSnapshot.observedAt;
+		const concurrentObservedTaskCommits = new Map(
+			nextActiveIncarnation.observedTaskCommits.map((commit) => [commit.commitSha, commit]),
+		);
+		for (const commit of confirmedActiveTaskCommits) {
+			if (!candidateIsOlderThanPersistedSnapshot) concurrentObservedTaskCommits.delete(commit.commitSha);
+			concurrentObservedTaskCommits.set(commit.commitSha, commit);
+		}
+		nextActiveIncarnation.observedTaskCommits = [...concurrentObservedTaskCommits.values()];
+		if (recoveredTaskCommitShas !== null) {
+			nextActiveIncarnation.taskCommitShasRecoveredFromHeadReflog = [
+				...new Set([
+					...(nextActiveIncarnation.taskCommitShasRecoveredFromHeadReflog ?? []),
+					...confirmedActiveTaskCommits
+						.filter(({ commitSha }) => recoveredTaskCommitShas?.has(commitSha))
+						.map(({ commitSha }) => commitSha),
+				]),
+			];
+		}
+		nextEntry.baseRef = input.baseRef;
 		if (!candidateIsOlderThanPersistedSnapshot) {
+			if (activeIncarnation.captureSource === "worktree_creation") {
+				nextActiveIncarnation.taskHeadCommitWithVerifiedBaseOverlapOwnership = candidateSnapshotFacts.headCommit;
+			}
 			nextEntry.retainedCommittedLineChangeHistory = resolvePersistedRetainedCommittedLineChangeHistory(
 				nextEntry.retainedCommittedLineChangeHistory,
 				retainedLineStatistics.history,
@@ -999,6 +1084,7 @@ export async function refreshTaskCommitIntegrationProvenance(
 		);
 		return nextEntry.lastWorkspaceGitSnapshot;
 	});
+	if (persistedSnapshot === null) return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
 	// 按本次探测读到的事实求值（不按合并后的持久快照）：观测就是「此刻在 worktree 上看到的」，与快照的时序取舍无关。
 	reportSharedTaskCommitLandingCriterionSatisfiedObservationWhenSatisfied({
 		workspaceId: input.workspaceId,
@@ -1055,12 +1141,16 @@ export async function probeAndRefreshTaskCommitIntegrationProvenance(input: {
 		});
 	}
 
-	const [headInfo, baseRefTipCommit, divergenceResult] = await Promise.all([
-		readGitHeadInfo(input.worktreePath),
-		input.knownBaseRefTipCommit !== undefined
-			? Promise.resolve(input.knownBaseRefTipCommit)
-			: resolveBaseRefTipCommit(input.repoPath, input.baseRef),
-		runGit(input.worktreePath, ["rev-list", "--left-right", "--count", `${input.baseRef}...HEAD`]),
+	const headInfo = await readGitHeadInfo(input.worktreePath);
+	const baseRefTipCommit = await resolveBaseRefTipCommit(input.repoPath, input.baseRef);
+	if (!headInfo.headCommit || !baseRefTipCommit) {
+		return createUnavailableWorkspaceGitStatus(input.baseRef, "git_probe_unavailable");
+	}
+	const divergenceResult = await runGit(input.worktreePath, [
+		"rev-list",
+		"--left-right",
+		"--count",
+		`${baseRefTipCommit}...${headInfo.headCommit}`,
 	]);
 	const [behindText, aheadText] = divergenceResult.stdout.split(/\s+/);
 	const commitsBehindBaseRef = Number.parseInt(behindText ?? "", 10);
@@ -1108,11 +1198,13 @@ export async function readSourceTaskCommitLandingReadiness(input: {
 	taskId: string;
 	repoPath: string;
 	localBaseRef: string;
+	liveWorktreePath?: string;
 }): Promise<boolean> {
 	const entry = (await readProvenanceFile(input.workspaceId)).tasks[input.taskId];
 	const incarnation = entry?.incarnations.at(-1);
-	const owned = entry?.lastWorkspaceGitSnapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
-	if (!incarnation || !owned || entry.baseRef !== input.localBaseRef) return false;
+	const snapshot = entry?.lastWorkspaceGitSnapshot;
+	const owned = snapshot?.taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead;
+	if (!incarnation || !snapshot || !owned || entry.baseRef !== input.localBaseRef) return false;
 	const base = await resolveBaseRefTipCommit(input.repoPath, input.localBaseRef);
 	if (!base) return false;
 	const commits = await loadBaseRefCommitIdentities({
@@ -1122,6 +1214,19 @@ export async function readSourceTaskCommitLandingReadiness(input: {
 		provenanceFloorCommit: incarnation.baseRefCommitHistoryProbeFloorCommit ?? incarnation.initialBaseCommit,
 	});
 	if (!commits) return false;
+	if (input.liveWorktreePath !== undefined) {
+		if (
+			snapshot.path !== input.liveWorktreePath ||
+			snapshot.taskCommitProvenanceIncarnationId !== incarnation.incarnationId
+		)
+			return false;
+		const currentRevisions = await runGit(input.liveWorktreePath, [
+			"rev-parse",
+			"HEAD",
+			`${input.localBaseRef}^{commit}`,
+		]);
+		if (!currentRevisions.ok || currentRevisions.stdout !== `${snapshot.headCommit}\n${base}`) return false;
+	}
 	return (
 		evaluateSharedTaskCommitLandingCriterionAgainstLocalBaseCommits({
 			taskOwnedNonMergeCommitsReachableFromLastKnownTaskHead: owned,

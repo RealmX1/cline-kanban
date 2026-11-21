@@ -1,5 +1,5 @@
-import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { expect } from "vitest";
 import type {
 	RuntimeTaskRetainedCommittedLineChangeHistory,
@@ -21,6 +21,7 @@ export async function runTaskRetainedCommittedLineChangeRealBrowserCheck(input: 
 	observeUntil: (predicate: () => Promise<boolean>, description: string) => Promise<void>;
 }) {
 	const { page, repository, workspaceId, taskId, webUiOrigin, evidenceOutputDirectory, observeUntil } = input;
+	await page.goto("about:blank");
 	const ensured = await input.ensureWorktree();
 	if (!ensured.path) throw new Error("隔离 worktree 不存在");
 	const worktreePath = ensured.path;
@@ -31,9 +32,23 @@ export async function runTaskRetainedCommittedLineChangeRealBrowserCheck(input: 
 	};
 	commit("a\nb\nc\nd\n", "浏览器：新增四行");
 	commit("a\nc\nd\n", "浏览器：删除一行");
-	await observeUntil(async () => (await input.readHistory()).summary.additions === 4, "真实探针捕获提交统计");
+	const taskHead = repository.runGit(["rev-parse", "HEAD"], { workingDirectoryPath: worktreePath }).stdout.trim();
+	repository.runGit(["merge", "--ff-only", taskHead]);
+	const reflogPath = resolve(
+		worktreePath,
+		repository.runGit(["rev-parse", "--git-path", "logs/HEAD"], { workingDirectoryPath: worktreePath }).stdout.trim(),
+	);
+	const reflog = readFileSync(reflogPath);
+	repository.runGit(["reflog", "expire", "--expire=all", "HEAD"], { workingDirectoryPath: worktreePath });
+	await page.goto(`${webUiOrigin}/${workspaceId}`);
 	const card = page.locator(`[data-task-id="${taskId}"]`).first();
 	const indicator = card.locator("[data-task-retained-committed-line-change-indicator]").getByRole("button");
+	await observeUntil(async () => (await indicator.textContent()) === "已提交 —", "缺少提交证据时仍显示未知");
+	writeFileSync(reflogPath, reflog);
+	await observeUntil(
+		async () => (await input.readHistory()).summary.additions === 4,
+		"真实探针恢复已合入 base 的提交",
+	);
 	await observeUntil(async () => (await indicator.textContent()) === "已提交 +4 −1", "主看板常驻累计");
 	await indicator.hover();
 	const details = page.getByRole("dialog", { name: "任务已提交增删行明细" });
@@ -50,7 +65,9 @@ export async function runTaskRetainedCommittedLineChangeRealBrowserCheck(input: 
 		"键盘关闭明细后恢复触发按钮焦点",
 	);
 	writeFileSync(join(worktreePath, "committed-lines.txt"), "dirty\n".repeat(30));
-	await observeUntil(async () => /1 file/.test(await card.innerText()), "dirty 编辑实时更新");
+	repository.runGit(["add", "committed-lines.txt"], { workingDirectoryPath: worktreePath });
+	const dirtyCell = card.locator('[data-task-card-summary-cell="dirty"]');
+	await observeUntil(async () => /1 file.*\+30.*-3/.test((await dirtyCell.textContent()) ?? ""), "dirty 编辑实时更新");
 	expect(await indicator.textContent()).toBe("已提交 +4 −1");
 	await page.goto(`${webUiOrigin}/${workspaceId}?task=${taskId}`);
 	const focusIndicators = page.locator("[data-task-retained-committed-line-change-indicator]");
@@ -108,7 +125,7 @@ export async function runTaskRetainedCommittedLineChangeRealBrowserCheck(input: 
 		JSON.stringify(
 			{
 				checks: [
-					"主看板累计",
+					"主看板累计在补证后由未知恢复",
 					"悬浮逐提交明细",
 					"dirty 独立更新",
 					"Focus 与顶栏",

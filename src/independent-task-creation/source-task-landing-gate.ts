@@ -82,7 +82,7 @@ export async function assertIndependentTaskSourceLandedBeforeInitialStart(input:
 	if (retainedPatchFiles.some((name) => name.startsWith(`${provenance.sourceTaskId}.`) && name.endsWith(".patch"))) {
 		throw new Error("来源任务仍保留未落地的工作树补丁，请先恢复并合入 local main。");
 	}
-	await probeAndRefreshTaskCommitIntegrationProvenance({
+	const sourceGitStatus = await probeAndRefreshTaskCommitIntegrationProvenance({
 		workspaceId: input.workspaceId,
 		taskId: provenance.sourceTaskId,
 		repoPath: input.repoPath,
@@ -91,11 +91,13 @@ export async function assertIndependentTaskSourceLandedBeforeInitialStart(input:
 		worktreeExists: exists,
 	});
 	if (
+		sourceGitStatus.taskCommitIntegrationTrackingStatus !== "complete" ||
 		!(await readSourceTaskCommitLandingReadiness({
 			workspaceId: input.workspaceId,
 			taskId: provenance.sourceTaskId,
 			repoPath: input.repoPath,
 			localBaseRef: "main",
+			...(exists ? { liveWorktreePath: path } : {}),
 		}))
 	) {
 		throw new Error("尚无来源任务成果全部进入 local main 的证明，请完成同步后再手动启动。");
