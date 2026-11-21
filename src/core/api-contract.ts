@@ -2232,6 +2232,7 @@ export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTa
 // 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
 export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	reopeningRequestId: z.string().uuid().optional(),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
@@ -3140,6 +3141,7 @@ export const nativePromptSubmissionNotStartedEvidenceSchema = z.object({
 export const terminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: terminalDeliveryFailureReasonSchema.nullable(),
+	submissionMayHaveStarted: z.boolean().optional(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
@@ -3163,6 +3165,7 @@ export type InjectionLedgerTerminalDeliveryFailureReason = z.infer<
 export const injectionLedgerTerminalDeliveryReceiptSchema = z.object({
 	status: terminalDeliveryStatusSchema,
 	reason: injectionLedgerTerminalDeliveryFailureReasonSchema.nullable(),
+	submissionMayHaveStarted: z.boolean().optional(),
 	failureNote: z.string().optional(),
 	codexNativePromptDeliveryEvidence: codexNativePromptDeliveryEvidenceSchema.optional(),
 	nativePromptSubmissionNotStartedEvidence: nativePromptSubmissionNotStartedEvidenceSchema.optional(),
@@ -6289,10 +6292,12 @@ export const runtimeAgentRaisedPendingUserDecisionSchema = z.object({
 		"not_answered",
 		"answer_recorded",
 		"delivery_in_progress",
+		"delivery_unconfirmed",
 		"delivered",
 		"delivery_failed",
 	]),
 	lastAnswerDeliveryFailureReason: z.string().nullable(),
+	answerDeliveryNextReconciliationAt: z.number().nullable().optional(),
 	// 提问它的那个会话活体。与当前会话 summary 的 runtimeSessionIncarnationId 相同且会话仍在跑，
 	// 即说明 agent 此刻正停在终端里的交互式选择器上——UI 据此默认折叠、引导去终端作答；
 	// 不同（会话已被回收 / 重启 / resume）或为 null（来源不明，如转录补录）则选择器早已不在，UI 主动展开。
@@ -6319,6 +6324,7 @@ export const runtimeAgentRaisedUserDecisionHistoryResolutionSchema = z.enum([
 	"interrupted_without_answer",
 	"failed_without_answer",
 	"answered_in_kanban_panel",
+	"user_confirmed_answer_handled",
 	"answered_in_agent_terminal",
 	"declined_in_agent_terminal",
 	"dismissed_in_kanban_panel",
@@ -6357,7 +6363,14 @@ export const runtimeAgentRaisedUserDecisionHistoryEntrySchema = z.object({
 	questionAnswers: z.array(runtimeAgentRaisedUserDecisionHistoryQuestionAnswerSchema),
 	// 面板作答才有投递状态；终端作答天然已送达、转录回填无此概念，均为 null。
 	answerDeliveryState: z
-		.enum(["not_answered", "answer_recorded", "delivery_in_progress", "delivered", "delivery_failed"])
+		.enum([
+			"not_answered",
+			"answer_recorded",
+			"delivery_in_progress",
+			"delivery_unconfirmed",
+			"delivered",
+			"delivery_failed",
+		])
 		.nullable(),
 });
 export type RuntimeAgentRaisedUserDecisionHistoryEntry = z.infer<
@@ -6457,6 +6470,28 @@ export const runtimeDismissAgentRaisedPendingUserDecisionResponseSchema = z.obje
 });
 export type RuntimeDismissAgentRaisedPendingUserDecisionResponse = z.infer<
 	typeof runtimeDismissAgentRaisedPendingUserDecisionResponseSchema
+>;
+
+export const runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema = z.object({
+	decisionId: z.string().trim().min(1),
+});
+export type RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequest = z.infer<
+	typeof runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema
+>;
+export const runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema =
+	runtimeAnswerAgentRaisedPendingUserDecisionResponseSchema;
+export type RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponse = z.infer<
+	typeof runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema
+>;
+export const runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema =
+	runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema;
+export type RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequest = z.infer<
+	typeof runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema
+>;
+export const runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema =
+	runtimeDismissAgentRaisedPendingUserDecisionResponseSchema;
+export type RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponse = z.infer<
+	typeof runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema
 >;
 
 // ==========================================================================

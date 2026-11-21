@@ -17,7 +17,13 @@ import {
 	resolveObservedTaskConversationSessionContextSourceIdentity,
 	resolveRecordedTaskConversationSessionContextSource,
 } from "../core/task-conversation-session-context-source";
-import { findTaskMessageInjectionRecord, readTaskMessageInjectionLedger } from "../core/task-message-injection-ledger";
+import {
+	createPendingTaskMessageInjectionRecord,
+	findTaskMessageInjectionRecord,
+	readTaskMessageInjectionLedger,
+	recordTaskMessageTerminalDeliveryOutcome,
+	withTaskMessageInjectionLedgerLock,
+} from "../core/task-message-injection-ledger";
 import { reconcileCodexUserQuestionTranscriptForTask } from "../server/codex-user-question-transcript-reconciliation";
 import { assertTaskMainSessionHandoverExistingTargetBinding } from "../server/task-main-session-handover-existing-target";
 import { assertTaskSessionIsNotPendingProjectConsolidation } from "../state/duplicate-project-consolidation-status";
@@ -37,7 +43,7 @@ import { PtyAgentProcessConfirmedNotSpawnedError } from "../terminal/pty-agent-p
 // workspace actions, but detailed Cline, terminal, and config behavior
 // should stay in focused services instead of accumulating here.
 
-import { rm } from "node:fs/promises";
+import { rm, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { TRPCError } from "@trpc/server";
@@ -74,6 +80,7 @@ import {
 	resolveAgentSessionTransportForLaunch,
 } from "../core/agent-session-transport-selection";
 import type {
+	InjectionLedgerTerminalDeliveryReceipt,
 	PromptLibraryScope,
 	RuntimeAgentId,
 	RuntimeAgentNativeConversationSessionIdentity,
@@ -155,11 +162,16 @@ import {
 	recordTaskMessageDeliveryRequestedIntoTaskConversationSessionWithoutBlocking,
 	recordUserQueuedTaskPromptDeliveryRequestedWithoutBlocking,
 } from "../inter-work-unit-relation-ledger/task-message-delivery-request-event-recording";
-import { createAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery";
+import {
+	type AgentRaisedPendingUserDecisionAnswerTransportReceipt,
+	createAgentRaisedPendingUserDecisionAnswerDelivery,
+} from "../server/agent-raised-pending-user-decision-answer-delivery";
+import { reconcileAgentRaisedPendingUserDecisionAnswerDelivery } from "../server/agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { openInBrowser } from "../server/browser";
 import type { QueuedTaskPromptDeliveryDispatcher } from "../server/queued-task-prompt-delivery-dispatcher";
 import { resolveSessionCategoryAndAttributedTaskCardId } from "../server/task-resource-usage-attribution-root-enumeration";
 import {
+	confirmAgentRaisedPendingUserDecisionAnswerHandled,
 	dismissAgentRaisedPendingUserDecision,
 	isOpenAgentRaisedPendingUserDecision,
 	readAgentRaisedPendingUserDecisions,
@@ -201,7 +213,11 @@ import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
-import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import {
+	listTaskClosureOperations,
+	requestTaskClosureLifecycleCancellation,
+	withTaskClosureLifecycleLocks,
+} from "../task-closure/task-closure-operation-store";
 import { createTaskFileDownloadService } from "../task-file-downloads/task-file-download-service";
 import {
 	readRecordedCreationNameSuggestionResult,
@@ -1356,7 +1372,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					if (!primary) return { ok: false, summary: null, error: "当前主会话记录缺失，未退回原 Claude 会话。" };
 					const resumed = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, primary);
 					if (!resumed) return { ok: false, summary: null, error: "当前主会话无法恢复。" };
-					return await runtimeApi.startTaskSession(workspaceScope, resumed);
+					return await runtimeApi.startTaskSession(workspaceScope, resumed, beforeAgentProcessLaunch);
 				}
 				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
 				const owningCardIsInBacklog =
@@ -2385,6 +2401,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		stopTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStopRequest(input);
+				try {
+					const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const card = board.columns
+						.flatMap((column) => column.cards)
+						.find(
+							(card) => card.id === body.taskId || resolveMainTaskConversationSessionId(card) === body.taskId,
+						);
+					if (card)
+						for (const operation of await listTaskClosureOperations({
+							workspaceId: workspaceScope.workspaceId,
+							taskId: card.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+						})) {
+							if (operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase))
+								await requestTaskClosureLifecycleCancellation(operation);
+						}
+				} catch (error) {
+					logAgentSessionRetentionWarning(`重开操作的 Stop 撤销证据暂不可写，继续停止会话：${String(error)}`);
+				}
 				// 自动收尾的持久暂停或取消失败不能拦住用户停止 agent 本体。
 				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch((error: unknown) => {
 					logAgentSessionRetentionWarning(
@@ -2505,6 +2540,26 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					transcriptRecoveryNotice = "暂时无法确认旧对话归属，旧问答记录尚未恢复。";
 				}
 			}
+			const reconciliationManager = await deps.getScopedTerminalManager(workspaceScope);
+			const reconciliationAcpService = decisions.some(
+				(decision) => decision.sessionTransport === "acp_stdio_subprocess",
+			)
+				? await deps.getScopedAcpTaskSessionService(workspaceScope)
+				: null;
+			for (const decision of decisions) {
+				if (
+					(!taskId || decision.taskId === taskId) &&
+					decision.status === "answered" &&
+					!decision.answerHandledConfirmation &&
+					decision.answerDeliveryState !== "delivered"
+				)
+					await reconcileAgentRaisedPendingUserDecisionAnswerDelivery({
+						workspaceId: workspaceScope.workspaceId,
+						decisionId: decision.decisionId,
+						getSummary: (id) => reconciliationAcpService?.getSummary(id) ?? reconciliationManager.getSummary(id),
+					});
+			}
+			decisions = await readAgentRaisedPendingUserDecisions(workspaceScope.workspaceId);
 			const alreadyHasOpenDecisionForTask =
 				taskId !== undefined &&
 				decisions.some((decision) => decision.taskId === taskId && isOpenAgentRaisedPendingUserDecision(decision));
@@ -2587,6 +2642,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						reclaimedAt: decision.reclaimedAt,
 						answerDeliveryState: decision.answerDeliveryState,
 						lastAnswerDeliveryFailureReason: decision.lastAnswerDeliveryFailureReason,
+						answerDeliveryNextReconciliationAt:
+							decision.answerDeliveryReconciliation?.nextReconciliationAt ??
+							decision.answerDeliveryAttempts?.at(-1)?.nextReconciliationAt ??
+							(decision.answerDeliveryState === "delivery_in_progress" ? Date.now() + 15_000 : null),
 						originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
 						nativeToolCallOutcome: decision.nativeToolCallOutcome,
 						pendingAnswerDraft: decision.status === "pending" ? (decision.pendingAnswerDraft ?? null) : null,
@@ -2603,6 +2662,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					})),
 			};
 		},
+		reconcileAgentRaisedPendingUserDecisionAnswerDelivery: async (workspaceScope, input) => {
+			const manager = await deps.getScopedTerminalManager(workspaceScope);
+			const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+			const record = await reconcileAgentRaisedPendingUserDecisionAnswerDelivery({
+				workspaceId: workspaceScope.workspaceId,
+				decisionId: input.decisionId,
+				getSummary: (id) => acpService.getSummary(id) ?? manager.getSummary(id),
+				force: true,
+			});
+			return { ok: record !== null, delivered: record?.answerDeliveryState === "delivered" };
+		},
+		confirmAgentRaisedPendingUserDecisionAnswerHandled: async (workspaceScope, input) => {
+			const manager = await deps.getScopedTerminalManager(workspaceScope);
+			const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
+			await reconcileAgentRaisedPendingUserDecisionAnswerDelivery({
+				workspaceId: workspaceScope.workspaceId,
+				decisionId: input.decisionId,
+				getSummary: (id) => acpService.getSummary(id) ?? manager.getSummary(id),
+				force: true,
+			});
+			const record = await confirmAgentRaisedPendingUserDecisionAnswerHandled(
+				workspaceScope.workspaceId,
+				input.decisionId,
+				Date.now(),
+			);
+			return { ok: record !== null, ...(record ? {} : { error: "仍有发送操作未收敛，请等待后再确认处理。" }) };
+		},
+
 		saveAgentRaisedPendingUserDecisionAnswerDraft: async (workspaceScope, input) => {
 			try {
 				const saved = await saveAgentRaisedPendingUserDecisionAnswerDraft(workspaceScope.workspaceId, input);
@@ -2629,6 +2716,10 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				const beforeAnswerDecision = beforeAnswerRecords.find(
 					(decision) => decision.decisionId === body.decisionId,
 				);
+				const answerAcpService =
+					beforeAnswerDecision?.sessionTransport === "acp_stdio_subprocess"
+						? await deps.getScopedAcpTaskSessionService(workspaceScope)
+						: null;
 				if (beforeAnswerDecision?.agentId === "codex") {
 					const summary = answerManager.getSummary(beforeAnswerDecision.taskId);
 					const identity = summary?.agentNativeConversationSessionIdentity;
@@ -2653,6 +2744,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				}
 
 				return await createAgentRaisedPendingUserDecisionAnswerDelivery({
+					getSummary: (taskId) => answerAcpService?.getSummary(taskId) ?? answerManager.getSummary(taskId),
 					ensureTaskSessionReadyForDelivery: async ({ taskId, sessionTransport }) => {
 						// 三种 transport 的「让会话回到可投递状态」手法不同；返回 false 表示恢复不了、
 						// 这次投不出去（不是「答案丢了」——答案已经 durable 落库）。
@@ -2686,15 +2778,50 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						text,
 						originRuntimeSessionIncarnationId,
 						idempotencyKey,
+						decisionId: answerDecisionId,
+						attemptId,
+						dispatchIdempotencyKey,
+						persistSubmissionContext,
 					}) => {
+						const deliveryManager = await deps.getScopedTerminalManager(workspaceScope);
+						const deliverySummary = answerAcpService?.getSummary(taskId) ?? deliveryManager.getSummary(taskId);
+						await persistSubmissionContext({
+							targetNativeSessionId:
+								deliverySummary?.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+							targetRuntimeSessionIncarnationId: deliverySummary?.runtimeSessionIncarnationId ?? null,
+							workingDirectoryPath: deliverySummary?.workspacePath ?? undefined,
+							transcriptPath: deliverySummary?.agentNativeConversationSessionIdentity?.transcriptPath ?? null,
+							preSubmissionAcceptance: deliverySummary?.agentConversationPromptSubmissionAcceptance ?? null,
+						});
 						let observedQuestionDeliveryOutcome: TaskChatInputDeliveryOutcome | null = null;
-						const deliverWithExistingQuestionConstraints = async (): Promise<boolean> => {
+						const deliverWithExistingQuestionConstraints = async (): Promise<
+							boolean | AgentRaisedPendingUserDecisionAnswerTransportReceipt
+						> => {
 							if (sessionTransport === "acp_stdio_subprocess") {
 								const acpService = await deps.getScopedAcpTaskSessionService(workspaceScope);
 								// ACP 的同步 summary 只代表已发出；等待有界的协议接受回执，不等待整轮结束。
-								return await new Promise<boolean>((resolveAcceptance) => {
+								return await new Promise<InjectionLedgerTerminalDeliveryReceipt>((resolveReceipt) => {
+									const resolveAcceptance = (accepted: boolean) =>
+										resolveReceipt(
+											accepted
+												? { status: "delivered_and_submit_confirmed", reason: null }
+												: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" },
+										);
 									void acpService
-										.sendTaskSessionInput(taskId, text, undefined, resolveAcceptance, idempotencyKey)
+										.sendTaskSessionInput(
+											taskId,
+											text,
+											undefined,
+											resolveAcceptance,
+											dispatchIdempotencyKey,
+											(reason) =>
+												resolveReceipt({
+													status: "delivery_failed",
+													reason: "no_active_terminal_session",
+													submissionMayHaveStarted: false,
+													failureNote: `ACP 在登记输入前拒绝提交：${reason}`,
+												}),
+										)
 										.then((summary) => {
 											if (!summary || !summary.agentConversationPromptSubmissionAcceptance)
 												resolveAcceptance(false);
@@ -2740,7 +2867,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 												);
 												const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
 												const currentDecision = records.find(
-													(decision) => decision.decisionId === body.decisionId,
+													(decision) => decision.decisionId === answerDecisionId,
 												);
 												if (
 													identity?.sourceAgentId !== "codex" ||
@@ -2761,8 +2888,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 													throw new Error("旧问答记录尚未完整读取，答案已保存；请稍后重试投递。");
 												const nativeQuestion = recovered.exchanges.find(
 													(exchange) =>
-														`${taskId}:${exchange.payload.decisionSourceId}` === body.decisionId ||
-														`${taskId}:${exchange.callId}` === body.decisionId,
+														`${taskId}:${exchange.payload.decisionSourceId}` === answerDecisionId ||
+														`${taskId}:${exchange.callId}` === answerDecisionId,
 												);
 												if (!nativeQuestion)
 													throw new Error("尚未核实原问题的完整记录，答案已保存但未投递。");
@@ -2810,7 +2937,15 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 											}
 										}
 									: undefined;
-							await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
+							try {
+								await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
+							} catch (error) {
+								return {
+									status: "delivery_failed",
+									reason: "terminal_prompt_readiness_timeout",
+									failureNote: String(error),
+								};
+							}
 							if (agentIsStoppedOnThisQuestionSelectorInLiveTerminal) {
 								const selectorDismissalOutcome =
 									await terminalManager.dismissAgentUserQuestionSelectorBeforeProgrammaticAnswerDelivery(
@@ -2818,7 +2953,11 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									);
 								if (!isAgentUserQuestionSelectorDismissedAndTerminalInputBoxVisible(selectorDismissalOutcome)) {
 									// 抛出而不是返回 false：失败原因要原样进账本，让面板如实告诉用户卡在哪。
-									throw new Error(`无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`);
+									return {
+										status: "delivery_failed",
+										reason: "terminal_prompt_readiness_timeout",
+										failureNote: `无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`,
+									};
 								}
 							}
 							const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
@@ -2826,8 +2965,32 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							const confirmedDelivery = new Promise<boolean>((resolve) => {
 								resolveConfirmedDelivery = resolve;
 							});
+							let terminalSubmissionWasAuthorized = false;
+							let capturedPreSubmissionPosition = false;
+							const persistPreSubmissionPositionBeforeTerminalWrite = async () => {
+								await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
+								if (!capturedPreSubmissionPosition) {
+									const path = deliverySummary?.agentNativeConversationSessionIdentity?.transcriptPath;
+									const metadata = path ? await stat(path).catch(() => null) : null;
+									if (metadata)
+										await persistSubmissionContext({
+											preSubmissionTranscriptByteOffset: metadata.size,
+											preSubmissionTranscriptFileIdentity: `${metadata.dev}:${metadata.ino}`,
+										});
+									capturedPreSubmissionPosition = true;
+								}
+								terminalSubmissionWasAuthorized = true;
+							};
 							const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
-								validateBeforeTerminalWrite: validateCodexQuestionImmediatelyBeforeTerminalWrite,
+								idempotencyKey: dispatchIdempotencyKey,
+								codexNativeDeliveryLedgerBinding: {
+									ledgerPath: getTaskMessageInjectionLedgerPath(
+										getWorkspaceDirectoryPath(workspaceScope.workspaceId),
+									),
+									ledgerTaskId: taskId,
+									idempotencyKey: dispatchIdempotencyKey,
+								},
+								validateBeforeTerminalWrite: persistPreSubmissionPositionBeforeTerminalWrite,
 								onDeliveryOutcome: (outcome) => {
 									observedQuestionDeliveryOutcome = outcome;
 									resolveConfirmedDelivery(outcome.status !== "delivery_failed");
@@ -2847,42 +3010,77 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									return stash.outcome;
 								},
 							});
-							const delivered = acceptedSummary ? await confirmedDelivery : false;
-							if (terminalWriteValidationFailure) throw terminalWriteValidationFailure;
-							return delivered;
+							if (acceptedSummary) await confirmedDelivery;
+							if (!acceptedSummary) return { status: "delivery_failed", reason: "no_active_terminal_session" };
+							if (terminalWriteValidationFailure)
+								return {
+									...(observedQuestionDeliveryOutcome ?? {
+										status: "delivery_failed" as const,
+										reason: "terminal_prompt_readiness_timeout" as const,
+									}),
+									submissionMayHaveStarted: terminalSubmissionWasAuthorized,
+									failureExplanation: String(terminalWriteValidationFailure),
+								};
+							return {
+								...(observedQuestionDeliveryOutcome ?? {
+									status: "delivery_failed" as const,
+									reason: "submit_confirmation_budget_exhausted" as const,
+								}),
+								submissionMayHaveStarted: terminalSubmissionWasAuthorized,
+							};
 						};
-						if (!deps.recordManagedTaskPromptDeliveries) return deliverWithExistingQuestionConstraints();
-						const manager = await deps.getScopedTerminalManager(workspaceScope);
-						const { handle } = await beginManagedTaskPromptDelivery({
-							workspaceId: workspaceScope.workspaceId,
-							taskId,
-							text,
-							origin: { messageType: "user_decision_answer", sourceLabel: body.decisionId },
-							summary: manager.getSummary(taskId),
+						const ledgerPath = getTaskMessageInjectionLedgerPath(
+							getWorkspaceDirectoryPath(workspaceScope.workspaceId),
+						);
+						await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => {
+							const existing = findTaskMessageInjectionRecord(records, taskId, dispatchIdempotencyKey);
+							if (existing) throw new Error("答案投递尝试已登记，只允许核验回执");
+							return {
+								records: [
+									...records,
+									createPendingTaskMessageInjectionRecord({
+										taskId,
+										attemptId: taskId,
+										source: "user_decision_answer",
+										idempotencyKey: dispatchIdempotencyKey,
+										promptSha256: createHash("sha256").update(text).digest("hex"),
+										nowIso: new Date().toISOString(),
+									}),
+								],
+								result: undefined,
+							};
 						});
-						try {
-							const delivered = await deliverWithExistingQuestionConstraints();
-							await handle
-								.settle(
-									observedQuestionDeliveryOutcome ??
-										(delivered
-											? { status: "delivered_and_submit_confirmed", reason: null }
-											: { status: "delivery_failed", reason: "submit_confirmation_budget_exhausted" }),
-								)
-								.catch(() => undefined);
-							return delivered;
-						} catch (error) {
-							await handle
-								.settle(
-									observedQuestionDeliveryOutcome ?? {
-										status: "delivery_failed",
-										reason: "submit_confirmation_budget_exhausted",
-									},
-									String(error),
-								)
-								.catch(() => undefined);
-							throw error;
-						}
+						const registration = deps.recordManagedTaskPromptDeliveries
+							? await beginManagedTaskPromptDelivery({
+									workspaceId: workspaceScope.workspaceId,
+									taskId,
+									text,
+									deliveryRequestId: `${idempotencyKey}:attempt:${attemptId}`,
+									idempotencyKey: dispatchIdempotencyKey,
+									origin: { messageType: "user_decision_answer", sourceLabel: answerDecisionId },
+									summary: deliverySummary,
+								})
+							: null;
+						const receipt = await deliverWithExistingQuestionConstraints();
+						const outcome: AgentRaisedPendingUserDecisionAnswerTransportReceipt =
+							typeof receipt === "boolean"
+								? receipt
+									? { status: "delivered_and_submit_confirmed", reason: null }
+									: { status: "delivery_failed", reason: "no_active_terminal_session" }
+								: receipt;
+						await recordTaskMessageTerminalDeliveryOutcome({
+							ledgerPath,
+							taskId,
+							idempotencyKey: dispatchIdempotencyKey,
+							status: outcome.status,
+							...(outcome.reason ? { failureReason: outcome.reason } : {}),
+							failureDetail: outcome.failureNote,
+							submissionMayHaveStarted: outcome.submissionMayHaveStarted,
+							codexNativePromptDeliveryEvidence: outcome.codexNativePromptDeliveryEvidence,
+							nowIso: new Date().toISOString(),
+						});
+						await registration?.handle.settle(outcome).catch(() => undefined);
+						return outcome;
 					},
 				}).answerPendingUserDecision({
 					workspaceId: workspaceScope.workspaceId,

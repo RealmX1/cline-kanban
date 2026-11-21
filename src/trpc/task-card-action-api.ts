@@ -35,7 +35,10 @@ import type {
 	RuntimeTaskWorktreeMode,
 	WorkspaceQueuedTaskPromptDeliverySnapshot,
 } from "../core/api-contract";
-import { runtimeTaskCardActionMoveIntoDoneRequestSchema } from "../core/api-contract";
+import {
+	runtimeTaskCardActionMoveIntoDoneRequestSchema,
+	runtimeTaskCardActionRestoreFromDoneRequestSchema,
+} from "../core/api-contract";
 import type { BacklogTaskStartReadinessReview } from "../core/backlog-task-start-readiness-contract";
 import {
 	type CodexNativeAgentTurnExecutionObservation,
@@ -106,17 +109,36 @@ import {
 } from "../state/workspace-state";
 import {
 	captureAndVerifyTaskClosureArchive,
+	reconcileTaskClosureVerifiedArchivePublication,
 	restoreVerifiedTaskClosureArchive,
 } from "../task-closure/task-closure-archive";
 import {
+	beginTaskClosureAutomaticSideEffect,
+	completeTaskClosureAutomaticSideEffect,
+	getTaskClosureAutomaticRecoveryState,
+	recordTaskClosureAutomaticFailure,
+	TaskClosureRecoveryPrerequisiteError,
+} from "../task-closure/task-closure-automatic-recovery-policy";
+import { readTaskClosureOwnedProcessExitEvidence } from "../task-closure/task-closure-failure-recovery-evidence";
+import { persistTaskClosureProgressAndProjectOntoCurrentCard } from "../task-closure/task-closure-operation-progress-projection";
+import {
+	assertTaskClosureLifecycleNotCancelled,
+	isTaskClosureLifecycleCancellationRequested,
 	listTaskClosureOperations,
 	readTaskClosureHistory,
 	readTaskClosureOperation,
+	requestTaskClosureLifecycleCancellation,
 	type TaskClosureOperation,
+	withTaskClosureLifecycleCancellationGuards,
 	withTaskClosureLifecycleLocks,
 	writeTaskClosureHistoryRecord,
 	writeTaskClosureOperation,
 } from "../task-closure/task-closure-operation-store";
+import {
+	readProcessIdentity,
+	readSystemBootIdentity,
+} from "../task-command-execution/task-command-execution-supervisor";
+import { createTaskConversationSessionOperationStore } from "../task-conversation-sessions/task-conversation-session-operation-store";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 import { deleteAllTaskTurnCheckpointRefs } from "../workspace/turn-checkpoints";
 import type { RuntimeTrpcContext, RuntimeTrpcWorkspaceScope } from "./app-router";
@@ -356,6 +378,7 @@ function toErrorMessage(error: unknown): string {
 export function createTaskCardActionApi(
 	deps: CreateTaskCardActionApiDependencies,
 ): RuntimeTrpcContext["taskCardActionApi"] {
+	const lifecycleSessionOperations = createTaskConversationSessionOperationStore();
 	const resolveIntent = async (
 		taskCardActionTaskMutationIntentSubject: TaskCardActionTaskMutationIntentSubject,
 		kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
@@ -541,11 +564,25 @@ export function createTaskCardActionApi(
 					: {}),
 				...(worktreeMode ? { worktreeMode } : {}),
 			});
+			if (operation) {
+				const current = await readTaskClosureOperation(operation.taskIdentity, operation.progress.closureRequestId);
+				if (current) Object.assign(operation, current);
+				if (!deleted.ok)
+					await recordTaskClosureAutomaticFailure(operation, new Error(deleted.error ?? "清理工作树失败"));
+				else await completeTaskClosureAutomaticSideEffect(operation);
+				await writeTaskClosureOperation(operation);
+			}
 			return {
 				taskWorktreeWasRemoved: deleted.removed,
 				taskWorktreeDeletionErrorMessage: deleted.ok ? null : (deleted.error ?? null),
 			};
 		} catch (error) {
+			if (operation) {
+				const current = await readTaskClosureOperation(operation.taskIdentity, operation.progress.closureRequestId);
+				if (current) Object.assign(operation, current);
+				await recordTaskClosureAutomaticFailure(operation, error);
+				await writeTaskClosureOperation(operation);
+			}
 			return { taskWorktreeWasRemoved: false, taskWorktreeDeletionErrorMessage: toErrorMessage(error) };
 		}
 	};
@@ -812,32 +849,8 @@ export function createTaskCardActionApi(
 		);
 
 	const writeClosureProgress = async (scope: RuntimeTrpcWorkspaceScope, operation: TaskClosureOperation) => {
-		await writeTaskClosureOperation(operation);
-		const saved = await mutateWorkspaceState(
-			scope.workspacePath,
-			buildTaskMutationIntentForKanbanRuntimeSystemComponent(
-				"task_closure_operation_progress_changed",
-				"task-closure-preservation",
-			),
-			(state) => {
-				const found = findTaskCardWithBoardColumn(state.board, operation.taskIdentity.taskId);
-				if (!found || found.taskCard.createdAt !== operation.taskIdentity.taskIncarnationCreatedAtEpochMs)
-					return { board: state.board, value: null, save: false };
-				return {
-					board: {
-						...state.board,
-						columns: state.board.columns.map((column) => ({
-							...column,
-							cards: column.cards.map((card) =>
-								card === found.taskCard ? { ...card, taskClosureOperationProgress: operation.progress } : card,
-							),
-						})),
-					},
-					value: null,
-				};
-			},
-		);
-		broadcastWorkspaceStateUpdatedWhenBoardWasSaved(scope, saved.saved);
+		const saved = await persistTaskClosureProgressAndProjectOntoCurrentCard(scope, operation);
+		broadcastWorkspaceStateUpdatedWhenBoardWasSaved(scope, saved);
 	};
 
 	const stopTaskSessionsAndConfirmExitBeforePreservation = async (
@@ -857,13 +870,40 @@ export function createTaskCardActionApi(
 		]) {
 			if (summary.taskConversationSessionMetadata?.workspaceTaskId === card.id) sessionIds.add(summary.taskId);
 		}
-		const processIds = new Set<number>(operation.processIdsAwaitingExit ?? []);
+		const currentOwnedProcessIds = new Set<number>();
 		// 主会话的停止会连带停止侧会话，须在停止任何会话前保存所有活体 PID。
 		for (const taskId of sessionIds) {
 			const before = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(scope.workspaceId, taskId);
-			if (before?.pid && before.pid !== process.pid) processIds.add(before.pid);
+			if (before?.pid && before.pid !== process.pid) currentOwnedProcessIds.add(before.pid);
+		}
+		const currentSystemBootIdentity =
+			currentOwnedProcessIds.size || operation.processIdsAwaitingExit?.length
+				? await readSystemBootIdentity()
+				: null;
+		if (
+			currentSystemBootIdentity &&
+			operation.systemBootIdentityAtProcessCapture &&
+			currentSystemBootIdentity !== operation.systemBootIdentityAtProcessCapture
+		) {
+			operation.processIdsAwaitingExit = [];
+			operation.ownedProcessIdentitiesAwaitingExit = [];
+		}
+		operation.systemBootIdentityAtProcessCapture = currentSystemBootIdentity;
+		const processIds = new Set<number>(operation.processIdsAwaitingExit ?? []);
+		for (const pid of currentOwnedProcessIds) {
+			processIds.add(pid);
+			operation.ownedProcessIdentitiesAwaitingExit = (operation.ownedProcessIdentitiesAwaitingExit ?? []).filter(
+				(identity) => identity.pid !== pid,
+			);
 		}
 		operation.processIdsAwaitingExit = [...processIds];
+		operation.ownedProcessIdentitiesAwaitingExit ??= [];
+		for (const pid of processIds) {
+			if (!operation.ownedProcessIdentitiesAwaitingExit.some((identity) => identity.pid === pid)) {
+				const identity = await readProcessIdentity(pid);
+				if (identity) operation.ownedProcessIdentitiesAwaitingExit.push(identity);
+			}
+		}
 		await writeTaskClosureOperation(operation);
 		for (const taskId of sessionIds) {
 			const stopped = await deps.runtimeApi.stopTaskSession(scope, { taskId });
@@ -875,16 +915,11 @@ export function createTaskCardActionApi(
 		operation.processIdsAwaitingExit = [...processIds];
 		await writeTaskClosureOperation(operation);
 		for (let attempt = 0; attempt < 50; attempt += 1) {
-			for (const pid of processIds) {
-				try {
-					process.kill(pid, 0);
-				} catch (error) {
-					if ((error as NodeJS.ErrnoException).code === "ESRCH") processIds.delete(pid);
-					else throw error;
-				}
-			}
-			if (!processIds.size) {
+			await assertTaskClosureLifecycleNotCancelled(operation);
+			if ((await readTaskClosureOwnedProcessExitEvidence(operation)).every((value) => value === "exited")) {
 				operation.processIdsAwaitingExit = [];
+				operation.ownedProcessIdentitiesAwaitingExit = [];
+				operation.systemBootIdentityAtProcessCapture = null;
 				await writeTaskClosureOperation(operation);
 				return;
 			}
@@ -1009,30 +1044,30 @@ export function createTaskCardActionApi(
 				initial.boardColumnId !== operation.sourceBoardColumnId)
 		)
 			throw new TRPCError({ code: "CONFLICT", message: "任务已被修改，旧结案请求已失效。" });
-		if (operation.archiveManifest) return operation;
 		const refreshedSource = await getTaskWorkspacePathInfo({
 			cwd: scope.workspacePath,
 			taskId: input.taskId,
 			baseRef: initial.taskCard.baseRef,
 			worktreeMode: initial.taskCard.worktreeMode,
 		});
-		operation.sourceWorktreePath = refreshedSource.exists ? refreshedSource.path : null;
+		if (!operation.archiveManifest)
+			operation.sourceWorktreePath = refreshedSource.exists ? refreshedSource.path : null;
 		try {
-			await stopTaskSessionsAndConfirmExitBeforePreservation(scope, initial.taskCard, operation);
-			for (let attempt = 0; attempt < 3; attempt += 1) {
-				operation.progress.attemptCount += 1;
-				operation.progress.phase = "preserving";
-				await writeClosureProgress(scope, operation);
-				try {
-					operation.archiveManifest = await captureAndVerifyTaskClosureArchive(operation);
-					break;
-				} catch (error) {
-					operation.progress.lastError = toErrorMessage(error);
-					await writeClosureProgress(scope, operation);
-					if (attempt === 2) throw error;
-					await waitForProcessExit(100 * (attempt + 1));
-				}
+			await reconcileTaskClosureVerifiedArchivePublication(operation);
+			if (operation.archiveManifest) {
+				await assertTaskClosureLifecycleNotCancelled(operation);
+				if (initial.boardColumnId !== "trash")
+					await stopTaskSessionsAndConfirmExitBeforePreservation(scope, initial.taskCard, operation);
+				return operation;
 			}
+			await beginTaskClosureAutomaticSideEffect(operation, "preserve_archive");
+			await stopTaskSessionsAndConfirmExitBeforePreservation(scope, initial.taskCard, operation);
+			operation.progress.attemptCount += 1;
+			operation.progress.phase = "preserving";
+			await writeClosureProgress(scope, operation);
+			operation.archiveManifest = await captureAndVerifyTaskClosureArchive(operation);
+			await assertTaskClosureLifecycleNotCancelled(operation);
+			await completeTaskClosureAutomaticSideEffect(operation);
 			operation.progress = {
 				...operation.progress,
 				phase: "archive_verified",
@@ -1042,13 +1077,21 @@ export function createTaskCardActionApi(
 			await writeClosureProgress(scope, operation);
 			return operation;
 		} catch (error) {
+			await recordTaskClosureAutomaticFailure(operation, error);
 			operation.progress = {
 				...operation.progress,
-				phase: "preservation_waiting_for_recovery",
+				phase: (await isTaskClosureLifecycleCancellationRequested(operation))
+					? "cancelled"
+					: "preservation_waiting_for_recovery",
 				lastError: toErrorMessage(error),
-				recoveryCondition: "所属进程退出、来源 Git／选定成果或磁盘可用空间变化，或运行时重启后重新核验",
 				nextRetryAtEpochMs: null,
 			};
+			if (operation.progress.phase === "cancelled" && operation.schemaVersion === 2)
+				operation.progress.unverifiedCandidateReclamation ??= {
+					phase: "pending",
+					automaticAttemptCount: 0,
+					lastError: null,
+				};
 			await writeClosureProgress(scope, operation);
 			throw new TRPCError({
 				code: "PRECONDITION_FAILED",
@@ -1121,6 +1164,12 @@ export function createTaskCardActionApi(
 			if (["completed", "cancelled"].includes(operation.progress.phase) && !cancelActiveReopening) continue;
 			if (cancelActiveReopening && operation.reopening) operation.reopening.phase = "cancelled";
 			operation.progress.phase = "cancelled";
+			if (operation.schemaVersion === 2)
+				operation.progress.unverifiedCandidateReclamation ??= {
+					phase: "pending",
+					automaticAttemptCount: 0,
+					lastError: null,
+				};
 			operation.progress.recoveryCondition = null;
 			await writeClosureProgress(scope, operation);
 		}
@@ -1198,8 +1247,24 @@ export function createTaskCardActionApi(
 				await persistClosureRecord(scope, record, evidence);
 				return record;
 			}),
-		cancelTaskClosureOperation: async (scope, input, _evidence) =>
-			await runSeriallyForTaskCards(scope, [input.taskId], async () => {
+		cancelTaskClosureOperation: async (scope, input, _evidence) => {
+			const current = await readTaskCardWithPersistedSessionSummaryOutsideBoardLock(
+				scope,
+				input.taskId,
+				input.expectedTaskIncarnationCreatedAtEpochMs,
+			);
+			for (const operation of await listTaskClosureOperations({
+				workspaceId: scope.workspaceId,
+				taskId: input.taskId,
+				taskIncarnationCreatedAtEpochMs: current.taskCard.createdAt,
+			})) {
+				if (
+					!["completed", "cancelled"].includes(operation.progress.phase) ||
+					(operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase))
+				)
+					await requestTaskClosureLifecycleCancellation(operation);
+			}
+			return await runSeriallyForTaskCards(scope, [input.taskId], async () => {
 				const found = await readTaskCardWithPersistedSessionSummaryOutsideBoardLock(
 					scope,
 					input.taskId,
@@ -1211,7 +1276,8 @@ export function createTaskCardActionApi(
 					taskId: input.taskId,
 					taskIncarnationCreatedAtEpochMs: found.taskCard.createdAt,
 				});
-			}),
+			});
+		},
 		transferNeverStartedBacklogTaskToProject: async (scope, input, evidence) => {
 			const live = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(scope.workspaceId, input.taskId);
 			if (live?.startedAt != null)
@@ -2019,11 +2085,13 @@ export function createTaskCardActionApi(
 						operation.closureRecord ??= makeClosureRecord(operation, before.taskCard.taskClosureSummary);
 						operation.progress.phase = "closed_cleanup_pending";
 						await writeTaskClosureOperation(operation);
-						movement = await moveTaskCardIntoTrashColumnWithinBoardLock(
-							workspaceScope,
-							operation.request,
-							kanbanRequestOriginActorEvidence,
-							operation,
+						movement = await withTaskClosureLifecycleCancellationGuards([operation], () =>
+							moveTaskCardIntoTrashColumnWithinBoardLock(
+								workspaceScope,
+								operation.request,
+								kanbanRequestOriginActorEvidence,
+								operation,
+							),
 						);
 					} catch (error) {
 						if (pdvAuthorized)
@@ -2100,6 +2168,48 @@ export function createTaskCardActionApi(
 					const pendingReopening = existingOperations.find(
 						(entry) => entry.reopening && !["completed", "cancelled"].includes(entry.reopening.phase),
 					);
+					const normalizeReopeningRequest = (request: typeof input, requestId: string | undefined) =>
+						JSON.stringify(
+							runtimeTaskCardActionRestoreFromDoneRequestSchema.parse({
+								...request,
+								reopeningRequestId: requestId,
+								expectedTaskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
+							}),
+						);
+					if (input.reopeningRequestId) {
+						const bound = existingOperations.find(
+							(entry) => entry.reopening?.reopeningRequestId === input.reopeningRequestId,
+						);
+						if (bound?.reopening?.phase === "cancelled")
+							throw new TRPCError({ code: "CONFLICT", message: "原重开请求已取消，不能重放。" });
+						if (
+							bound?.reopening &&
+							normalizeReopeningRequest(input, input.reopeningRequestId) !==
+								normalizeReopeningRequest(bound.reopening.request, input.reopeningRequestId)
+						)
+							throw new TRPCError({ code: "CONFLICT", message: "同一重开请求已绑定其他参数。" });
+						if (
+							bound?.reopening?.phase === "completed" &&
+							(reopeningCard.boardColumnId !== "review" ||
+								reopeningCard.taskCard.taskClosureSummary?.closureRequestId !== input.reopeningRequestId)
+						)
+							throw new TRPCError({ code: "CONFLICT", message: "任务已再次变化，旧重开请求不能重放。" });
+						if (
+							pendingReopening?.reopening?.reopeningRequestId &&
+							pendingReopening.reopening.reopeningRequestId !== input.reopeningRequestId
+						)
+							throw new TRPCError({ code: "CONFLICT", message: "任务已有其他待恢复的重开请求。" });
+					}
+					if (pendingReopening?.reopening) {
+						if (
+							normalizeReopeningRequest(input, pendingReopening.reopening.reopeningRequestId) !==
+							normalizeReopeningRequest(
+								pendingReopening.reopening.request,
+								pendingReopening.reopening.reopeningRequestId,
+							)
+						)
+							throw new TRPCError({ code: "CONFLICT", message: "同一重开请求已绑定其他参数。" });
+					}
 					const previousClosure = reopeningCard.taskCard.taskClosureSummary;
 					if (
 						!pendingReopening &&
@@ -2121,13 +2231,12 @@ export function createTaskCardActionApi(
 							),
 						};
 
-					let reopeningOperation =
-						pendingReopening ??
-						existingOperations.find(
-							(entry) =>
-								previousClosure &&
-								entry.archiveManifest?.archiveDirectory === previousClosure.archiveManifest.archiveDirectory,
-						);
+					const archiveOperation = existingOperations.find(
+						(entry) =>
+							previousClosure &&
+							entry.archiveManifest?.archiveDirectory === previousClosure.archiveManifest.archiveDirectory,
+					);
+					let reopeningOperation = pendingReopening;
 					if (
 						reopeningCard.boardColumnId !== "trash" &&
 						!(
@@ -2141,7 +2250,9 @@ export function createTaskCardActionApi(
 							message: "只能重新打开已结案任务；已修改的恢复请求不能重放。",
 						});
 					if (!reopeningOperation) {
-						const requestId = randomUUID();
+						const requestId = input.reopeningRequestId ?? randomUUID();
+						if (existingOperations.some((entry) => entry.progress.closureRequestId === requestId))
+							throw new TRPCError({ code: "CONFLICT", message: "重开请求 ID 已由其他生命周期操作占用。" });
 						reopeningOperation = {
 							schemaVersion: 1,
 							taskIdentity: identity,
@@ -2165,6 +2276,7 @@ export function createTaskCardActionApi(
 								nextRetryAtEpochMs: null,
 							},
 							archiveManifest: previousClosure?.archiveManifest ?? null,
+							archiveRepairManifest: archiveOperation?.archiveRepairManifest,
 							closureRecord: previousClosure ?? null,
 							lastAttemptRuntimeInstanceId: null,
 							lastRecoveryProbeFingerprint: null,
@@ -2172,9 +2284,10 @@ export function createTaskCardActionApi(
 					}
 					if (!pendingReopening)
 						reopeningOperation.reopening = {
-							reopeningRequestId: randomUUID(),
+							reopeningRequestId: reopeningOperation.progress.closureRequestId,
 							request: {
 								...input,
+								reopeningRequestId: reopeningOperation.progress.closureRequestId,
 								expectedTaskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
 							},
 							intent: await resolveIntent(
@@ -2184,6 +2297,9 @@ export function createTaskCardActionApi(
 								[input.taskId],
 							),
 							phase: "restoring_archive",
+							explicitStopMarkerObservationAtRequest:
+								await lifecycleSessionOperations.observeExplicitStopMarkerVersion(workspaceScope),
+							sessionResumeAuthorizationApplied: false,
 							startedAtEpochMs: Date.now(),
 							sourceTaskUpdatedAtEpochMs: reopeningCard.taskCard.updatedAt,
 							lastError: null,
@@ -2196,6 +2312,40 @@ export function createTaskCardActionApi(
 						reopeningOperation.reopening.startedAtEpochMs = Date.now();
 					if (reopeningOperation.progress.phase !== "completed") reopeningOperation.progress.phase = "cancelled";
 					await writeClosureProgress(workspaceScope, reopeningOperation);
+					if (
+						reopeningOperation.reopening?.explicitStopMarkerObservationAtRequest &&
+						!reopeningOperation.reopening.sessionResumeAuthorizationApplied
+					) {
+						await assertTaskClosureLifecycleNotCancelled(reopeningOperation);
+						const applied = await lifecycleSessionOperations.clearExplicitStopMarkersIfObservationUnchanged(
+							workspaceScope,
+							[input.taskId, resolveMainTaskConversationSessionId(reopeningCard.taskCard)],
+							reopeningOperation.reopening.explicitStopMarkerObservationAtRequest,
+						);
+						if (!applied) {
+							const error = new TaskClosureRecoveryPrerequisiteError(
+								"explicit_execution_stop_still_effective",
+								"Stop 记录在复开授权后变化，尚不能确认本请求仍可撤销停止。",
+							);
+							await recordTaskClosureAutomaticFailure(reopeningOperation, error);
+							reopeningOperation.reopening.phase = (await isTaskClosureLifecycleCancellationRequested(
+								reopeningOperation,
+							))
+								? "cancelled"
+								: "waiting_for_recovery";
+							if (reopeningOperation.reopening.phase === "cancelled")
+								reopeningOperation.progress.unverifiedCandidateReclamation ??= {
+									phase: "pending",
+									automaticAttemptCount: 0,
+									lastError: null,
+								};
+							reopeningOperation.reopening.lastError = error.message;
+							await writeTaskClosureOperation(reopeningOperation);
+							throw new TRPCError({ code: "PRECONDITION_FAILED", message: error.message });
+						}
+						reopeningOperation.reopening.sessionResumeAuthorizationApplied = true;
+						await writeTaskClosureOperation(reopeningOperation);
+					}
 					await cancelPendingClosureOperations(workspaceScope, reopeningCard.taskCard, false);
 					const makeReopenedRecord = (): TaskClosureRecord => ({
 						closureRequestId: reopeningOperation.reopening?.reopeningRequestId ?? randomUUID(),
@@ -2238,6 +2388,7 @@ export function createTaskCardActionApi(
 								reopeningOperation.reopening?.intent,
 							);
 						}
+						await completeTaskClosureAutomaticSideEffect(reopeningOperation);
 						if (reopeningOperation.reopening) reopeningOperation.reopening.phase = "completed";
 						await writeTaskClosureOperation(reopeningOperation);
 						return {
@@ -2254,6 +2405,7 @@ export function createTaskCardActionApi(
 					}
 					// 撤销清理后才恢复归档，重启通过同一操作继续；归档记录和校验清单不删除。
 					try {
+						await assertTaskClosureLifecycleNotCancelled(reopeningOperation);
 						if (reopeningOperation.archiveManifest?.availability === "verified_recoverable") {
 							const target = await getTaskWorkspacePathInfo({
 								cwd: workspaceScope.workspacePath,
@@ -2262,11 +2414,27 @@ export function createTaskCardActionApi(
 								worktreeMode: reopeningCard.taskCard.worktreeMode,
 							});
 							await restoreVerifiedTaskClosureArchive(reopeningOperation, target.path);
+							if (
+								getTaskClosureAutomaticRecoveryState(reopeningOperation).pendingSideEffect === "restore_archive"
+							)
+								await completeTaskClosureAutomaticSideEffect(reopeningOperation);
+							await writeTaskClosureOperation(reopeningOperation);
 						}
 					} catch (error) {
+						await recordTaskClosureAutomaticFailure(reopeningOperation, error);
 						if (reopeningOperation.reopening) {
-							reopeningOperation.reopening.phase = "waiting_for_recovery";
+							reopeningOperation.reopening.phase = (await isTaskClosureLifecycleCancellationRequested(
+								reopeningOperation,
+							))
+								? "cancelled"
+								: "waiting_for_recovery";
 							reopeningOperation.reopening.lastError = toErrorMessage(error);
+							if (reopeningOperation.reopening.phase === "cancelled")
+								reopeningOperation.progress.unverifiedCandidateReclamation ??= {
+									phase: "pending",
+									automaticAttemptCount: 0,
+									lastError: null,
+								};
 						}
 						await writeTaskClosureOperation(reopeningOperation);
 						throw new TRPCError({
@@ -2400,7 +2568,21 @@ export function createTaskCardActionApi(
 							autoReviewSettingsOfTaskCardBeforeRestoreDisabledAutoReview,
 						);
 						if (reopeningOperation.reopening) {
-							reopeningOperation.reopening.phase = "waiting_for_recovery";
+							await recordTaskClosureAutomaticFailure(
+								reopeningOperation,
+								new Error(taskCardRestoreFromDoneFailureMessage),
+							);
+							reopeningOperation.reopening.phase =
+								reopeningOperation.reopening.phase === "cancelled" ||
+								(await isTaskClosureLifecycleCancellationRequested(reopeningOperation))
+									? "cancelled"
+									: "waiting_for_recovery";
+							if (reopeningOperation.reopening.phase === "cancelled")
+								reopeningOperation.progress.unverifiedCandidateReclamation ??= {
+									phase: "pending",
+									automaticAttemptCount: 0,
+									lastError: null,
+								};
 							reopeningOperation.reopening.lastError = taskCardRestoreFromDoneFailureMessage;
 							reopeningOperation.reopening.sourceTaskUpdatedAtEpochMs = snapshot.taskCard.updatedAt;
 						}
@@ -2424,6 +2606,30 @@ export function createTaskCardActionApi(
 					}
 					if (reopeningOperation.reopening) reopeningOperation.reopening.phase = "resuming_session";
 					await writeTaskClosureOperation(reopeningOperation);
+					const assertReopeningSessionLaunchAllowed = async () => {
+						await assertTaskClosureLifecycleNotCancelled(reopeningOperation);
+						const stopped = (await lifecycleSessionOperations.read(workspaceScope)).explicitlyStoppedSessionIds;
+						if (
+							[input.taskId, resolveMainTaskConversationSessionId(reopeningCard.taskCard)].some((id) =>
+								stopped.includes(id),
+							)
+						)
+							throw new TaskClosureRecoveryPrerequisiteError(
+								"explicit_execution_stop_still_effective",
+								"显式 Stop 仍禁止接续原重开请求。",
+							);
+					};
+					try {
+						await beginTaskClosureAutomaticSideEffect(reopeningOperation, "resume_session", true);
+						await assertReopeningSessionLaunchAllowed();
+					} catch (error) {
+						await recordTaskClosureAutomaticFailure(reopeningOperation, error);
+						return respondWithRestoreFailureAfterMovingBackIntoDone(
+							"agent_session_resume_failed_so_task_card_was_moved_back_into_done",
+							toErrorMessage(error),
+							ensured.warningMessage,
+						);
+					}
 					const resumed = await startTaskSessionReportingFailure(
 						workspaceScope,
 						foundAfterMovement.taskCard,
@@ -2432,6 +2638,7 @@ export function createTaskCardActionApi(
 							agentTerminalGeometryForTaskSessionSpawn: input.agentTerminalGeometryForTaskSessionSpawn,
 						},
 						"Could not resume task session.",
+						assertReopeningSessionLaunchAllowed,
 					);
 					if (!resumed.ok) {
 						return await respondWithRestoreFailureAfterMovingBackIntoDone(
@@ -2442,6 +2649,27 @@ export function createTaskCardActionApi(
 					}
 
 					{
+						try {
+							await assertReopeningSessionLaunchAllowed();
+						} catch (error) {
+							const current = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(
+								workspaceScope.workspaceId,
+								resolveMainTaskConversationSessionId(reopeningCard.taskCard),
+							);
+							if (
+								current?.runtimeSessionIncarnationId &&
+								current.runtimeSessionIncarnationId === resumed.startedSummary.runtimeSessionIncarnationId
+							)
+								await deps.runtimeApi.stopTaskSession(workspaceScope, { taskId: current.taskId });
+							await recordTaskClosureAutomaticFailure(reopeningOperation, error);
+							if (reopeningOperation.reopening) reopeningOperation.reopening.phase = "cancelled";
+							await writeTaskClosureOperation(reopeningOperation);
+							return respondWithRestoreFailureAfterMovingBackIntoDone(
+								"agent_session_resume_failed_so_task_card_was_moved_back_into_done",
+								toErrorMessage(error),
+								ensured.warningMessage,
+							);
+						}
 						const reopened = makeReopenedRecord();
 						await persistClosureRecord(
 							workspaceScope,
@@ -2451,6 +2679,7 @@ export function createTaskCardActionApi(
 						);
 					}
 					if (reopeningOperation.reopening) {
+						await completeTaskClosureAutomaticSideEffect(reopeningOperation);
 						reopeningOperation.reopening.phase = "completed";
 						reopeningOperation.reopening.lastError = null;
 					}
@@ -2528,73 +2757,85 @@ export function createTaskCardActionApi(
 						preserved.progress.phase = "closed_cleanup_pending";
 						await writeTaskClosureOperation(preserved);
 					}
-					const deletion = await mutateWorkspaceState<
-						Array<
-							TaskCardFoundWithBoardColumn & {
-								taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
-							}
-						>
-					>(
-						workspaceScope.workspacePath,
-						await resolveIntent(
-							"permanently_delete_task_cards",
-							kanbanRequestOriginActorEvidence,
-							input.boardMutationInitiator,
-							subjectTaskIdsOfTaskCardAction,
-						),
-						(state) => {
-							const selectedTaskCards: TaskCardFoundWithBoardColumn[] =
-								selection.permanentlyDeletedTaskCardSelectionKind === "task_cards_selected_by_task_id"
-									? [...new Set(selection.selectedTaskIds)].map((taskId) =>
-											findTaskCardWithBoardColumnOrThrowNotFound(
-												state.board,
-												taskId,
-												workspaceScope.workspacePath,
-												input.expectedTaskIncarnationCreatedAtEpochMsByTaskId?.[taskId],
-											),
+					const deletion = await withTaskClosureLifecycleCancellationGuards(
+						[...preservationByTaskId.values()],
+						async () =>
+							mutateWorkspaceState<
+								Array<
+									TaskCardFoundWithBoardColumn & {
+										taskSessionSummaryPersistedInWorkspaceSessionsFile: RuntimeTaskSessionSummary | null;
+									}
+								>
+							>(
+								workspaceScope.workspacePath,
+								await resolveIntent(
+									"permanently_delete_task_cards",
+									kanbanRequestOriginActorEvidence,
+									input.boardMutationInitiator,
+									subjectTaskIdsOfTaskCardAction,
+								),
+								(state) => {
+									const selectedTaskCards: TaskCardFoundWithBoardColumn[] =
+										selection.permanentlyDeletedTaskCardSelectionKind === "task_cards_selected_by_task_id"
+											? [...new Set(selection.selectedTaskIds)].map((taskId) =>
+													findTaskCardWithBoardColumnOrThrowNotFound(
+														state.board,
+														taskId,
+														workspaceScope.workspacePath,
+														input.expectedTaskIncarnationCreatedAtEpochMsByTaskId?.[taskId],
+													),
+												)
+											: (
+													state.board.columns.find(
+														(column) => column.id === selection.selectedBoardColumnId,
+													)?.cards ?? []
+												)
+													.filter(
+														(taskCard) =>
+															subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id) &&
+															!isTaskCardShelved(taskCard),
+													)
+													.map((taskCard) => ({
+														taskCard,
+														boardColumnId: selection.selectedBoardColumnId,
+													}));
+									for (const selected of selectedTaskCards) {
+										const preserved = preservationByTaskId.get(selected.taskCard.id);
+										if (
+											!preserved ||
+											preserved.taskIdentity.taskIncarnationCreatedAtEpochMs !==
+												selected.taskCard.createdAt ||
+											preserved.sourceTaskUpdatedAtEpochMs !== selected.taskCard.updatedAt
 										)
-									: (
-											state.board.columns.find((column) => column.id === selection.selectedBoardColumnId)
-												?.cards ?? []
-										)
-											.filter(
-												(taskCard) =>
-													subjectTaskIdSetHoldingPerTaskCommandSerialization.has(taskCard.id) &&
-													!isTaskCardShelved(taskCard),
-											)
-											.map((taskCard) => ({ taskCard, boardColumnId: selection.selectedBoardColumnId }));
-							for (const selected of selectedTaskCards) {
-								const preserved = preservationByTaskId.get(selected.taskCard.id);
-								if (
-									!preserved ||
-									preserved.taskIdentity.taskIncarnationCreatedAtEpochMs !== selected.taskCard.createdAt ||
-									preserved.sourceTaskUpdatedAtEpochMs !== selected.taskCard.updatedAt
-								)
-									throw new TRPCError({ code: "CONFLICT", message: "归档期间任务已改变，未执行永久删除。" });
-							}
-							const deleted = deleteTasksFromBoard(
-								state.board,
-								selectedTaskCards.map(({ taskCard }) => taskCard.id),
-							);
-							if (!deleted.deleted) {
-								return { board: state.board, value: [], save: false };
-							}
-							const deletedTaskIds = new Set(deleted.deletedTaskIds);
-							return {
-								board: deleted.board,
-								value: selectedTaskCards
-									.filter(({ taskCard }) => deletedTaskIds.has(taskCard.id))
-									.map((found) => ({
-										...found,
-										taskSessionSummaryPersistedInWorkspaceSessionsFile:
-											resolveMainTaskConversationSessionSummaryForTaskId(
-												state.board,
-												state.sessions,
-												found.taskCard.id,
-											),
-									})),
-							};
-						},
+											throw new TRPCError({
+												code: "CONFLICT",
+												message: "归档期间任务已改变，未执行永久删除。",
+											});
+									}
+									const deleted = deleteTasksFromBoard(
+										state.board,
+										selectedTaskCards.map(({ taskCard }) => taskCard.id),
+									);
+									if (!deleted.deleted) {
+										return { board: state.board, value: [], save: false };
+									}
+									const deletedTaskIds = new Set(deleted.deletedTaskIds);
+									return {
+										board: deleted.board,
+										value: selectedTaskCards
+											.filter(({ taskCard }) => deletedTaskIds.has(taskCard.id))
+											.map((found) => ({
+												...found,
+												taskSessionSummaryPersistedInWorkspaceSessionsFile:
+													resolveMainTaskConversationSessionSummaryForTaskId(
+														state.board,
+														state.sessions,
+														found.taskCard.id,
+													),
+											})),
+									};
+								},
+							),
 					);
 					broadcastWorkspaceStateUpdatedWhenBoardWasSaved(workspaceScope, deletion.saved);
 					const permanentlyDeletedTaskCards = deletion.value;

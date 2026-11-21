@@ -12,7 +12,6 @@ import {
 } from "../acp-client-session/acp-task-session-service";
 import { createBacklogTaskStartReadinessRecovery } from "../backlog-task-start-readiness/backlog-task-start-readiness-recovery";
 import { transferBacklogTaskStartReadinessIntentAfterMigration } from "../backlog-task-start-readiness/backlog-task-start-readiness-service";
-
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentSessionCountsAffectedByRuntimeExit,
@@ -103,6 +102,7 @@ import {
 	validatePasscode,
 	validateSession,
 } from "../security/passcode-manager";
+import { observePendingUserDecisionAnswerDeliveryStateChanges } from "../state/agent-raised-pending-user-decision-store";
 import {
 	beginManagedTaskPromptDelivery,
 	observeManagedTaskPromptDeliveryChanges,
@@ -134,8 +134,10 @@ import {
 	probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
+import { completeTaskClosureAutomaticSideEffect } from "../task-closure/task-closure-automatic-recovery-policy";
 import {
 	readTaskClosureOperation,
+	withTaskClosureLifecycleCancellationGuards,
 	withTaskClosureLifecycleLocks,
 	writeTaskClosureHistoryRecord,
 	writeTaskClosureOperation,
@@ -184,6 +186,7 @@ import {
 	countAcpTaskSessionsInterruptedByRuntimeExit,
 	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
+import { reconcilePendingUserDecisionAnswerDeliveriesForWorkspace } from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
 import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
@@ -304,6 +307,8 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	const webUiDir = getWebUiDir();
 	let verificationExecutionRecoveryLifecycle: ReturnType<typeof startVerificationExecutionRecoveryLifecycle> | null =
 		null;
+	// ACP 的接受证据由所属服务持有；启动补证也必须读实际 transport。
+	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
 
 	try {
 		await readFile(join(webUiDir, "index.html"));
@@ -321,15 +326,29 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			sweepAllWorkspacesOnce: () =>
 				sweepStalePendingTaskMessageInjectionsForAllWorkspaces({
 					getSummary: (workspaceId, conversationSessionId) =>
+						acpTaskSessionServiceByWorkspaceId.get(workspaceId)?.getSummary(conversationSessionId) ??
 						deps.workspaceRegistry
 							.getTerminalManagerForWorkspace(workspaceId)
-							?.getSummary(conversationSessionId) ?? null,
+							?.getSummary(conversationSessionId) ??
+						null,
 					onAutomaticFailureContinuationDeliveryObserved: (workspaceId, conversationSessionId, ...observation) =>
 						deps.workspaceRegistry
 							.getTerminalManagerForWorkspace(workspaceId)
 							?.reconcileHistoricalAutomaticFailureContinuationDelivery(conversationSessionId, ...observation),
 				}),
 		});
+
+	const stopObservingPendingUserDecisionAnswerDeliveryChanges = observePendingUserDecisionAnswerDeliveryStateChanges(
+		(_workspaceId, records) => {
+			for (const record of records) {
+				if (record.answerHandledConfirmation || record.answerDeliveryState === "delivered") continue;
+				const next =
+					record.answerDeliveryReconciliation?.nextReconciliationAt ??
+					record.answerDeliveryAttempts?.at(-1)?.nextReconciliationAt;
+				if (typeof next === "number") stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.requestSweepAt(next);
+			}
+		},
+	);
 
 	// 本实例的活性心跳。必须在任何启动清扫**之前**起：清扫要按「归属实例此刻还活不活着」判定该不该
 	// 收拾一条记录，而同刻启动的另一个实例读到的心跳目录里必须已经有我——否则它会在那一拍里把我
@@ -425,6 +444,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	deps.runtimeStateHub.attachTaskVisualizationArtifactService?.(taskVisualizationArtifactApi);
 	deps.runtimeStateHub.registerAgentConversationInputAcceptedListener?.(
 		({ workspaceId, summary, submittedPromptText }) => {
+			void reconcilePendingUserDecisionAnswerDeliveriesForWorkspace({
+				workspaceId,
+				taskId: summary.taskId,
+				getSummary: (id) =>
+					deps.workspaceRegistry.getTerminalManagerForWorkspace(workspaceId)?.getSummary(id) ?? null,
+			}).catch((error) => deps.warn(String(error)));
 			promptDraftUsageService.notifyUserPromptSubmitted({
 				workspaceId,
 				taskId: summary.taskConversationSessionMetadata?.workspaceTaskId ?? summary.taskId,
@@ -468,7 +493,6 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 每次请求新建会让每次看图都从头重读整份 transcript。
 	const explorationThreadGraphReadOnlyTurnSource = new ClaudeCodeTranscriptCompletedTurnSource();
 	// ACP（omp 等）会话按 workspace 作用域持有。
-	const acpTaskSessionServiceByWorkspaceId = new Map<string, AcpTaskSessionService>();
 	// 关服 / 重置时也要遍历「只跑过 ACP 会话」的 workspace，
 	// 它们未必在 workspaceRegistry 中出现过。
 	const acpWorkspacePathByWorkspaceId = new Map<string, string>();
@@ -481,6 +505,12 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			});
 			service.setUserPromptSubmittedListener((taskId, text) => {
 				const summary = service?.getSummary(taskId);
+				if (summary)
+					void reconcilePendingUserDecisionAnswerDeliveriesForWorkspace({
+						workspaceId: scope.workspaceId,
+						taskId,
+						getSummary: (id) => (id === taskId ? summary : null),
+					}).catch((error) => deps.warn(String(error)));
 				promptDraftUsageService.notifyUserPromptSubmitted({
 					workspaceId: scope.workspaceId,
 					taskId: summary?.taskConversationSessionMetadata?.workspaceTaskId ?? taskId,
@@ -1991,100 +2021,131 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		};
 	};
 
-	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(async (staleOperation) => {
-		const identity = staleOperation.taskIdentity;
-		const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
-		const board = await loadWorkspaceBoardById(identity.workspaceId);
-		const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
-		const card = column?.cards.find((entry) => entry.id === identity.taskId);
-		if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
-			if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				card.taskClosureSummary?.eventKind === "reopened" &&
-				card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
-			) {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "completed";
-						await writeTaskClosureOperation(current);
-					}
-					if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
-				});
-			} else if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
-					(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
-			) {
-				await createTaskCardActions(
-					createWorkspaceControlApi(),
-				).restoreTaskCardFromDoneIntoReviewResumingAgentSession(scope, staleOperation.reopening.request, {
-					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
-				});
-			} else {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "cancelled";
-						current.reopening.lastError = "任务身份已变化或卡片已删除";
-						await writeTaskClosureOperation(current);
-					}
-				});
+	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(
+		async (staleOperation) => {
+			const identity = staleOperation.taskIdentity;
+			const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
+			const board = await loadWorkspaceBoardById(identity.workspaceId);
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
+			const card = column?.cards.find((entry) => entry.id === identity.taskId);
+			if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
+				if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					card.taskClosureSummary?.eventKind === "reopened" &&
+					card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
+				) {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (
+							current?.reopening &&
+							!["completed", "cancelled"].includes(current.reopening.phase) &&
+							(current.reopening.reopeningRequestId ?? current.progress.closureRequestId) ===
+								(staleOperation.reopening?.reopeningRequestId ?? staleOperation.progress.closureRequestId)
+						)
+							await withTaskClosureLifecycleCancellationGuards([current], async () => {
+								if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
+								await completeTaskClosureAutomaticSideEffect(current);
+								if (current.reopening) current.reopening.phase = "completed";
+								await writeTaskClosureOperation(current);
+							});
+					});
+				} else if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
+						(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
+				) {
+					await createTaskCardActions(
+						createWorkspaceControlApi(),
+					).restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+						scope,
+						{
+							...staleOperation.reopening.request,
+							reopeningRequestId:
+								staleOperation.reopening.reopeningRequestId ?? staleOperation.progress.closureRequestId,
+						},
+						{
+							decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
+						},
+					);
+				} else {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (current?.reopening) {
+							current.reopening.phase = "cancelled";
+							current.reopening.lastError = "任务身份已变化或卡片已删除";
+							await writeTaskClosureOperation(current);
+						}
+					});
+				}
+				return;
 			}
-			return;
-		}
-		if (
-			card &&
-			(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
-				(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
-		) {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase === "completed") return;
-				current.progress.phase = "cancelled";
-				current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
-				await writeTaskClosureOperation(current);
-			});
-			return;
-		}
-		const workspaceApi = createWorkspaceControlApi();
-		if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase !== "closed_cleanup_pending") return;
-				const result = await workspaceApi.deleteWorktree(scope, {
-					taskId: identity.taskId,
-					taskClosureArchiveCleanupCredential: {
-						taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
-						closureRequestId: current.progress.closureRequestId,
-					},
+			if (
+				card &&
+				(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
+					(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
+			) {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase === "completed") return;
+					current.progress.phase = "cancelled";
+					current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
+					await writeTaskClosureOperation(current);
 				});
-				current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
-				current.progress.lastError = result.error ?? null;
-				await writeTaskClosureOperation(current);
-			});
-		} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
-			await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
-				scope,
-				{
-					expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
-						[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+				return;
+			}
+			const workspaceApi = createWorkspaceControlApi();
+			if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase !== "closed_cleanup_pending") return;
+					const result = await workspaceApi.deleteWorktree(scope, {
+						taskId: identity.taskId,
+						taskClosureArchiveCleanupCredential: {
+							taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
+							closureRequestId: current.progress.closureRequestId,
+						},
+					});
+					const latest = await readTaskClosureOperation(identity, current.progress.closureRequestId);
+					if (latest) Object.assign(current, latest);
+					current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
+					current.progress.lastError = result.error ?? null;
+					await writeTaskClosureOperation(current);
+				});
+			} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
+				await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					scope,
+					{
+						expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
+							[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+						},
+						permanentlyDeletedTaskCardSelection: {
+							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+							selectedTaskIds: [identity.taskId],
+						},
 					},
-					permanentlyDeletedTaskCardSelection: {
-						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
-						selectedTaskIds: [identity.taskId],
-					},
-				},
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			} else if (card) {
+				await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+					scope,
+					staleOperation.request,
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			}
+		},
+		deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		(operation, card) => {
+			const summary = findRuntimeSessionSummary(
+				operation.taskIdentity.workspaceId,
+				resolveMainTaskConversationSessionId(card),
 			);
-		} else if (card) {
-			await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
-				scope,
-				staleOperation.request,
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+			return (
+				!!summary &&
+				resolveSessionFacets(summary).liveness === "live" &&
+				(summary.startedAt ?? 0) >= (operation.reopening?.startedAtEpochMs ?? Infinity)
 			);
-		}
-	});
+		},
+	);
 
 	const trpcHttpHandler = createHTTPHandler({
 		basePath: "/api/trpc/",
@@ -2363,6 +2424,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		clearInterval(workspaceLifecycleOperationRecoveryTimer);
 		clearInterval(conversationSessionRecoveryTimer);
 		stalePendingTaskMessageInjectionSweepsForRuntimeLifetime.stop();
+		stopObservingPendingUserDecisionAnswerDeliveryChanges();
 		agentSessionInactivityReclamationScheduler.stop();
 		// 计划内 handover 先停止新认领，给已进入写链的投递保留同一个有界排空窗口。
 		// 窗口结束后必须硬停，防止尚在 await 身份复核的操作在 detach 后写入。

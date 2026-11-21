@@ -48,7 +48,10 @@ export interface IsolatedGitTestWorkspaceFixture {
 	ownedIntegrationProjectsDirectoryPath: string;
 	createIsolatedChildProcessEnvironment(
 		environmentVariableOverrides?: NodeJS.ProcessEnv,
-		observations?: { gitTrace2EventOutputFileName?: string },
+		observations?: {
+			gitTrace2EventOutputFileName?: string;
+			independentPtyHostLaunchIsExcluded?: true;
+		},
 	): NodeJS.ProcessEnv;
 	createNonBareRepository(options: {
 		repositoryDirectoryName: string;
@@ -454,6 +457,8 @@ export function createIsolatedGitTestWorkspaceFixture(
 					"Git Trace2 输出文件",
 				);
 			}
+			// 仅用于不启动 runtime/PTY 的 Git 子命令；调用方仍须等待并回收自己的子进程。
+			if (observations.independentPtyHostLaunchIsExcluded) return environment;
 			testOwnedPtyHostLifetime ??= createIsolatedTestOwnedPtyHostLifetime(fixtureRootDirectoryPath);
 			return bindTestPtyLifetimeToChildEnvironment(environment, testOwnedPtyHostLifetime);
 		},

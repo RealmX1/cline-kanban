@@ -149,6 +149,25 @@ async function createStandardStageFixture(
 }
 
 describe("标准部署当前代际与恢复语义", () => {
+	it("目标安装已采用新结案协议时，旧候选在发布和启动前被拒绝且原数据字节不变", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const runtimeHome = request.runtimeIdentity.runtimeHomeDirectoryPath;
+		await mkdir(runtimeHome, { recursive: true });
+		await writeFile(
+			join(runtimeHome, "task-closure-storage-protocol-adoption.json"),
+			JSON.stringify({ minimumReadableOperationSchemaVersion: 2 }),
+		);
+		const operationPath = join(runtimeHome, "preserved-v2-operation.json");
+		await writeFile(operationPath, JSON.stringify({ schemaVersion: 2, automaticAttemptCount: 3, cancelled: true }));
+		const originalOperation = await readFile(operationPath);
+		const originalInstallation = await readFile(join(request.distributionDirectoryPath, "cli.js"));
+		for (const stage of ["build_publication", "runtime_restart"] as const)
+			await expect(executeStandardLocalRedeploymentStage(directory, stage)).rejects.toThrow(
+				"不支持已采用的结案存储协议 v2",
+			);
+		expect(await readFile(operationPath)).toEqual(originalOperation);
+		expect(await readFile(join(request.distributionDirectoryPath, "cli.js"))).toEqual(originalInstallation);
+	});
 	it("历史运行验收之后已换候选，禁止补做首次部署登记", async () => {
 		const { directory, current, reportPath } = await createStandardStageFixture({ candidateAlreadyLoaded: true });
 		const executionPath = join(directory, "local-deployment-execution.json");
