@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
-
+import { readBacklogTaskStartReadinessOperation } from "../backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { assertRuntimeAgentIsNotRetired, CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "../core/agent-catalog";
@@ -31,6 +31,7 @@ import {
 import { readCodexDraftStashOperationStatus } from "../terminal/codex-draft-stash-operation";
 import { exitCodexNativeConversationPlanMode } from "../terminal/codex-native-conversation-plan-mode-exit";
 import { readCreationAgentDefaultModel } from "../terminal/creation-agent-default-model";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "../terminal/pty-agent-process-confirmed-not-spawned-error";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -1282,7 +1283,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input, abortSignal) => {
 			return await suggestTaskNamesFromTaskDescription(input, { abortSignal });
 		},
-		startTaskSession: async (workspaceScope, input, beforeAgentProcessLaunch) => {
+		startTaskSession: async (
+			workspaceScope,
+			input,
+			beforeAgentProcessLaunch,
+			backlogTaskStartReadinessOperationId,
+		) => {
 			const startRequestReceivedAt = Date.now();
 			let diagnosticTaskId = "(unparsed)";
 			let requestedAgentIdForDiagnostics: RuntimeAgentId | null = null;
@@ -1353,6 +1359,31 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					return await runtimeApi.startTaskSession(workspaceScope, resumed);
 				}
 				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
+				const owningCardIsInBacklog =
+					owningCard &&
+					startBoard.columns.some(
+						(column) => column.id === "backlog" && column.cards.some((card) => card.id === owningCard.id),
+					);
+				const pendingBacklogStart =
+					owningCard && !owningCardIsInBacklog
+						? await readBacklogTaskStartReadinessOperation(
+								workspaceScope.workspaceId,
+								owningCard.id,
+								owningCard.createdAt,
+							)
+						: null;
+				if (
+					owningCardIsInBacklog ||
+					(pendingBacklogStart &&
+						pendingBacklogStart.review.phase !== "started" &&
+						(!beforeAgentProcessLaunch ||
+							pendingBacklogStart.review.operationId !== backlogTaskStartReadinessOperationId))
+				)
+					return {
+						ok: false,
+						summary: null,
+						error: "Backlog 必须通过 taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress 完成启动前复核。",
+					};
 				if (owningCard?.independentTaskCreationProvenance) {
 					await assertIndependentTaskSourceLandedBeforeInitialStart({
 						workspaceId: workspaceScope.workspaceId,
@@ -1999,6 +2030,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					body.taskSessionStartOriginDeclaredByClient ?? "external_entry_point",
 				);
 				latestStartedSummaryForDiagnostics = summary;
+				if (backlogTaskStartReadinessOperationId && summary.pid === null && summary.startedAt === null)
+					return { ok: false, summary, error: "用户已停止待启动的会话。" };
 				recordStartDiagnostic("runtime_started", startFailurePhase);
 				const terminalStartRejectedBecauseHostTaskCardRemovedDuringStart =
 					await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(async () =>
@@ -2058,6 +2091,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					ok: false,
 					summary: null,
 					error: message,
+					...(error instanceof PtyAgentProcessConfirmedNotSpawnedError
+						? { agentProcessConfirmedNotSpawned: true }
+						: {}),
 				};
 			}
 		},
@@ -4240,11 +4276,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 	};
 	const startTaskSessionWithoutClosureLock = runtimeApi.startTaskSession;
-	runtimeApi.startTaskSession = async (scope, input, beforeAgentProcessLaunch) =>
+	runtimeApi.startTaskSession = async (scope, input, beforeAgentProcessLaunch, backlogTaskStartReadinessOperationId) =>
 		await serializeSessionStartupAgainstTaskClosure(
 			scope,
 			() => input.workspaceTaskId ?? resolveSessionCategoryAndAttributedTaskCardId(input).attributedTaskCardId,
-			async () => await startTaskSessionWithoutClosureLock(scope, input, beforeAgentProcessLaunch),
+			async () =>
+				await startTaskSessionWithoutClosureLock(
+					scope,
+					input,
+					beforeAgentProcessLaunch,
+					backlogTaskStartReadinessOperationId,
+				),
 			(error) => ({ ok: false, summary: null, error }),
 		);
 	const refreshTaskTerminalWithoutClosureLock = runtimeApi.refreshTaskTerminal;

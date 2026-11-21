@@ -9,6 +9,7 @@ import {
 	recordPtySessionExitOutcome,
 	recordPtySessionSpawnOutcome,
 } from "../diagnostics/pty-session-spawn-attribution-probe";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "./pty-agent-process-confirmed-not-spawned-error";
 import { terminatePtyProcessGroup } from "./pty-process-group-termination-signal-policy";
 import type { TerminalPtyProcessExitEvent, TerminalPtyProcessHandle } from "./terminal-pty-process-handle";
 
@@ -133,6 +134,10 @@ export class PtySession implements TerminalPtyProcessHandle {
 				spawnErrorCode: (error as NodeJS.ErrnoException)?.code ?? "UNKNOWN",
 				spawnErrorMessage: error instanceof Error ? error.message : String(error),
 			});
+			if (spawnAttribution?.reason === "task_agent_session")
+				throw new PtyAgentProcessConfirmedNotSpawnedError(error instanceof Error ? error.message : String(error), {
+					cause: error,
+				});
 			throw error;
 		}
 		const ptySessionSpawnSequenceNumber = recordPtySessionSpawnOutcome({

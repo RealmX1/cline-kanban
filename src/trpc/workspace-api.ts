@@ -691,6 +691,7 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 						{
 							title: input.title,
 							taskDescription: input.taskDescription,
+							backlogTaskStartReadinessConditionsText: input.backlogTaskStartReadinessConditionsText,
 							prompt,
 							startInPlanMode: runtimeConfig.newTaskStartInPlanModeByDefault,
 							ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,

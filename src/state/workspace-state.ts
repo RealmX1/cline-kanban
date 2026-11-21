@@ -4,6 +4,7 @@ import { readFile, realpath, stat, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { z } from "zod";
+import { captureRepositoryBaselinesForNewBacklogTaskCards } from "../backlog-task-start-readiness/backlog-task-creation-repository-baseline";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
 import { preservePersistedAgentWorkProgressEntriesAgainstStaleSnapshot } from "../core/agent-work-progress";
 import {
@@ -18,6 +19,7 @@ import {
 	runtimeTaskSessionSummarySchema,
 	runtimeWorkspaceStateSaveRequestSchema,
 } from "../core/api-contract";
+import { preserveBacklogTaskStartReadinessAgainstClientBoardSnapshot } from "../core/backlog-task-start-readiness-protected-board-state";
 import { preserveRuntimeOnlySessionFieldsFromSameGeneration } from "../core/browser-task-session-summary-projection";
 import {
 	applySessionFacets,
@@ -1258,6 +1260,11 @@ export async function saveWorkspaceState(
 						? {
 								...card,
 								taskDescription: persistedCard.taskDescription,
+								backlogTaskStartReadinessConditionsText: persistedCard.backlogTaskStartReadinessConditionsText,
+								backlogTaskCreationRepositoryBaseline: persistedCard.backlogTaskCreationRepositoryBaseline,
+								backlogTaskStartReadinessReview: persistedCard.backlogTaskStartReadinessReview,
+								backlogTaskStartReadinessExecutionRevision:
+									persistedCard.backlogTaskStartReadinessExecutionRevision,
 								externalWorkflowRunBinding: persistedCard.externalWorkflowRunBinding,
 							}
 						: { ...card, externalWorkflowRunBinding: undefined };
@@ -1324,13 +1331,20 @@ export async function saveWorkspaceState(
 				revertedTaskIds: postDeployVerificationDoneEntryGuarded.revertedTaskIds,
 			});
 		}
-		const board = preserveRuntimeOwnedTaskClosureState(
+		let board = preserveRuntimeOwnedTaskClosureState(
 			persistedBoard,
 			preservePersistedTaskStickerEntriesAgainstIncomingBoardSnapshot(
 				persistedBoard,
 				preserveRuntimeOwnedMainSessionBindings(persistedBoard, postDeployVerificationDoneEntryGuarded.board),
 			),
 		);
+		board = await captureRepositoryBaselinesForNewBacklogTaskCards(
+			context.workspaceId,
+			context.repoPath,
+			persistedBoard,
+			board,
+		);
+		board = preserveBacklogTaskStartReadinessAgainstClientBoardSnapshot(persistedBoard, board);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,
@@ -1426,11 +1440,18 @@ export async function mutateWorkspaceState<T>(
 				mutatedSessionsRemoval.sessionsWithoutSummariesOwnedByOtherWorkspaces,
 			),
 		);
-		const nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
+		let nextBoard = reconcileIncomingBoardToPreventStartedTasksFromReenteringBacklog(
 			currentBoard,
 			mutation.board,
 			nextSessions,
 		);
+		if (!taskMutationIntentWithResolvedActor.backlogTaskProjectTransfer)
+			nextBoard = await captureRepositoryBaselinesForNewBacklogTaskCards(
+				context.workspaceId,
+				context.repoPath,
+				currentBoard,
+				nextBoard,
+			);
 		const nextRevision = currentMeta.revision + 1;
 		const nextMeta: WorkspaceStateMeta = {
 			revision: nextRevision,

@@ -10,6 +10,8 @@ import {
 	type AcpTaskSessionService,
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
+import { createBacklogTaskStartReadinessRecovery } from "../backlog-task-start-readiness/backlog-task-start-readiness-recovery";
+import { transferBacklogTaskStartReadinessIntentAfterMigration } from "../backlog-task-start-readiness/backlog-task-start-readiness-service";
 
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
@@ -1644,6 +1646,52 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			},
 		});
 
+	const backlogTaskStartReadinessRecovery = createBacklogTaskStartReadinessRecovery({
+		resolveScope: async (record) => {
+			const { kanbanBoardCardIdentityCandidates } =
+				await taskEditorCreationRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId({
+					bareTaskId: record.taskId,
+				});
+			const matches = kanbanBoardCardIdentityCandidates.filter(
+				(candidate) =>
+					candidate.kanbanBoardCard.taskIncarnationCreatedAtEpochMs === record.taskIncarnationCreatedAtEpochMs &&
+					(candidate.workspaceIdsUsedByTaskIncarnation?.includes(record.workspaceId) ||
+						candidate.kanbanBoardCard.workspaceId === record.workspaceId) &&
+					candidate.permanentlyRemovedFromBoardAt === null,
+			);
+			if (matches.length !== 1) return null;
+			const workspaceId = matches[0]?.kanbanBoardCard.workspaceId;
+			const workspacePath = workspaceId ? deps.workspaceRegistry.getWorkspacePathById(workspaceId) : null;
+			return workspaceId && workspacePath ? { workspaceId, workspacePath } : null;
+		},
+		resume: async (scope, record, assertStillOpen) => {
+			if (scope.workspaceId !== record.workspaceId) {
+				const migrated = await taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
+					scope.workspaceId,
+					[record.taskId],
+					() => transferBacklogTaskStartReadinessIntentAfterMigration(scope, record),
+				);
+				if (!migrated) return;
+				record = migrated;
+			}
+			return await createTaskCardActions(
+				createWorkspaceControlApi(),
+			).startTaskCardAgentSessionMovingItIntoInProgress(
+				scope,
+				{
+					...record.acceptedStartRequest,
+					overrideUnmetBacklogTaskStartConditions: record.previousWorkspaceIds.length
+						? undefined
+						: record.acceptedStartRequest.overrideUnmetBacklogTaskStartConditions,
+					resumeBacklogTaskStartReadinessOperationId: record.review.operationId,
+				},
+				record.acceptedRequestOriginEvidence,
+				assertStillOpen,
+			);
+		},
+		warn: deps.warn,
+	});
+
 	const taskEditorCreationRelationReadApi = createWorkUnitRelationReadApi({
 		readRecordedInterWorkUnitRelationProjection:
 			readRecordedInterWorkUnitRelationProjectionOfActiveKanbanRuntimeLiveCapture,
@@ -2337,6 +2385,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
 			taskEditorCreationSubmissionApi.close(),
+			backlogTaskStartReadinessRecovery.close(),
 			taskVisualizationArtifactApi.stop(),
 			taskLookupConversationApi.close(),
 			dailyWorkProgressStatisticsService.close(),
@@ -2404,6 +2453,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	taskClosureRecoveryMonitor.start();
 	taskEditorCreationSubmissionApi.start();
+	backlogTaskStartReadinessRecovery.start();
 	agentSessionInactivityReclamationScheduler.start();
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();

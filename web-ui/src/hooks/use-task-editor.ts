@@ -227,7 +227,9 @@ export interface UseTaskEditorResult {
 	taskEditorDefaultAgentId: RuntimeAgentId | null;
 	newTaskName: string;
 	newTaskDescription: string;
+	newBacklogTaskStartReadinessConditionsText: string;
 	setNewTaskDescription: Dispatch<SetStateAction<string>>;
+	setNewBacklogTaskStartReadinessConditionsText: Dispatch<SetStateAction<string>>;
 	setNewTaskName: Dispatch<SetStateAction<string>>;
 	newTaskPrompt: string;
 	setNewTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -259,7 +261,9 @@ export interface UseTaskEditorResult {
 	editingTaskId: string | null;
 	editTaskName: string;
 	editTaskDescription: string;
+	editBacklogTaskStartReadinessConditionsText: string;
 	setEditTaskDescription: Dispatch<SetStateAction<string>>;
+	setEditBacklogTaskStartReadinessConditionsText: Dispatch<SetStateAction<string>>;
 	setEditTaskName: Dispatch<SetStateAction<string>>;
 	editTaskPrompt: string;
 	setEditTaskPrompt: Dispatch<SetStateAction<string>>;
@@ -379,6 +383,7 @@ export function useTaskEditor({
 	>();
 	const [newTaskName, setNewTaskName] = useState("");
 	const [newTaskDescription, setNewTaskDescription] = useState("");
+	const [newBacklogTaskStartReadinessConditionsText, setNewBacklogTaskStartReadinessConditionsText] = useState("");
 	const [newTaskPrompt, setNewTaskPrompt] = useState("");
 	const [newTaskImages, setNewTaskImages] = useState<TaskImage[]>([]);
 	const [newTaskStartInPlanMode, setNewTaskStartInPlanMode] = useState(newTaskStartInPlanModeByDefault);
@@ -397,6 +402,7 @@ export function useTaskEditor({
 	const [editTaskFormSeededFromSavedDraftAt, setEditTaskFormSeededFromSavedDraftAt] = useState<number | null>(null);
 	const [editTaskName, setEditTaskName] = useState("");
 	const [editTaskDescription, setEditTaskDescription] = useState("");
+	const [editBacklogTaskStartReadinessConditionsText, setEditBacklogTaskStartReadinessConditionsText] = useState("");
 	const [editTaskPrompt, setEditTaskPrompt] = useState("");
 	const [editTaskImages, setEditTaskImages] = useState<TaskImage[]>([]);
 	const [editTaskStartInPlanMode, setEditTaskStartInPlanMode] = useState(false);
@@ -624,6 +630,7 @@ export function useTaskEditor({
 	const editTaskFormValues: TaskEditDraftFormValues = {
 		taskTitleOverride: editTaskName,
 		taskDescription: editTaskDescription,
+		backlogTaskStartReadinessConditionsText: editBacklogTaskStartReadinessConditionsText,
 		prompt: editTaskPrompt,
 		images: editTaskImages,
 		startInPlanMode: editTaskStartInPlanMode,
@@ -748,6 +755,7 @@ export function useTaskEditor({
 				taskId: editingTaskId,
 				taskTitleOverride: editTaskName,
 				taskDescription: editTaskDescription,
+				backlogTaskStartReadinessConditionsText: editBacklogTaskStartReadinessConditionsText,
 				prompt: editTaskPrompt,
 				// 图片可能是几 MB 的 dataURL，深拷贝要等到确定「真的要写盘」之后再做。
 				images: editTaskImages,
@@ -790,6 +798,7 @@ export function useTaskEditor({
 			editTaskImages,
 			editTaskName,
 			editTaskDescription,
+			editBacklogTaskStartReadinessConditionsText,
 			editTaskPrompt,
 			editTaskStartInPlanMode,
 			editTaskWorktreeMode,
@@ -822,6 +831,7 @@ export function useTaskEditor({
 					formValues: {
 						taskTitleOverride: newTaskName,
 						taskDescription: newTaskDescription,
+						backlogTaskStartReadinessConditionsText: newBacklogTaskStartReadinessConditionsText,
 						prompt: newTaskPrompt,
 						images: newTaskImages.map((image) => ({ ...image })),
 						startInPlanMode: newTaskStartInPlanMode,
@@ -857,12 +867,14 @@ export function useTaskEditor({
 			editTaskWorkspaceId,
 			editTaskName,
 			editTaskDescription,
+			editBacklogTaskStartReadinessConditionsText,
 			isInlineTaskCreateOpen,
 			taskCreationTargetWorkspaceId,
 			taskEditorSessionWorkspaceId,
 			taskEditorDefaultAgentIdAtSessionOpen,
 			newTaskName,
 			newTaskDescription,
+			newBacklogTaskStartReadinessConditionsText,
 			newTaskPrompt,
 			newTaskImages,
 			newTaskStartInPlanMode,
@@ -963,6 +975,7 @@ export function useTaskEditor({
 		preservedTaskEditorSubmissionRef.current = null;
 		setNewTaskName("");
 		setNewTaskDescription("");
+		setNewBacklogTaskStartReadinessConditionsText("");
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setIsInlineTaskCreateOpen(false);
 
@@ -986,6 +999,9 @@ export function useTaskEditor({
 		(task: BoardCard, savedDraft: TaskEditDraft | null): TaskEditDraftFormValues => ({
 			taskTitleOverride: savedDraft?.taskTitleOverride ?? task.title,
 			taskDescription: savedDraft ? (savedDraft.taskDescription ?? task.taskDescription) : task.taskDescription,
+			backlogTaskStartReadinessConditionsText: savedDraft
+				? (savedDraft.backlogTaskStartReadinessConditionsText ?? task.backlogTaskStartReadinessConditionsText)
+				: task.backlogTaskStartReadinessConditionsText,
 			prompt: savedDraft?.prompt ?? task.prompt.trim(),
 			images: savedDraft
 				? savedDraft.images.map((image) => ({ ...image }))
@@ -1021,6 +1037,7 @@ export function useTaskEditor({
 			editTaskAgentPermissionModeExplicitlySelectedRef.current = false;
 			setEditTaskName(formValues.taskTitleOverride ?? task.title);
 			setEditTaskDescription(formValues.taskDescription ?? "");
+			setEditBacklogTaskStartReadinessConditionsText(formValues.backlogTaskStartReadinessConditionsText ?? "");
 			setEditTaskPrompt(formValues.prompt);
 			setEditTaskImages(formValues.images);
 			setEditTaskStartInPlanMode(formValues.startInPlanMode);
@@ -1096,6 +1113,7 @@ export function useTaskEditor({
 
 			setNewTaskName("");
 			setNewTaskDescription("");
+			setNewBacklogTaskStartReadinessConditionsText("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			const savedDraft = readSavedTaskEditDraft(workspaceId, task.id);
@@ -1253,6 +1271,8 @@ export function useTaskEditor({
 			const submitted: TaskEditorSubmittedTaskCardFieldValues = {
 				taskTitleOverride: options?.taskNameOverride ?? editTaskName,
 				taskDescription: options?.taskDescriptionOverride ?? editTaskDescription,
+				backlogTaskStartReadinessConditionsText:
+					options?.backlogTaskStartReadinessConditionsTextOverride ?? editBacklogTaskStartReadinessConditionsText,
 				prompt,
 				images: editTaskImages,
 				startInPlanMode: editTaskStartInPlanMode,
@@ -1290,6 +1310,7 @@ export function useTaskEditor({
 					taskId: savedTaskId,
 					taskTitleOverride: submitted.taskTitleOverride,
 					taskDescription: submitted.taskDescription,
+					backlogTaskStartReadinessConditionsText: submitted.backlogTaskStartReadinessConditionsText,
 					prompt: submitted.prompt,
 					images: submitted.images.map((image) => ({ ...image })),
 					startInPlanMode: submitted.startInPlanMode,
@@ -1444,6 +1465,7 @@ export function useTaskEditor({
 			editTaskAgentSessionInitialization,
 			editTaskName,
 			editTaskDescription,
+			editBacklogTaskStartReadinessConditionsText,
 			editTaskPrompt,
 			editTaskImages,
 			editTaskStartInPlanMode,
@@ -1549,7 +1571,12 @@ export function useTaskEditor({
 	const createBacklogTaskCardsInOtherProject = useCallback(
 		(
 			workspaceId: string,
-			newTaskCards: ReadonlyArray<{ prompt: string; title?: string; taskDescription?: string }>,
+			newTaskCards: ReadonlyArray<{
+				prompt: string;
+				title?: string;
+				taskDescription?: string;
+				backlogTaskStartReadinessConditionsText?: string;
+			}>,
 			baseRef: string,
 		): BoardCard[] | null => {
 			const runtimeAllocatedTaskIds = takeRuntimeAllocatedTaskIdsForNewTaskCardsOrExplainWhyTaskCreationIsBlocked(
@@ -1572,6 +1599,8 @@ export function useTaskEditor({
 						...(newTaskCard.title !== undefined ? { title: newTaskCard.title } : {}),
 						prompt: newTaskCard.prompt,
 						taskDescription: newTaskCard.taskDescription,
+						backlogTaskStartReadinessConditionsText:
+							newTaskCard.backlogTaskStartReadinessConditionsText ?? newBacklogTaskStartReadinessConditionsText,
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
@@ -1619,6 +1648,7 @@ export function useTaskEditor({
 			newTaskAutoReviewMode,
 			newTaskConversationMode,
 			newTaskImages,
+			newBacklogTaskStartReadinessConditionsText,
 			newTaskStartInPlanMode,
 			newTaskTerminalAgentModelOverrideSettings,
 			newTaskWorktreeMode,
@@ -1671,6 +1701,7 @@ export function useTaskEditor({
 			if (options?.preserveFormUntilCreationConfirmed) return;
 			setNewTaskName("");
 			setNewTaskDescription("");
+			setNewBacklogTaskStartReadinessConditionsText("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -1740,6 +1771,9 @@ export function useTaskEditor({
 					{
 						title,
 						taskDescription: options?.taskDescriptionOverride ?? newTaskDescription,
+						backlogTaskStartReadinessConditionsText:
+							options?.backlogTaskStartReadinessConditionsTextOverride ??
+							newBacklogTaskStartReadinessConditionsText,
 						prompt,
 						baseRef,
 						startInPlanMode: newTaskStartInPlanMode,
@@ -1764,7 +1798,16 @@ export function useTaskEditor({
 			if (explicitTargetOtherWorkspaceId) {
 				const createdTaskCard = createBacklogTaskCardsInOtherProject(
 					explicitTargetOtherWorkspaceId,
-					[{ prompt, title, taskDescription: options?.taskDescriptionOverride ?? newTaskDescription }],
+					[
+						{
+							prompt,
+							title,
+							taskDescription: options?.taskDescriptionOverride ?? newTaskDescription,
+							backlogTaskStartReadinessConditionsText:
+								options?.backlogTaskStartReadinessConditionsTextOverride ??
+								newBacklogTaskStartReadinessConditionsText,
+						},
+					],
 					baseRef,
 				)?.[0];
 				if (!createdTaskCard) {
@@ -1803,6 +1846,9 @@ export function useTaskEditor({
 				{
 					title,
 					taskDescription: options?.taskDescriptionOverride ?? newTaskDescription,
+					backlogTaskStartReadinessConditionsText:
+						options?.backlogTaskStartReadinessConditionsTextOverride ??
+						newBacklogTaskStartReadinessConditionsText,
 					prompt,
 					startInPlanMode: newTaskStartInPlanMode,
 					taskAgentPermissionMode: newTaskAgentPermissionMode,
@@ -1851,6 +1897,7 @@ export function useTaskEditor({
 			if (options?.preserveFormUntilCreationConfirmed) return created.task.id;
 			setNewTaskName("");
 			setNewTaskDescription("");
+			setNewBacklogTaskStartReadinessConditionsText("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -1898,6 +1945,7 @@ export function useTaskEditor({
 			ompAgentSessionTransportForNewTasks,
 			newTaskName,
 			newTaskDescription,
+			newBacklogTaskStartReadinessConditionsText,
 			newTaskPrompt,
 			newTaskCodexReasoningEffortOverride,
 			newTaskAgentPermissionMode,
@@ -1995,6 +2043,7 @@ export function useTaskEditor({
 					"backlog",
 					{
 						prompt,
+						backlogTaskStartReadinessConditionsText: newBacklogTaskStartReadinessConditionsText,
 						startInPlanMode: newTaskStartInPlanMode,
 						taskAgentPermissionMode: newTaskAgentPermissionMode,
 						codexReasoningEffortOverride: newTaskCodexReasoningEffortOverride,
@@ -2044,6 +2093,7 @@ export function useTaskEditor({
 			}
 			setNewTaskName("");
 			setNewTaskDescription("");
+			setNewBacklogTaskStartReadinessConditionsText("");
 			setNewTaskPrompt("");
 			setNewTaskImages([]);
 			setNewTaskCodexReasoningEffortOverride(undefined);
@@ -2088,6 +2138,7 @@ export function useTaskEditor({
 			newTaskAgentPermissionMode,
 			newTaskAgentPermissionModeByDefault,
 			newTaskConversationMode,
+			newBacklogTaskStartReadinessConditionsText,
 			newTaskStartInPlanMode,
 			newTaskStartInPlanModeByDefault,
 			resolvedDefaultTaskBranchRef,
@@ -2154,6 +2205,7 @@ export function useTaskEditor({
 		preservedTaskEditorSubmissionRef.current = null;
 		setNewTaskName("");
 		setNewTaskDescription("");
+		setNewBacklogTaskStartReadinessConditionsText("");
 		setIsInlineTaskCreateOpen(false);
 		setTaskCreationTargetWorkspaceIdPinnedInBoardScope(null);
 		setEditingTaskId(null);
@@ -2203,6 +2255,7 @@ export function useTaskEditor({
 		const values = seed.formValues;
 		setNewTaskName(values.taskTitleOverride ?? "");
 		setNewTaskDescription(values.taskDescription ?? "");
+		setNewBacklogTaskStartReadinessConditionsText(values.backlogTaskStartReadinessConditionsText ?? "");
 		setNewTaskPrompt(values.prompt);
 		setNewTaskImages(values.images.map((image) => ({ ...image })));
 		setNewTaskStartInPlanMode(values.startInPlanMode);
@@ -2243,8 +2296,10 @@ export function useTaskEditor({
 		taskEditorDefaultAgentId,
 		newTaskName,
 		newTaskDescription,
+		newBacklogTaskStartReadinessConditionsText,
 		setNewTaskName,
 		setNewTaskDescription,
+		setNewBacklogTaskStartReadinessConditionsText,
 		newTaskPrompt,
 		setNewTaskPrompt,
 		newTaskImages,
@@ -2275,8 +2330,10 @@ export function useTaskEditor({
 		editingTaskId,
 		editTaskName,
 		editTaskDescription,
+		editBacklogTaskStartReadinessConditionsText,
 		setEditTaskName,
 		setEditTaskDescription,
+		setEditBacklogTaskStartReadinessConditionsText,
 		editTaskPrompt,
 		setEditTaskPrompt,
 		editTaskImages,

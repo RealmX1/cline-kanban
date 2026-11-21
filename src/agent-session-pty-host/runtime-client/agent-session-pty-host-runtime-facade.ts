@@ -19,6 +19,7 @@ import type {
 } from "../../core/agent-session-pty-host-diagnostics-contract";
 import { readPosixProcessResourceTable } from "../../diagnostics/posix-process-table-with-resource-columns-reader";
 import { lockedFileSystem } from "../../fs/locked-file-system";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "../../terminal/pty-agent-process-confirmed-not-spawned-error";
 import { PtySession } from "../../terminal/pty-session";
 import type {
 	HostedTerminalPtyProcessSpawner,
@@ -566,7 +567,12 @@ export class AgentSessionPtyHostRuntimeFacade {
 		);
 		await this.persistPendingHostedSessionSpawnOwnership();
 		if (outcome.kind === "spawn_failed") {
-			const spawnError = new Error(outcome.errorMessage) as NodeJS.ErrnoException;
+			const spawnError = (
+				request.hostedSessionKind === "task_agent_session" &&
+				!["DUPLICATE_HOSTED_SESSION_KEY", "DUPLICATE_RUNNING_CONVERSATION_SESSION"].includes(outcome.errorCode)
+					? new PtyAgentProcessConfirmedNotSpawnedError(outcome.errorMessage)
+					: new Error(outcome.errorMessage)
+			) as NodeJS.ErrnoException;
 			spawnError.code = outcome.errorCode;
 			throw spawnError;
 		}

@@ -68,6 +68,12 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 		(editing ? controller.setEditTaskAgentSessionInitialization : controller.setNewTaskAgentSessionInitialization)?.(
 			props.taskAgentSessionInitialization,
 		);
+		if (props.backlogTaskStartReadinessConditionsText !== undefined)
+			(editing
+				? controller.setEditBacklogTaskStartReadinessConditionsText
+				: controller.setNewBacklogTaskStartReadinessConditionsText)?.(
+				props.backlogTaskStartReadinessConditionsText,
+			);
 		controller.setNewTaskName(props.creatingTaskName ?? "");
 		controller.setEditTaskName(props.editingTaskName ?? "");
 		setReady(true);
@@ -123,6 +129,16 @@ function TaskEditorHostedSession(props: TaskEditorDialogProps) {
 			prompt={editing ? controller.editTaskPrompt : controller.newTaskPrompt}
 			onPromptChange={editing ? controller.setEditTaskPrompt : controller.setNewTaskPrompt}
 			taskDescription={editing ? controller.editTaskDescription : controller.newTaskDescription}
+			backlogTaskStartReadinessConditionsText={
+				editing
+					? controller.editBacklogTaskStartReadinessConditionsText
+					: controller.newBacklogTaskStartReadinessConditionsText
+			}
+			onBacklogTaskStartReadinessConditionsTextChange={
+				editing
+					? controller.setEditBacklogTaskStartReadinessConditionsText
+					: controller.setNewBacklogTaskStartReadinessConditionsText
+			}
 			onTaskDescriptionChange={editing ? controller.setEditTaskDescription : controller.setNewTaskDescription}
 			images={editing ? controller.editTaskImages : controller.newTaskImages}
 			onImagesChange={editing ? controller.setEditTaskImages : controller.setNewTaskImages}

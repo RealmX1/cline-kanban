@@ -45,6 +45,7 @@ import { AgentWorkProgress } from "@/components/agent-work-progress";
 import { notifyError, showAppToast } from "@/components/app-toaster";
 import { AutomaticAgentFailureContinuationNotice } from "@/components/automatic-agent-failure-continuation-notice";
 import { BacklogTaskDescriptionLastUpdatedPill } from "@/components/backlog-task-description-last-updated-pill";
+import { BacklogTaskStartReadinessReviewNotice } from "@/components/backlog-task-start-readiness-review";
 import { PostDeployVerificationEntryNavigationButton } from "@/components/post-deploy-verification/post-deploy-verification-entry-navigation-button";
 import { boardTaskCardAnchorKey } from "@/components/post-deploy-verification/verification-anchor-registry";
 import { PrimaryActionButtonWithAdditionalActionMenu } from "@/components/primary-action-button-with-additional-action-menu";
@@ -776,6 +777,11 @@ export const TaskCardBody = memo(function TaskCardBody(
 					elapsedNowMs={elapsedNowMs}
 					revealHoverActionTooltip={(label) => label ?? undefined}
 				/>
+			) : null}
+			{columnId === "backlog" && card.backlogTaskStartReadinessReview?.phase === "reviewing" ? (
+				<span role="status" className="text-xs text-text-primary">
+					启动前复核
+				</span>
 			) : null}
 		</>
 	);
@@ -1561,6 +1567,14 @@ export const TaskCardBody = memo(function TaskCardBody(
 						</p>
 					) : null}
 					<AgentWorkProgress summary={sessionSummary} />
+					{!historicalSnapshot && (columnId === "backlog" || card.backlogTaskStartReadinessReview) && (
+						<BacklogTaskStartReadinessReviewNotice
+							key={`${taskCommentsWorkspaceId}:${card.id}:${card.createdAt}`}
+							card={card}
+							workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}
+							canStart={columnId === "backlog" && Boolean(onStart) && !card.taskShelvingState?.isShelved}
+						/>
+					)}
 					<TaskExternalWorkflowRunReference
 						card={card}
 						workspaceId={taskWorkspaceId ?? taskCommentsWorkspaceId ?? null}

@@ -29,6 +29,13 @@ const agentRegistryMocks = vi.hoisted(() => ({
 const taskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
 }));
+const backlogTaskReadinessMocks = vi.hoisted(() => ({
+	readBacklogTaskStartReadinessOperation: vi.fn(async () => null),
+}));
+vi.mock(
+	"../../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store",
+	() => backlogTaskReadinessMocks,
+);
 
 const taskClosureLockMocks = vi.hoisted(() => ({
 	withTaskClosureLifecycleLocks: vi.fn(
@@ -302,6 +309,30 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			commit: "1111111",
 			createdAt: Date.now(),
 		});
+	});
+	it("移入进行中后，直接启动仍需经过未完成的 Backlog 首发门禁", async () => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", createdAt: 1 }] }],
+		});
+		const review = { operationId: "isolated-backlog-first-start", phase: "start_failed" };
+		backlogTaskReadinessMocks.readBacklogTaskStartReadinessOperation.mockImplementationOnce(
+			async () => ({ review }) as never,
+		);
+		const getScopedTerminalManager = vi.fn();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", prompt: "原始需求", baseRef: "main" },
+		);
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("启动前复核") });
+		expect(getScopedTerminalManager).not.toHaveBeenCalled();
 	});
 	it("自动恢复动作按 workspace、会话与当前 episode 投递，不把过期动作冒充成功", async () => {
 		const actOnAutomaticFailureContinuation = vi.fn(
