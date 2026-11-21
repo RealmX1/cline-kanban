@@ -1080,6 +1080,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					.digest("hex"),
 			};
 		},
+		onParkedMainAgentTurnCompletion: (request, summary) => {
+			deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(request.workspaceId)
+				?.recordOwnedParkedMainAgentTurnCompletion(summary, request.hookEventCapturedAtEpochMs);
+		},
 		persistApplicationConfirmation: async (request, taskIncarnationCreatedAtEpochMs) => {
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
@@ -1307,6 +1312,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	conversationSessionRecoveryTimer.unref();
 	reconcileConversationSessions();
 	const taskCommandExecutionApi = createTaskCommandExecutionService({
+		onOwnedBackgroundWorkWaitingProjectionChanged: () => {
+			void deps.runtimeStateHub.broadcastRuntimeProjectsUpdated(null);
+		},
 		readOwner: async (workspaceId, taskId, execution) => {
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(workspaceId) ??
@@ -1358,16 +1366,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					deps.workspaceRegistry.getWorkspacePathById(record.workspaceId) ?? record.worktreeIdentity.realPath,
 			};
 			const acp = await getScopedAcpTaskSessionService(scope);
-			const options = { label: record.specification.label, owningCommandExecutionId: record.executionId };
-			const result = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
-				acp.getSummary(record.originatingConversationSessionId),
+			const conversationSessionId = record.originatingConversationSessionId;
+			const service = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acp.getSummary(conversationSessionId))
+				? acp
+				: await getScopedTerminalManager(scope);
+			const summary = service.getSummary(conversationSessionId);
+			if (
+				!summary ||
+				summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover ||
+				summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.originatingNativeSessionId ||
+				(record.requiresOriginatingSessionBinding &&
+					(summary.runtimeSessionIncarnationId ?? null) !== record.originatingRuntimeSessionIncarnationId)
 			)
-				? acp.parkTaskSessionAwaitingDispatchedBackgroundWork(record.originatingConversationSessionId, options)
-				: (await getScopedTerminalManager(scope)).parkTaskSessionAwaitingDispatchedBackgroundWork(
-						record.originatingConversationSessionId,
-						options,
-					);
-			return result.ok;
+				return false;
+			return service.parkTaskSessionAwaitingDispatchedBackgroundWork(conversationSessionId, {
+				label: record.specification.label,
+				owningCommandExecutionId: record.executionId,
+			}).ok;
 		},
 		unpark: async (record) => {
 			const scope = {

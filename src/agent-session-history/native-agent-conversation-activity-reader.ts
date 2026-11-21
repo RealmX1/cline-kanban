@@ -21,6 +21,7 @@ import {
 	readCodexNativeAgentTurnExecution,
 	withCodexNativeObservationReadSlot,
 } from "./codex-native-agent-turn-execution-reader";
+import { supplementCodexNativeTurnExecutionWithTranscriptEvidence } from "./codex-native-turn-completion-transcript-evidence";
 import {
 	type CodexPromptSubmissionAcceptanceReconciliation,
 	reconcileCodexPromptSubmissionAcceptance,
@@ -268,6 +269,9 @@ async function readCurrentCodexNativeActivity(
 		} catch (error) {
 			executionReadFailure = error instanceof Error ? error.message : String(error);
 		}
+	}
+	if (input.shouldReadCodexNativeAgentTurnExecution !== false && !input.signal?.aborted) {
+		execution = await supplementCodexNativeTurnExecutionWithTranscriptEvidence({ ...input, control: execution });
 	}
 	const independentObservations = {
 		...(execution ? { codexNativeAgentTurnExecution: execution } : {}),

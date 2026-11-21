@@ -24,6 +24,7 @@ import type {
 import {
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
 	type CodexNativeAgentTurnExecutionObservation,
+	isCodexNativeTerminalOutcomeForCurrentTurn,
 	shouldContinuouslyObserveCodexNativeTurnExecution,
 } from "../core/codex-native-agent-turn-execution-observation";
 import {
@@ -61,6 +62,11 @@ export interface CreateNativeAgentConversationActivityObserverOptions {
 		observation: CodexNativeAgentTurnExecutionObservation,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
 	) => Promise<void> | void;
+	onCodexNativeTurnVerificationPending?: (
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		workspaceId: string,
+		nextCheckAtMs: number | null,
+	) => void;
 	onCodexNativeDirectInputReadiness?: (
 		observation: NativeAgentConversationActivityObservationContext & CodexNativeDirectInputReadinessObservation,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
@@ -537,12 +543,28 @@ export function createNativeAgentConversationActivityObserver(
 						await recordUnavailableAcceptanceEvidence();
 						return;
 					}
-					if (result.codexNativeAgentTurnExecution) {
-						hasKnownNativeExecution = result.codexNativeAgentTurnExecution.executionStatus !== "unknown";
-						await options.onCodexNativeAgentTurnExecution?.(
-							result.codexNativeAgentTurnExecution,
-							summaryBeforeRead,
-						);
+					const nativeExecution = result.codexNativeAgentTurnExecution;
+					if (nativeExecution) {
+						const terminalOutcome = nativeExecution.executionStatus === "finished";
+						const unprocessedNativeInput =
+							(result.promptSubmissionAcceptanceReconciliation?.accepted?.eventId !== undefined &&
+								result.promptSubmissionAcceptanceReconciliation.accepted.eventId !==
+									summaryBeforeRead.agentConversationPromptSubmissionAcceptance?.eventId) ||
+							result.events.some(
+								(event) =>
+									event.activityKind === "accepted_user_input" &&
+									event.evidenceKind === "native_user_prompt_acceptance" &&
+									event.eventId !== summaryBeforeRead.agentConversationPromptSubmissionAcceptance?.eventId,
+							);
+						hasKnownNativeExecution = terminalOutcome
+							? !unprocessedNativeInput &&
+								!hasReplacementSubmissionCandidate() &&
+								isCodexNativeTerminalOutcomeForCurrentTurn(summaryBeforeRead, nativeExecution)
+							: nativeExecution.executionStatus !== "unknown";
+						if (hasKnownNativeExecution)
+							options.onCodexNativeTurnVerificationPending?.(summaryBeforeRead, state.workspaceId, null);
+						if (!terminalOutcome || hasKnownNativeExecution)
+							await options.onCodexNativeAgentTurnExecution?.(nativeExecution, summaryBeforeRead);
 						if (!isReadStillCurrent()) return;
 					}
 					const readFailure =
@@ -660,6 +682,16 @@ export function createNativeAgentConversationActivityObserver(
 						state.nextNativeExecutionReadAtMs =
 							nowMs() +
 							Math.min(15_000 * 2 ** Math.max(0, state.consecutiveUnknownNativeExecutionReadCount - 1), 60_000);
+						if (
+							!hasKnownNativeExecution &&
+							state.consecutiveUnknownNativeExecutionReadCount >= 2 &&
+							isReadStillCurrent()
+						)
+							options.onCodexNativeTurnVerificationPending?.(
+								summaryBeforeRead,
+								state.workspaceId,
+								state.nextNativeExecutionReadAtMs,
+							);
 						if (
 							!hasKnownNativeExecution &&
 							!readFailureWasReported &&

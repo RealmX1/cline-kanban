@@ -1209,6 +1209,14 @@ export type RuntimeTaskAwaitingDispatchedBackgroundWork = z.infer<
 	typeof runtimeTaskAwaitingDispatchedBackgroundWorkSchema
 >;
 
+const runtimeCodexNativeTurnVerificationPendingSchema = z.object({
+	reason: z.enum(["native_execution_unavailable", "native_failure_reason_unavailable"]),
+	runtimeSessionIncarnationId: z.string(),
+	turnSequence: z.number().int().nonnegative(),
+	firstObservedAtMs: z.number(),
+	nextCheckAtMs: z.number(),
+});
+
 // ── 会话「停止生成响应后固定宽限期」回收（加性 sidecar，与 connectionRetry / park 同侧）────────
 // 设计与核验见 .plan/docs/cross-harness-agent-session-inactivity-grace-period-reclamation-and-
 // pending-user-decision-carry-forward-implementation-plan.md。
@@ -1611,6 +1619,15 @@ const runtimeTaskSessionSummaryObjectSchema = z.object({
 	// present = parked；判据 / 时序见 runtimeTaskAwaitingDispatchedBackgroundWorkSchema 与 session-activity.ts
 	// 的 isParkedAwaitingDispatchedBackgroundWork。不参与 facet / superRefine（与 connectionRetry-only 写同形）。
 	awaitingDispatchedBackgroundWork: runtimeTaskAwaitingDispatchedBackgroundWorkSchema.nullable().optional(),
+	codexNativeTurnVerificationPending: runtimeCodexNativeTurnVerificationPendingSchema.nullable().optional(),
+	parkedMainAgentTurnCompletion: z
+		.object({
+			runtimeSessionIncarnationId: z.string(),
+			turnSequence: z.number().int().nonnegative(),
+			observedAtMs: z.number(),
+		})
+		.nullable()
+		.optional(),
 	// 「停止生成后固定宽限期」回收的四个加性 sidecar（不参与 facet / superRefine，见上方 schema 注释）。
 	// 每次真实 spawn / ACP 连接 / SDK 会话创建生成一个新 id：它是「这一条 summary 说的还是同一个活体」的
 	// 唯一判据，防止陈旧回收定时器杀掉重启后的新会话。
@@ -2476,6 +2493,13 @@ export type RuntimeInProgressTaskDetail = z.infer<typeof runtimeInProgressTaskDe
 // 不是第二份实现。与它的区别只在**取景**：不按列取，而是取「非 Done 列、且近期被碰过 / 已置顶 / agent 正持有回合」
 // 的卡（取景判据见 isTaskCardWithinCrossProjectTaskSwitcherBroadcastScope）。区归属（Running / 缓存倒计时 /
 // 剩余）在前端按 now 现算，见 src/core/cross-project-recently-active-task-switcher-section-assignment.ts。
+export const runtimeOwnedBackgroundWorkWaitingStatusSchema = z.enum([
+	"background_execution_running",
+	"waiting_for_machine_evidence",
+	"waiting_for_result_continuation",
+]);
+export type RuntimeOwnedBackgroundWorkWaitingStatus = z.infer<typeof runtimeOwnedBackgroundWorkWaitingStatusSchema>;
+
 export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskDetailSchema.extend({
 	taskEditorCreationAgentStartupProgress: taskEditorCreationSubmissionStatusSchema.optional(),
 	// ACP 准备摘要的 startedAt 只是连接尝试时刻；没有进程、原生会话或语义活动时仍属启动准备。
@@ -2489,8 +2513,10 @@ export const runtimeCrossProjectTaskSwitcherEntrySchema = runtimeInProgressTaskD
 	columnId: runtimeBoardColumnIdSchema,
 	// 第三个 facet。缓存倒计时区的判据 isNotifiableUserTurn 要用完整三元组。
 	userTurnKind: runtimeTaskSessionUserTurnKindSchema,
-	// 主 agent 已 park、在等自己派发的后台工作（isParkedAwaitingDispatchedBackgroundWork）。归 Running 区。
+	// 停止证明和所属执行处置齐备时，投影独立的后台等待分组。
 	isParkedAwaitingDispatchedBackgroundWork: z.boolean(),
+	ownedBackgroundWorkWaitingStatus: runtimeOwnedBackgroundWorkWaitingStatusSchema.optional(),
+	codexNativeTurnVerificationPending: runtimeCodexNativeTurnVerificationPendingSchema.optional(),
 	// Description 最后一次内容变化的时刻（老卡回落 updatedAt，同 Backlog 排序）。
 	taskDescriptionLastUpdatedAt: z.number(),
 	// 用户最近一次在任一浏览器里打开这个任务的时刻（服务端记录，见 task-last-opened-by-user-record-store.ts）。

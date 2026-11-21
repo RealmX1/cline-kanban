@@ -4,6 +4,8 @@ import type {
 	RuntimeBoardColumnId,
 	RuntimeBoardData,
 	RuntimeCrossProjectTaskSwitcherEntry,
+	RuntimeOwnedBackgroundWorkWaitingStatus,
+	TaskCommandExecutionRecord,
 	TaskEditorCreationSubmissionStatus,
 } from "../core/api-contract";
 import { resolveTaskDescriptionLastUpdatedAt } from "../core/backlog-task-description-last-updated-ordering";
@@ -38,6 +40,7 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 		taskShelvingState: card.taskShelvingState,
 		userTurnKind: sessionFacts?.userTurnKind ?? null,
 		isParkedAwaitingDispatchedBackgroundWork: sessionFacts?.isParkedAwaitingDispatchedBackgroundWork ?? false,
+		codexNativeTurnVerificationPending: sessionFacts?.codexNativeTurnVerificationPending ?? undefined,
 		taskDescriptionLastUpdatedAt: resolveTaskDescriptionLastUpdatedAt(card),
 		lastOpenedByUserAt,
 		pinnedToTaskPinboardAt: card.pinnedToTaskPinboardAt ?? null,
@@ -51,12 +54,59 @@ function buildCrossProjectTaskSwitcherEntryFromBoardCard(
 	};
 }
 
+type OwnedBackgroundWorkWaitingProjectionExecution = Pick<
+	TaskCommandExecutionRecord,
+	| "taskId"
+	| "taskIncarnationCreatedAtEpochMs"
+	| "originatingConversationSessionId"
+	| "originatingNativeSessionId"
+	| "originatingRuntimeSessionIncarnationId"
+	| "requiresOriginatingSessionBinding"
+	| "parkOwned"
+	| "revokedAtEpochMs"
+	| "launchState"
+	| "businessDisposition"
+>;
+
+function resolveOwnedBackgroundWorkWaitingStatus(
+	card: RuntimeBoardCard,
+	mainSessionId: string,
+	facts: TaskSessionFactsForCrossProjectTaskViews | undefined,
+	executionsById: ReadonlyMap<string, OwnedBackgroundWorkWaitingProjectionExecution> | undefined,
+): RuntimeOwnedBackgroundWorkWaitingStatus | undefined {
+	if (facts?.turnOwner !== "agent" || !facts.isParkedAwaitingDispatchedBackgroundWork) return undefined;
+	const ownedExecutions = (facts.stoppedMainTurnOwnedCommandExecutionIds ?? [])
+		.map((executionId) => executionsById?.get(executionId))
+		.filter(
+			(record): record is OwnedBackgroundWorkWaitingProjectionExecution =>
+				record != null &&
+				record.taskId === card.id &&
+				record.taskIncarnationCreatedAtEpochMs === card.createdAt &&
+				record.originatingConversationSessionId === mainSessionId &&
+				record.originatingNativeSessionId === facts.nativeSessionId &&
+				(!record.requiresOriginatingSessionBinding ||
+					record.originatingRuntimeSessionIncarnationId ===
+						facts.ownedBackgroundWaitRuntimeSessionIncarnationId) &&
+				record.parkOwned &&
+				record.revokedAtEpochMs === null,
+		);
+	if (ownedExecutions.some((record) => record.businessDisposition === "machine_evidence_pending"))
+		return "waiting_for_machine_evidence";
+	if (ownedExecutions.some((record) => record.launchState === "running" || record.launchState === "launching"))
+		return "background_execution_running";
+	if (ownedExecutions.some((record) => record.launchState === "unknown" || record.launchState === "registered"))
+		return "waiting_for_machine_evidence";
+	if (ownedExecutions.length > 0) return "waiting_for_result_continuation";
+	return undefined;
+}
+
 export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 	board: RuntimeBoardData;
 	sessionFactsByTaskId: ReadonlyMap<string, TaskSessionFactsForCrossProjectTaskViews>;
 	lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
 	nowMs: number;
 	activityHorizonMs: number;
+	executionsById?: ReadonlyMap<string, OwnedBackgroundWorkWaitingProjectionExecution>;
 	taskEditorCreationAgentStartupProgressByTaskId?: ReadonlyMap<string, TaskEditorCreationSubmissionStatus>;
 }): RuntimeCrossProjectTaskSwitcherEntry[] {
 	const activityHorizonStartAt = input.nowMs - input.activityHorizonMs;
@@ -74,10 +124,15 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 	}
 	for (const column of input.board.columns) {
 		for (const card of column.cards) {
+			const mainSessionId = resolveMainTaskConversationSessionId(card);
+			const mainSessionFacts = resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(
+				card,
+				input.sessionFactsByTaskId,
+			);
 			const entry = buildCrossProjectTaskSwitcherEntryFromBoardCard(
 				card,
 				column.id,
-				resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(card, input.sessionFactsByTaskId),
+				mainSessionFacts,
 				input.lastOpenedByUserAtByTaskId.get(card.id) ?? null,
 			);
 			const sessionActivityFacts = sessionActivityFactsByOwningCardId.get(card.id) ?? [];
@@ -91,11 +146,12 @@ export function collectCrossProjectTaskSwitcherEntriesFromBoard(input: {
 				})
 			)
 				entry.taskEditorCreationAgentStartupProgress = startupProgress;
-			const mainSessionId = resolveMainTaskConversationSessionId(card);
-			const mainSessionFacts = resolveCurrentMainConversationTaskSessionFactsWithVerifiedCardOwnership(
-				card,
-				input.sessionFactsByTaskId,
-			);
+			const ownedBackgroundWorkWaitingStatus =
+				column.id === "trash"
+					? undefined
+					: resolveOwnedBackgroundWorkWaitingStatus(card, mainSessionId, mainSessionFacts, input.executionsById);
+			if (ownedBackgroundWorkWaitingStatus)
+				entry.ownedBackgroundWorkWaitingStatus = ownedBackgroundWorkWaitingStatus;
 			entry.taskConversationSessionActivityObservations = collectTaskConversationSessionActivityObservations(
 				card,
 				mainSessionFacts && !sessionActivityFacts.some((facts) => facts.taskId === mainSessionId)

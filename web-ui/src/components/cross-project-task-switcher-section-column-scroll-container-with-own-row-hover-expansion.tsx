@@ -1,13 +1,13 @@
 import type { CrossProjectTaskSwitcherEntryInProject } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { type ReactElement, useLayoutEffect, useRef } from "react";
 import {
-	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
 	CrossProjectTaskSwitcherPinnedSectionBlock,
 	CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock,
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
 	CrossProjectTaskSwitcherRunningSectionBlock,
 	type CrossProjectTaskSwitcherSectionBlockProps,
 	CrossProjectTaskSwitcherShelvedSectionBlock,
+	CrossProjectTaskSwitcherWaitingSectionBlock,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-section-blocks";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import { useCrossProjectTaskSwitcherRowHoverExpansionInPlace } from "@/hooks/use-cross-project-task-switcher-row-hover-expansion-in-place";
@@ -77,7 +77,8 @@ export function CrossProjectTaskSwitcherSectionColumnScrollContainerWithOwnRowHo
 		case "running":
 			return <CrossProjectTaskSwitcherRunningSectionBlock {...sectionBlockProps} />;
 		case "waiting_automatic_recovery":
-			return <CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock {...sectionBlockProps} />;
+		case "waiting_owned_background_work":
+			return <CrossProjectTaskSwitcherWaitingSectionBlock {...sectionBlockProps} waitingSection={section} />;
 		case "prompt_cache_warm":
 			return <CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock {...sectionBlockProps} />;
 		case "remaining":

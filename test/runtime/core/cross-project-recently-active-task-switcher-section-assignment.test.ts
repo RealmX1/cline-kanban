@@ -289,6 +289,22 @@ describe("Recent 的阶段多选与统一活动范围", () => {
 });
 
 describe("isCrossProjectTaskSwitcherEntryRunning", () => {
+	it("仅将主回合已确认结束的所属后台等待分到独立组", () => {
+		const parked = { ...AGENT_RUNNING, isParkedAwaitingDispatchedBackgroundWork: true };
+		const waiting = makeEntry("waiting", {
+			...parked,
+			ownedBackgroundWorkWaitingStatus: "waiting_for_machine_evidence",
+			pinnedToTaskPinboardAt: NOW_MS,
+		});
+		const sections = assign([
+			inProject("workspace", waiting),
+			inProject("workspace", makeEntry("still-running", parked)),
+		]);
+		expect(isCrossProjectTaskSwitcherEntryRunning(waiting, NOW_MS)).toBe(false);
+		expect(sections.ownedBackgroundWorkWaitingEntries.map(({ entry }) => entry.taskId)).toEqual(["waiting"]);
+		expect(sections.runningEntries.map(({ entry }) => entry.taskId)).toEqual(["still-running"]);
+		expect(sections.pinnedEntries.map(({ entry }) => entry.taskId)).toEqual(["waiting"]);
+	});
 	it("自动重连进入等待自动恢复，保留原回合排序起点", () => {
 		const entry = makeEntry("retrying", {
 			...AGENT_RUNNING,
