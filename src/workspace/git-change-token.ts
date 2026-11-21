@@ -84,7 +84,10 @@ async function statSignature(targetPath: string): Promise<string> {
  * gitdir 解析不出（路径缺失、非 git 目录）→ 返回恒定 sentinel。调用方仍会因兜底窗口定期跑真探针，
  * 由真探针自行优雅处理非 git 的情况，故恒定 sentinel 安全。
  */
-export async function computeWorktreeGitChangeToken(worktreeRoot: string): Promise<string> {
+export async function computeWorktreeGitChangeToken(
+	worktreeRoot: string,
+	onHeadReflogChangeToken?: (token: string) => void,
+): Promise<string> {
 	const gitDir = await resolveWorktreeGitDir(worktreeRoot);
 	if (!gitDir) {
 		return NO_GIT_DIR_SENTINEL;
@@ -110,6 +113,7 @@ export async function computeWorktreeGitChangeToken(worktreeRoot: string): Promi
 		symbolicHeadRef ? statSignature(join(commonGitDir, symbolicHeadRef)) : Promise.resolve("detached"),
 		statSignature(join(commonGitDir, "packed-refs")),
 	]);
+	onHeadReflogChangeToken?.(`${gitDir}|${reflogSignature}`);
 	return `${gitDir}|${commonGitDir}|${head}|${headSignature}|${indexSignature}|${reflogSignature}|${worktreeRootSignature}|${headRefSignature}|${packedRefsSignature}`;
 }
 

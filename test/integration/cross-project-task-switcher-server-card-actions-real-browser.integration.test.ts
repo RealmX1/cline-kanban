@@ -457,18 +457,41 @@ export default { ...baseConfiguration, optimizeDeps: { entries: [${JSON.stringif
 			}
 			if (process.env.KANBAN_RUN_ISOLATED_TASK_COMMITTED_LINE_CHANGE_BROWSER_CHECK === "1") {
 				const client = runtimeClient(alphaWorkspaceId);
+				const committedStatisticsTaskId = "c0ff3";
+				const boardState = await client.workspace.getState.query();
+				const reviewColumn = boardState.board.columns.find((column) => column.id === "review");
+				if (!reviewColumn) throw new Error("隔离看板缺少 Review 列");
+				const now = Date.now();
+				reviewColumn.cards.push({
+					id: committedStatisticsTaskId,
+					title: "已提交统计恢复样本",
+					prompt: "验证已合回却未采集的提交统计",
+					baseRef: "main",
+					startInPlanMode: false,
+					createdAt: now,
+					updatedAt: now,
+				});
+				const savedBoard = await client.workspace.saveState.mutate({
+					board: boardState.board,
+					sessions: boardState.sessions,
+					expectedRevision: boardState.revision,
+				});
+				expect(savedBoard.board.columns.find((column) => column.id === "review")?.cards).toEqual(
+					expect.arrayContaining([expect.objectContaining({ id: committedStatisticsTaskId })]),
+				);
 				await runTaskRetainedCommittedLineChangeRealBrowserCheck({
 					page,
 					repository: firstProject,
 					workspaceId: alphaWorkspaceId,
-					taskId: focusId,
+					taskId: committedStatisticsTaskId,
 					webUiOrigin,
 					evidenceOutputDirectory,
 					observeUntil,
-					ensureWorktree: () => client.workspace.ensureWorktree.mutate({ taskId: focusId, baseRef: "main" }),
+					ensureWorktree: () =>
+						client.workspace.ensureWorktree.mutate({ taskId: committedStatisticsTaskId, baseRef: "main" }),
 					readHistory: () =>
 						client.workspace.getTaskRetainedCommittedLineChangeHistory.query({
-							taskId: focusId,
+							taskId: committedStatisticsTaskId,
 							baseRef: "main",
 						}),
 					restartRuntime: async () => {

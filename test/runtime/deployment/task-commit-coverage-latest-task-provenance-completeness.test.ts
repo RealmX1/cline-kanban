@@ -157,6 +157,7 @@ describe.sequential("最新提交归属完整性约束部署覆盖", () => {
 		}
 		const unobservedCommit = commit(worktreePath, "unobserved.txt", "探测间新增并落地的任务提交");
 		repository.runGit(["merge", "--quiet", "--ff-only", taskBranch]);
+		repository.runGit(["reflog", "expire", "--expire=all", "HEAD"], { workingDirectoryPath: worktreePath });
 		recordDeployment(unobservedCommit);
 		const latestMetadata = await probeTaskMetadata();
 		expect(latestMetadata.workspaceGitStatus.taskCommitIntegrationTrackingStatus).toBe(
