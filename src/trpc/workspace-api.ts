@@ -43,7 +43,16 @@ import {
 	saveWorkspaceState,
 	WorkspaceStateConflictError,
 } from "../state/workspace-state";
-import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import {
+	beginTaskClosureAutomaticSideEffect,
+	completeTaskClosureAutomaticSideEffect,
+	recordTaskClosureAutomaticFailure,
+} from "../task-closure/task-closure-automatic-recovery-policy";
+import {
+	readTaskClosureOperation,
+	withTaskClosureLifecycleLocks,
+	writeTaskClosureOperation,
+} from "../task-closure/task-closure-operation-store";
 import { assertTaskWorktreeCleanupHasCurrentVerifiedArchive } from "../task-closure/task-worktree-verified-archive-cleanup-guard";
 import type { TerminalSessionManager } from "../terminal/session-manager";
 import {
@@ -529,12 +538,54 @@ export function createWorkspaceApi(deps: CreateWorkspaceApiDependencies): Runtim
 				};
 				if (cleanupPath.exists && body.worktreeMode !== "inplace")
 					await assertCleanupStillAuthorizedBeforeRemoval();
-				const deletionResult = await deleteTaskWorktree({
-					repoPath: workspaceScope.workspacePath,
-					assertCleanupStillAuthorizedBeforeRemoval,
-					taskId: body.taskId,
-					worktreeMode: body.worktreeMode,
-				});
+				const credential = body.taskClosureArchiveCleanupCredential;
+				const operation = credential
+					? await readTaskClosureOperation(
+							{
+								workspaceId: workspaceScope.workspaceId,
+								taskId: body.taskId,
+								taskIncarnationCreatedAtEpochMs: credential.taskIncarnationCreatedAtEpochMs,
+							},
+							credential.closureRequestId,
+						)
+					: null;
+				if (operation && cleanupPath.exists)
+					await beginTaskClosureAutomaticSideEffect(operation, "remove_source_worktree", true);
+				let deletionResult: Awaited<ReturnType<typeof deleteTaskWorktree>>;
+				try {
+					deletionResult = await deleteTaskWorktree({
+						repoPath: workspaceScope.workspacePath,
+						assertCleanupStillAuthorizedBeforeRemoval,
+						taskId: body.taskId,
+						worktreeMode: body.worktreeMode,
+					});
+					if (operation) {
+						const current = await readTaskClosureOperation(
+							operation.taskIdentity,
+							operation.progress.closureRequestId,
+						);
+						if (current) Object.assign(operation, current);
+						if (deletionResult.ok)
+							await completeTaskClosureAutomaticSideEffect(operation, "remove_source_worktree");
+						else
+							await recordTaskClosureAutomaticFailure(
+								operation,
+								new Error(deletionResult.error ?? "工作树清理失败"),
+							);
+						await writeTaskClosureOperation(operation);
+					}
+				} catch (error) {
+					if (operation) {
+						const current = await readTaskClosureOperation(
+							operation.taskIdentity,
+							operation.progress.closureRequestId,
+						);
+						if (current) Object.assign(operation, current);
+						await recordTaskClosureAutomaticFailure(operation, error);
+						await writeTaskClosureOperation(operation);
+					}
+					throw error;
+				}
 				// 删 worktree 不再连带删除 task commit provenance（落地数据保全，Y-PHASE-3）：1c 的共享落地判据要读这份数据。
 				if (deletionResult.removed && finalTaskCommitIntegrationProbeFailureReason !== null) {
 					recordFactObservedByActiveKanbanRuntimeWithoutBlocking({

@@ -8,6 +8,7 @@ import { getRuntimeFetch } from "../core/runtime-endpoint";
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
+import { assertTaskClosureStorageProtocolCompatibleWithDistribution } from "../task-closure/task-closure-storage-protocol-compatibility";
 import {
 	readProcessIdentity,
 	readSystemBootIdentity,
@@ -887,6 +888,10 @@ export async function executeStandardLocalRedeploymentStage(
 		]);
 	}
 	if (stage === "build_publication") {
+		await assertTaskClosureStorageProtocolCompatibleWithDistribution(
+			manifest.candidateDistributionDirectoryPath,
+			request.runtimeIdentity.runtimeHomeDirectoryPath,
+		);
 		const sourcePackage = (await readLocalRedeploymentJson(join(request.sourceCheckoutPath, "package.json"))) as {
 			name?: string;
 			bin?: { kanban?: string };
@@ -943,6 +948,10 @@ export async function executeStandardLocalRedeploymentStage(
 			throw new Error("实际 Node 的 CLI 链接与冻结目标不一致");
 	}
 	if (stage === "runtime_restart") {
+		await assertTaskClosureStorageProtocolCompatibleWithDistribution(
+			request.distributionDirectoryPath,
+			request.runtimeIdentity.runtimeHomeDirectoryPath,
+		);
 		let restartBaseline: typeof manifest.runtimeBefore = null;
 		await run(
 			"published-runtime-abi",

@@ -212,7 +212,11 @@ import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
-import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import {
+	listTaskClosureOperations,
+	requestTaskClosureLifecycleCancellation,
+	withTaskClosureLifecycleLocks,
+} from "../task-closure/task-closure-operation-store";
 import { createTaskFileDownloadService } from "../task-file-downloads/task-file-download-service";
 import {
 	readRecordedCreationNameSuggestionResult,
@@ -1362,7 +1366,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					if (!primary) return { ok: false, summary: null, error: "当前主会话记录缺失，未退回原 Claude 会话。" };
 					const resumed = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, primary);
 					if (!resumed) return { ok: false, summary: null, error: "当前主会话无法恢复。" };
-					return await runtimeApi.startTaskSession(workspaceScope, resumed);
+					return await runtimeApi.startTaskSession(workspaceScope, resumed, beforeAgentProcessLaunch);
 				}
 				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
 				if (owningCard?.independentTaskCreationProvenance) {
@@ -2361,6 +2365,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		stopTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStopRequest(input);
+				try {
+					const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const card = board.columns
+						.flatMap((column) => column.cards)
+						.find(
+							(card) => card.id === body.taskId || resolveMainTaskConversationSessionId(card) === body.taskId,
+						);
+					if (card)
+						for (const operation of await listTaskClosureOperations({
+							workspaceId: workspaceScope.workspaceId,
+							taskId: card.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+						})) {
+							if (operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase))
+								await requestTaskClosureLifecycleCancellation(operation);
+						}
+				} catch (error) {
+					logAgentSessionRetentionWarning(`重开操作的 Stop 撤销证据暂不可写，继续停止会话：${String(error)}`);
+				}
 				// 自动收尾的持久暂停或取消失败不能拦住用户停止 agent 本体。
 				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch((error: unknown) => {
 					logAgentSessionRetentionWarning(

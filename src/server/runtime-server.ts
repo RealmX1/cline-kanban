@@ -132,8 +132,10 @@ import {
 	probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
+import { completeTaskClosureAutomaticSideEffect } from "../task-closure/task-closure-automatic-recovery-policy";
 import {
 	readTaskClosureOperation,
+	withTaskClosureLifecycleCancellationGuards,
 	withTaskClosureLifecycleLocks,
 	writeTaskClosureHistoryRecord,
 	writeTaskClosureOperation,
@@ -1971,100 +1973,131 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		};
 	};
 
-	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(async (staleOperation) => {
-		const identity = staleOperation.taskIdentity;
-		const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
-		const board = await loadWorkspaceBoardById(identity.workspaceId);
-		const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
-		const card = column?.cards.find((entry) => entry.id === identity.taskId);
-		if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
-			if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				card.taskClosureSummary?.eventKind === "reopened" &&
-				card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
-			) {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "completed";
-						await writeTaskClosureOperation(current);
-					}
-					if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
-				});
-			} else if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
-					(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
-			) {
-				await createTaskCardActions(
-					createWorkspaceControlApi(),
-				).restoreTaskCardFromDoneIntoReviewResumingAgentSession(scope, staleOperation.reopening.request, {
-					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
-				});
-			} else {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "cancelled";
-						current.reopening.lastError = "任务身份已变化或卡片已删除";
-						await writeTaskClosureOperation(current);
-					}
-				});
+	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(
+		async (staleOperation) => {
+			const identity = staleOperation.taskIdentity;
+			const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
+			const board = await loadWorkspaceBoardById(identity.workspaceId);
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
+			const card = column?.cards.find((entry) => entry.id === identity.taskId);
+			if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
+				if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					card.taskClosureSummary?.eventKind === "reopened" &&
+					card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
+				) {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (
+							current?.reopening &&
+							!["completed", "cancelled"].includes(current.reopening.phase) &&
+							(current.reopening.reopeningRequestId ?? current.progress.closureRequestId) ===
+								(staleOperation.reopening?.reopeningRequestId ?? staleOperation.progress.closureRequestId)
+						)
+							await withTaskClosureLifecycleCancellationGuards([current], async () => {
+								if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
+								await completeTaskClosureAutomaticSideEffect(current);
+								if (current.reopening) current.reopening.phase = "completed";
+								await writeTaskClosureOperation(current);
+							});
+					});
+				} else if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
+						(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
+				) {
+					await createTaskCardActions(
+						createWorkspaceControlApi(),
+					).restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+						scope,
+						{
+							...staleOperation.reopening.request,
+							reopeningRequestId:
+								staleOperation.reopening.reopeningRequestId ?? staleOperation.progress.closureRequestId,
+						},
+						{
+							decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
+						},
+					);
+				} else {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (current?.reopening) {
+							current.reopening.phase = "cancelled";
+							current.reopening.lastError = "任务身份已变化或卡片已删除";
+							await writeTaskClosureOperation(current);
+						}
+					});
+				}
+				return;
 			}
-			return;
-		}
-		if (
-			card &&
-			(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
-				(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
-		) {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase === "completed") return;
-				current.progress.phase = "cancelled";
-				current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
-				await writeTaskClosureOperation(current);
-			});
-			return;
-		}
-		const workspaceApi = createWorkspaceControlApi();
-		if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase !== "closed_cleanup_pending") return;
-				const result = await workspaceApi.deleteWorktree(scope, {
-					taskId: identity.taskId,
-					taskClosureArchiveCleanupCredential: {
-						taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
-						closureRequestId: current.progress.closureRequestId,
-					},
+			if (
+				card &&
+				(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
+					(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
+			) {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase === "completed") return;
+					current.progress.phase = "cancelled";
+					current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
+					await writeTaskClosureOperation(current);
 				});
-				current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
-				current.progress.lastError = result.error ?? null;
-				await writeTaskClosureOperation(current);
-			});
-		} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
-			await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
-				scope,
-				{
-					expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
-						[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+				return;
+			}
+			const workspaceApi = createWorkspaceControlApi();
+			if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase !== "closed_cleanup_pending") return;
+					const result = await workspaceApi.deleteWorktree(scope, {
+						taskId: identity.taskId,
+						taskClosureArchiveCleanupCredential: {
+							taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
+							closureRequestId: current.progress.closureRequestId,
+						},
+					});
+					const latest = await readTaskClosureOperation(identity, current.progress.closureRequestId);
+					if (latest) Object.assign(current, latest);
+					current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
+					current.progress.lastError = result.error ?? null;
+					await writeTaskClosureOperation(current);
+				});
+			} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
+				await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					scope,
+					{
+						expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
+							[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+						},
+						permanentlyDeletedTaskCardSelection: {
+							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+							selectedTaskIds: [identity.taskId],
+						},
 					},
-					permanentlyDeletedTaskCardSelection: {
-						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
-						selectedTaskIds: [identity.taskId],
-					},
-				},
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			} else if (card) {
+				await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+					scope,
+					staleOperation.request,
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			}
+		},
+		deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		(operation, card) => {
+			const summary = findRuntimeSessionSummary(
+				operation.taskIdentity.workspaceId,
+				resolveMainTaskConversationSessionId(card),
 			);
-		} else if (card) {
-			await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
-				scope,
-				staleOperation.request,
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+			return (
+				!!summary &&
+				resolveSessionFacets(summary).liveness === "live" &&
+				(summary.startedAt ?? 0) >= (operation.reopening?.startedAtEpochMs ?? Infinity)
 			);
-		}
-	});
+		},
+	);
 
 	const trpcHttpHandler = createHTTPHandler({
 		basePath: "/api/trpc/",

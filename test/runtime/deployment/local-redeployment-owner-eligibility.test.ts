@@ -29,6 +29,8 @@ beforeEach(() => {
 	sandbox = createTempDir("local-redeployment-frozen-owner-");
 	vi.mocked(createTaskConversationSessionOperationStore).mockReturnValue({
 		read: readOperations,
+		observeExplicitStopMarkerVersion: vi.fn(),
+		clearExplicitStopMarkersIfObservationUnchanged: vi.fn(),
 		recordExplicitStopMarkers: vi.fn(),
 		clearExplicitStopMarker: vi.fn(),
 		migrateTransferredExplicitStopMarkers: vi.fn(),

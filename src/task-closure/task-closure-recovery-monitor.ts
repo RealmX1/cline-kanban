@@ -1,161 +1,54 @@
-import { randomUUID } from "node:crypto";
-import { lstat, statfs } from "node:fs/promises";
-import { delimiter } from "node:path";
+import type { RuntimeBoardCard } from "../core/api-contract";
 import { loadWorkspaceBoardById } from "../state/workspace-state";
-import { getGitStdout } from "../workspace/git-utils";
 import { getTaskWorkspacePathInfo } from "../workspace/task-worktree";
 import {
+	reclaimCancelledTaskClosureRestorationWorktrees,
+	reconcileTaskClosureCompletedArchiveRestoration,
+	reconcileTaskClosureCompletedSourceWorktreeRemoval,
+	reconcileTaskClosureVerifiedArchivePublication,
+} from "./task-closure-archive";
+import {
+	completeTaskClosureAutomaticSideEffect,
+	getTaskClosureAutomaticRecoveryState,
+	isTaskClosureAutomaticRecoveryEligible,
+	recordTaskClosureAutomaticFailure,
+} from "./task-closure-automatic-recovery-policy";
+import { persistTaskClosureProgressAndProjectOntoCurrentCard } from "./task-closure-operation-progress-projection";
+import {
+	isTaskClosureLifecycleCancellationRequested,
 	listTaskClosureOperations,
 	logTaskClosureRecoveryFailure,
 	readTaskClosureOperation,
 	type TaskClosureOperation,
-	taskClosureIdentityKey,
+	withTaskClosureLifecycleCancellationGuards,
 	withTaskClosureLifecycleLocks,
+	writeTaskClosureHistoryRecord,
 	writeTaskClosureOperation,
 } from "./task-closure-operation-store";
+import { reconcileCancelledTaskClosureCandidateReclamation } from "./task-closure-unverified-candidate-reclamation";
 
 const needsOperationRecovery = (operation: TaskClosureOperation) =>
+	!!(
+		operation.progress.unverifiedCandidateReclamation &&
+		operation.progress.unverifiedCandidateReclamation.phase !== "completed"
+	) ||
 	!!(operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase)) ||
 	!["completed", "cancelled"].includes(operation.progress.phase);
 
-async function readRecoveryConditionFingerprint(operation: TaskClosureOperation) {
-	let source = "来源不存在";
-	if (operation.sourceWorktreePath) {
-		try {
-			const [status, diff, untracked, disk] = await Promise.all([
-				getGitStdout(["--no-optional-locks", "status", "--porcelain=v1"], operation.sourceWorktreePath),
-				getGitStdout(["diff", "--binary", "--full-index", "HEAD", "--"], operation.sourceWorktreePath),
-				getGitStdout(["ls-files", "--others", "--exclude-standard", "-z"], operation.sourceWorktreePath, {
-					trimStdout: false,
-				}),
-				statfs(operation.sourceWorktreePath),
-			]);
-			const fileChanges = await Promise.all(
-				[
-					...untracked.split("\0").filter(Boolean),
-					...(operation.request.closure?.selectedArtifactRelativePaths ?? []),
-				].map(async (path) => {
-					try {
-						const info = await lstat(`${operation.sourceWorktreePath}/${path}`);
-						return [path, info.size, info.mtimeMs];
-					} catch {
-						return [path, "不可读"];
-					}
-				}),
-			);
-			source = JSON.stringify([
-				status,
-				diff,
-				fileChanges,
-				Math.floor((disk.bavail * disk.bsize) / (64 * 1024 * 1024)),
-			]);
-		} catch (error) {
-			source = String(error);
-		}
-	}
-	let taskOwnershipEvidence: unknown;
-	try {
-		const board = await loadWorkspaceBoardById(operation.taskIdentity.workspaceId);
-		const column = board.columns.find((entry) =>
-			entry.cards.some((card) => card.id === operation.taskIdentity.taskId),
-		);
-		const card = column?.cards.find((entry) => entry.id === operation.taskIdentity.taskId);
-		const worktree = card
-			? await getTaskWorkspacePathInfo({
-					cwd: operation.workspacePath,
-					taskId: card.id,
-					baseRef: card.baseRef,
-					worktreeMode: card.worktreeMode,
-				})
-			: null;
-		taskOwnershipEvidence = [
-			column?.id,
-			card?.createdAt,
-			card?.updatedAt,
-			card?.taskShelvingState?.isShelved,
-			card?.taskClosureSummary?.closureRequestId,
-			worktree?.path,
-			worktree?.exists,
-		];
-	} catch (error) {
-		taskOwnershipEvidence = String(error);
-	}
-	const processExitEvidence = (operation.processIdsAwaitingExit ?? []).map((pid) => {
-		try {
-			process.kill(pid, 0);
-			return [pid, "仍存活"];
-		} catch (error) {
-			return [pid, (error as NodeJS.ErrnoException).code ?? "未知"];
-		}
-	});
-	const toolingDirectoryEvidence = await Promise.all(
-		(process.env.PATH ?? "")
-			.split(delimiter)
-			.filter(Boolean)
-			.map(async (path) => {
-				try {
-					const info = await lstat(path);
-					return [path, info.mtimeMs];
-				} catch {
-					return [path, "不可读"];
-				}
-			}),
-	);
-	return taskClosureIdentityKey([source, taskOwnershipEvidence, processExitEvidence, toolingDirectoryEvidence]);
-}
-
-/** 条件无变化时不重复归档；运行时新一代有一次恢复预算，记录仍保留原失败历史。 */
-export function createTaskClosureRecoveryMonitor(execute: (operation: TaskClosureOperation) => Promise<void>) {
-	const runtimeInstanceId = randomUUID();
+/** 运行时只检查具体缺口；总次数及修复补试资格由原请求持久保存。 */
+export function createTaskClosureRecoveryMonitor(
+	execute: (operation: TaskClosureOperation) => Promise<void>,
+	publishProgress?: (workspaceId: string, workspacePath: string) => void | Promise<void>,
+	hasLiveSessionCreatedForReopening?: (operation: TaskClosureOperation, card: RuntimeBoardCard) => boolean,
+) {
 	let timer: ReturnType<typeof setInterval> | null = null;
 	let running: Promise<void> | null = null;
 	let closed = false;
 	const sweep = async () => {
 		for (const operation of await listTaskClosureOperations()) {
 			if (closed || !needsOperationRecovery(operation)) continue;
-			const fingerprint = await readRecoveryConditionFingerprint(operation);
-			if (
-				operation.lastAttemptRuntimeInstanceId === runtimeInstanceId &&
-				operation.lastRecoveryProbeFingerprint === fingerprint
-			)
-				continue;
-			// 状态条件先持久化，再执行；同一代条件未变只消费一次三次重试预算。
-			const claimed = await withTaskClosureLifecycleLocks(
-				operation.taskIdentity.workspaceId,
-				[operation.taskIdentity.taskId],
-				async () => {
-					const current = await readTaskClosureOperation(
-						operation.taskIdentity,
-						operation.progress.closureRequestId,
-					);
-					if (!current || !needsOperationRecovery(current)) return null;
-					current.lastAttemptRuntimeInstanceId = runtimeInstanceId;
-					current.lastRecoveryProbeFingerprint = fingerprint;
-					await writeTaskClosureOperation(current);
-					return current;
-				},
-			);
-			if (claimed) {
-				await execute(claimed).catch(async (error: unknown) => {
-					logTaskClosureRecoveryFailure(claimed.progress.closureRequestId, error);
-					await withTaskClosureLifecycleLocks(
-						claimed.taskIdentity.workspaceId,
-						[claimed.taskIdentity.taskId],
-						async () => {
-							const current = await readTaskClosureOperation(
-								claimed.taskIdentity,
-								claimed.progress.closureRequestId,
-							);
-							if (!current || !needsOperationRecovery(current)) return;
-							if (current.reopening && !["completed", "cancelled"].includes(current.reopening.phase))
-								current.reopening.lastError = `自动恢复失败：${error instanceof Error ? error.message : String(error)}`;
-							else
-								current.progress.lastError = `自动恢复失败：${error instanceof Error ? error.message : String(error)}`;
-							await writeTaskClosureOperation(current);
-						},
-					);
-				});
-				await withTaskClosureLifecycleLocks(
+			try {
+				const claimed = await withTaskClosureLifecycleLocks(
 					operation.taskIdentity.workspaceId,
 					[operation.taskIdentity.taskId],
 					async () => {
@@ -163,11 +56,154 @@ export function createTaskClosureRecoveryMonitor(execute: (operation: TaskClosur
 							operation.taskIdentity,
 							operation.progress.closureRequestId,
 						);
-						if (!current || !needsOperationRecovery(current)) return;
-						current.lastRecoveryProbeFingerprint = await readRecoveryConditionFingerprint(current);
+						if (closed || !current || !needsOperationRecovery(current)) return null;
+						const board = await loadWorkspaceBoardById(current.taskIdentity.workspaceId);
+						const card = board.columns
+							.flatMap((column) => column.cards)
+							.find((card) => card.id === current.taskIdentity.taskId);
+						if (await isTaskClosureLifecycleCancellationRequested(current)) {
+							if (current.reopening && !["completed", "cancelled"].includes(current.reopening.phase))
+								current.reopening.phase = "cancelled";
+							current.progress.phase = "cancelled";
+							current.progress.recoveryCondition = null;
+							current.progress.nextRetryAtEpochMs = null;
+							if (current.schemaVersion === 2)
+								current.progress.unverifiedCandidateReclamation ??= {
+									phase: "pending",
+									automaticAttemptCount: 0,
+									lastError: null,
+								};
+							await persistTaskClosureProgressAndProjectOntoCurrentCard(
+								{ workspacePath: current.workspacePath },
+								current,
+							);
+							await publishProgress?.(current.taskIdentity.workspaceId, current.workspacePath);
+						}
+						if (
+							current.progress.phase === "cancelled" &&
+							current.progress.unverifiedCandidateReclamation &&
+							card?.createdAt === current.taskIdentity.taskIncarnationCreatedAtEpochMs
+						) {
+							try {
+								await reclaimCancelledTaskClosureRestorationWorktrees(current);
+							} catch (error) {
+								current.progress.unverifiedCandidateReclamation.phase = "waiting_for_recovery";
+								current.progress.unverifiedCandidateReclamation.lastError =
+									error instanceof Error ? error.message : String(error);
+								if (
+									await persistTaskClosureProgressAndProjectOntoCurrentCard(
+										{ workspacePath: current.workspacePath },
+										current,
+									)
+								)
+									await publishProgress?.(current.taskIdentity.workspaceId, current.workspacePath);
+								return null;
+							}
+							await reconcileCancelledTaskClosureCandidateReclamation(current);
+							if (
+								await persistTaskClosureProgressAndProjectOntoCurrentCard(
+									{ workspacePath: current.workspacePath },
+									current,
+								)
+							)
+								await publishProgress?.(current.taskIdentity.workspaceId, current.workspacePath);
+							return null;
+						}
+						if (
+							current.progress.phase === "cancelled" &&
+							(!current.reopening || ["completed", "cancelled"].includes(current.reopening.phase))
+						)
+							return null;
+						if (
+							current.reopening &&
+							!["completed", "cancelled"].includes(current.reopening.phase) &&
+							card?.createdAt === current.taskIdentity.taskIncarnationCreatedAtEpochMs &&
+							card.taskClosureSummary?.eventKind === "reopened" &&
+							card.taskClosureSummary.taskIdentity.workspaceId === current.taskIdentity.workspaceId &&
+							card.taskClosureSummary.taskIdentity.taskId === current.taskIdentity.taskId &&
+							card.taskClosureSummary.taskIdentity.taskIncarnationCreatedAtEpochMs ===
+								current.taskIdentity.taskIncarnationCreatedAtEpochMs &&
+							card.taskClosureSummary.closureRequestId ===
+								(current.reopening.reopeningRequestId ?? current.progress.closureRequestId)
+						) {
+							const completedRecord = card.taskClosureSummary;
+							await withTaskClosureLifecycleCancellationGuards([current], async () => {
+								await writeTaskClosureHistoryRecord(completedRecord);
+								await completeTaskClosureAutomaticSideEffect(current);
+								if (current.reopening) {
+									current.reopening.phase = "completed";
+									current.reopening.lastError = null;
+								}
+								await writeTaskClosureOperation(current);
+							});
+							await publishProgress?.(current.taskIdentity.workspaceId, current.workspacePath);
+							return null;
+						}
+						await reconcileTaskClosureVerifiedArchivePublication(current);
+						await reconcileTaskClosureCompletedSourceWorktreeRemoval(current);
+						if (
+							card?.createdAt === current.taskIdentity.taskIncarnationCreatedAtEpochMs &&
+							current.reopening?.automaticRecovery?.pendingSideEffect === "restore_archive"
+						) {
+							const target = await getTaskWorkspacePathInfo({
+								cwd: current.workspacePath,
+								taskId: card.id,
+								baseRef: card.baseRef,
+								worktreeMode: card.worktreeMode,
+							});
+							await reconcileTaskClosureCompletedArchiveRestoration(current, target.path);
+						}
+						const identityChanged =
+							card &&
+							(card.createdAt !== current.taskIdentity.taskIncarnationCreatedAtEpochMs ||
+								(!current.reopening &&
+									card.updatedAt !== current.sourceTaskUpdatedAtEpochMs &&
+									!board.columns.find((column) => column.id === "trash")?.cards.includes(card)));
+						const beforeProbe = JSON.stringify(current);
+						const completedSessionLaunch =
+							current.reopening?.automaticRecovery?.pendingSideEffect === "resume_session" &&
+							!current.reopening.automaticRecovery.failureClassification &&
+							card?.createdAt === current.taskIdentity.taskIncarnationCreatedAtEpochMs &&
+							hasLiveSessionCreatedForReopening?.(current, card);
+						const eligible =
+							identityChanged ||
+							completedSessionLaunch ||
+							(await isTaskClosureAutomaticRecoveryEligible(current));
+						if (JSON.stringify(current) !== beforeProbe) await writeTaskClosureOperation(current);
+						if (!eligible) return null;
+						getTaskClosureAutomaticRecoveryState(current);
 						await writeTaskClosureOperation(current);
+						return current;
 					},
 				);
+				if (claimed) {
+					try {
+						await execute(claimed);
+					} catch (error) {
+						logTaskClosureRecoveryFailure(claimed.progress.closureRequestId, error);
+						await withTaskClosureLifecycleLocks(
+							claimed.taskIdentity.workspaceId,
+							[claimed.taskIdentity.taskId],
+							async () => {
+								const failed = await readTaskClosureOperation(
+									claimed.taskIdentity,
+									claimed.progress.closureRequestId,
+								);
+								if (!failed || !needsOperationRecovery(failed)) return;
+								if (failed.reopening && !["completed", "cancelled"].includes(failed.reopening.phase))
+									failed.reopening.lastError = `自动恢复失败：${error instanceof Error ? error.message : String(error)}`;
+								else
+									failed.progress.lastError = `自动恢复失败：${error instanceof Error ? error.message : String(error)}`;
+								// 入口已记录原始原因时，不能被外层 PRECONDITION_FAILED 覆盖。
+								if (!getTaskClosureAutomaticRecoveryState(failed).failureClassification)
+									await recordTaskClosureAutomaticFailure(failed, error);
+								await writeTaskClosureOperation(failed);
+							},
+						);
+					}
+				}
+			} catch (error) {
+				logTaskClosureRecoveryFailure(operation.progress.closureRequestId, error);
 			}
 		}
 	};
