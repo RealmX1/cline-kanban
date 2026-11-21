@@ -119,6 +119,7 @@ export interface TaskCreateFormSnapshot {
 	codexReasoningEffortOverride?: string;
 	prompt: string;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	/** 名字输入框。留空是常态（= 用描述推导），但用户敲进去的名字同样是「改动过表单」。 */
 	taskName: string;
 	/** 多任务模式下所有非空行 trim 后拼接；单任务模式为空串 */
@@ -148,6 +149,8 @@ export function hasTaskCreateFormEdits(current: TaskCreateFormSnapshot, baseline
 	return (
 		current.prompt.trim() !== baseline.prompt.trim() ||
 		(current.taskDescription ?? "").trim() !== (baseline.taskDescription ?? "").trim() ||
+		(current.backlogTaskStartReadinessConditionsText ?? "").trim() !==
+			(baseline.backlogTaskStartReadinessConditionsText ?? "").trim() ||
 		current.taskName.trim() !== baseline.taskName.trim() ||
 		current.multiPromptContent !== baseline.multiPromptContent ||
 		current.imageCount !== baseline.imageCount ||
@@ -235,6 +238,8 @@ export function TaskEditorDialogForm({
 	prompt,
 	onPromptChange,
 	taskDescription = "",
+	backlogTaskStartReadinessConditionsText = "",
+	onBacklogTaskStartReadinessConditionsTextChange,
 	onTaskDescriptionChange,
 	images,
 	onImagesChange,
@@ -299,6 +304,8 @@ export function TaskEditorDialogForm({
 	prompt: string;
 	onPromptChange: (value: string) => void;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
+	onBacklogTaskStartReadinessConditionsTextChange?: (text: string) => void;
 	onTaskDescriptionChange?: (value: string) => void;
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
@@ -559,6 +566,7 @@ export function TaskEditorDialogForm({
 		//（对话框整个关掉时不需要这一步：Radix 关闭即卸载内容，那些 state 自然没了）。
 		setNewTaskName("");
 		onTaskDescriptionChange?.("");
+		onBacklogTaskStartReadinessConditionsTextChange?.("");
 		onImagesChange([]);
 		onCodexReasoningEffortOverrideChange?.(undefined);
 		setMode("single");
@@ -566,7 +574,13 @@ export function TaskEditorDialogForm({
 		inputRefs.current = [];
 		nextFocusIndexRef.current = null;
 		setComposerResetKey((current) => current + 1);
-	}, [onImagesChange, onTaskDescriptionChange, propagatePromptDraft, onCodexReasoningEffortOverrideChange]);
+	}, [
+		onImagesChange,
+		onTaskDescriptionChange,
+		onBacklogTaskStartReadinessConditionsTextChange,
+		propagatePromptDraft,
+		onCodexReasoningEffortOverrideChange,
+	]);
 
 	const [temporarilyRevealedSettingKeys, setTemporarilyRevealedSettingKeys] = useState<ReadonlySet<string>>(new Set());
 	const editorSurfaceRef = useRef<HTMLDivElement>(null);
@@ -648,6 +662,7 @@ export function TaskEditorDialogForm({
 		workspaceId: targetWorkspaceId,
 		prompt: promptDraft,
 		taskDescription,
+		backlogTaskStartReadinessConditionsText,
 		title: taskName,
 		branchRef,
 		images,
@@ -896,6 +911,7 @@ export function TaskEditorDialogForm({
 						promptOverride: submittingPrompt,
 						taskNameOverride: submittingTitle,
 						taskDescriptionOverride: taskDescription,
+						backlogTaskStartReadinessConditionsTextOverride: backlogTaskStartReadinessConditionsText,
 						targetWorkspaceIdOverride: assignment.workspaceId,
 						baseRefOverride: assignment.baseRef,
 						onNewTaskCardPreparedForRuntimeCreationSubmission: (card) => {
@@ -967,6 +983,7 @@ export function TaskEditorDialogForm({
 				promptOverride: submittingPrompt,
 				taskNameOverride: submittingTitle,
 				taskDescriptionOverride: taskDescription,
+				backlogTaskStartReadinessConditionsTextOverride: backlogTaskStartReadinessConditionsText,
 				targetWorkspaceIdOverride: assignment.workspaceId,
 				baseRefOverride: assignment.baseRef,
 				onTaskPersistenceRequested: (requested) => {
@@ -1060,6 +1077,7 @@ export function TaskEditorDialogForm({
 			setPromptDraft(card.prompt);
 			propagatePromptDraft(card.prompt);
 			setTaskName(card.title);
+			onBacklogTaskStartReadinessConditionsTextChange?.(card.backlogTaskStartReadinessConditionsText ?? "");
 			onImagesChange(card.images ?? []);
 			setSelectedTargetWorkspaceId(pending.workspaceId);
 			onBranchRefChange(card.baseRef);
@@ -1073,6 +1091,7 @@ export function TaskEditorDialogForm({
 				workspaceId: pending.workspaceId,
 				branchRef: card.baseRef,
 				prompt: card.prompt,
+				backlogTaskStartReadinessConditionsText: card.backlogTaskStartReadinessConditionsText ?? "",
 				title: card.title,
 				images: card.images ?? [],
 				mode: pending.batchPromptsAfterCurrentCard ? "multi" : "single",
@@ -1085,11 +1104,19 @@ export function TaskEditorDialogForm({
 			savePendingTaskEditorCreationSubmission(key, pending);
 		}
 		const savedBatch = localStorage.getItem(`${key}:remaining-batch-prompts`);
-		if (savedBatch && !promptDraft.trim() && !taskPrompts.length) {
-			const remaining: unknown = JSON.parse(savedBatch);
+		if (!pending && savedBatch && !promptDraft.trim() && !taskPrompts.length) {
+			const saved: unknown = JSON.parse(savedBatch);
+			const remaining: unknown = saved && typeof saved === "object" && "prompts" in saved ? saved.prompts : saved;
 			if (Array.isArray(remaining) && remaining.every((entry) => typeof entry === "string") && remaining.length) {
 				setMode("multi");
 				setTaskPrompts(remaining);
+				if (
+					saved &&
+					typeof saved === "object" &&
+					"backlogTaskStartReadinessConditionsText" in saved &&
+					typeof saved.backlogTaskStartReadinessConditionsText === "string"
+				)
+					onBacklogTaskStartReadinessConditionsTextChange?.(saved.backlogTaskStartReadinessConditionsText);
 			}
 		}
 		setPendingCreationDraftHydratedForWorkspaceId(editorSessionWorkspaceId);
@@ -1156,7 +1183,14 @@ export function TaskEditorDialogForm({
 				}
 				if (pending.batchPromptsAfterCurrentCard) {
 					const remaining = pending.batchPromptsAfterCurrentCard;
-					localStorage.setItem(`${key}:remaining-batch-prompts`, JSON.stringify(remaining));
+					localStorage.setItem(
+						`${key}:remaining-batch-prompts`,
+						JSON.stringify({
+							prompts: remaining,
+							backlogTaskStartReadinessConditionsText:
+								pending.request.newTaskCard.backlogTaskStartReadinessConditionsText ?? "",
+						}),
+					);
 					setTaskPrompts(remaining);
 					if (remaining.length) return;
 					localStorage.removeItem(`${key}:remaining-batch-prompts`);
@@ -1250,7 +1284,15 @@ export function TaskEditorDialogForm({
 			const prompts = getValidPrompts();
 			const generation = editorDialogGenerationRef.current;
 			const batchStorageKey = `${taskEditorPendingCreationStorageKey(editorSessionWorkspaceId ?? targetWorkspaceId ?? "unavailable")}:remaining-batch-prompts`;
-			localStorage.setItem(batchStorageKey, JSON.stringify(prompts));
+			const saveRemainingBatch = (remaining: string[]) =>
+				localStorage.setItem(
+					batchStorageKey,
+					JSON.stringify({
+						prompts: remaining,
+						backlogTaskStartReadinessConditionsText,
+					}),
+				);
+			saveRemainingBatch(prompts);
 			for (let index = 0; index < prompts.length; index++) {
 				const saved = await submitSingleTask(
 					action,
@@ -1264,7 +1306,7 @@ export function TaskEditorDialogForm({
 					setTaskPrompts(prompts.slice(index));
 					return;
 				}
-				localStorage.setItem(batchStorageKey, JSON.stringify(prompts.slice(index + 1)));
+				saveRemainingBatch(prompts.slice(index + 1));
 			}
 			localStorage.removeItem(batchStorageKey);
 			if (createMore) resetForCreateMore();
@@ -1377,6 +1419,7 @@ export function TaskEditorDialogForm({
 	const currentFormSnapshot: TaskCreateFormSnapshot = {
 		prompt: promptDraft,
 		taskDescription,
+		backlogTaskStartReadinessConditionsText,
 		taskName,
 		multiPromptContent: taskPrompts
 			.map((value) => value.trim())
@@ -1787,6 +1830,7 @@ export function TaskEditorDialogForm({
 														// 父层那份要等失焦/提交才追平，拿它做对照会把「已经改过了」说成没差别。
 														taskTitleOverride: taskName,
 														taskDescription,
+														backlogTaskStartReadinessConditionsText,
 														prompt: promptDraft,
 														images,
 														startInPlanMode,
@@ -1807,6 +1851,22 @@ export function TaskEditorDialogForm({
 												}
 											/>
 										) : null}
+										<label className="mb-4 block space-y-1 text-xs text-text-secondary">
+											<span>适合开启的条件（可选）</span>
+											<textarea
+												aria-label="适合开启的条件"
+												value={backlogTaskStartReadinessConditionsText}
+												onChange={(event) =>
+													onBacklogTaskStartReadinessConditionsTextChange?.(event.target.value)
+												}
+												maxLength={4000}
+												rows={2}
+												disabled={isTaskEditorPersisting}
+												placeholder="例如：相关依赖合入且当前方案仍适用时开启"
+												className="w-full resize-y rounded-md border border-border bg-surface-1 px-3 py-2 text-sm text-text-primary focus-visible:outline-2 focus-visible:outline-accent"
+											/>
+											<span className="block">开启时会结合最新状态复核；条件声明不增加执行权限。</span>
+										</label>
 										{mode === "single" ? (
 											<div>
 												<TaskNameInputWithAiSuggestions

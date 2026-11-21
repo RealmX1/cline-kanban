@@ -83,30 +83,31 @@ describe("asserted relation injection receipt is committed only after the task s
 		);
 		expect(manager.getSummary("b0002")?.pid).toBe(100);
 	});
-	it("创建提交在异步准备期间 Stop，最终门禁拒绝真正 spawn", async () => {
-		let finishPreparation!: () => void;
-		const preparation = new Promise<void>((resolve) => {
-			finishPreparation = resolve;
+	it.each(["异步准备", "启动门禁"])("创建提交在%s期间 Stop，取消后不创建进程", async (blockedStage) => {
+		let finishBlockedStage!: () => void;
+		const blocked = new Promise<void>((resolve) => {
+			finishBlockedStage = resolve;
 		});
-		prepareAgentLaunchMock.mockImplementationOnce(async () => {
-			await preparation;
-			return { args: [], env: {} };
-		});
+		const stopDuringPreparation = blockedStage === "异步准备";
+		if (stopDuringPreparation) {
+			prepareAgentLaunchMock.mockImplementationOnce(async () => {
+				await blocked;
+				return { args: [], env: {} };
+			});
+		}
 		ptySessionSpawnMock.mockImplementation(() => createMockPtySession(100));
 		const manager = new TerminalSessionManager();
-		let stopped = false;
 		const beforeAgentProcessLaunch = vi.fn(async () => {
-			if (stopped) throw new Error("用户已经 Stop");
+			if (!stopDuringPreparation) await blocked;
 		});
 		const running = manager.startTaskSession({ ...startTaskSessionRequestFor("stop1"), beforeAgentProcessLaunch });
-		const failure = expect(running).rejects.toThrow("用户已经 Stop");
-		await vi.waitFor(() => expect(prepareAgentLaunchMock).toHaveBeenCalled());
-		expect(beforeAgentProcessLaunch).not.toHaveBeenCalled();
-		stopped = true;
+		await vi.waitFor(() =>
+			expect(stopDuringPreparation ? prepareAgentLaunchMock : beforeAgentProcessLaunch).toHaveBeenCalled(),
+		);
 		manager.stopTaskSession("stop1");
-		finishPreparation();
-		await failure;
-		expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(1);
+		finishBlockedStage();
+		await expect(running).resolves.toMatchObject({ pid: null, startedAt: null });
+		expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(stopDuringPreparation ? 0 : 1);
 		expect(ptySessionSpawnMock).not.toHaveBeenCalled();
 	});
 

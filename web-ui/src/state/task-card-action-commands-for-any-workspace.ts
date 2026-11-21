@@ -188,6 +188,7 @@ export async function moveTaskCardBetweenNonTrashColumnsThroughRuntime(input: {
 // --- 启动：backlog / in_progress → in_progress，服务端先移列再 ensure worktree、再起会话 ---
 export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRuntime(input: {
 	skipTaskProjectAssignmentPreflight?: boolean;
+	overrideUnmetBacklogTaskStartConditions?: { operationId: string; reason: string };
 	workspaceId: string;
 	taskId: string;
 	expectedTaskIncarnationCreatedAtEpochMs?: number;
@@ -258,17 +259,11 @@ export async function startTaskCardAgentSessionMovingItIntoInProgressThroughRunt
 		workspaceId: input.workspaceId,
 		taskIds: [input.taskId],
 		commandKind: "start_task_card_agent_session_moving_it_into_in_progress",
-		expectedBoardEffectByTaskId: expectedBoardEffectsForSingleTaskCard(
-			input.taskId,
-			expectedTaskCardMoveIntoBoardColumn(
-				input.currentProjectBoardForOptimisticOverlay,
-				"in_progress",
-				input.insertAtIndexWithinInProgressBoardColumn,
-			),
-		),
+		expectedBoardEffectByTaskId: expectedBoardEffectsForSingleTaskCard(input.taskId, null),
 		sendCommand: () =>
 			startTaskCardAgentSessionMovingItIntoInProgressInWorkspace(input.workspaceId, {
 				taskId: input.taskId,
+				overrideUnmetBacklogTaskStartConditions: input.overrideUnmetBacklogTaskStartConditions,
 				...(input.expectedTaskIncarnationCreatedAtEpochMs !== undefined
 					? { expectedTaskIncarnationCreatedAtEpochMs: input.expectedTaskIncarnationCreatedAtEpochMs }
 					: {}),

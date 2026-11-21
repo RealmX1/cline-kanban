@@ -32,6 +32,17 @@ import type { TaskMutationIntentWithResolvedActor } from "../../../src/state/wor
 import type { TaskClosureOperation } from "../../../src/task-closure/task-closure-operation-store";
 import * as ProcessSupervisor from "../../../src/task-command-execution/task-command-execution-supervisor";
 
+// 本组验证既有卡片动作；开启复核的真实持久化与恢复另有隔离回归。
+vi.mock("../../../src/backlog-task-start-readiness/backlog-task-start-readiness-service", () => ({
+	prepareBacklogTaskStartReadiness: async () => ({ canStart: true, record: null, report: null }),
+	assertBacklogTaskReadinessReportStillCurrent: vi.fn(),
+	observeBacklogTaskInitialLaunchReceipt: () => false,
+}));
+vi.mock("../../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store", () => ({
+	readBacklogTaskStartReadinessOperation: async () => null,
+	writeBacklogTaskStartReadinessOperation: vi.fn(),
+}));
+
 // taskCardAction.* 的单元测试：board 持久化漏斗换成内存假实现（照样执行 mutate 回调、尊重 save:false），
 // 会话 / worktree 副作用换成记录调用顺序的桩，草稿 / 排队 prompt / checkpoint ref 清理同样只记顺序。
 // 真实 runtime + 关系账本下的行动者归因见 test/integration/task-card-action-commands-through-runtime-procedure.integration.test.ts。
