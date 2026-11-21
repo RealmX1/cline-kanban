@@ -1,7 +1,7 @@
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { DismissableLayer } from "@radix-ui/react-dismissable-layer";
 import { FocusScope } from "@radix-ui/react-focus-scope";
-import { GripHorizontal, Maximize2, Minus, X } from "lucide-react";
+import { GripHorizontal, Maximize2, Minus, MoveDiagonal, X } from "lucide-react";
 import {
 	type ComponentProps,
 	type CSSProperties,
@@ -19,6 +19,13 @@ import { cn } from "@/components/ui/cn";
 import { isKeyboardEventEmittedDuringImeComposition } from "@/utils/keyboard-event-ime-composition-detection";
 
 interface FloatingFormVisualViewport {
+	left: number;
+	top: number;
+	width: number;
+	height: number;
+}
+
+export interface NonModalFloatingFormWindowBounds {
 	left: number;
 	top: number;
 	width: number;
@@ -79,6 +86,10 @@ export interface NonModalFloatingFormWindowProps extends FloatingFormContentEven
 	ownershipLabel?: string;
 	verificationAnchor?: string;
 	collapseControlLabel?: string;
+	resizableLayout?: {
+		initialBounds?: NonModalFloatingFormWindowBounds;
+		onBoundsChange: (bounds: NonModalFloatingFormWindowBounds) => void;
+	};
 }
 
 /** 正文始终挂载，收起只隐藏正文；焦点、选区、附件和滚动由原节点保留。 */
@@ -95,6 +106,7 @@ export function NonModalFloatingFormWindow({
 	verificationAnchor = "non-modal-floating-form-window",
 	maximumExpandedViewportHeightRatio = 0.88,
 	collapseControlLabel = "填写窗口",
+	resizableLayout,
 	onClickCapture,
 	onKeyDownCapture,
 	onKeyDown,
@@ -112,8 +124,10 @@ export function NonModalFloatingFormWindow({
 	const lastBodyFocus = useRef<HTMLElement | null>(null);
 	const lastHandledRevealSequence = useRef(session?.revealSequence ?? 0);
 	const dragRef = useRef<{ pointerId: number; x: number; y: number; left: number; top: number } | null>(null);
+	const resizeRef = useRef<{ pointerId: number; x: number; y: number; width: number; height: number } | null>(null);
 	const accessibleTitleId = useId();
 	const [position, setPosition] = useState<{ left: number; top: number } | null>(null);
+	const [preferredBounds, setPreferredBounds] = useState(resizableLayout?.initialBounds);
 	const [collapsed, setCollapsed] = useState(false);
 	const lastHandledCollapseSequence = useRef(session?.collapseSequence ?? 0);
 	const lastReportedRevealSequence = useRef<number | null>(null);
@@ -145,6 +159,7 @@ export function NonModalFloatingFormWindow({
 			return;
 		}
 		const updateViewport = () => setViewport(readFloatingFormVisualViewport());
+		updateViewport();
 		window.addEventListener("resize", updateViewport);
 		window.visualViewport?.addEventListener("resize", updateViewport);
 		window.visualViewport?.addEventListener("scroll", updateViewport);
@@ -184,13 +199,42 @@ export function NonModalFloatingFormWindow({
 			previousBodyFocus.current = null;
 		}
 	}, [collapsed]);
+	const expandedLayoutWidth = Math.min(preferredBounds?.width ?? 620, Math.max(0, viewport.width - 16));
+	const expandedLayoutHeight = Math.min(preferredBounds?.height ?? 520, Math.max(0, viewport.height - 16));
+	const collapsedWidth = Math.min(320, viewport.width * 0.94, viewport.width - 16);
+	const resizableWindowPosition = clampNonModalFloatingFormWindowPosition(
+		preferredBounds ?? {
+			left: viewport.left + (viewport.width - expandedLayoutWidth) / 2,
+			top: viewport.top + Math.min(viewport.height * 0.05, 40) + (session?.initialCascadeOffsetPx ?? 0),
+		},
+		collapsed ? collapsedWidth : expandedLayoutWidth,
+		collapsed ? 58 : expandedLayoutHeight,
+		viewport,
+	);
+	const changePreferredBounds = (bounds: NonModalFloatingFormWindowBounds) => {
+		setPreferredBounds(bounds);
+		resizableLayout?.onBoundsChange(bounds);
+	};
+	const resizeExpandedWindow = (width: number, height: number) => {
+		const availableWidth = viewport.left + viewport.width - resizableWindowPosition.left - 8;
+		const availableHeight = viewport.top + viewport.height - resizableWindowPosition.top - 8;
+		changePreferredBounds({
+			...resizableWindowPosition,
+			width: Math.min(availableWidth, Math.max(300, width)),
+			height: Math.min(availableHeight, Math.max(240, height)),
+		});
+	};
 	const style: CSSProperties = {
 		left: position?.left ?? Math.max(8, viewport.left + (viewport.width - Math.min(860, viewport.width * 0.94)) / 2),
 		top: position?.top ?? viewport.top + Math.min(viewport.height * 0.05, 40),
-		width: collapsed
-			? Math.min(320, viewport.width * 0.94, viewport.width - 16)
-			: `min(${expandedWidth}, ${Math.max(0, viewport.width - 16)}px)`,
+		width: collapsed ? collapsedWidth : `min(${expandedWidth}, ${Math.max(0, viewport.width - 16)}px)`,
 		maxHeight: Math.max(0, Math.min(viewport.height - 16, window.innerHeight * maximumExpandedViewportHeightRatio)),
+		...(resizableLayout && {
+			...resizableWindowPosition,
+			width: collapsed ? collapsedWidth : expandedLayoutWidth,
+			height: collapsed ? undefined : expandedLayoutHeight,
+			maxHeight: Math.max(0, viewport.height - 16),
+		}),
 	};
 	return (
 		<DialogPrimitive.Root open={open} onOpenChange={onOpenChange} modal={false}>
@@ -285,12 +329,14 @@ export function NonModalFloatingFormWindow({
 							onOpenChange(false);
 						}}
 					>
-						<NonModalFloatingFormViewportPositionConstraint
-							viewport={viewport}
-							collapsed={collapsed}
-							initialCascadeOffsetPx={session?.initialCascadeOffsetPx ?? 0}
-							setPosition={setPosition}
-						/>
+						{!resizableLayout && (
+							<NonModalFloatingFormViewportPositionConstraint
+								viewport={viewport}
+								collapsed={collapsed}
+								initialCascadeOffsetPx={session?.initialCascadeOffsetPx ?? 0}
+								setPosition={setPosition}
+							/>
+						)}
 						<div
 							className="flex shrink-0 touch-none items-center gap-1 border-b border-border bg-surface-2 px-2 py-1 select-none cursor-grab active:cursor-grabbing"
 							onPointerDown={(event) => {
@@ -311,14 +357,19 @@ export function NonModalFloatingFormWindow({
 								const drag = dragRef.current;
 								const rect = contentRef.current?.getBoundingClientRect();
 								if (!drag || drag.pointerId !== event.pointerId || !rect) return;
-								setPosition(
-									clampNonModalFloatingFormWindowPosition(
-										{ left: drag.left + event.clientX - drag.x, top: drag.top + event.clientY - drag.y },
-										rect.width,
-										rect.height,
-										viewport,
-									),
+								const nextPosition = clampNonModalFloatingFormWindowPosition(
+									{ left: drag.left + event.clientX - drag.x, top: drag.top + event.clientY - drag.y },
+									rect.width,
+									rect.height,
+									viewport,
 								);
+								if (resizableLayout) {
+									changePreferredBounds({
+										...nextPosition,
+										width: preferredBounds?.width ?? 620,
+										height: preferredBounds?.height ?? 520,
+									});
+								} else setPosition(nextPosition);
 							}}
 							onPointerUp={() => {
 								dragRef.current = null;
@@ -373,6 +424,48 @@ export function NonModalFloatingFormWindow({
 						>
 							{children}
 						</div>
+						{resizableLayout && !collapsed && (
+							<button
+								type="button"
+								aria-label={`调整${collapseControlLabel}大小`}
+								title="拖动或使用方向键调整大小"
+								className="absolute right-0 bottom-0 z-10 flex size-8 cursor-nwse-resize touch-none items-center justify-center rounded-tl bg-surface-2 text-text-secondary hover:bg-surface-3 focus-visible:outline-2 focus-visible:outline-accent"
+								onPointerDown={(event) => {
+									if (event.button !== 0) return;
+									resizeRef.current = {
+										pointerId: event.pointerId,
+										x: event.clientX,
+										y: event.clientY,
+										width: expandedLayoutWidth,
+										height: expandedLayoutHeight,
+									};
+									event.currentTarget.setPointerCapture(event.pointerId);
+								}}
+								onPointerMove={(event) => {
+									const resize = resizeRef.current;
+									if (!resize || resize.pointerId !== event.pointerId) return;
+									resizeExpandedWindow(
+										resize.width + event.clientX - resize.x,
+										resize.height + event.clientY - resize.y,
+									);
+								}}
+								onLostPointerCapture={() => {
+									resizeRef.current = null;
+								}}
+								onKeyDown={(event) => {
+									const horizontal = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+									const vertical = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+									if (!horizontal && !vertical) return;
+									event.preventDefault();
+									resizeExpandedWindow(
+										expandedLayoutWidth + horizontal * 16,
+										expandedLayoutHeight + vertical * 16,
+									);
+								}}
+							>
+								<MoveDiagonal size={16} aria-hidden />
+							</button>
+						)}
 					</DismissableLayer>
 				</FocusScope>
 			</DialogPrimitive.Portal>

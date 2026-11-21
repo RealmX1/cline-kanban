@@ -220,6 +220,12 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	globalMarkdownDraftCreateInputSchema,
+	globalMarkdownDraftDeleteInputSchema,
+	globalMarkdownDraftDeleteResultSchema,
+	globalMarkdownDraftSchema,
+	globalMarkdownDraftUpdateInputSchema,
+	globalMarkdownDraftUpdateResultSchema,
 	type RuntimeAutomaticAgentFailureContinuationActionRequest,
 	type RuntimeGetPostDeployVerificationDeploymentGroupRequest,
 	type RuntimeGetPostDeployVerificationDeploymentGroupResponse,
@@ -487,7 +493,6 @@ import {
 	backlogTaskStartReadinessAssessmentResponseSchema,
 } from "../core/backlog-task-start-readiness-contract";
 import { projectWorkspaceStateForBrowser } from "../core/browser-task-session-summary-projection";
-
 import {
 	type RuntimeCodexConversationStorageOperationRequest,
 	type RuntimeCodexConversationStorageOperationResponse,
@@ -687,6 +692,7 @@ import {
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
 import { assertWorkspaceHasNotBeenConsolidated } from "../state/duplicate-project-consolidation-status";
+import { globalMarkdownDraftStore } from "../state/global-markdown-draft-store";
 import { savePersistentAgentPromptFileAttachment } from "../state/persistent-agent-prompt-file-attachments";
 import {
 	readPersistentAgentPromptImageAttachments,
@@ -3179,8 +3185,27 @@ const runtimeApplicationExploratoryProcedureRouter = t.router({
 		}),
 });
 
+const runtimeApplicationGlobalMarkdownDraftProcedureRouter = t.router({
+	list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(z.array(globalMarkdownDraftSchema))
+		.query(() => globalMarkdownDraftStore.list()),
+	create: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftCreateInputSchema)
+		.output(globalMarkdownDraftSchema.nullable())
+		.mutation(({ input }) => globalMarkdownDraftStore.create(input)),
+	update: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftUpdateInputSchema)
+		.output(globalMarkdownDraftUpdateResultSchema)
+		.mutation(({ input }) => globalMarkdownDraftStore.update(input)),
+	delete: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftDeleteInputSchema)
+		.output(globalMarkdownDraftDeleteResultSchema)
+		.mutation(({ input }) => globalMarkdownDraftStore.delete(input)),
+});
+
 // 保留具名子路由类型，避免新契约使声明输出超过 TypeScript 的序列化长度上限。
 type RuntimeAppRouterProcedureRecord = {
+	globalMarkdownDraft: typeof runtimeApplicationGlobalMarkdownDraftProcedureRouter;
 	taskCommandExecution: typeof runtimeApplicationTaskCommandExecutionProcedureRouter;
 	dailyWorkProgressStatistics: typeof runtimeApplicationDailyWorkProgressStatisticsProcedureRouter;
 	notificationIntelligence: typeof runtimeApplicationNotificationIntelligenceProcedureRouter;
@@ -3199,6 +3224,7 @@ type RuntimeAppRouterProcedureRecord = {
 	exploratory: typeof runtimeApplicationExploratoryProcedureRouter;
 };
 const runtimeAppRouterProcedureRecord: RuntimeAppRouterProcedureRecord = {
+	globalMarkdownDraft: runtimeApplicationGlobalMarkdownDraftProcedureRouter,
 	taskCommandExecution: runtimeApplicationTaskCommandExecutionProcedureRouter,
 	dailyWorkProgressStatistics: runtimeApplicationDailyWorkProgressStatisticsProcedureRouter,
 	notificationIntelligence: runtimeApplicationNotificationIntelligenceProcedureRouter,
