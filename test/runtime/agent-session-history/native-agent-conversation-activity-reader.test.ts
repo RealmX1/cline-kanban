@@ -75,6 +75,81 @@ function claudeUser(uuid: string) {
 }
 
 describe("有界原生活动增量读取", () => {
+	it.each(["控制超时", "控制状态未知", "缺少控制面开始时间"])(
+		"%s 时补读同代失败终态，新输入使旧证据失效",
+		async (controlEvidence) => {
+			const directory = await mkdtemp(join(tmpdir(), "kanban-codex-terminal-evidence-"));
+			directories.push(directory);
+			const path = join(directory, "native.jsonl");
+			const target = summary("codex", path);
+			const errorMessage = "stream disconnected before completion: error decoding response body";
+			const start = (turnId: string) => ({
+				type: "event_msg",
+				timestamp,
+				payload: { type: "task_started", turn_id: turnId },
+			});
+			const transcriptRecords = [
+				{ type: "session_meta", payload: { id: "native", cwd: "/isolated", source: "vscode" } },
+				start("failed-turn"),
+				{ type: "event_msg", timestamp, payload: { type: "error", message: errorMessage } },
+				{
+					type: "event_msg",
+					timestamp,
+					payload: { type: "task_complete", turn_id: "failed-turn" },
+				},
+			];
+			await writeFile(path, `${transcriptRecords.map((record) => JSON.stringify(record)).join("\n")}\n`);
+			request.mockImplementation(async (method: string) => {
+				if (controlEvidence === "控制超时") throw new Error("控制查询超时");
+				if (method === "thread/loaded/list") return { data: ["native"] };
+				if (method === "thread/read")
+					return {
+						thread: {
+							id: "native",
+							status: { type: controlEvidence === "控制状态未知" ? "active" : "systemError" },
+						},
+					};
+				return {
+					data: [
+						{
+							id: "failed-turn",
+							status: "failed",
+							items: [],
+							error: controlEvidence === "缺少控制面开始时间" ? { message: errorMessage } : null,
+						},
+					],
+				};
+			});
+			const input = {
+				workspaceId: "workspace",
+				summary: target,
+				cursor: null,
+				observedAtMs: Date.parse(timestamp) + 1,
+			};
+			const failure = await readNativeAgentConversationActivity(input);
+			expect(failure?.codexNativeAgentTurnExecution).toMatchObject({
+				nativeTurnId: "failed-turn",
+				nativeTurnStatus: "failed",
+				nativeTurnErrorMessage: errorMessage,
+				source: "persisted_codex_turn_completion",
+			});
+			await appendFile(
+				path,
+				`${JSON.stringify({
+					type: "response_item",
+					timestamp,
+					payload: { type: "message", role: "user", content: [{ type: "input_text", text: "下一轮" }] },
+				})}\n`,
+			);
+			if (controlEvidence === "控制超时") {
+				await expect(readNativeAgentConversationActivity(input)).rejects.toThrow("控制查询超时");
+			} else {
+				const result = await readNativeAgentConversationActivity(input);
+				expect(result?.codexNativeAgentTurnExecution?.source).toBeUndefined();
+			}
+		},
+	);
+
 	it("已有可信前驱时完整读取超时，新回合首条用户输入仍由 summary 确认", async () => {
 		const target = summary("codex", "/isolated/native.jsonl");
 		request.mockImplementation(async (method, parameters) => {

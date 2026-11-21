@@ -398,6 +398,7 @@ describe(
 					});
 					expect(
 						history.operations.find((operation) => operation.closureRequestId === secondClosureRequestId)?.phase,
+						JSON.stringify(history.operations),
 					).toBe("completed");
 					expect(history.records.map((record) => record.eventKind)).toEqual(["closed", "reopened", "closed"]);
 					const deleted = await runtime.client.taskCardAction.readTaskCardWithBoardColumn.query({
@@ -405,7 +406,8 @@ describe(
 					});
 					expect(deleted.taskCardLookupOutcome).toBe("task_card_not_found_on_workspace_board");
 				},
-				{ timeout: 30_000, interval: 100 },
+				// 来源稳定观察后由后续扫描接续，等待覆盖两个扫描边界及实际归档时间。
+				{ timeout: 60_000, interval: 100 },
 			);
 			await vi.waitFor(
 				async () => {

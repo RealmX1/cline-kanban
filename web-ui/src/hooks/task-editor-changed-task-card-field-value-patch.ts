@@ -15,6 +15,7 @@ export interface TaskEditorSubmittedTaskCardFieldValues {
 	codexReasoningEffortOverride?: string;
 	taskTitleOverride?: string;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	prompt: string;
 	images: TaskImage[];
 	startInPlanMode: boolean;
@@ -61,6 +62,11 @@ export function buildTaskCardFieldValuePatchContainingOnlyFieldsChangedInTaskEdi
 
 	if (submitted.taskDescription !== undefined && submitted.taskDescription.trim() !== (seed.taskDescription ?? ""))
 		patch.taskDescription = submitted.taskDescription.trim() || null;
+	if (
+		submitted.backlogTaskStartReadinessConditionsText !== undefined &&
+		submitted.backlogTaskStartReadinessConditionsText.trim() !== (seed.backlogTaskStartReadinessConditionsText ?? "")
+	)
+		patch.backlogTaskStartReadinessConditionsText = submitted.backlogTaskStartReadinessConditionsText.trim() || null;
 	if (submitted.prompt !== seed.prompt.trim()) {
 		patch.prompt = submitted.prompt;
 	}

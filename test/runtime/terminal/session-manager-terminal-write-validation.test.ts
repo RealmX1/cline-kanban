@@ -104,7 +104,39 @@ describe("程序化终端投递的实际写入前核验", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("readiness 挂起期间问题已作答时，不写入旧答案并结算失败", async () => {
+	it("Codex 提示符和空框是独立的补送证据，同一画面在管理器重建后结论一致", async () => {
+		for (const manager of [new TerminalSessionManager(), new TerminalSessionManager()]) {
+			const { entry, internals } = installIsolatedFakeTerminal(manager);
+			vi.mocked(internals.resolveInteractivePromptReadiness).mockRestore();
+			vi.mocked(internals.resolveProgrammaticDeliveryInputBoxContentionForTask).mockRestore();
+			let screen = "model: loading";
+			entry.terminalStateMirror = {
+				getScreenSnapshot: async () => ({
+					lines: [{ text: screen, isWrapped: false, dimmedTextColumnRanges: [[2, 16]] }],
+					columnCount: 80,
+					cursorRow: 0,
+					cursorColumn: screen === "› unfinished draft" ? screen.length : 2,
+				}),
+			};
+			const observe = () => manager.observeCodexProgrammaticWriteReadinessForOwnedResultRecovery("guarded-answer");
+			expect(await observe()).toEqual({
+				terminalPromptReady: false,
+				terminalComposerClearForProgrammaticDelivery: false,
+			});
+			screen = "› unfinished draft";
+			expect(await observe()).toEqual({
+				terminalPromptReady: true,
+				terminalComposerClearForProgrammaticDelivery: false,
+			});
+			screen = "› Type a message";
+			expect(await observe()).toEqual({
+				terminalPromptReady: true,
+				terminalComposerClearForProgrammaticDelivery: true,
+			});
+		}
+	});
+
+	it("就绪等待期间所属通知已被消费，终端零写入且回执保留撤下原因", async () => {
 		const manager = new TerminalSessionManager();
 		const { write, internals } = installIsolatedFakeTerminal(manager);
 		let releaseReadiness: (value: "prompt") => void = () => undefined;
@@ -114,20 +146,27 @@ describe("程序化终端投递的实际写入前核验", () => {
 			}),
 		};
 		vi.mocked(internals.resolveInteractivePromptReadiness).mockReturnValue(readiness.promise);
-		let alreadyAnswered = false;
+		let noticeConsumed = false;
 		const outcomes: TaskChatInputDeliveryOutcome[] = [];
-		manager.submitTaskChatInputWhenReady("guarded-answer", "旧问题的答案", {
+		manager.submitTaskChatInputWhenReady("guarded-answer", "后台结果通知", {
+			owningCommandExecutionId: "owned-command-execution",
 			validateBeforeTerminalWrite: async () => {
-				if (alreadyAnswered) throw new Error("原问题已有真实答案");
+				if (noticeConsumed) throw new Error("所属通知已被消费，投递资格已撤下");
 			},
 			onDeliveryOutcome: (outcome) => outcomes.push(outcome),
 		});
 		await vi.advanceTimersByTimeAsync(1000);
-		alreadyAnswered = true;
+		noticeConsumed = true;
 		releaseReadiness("prompt");
 		await vi.advanceTimersByTimeAsync(0);
 		expect(write).not.toHaveBeenCalled();
-		expect(outcomes).toEqual([{ status: "delivery_failed", reason: "cancelled_before_delivery" }]);
+		expect(outcomes).toEqual([
+			{
+				status: "delivery_failed",
+				reason: "cancelled_before_delivery",
+				failureNote: "所属通知已被消费，投递资格已撤下",
+			},
+		]);
 	});
 	it("争用检查挂起期间出现新问题时，不粘贴旧答案", async () => {
 		const manager = new TerminalSessionManager();

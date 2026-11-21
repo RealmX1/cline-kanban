@@ -339,7 +339,7 @@ describe("Codex 原生投递保留 composer", () => {
 		expect(journal.recordAcceptance).toHaveBeenCalledOnce();
 	});
 
-	it("写前意图落盘后出现模态时撤回未调用意图，同一消息随后仍可发送", async () => {
+	it.each(["sync", "async"] as const)("最终门禁拒绝（%s）时撤回未调用意图，同一消息随后仍可发送", async (gate) => {
 		installNativeResponses();
 		let mayInvoke = true;
 		let requestMayHaveBeenSent = false;
@@ -352,7 +352,6 @@ describe("Codex 原生投递保留 composer", () => {
 			})),
 			recordRequestIntent: vi.fn(async () => {
 				requestMayHaveBeenSent = true;
-				mayInvoke = false;
 			}),
 			recordRequestNotInvoked: vi.fn(async () => {
 				requestMayHaveBeenSent = false;
@@ -363,23 +362,30 @@ describe("Codex 原生投递保留 composer", () => {
 			recordAcceptanceHistoryQueryProgress: vi.fn(async () => {}),
 			recordAcceptance: vi.fn(async () => {}),
 		};
+		const finalGate =
+			gate === "async"
+				? { validateImmediatelyBeforeNativeTurnStartRequest: async () => mayInvoke }
+				: { mayInvokeNativeTurnStartRequest: () => mayInvoke };
 		expect(
 			(
 				await deliverCodexNativePromptWithoutChangingComposer(
-					createInput({ deliveryJournal: journal, mayInvokeNativeTurnStartRequest: () => mayInvoke }),
+					createInput({
+						deliveryJournal: journal,
+						...finalGate,
+						onRequestAttempted: async () => {
+							mayInvoke = false;
+						},
+					}),
 				)
 			).status,
 		).toBe("cancelled");
 		expect(mocks.request.mock.calls.filter(([method]) => method === "turn/start")).toHaveLength(0);
 		expect(journal.recordRequestNotInvoked).toHaveBeenCalledOnce();
-		journal.recordRequestIntent.mockImplementation(async () => {
-			requestMayHaveBeenSent = true;
-		});
 		mayInvoke = true;
 		expect(
 			(
 				await deliverCodexNativePromptWithoutChangingComposer(
-					createInput({ deliveryJournal: journal, mayInvokeNativeTurnStartRequest: () => mayInvoke }),
+					createInput({ deliveryJournal: journal, ...finalGate }),
 				)
 			).status,
 		).toBe("confirmed");

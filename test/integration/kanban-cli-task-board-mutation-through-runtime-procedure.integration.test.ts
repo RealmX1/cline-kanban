@@ -29,6 +29,11 @@ import { createWorkspaceApi } from "../../src/trpc/workspace-api";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
+// 本组验证 CLI 行动者归属，真实启动复核由专门的运行时集成测试覆盖。
+vi.mock("../../src/backlog-task-start-readiness/backlog-task-start-readiness-service", () => ({
+	prepareBacklogTaskStartReadiness: async () => ({ canStart: true, record: null, report: null }),
+}));
+
 // dd2db 1a.2b：`kanban task create` 经 `workspace.applyKanbanCliTaskBoardMutation` 落盘；update / start / done /
 // delete 经 `taskCardAction.*`（与浏览器共用的唯一实现）。这里走真实的 tRPC 路由（含输入/输出 zod 校验）、真实的
 // workspace api、真实的 board 漏斗、真实的行动者解析 lookups（读隔离 HOME 下的 workspace 索引与 board.json）与

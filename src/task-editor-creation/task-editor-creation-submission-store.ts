@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { TRPCError } from "@trpc/server";
@@ -69,7 +70,12 @@ function parseTaskEditorCreationSubmissionRecord(text: string) {
 		record.request.submissionId !== record.status.submissionId ||
 		record.request.newTaskCard.id !== record.status.taskId ||
 		record.request.newTaskCard.createdAt !== record.status.taskIncarnationCreatedAtEpochMs ||
-		record.request.startAgentAfterCreation !== record.status.startRequested ||
+		(record.status.startCancellationReason === "no_remaining_work"
+			? !record.request.startAgentAfterCreation ||
+				record.status.startRequested ||
+				record.status.startCompleted ||
+				record.status.phase !== "completed"
+			: record.request.startAgentAfterCreation !== record.status.startRequested) ||
 		record.requestFingerprint !== taskEditorCreationFingerprint(record.request)
 	)
 		throw new Error("创建提交的冻结输入、完整身份或指纹不一致，保留原记录等待核验。");
@@ -222,6 +228,21 @@ export async function readTaskEditorCreationExplicitStop(workspaceId: string, ta
 		return z
 			.object({ stoppedAtEpochMs: z.number() })
 			.parse(JSON.parse(await readFile(explicitStopPath(workspaceId, taskId, createdAt), "utf8"))).stoppedAtEpochMs;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw error;
+	}
+}
+
+export function readTaskEditorCreationExplicitStopAtLaunchBoundary(
+	workspaceId: string,
+	taskId: string,
+	createdAt: number,
+) {
+	try {
+		return z
+			.object({ stoppedAtEpochMs: z.number() })
+			.parse(JSON.parse(readFileSync(explicitStopPath(workspaceId, taskId, createdAt), "utf8"))).stoppedAtEpochMs;
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
 		throw error;

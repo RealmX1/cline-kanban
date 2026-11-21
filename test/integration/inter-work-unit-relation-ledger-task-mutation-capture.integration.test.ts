@@ -281,12 +281,19 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 			});
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 
-			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, () => ({
-				board: createBoard({
-					backlog: [createCard("t0001", "amended requirement"), createCard("t0002", "spawned follow-up")],
-				}),
-				value: null,
-			}));
+			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, ({ board }) => {
+				const originalCard = board.columns.find((column) => column.id === "backlog")?.cards[0];
+				if (!originalCard) throw new Error("缺少待修订的隔离任务");
+				return {
+					board: createBoard({
+						backlog: [
+							{ ...originalCard, title: "amended requirement", prompt: "amended requirement" },
+							createCard("t0002", "spawned follow-up"),
+						],
+					}),
+					value: null,
+				};
+			});
 
 			const events = await ledgerClient.listCommittedEvents({});
 			expect(summarize(events)).toEqual([
@@ -341,16 +348,18 @@ describe("inter-work-unit relation ledger task mutation capture", () => {
 	it("detects board changes written outside the runtime persistence funnel as unresolved-actor occurrences", async () => {
 		await withIsolatedHomeAndLedger(async ({ workspacePath, ledgerClient, realCapture }) => {
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
-			await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, {
+			const saved = await saveWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, {
 				board: createBoard({ backlog: [createCard("t0001", "requirement")] }),
 				sessions: {},
 			});
+			const originalCard = saved.board.columns.find((column) => column.id === "backlog")?.cards[0];
+			if (!originalCard) throw new Error("缺少待移列的隔离任务");
 
 			// 模拟迁到 runtime procedure 之前的 CLI 进程：没有注册捕获，直接写盘。
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(null);
 			await overwriteIsolatedWorkspaceBoardFileOutsideRuntimePersistenceFunnel(
 				workspacePath,
-				createBoard({ trash: [createCard("t0001", "requirement")] }),
+				createBoard({ trash: [originalCard] }),
 			);
 			registerWorkspaceBoardPersistenceFunnelTaskMutationEventCapture(realCapture);
 			await mutateWorkspaceState(workspacePath, TASK_MUTATION_INTENT_FROM_ACTING_CARD, (state) => ({

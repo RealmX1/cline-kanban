@@ -3,7 +3,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCodexNativePromptDeliveryJournal } from "../../../src/core/codex-native-prompt-delivery-journal";
+import {
+	createCodexNativePromptDeliveryJournal,
+	getOwnedCommandResultReadinessTimeout,
+} from "../../../src/core/codex-native-prompt-delivery-journal";
 import {
 	createPendingTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
@@ -28,7 +31,7 @@ describe("原生投递持久意图与接受历史", () => {
 			...binding(),
 			taskId: "card",
 			status: "delivery_failed",
-			failureReason: "human_terminal_contention_timeout",
+			failureReason: "terminal_prompt_readiness_timeout",
 			nowIso: new Date().toISOString(),
 		});
 		expect((await createCodexNativePromptDeliveryJournal(binding()).prepare(identity)).requestMayHaveBeenSent).toBe(
@@ -91,6 +94,39 @@ describe("原生投递持久意图与接受历史", () => {
 	});
 	const binding = () => ({ ledgerPath, ledgerTaskId: "card", idempotencyKey: "stable-key" });
 
+	it("首个争用失败早于 Codex 登记时仍可保留随后就绪超时的独立证据", async () => {
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+			records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
+			result: undefined,
+		}));
+		const journal = createCodexNativePromptDeliveryJournal(binding());
+		await recordTaskMessageTerminalDeliveryOutcome({
+			...binding(),
+			taskId: "card",
+			status: "delivery_failed",
+			failureReason: "human_terminal_contention_timeout",
+			nowIso: new Date().toISOString(),
+		});
+		expect(
+			(await readTaskMessageInjectionLedger(ledgerPath))[0].codex_native_prompt_delivery_operation,
+		).toBeUndefined();
+		await expect(journal.prepare(identity)).resolves.toMatchObject({ requestMayHaveBeenSent: false });
+		await recordTaskMessageTerminalDeliveryOutcome({
+			...binding(),
+			taskId: "card",
+			status: "delivery_failed",
+			failureReason: "terminal_prompt_readiness_timeout",
+			nowIso: new Date().toISOString(),
+		});
+		const persisted = (await readTaskMessageInjectionLedger(ledgerPath))[0];
+		expect(persisted.terminal_delivery_failure_reason).toBe("human_terminal_contention_timeout");
+		expect(getOwnedCommandResultReadinessTimeout(persisted)).toMatchObject({
+			receipt: { reason: "terminal_prompt_readiness_timeout" },
+		});
+		expect((await journal.prepare(identity)).requestMayHaveBeenSent).toBe(false);
+		await journal.recordRequestIntent(null);
+	});
+
 	it("意图落盘后崩溃，重启沿用客户端身份并禁止再次发送", async () => {
 		const journal = createCodexNativePromptDeliveryJournal(binding());
 		await journal.prepare(identity);
@@ -151,28 +187,40 @@ describe("原生投递持久意图与接受历史", () => {
 		);
 	});
 
-	it("所属结果仅在登记未发送且非取消时可恢复，保留历史失败", async () => {
-		await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
-			records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
-			result: undefined,
-		}));
-		const journal = createCodexNativePromptDeliveryJournal(binding());
-		await journal.prepare(identity);
-		await recordTaskMessageTerminalDeliveryOutcome({
-			...binding(),
-			taskId: "card",
-			status: "delivery_failed",
-			failureReason: "human_terminal_contention_timeout",
-			nowIso: new Date().toISOString(),
-		});
-		const restarted = createCodexNativePromptDeliveryJournal(binding());
-		expect((await restarted.prepare(identity)).requestMayHaveBeenSent).toBe(false);
-		await restarted.recordRequestIntent(null);
-		await restarted.recordRequestInvoked();
-		expect((await restarted.prepare(identity)).requestMayHaveBeenSent).toBe(true);
-		expect((await readTaskMessageInjectionLedger(ledgerPath))[0]?.terminal_delivery_status).toBe("delivery_failed");
-		await expect(restarted.recordRequestIntent(null)).rejects.toThrow("只允许补证");
-	});
+	it.each(["human_terminal_contention_timeout", "terminal_prompt_readiness_timeout"] as const)(
+		"所属结果用原客户端身份恢复写入前失败 %s，并保留原回执",
+		async (failureReason) => {
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => ({
+				records: records.map((record) => ({ ...record, source: "owned_command_execution_result" })),
+				result: undefined,
+			}));
+			const journal = createCodexNativePromptDeliveryJournal(binding());
+			await journal.prepare(identity);
+			await recordTaskMessageTerminalDeliveryOutcome({
+				...binding(),
+				taskId: "card",
+				status: "delivery_failed",
+				failureReason,
+				nowIso: new Date().toISOString(),
+			});
+			const restarted = createCodexNativePromptDeliveryJournal(binding());
+			expect(
+				await restarted.prepare({ ...identity, clientUserMessageId: "restarted-client-proposal" }),
+			).toMatchObject({
+				requestMayHaveBeenSent: false,
+				clientUserMessageId: identity.clientUserMessageId,
+			});
+			await restarted.recordRequestIntent(null);
+			await restarted.recordRequestInvoked();
+			expect((await restarted.prepare(identity)).requestMayHaveBeenSent).toBe(true);
+			expect((await readTaskMessageInjectionLedger(ledgerPath))[0]).toMatchObject({
+				terminal_delivery_status: "delivery_failed",
+				terminal_delivery_failure_reason: failureReason,
+				codex_native_prompt_delivery_operation: { actualSendAttemptCount: 1 },
+			});
+			await expect(restarted.recordRequestIntent(null)).rejects.toThrow("只允许补证");
+		},
+	);
 
 	it("并发登记只产生一个稳定消息身份", async () => {
 		const results = await Promise.all(

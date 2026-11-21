@@ -10,6 +10,8 @@ import {
 	type AcpTaskSessionService,
 	createAcpTaskSessionService,
 } from "../acp-client-session/acp-task-session-service";
+import { createBacklogTaskStartReadinessRecovery } from "../backlog-task-start-readiness/backlog-task-start-readiness-recovery";
+import { transferBacklogTaskStartReadinessIntentAfterMigration } from "../backlog-task-start-readiness/backlog-task-start-readiness-service";
 import { getRuntimeAgentCatalogEntry, isRuntimeAgentSessionSummaryDrivenByAcpProtocol } from "../core/agent-catalog";
 import type {
 	RuntimeAgentSessionCountsAffectedByRuntimeExit,
@@ -23,7 +25,6 @@ import type {
 	RuntimeTaskSessionSummary,
 	RuntimeUpdateStatusResponse,
 } from "../core/api-contract";
-import { isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports } from "../core/codex-native-prompt-delivery-journal";
 import { resolveCreationStartupSettings } from "../core/creation-startup-settings";
 import {
 	decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue,
@@ -51,11 +52,9 @@ import {
 	resolveMainTaskConversationSessionId,
 } from "../core/task-main-conversation-session-binding";
 import {
-	createPendingTaskMessageInjectionRecord,
 	findTaskMessageInjectionRecord,
 	getTaskMessageInjectionLedgerPath,
 	readTaskMessageInjectionLedger,
-	withTaskMessageInjectionLedgerLock,
 } from "../core/task-message-injection-ledger";
 import { isTaskCardShelved } from "../core/task-shelving-state";
 import { createDailyWorkProgressStatisticsCollector } from "../daily-work-progress-statistics/daily-work-progress-statistics-collector";
@@ -101,10 +100,7 @@ import {
 	validateSession,
 } from "../security/passcode-manager";
 import { observePendingUserDecisionAnswerDeliveryStateChanges } from "../state/agent-raised-pending-user-decision-store";
-import {
-	beginManagedTaskPromptDelivery,
-	observeManagedTaskPromptDeliveryChanges,
-} from "../state/managed-task-prompt-delivery-coordinator";
+import { observeManagedTaskPromptDeliveryChanges } from "../state/managed-task-prompt-delivery-coordinator";
 import { recordProgrammaticReviewExplicitUserStopObservations } from "../state/programmatic-review-explicit-user-stop-observations";
 import { readWorkspacePromptLibrarySnapshot } from "../state/prompt-library-store";
 import {
@@ -132,8 +128,10 @@ import {
 	probeHookReviewLifecycleWorkspaceSnapshotCommitReadiness,
 	resolveRegisteredWorkspaceScopeByIdWithoutGitProbe,
 } from "../state/workspace-state";
+import { completeTaskClosureAutomaticSideEffect } from "../task-closure/task-closure-automatic-recovery-policy";
 import {
 	readTaskClosureOperation,
+	withTaskClosureLifecycleCancellationGuards,
 	withTaskClosureLifecycleLocks,
 	writeTaskClosureHistoryRecord,
 	writeTaskClosureOperation,
@@ -185,12 +183,16 @@ import {
 import { reconcilePendingUserDecisionAnswerDeliveriesForWorkspace } from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
-import { reconcileWorkspaceCodexNativePromptDeliveryAcceptances } from "./codex-native-prompt-delivery-acceptance-reconciliation";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { createDuplicateProjectConsolidationService } from "./duplicate-project-consolidation";
 import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
 import { withCompressedHttpResponses } from "./http-response-compression";
 import { handleHttpRequest, handleSocketUpgrade } from "./middleware";
+import {
+	deliverOwnedCommandResultToActiveSession,
+	readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+	reconcileOwnedCommandResultPromptDelivery,
+} from "./owned-command-result-prompt-delivery";
 import {
 	startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime,
 	sweepStalePendingTaskMessageInjectionsForAllWorkspaces,
@@ -1076,6 +1078,11 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					.digest("hex"),
 			};
 		},
+		onParkedMainAgentTurnCompletion: (request, summary) => {
+			deps.workspaceRegistry
+				.getTerminalManagerForWorkspace(request.workspaceId)
+				?.recordOwnedParkedMainAgentTurnCompletion(summary, request.hookEventCapturedAtEpochMs);
+		},
 		persistApplicationConfirmation: async (request, taskIncarnationCreatedAtEpochMs) => {
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(request.workspaceId) ??
@@ -1303,6 +1310,9 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	conversationSessionRecoveryTimer.unref();
 	reconcileConversationSessions();
 	const taskCommandExecutionApi = createTaskCommandExecutionService({
+		onOwnedBackgroundWorkWaitingProjectionChanged: () => {
+			void deps.runtimeStateHub.broadcastRuntimeProjectsUpdated(null);
+		},
 		readOwner: async (workspaceId, taskId, execution) => {
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(workspaceId) ??
@@ -1354,16 +1364,23 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					deps.workspaceRegistry.getWorkspacePathById(record.workspaceId) ?? record.worktreeIdentity.realPath,
 			};
 			const acp = await getScopedAcpTaskSessionService(scope);
-			const options = { label: record.specification.label, owningCommandExecutionId: record.executionId };
-			const result = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(
-				acp.getSummary(record.originatingConversationSessionId),
+			const conversationSessionId = record.originatingConversationSessionId;
+			const service = isRuntimeAgentSessionSummaryDrivenByAcpProtocol(acp.getSummary(conversationSessionId))
+				? acp
+				: await getScopedTerminalManager(scope);
+			const summary = service.getSummary(conversationSessionId);
+			if (
+				!summary ||
+				summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover ||
+				summary.agentNativeConversationSessionIdentity?.nativeSessionId !== record.originatingNativeSessionId ||
+				(record.requiresOriginatingSessionBinding &&
+					(summary.runtimeSessionIncarnationId ?? null) !== record.originatingRuntimeSessionIncarnationId)
 			)
-				? acp.parkTaskSessionAwaitingDispatchedBackgroundWork(record.originatingConversationSessionId, options)
-				: (await getScopedTerminalManager(scope)).parkTaskSessionAwaitingDispatchedBackgroundWork(
-						record.originatingConversationSessionId,
-						options,
-					);
-			return result.ok;
+				return false;
+			return service.parkTaskSessionAwaitingDispatchedBackgroundWork(conversationSessionId, {
+				label: record.specification.label,
+				owningCommandExecutionId: record.executionId,
+			}).ok;
 		},
 		unpark: async (record) => {
 			const scope = {
@@ -1411,123 +1428,34 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				)
 					throw new Error("原主会话尚未通过持久恢复入口恢复到同一原生身份");
 			}
-			const result = record.resultDelivery;
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			await withTaskMessageInjectionLedgerLock(ledgerPath, async (records) => {
-				const existing = findTaskMessageInjectionRecord(records, record.taskId, result.resultId);
-				if (
-					existing &&
-					(existing.prompt_sha256 !== result.textSha256 ||
-						existing.attempt_id !== record.originatingConversationSessionId)
-				)
-					throw new Error("所属结果的原生发送意图与冻结身份不符");
-				return {
-					records: existing
-						? records
-						: [
-								...records,
-								createPendingTaskMessageInjectionRecord({
-									taskId: record.taskId,
-									attemptId: record.originatingConversationSessionId,
-									source: "owned_command_execution_result",
-									idempotencyKey: result.resultId,
-									promptSha256: result.textSha256,
-									nowIso: new Date().toISOString(),
-								}),
-							],
-					result: undefined,
-				};
-			});
-			const managed = await beginManagedTaskPromptDelivery({
-				workspaceId: record.workspaceId,
-				taskId: record.originatingConversationSessionId,
-				workspaceTaskId: record.taskId,
-				text: result.text,
-				deliveryRequestId: result.resultId,
-				idempotencyKey: result.resultId,
-				injectionLedgerTaskId: record.taskId,
-				origin: { messageType: "programmatic_injection", sourceLabel: record.specification.label },
+			return deliverOwnedCommandResultToActiveSession({
+				record,
+				scope,
 				summary,
-			});
-			const response = await sendTaskChatMessageAcrossSessionTransports(
-				{
+				transport: {
 					getScopedTerminalManager,
 					getScopedAcpTaskSessionService,
 					loadScopedRuntimeConfig: deps.workspaceRegistry.loadScopedRuntimeConfig,
-					programmaticInjectionLedgerTaskId: record.taskId,
-					validateBeforeTerminalWrite,
-					preserveExistingComposerDraft: true,
-					owningCommandExecutionId: record.executionId,
-					programmaticSubmissionAttemptId: result.attemptId ?? undefined,
-					onProgrammaticTerminalDeliverySettled: (receipt) => {
-						void managed.handle.settle(receipt);
-						void settled(receipt);
-					},
 				},
-				scope,
-				{
-					taskId: record.originatingConversationSessionId,
-					text: result.text,
-					source: "owned_command_execution_result",
-					idempotencyKey: result.resultId,
-					deliveryRequestId: result.resultId,
-					promptSha256: result.textSha256,
-				},
-			);
-			if (response.terminalDelivery && response.terminalDelivery.status !== "accepted_pending_submit_confirmation")
-				await managed.handle.settle(response.terminalDelivery);
-			return response;
-		},
-		reconcileDelivery: async (record) => {
-			if (!record.resultDelivery) return "unknown";
-			const summary = findRuntimeSessionSummary(record.workspaceId, record.originatingConversationSessionId);
-			const acceptance = summary?.agentConversationPromptSubmissionAcceptance;
-			if (
-				acceptance?.status === "accepted" &&
-				acceptance.eventId === record.resultDelivery.resultId &&
-				acceptance.nativeSessionId === record.originatingNativeSessionId
-			)
-				return "native_accepted";
-			const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
-				record.originatingConversationSessionId
-			]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
-			const notStarted = managed?.managedDelivery?.terminalDeliveryReceipt?.nativePromptSubmissionNotStartedEvidence;
-			const managedReceipt = managed?.managedDelivery?.terminalDeliveryReceipt;
-			if (
-				managed?.text === record.resultDelivery.text &&
-				managed.workspaceTaskId === record.taskId &&
-				(managedReceipt?.status === "delivered_and_submit_confirmed" ||
-					managedReceipt?.status === "delivered_queued_behind_active_agent_turn")
-			)
-				return "native_accepted";
-			if (
-				notStarted?.clientUserMessageId === record.resultDelivery.resultId &&
-				notStarted.submissionAttemptId === record.resultDelivery.attemptId &&
-				notStarted.nativeSessionId === record.originatingNativeSessionId
-			)
-				return "known_not_submitted";
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			await reconcileWorkspaceCodexNativePromptDeliveryAcceptances({
-				workspaceId: record.workspaceId,
-				ledgerPath,
-				getSummary: (sessionId) => findRuntimeSessionSummary(record.workspaceId, sessionId),
+				validateBeforeTerminalWrite,
+				settled,
+				warn: deps.warn,
 			});
-			const entry = findTaskMessageInjectionRecord(
-				await readTaskMessageInjectionLedger(ledgerPath),
-				record.taskId,
-				record.resultDelivery.resultId,
-			);
-			if (
-				entry?.terminal_delivery_status === "delivered_and_submit_confirmed" ||
-				entry?.terminal_delivery_status === "delivered_queued_behind_active_agent_turn" ||
-				entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence
-			)
-				return "native_accepted";
-			if (entry && isOwnedCommandResultDefinitelyUnsubmittedAcrossTransports(entry)) return "known_not_submitted";
-			return "unknown";
 		},
-		readDeliveryRecoveryEvidenceSha256: async (record) => {
+		reconcileDelivery: (record) =>
+			reconcileOwnedCommandResultPromptDelivery(record, (sessionId) =>
+				findRuntimeSessionSummary(record.workspaceId, sessionId),
+			),
+		readReadinessTimeoutObservedAtEpochMs: readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+		readDeliveryRecoveryEvidenceSha256: async (record, purpose) => {
 			const summary = findRuntimeSessionSummary(record.workspaceId, record.originatingConversationSessionId);
+			const terminalManager = deps.workspaceRegistry.getTerminalManagerForWorkspace(record.workspaceId);
+			const observesCodexPromptReadiness = purpose === "retry_before_write" && summary?.agentId === "codex";
+			const codexProgrammaticWriteReadiness = observesCodexPromptReadiness
+				? ((await terminalManager?.observeCodexProgrammaticWriteReadinessForOwnedResultRecovery(
+						record.originatingConversationSessionId,
+					)) ?? null)
+				: undefined;
 			const workspacePath =
 				deps.workspaceRegistry.getWorkspacePathById(record.workspaceId) ??
 				(await listWorkspaceIndexEntries()).find((entry) => entry.workspaceId === record.workspaceId)?.repoPath;
@@ -1537,17 +1465,24 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 							await getScopedAcpTaskSessionService({ workspaceId: record.workspaceId, workspacePath })
 						).getTaskSessionInputSubmissionReadiness(record.originatingConversationSessionId)
 					: null;
-			const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
-				record.originatingConversationSessionId
-			]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
-			const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
-			const entry = record.resultDelivery
-				? findTaskMessageInjectionRecord(
-						await readTaskMessageInjectionLedger(ledgerPath),
-						record.taskId,
-						record.resultDelivery.resultId,
-					)
-				: null;
+			let submissionEvidence: unknown = null;
+			if (purpose === "reconcile_submission" && record.resultDelivery) {
+				const managed = (await readWorkspaceQueuedTaskPromptDeliverySnapshot(record.workspaceId)).entriesByTaskId[
+					record.originatingConversationSessionId
+				]?.find((entry) => entry.queueEntryId === record.resultDelivery?.resultId);
+				const ledgerPath = getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(record.workspaceId));
+				const entry = findTaskMessageInjectionRecord(
+					await readTaskMessageInjectionLedger(ledgerPath),
+					record.taskId,
+					record.resultDelivery.resultId,
+				);
+				submissionEvidence = {
+					sendPhase: entry?.codex_native_prompt_delivery_operation?.sendPhase,
+					acceptance: entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence,
+					receipt: entry?.terminal_delivery_status,
+					managedReceipt: managed?.managedDelivery?.terminalDeliveryReceipt,
+				};
+			}
 			const transcriptPath = summary?.agentNativeConversationSessionIdentity?.transcriptPath;
 			let transcriptObservation: { size: number; modifiedAtEpochMs: number } | null = null;
 			if (transcriptPath) {
@@ -1561,20 +1496,27 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			return createHash("sha256")
 				.update(
 					JSON.stringify({
-						nativeIdentity: summary?.agentNativeConversationSessionIdentity,
-						humanInputMutationSequence: deps.workspaceRegistry
-							.getTerminalManagerForWorkspace(record.workspaceId)
-							?.getTaskHumanTerminalInputMutationSequenceNumber(record.originatingConversationSessionId),
-						runtimeSessionIncarnationId: summary?.runtimeSessionIncarnationId,
+						nativeSessionId: summary?.agentNativeConversationSessionIdentity?.nativeSessionId,
+						// Codex 使用当前可写状态，管理器重建不会因输入计数重置而补发预算。
+						...(observesCodexPromptReadiness
+							? {
+									codexProgrammaticWriteReadiness,
+									nativeControlAvailable: summary.codexNativeSessionControlEndpoint != null,
+								}
+							: {
+									humanInputMutationSequence: terminalManager?.getTaskHumanTerminalInputMutationSequenceNumber(
+										record.originatingConversationSessionId,
+									),
+									runtimeSessionIncarnationId: summary?.runtimeSessionIncarnationId,
+									endpoint: summary?.codexNativeSessionControlEndpoint,
+								}),
 						sessionFacets: summary ? resolveSessionFacets(summary) : null,
 						acpInputSubmissionReadiness,
-						endpoint: summary?.codexNativeSessionControlEndpoint,
 						transcriptObservation,
-						acceptedPrompt: summary?.agentConversationPromptSubmissionAcceptance,
-						sendPhase: entry?.codex_native_prompt_delivery_operation?.sendPhase,
-						acceptance: entry?.codex_native_prompt_delivery_operation?.historicalAcceptanceEvidence,
-						receipt: entry?.terminal_delivery_status,
-						managedReceipt: managed?.managedDelivery?.terminalDeliveryReceipt,
+						acceptedPrompt: observesCodexPromptReadiness
+							? summary.agentConversationPromptSubmissionAcceptance?.eventId
+							: summary?.agentConversationPromptSubmissionAcceptance,
+						submissionEvidence,
 					}),
 				)
 				.digest("hex");
@@ -1671,6 +1613,52 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 				revokePostDeployVerificationDoneEntryAuthorizationAfterMoveIntoDoneFailed,
 			},
 		});
+
+	const backlogTaskStartReadinessRecovery = createBacklogTaskStartReadinessRecovery({
+		resolveScope: async (record) => {
+			const { kanbanBoardCardIdentityCandidates } =
+				await taskEditorCreationRelationReadApi.resolveKanbanBoardCardIdentityByBareTaskId({
+					bareTaskId: record.taskId,
+				});
+			const matches = kanbanBoardCardIdentityCandidates.filter(
+				(candidate) =>
+					candidate.kanbanBoardCard.taskIncarnationCreatedAtEpochMs === record.taskIncarnationCreatedAtEpochMs &&
+					(candidate.workspaceIdsUsedByTaskIncarnation?.includes(record.workspaceId) ||
+						candidate.kanbanBoardCard.workspaceId === record.workspaceId) &&
+					candidate.permanentlyRemovedFromBoardAt === null,
+			);
+			if (matches.length !== 1) return null;
+			const workspaceId = matches[0]?.kanbanBoardCard.workspaceId;
+			const workspacePath = workspaceId ? deps.workspaceRegistry.getWorkspacePathById(workspaceId) : null;
+			return workspaceId && workspacePath ? { workspaceId, workspacePath } : null;
+		},
+		resume: async (scope, record, assertStillOpen) => {
+			if (scope.workspaceId !== record.workspaceId) {
+				const migrated = await taskCardActionPerTaskCommandSerializer.runTaskCardActionCommandSeriallyForTaskCards(
+					scope.workspaceId,
+					[record.taskId],
+					() => transferBacklogTaskStartReadinessIntentAfterMigration(scope, record),
+				);
+				if (!migrated) return;
+				record = migrated;
+			}
+			return await createTaskCardActions(
+				createWorkspaceControlApi(),
+			).startTaskCardAgentSessionMovingItIntoInProgress(
+				scope,
+				{
+					...record.acceptedStartRequest,
+					overrideUnmetBacklogTaskStartConditions: record.previousWorkspaceIds.length
+						? undefined
+						: record.acceptedStartRequest.overrideUnmetBacklogTaskStartConditions,
+					resumeBacklogTaskStartReadinessOperationId: record.review.operationId,
+				},
+				record.acceptedRequestOriginEvidence,
+				assertStillOpen,
+			);
+		},
+		warn: deps.warn,
+	});
 
 	const taskEditorCreationRelationReadApi = createWorkUnitRelationReadApi({
 		readRecordedInterWorkUnitRelationProjection:
@@ -1971,100 +1959,131 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		};
 	};
 
-	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(async (staleOperation) => {
-		const identity = staleOperation.taskIdentity;
-		const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
-		const board = await loadWorkspaceBoardById(identity.workspaceId);
-		const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
-		const card = column?.cards.find((entry) => entry.id === identity.taskId);
-		if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
-			if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				card.taskClosureSummary?.eventKind === "reopened" &&
-				card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
-			) {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "completed";
-						await writeTaskClosureOperation(current);
-					}
-					if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
-				});
-			} else if (
-				card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
-				((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
-					(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
-			) {
-				await createTaskCardActions(
-					createWorkspaceControlApi(),
-				).restoreTaskCardFromDoneIntoReviewResumingAgentSession(scope, staleOperation.reopening.request, {
-					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
-				});
-			} else {
-				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-					if (current?.reopening) {
-						current.reopening.phase = "cancelled";
-						current.reopening.lastError = "任务身份已变化或卡片已删除";
-						await writeTaskClosureOperation(current);
-					}
-				});
+	const taskClosureRecoveryMonitor = createTaskClosureRecoveryMonitor(
+		async (staleOperation) => {
+			const identity = staleOperation.taskIdentity;
+			const scope = { workspaceId: identity.workspaceId, workspacePath: staleOperation.workspacePath };
+			const board = await loadWorkspaceBoardById(identity.workspaceId);
+			const column = board.columns.find((entry) => entry.cards.some((card) => card.id === identity.taskId));
+			const card = column?.cards.find((entry) => entry.id === identity.taskId);
+			if (staleOperation.reopening && !["completed", "cancelled"].includes(staleOperation.reopening.phase)) {
+				if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					card.taskClosureSummary?.eventKind === "reopened" &&
+					card.taskClosureSummary.closureRequestId === staleOperation.reopening.reopeningRequestId
+				) {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (
+							current?.reopening &&
+							!["completed", "cancelled"].includes(current.reopening.phase) &&
+							(current.reopening.reopeningRequestId ?? current.progress.closureRequestId) ===
+								(staleOperation.reopening?.reopeningRequestId ?? staleOperation.progress.closureRequestId)
+						)
+							await withTaskClosureLifecycleCancellationGuards([current], async () => {
+								if (card.taskClosureSummary) await writeTaskClosureHistoryRecord(card.taskClosureSummary);
+								await completeTaskClosureAutomaticSideEffect(current);
+								if (current.reopening) current.reopening.phase = "completed";
+								await writeTaskClosureOperation(current);
+							});
+					});
+				} else if (
+					card?.createdAt === identity.taskIncarnationCreatedAtEpochMs &&
+					((column?.id === "trash" && card.updatedAt === staleOperation.reopening.sourceTaskUpdatedAtEpochMs) ||
+						(column?.id === "review" && card.updatedAt === staleOperation.reopening.startedAtEpochMs))
+				) {
+					await createTaskCardActions(
+						createWorkspaceControlApi(),
+					).restoreTaskCardFromDoneIntoReviewResumingAgentSession(
+						scope,
+						{
+							...staleOperation.reopening.request,
+							reopeningRequestId:
+								staleOperation.reopening.reopeningRequestId ?? staleOperation.progress.closureRequestId,
+						},
+						{
+							decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
+						},
+					);
+				} else {
+					await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+						const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+						if (current?.reopening) {
+							current.reopening.phase = "cancelled";
+							current.reopening.lastError = "任务身份已变化或卡片已删除";
+							await writeTaskClosureOperation(current);
+						}
+					});
+				}
+				return;
 			}
-			return;
-		}
-		if (
-			card &&
-			(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
-				(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
-		) {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase === "completed") return;
-				current.progress.phase = "cancelled";
-				current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
-				await writeTaskClosureOperation(current);
-			});
-			return;
-		}
-		const workspaceApi = createWorkspaceControlApi();
-		if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
-			await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
-				const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
-				if (!current || current.progress.phase !== "closed_cleanup_pending") return;
-				const result = await workspaceApi.deleteWorktree(scope, {
-					taskId: identity.taskId,
-					taskClosureArchiveCleanupCredential: {
-						taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
-						closureRequestId: current.progress.closureRequestId,
-					},
+			if (
+				card &&
+				(card.createdAt !== identity.taskIncarnationCreatedAtEpochMs ||
+					(card.updatedAt !== staleOperation.sourceTaskUpdatedAtEpochMs && column?.id !== "trash"))
+			) {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase === "completed") return;
+					current.progress.phase = "cancelled";
+					current.progress.lastError = "任务已更改或重开，旧操作清理资格失效";
+					await writeTaskClosureOperation(current);
 				});
-				current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
-				current.progress.lastError = result.error ?? null;
-				await writeTaskClosureOperation(current);
-			});
-		} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
-			await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
-				scope,
-				{
-					expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
-						[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+				return;
+			}
+			const workspaceApi = createWorkspaceControlApi();
+			if (!card && staleOperation.progress.phase === "closed_cleanup_pending") {
+				await withTaskClosureLifecycleLocks(identity.workspaceId, [identity.taskId], async () => {
+					const current = await readTaskClosureOperation(identity, staleOperation.progress.closureRequestId);
+					if (!current || current.progress.phase !== "closed_cleanup_pending") return;
+					const result = await workspaceApi.deleteWorktree(scope, {
+						taskId: identity.taskId,
+						taskClosureArchiveCleanupCredential: {
+							taskIncarnationCreatedAtEpochMs: identity.taskIncarnationCreatedAtEpochMs,
+							closureRequestId: current.progress.closureRequestId,
+						},
+					});
+					const latest = await readTaskClosureOperation(identity, current.progress.closureRequestId);
+					if (latest) Object.assign(current, latest);
+					current.progress.phase = result.ok ? "completed" : "closed_cleanup_pending";
+					current.progress.lastError = result.error ?? null;
+					await writeTaskClosureOperation(current);
+				});
+			} else if (card && staleOperation.preservationPurpose === "permanently_delete_task") {
+				await createTaskCardActions(workspaceApi).permanentlyDeleteTaskCardsWithFullResourceCleanup(
+					scope,
+					{
+						expectedTaskIncarnationCreatedAtEpochMsByTaskId: {
+							[identity.taskId]: identity.taskIncarnationCreatedAtEpochMs,
+						},
+						permanentlyDeletedTaskCardSelection: {
+							permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
+							selectedTaskIds: [identity.taskId],
+						},
 					},
-					permanentlyDeletedTaskCardSelection: {
-						permanentlyDeletedTaskCardSelectionKind: "task_cards_selected_by_task_id",
-						selectedTaskIds: [identity.taskId],
-					},
-				},
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			} else if (card) {
+				await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
+					scope,
+					staleOperation.request,
+					{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+				);
+			}
+		},
+		deps.runtimeStateHub.broadcastRuntimeWorkspaceStateUpdated,
+		(operation, card) => {
+			const summary = findRuntimeSessionSummary(
+				operation.taskIdentity.workspaceId,
+				resolveMainTaskConversationSessionId(card),
 			);
-		} else if (card) {
-			await createTaskCardActions(workspaceApi).moveTaskCardIntoDoneStoppingSessionsAndDeletingWorktree(
-				scope,
-				staleOperation.request,
-				{ decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" } },
+			return (
+				!!summary &&
+				resolveSessionFacets(summary).liveness === "live" &&
+				(summary.startedAt ?? 0) >= (operation.reopening?.startedAtEpochMs ?? Infinity)
 			);
-		}
-	});
+		},
+	);
 
 	const trpcHttpHandler = createHTTPHandler({
 		basePath: "/api/trpc/",
@@ -2366,6 +2385,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			runtimeApi.closeTaskConversationSessionOperations(),
 			taskClosureRecoveryMonitor.close(),
 			taskEditorCreationSubmissionApi.close(),
+			backlogTaskStartReadinessRecovery.close(),
 			taskVisualizationArtifactApi.stop(),
 			taskLookupConversationApi.close(),
 			dailyWorkProgressStatisticsService.close(),
@@ -2433,6 +2453,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 	// 重启后能直接把「停机时早就到期」的记录处理掉，不需要任何补偿逻辑。
 	taskClosureRecoveryMonitor.start();
 	taskEditorCreationSubmissionApi.start();
+	backlogTaskStartReadinessRecovery.start();
 	agentSessionInactivityReclamationScheduler.start();
 	taskLookupConversationApi.start();
 	queuedTaskPromptDeliveryDispatcher.start();

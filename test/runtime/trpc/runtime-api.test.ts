@@ -29,6 +29,13 @@ const agentRegistryMocks = vi.hoisted(() => ({
 const taskWorktreeMocks = vi.hoisted(() => ({
 	resolveTaskCwd: vi.fn(),
 }));
+const backlogTaskReadinessMocks = vi.hoisted(() => ({
+	readBacklogTaskStartReadinessOperation: vi.fn(async () => null),
+}));
+vi.mock(
+	"../../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store",
+	() => backlogTaskReadinessMocks,
+);
 
 const taskClosureLockMocks = vi.hoisted(() => ({
 	withTaskClosureLifecycleLocks: vi.fn(
@@ -303,6 +310,30 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			createdAt: Date.now(),
 		});
 	});
+	it("移入进行中后，直接启动仍需经过未完成的 Backlog 首发门禁", async () => {
+		workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+			columns: [{ id: "in_progress", cards: [{ id: "task-1", createdAt: 1 }] }],
+		});
+		const review = { operationId: "isolated-backlog-first-start", phase: "start_failed" };
+		backlogTaskReadinessMocks.readBacklogTaskStartReadinessOperation.mockImplementationOnce(
+			async () => ({ review }) as never,
+		);
+		const getScopedTerminalManager = vi.fn();
+		const api = createTestRuntimeApi({
+			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+			setActiveRuntimeConfig: vi.fn(),
+			getScopedTerminalManager,
+			resolveInteractiveShellCommand: vi.fn(),
+			runCommand: vi.fn(),
+		});
+		const response = await api.startTaskSession(
+			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+			{ taskId: "task-1", prompt: "原始需求", baseRef: "main" },
+		);
+		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("启动前复核") });
+		expect(getScopedTerminalManager).not.toHaveBeenCalled();
+	});
 	it("自动恢复动作按 workspace、会话与当前 episode 投递，不把过期动作冒充成功", async () => {
 		const actOnAutomaticFailureContinuation = vi.fn(
 			async (_taskId: string, episodeId: string) => episodeId === "current",
@@ -452,41 +483,67 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 		expect(terminalManager.startTaskSession).not.toHaveBeenCalled();
 	});
 
-	it("创建提交的启动门禁在 transport 的 spawn 前拒绝时，不启动实际终端进程", async () => {
-		taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
-		const spawnTerminalProcess = vi.fn(() => createSummary());
-		const terminalManager = {
-			startTaskSession: vi.fn(async (request: StartTaskSessionRequest) => {
-				await request.beforeAgentProcessLaunch?.(createSummary());
-				return spawnTerminalProcess();
-			}),
-			applyTurnCheckpoint: vi.fn(),
-		};
-		const api = createTestRuntimeApi({
-			getActiveWorkspaceId: vi.fn(() => "workspace-1"),
-			loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
-			setActiveRuntimeConfig: vi.fn(),
-			getScopedTerminalManager: vi.fn(async () => terminalManager as never),
-			resolveInteractiveShellCommand: vi.fn(),
-			runCommand: vi.fn(),
-		});
-		const beforeAgentProcessLaunch = vi.fn(async () => {
-			throw new Error("已收到 Stop，创建提交禁止启动");
-		});
-		const response = await api.startTaskSession(
-			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
-			{ taskId: "task-1", baseRef: "main", prompt: "只启动一次" },
-			beforeAgentProcessLaunch,
-		);
-		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Stop") });
-		expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(1);
-		expect(terminalManager.startTaskSession).toHaveBeenCalledTimes(1);
-		expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
-			expect.objectContaining({ beforeAgentProcessLaunch }),
-			expect.any(String),
-		);
-		expect(spawnTerminalProcess).not.toHaveBeenCalled();
-	});
+	it.each(["direct_main", "promoted_main"] as const)(
+		"%s 的启动门禁在 transport 的 spawn 前拒绝时，不启动实际终端进程",
+		async (scenario) => {
+			taskWorktreeMocks.resolveTaskCwd.mockResolvedValue("/tmp/existing-worktree");
+			const spawnTerminalProcess = vi.fn(() => createSummary());
+			const primary = createCollaborationSummary({
+				taskId: "promoted-main",
+				agentId: "claude",
+				sessionTransport: "pty_terminal",
+			});
+			if (scenario === "promoted_main")
+				workspaceStateMocks.loadWorkspaceBoardById.mockResolvedValue({
+					columns: [
+						{
+							id: "review",
+							cards: [
+								{
+									id: "task-1",
+									baseRef: "main",
+									createdAt: 1,
+									updatedAt: 1,
+									mainTaskConversationSessionId: primary.taskId,
+								},
+							],
+						},
+					],
+				});
+			const terminalManager = {
+				getSummary: vi.fn(() => primary),
+				startTaskSession: vi.fn(async (request: StartTaskSessionRequest) => {
+					await request.beforeAgentProcessLaunch?.(createSummary());
+					return spawnTerminalProcess();
+				}),
+				applyTurnCheckpoint: vi.fn(),
+			};
+			const api = createTestRuntimeApi({
+				getActiveWorkspaceId: vi.fn(() => "workspace-1"),
+				loadScopedRuntimeConfig: vi.fn(async () => createRuntimeConfigState()),
+				setActiveRuntimeConfig: vi.fn(),
+				getScopedTerminalManager: vi.fn(async () => terminalManager as never),
+				resolveInteractiveShellCommand: vi.fn(),
+				runCommand: vi.fn(),
+			});
+			const beforeAgentProcessLaunch = vi.fn(async () => {
+				throw new Error("已收到 Stop，创建提交禁止启动");
+			});
+			const response = await api.startTaskSession(
+				{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
+				{ taskId: "task-1", baseRef: "main", prompt: "只启动一次" },
+				beforeAgentProcessLaunch,
+			);
+			expect(response).toMatchObject({ ok: false, error: expect.stringContaining("Stop") });
+			expect(beforeAgentProcessLaunch).toHaveBeenCalledTimes(1);
+			expect(terminalManager.startTaskSession).toHaveBeenCalledTimes(1);
+			expect(terminalManager.startTaskSession).toHaveBeenCalledWith(
+				expect.objectContaining({ beforeAgentProcessLaunch }),
+				expect.any(String),
+			);
+			expect(spawnTerminalProcess).not.toHaveBeenCalled();
+		},
+	);
 
 	describe("taskConversationMode 传参", () => {
 		it("终端分支把启动请求里的 taskConversationMode 带进 startTaskSession", async () => {

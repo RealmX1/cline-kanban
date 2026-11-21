@@ -280,8 +280,28 @@ describe("共用故障恢复的会话接线", () => {
 				turnOwner: "agent",
 				liveness: "live",
 				userTurnKind: null,
-				automaticAgentFailureContinuation: { phase: "recovered" },
+				automaticAgentFailureContinuation: { phase: "executing", acceptedCount: 1 },
 			});
+			const episode = requireSummary(manager, taskId).automaticAgentFailureContinuation;
+			if (!episode?.activeDeliveryId || episode.nextCheckAtMs == null) throw new Error("缺少原投递和后续核验时间");
+			expect(episode.pendingCompletionReview?.activeDeliveryId).not.toBe(episode.activeDeliveryId);
+			nativeFailureContinuationDeliveryMock.mockResolvedValue({
+				outcome: "accepted_finished",
+				nativeTurnId: "retry-turn",
+			});
+			await vi.advanceTimersByTimeAsync(episode.nextCheckAtMs - Date.now());
+			expect(nativeFailureContinuationDeliveryMock).toHaveBeenCalledTimes(2);
+			expect(nativeFailureContinuationDeliveryMock.mock.lastCall?.[0].record.activeDeliveryId).toBe(
+				episode.activeDeliveryId,
+			);
+			expect(manager.getSummary(taskId)).toMatchObject({
+				turnOwner: "user",
+				userTurnKind: "review",
+				automaticAgentFailureContinuation: { phase: "recovered", acceptedCount: 1 },
+			});
+			expect(
+				requireSummary(manager, taskId).automaticAgentFailureContinuation?.pendingCompletionReview,
+			).toBeUndefined();
 		} finally {
 			manager.stopTaskSession(taskId);
 			manager.dispose();

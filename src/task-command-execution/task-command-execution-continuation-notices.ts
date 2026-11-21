@@ -65,8 +65,9 @@ export async function assertTaskCommandContinuationNoticeStillEligible(
 		return;
 	}
 	const notice = notices.find((item) => item.noticeId === delivery.producerNoticeId);
-	if (!notice || delivery.text !== formatTaskCommandContinuationNotice(record, notice))
-		throw new Error("后台事件已被新补充或结果修订替代，先对账既有接受，再选择当前有效事件");
+	if (!notice) throw new Error("原后台通知已从当前可投递清单撤下，可能已被消费或被新结果替换。");
+	if (delivery.text !== formatTaskCommandContinuationNotice(record, notice))
+		throw new Error("原后台通知的冻结正文与当前修订不一致。");
 }
 
 export function formatTaskCommandContinuationNotice(

@@ -22,6 +22,7 @@ import type {
 import { CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS } from "../core/cross-project-recently-active-task-switcher-section-assignment";
 import { getDefaultProjectVisualIdentity, type ProjectVisualIdentity } from "../core/project-visual-identity";
 import { isNeverStartedPlaceholderTaskSessionSummary } from "../core/session-activity";
+import type { TaskCommandExecutionRecord } from "../core/task-command-execution-contract";
 import { recordUserTerminalInputSubmissionObservedForSessionWithoutBlocking } from "../inter-work-unit-relation-ledger/kanban-runtime-inter-work-unit-relation-ledger-live-capture-activation";
 import { deriveProjectDisplayNameFromRepoPath } from "../projects/project-display-name";
 import {
@@ -42,6 +43,7 @@ import {
 	type RuntimeWorkspaceIndexEntry,
 } from "../state/workspace-state";
 import { applyOwnedCommandExecutionPoliciesBeforeOwnerSessionTerminalInterrupt } from "../task-command-execution/task-command-execution-owner-session-interrupt-port";
+import { readTaskCommandExecutionsForObservation } from "../task-command-execution/task-command-execution-store";
 import { readTaskEditorCreationAgentStartupProgressByTaskId } from "../task-editor-creation/task-editor-creation-submission-store";
 import { createClaudeCodeBackgroundSessionDaemonCliClient } from "../terminal/claude-code-background-session-ownership-preflight-before-resume";
 import { backfillCursorAgentChatIdentityAndNeverEstablishedStateBeforeHydrate } from "../terminal/cursor-agent-chat-identity-backfill-before-hydrate";
@@ -564,6 +566,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 		sessionFactsByTaskId: Map<string, TaskSessionFactsForCrossProjectTaskViews>;
 		lastOpenedByUserAtByTaskId: ReadonlyMap<string, number>;
 		taskEditorCreationAgentStartupProgressByTaskId: ReadonlyMap<string, TaskEditorCreationSubmissionStatus>;
+		executionsById: ReadonlyMap<string, TaskCommandExecutionRecord>;
 	}> => {
 		// 宽松读取可能把旧版 null 正文投影为空看板，严格查询不能继承这份兼容结果。
 		const boardReadCache = requireCompleteRead ? completeProjectSummaryBoardReadCache : projectSummaryBoardReadCache;
@@ -599,8 +602,17 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 			if (requireCompleteRead) throw error;
 			return new Map<string, number>();
 		});
+		const executions = [...sessionFactsByTaskId.values()].some(
+			(facts) => facts.stoppedMainTurnOwnedCommandExecutionIds,
+		)
+			? await readTaskCommandExecutionsForObservation(workspaceId).catch((error) => {
+					if (requireCompleteRead) throw error;
+					return [];
+				})
+			: [];
 		return {
 			board,
+			executionsById: new Map(executions.map((record) => [record.executionId, record])),
 			terminalManagerSessionsByTaskId,
 			sessionFactsByTaskId,
 			lastOpenedByUserAtByTaskId,
@@ -629,6 +641,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 				sessionFactsByTaskId,
 				lastOpenedByUserAtByTaskId,
 				taskEditorCreationAgentStartupProgressByTaskId,
+				executionsById,
 			} = await loadProjectBoardAndTaskSessionFacts(workspaceId);
 			const persistedCounts = countTasksByColumn(board);
 			// 计数 overlay 仍只看 terminal manager 的 summary（未加载项目退化为原始列计数），与改动前一致。
@@ -648,6 +661,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 					sessionFactsByTaskId,
 					lastOpenedByUserAtByTaskId,
 					taskEditorCreationAgentStartupProgressByTaskId,
+					executionsById,
 					nowMs: now(),
 					activityHorizonMs: CROSS_PROJECT_TASK_SWITCHER_DEFAULT_REMAINING_SECTION_ACTIVITY_HORIZON_MS,
 				}),
@@ -678,6 +692,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 						sessionFactsByTaskId,
 						lastOpenedByUserAtByTaskId,
 						taskEditorCreationAgentStartupProgressByTaskId,
+						executionsById,
 					} = await loadProjectBoardAndTaskSessionFacts(project.workspaceId);
 					return {
 						workspaceId: project.workspaceId,
@@ -686,6 +701,7 @@ export async function createWorkspaceRegistry(deps: CreateWorkspaceRegistryDepen
 							sessionFactsByTaskId,
 							lastOpenedByUserAtByTaskId,
 							taskEditorCreationAgentStartupProgressByTaskId,
+							executionsById,
 							nowMs,
 							activityHorizonMs,
 						}),

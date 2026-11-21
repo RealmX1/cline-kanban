@@ -909,24 +909,9 @@ describe("useBoardInteractions", () => {
 		]);
 	});
 
-	it("waits for a new backlog card height to settle before starting animation", async () => {
+	it("启动前复核走运行时，等待响应期间不乐观移出 Backlog", async () => {
 		let latestSnapshot: HookSnapshot | null = null;
 		const tryProgrammaticCardMove = vi.fn(() => "unavailable" as const);
-		let measurementCount = 0;
-		const boardElement = document.createElement("section");
-		boardElement.className = "kb-board";
-		const taskElement = document.createElement("div");
-		taskElement.dataset.taskId = "task-1";
-		vi.spyOn(taskElement, "getBoundingClientRect").mockImplementation(() => {
-			measurementCount += 1;
-			if (measurementCount === 1) {
-				return createRect(160, 44);
-			}
-			return createRect(160, 96);
-		});
-		boardElement.appendChild(taskElement);
-		document.body.appendChild(boardElement);
-
 		useProgrammaticCardMovesMock.mockReturnValue({
 			handleProgrammaticCardMoveReady: () => {},
 			setRequestMoveTaskToTrashHandler: () => {},
@@ -938,10 +923,25 @@ describe("useBoardInteractions", () => {
 			requestMoveTaskToTrashWithAnimation: async () => {},
 			programmaticCardMoveCycle: 0,
 		});
-
+		let releaseReview: (() => void) | undefined;
+		taskCardActionQueryMocks.startTaskCardAgentSessionMovingItIntoInProgressInWorkspace.mockImplementation(
+			async () => {
+				await new Promise<void>((resolve) => {
+					releaseReview = resolve;
+				});
+				return {
+					boardColumnIdOfTaskCardBeforeAction: "backlog",
+					taskCardWasMovedIntoInProgressColumnByThisAction: false,
+					agentSessionStartOutcome: "backlog_task_start_readiness_review_pending",
+					agentSessionStartFailureMessage: "条件未满足，保留 Backlog。",
+					ensuredTaskWorktreeWarningMessage: null,
+					startedAgentSessionSummary: null,
+					taskCardSnapshotAfterAction: makeTaskCardSnapshotAfterAction("task-1", "backlog"),
+				};
+			},
+		);
 		const board = createBoard();
 		const setBoard = vi.fn<Dispatch<SetStateAction<BoardData>>>(() => {});
-
 		await act(async () => {
 			root.render(
 				<HookHarness
@@ -953,33 +953,28 @@ describe("useBoardInteractions", () => {
 				/>,
 			);
 		});
-
-		if (!latestSnapshot) {
-			throw new Error("Expected a hook snapshot.");
-		}
-
+		if (!latestSnapshot) throw new Error("缺少 Hook 快照");
 		await act(async () => {
 			latestSnapshot!.handleStartTask("task-1");
 		});
-
+		expect(taskCardActionQueryMocks.startTaskCardAgentSessionMovingItIntoInProgressInWorkspace).toHaveBeenCalledWith(
+			"project-1",
+			expect.objectContaining({ taskId: "task-1" }),
+		);
 		expect(tryProgrammaticCardMove).not.toHaveBeenCalled();
-
+		expect(
+			readPendingTaskCardCommandBoardOverlayEntries("project-1").some(
+				(entry) =>
+					entry.expectedBoardEffect?.pendingTaskCardCommandExpectedBoardEffectKind ===
+					"task_card_moved_into_board_column",
+			),
+		).toBe(false);
 		await act(async () => {
-			vi.advanceTimersByTime(32);
+			releaseReview?.();
 			await Promise.resolve();
 		});
-
 		expect(tryProgrammaticCardMove).not.toHaveBeenCalled();
-
-		await act(async () => {
-			vi.advanceTimersByTime(16);
-			await Promise.resolve();
-		});
-
-		expect(tryProgrammaticCardMove).toHaveBeenCalledWith("task-1", "backlog", "in_progress", {
-			boardMutationInitiator: "web_ui_user_gesture",
-		});
-		boardElement.remove();
+		expect(board.columns.find((column) => column.id === "backlog")?.cards.map((card) => card.id)).toContain("task-1");
 	});
 
 	it("starts backlog tasks immediately from detail view without waiting for card height to settle", async () => {

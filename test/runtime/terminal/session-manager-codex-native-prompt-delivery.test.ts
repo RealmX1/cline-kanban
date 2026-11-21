@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,8 +6,21 @@ import { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-
 import { USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET } from "../../../src/config/user-interface-preferences-shared-across-browser-origins";
 import { runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import * as nativeDeliveryJournal from "../../../src/core/codex-native-prompt-delivery-journal";
+import {
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+} from "../../../src/core/task-message-injection-ledger";
+import {
+	deliverOwnedCommandResultToActiveSession,
+	readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+	reconcileOwnedCommandResultPromptDelivery,
+} from "../../../src/server/owned-command-result-prompt-delivery";
+import * as managedTaskPromptDelivery from "../../../src/state/managed-task-prompt-delivery-coordinator";
+import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../../src/state/queued-task-prompt-delivery-store";
+import * as runtimeHeartbeat from "../../../src/state/runtime-process-instance-heartbeat-registry";
 import * as workspaceState from "../../../src/state/workspace-state";
 import { createTaskCommandExecutionService } from "../../../src/task-command-execution/task-command-execution-service";
+import { mutateTaskCommandExecutions } from "../../../src/task-command-execution/task-command-execution-store";
 import type {
 	CodexNativePromptDeliveryInput,
 	CodexNativePromptDeliveryResult,
@@ -20,7 +33,6 @@ import {
 } from "../../../src/terminal/terminal-input-box-occupancy";
 import type { PendingProgrammaticDeliveryReceipt } from "../../../src/terminal/terminal-session-active-process-state";
 import { canTransitionTaskForHookEvent } from "../../../src/trpc/hook-event-task-transition-gate";
-import { sendTaskChatMessageAcrossSessionTransports } from "../../../src/trpc/task-chat-message-send-across-session-transports";
 
 const INCARNATION = "e96aa879-02a4-480e-bbd6-97b7e5e83843";
 const managedRecording = vi.hoisted(() => ({ begin: vi.fn(), settle: vi.fn() }));
@@ -28,7 +40,8 @@ const readNativeActivity = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/agent-session-history/native-agent-conversation-activity-reader", () => ({
 	readNativeAgentConversationActivity: readNativeActivity,
 }));
-vi.mock("../../../src/state/managed-task-prompt-delivery-coordinator", () => ({
+vi.mock("../../../src/state/managed-task-prompt-delivery-coordinator", async (importOriginal) => ({
+	...(await importOriginal<typeof managedTaskPromptDelivery>()),
 	beginManagedTaskPromptDelivery: managedRecording.begin,
 	settleManagedTaskPromptDeliveryWithoutBlocking: managedRecording.settle,
 }));
@@ -118,33 +131,77 @@ function installSession(manager: TerminalSessionManager, draft = "HUMAN_DRAFT") 
 }
 
 describe("session manager 的 Codex 原生投递", () => {
-	it("所属执行服务经过真实统一投递出口与终端门禁接续，最后一个结果完成才允许 Review", async () => {
+	it.each([
+		"two_owned_results",
+		"timeout_then_restart",
+		"timeout_then_transport_receipt_readback",
+		"timeout_then_withdrawal_receipt_readback",
+		"timeout_then_withdrawal_after_intent",
+		"withdrawn_while_waiting",
+	] as const)("所属结果经统一投递出口和终端门禁（%s）", async (scenario) => {
 		vi.useRealTimers();
+		const actualManagedDelivery = await vi.importActual<typeof managedTaskPromptDelivery>(
+			"../../../src/state/managed-task-prompt-delivery-coordinator",
+		);
+		managedRecording.begin.mockImplementation(actualManagedDelivery.beginManagedTaskPromptDelivery);
+		let now = Date.now();
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const runtimeInstance = vi
+			.spyOn(runtimeHeartbeat, "getThisRuntimeProcessInstanceId")
+			.mockReturnValue("runtime-before-restart");
+		const runtimeLiveness = vi
+			.spyOn(runtimeHeartbeat, "readRuntimeProcessInstanceLiveness")
+			.mockResolvedValue("dead");
 		const directory = await mkdtemp(join(tmpdir(), "owned-result-terminal-chain-"));
 		const workspaceDirectory = vi
 			.spyOn(workspaceState, "getWorkspaceDirectoryPath")
 			.mockImplementation((id) => join(directory, "workspaces", id));
+		const workspacesRoot = vi
+			.spyOn(workspaceState, "getWorkspacesRootPath")
+			.mockReturnValue(join(directory, "workspaces"));
 		const runtimeHome = vi.spyOn(workspaceState, "getRuntimeHomePath").mockReturnValue(directory);
+		const workingDirectoryPath = await realpath(directory);
+		const nativeSendInvocations = vi.fn<(clientUserMessageId: string) => void>();
+		let nativeReady = scenario === "two_owned_results";
+		let withdrawNoticeAfterIntent: (() => Promise<void>) | undefined;
 		const native = vi.fn(async (input: CodexNativePromptDeliveryInput): Promise<CodexNativePromptDeliveryResult> => {
-			if (!(await input.beforeSubmit())) return { status: "cancelled" };
+			const journal = input.deliveryJournal;
+			if (!journal) throw new Error("缺少原生账本");
+			const operation = await journal.prepare({
+				workspaceId: input.workspaceId,
+				conversationSessionId: input.summary.taskId,
+				nativeSessionId: "thread-1",
+				workingDirectoryPath,
+				clientUserMessageId: input.clientUserMessageId,
+				text: input.text,
+			});
+			if (!nativeReady) return { status: "not_ready" };
+			if (operation.requestMayHaveBeenSent || !(await input.beforeSubmit())) return { status: "cancelled" };
+			await journal.recordRequestIntent(null);
+			await withdrawNoticeAfterIntent?.();
 			await input.onRequestAttempted();
+			if ((await input.validateImmediatelyBeforeNativeTurnStartRequest?.()) === false) {
+				await journal.recordRequestNotInvoked?.();
+				return { status: "cancelled" };
+			}
+			await journal.recordRequestInvoked();
+			nativeSendInvocations(operation.clientUserMessageId);
 			manager.confirmAcceptedAgentConversationInput("conversation-1", {
 				observedAtMs: Date.now(),
-				eventId: input.clientUserMessageId,
+				eventId: operation.clientUserMessageId,
 				nativeSessionId: "thread-1",
 				runtimeSessionIncarnationId: INCARNATION,
 				submittedPromptText: input.text,
 				acceptedNativeAgentTurnIsInProgress: true,
 			});
-			return {
-				status: "confirmed",
-				evidence: {
-					clientUserMessageId: input.clientUserMessageId,
-					nativeSessionId: "thread-1",
-					nativeTurnId: input.clientUserMessageId,
-					nativeUserMessageId: input.clientUserMessageId,
-				},
+			const evidence = {
+				clientUserMessageId: operation.clientUserMessageId,
+				nativeSessionId: "thread-1",
+				nativeTurnId: operation.clientUserMessageId,
+				nativeUserMessageId: operation.clientUserMessageId,
 			};
+			if (scenario !== "timeout_then_transport_receipt_readback") await journal.recordAcceptance(evidence);
+			return { status: "confirmed", evidence };
 		});
 		const manager = new TerminalSessionManager({ deliverCodexNativePromptWithoutChangingComposer: native });
 		const { entry, active, write } = installSession(manager);
@@ -159,79 +216,71 @@ describe("session manager 的 Codex 原生投递", () => {
 		Object.assign(active, { outputReactionEngine: null, outputReactionSession: null });
 		const acp = new AcpTaskSessionService();
 		const launch = vi.fn(async () => {});
-		const pendingSettlements: Promise<void>[] = [];
-		const service = createTaskCommandExecutionService({
-			readOwner: async (_workspaceId, _taskId, record) => ({
-				taskId: "task",
-				taskIncarnationCreatedAtEpochMs: 7,
-				conversationSessionId: "conversation-1",
-				nativeSessionId: "thread-1",
-				worktreePath: directory,
-				summary: manager.getSummary("conversation-1"),
-				isNativeInputSubmissionBusy: manager.hasPendingProgrammaticTaskChatInputDelivery(
-					"conversation-1",
-					record?.resultDelivery?.resultId,
-				),
-			}),
-			park: async (record) =>
-				manager.parkTaskSessionAwaitingDispatchedBackgroundWork("conversation-1", {
-					owningCommandExecutionId: record.executionId,
-				}).ok,
-			unpark: async (record) => {
-				manager.unparkTaskSession("conversation-1", record.executionId);
-			},
-			deliver: async (record, validate, settled) => {
-				if (!record.resultDelivery) throw new Error("缺少冻结结果");
-				return sendTaskChatMessageAcrossSessionTransports(
-					{
-						getScopedTerminalManager: async () => manager,
-						getScopedAcpTaskSessionService: async () => acp,
-						loadScopedRuntimeConfig: async () => ({
-							globalConfigPath: join(directory, "config.json"),
-							projectConfigPath: null,
-							selectedAgentId: "codex",
-							selectedShortcutLabel: null,
-							agentAutonomousModeEnabled: false,
-							newTaskStartInPlanModeByDefault: false,
-							ompAgentSessionTransportForNewTasks: "pty_terminal",
-							readyForReviewNotificationsEnabled: false,
-							notificationSoundEnabled: false,
-							autoContinueOnConnectionDropEnabled: false,
-							programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: false,
-							postDeployVerificationForceCompleteEnabled: false,
-							shortcuts: [],
-							commitPromptTemplate: "",
-							openPrPromptTemplate: "",
-							commitPromptTemplateDefault: "",
-							openPrPromptTemplateDefault: "",
-							userInterfacePreferencesSharedAcrossBrowserOrigins:
-								USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
-						}),
-						validateBeforeTerminalWrite: validate,
-						preserveExistingComposerDraft: true,
+		const warnings = vi.fn<(message: string) => void>();
+		const createService = () =>
+			createTaskCommandExecutionService({
+				readOwner: async (_workspaceId, _taskId, record) => ({
+					taskId: "task",
+					taskIncarnationCreatedAtEpochMs: 7,
+					conversationSessionId: "conversation-1",
+					nativeSessionId: "thread-1",
+					worktreePath: directory,
+					summary: manager.getSummary("conversation-1"),
+					isNativeInputSubmissionBusy: manager.hasPendingProgrammaticTaskChatInputDelivery(
+						"conversation-1",
+						record?.resultDelivery?.resultId,
+					),
+				}),
+				park: async (record) =>
+					manager.parkTaskSessionAwaitingDispatchedBackgroundWork("conversation-1", {
 						owningCommandExecutionId: record.executionId,
-						programmaticTerminalDeliveryReceiptPersistenceOwner: "queued_task_prompt_delivery_store",
-						onProgrammaticTerminalDeliverySettled: (receipt) => {
-							const pending = settled(receipt);
-							pendingSettlements.push(pending);
-							void pending.catch(() => {});
+					}).ok,
+				unpark: async (record) => {
+					manager.unparkTaskSession("conversation-1", record.executionId);
+				},
+				deliver: (record, validate, settled) =>
+					deliverOwnedCommandResultToActiveSession({
+						record,
+						scope: { workspaceId: "workspace-1", workspacePath: directory },
+						summary: manager.getSummary("conversation-1"),
+						validateBeforeTerminalWrite: validate,
+						settled,
+						warn: warnings,
+						transport: {
+							getScopedTerminalManager: async () => manager,
+							getScopedAcpTaskSessionService: async () => acp,
+							loadScopedRuntimeConfig: async () => ({
+								globalConfigPath: join(directory, "config.json"),
+								projectConfigPath: null,
+								selectedAgentId: "codex",
+								selectedShortcutLabel: null,
+								agentAutonomousModeEnabled: false,
+								newTaskStartInPlanModeByDefault: false,
+								ompAgentSessionTransportForNewTasks: "pty_terminal",
+								readyForReviewNotificationsEnabled: false,
+								notificationSoundEnabled: false,
+								autoContinueOnConnectionDropEnabled: false,
+								programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled: false,
+								postDeployVerificationForceCompleteEnabled: false,
+								shortcuts: [],
+								commitPromptTemplate: "",
+								openPrPromptTemplate: "",
+								commitPromptTemplateDefault: "",
+								openPrPromptTemplateDefault: "",
+								userInterfacePreferencesSharedAcrossBrowserOrigins:
+									USER_INTERFACE_PREFERENCES_SHARED_ACROSS_BROWSER_ORIGINS_WITH_NOTHING_SET,
+							}),
 						},
-					},
-					{ workspaceId: "workspace-1", workspacePath: directory },
-					{
-						taskId: "conversation-1",
-						text: record.resultDelivery.text,
-						source: "owned_command_execution_result",
-						idempotencyKey: record.resultDelivery.resultId,
-					},
-				);
-			},
-			reconcileDelivery: async () => "unknown",
-			listWorkspaceIds: async () => ["workspace-1"],
-			warn: () => {},
-			launch,
-			inspectWorker: async () => "running",
-		});
+					}),
+				reconcileDelivery: (record) =>
+					reconcileOwnedCommandResultPromptDelivery(record, (sessionId) => manager.getSummary(sessionId)),
+				readReadinessTimeoutObservedAtEpochMs: readOwnedCommandResultReadinessTimeoutObservedAtEpochMs,
+				listWorkspaceIds: async () => ["workspace-1"],
+				warn: warnings,
+				launch,
+				inspectWorker: async () => "running",
+			});
+		let service = createService();
 		try {
 			const start = (name: string) =>
 				service.start("workspace-1", {
@@ -246,6 +295,170 @@ describe("session manager 的 Codex 原生投递", () => {
 						label: name,
 					},
 				});
+			if (scenario !== "two_owned_results") {
+				const execution = await start("delayed-result");
+				const resultFile = execution.specification.resultFile;
+				if (scenario === "timeout_then_withdrawal_after_intent")
+					withdrawNoticeAfterIntent = () =>
+						writeFile(resultFile, JSON.stringify({ disposition: "machine_evidence_pending" }));
+				await writeFile(
+					resultFile,
+					JSON.stringify({
+						disposition: "agent_review_ready",
+						agentContinuationNotice: {
+							noticeId: "frozen-producer-notice",
+							stage: "final_agent_review",
+							text: "冻结的所属结果",
+						},
+					}),
+				);
+				await service.sweepExecution("workspace-1", execution.executionId);
+				const delivery = (await service.inspect("workspace-1", execution)).resultDelivery;
+				if (!delivery) throw new Error("未登记所属结果");
+				const readQueueEntry = async () =>
+					(await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace-1")).entriesByTaskId[
+						"conversation-1"
+					]?.find((entry) => entry.queueEntryId === delivery.resultId);
+				const ledgerPath = getTaskMessageInjectionLedgerPath(join(directory, "workspaces", "workspace-1"));
+				const readInjection = async () => (await readTaskMessageInjectionLedger(ledgerPath))[0];
+				if (scenario === "withdrawn_while_waiting") {
+					await vi.waitFor(
+						async () =>
+							expect((await readInjection())?.codex_native_prompt_delivery_operation?.sendPhase).toBe(
+								"registered",
+							),
+						{ timeout: 8_000 },
+					);
+					await writeFile(resultFile, JSON.stringify({ disposition: "machine_evidence_pending" }));
+					nativeReady = true;
+					await vi.waitFor(
+						async () =>
+							expect(await readQueueEntry()).toMatchObject({
+								deliveryState: "cancelled",
+								lastDeliveryFailureNote: expect.stringContaining("原后台通知已从当前可投递清单撤下"),
+								managedDelivery: { terminalDeliveryReceipt: { reason: "cancelled_before_delivery" } },
+							}),
+						{ timeout: 8_000 },
+					);
+					expect(nativeSendInvocations).not.toHaveBeenCalled();
+					expect(write).not.toHaveBeenCalled();
+					expect((await readInjection())?.codex_native_prompt_delivery_operation?.actualSendAttemptCount).toBe(0);
+					return;
+				}
+				now += 61_000;
+				await vi.waitFor(
+					async () =>
+						expect(await readQueueEntry()).toMatchObject({
+							deliveryState: "settled_failed",
+							managedDelivery: { terminalDeliveryReceipt: { reason: "terminal_prompt_readiness_timeout" } },
+						}),
+					{ timeout: 8_000 },
+				);
+				let originalClientUserMessageId: string | undefined;
+				await vi.waitFor(async () => {
+					const injection = await readInjection();
+					expect(injection).toMatchObject({
+						terminal_delivery_failure_reason: "terminal_prompt_readiness_timeout",
+						codex_native_prompt_delivery_operation: { sendPhase: "registered", actualSendAttemptCount: 0 },
+					});
+					originalClientUserMessageId = injection.codex_native_prompt_delivery_operation?.clientUserMessageId;
+				});
+				expect(nativeSendInvocations).not.toHaveBeenCalled();
+				expect(
+					manager.getSummary("conversation-1")?.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds,
+				).toEqual([execution.executionId]);
+				if (scenario === "timeout_then_restart") {
+					// 原生账本已落超时，模拟所属执行仍只读得到交给 transport 的状态。
+					now = Date.parse((await readInjection()).terminal_delivery_status_updated_at);
+					await mutateTaskCommandExecutions("workspace-1", (records) => ({
+						records: records.map((record) => ({
+							...record,
+							resultDelivery: record.resultDelivery && {
+								...record.resultDelivery,
+								state: "known_not_submitted" as const,
+								awaitingTransportReceipt: true,
+								nativeReceipt: { status: "accepted_pending_submit_confirmation", reason: null },
+								lastPreflightFailureEvidenceSha256: null,
+								retryPreflightNotBeforeEpochMs: null,
+							},
+						})),
+						result: undefined,
+					}));
+				}
+				service.stop();
+				runtimeInstance.mockReturnValue("runtime-after-restart");
+				service = createService();
+				nativeReady = true;
+				await service.sweepExecution("workspace-1", execution.executionId);
+				expect(native).toHaveBeenCalledTimes(1);
+				now += 30_001;
+				const lostQueueWrite =
+					scenario === "timeout_then_transport_receipt_readback" ||
+					scenario === "timeout_then_withdrawal_receipt_readback"
+						? vi
+								.spyOn(managedTaskPromptDelivery, "settleManagedTaskPromptDelivery")
+								.mockResolvedValueOnce(undefined)
+						: null;
+				await service.sweepExecution("workspace-1", execution.executionId);
+				if (scenario === "timeout_then_withdrawal_receipt_readback")
+					await writeFile(resultFile, JSON.stringify({ disposition: "machine_evidence_pending" }));
+				if (lostQueueWrite) {
+					try {
+						await vi.waitFor(() => expect(lostQueueWrite).toHaveBeenCalledOnce(), { timeout: 8_000 });
+						expect((await readQueueEntry())?.deliveryState).toBe("settled_failed");
+						await managedTaskPromptDelivery.reconcileManagedTaskPromptDeliveryReceipts(
+							"workspace-1",
+							await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace-1"),
+						);
+					} finally {
+						lostQueueWrite.mockRestore();
+					}
+				}
+				if (
+					scenario === "timeout_then_withdrawal_receipt_readback" ||
+					scenario === "timeout_then_withdrawal_after_intent"
+				) {
+					await vi.waitFor(async () => expect((await readQueueEntry())?.deliveryState).toBe("cancelled"), {
+						timeout: 8_000,
+					});
+					expect(await readQueueEntry()).toMatchObject({
+						deliveryState: "cancelled",
+						lastDeliveryFailureNote: expect.stringContaining("原后台通知已从当前可投递清单撤下"),
+						managedDelivery: {
+							previousUnconfirmedTerminalDeliveryReceipt: { reason: "terminal_prompt_readiness_timeout" },
+						},
+					});
+					expect(nativeSendInvocations).not.toHaveBeenCalled();
+					expect(write).not.toHaveBeenCalled();
+					expect((await readInjection())?.codex_native_prompt_delivery_operation).toMatchObject({
+						sendPhase: "registered",
+						actualSendAttemptCount: 0,
+					});
+					return;
+				}
+				await vi.waitFor(
+					async () =>
+						expect(await readQueueEntry()).toMatchObject({
+							deliveryState: "settled_delivered",
+							managedDelivery: {
+								previousUnconfirmedTerminalDeliveryReceipt: { reason: "terminal_prompt_readiness_timeout" },
+							},
+						}),
+					{ timeout: 8_000 },
+				);
+				await service.sweepExecution("workspace-1", execution.executionId);
+				expect(nativeSendInvocations).toHaveBeenCalledExactlyOnceWith(originalClientUserMessageId);
+				expect((await service.inspect("workspace-1", execution)).resultDelivery).toMatchObject({
+					resultId: delivery.resultId,
+					state: "native_accepted",
+					readinessTimeoutRecoveryAttemptedEvidenceSha256s: [expect.any(String)],
+				});
+				expect((await readInjection())?.terminal_delivery_failure_reason).toBe("terminal_prompt_readiness_timeout");
+				expect(manager.getSummary("conversation-1")?.awaitingDispatchedBackgroundWork).toBeNull();
+				expect(write).not.toHaveBeenCalled();
+				expect(warnings).not.toHaveBeenCalled();
+				return;
+			}
 			const first = await start("first-result");
 			const second = await start("second-result");
 			for (const record of [first, second])
@@ -284,13 +497,13 @@ describe("session manager 的 Codex 原生投递", () => {
 			const pendingDeliveryId = active.programmaticDeliveryReceipt?.idempotencyKey;
 			if (pendingDeliveryId) manager.cancelTaskChatInputDelivery("conversation-1", pendingDeliveryId);
 			acp.disposeAllTaskSessions();
-			try {
-				await Promise.all(pendingSettlements);
-			} finally {
-				workspaceDirectory.mockRestore();
-				runtimeHome.mockRestore();
-				await rm(directory, { recursive: true, force: true });
-			}
+			workspaceDirectory.mockRestore();
+			workspacesRoot.mockRestore();
+			runtimeHome.mockRestore();
+			runtimeInstance.mockRestore();
+			runtimeLiveness.mockRestore();
+			clock.mockRestore();
+			await rm(directory, { recursive: true, force: true });
 		}
 	});
 	it("原生投递准备期间开始暂存时先暂停，暂存结束后沿用原消息继续提交", async () => {

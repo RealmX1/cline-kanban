@@ -176,7 +176,7 @@ export default { ...base, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDir
 	}
 	return {
 		dispose,
-		async assertPhase(phase: string) {
+		async assertPhase(phase: string, waitingNotice = "容量不足") {
 			for (const page of pages) {
 				await expect
 					.poll(() => page.locator("main").getAttribute("data-native-capacity-browser-phase"), { timeout: 15_000 })
@@ -194,7 +194,7 @@ export default { ...base, cacheDir: ${JSON.stringify(join(fixture.fixtureRootDir
 					).toBe(2);
 					await expect
 						.poll(() => page.locator("[data-automatic-agent-failure-continuation]").textContent())
-						.toContain("容量不足");
+						.toContain(waitingNotice);
 				} else if (phase === "executing") {
 					expect(
 						await page.locator('[data-cross-project-task-switcher-section="waiting_automatic_recovery"]').count(),

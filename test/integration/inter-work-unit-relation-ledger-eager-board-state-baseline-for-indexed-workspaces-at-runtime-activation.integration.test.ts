@@ -80,6 +80,9 @@ describe("inter-work-unit relation ledger eager board state baseline at runtime 
 				const boardFilePath = join(getWorkspaceDirectoryPath(workspaceId), "board.json");
 				const metaFilePath = join(getWorkspaceDirectoryPath(workspaceId), "meta.json");
 				const boardFileBytesBeforeActivation = readFileSync(boardFilePath, "utf8");
+				const boardBeforeActivation: RuntimeBoardData = JSON.parse(boardFileBytesBeforeActivation);
+				const originalCard = boardBeforeActivation.columns.find((column) => column.id === "backlog")?.cards[0];
+				if (!originalCard) throw new Error("缺少激活前的隔离任务");
 				const metaFileBytesBeforeActivation = readFileSync(metaFilePath, "utf8");
 
 				const activatedLiveCapture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();
@@ -95,7 +98,7 @@ describe("inter-work-unit relation ledger eager board state baseline at runtime 
 						boardFilePath,
 						JSON.stringify(
 							createBoardWithBacklogCards([
-								createBacklogCard("t0001", "requirement written before deploy"),
+								originalCard,
 								createBacklogCard("t0002", "card added outside the runtime persistence funnel"),
 							]),
 							null,

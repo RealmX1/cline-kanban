@@ -3,6 +3,7 @@ import type {
 	IndependentTaskCreationProvenance,
 	RuntimeAgentId,
 	RuntimeAgentSessionTransport,
+	RuntimeBoardCard,
 	RuntimeBoardColumnId,
 	RuntimeExternalWorkflowRunBinding,
 	RuntimeTaskAgentPermissionMode,
@@ -63,6 +64,7 @@ export interface TaskEditorSubmitOptions {
 	promptOverride?: string;
 	taskNameOverride?: string;
 	taskDescriptionOverride?: string;
+	backlogTaskStartReadinessConditionsTextOverride?: string;
 }
 
 export const DEFAULT_TASK_AUTO_REVIEW_MODE: TaskAutoReviewMode = "commit";
@@ -91,8 +93,12 @@ export function getTaskAutoReviewCancelButtonLabel(mode: TaskAutoReviewMode | nu
 }
 
 export interface BoardCard {
+	backlogTaskCreationRepositoryBaseline?: RuntimeBoardCard["backlogTaskCreationRepositoryBaseline"];
+	backlogTaskStartReadinessReview?: RuntimeBoardCard["backlogTaskStartReadinessReview"];
+	backlogTaskStartReadinessExecutionRevision?: RuntimeBoardCard["backlogTaskStartReadinessExecutionRevision"];
 	externalWorkflowRunBinding?: RuntimeExternalWorkflowRunBinding;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	taskNameVersion?: number;
 	codexReasoningEffortOverride?: string;
 	codexReasoningEffortFollowsNativeConfiguration?: true;

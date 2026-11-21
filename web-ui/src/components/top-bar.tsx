@@ -23,6 +23,7 @@ import {
 import { useState } from "react";
 import { ConnectionRetryIndicator, type ConnectionRetrySessionView } from "@/components/connection-retry-indicator";
 import { FirstProjectScriptShortcutFormWindow } from "@/components/first-project-script-shortcut-form-window";
+import { GlobalMarkdownDraftEntry } from "@/components/global-markdown-draft-window";
 import { OpenWorkspaceButton } from "@/components/open-workspace-button";
 import {
 	topBarBoardScopeAllProjectsToggleButtonAnchorKey,
@@ -512,6 +513,7 @@ export function TopBar({
 					)}
 				>
 					{isMobile ? visitedTaskNavigationControl : null}
+					<GlobalMarkdownDraftEntry isMobile={isMobile} />
 					{/* Desktop: inline shortcut, terminal, debug buttons */}
 					{!isMobile ? (
 						<>

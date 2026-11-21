@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AcpTaskSessionService } from "../../../src/acp-client-session/acp-task-session-service";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
+import { createCodexNativePromptDeliveryJournal } from "../../../src/core/codex-native-prompt-delivery-journal";
 import { isQueuedTaskPromptDeliveryAwaitingDispatch } from "../../../src/core/queued-task-prompt-delivery-dispatch-eligibility";
 import { buildRuntimeQueuedTaskPromptDeliveryProjection } from "../../../src/core/queued-task-prompt-delivery-projection";
 import {
@@ -64,6 +65,142 @@ afterEach(async () => {
 });
 
 describe("所有主动投递使用统一记录", () => {
+	it("重启从账本补核写入前撤下，Queue 保留取消回执和原因", async () => {
+		const { entry } = await beginManagedTaskPromptDelivery({
+			workspaceId: "workspace",
+			taskId: "session-1",
+			text: "已被消费的后台通知",
+			origin: { messageType: "programmatic_injection" },
+			idempotencyKey: "withdrawn-result",
+		});
+		const ledgerPath = getTaskMessageInjectionLedgerPath(join(isolatedRuntimeHome.path, "workspaces", "workspace"));
+		const record = createPendingTaskMessageInjectionRecord({
+			taskId: entry.taskId,
+			attemptId: entry.taskId,
+			source: "owned_command_execution_result",
+			idempotencyKey: "withdrawn-result",
+			promptSha256: computeQueuedTaskPromptDeliveryTextSha256(entry.text),
+			nowIso: new Date().toISOString(),
+		});
+		await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({ records: [record], result: null }));
+		const failureNote = "原后台通知已从当前可投递清单撤下。";
+		await recordTaskMessageTerminalDeliveryOutcome({
+			ledgerPath,
+			taskId: record.task_id,
+			idempotencyKey: record.idempotency_key,
+			status: "delivery_failed",
+			failureReason: "cancelled_before_delivery",
+			failureDetail: failureNote,
+			nowIso: new Date().toISOString(),
+		});
+		const snapshot = await reconcileManagedTaskPromptDeliveryReceipts(
+			"workspace",
+			await readWorkspaceQueuedTaskPromptDeliverySnapshot("workspace"),
+		);
+		expect(snapshot.entriesByTaskId[entry.taskId][0]).toMatchObject({
+			deliveryState: "cancelled",
+			lastDeliveryFailureNote: failureNote,
+			managedDelivery: {
+				terminalDeliveryReceipt: { status: "delivery_failed", reason: "cancelled_before_delivery", failureNote },
+			},
+		});
+	});
+
+	it.each(["matching", "queue_receipt_missing", "different_native_session"] as const)(
+		"重启核对所属结果补送的原生接受，保留原超时回执（%s）",
+		async (scenario) => {
+			const workspaceId = "workspace";
+			const resultId = "command-execution-result-isolated";
+			const taskId = "board-task";
+			const nativeSessionId = "original-native-thread";
+			const { entry, handle } = await beginManagedTaskPromptDelivery({
+				workspaceId,
+				taskId: summary.taskId,
+				workspaceTaskId: taskId,
+				text: "冻结的后台通知",
+				origin: { messageType: "programmatic_injection" },
+				idempotencyKey: resultId,
+				deliveryRequestId: resultId,
+				injectionLedgerTaskId: taskId,
+				summary: {
+					...summary,
+					agentNativeConversationSessionIdentity: {
+						sourceAgentId: "codex",
+						nativeSessionId:
+							scenario === "different_native_session" ? "different-native-thread" : nativeSessionId,
+						transcriptPath: null,
+						observedAt: 1,
+					},
+				},
+			});
+			const ledgerPath = getTaskMessageInjectionLedgerPath(
+				join(isolatedRuntimeHome.path, "workspaces", workspaceId),
+			);
+			const record = createPendingTaskMessageInjectionRecord({
+				taskId,
+				attemptId: entry.taskId,
+				source: "owned_command_execution_result",
+				idempotencyKey: resultId,
+				promptSha256: computeQueuedTaskPromptDeliveryTextSha256(entry.text),
+				nowIso: new Date().toISOString(),
+			});
+			await withTaskMessageInjectionLedgerLock(ledgerPath, async () => ({ records: [record], result: null }));
+			const journal = createCodexNativePromptDeliveryJournal({
+				ledgerPath,
+				ledgerTaskId: taskId,
+				idempotencyKey: resultId,
+			});
+			const clientUserMessageId = "original-client-id";
+			await journal.prepare({
+				workspaceId,
+				conversationSessionId: entry.taskId,
+				nativeSessionId,
+				workingDirectoryPath: summary.workspacePath ?? "/isolated-repo",
+				clientUserMessageId,
+				text: entry.text,
+			});
+			const readinessTimeout = { status: "delivery_failed", reason: "terminal_prompt_readiness_timeout" } as const;
+			await recordTaskMessageTerminalDeliveryOutcome({
+				ledgerPath,
+				taskId,
+				idempotencyKey: resultId,
+				status: readinessTimeout.status,
+				failureReason: readinessTimeout.reason,
+				nowIso: new Date().toISOString(),
+			});
+			if (scenario !== "queue_receipt_missing") await handle.settle(readinessTimeout);
+			await journal.recordRequestIntent(null);
+			await journal.recordRequestInvoked();
+			const acceptance = {
+				clientUserMessageId,
+				nativeSessionId,
+				nativeTurnId: "confirmed-turn",
+				nativeUserMessageId: "confirmed-message",
+			};
+			await journal.recordAcceptance(acceptance);
+			const snapshot = await reconcileManagedTaskPromptDeliveryReceipts(
+				workspaceId,
+				await readWorkspaceQueuedTaskPromptDeliverySnapshot(workspaceId),
+			);
+			const recovered = snapshot.entriesByTaskId[entry.taskId][0];
+			if (scenario === "different_native_session") {
+				expect(recovered.deliveryState).toBe("settled_failed");
+				return;
+			}
+			expect(recovered).toMatchObject({
+				queueEntryId: resultId,
+				deliveryState: "settled_delivered",
+				managedDelivery: {
+					terminalDeliveryReceipt: {
+						status: "delivered_and_submit_confirmed",
+						codexNativePromptDeliveryEvidence: acceptance,
+					},
+					previousUnconfirmedTerminalDeliveryReceipt: readinessTimeout,
+				},
+			});
+		},
+	);
+
 	it("保留原生投递失败的具体诊断，不只保存通用原因码", async () => {
 		const { handle } = await beginManagedTaskPromptDelivery({
 			workspaceId: "workspace",

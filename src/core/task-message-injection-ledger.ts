@@ -409,6 +409,34 @@ export async function recordTaskMessageTerminalDeliveryOutcome(input: {
 				return { result: { outcome: "unknown_idempotency_key" } };
 			}
 			if (isTaskMessageTerminalDeliveryStatusSettled(existing.terminal_delivery_status)) {
+				const operation = existing.codex_native_prompt_delivery_operation;
+				if (
+					existing.source === "owned_command_execution_result" &&
+					existing.terminal_delivery_status === "delivery_failed" &&
+					existing.terminal_delivery_failure_reason !== "terminal_prompt_readiness_timeout" &&
+					existing.terminal_delivery_failure_reason !== "cancelled_before_delivery" &&
+					input.status === "delivery_failed" &&
+					input.failureReason === "terminal_prompt_readiness_timeout" &&
+					operation?.sendPhase === "registered" &&
+					operation.actualSendAttemptCount === 0 &&
+					!operation.historicalAcceptanceEvidence &&
+					!operation.firstTerminalPromptReadinessTimeout
+				) {
+					const record: TaskMessageInjectionRecord = {
+						...existing,
+						codex_native_prompt_delivery_operation: {
+							...operation,
+							firstTerminalPromptReadinessTimeout: {
+								observedAtIso: input.nowIso,
+								failureNote: input.failureDetail,
+							},
+						},
+					};
+					return {
+						records: records.map((item) => (item === existing ? record : item)),
+						result: { outcome: "already_settled", record },
+					};
+				}
 				return { result: { outcome: "already_settled", record: existing } };
 			}
 			const nextRecord = applyTerminalDeliveryOutcomeToRecord(existing, {

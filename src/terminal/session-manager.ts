@@ -22,6 +22,7 @@ import {
 } from "./automatic-agent-failure-continuation-coordinator";
 import {
 	buildAutomaticAgentFailureContinuationPrompt,
+	classifyCodexNativeTurnRetryableFailureReason,
 	deliverAutomaticAgentFailureContinuationNativePrompt,
 } from "./automatic-agent-failure-continuation-native-delivery";
 import {
@@ -127,6 +128,7 @@ import {
 	buildCodexNativeAgentTurnExecutionSemanticGuard,
 	type CodexNativeAgentTurnExecutionObservation,
 	canCorrectCodexReviewMisclassificationForSameNativeTurn,
+	isCodexNativeTerminalOutcomeForCurrentTurn,
 	isCodexReviewMisclassificationNativeReconciliationCandidate,
 	isCurrentCodexNativeAgentTurnExecutionObservation,
 } from "../core/codex-native-agent-turn-execution-observation";
@@ -273,6 +275,7 @@ import {
 	type OutputReactionEngine,
 } from "./output-reactions";
 import { ensureNetworkInterruptionResumeInstructionsFile } from "./output-reactions/network-interruption-continuation-instructions";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "./pty-agent-process-confirmed-not-spawned-error";
 import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
 import type { StashTaskTerminalInputBoxIntoPromptLibraryRequest } from "./stash-task-terminal-input-box-into-prompt-library";
@@ -593,6 +596,7 @@ interface TaskChatInputDeliveryAttemptPlan {
 	requiresCodexStartupPromptReady: boolean;
 	// 调用方的领域核验；每次实际粘贴或提交前重读，不缓存入队时结论。
 	validateBeforeTerminalWrite: TaskChatDeliveryWriteValidator | null;
+	owningCommandExecutionId: string | null;
 	// 争用策略：人不在场时是否允许自动暂存抢占（计划里的 auto / never_preempt 两档）。
 	// 在受理时捕获而不是每次重探重读配置：一条投递最多活 ~196s，用同一份策略走完全程，
 	// 好过让它在半途因为用户改了设置而换一套语义。
@@ -1137,6 +1141,8 @@ export function reconstructTaskSessionSummaryFromPersistedRecordWithoutLiveAgent
 		{
 			...summary,
 			awaitingDispatchedBackgroundWork: null,
+			parkedMainAgentTurnCompletion: null,
+			codexNativeTurnVerificationPending: null,
 			// 投递挂起可见性同理，且更窄：它是「活 active 上此刻真有一条投递在等这个输入框」的派生读数，
 			// 登记本体（单飞槽、重探定时器、回执 observer）全挂在 active 上，而重建条目恒 active: null，
 			// 按构造不可能有任何在途投递。但它照样会上盘：完整 summary 经 listSummaries() 进 saveState /
@@ -1473,6 +1479,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private readonly entries = new Map<string, SessionEntry>();
+	private readonly explicitStopGenerationBySessionEntry = new WeakMap<SessionEntry, number>();
 	private readonly nativeInputReadyStartupDiagnosticContextByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		{ workspaceId: string; runtimeSessionIncarnationId: string }
@@ -1498,6 +1505,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		}
 	>();
 	private readonly summaryListeners = new Set<(summary: RuntimeTaskSessionSummary) => void>();
+	private readonly terminalProcessesWithStopRequested = new WeakSet<ActiveProcessState>();
 	private codexReviewMisclassificationPersistenceHandler: CodexReviewMisclassificationPersistenceHandler | null = null;
 	private readonly stallThresholdMs = readStallThresholdMs();
 	private stallScanInterval: NodeJS.Timeout | null = null;
@@ -1979,6 +1987,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		taskId: string,
 		reason: "connection" | "model_capacity",
 		nativeTurnId: string | null = null,
+		observedTargetIsStillCurrent?: () => boolean,
 	): Promise<boolean> {
 		const entry = this.entries.get(taskId);
 		if (!entry?.active || this.automaticFailureContinuationPendingInspection.has(taskId)) return false;
@@ -1992,7 +2001,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (
 				this.entries.get(taskId) !== entry ||
 				entry.active !== active ||
-				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity
+				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity ||
+				observedTargetIsStillCurrent?.() === false
 			)
 				return false;
 			if (eligibility && !eligibility.eligible) return false;
@@ -2014,7 +2024,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 			if (
 				entry.active !== active ||
 				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity ||
-				entry.suppressAutoRestartOnExit
+				entry.suppressAutoRestartOnExit ||
+				observedTargetIsStillCurrent?.() === false
 			)
 				return false;
 			const coordinator = this.getAutomaticFailureContinuationCoordinator(taskId);
@@ -2040,7 +2051,8 @@ export class TerminalSessionManager implements TerminalSessionService {
 				this.entries.get(taskId) !== entry ||
 				entry.active !== active ||
 				entry.suppressAutoRestartOnExit ||
-				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity
+				this.automaticFailureContinuationFaultIdentity(entry.summary) !== faultIdentity ||
+				observedTargetIsStillCurrent?.() === false
 			)
 				return false;
 			const switchStillEnabled =
@@ -3116,6 +3128,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			text,
 			codexNativeClientUserMessageId: randomUUID(),
 			codexNativeDeliveryLedgerBinding: options?.codexNativeDeliveryLedgerBinding ?? null,
+			owningCommandExecutionId: options?.owningCommandExecutionId ?? null,
 			deadlineAt,
 			generation,
 			deferWhileUserTurn,
@@ -3513,6 +3526,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		};
 		const capturedHumanInputAt = active.lastUserInputAt;
 		const receipt = active.programmaticDeliveryReceipt;
+		const ownedResultWriteValidator = plan.owningCommandExecutionId ? plan.validateBeforeTerminalWrite : null;
+		const composerStillAllowsSubmission = () =>
+			active.lastUserInputAt === capturedHumanInputAt &&
+			!this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId);
+		let ownedResultWriteRejection: string | undefined;
 		const sender =
 			this.terminalSessionManagerOptions.deliverCodexNativePromptWithoutChangingComposer ??
 			deliverCodexNativePromptWithoutChangingComposer;
@@ -3533,13 +3551,9 @@ export class TerminalSessionManager implements TerminalSessionService {
 					now() < plan.deadlineAt
 				)
 					await new Promise<void>((resolve) => setTimeout(resolve, 50));
+				if (!bindingStillMatches() || !composerStillAllowsSubmission()) return false;
 				if (
-					!bindingStillMatches() ||
-					active.lastUserInputAt !== capturedHumanInputAt ||
-					this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
-				)
-					return false;
-				if (
+					!ownedResultWriteValidator &&
 					plan.validateBeforeTerminalWrite &&
 					!(await this.validateProgrammaticDeliveryImmediatelyBeforeTerminalWrite(
 						plan.taskId,
@@ -3549,12 +3563,23 @@ export class TerminalSessionManager implements TerminalSessionService {
 					))
 				)
 					return false;
-				return (
-					bindingStillMatches() &&
-					active.lastUserInputAt === capturedHumanInputAt &&
-					!this.isCodexDraftStashBlockingProgrammaticDelivery(plan.taskId)
-				);
+				return bindingStillMatches() && composerStillAllowsSubmission();
 			},
+			...(ownedResultWriteValidator
+				? {
+						validateImmediatelyBeforeNativeTurnStartRequest: async () => {
+							if (!bindingStillMatches() || !composerStillAllowsSubmission()) return false;
+							try {
+								await ownedResultWriteValidator("before_first_transport_write");
+								return true;
+							} catch (error) {
+								ownedResultWriteRejection = error instanceof Error ? error.message : String(error);
+								return false;
+							}
+						},
+						mayInvokeNativeTurnStartRequest: composerStillAllowsSubmission,
+					}
+				: {}),
 			onRequestAttempted: async (_observation) => {
 				if (!bindingStillMatches()) return;
 				if (receipt) {
@@ -3571,6 +3596,17 @@ export class TerminalSessionManager implements TerminalSessionService {
 			return true;
 		}
 		if (result.status === "unavailable") return false;
+		if (result.status === "cancelled" && ownedResultWriteRejection !== undefined) {
+			settleActiveProgrammaticDelivery(
+				active,
+				"delivery_failed",
+				"cancelled_before_delivery",
+				undefined,
+				ownedResultWriteRejection,
+			);
+			this.publishTaskChatInputDeliveryContentionVisibility(plan.taskId, null);
+			return true;
+		}
 		if (result.status === "confirmed") {
 			clearResumeSubstantiveGuard(active);
 			this.disarmRestorationContinuationGuard(plan.taskId);
@@ -3906,7 +3942,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 						? "cancelled_before_delivery"
 						: "submit_confirmation_budget_exhausted",
 				undefined,
-				error instanceof NativeIndependentUserTurnDeliveryError ? error.message : undefined,
+				error instanceof NativeIndependentUserTurnDeliveryError || originalReceipt?.phase === "awaiting_readiness"
+					? error instanceof Error
+						? error.message
+						: String(error)
+					: undefined,
 			);
 			this.publishTaskChatInputDeliveryContentionVisibility(taskId, null);
 			logTuiFreezeWarning(`[tui-freeze] terminal-write-validation-rejected taskId=${taskId} error=${String(error)}`);
@@ -4490,6 +4530,24 @@ export class TerminalSessionManager implements TerminalSessionService {
 		);
 	}
 
+	async observeCodexProgrammaticWriteReadinessForOwnedResultRecovery(taskId: string): Promise<{
+		terminalPromptReady: boolean;
+		terminalComposerClearForProgrammaticDelivery: boolean;
+	} | null> {
+		const entry = this.entries.get(taskId);
+		const active = entry?.active;
+		if (!entry || !active || entry.summary.agentId !== "codex") return null;
+		const readiness = await this.resolveInteractivePromptReadiness(entry, true);
+		const contention = await this.resolveProgrammaticDeliveryInputBoxContentionForTask(taskId, active);
+		return this.entries.get(taskId)?.active === active
+			? {
+					terminalPromptReady: readiness !== null && active.deferredStartupPromptText === null,
+					terminalComposerClearForProgrammaticDelivery:
+						contention?.verdict === "input_box_clear_for_programmatic_delivery",
+				}
+			: null;
+	}
+
 	// 提示符就绪判定（多通道）：① 快路径——尚未建模输入框结构的 agent，在输出反应扫描缓冲在线时复用同步的
 	// isAtInteractivePromptForReaction（便宜、可测）；② 结构判定——读镜像 buffer 行判输入框形状；
 	// ③ 兜底——永远在线的全屏镜像快照（即便反应引擎关闭，也已捕获 Stop 后的最终提示符渲染），
@@ -4669,6 +4727,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 			: previousPark?.owningCommandExecutionIds;
 		const sinceMs = entry.summary.awaitingDispatchedBackgroundWork?.sinceMs ?? now();
 		const summary = updateSummary(entry, {
+			...(!previousPark ? { parkedMainAgentTurnCompletion: null } : {}),
 			awaitingDispatchedBackgroundWork: {
 				sinceMs,
 				...((!options.owningCommandExecutionId && previousPark?.owningCommandExecutionIds?.length) ||
@@ -6206,8 +6265,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 到达时刻在闸门**之外**取，才看得见排队并发；闸门时刻在闸门**之内**取，才判得出互斥是否失效。
 		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
+		const explicitStopGenerationAtStart = this.explicitStopGenerationBySessionEntry.get(entry) ?? 0;
 		const isTaskSessionStartCancelled = () =>
 			isTaskSessionStartStillRequested?.() === false ||
+			(request.beforeAgentProcessLaunch !== undefined &&
+				explicitStopGenerationAtStart !== (this.explicitStopGenerationBySessionEntry.get(entry) ?? 0)) ||
 			(request.automaticFailureContinuationEpisodeId !== undefined &&
 				(this.taskSessionNativeConversationIdentityRecoveryStoppedForRuntimeShutdown ||
 					entry.summary.automaticAgentFailureContinuation?.episodeId !==
@@ -6620,14 +6682,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				});
 			throwIfTaskSessionStartWasCancelled();
 			const beforeAgentProcessLaunch = request.beforeAgentProcessLaunch
-				? async () =>
+				? async () => {
 						await request.beforeAgentProcessLaunch?.({
 							...cloneSummary(entry.summary),
+							agentId: request.agentId,
 							runtimeSessionIncarnationId,
 							workspacePath: request.cwd,
-						})
+						});
+						throwIfTaskSessionStartWasCancelled();
+					}
 				: undefined;
 			if (!hostedTerminalPtyProcessSpawner) await beforeAgentProcessLaunch?.();
+			throwIfTaskSessionStartWasCancelled();
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
@@ -6702,7 +6768,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 				terminalStateMirror,
 				spawnFailureMessage,
 			);
+			if (error instanceof PtyAgentProcessConfirmedNotSpawnedError)
+				throw new PtyAgentProcessConfirmedNotSpawnedError(spawnFailureMessage, { cause: error });
 			throw new Error(spawnFailureMessage);
+		}
+		if (isTaskSessionStartCancelled()) {
+			session.stop();
+			terminalStateMirror.dispose();
+			if (managedArgumentStartupRegistration) {
+				this.managedArgumentStartupDeliveryByTaskId.delete(request.taskId);
+				settleManagedTaskPromptDeliveryWithoutBlocking(managedArgumentStartupRegistration.handle, {
+					status: "delivery_failed",
+					reason: "cancelled_before_delivery",
+				});
+			}
+			void launch.cleanup?.().catch(() => {});
+			return cloneSummary(entry.summary);
 		}
 
 		// 输出反应框架：仅当「连接中断自动续跑」开关开启、且有 reaction 适用于该 agent
@@ -8563,6 +8644,20 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const entry = this.entries.get(taskId);
 		if (
 			entry?.active &&
+			(entry.summary.parkedMainAgentTurnCompletion ||
+				entry.summary.codexNativeTurnVerificationPending?.reason === "native_failure_reason_unavailable") &&
+			(observation.executionStatus === "running" || observation.executionStatus === "waiting_for_user") &&
+			isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation)
+		) {
+			this.emitSummary(
+				updateSummary(entry, {
+					parkedMainAgentTurnCompletion: null,
+					codexNativeTurnVerificationPending: null,
+				}),
+			);
+		}
+		if (
+			entry?.active &&
 			isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) &&
 			canCorrectCodexReviewMisclassificationForSameNativeTurn(entry.summary, observation) &&
 			this.codexReviewMisclassificationPersistenceHandler
@@ -8573,6 +8668,204 @@ export class TerminalSessionManager implements TerminalSessionService {
 				applyCorrectionAfterPersistence,
 			);
 		return applyCorrectionAfterPersistence();
+	}
+
+	recordCodexNativeTurnVerificationPending(
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		nextCheckAtMs: number | null,
+		reason: NonNullable<
+			RuntimeTaskSessionSummary["codexNativeTurnVerificationPending"]
+		>["reason"] = "native_execution_unavailable",
+	): void {
+		const entry = this.entries.get(summaryBeforeRead.taskId);
+		if (
+			!entry?.active ||
+			buildCodexNativeAgentTurnExecutionSemanticGuard(entry.summary) !==
+				buildCodexNativeAgentTurnExecutionSemanticGuard(summaryBeforeRead)
+		)
+			return;
+		const previous = entry.summary.codexNativeTurnVerificationPending;
+		const incarnationId = entry.summary.runtimeSessionIncarnationId;
+		const turnSequence = entry.summary.agentResponseGenerationTurnSequence ?? 0;
+		if (!incarnationId) return;
+		if (nextCheckAtMs === null) {
+			if (previous?.reason === reason)
+				this.emitSummary(updateSummary(entry, { codexNativeTurnVerificationPending: null }));
+			return;
+		}
+		const sameTurn =
+			previous?.runtimeSessionIncarnationId === incarnationId &&
+			previous.turnSequence === turnSequence &&
+			previous.firstObservedAtMs >= (entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0);
+		if (sameTurn && previous.reason === reason && previous.nextCheckAtMs > now()) return;
+		this.emitSummary(
+			updateSummary(entry, {
+				codexNativeTurnVerificationPending: {
+					reason,
+					runtimeSessionIncarnationId: incarnationId,
+					turnSequence,
+					firstObservedAtMs: sameTurn && previous.reason === reason ? previous.firstObservedAtMs : now(),
+					nextCheckAtMs,
+				},
+			}),
+		);
+	}
+
+	recordOwnedParkedMainAgentTurnCompletion(summaryBeforeRead: RuntimeTaskSessionSummary, observedAtMs: number): void {
+		const entry = this.entries.get(summaryBeforeRead.taskId);
+		const incarnationId = summaryBeforeRead.runtimeSessionIncarnationId;
+		const turnSequence = summaryBeforeRead.agentResponseGenerationTurnSequence ?? 0;
+		if (
+			!entry?.active ||
+			!incarnationId ||
+			!entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds?.length ||
+			buildCodexNativeAgentTurnExecutionSemanticGuard(summaryBeforeRead) !==
+				buildCodexNativeAgentTurnExecutionSemanticGuard(entry.summary) ||
+			observedAtMs <
+				Math.max(
+					entry.summary.startedAt ?? 0,
+					entry.summary.agentResponseGenerationTurnStarted?.startedAt ?? 0,
+					entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0,
+				)
+		)
+			return;
+		const previous = entry.summary.parkedMainAgentTurnCompletion;
+		if (
+			previous?.runtimeSessionIncarnationId === incarnationId &&
+			previous.turnSequence === turnSequence &&
+			previous.observedAtMs >= (entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0)
+		)
+			return;
+		this.emitSummary(
+			updateSummary(entry, {
+				parkedMainAgentTurnCompletion: { runtimeSessionIncarnationId: incarnationId, turnSequence, observedAtMs },
+			}),
+		);
+	}
+
+	async reconcileCodexNativeTurnTerminalOutcome(
+		taskId: string,
+		summaryBeforeRead: RuntimeTaskSessionSummary,
+		observation: CodexNativeAgentTurnExecutionObservation,
+	): Promise<void> {
+		const entry = this.entries.get(taskId);
+		if (
+			!entry?.active ||
+			this.terminalProcessesWithStopRequested.has(entry.active) ||
+			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation) ||
+			!isCodexNativeTerminalOutcomeForCurrentTurn(entry.summary, observation) ||
+			entry.summary.taskConversationSessionMetadata?.taskAutomationSuspendedForMainSessionHandover ||
+			this.hasPendingProgrammaticTaskChatInputDelivery(taskId)
+		)
+			return;
+		const facets = resolveSessionFacets(entry.summary);
+		if (facets.liveness !== "live") return;
+		const hasBackgroundWait = isParkedAwaitingDispatchedBackgroundWork(entry.summary);
+		if (hasBackgroundWait && observation.nativeTurnStatus !== "failed") {
+			if (observation.nativeTurnStatus === "completed" || observation.nativeTurnStatus === "interrupted")
+				this.recordOwnedParkedMainAgentTurnCompletion(
+					summaryBeforeRead,
+					observation.nativeTurnFinishedAtMs ?? observation.observedAtMs,
+				);
+			return;
+		}
+		if (entry.suppressAutoRestartOnExit && !hasBackgroundWait) return;
+		const coordinator = this.automaticFailureContinuationCoordinators.get(taskId);
+		const episode = coordinator?.snapshot();
+		if (observation.nativeTurnStatus === "completed") {
+			// 已发送的恢复请求仍须按其投递身份核对接受。
+			if (
+				episode &&
+				isAutomaticAgentFailureContinuationActive(episode) &&
+				!episode.activeDeliveryId &&
+				observation.nativeTurnId === episode.faultNativeTurnId
+			)
+				coordinator?.finishRecovered("native_turn_completed");
+			else if (
+				!isAutomaticAgentFailureContinuationActive(episode) &&
+				facets.turnOwner === "agent" &&
+				observation.source === "persisted_codex_turn_completion" &&
+				observation.nativeTurnFinishedAtMs !== undefined
+			)
+				this.transitionToReview(taskId, "idle_stall", undefined, {
+					domainEventObservedAtEpochMs: observation.nativeTurnFinishedAtMs,
+				});
+			return;
+		}
+		if (
+			observation.nativeTurnStatus !== "failed" ||
+			(facets.turnOwner !== "agent" &&
+				!isCodexReviewMisclassificationNativeReconciliationCandidate(entry.summary)) ||
+			this.automaticFailureContinuationPendingInspection.has(taskId)
+		)
+			return;
+		if (
+			episode &&
+			isAutomaticAgentFailureContinuationActive(episode) &&
+			(episode.faultNativeTurnId === observation.nativeTurnId || episode.activeDeliveryId)
+		)
+			return;
+		if (!observation.nativeTurnErrorMessage) {
+			const pending = entry.summary.codexNativeTurnVerificationPending;
+			if (
+				pending?.reason !== "native_failure_reason_unavailable" ||
+				pending.runtimeSessionIncarnationId !== entry.summary.runtimeSessionIncarnationId ||
+				pending.turnSequence !== (entry.summary.agentResponseGenerationTurnSequence ?? 0) ||
+				pending.firstObservedAtMs <
+					(entry.summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0) ||
+				now() - pending.firstObservedAtMs < 60_000
+			) {
+				this.recordCodexNativeTurnVerificationPending(
+					summaryBeforeRead,
+					now() + 15_000,
+					"native_failure_reason_unavailable",
+				);
+				return;
+			}
+		} else {
+			this.recordCodexNativeTurnVerificationPending(summaryBeforeRead, null, "native_failure_reason_unavailable");
+		}
+		const reason = classifyCodexNativeTurnRetryableFailureReason(observation.nativeTurnErrorMessage ?? "");
+		const episodeOwnsObservedFailure =
+			episode &&
+			(episode.faultNativeTurnId === observation.nativeTurnId ||
+				episode.faultTurnIdentity === this.automaticFailureContinuationFaultIdentity(entry.summary));
+		// park 保留所属任务的投递门禁，原生失败仍须作为失败交棒。
+		if (reason && !hasBackgroundWait && !episodeOwnsObservedFailure) {
+			await this.beginAutomaticFailureContinuation(
+				taskId,
+				reason,
+				observation.nativeTurnId,
+				() =>
+					this.entries.get(taskId) === entry &&
+					!this.hasPendingProgrammaticTaskChatInputDelivery(taskId) &&
+					isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation),
+			);
+			if (
+				isAutomaticAgentFailureContinuationActive(
+					this.automaticFailureContinuationCoordinators.get(taskId)?.snapshot(),
+				)
+			)
+				return;
+		}
+		if (
+			this.entries.get(taskId) !== entry ||
+			!entry.active ||
+			this.terminalProcessesWithStopRequested.has(entry.active) ||
+			(entry.suppressAutoRestartOnExit && !hasBackgroundWait) ||
+			!isCurrentCodexNativeAgentTurnExecutionObservation(summaryBeforeRead, entry.summary, observation)
+		)
+			return;
+		const summary = updateSummary(entry, {
+			turnOwner: "user",
+			liveness: "live",
+			userTurnKind: "error",
+			reviewReason: "error",
+			codexNativeTurnVerificationPending: null,
+			parkedMainAgentTurnCompletion: null,
+		});
+		for (const listener of entry.listeners.values()) listener.onState?.(cloneSummary(summary));
+		this.emitSummary(summary);
 	}
 
 	private applyCodexReviewMisclassificationCorrection(
@@ -9903,6 +10196,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		this.explicitStopGenerationBySessionEntry.set(
+			entry,
+			(this.explicitStopGenerationBySessionEntry.get(entry) ?? 0) + 1,
+		);
 		this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，
@@ -9923,6 +10220,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearTaskChatInputDeliveryTimer(entry.active);
 		clearSubmitConfirmTimer(entry.active);
 		discardPendingOutputAnalysis(entry.active);
+		this.terminalProcessesWithStopRequested.add(entry.active);
 		entry.active.session.stop();
 		if (cleanupFn) {
 			cleanupFn().catch(() => {
@@ -9983,6 +10281,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		clearTaskChatInputDeliveryTimer(active);
 		clearSubmitConfirmTimer(active);
 		discardPendingOutputAnalysis(active);
+		this.terminalProcessesWithStopRequested.add(active);
 		active.session.stop();
 		const gracefulDeadline = now() + gracefulTimeoutMs;
 		while (now() < gracefulDeadline) {
@@ -10494,6 +10793,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 而它之后进程就要退出了，没有任何后续路径能补上这一跑。
 		const interruptedSessionCleanup = entry.active.onSessionCleanup;
 		entry.active.onSessionCleanup = null;
+		this.terminalProcessesWithStopRequested.add(entry.active);
 		entry.active.session.stop({ interrupted: true });
 		if (interruptedSessionCleanup) {
 			interruptedSessionCleanup().catch(() => {

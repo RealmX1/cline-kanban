@@ -245,13 +245,25 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 	const nativeActivityObserver = createNativeAgentConversationActivityObserver({
 		cooldownMs: 1_000,
 		onCodexNativeAgentTurnExecution: async (observation, summaryBeforeRead) => {
-			await terminalManagersByWorkspaceId
-				.get(observation.workspaceId)
-				?.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			if (observation.executionStatus === "finished") {
+				await manager?.reconcileCodexNativeTurnTerminalOutcome(
 					observation.conversationSessionId,
 					summaryBeforeRead,
 					observation,
 				);
+			} else {
+				await manager?.reconcileCodexReviewMisclassificationWithNativeAgentTurnExecution(
+					observation.conversationSessionId,
+					summaryBeforeRead,
+					observation,
+				);
+			}
+		},
+		onCodexNativeTurnVerificationPending: (summaryBeforeRead, workspaceId, nextCheckAtMs) => {
+			terminalManagersByWorkspaceId
+				.get(workspaceId)
+				?.recordCodexNativeTurnVerificationPending?.(summaryBeforeRead, nextCheckAtMs);
 		},
 		onCodexNativeDirectInputReadiness: async (observation, summaryBeforeRead) => {
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
@@ -762,6 +774,8 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				value.startedAt,
 				value.pid,
 				isParkedAwaitingDispatchedBackgroundWork(value),
+				value.parkedMainAgentTurnCompletion,
+				value.codexNativeTurnVerificationPending,
 				value.automaticAgentFailureContinuation?.phase,
 			]);
 		const sessionStatusChanged =

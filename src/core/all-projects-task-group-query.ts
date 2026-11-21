@@ -10,6 +10,7 @@ export const ALL_PROJECTS_TASK_QUERY_GROUPS = [
 	"pinned",
 	"running",
 	"waiting_automatic_recovery",
+	"waiting_owned_background_work",
 	"cache_warm_awaiting_user",
 	"recent",
 	"shelved",
@@ -47,6 +48,7 @@ export function buildAllProjectsTaskGroupQueryResult(
 		pinned: sections.pinnedEntries,
 		running: sections.runningEntries,
 		waiting_automatic_recovery: sections.automaticRecoveryWaitingEntries,
+		waiting_owned_background_work: sections.ownedBackgroundWorkWaitingEntries,
 		cache_warm_awaiting_user: sections.promptCacheWarmAwaitingUserEntries,
 		recent: sections.remainingSection.entries,
 	};

@@ -29,6 +29,17 @@ import { createTaskCardActionPerTaskCommandSerializer } from "../../src/trpc/tas
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { TASK_MUTATION_INTENT_FOR_TEST_FIXTURE } from "../utilities/task-mutation-intent-for-test-fixture";
 
+// 本组验证既有卡片动作；开启复核的真实持久化与恢复另有隔离回归。
+vi.mock("../../src/backlog-task-start-readiness/backlog-task-start-readiness-service", () => ({
+	prepareBacklogTaskStartReadiness: async () => ({ canStart: true, record: null, report: null }),
+	assertBacklogTaskReadinessReportStillCurrent: vi.fn(),
+	observeBacklogTaskInitialLaunchReceipt: () => false,
+}));
+vi.mock("../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store", () => ({
+	readBacklogTaskStartReadinessOperation: async () => null,
+	writeBacklogTaskStartReadinessOperation: vi.fn(),
+}));
+
 // taskCardAction.* 走真实 tRPC 路由（输入/输出 zod 校验）、真实 board 漏斗与真实关系账本捕获，验证两件事：
 //   1) 同一个服务端动作按请求来源记账：带页面 nonce 的请求按浏览器声明的发起方记成「用户手势」/「浏览器端自动流转」，
 //      带 CLI 声明头的请求记成 CLI 行动者（带了发起方也不采信），意图名分别是 web_ui_task_card_action_* 与 CLI 旧名；
