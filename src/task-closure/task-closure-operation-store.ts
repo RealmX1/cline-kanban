@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readdir, readFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import {
 import type { TaskClosureRecord } from "../core/task-closure-contract";
 import {
 	taskClosureArchiveManifestSchema,
+	taskClosureAutomaticRecoveryStateSchema,
 	taskClosureOperationProgressSchema,
 	taskClosureQualifiedTaskReferenceSchema,
 	taskClosureRecordSchema,
@@ -18,14 +19,25 @@ import {
 import { lockedFileSystem } from "../fs/locked-file-system";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
 import type { TaskMutationIntentWithResolvedActor } from "../state/workspace-board-persistence-funnel-task-mutation-event-capture-port";
+import { adoptTaskClosureOperationStorageProtocolVersion } from "./task-closure-storage-protocol-compatibility";
 
 export const taskClosureOperationSchema = z.object({
-	schemaVersion: z.literal(1),
+	schemaVersion: z.union([z.literal(1), z.literal(2)]),
 	preservationPurpose: z.enum(["close_task", "permanently_delete_task"]).optional(),
 	taskIdentity: taskClosureQualifiedTaskReferenceSchema,
 	workspacePath: z.string(),
 	sourceWorktreePath: z.string().nullable(),
 	processIdsAwaitingExit: z.array(z.number().int().positive()).optional(),
+	ownedProcessIdentitiesAwaitingExit: z
+		.array(
+			z.object({
+				pid: z.number().int().positive(),
+				startAndCommand: z.string(),
+				nativeProcessGenerationIdentity: z.string().optional(),
+			}),
+		)
+		.optional(),
+	systemBootIdentityAtProcessCapture: z.string().nullable().optional(),
 	sourceBoardColumnId: z.enum(["backlog", "in_progress", "review", "validation", "trash"]),
 	sourceTaskUpdatedAtEpochMs: z.number(),
 	request: runtimeTaskCardActionMoveIntoDoneRequestSchema,
@@ -41,6 +53,14 @@ export const taskClosureOperationSchema = z.object({
 	closureRecord: taskClosureRecordSchema.nullable(),
 	lastAttemptRuntimeInstanceId: z.string().nullable(),
 	lastRecoveryProbeFingerprint: z.string().nullable(),
+	archiveStorageLimits: z
+		.object({
+			maximumArchivePayloadBytes: z.number().nonnegative(),
+			maximumRestorationWorkspaceBytes: z.number().nonnegative(),
+			minimumRemainingVolumeStorageBytes: z.number().nonnegative(),
+		})
+		.optional(),
+	archiveRepairManifest: taskClosureArchiveManifestSchema.optional(),
 	reopening: z
 		.object({
 			request: runtimeTaskCardActionRestoreFromDoneRequestSchema,
@@ -56,6 +76,9 @@ export const taskClosureOperationSchema = z.object({
 			startedAtEpochMs: z.number(),
 			sourceTaskUpdatedAtEpochMs: z.number(),
 			lastError: z.string().nullable(),
+			automaticRecovery: taskClosureAutomaticRecoveryStateSchema.optional(),
+			explicitStopMarkerObservationAtRequest: z.string().optional(),
+			sessionResumeAuthorizationApplied: z.boolean().optional(),
 		})
 		.optional(),
 });
@@ -79,9 +102,10 @@ export async function ensurePrivateTaskClosureArtifactDirectory(
 	if (requestId) directories.push(taskClosureOperationDirectory(identity, requestId));
 	for (const directory of directories) {
 		await mkdir(directory, { recursive: true, mode: 0o700 });
+		if ((await lstat(directory)).isSymbolicLink()) throw new Error("结案私有目录变成符号链接，未继续写入。");
 		await chmod(directory, 0o700);
 	}
-	return directories[directories.length - 1];
+	return requestId ? taskClosureOperationDirectory(identity, requestId) : taskClosureTaskDirectory(identity);
 }
 export async function readTaskClosureOperation(identity: TaskClosureOperation["taskIdentity"], requestId: string) {
 	try {
@@ -95,6 +119,7 @@ export async function readTaskClosureOperation(identity: TaskClosureOperation["t
 }
 export async function writeTaskClosureOperation(operation: TaskClosureOperation) {
 	await ensurePrivateTaskClosureArtifactDirectory(operation.taskIdentity, operation.progress.closureRequestId);
+	if (operation.schemaVersion === 2) await adoptTaskClosureOperationStorageProtocolVersion();
 	await lockedFileSystem.writeTextFileAtomic(
 		join(
 			taskClosureOperationDirectory(operation.taskIdentity, operation.progress.closureRequestId),
@@ -103,6 +128,118 @@ export async function writeTaskClosureOperation(operation: TaskClosureOperation)
 		JSON.stringify(operation),
 		{ lock: null, durable: true, fileMode: 0o600 },
 	);
+}
+
+export function activeTaskClosureLifecycleRequestId(operation: TaskClosureOperation) {
+	return operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase)
+		? (operation.reopening.reopeningRequestId ?? operation.progress.closureRequestId)
+		: operation.progress.closureRequestId;
+}
+
+function cancellationRequestPath(operation: TaskClosureOperation, requestId: string) {
+	z.string().uuid().parse(requestId);
+	return join(
+		taskClosureOperationDirectory(operation.taskIdentity, operation.progress.closureRequestId),
+		`cancel-lifecycle-request-${requestId}.json`,
+	);
+}
+
+/** 撤销先独立持久化，不等待复制持有的生命周期锁；该标记只追加，不能复活旧请求。 */
+export async function requestTaskClosureLifecycleCancellation(operation: TaskClosureOperation) {
+	const requestId = activeTaskClosureLifecycleRequestId(operation);
+	await ensurePrivateTaskClosureArtifactDirectory(operation.taskIdentity, operation.progress.closureRequestId);
+	await lockedFileSystem.writeTextFileAtomic(
+		cancellationRequestPath(operation, requestId),
+		JSON.stringify({
+			taskIdentity: operation.taskIdentity,
+			requestId,
+		}),
+		{ durable: true, fileMode: 0o600 },
+	);
+}
+
+/** 最终看板提交与独立撤销凭据共用短锁，明确二者的持久提交顺序。 */
+export async function withTaskClosureLifecycleCancellationGuards<T>(
+	operations: TaskClosureOperation[],
+	action: () => Promise<T>,
+) {
+	return lockedFileSystem.withLocks(
+		operations.map((operation) => ({
+			path: cancellationRequestPath(operation, activeTaskClosureLifecycleRequestId(operation)),
+		})),
+		async () => {
+			for (const operation of operations) await assertTaskClosureLifecycleNotCancelled(operation);
+			return action();
+		},
+	);
+}
+
+export async function isTaskClosureLifecycleCancellationRequested(operation: TaskClosureOperation) {
+	try {
+		const requestId = activeTaskClosureLifecycleRequestId(operation);
+		const record = z
+			.object({ requestId: z.string().uuid(), taskIdentity: taskClosureQualifiedTaskReferenceSchema })
+			.parse(JSON.parse(await readFile(cancellationRequestPath(operation, requestId), "utf8")));
+		if (record.requestId !== requestId || !isDeepStrictEqual(record.taskIdentity, operation.taskIdentity))
+			throw new Error("结案撤销记录归属不一致，保留工作树。");
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+		throw error;
+	}
+}
+
+export async function assertTaskClosureLifecycleNotCancelled(operation: TaskClosureOperation) {
+	if (await isTaskClosureLifecycleCancellationRequested(operation))
+		throw new Error("任务生命周期请求已取消，未继续执行。");
+}
+
+export function taskClosureVerifiedArchivePublicationReceiptPath(
+	operation: TaskClosureOperation,
+	isDamagedArchiveReplacement = false,
+) {
+	return join(
+		taskClosureOperationDirectory(operation.taskIdentity, operation.progress.closureRequestId),
+		isDamagedArchiveReplacement
+			? "verified-replacement-git-working-state-archive-manifest.json"
+			: "verified-git-working-state-archive-manifest.json",
+	);
+}
+
+export async function writeTaskClosureAutomaticAttemptReceipt(
+	operation: TaskClosureOperation,
+	event: "started" | "completed" | "failed",
+	details: unknown = null,
+) {
+	const state =
+		operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase)
+			? operation.reopening.automaticRecovery
+			: operation.progress.automaticRecovery;
+	if (!state?.pendingSideEffect) return;
+	const directory = await ensurePrivateTaskClosureArtifactDirectory(
+		operation.taskIdentity,
+		operation.progress.closureRequestId,
+	);
+	const path = join(
+		directory,
+		`automatic-attempt-${state.automaticAttemptCount}-${state.pendingSideEffect}-${event}.json`,
+	);
+	const receipt = {
+		taskIdentity: operation.taskIdentity,
+		requestId: activeTaskClosureLifecycleRequestId(operation),
+		automaticAttemptCount: state.automaticAttemptCount,
+		sideEffect: state.pendingSideEffect,
+		event,
+		details,
+	};
+	try {
+		const previous: unknown = JSON.parse(await readFile(path, "utf8"));
+		if (!isDeepStrictEqual(previous, receipt)) throw new Error("自动尝试回执只允许追加，不能覆盖已有事实。");
+		return;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	await lockedFileSystem.writeTextFileAtomic(path, JSON.stringify(receipt), { durable: true, fileMode: 0o600 });
 }
 
 const reportedRecoveryFailuresByIdentity = new Map<string, string>();
@@ -219,6 +356,7 @@ export async function readTaskClosureHistory(identity: TaskClosureOperation["tas
 							closureRequestId: operation.progress.closureRequestId,
 							phase: operation.reopening.phase,
 							lastError: operation.reopening.lastError,
+							automaticRecovery: operation.reopening.automaticRecovery,
 						},
 					]
 				: [],

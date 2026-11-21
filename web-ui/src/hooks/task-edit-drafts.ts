@@ -21,6 +21,7 @@ export interface TaskEditDraft {
 	codexReasoningEffortOverride?: string;
 	taskTitleOverride?: string;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	taskId: string;
 	prompt: string;
 	images: TaskImage[];
@@ -101,6 +102,7 @@ export function areTaskEditDraftFormValuesEqual(
 	return (
 		left.taskTitleOverride === right.taskTitleOverride &&
 		(left.taskDescription ?? "") === (right.taskDescription ?? "") &&
+		(left.backlogTaskStartReadinessConditionsText ?? "") === (right.backlogTaskStartReadinessConditionsText ?? "") &&
 		left.prompt === right.prompt &&
 		areTaskImagesEqual(left.images, right.images) &&
 		left.startInPlanMode === right.startInPlanMode &&
@@ -149,6 +151,7 @@ export function isTaskEditDraftEqualToTask(draft: Omit<TaskEditDraft, "savedAt">
 	return (
 		(draft.taskTitleOverride === undefined || draft.taskTitleOverride.trim() === task.title) &&
 		(draft.taskDescription ?? "") === (task.taskDescription ?? "") &&
+		(draft.backlogTaskStartReadinessConditionsText ?? "") === (task.backlogTaskStartReadinessConditionsText ?? "") &&
 		draft.prompt === task.prompt.trim() &&
 		areTaskImagesEqual(draft.images, task.images ?? []) &&
 		draft.startInPlanMode === task.startInPlanMode &&

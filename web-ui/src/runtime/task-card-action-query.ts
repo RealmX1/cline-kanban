@@ -12,6 +12,27 @@ import type {
 
 import { getRuntimeTrpcClient, isRuntimeTrpcTransportFailure } from "@/runtime/trpc-client";
 
+export async function assessBacklogTaskStartReadinessInWorkspace(
+	workspaceId: string,
+	taskId: string,
+	createdAt: number,
+) {
+	return getRuntimeTrpcClient(workspaceId).taskCardAction.assessBacklogTaskStartReadiness.mutate({
+		taskId,
+		expectedTaskIncarnationCreatedAtEpochMs: createdAt,
+	});
+}
+export async function readBacklogTaskStartReadinessReportInWorkspace(
+	workspaceId: string,
+	taskId: string,
+	createdAt: number,
+) {
+	return getRuntimeTrpcClient(workspaceId).taskCardAction.readBacklogTaskStartReadinessReport.query({
+		taskId,
+		expectedTaskIncarnationCreatedAtEpochMs: createdAt,
+	});
+}
+
 export async function readTaskClosureHistoryInWorkspace(workspaceId: string, taskId: string, createdAt: number) {
 	return await getRuntimeTrpcClient(workspaceId).taskCardAction.readTaskClosureHistory.query({
 		taskId,

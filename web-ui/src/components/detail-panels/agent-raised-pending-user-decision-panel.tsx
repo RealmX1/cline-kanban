@@ -24,6 +24,8 @@ export function AgentRaisedPendingUserDecisionPanel({
 	isSubmitting,
 	onAnswer,
 	onDismiss,
+	onReconcileDelivery,
+	onConfirmHandled,
 	agentResponseGenerationTurnSequence,
 	isAgentStoppedOnThisQuestionSelectorInLiveTerminal,
 	isQuestionRaisedByEarlierAgentSessionIncarnation,
@@ -34,6 +36,8 @@ export function AgentRaisedPendingUserDecisionPanel({
 	isSubmitting: boolean;
 	onAnswer: (answers: PendingUserDecisionQuestionAnswerDraft[]) => Promise<boolean>;
 	onDismiss: () => Promise<boolean>;
+	onReconcileDelivery?: () => Promise<boolean>;
+	onConfirmHandled?: () => Promise<boolean>;
 	agentResponseGenerationTurnSequence: number;
 	// agent 此刻正停在终端里这道题的交互式选择器上：默认在终端作答，面板折叠但可手动展开作答。
 	isAgentStoppedOnThisQuestionSelectorInLiveTerminal: boolean;
@@ -44,7 +48,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 	isQuestionRaisedByEarlierAgentSessionIncarnation: boolean;
 	onDecisionNoLongerPending?: () => void;
 }) {
-	const [isExpanded, setIsExpanded] = useState(!isAgentStoppedOnThisQuestionSelectorInLiveTerminal);
+	const [isExpanded, setIsExpanded] = useState(
+		decision.recordedAnswerQuestionAnswers === null && !isAgentStoppedOnThisQuestionSelectorInLiveTerminal,
+	);
 	const [questionsPreparingImages, setQuestionsPreparingImages] = useState<ReadonlySet<string>>(new Set());
 	const initialAgentResponseGenerationTurnSequenceRef = useRef(agentResponseGenerationTurnSequence);
 	const { questionAnswerDrafts, updateQuestionAnswerDraft, discardAnswerDraft, draftSaveStatusText } =
@@ -77,11 +83,18 @@ export function AgentRaisedPendingUserDecisionPanel({
 
 	const wasRaisedByEarlierAgentSessionIncarnationRef = useRef(isQuestionRaisedByEarlierAgentSessionIncarnation);
 	useEffect(() => {
-		if (!wasRaisedByEarlierAgentSessionIncarnationRef.current && isQuestionRaisedByEarlierAgentSessionIncarnation) {
+		if (
+			!answerIsRecordedButNotYetDelivered &&
+			!wasRaisedByEarlierAgentSessionIncarnationRef.current &&
+			isQuestionRaisedByEarlierAgentSessionIncarnation
+		) {
 			setIsExpanded(true);
 		}
 		wasRaisedByEarlierAgentSessionIncarnationRef.current = isQuestionRaisedByEarlierAgentSessionIncarnation;
-	}, [isQuestionRaisedByEarlierAgentSessionIncarnation]);
+	}, [isQuestionRaisedByEarlierAgentSessionIncarnation, answerIsRecordedButNotYetDelivered]);
+	useEffect(() => {
+		if (answerIsRecordedButNotYetDelivered) setIsExpanded(false);
+	}, [answerIsRecordedButNotYetDelivered]);
 
 	// 面板可能先于会话 summary 挂载（或先于 summary 推进到提问回合）：那一刻「选择器在终端上」被算成 false，
 	// 面板以展开态出现。之后 summary 到达、确认选择器其实就在当前活体终端上时，收回到默认折叠，
@@ -123,7 +136,9 @@ export function AgentRaisedPendingUserDecisionPanel({
 		disabled: primaryActionDisabled,
 	});
 	const headerTitle = answerIsRecordedButNotYetDelivered
-		? "答案已保存，尚未送达 agent"
+		? decision.answerDeliveryState === "delivery_failed"
+			? "答案已保存，尚未送达 agent"
+			: "答案已保存，送达待确认"
 		: isAgentStoppedOnThisQuestionSelectorInLiveTerminal
 			? "Agent 正在终端里等你回答一个问题"
 			: "Agent 有一个尚未回答的问题";
@@ -173,6 +188,8 @@ export function AgentRaisedPendingUserDecisionPanel({
 							decision={decision}
 							isSubmitting={isSubmitting}
 							onRetryDelivery={() => onAnswer(decision.recordedAnswerQuestionAnswers ?? [])}
+							onReconcileDelivery={onReconcileDelivery}
+							onConfirmHandled={onConfirmHandled}
 						/>
 					) : (
 						<>
@@ -325,10 +342,14 @@ function RecordedAnswerAwaitingDelivery({
 	decision,
 	isSubmitting,
 	onRetryDelivery,
+	onReconcileDelivery,
+	onConfirmHandled,
 }: {
 	decision: RuntimeAgentRaisedPendingUserDecision;
 	isSubmitting: boolean;
 	onRetryDelivery: () => Promise<boolean>;
+	onReconcileDelivery?: () => Promise<boolean>;
+	onConfirmHandled?: () => Promise<boolean>;
 }) {
 	return (
 		<div className="space-y-3">
@@ -358,19 +379,40 @@ function RecordedAnswerAwaitingDelivery({
 					</div>
 				);
 			})}
-			<p className="text-[11px] text-status-red">
-				未送达原因：{decision.lastAnswerDeliveryFailureReason ?? "投递尚未完成"}
+			<p role="status" className="text-[11px] text-text-secondary">
+				{decision.answerDeliveryState === "delivery_failed" ? "未送达原因：" : "确认进度："}
+				{decision.lastAnswerDeliveryFailureReason ?? "尚无足够的接受证据，可重新核验或确认已在终端处理。"}
 			</p>
-			<div className="flex justify-end">
+			<div className="flex flex-wrap justify-end gap-2">
 				<Button
-					variant="primary"
+					variant="ghost"
+					size="sm"
+					disabled={isSubmitting || decision.answerDeliveryState === "delivery_in_progress" || !onConfirmHandled}
+					onClick={() => void onConfirmHandled?.()}
+				>
+					我已在终端确认处理
+				</Button>
+				<Button
+					variant="ghost"
 					size="sm"
 					icon={<RotateCw size={14} />}
-					disabled={isSubmitting}
-					onClick={() => void onRetryDelivery()}
+					disabled={isSubmitting || !onReconcileDelivery}
+					onClick={() => void onReconcileDelivery?.()}
 				>
-					重试投递
+					重新核验送达
 				</Button>
+				{decision.answerDeliveryState === "delivery_failed" ||
+				decision.answerDeliveryState === "answer_recorded" ? (
+					<Button
+						variant="primary"
+						size="sm"
+						icon={<RotateCw size={14} />}
+						disabled={isSubmitting}
+						onClick={() => void onRetryDelivery()}
+					>
+						{decision.answerDeliveryState === "answer_recorded" ? "投递已保存的回答" : "重试投递"}
+					</Button>
+				) : null}
 			</div>
 		</div>
 	);

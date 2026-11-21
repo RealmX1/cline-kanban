@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import {
@@ -118,8 +118,9 @@ type AppliedDuplicateProjectStopMigration = z.infer<typeof appliedDuplicateProje
 type ExplicitStopMarkerDocument = {
 	sessionIds: string[];
 	appliedDuplicateProjectStopMigrations: AppliedDuplicateProjectStopMigration[];
+	observationId?: string;
 };
-// 旧文件仍是会话 ID 数组。只有记下“这次合并已经复制”时才写成对象，并且和名单同一次原子提交。
+// 兼容旧数组；新写入的唯一观察身份与名单同次原子提交，重复 Stop 也能撤销旧启动授权。
 const explicitStopMarkerDocumentSchema = z.union([
 	z.array(z.string()).transform(
 		(sessionIds): ExplicitStopMarkerDocument => ({
@@ -132,21 +133,25 @@ const explicitStopMarkerDocumentSchema = z.union([
 			schemaVersion: z.literal(1),
 			sessionIds: z.array(z.string()),
 			appliedDuplicateProjectStopMigrations: z.array(appliedDuplicateProjectStopMigrationSchema).default([]),
+			observationId: z.string().uuid().optional(),
 		})
 		.transform(
 			(document): ExplicitStopMarkerDocument => ({
 				sessionIds: document.sessionIds,
 				appliedDuplicateProjectStopMigrations: document.appliedDuplicateProjectStopMigrations,
+				observationId: document.observationId,
 			}),
 		),
 ]);
 
 function explicitStopMarkerPayload(document: ExplicitStopMarkerDocument): unknown {
-	if (document.appliedDuplicateProjectStopMigrations.length === 0) return document.sessionIds;
+	if (document.appliedDuplicateProjectStopMigrations.length === 0 && !document.observationId)
+		return document.sessionIds;
 	return {
 		schemaVersion: 1,
 		sessionIds: document.sessionIds,
 		appliedDuplicateProjectStopMigrations: document.appliedDuplicateProjectStopMigrations,
+		observationId: document.observationId,
 	};
 }
 
@@ -175,13 +180,24 @@ export function createTaskConversationSessionOperationStore(
 	};
 	const readExplicitStopMarkers = async (scope: TaskConversationSessionWorkspaceScope): Promise<string[] | null> =>
 		(await readExplicitStopMarkerDocument(scope))?.sessionIds ?? null;
+	const observeStopMarkerVersion = async (scope: TaskConversationSessionWorkspaceScope) => {
+		try {
+			const document = await readExplicitStopMarkerDocument(scope);
+			if (document?.observationId) return document.observationId;
+			const info = await lstat(explicitStopMarkerPathForScope(scope));
+			return JSON.stringify([info.dev, info.ino, info.birthtimeMs, info.mtimeMs, info.size]);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return "missing_stop_marker";
+			throw error;
+		}
+	};
 	const writeExplicitStopMarkerDocument = async (
 		scope: TaskConversationSessionWorkspaceScope,
 		document: ExplicitStopMarkerDocument,
 	) => {
 		await lockedFileSystem.writeJsonFileAtomic(
 			explicitStopMarkerPathForScope(scope),
-			explicitStopMarkerPayload(document),
+			explicitStopMarkerPayload({ ...document, observationId: randomUUID() }),
 			{
 				lock: null,
 				durable: true,
@@ -233,6 +249,25 @@ export function createTaskConversationSessionOperationStore(
 	};
 	return {
 		read,
+		observeExplicitStopMarkerVersion: observeStopMarkerVersion,
+		async clearExplicitStopMarkersIfObservationUnchanged(
+			scope: TaskConversationSessionWorkspaceScope,
+			sessionIds: readonly string[],
+			expectedVersion: string,
+		) {
+			await mkdir(join(storageRootDirectoryPath, "explicit-session-stop-markers"), { recursive: true, mode: 0o700 });
+			return lockedFileSystem.withLock({ path: explicitStopMarkerPathForScope(scope) }, async () => {
+				const previous = await readExplicitStopMarkerDocument(scope);
+				const stopped = await previousExplicitStopSessionIds(scope, previous);
+				if (!sessionIds.some((id) => stopped.includes(id))) return true;
+				if ((await observeStopMarkerVersion(scope)) !== expectedVersion) return false;
+				await writeExplicitStopMarkerDocument(scope, {
+					sessionIds: stopped.filter((id) => !sessionIds.includes(id)),
+					appliedDuplicateProjectStopMigrations: previous?.appliedDuplicateProjectStopMigrations ?? [],
+				});
+				return true;
+			});
+		},
 		async recordExplicitStopMarkers(scope: TaskConversationSessionWorkspaceScope, sessionIds: readonly string[]) {
 			await updateExplicitStopMarkers(scope, (previousSessionIds) => [
 				...new Set([...previousSessionIds, ...sessionIds]),

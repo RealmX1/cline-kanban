@@ -224,7 +224,9 @@ describe.sequential("Codex 面板答题在实际 PTY 写入前重新读取原生
 							decision.taskId === "guarded-answer" && decision.answer?.answerSource === "kanban_panel",
 					);
 					expect(saved?.answer?.freeformText).toBe("保留已保存的答案");
-					expect(saved?.answerDeliveryState).toBe("delivery_failed");
+					expect(saved?.answerDeliveryState).toBe(
+						stage === "after_paste" || stage === "before_resend" ? "delivery_unconfirmed" : "delivery_failed",
+					);
 					expect(saved?.lastAnswerDeliveryFailureReason).toContain(
 						change === "real_answer" ? "终端作答" : "新提问取代",
 					);

@@ -49,21 +49,29 @@ export function TaskClosureSummaryAndHistory({
 	useEffect(() => {
 		if (open) void refresh();
 	}, [open, refresh]);
+	const pendingReopenings =
+		history?.reopeningOperations?.filter((operation) => !["completed", "cancelled"].includes(operation.phase)) ?? [];
 	const progress = card.taskClosureOperationProgress;
 	const pending = progress && !["completed", "cancelled"].includes(progress.phase);
-	if (!isClosed && !card.taskClosureSummary && !pending) return null;
-	const label = pending
-		? progress.phase === "closed_cleanup_pending"
-			? "清理待恢复"
-			: progress.phase === "preservation_waiting_for_recovery"
-				? "保全待恢复"
-				: "正在保全成果"
-		: isClosed
-			? TASK_CLOSURE_OUTCOME_LABELS[
-					resolveTaskClosureOutcomeForBoardColumn("trash", card.taskClosureSummary) ??
-						"closure_outcome_unspecified"
-				]
-			: "已重新打开";
+	const reclamation = progress?.unverifiedCandidateReclamation;
+	const reclamationPending = reclamation && reclamation.phase !== "completed";
+	if (!isClosed && !card.taskClosureSummary && !progress) return null;
+	const label = reclamationPending
+		? "失败载荷待回收"
+		: pending
+			? progress.phase === "closed_cleanup_pending"
+				? "清理待恢复"
+				: progress.phase === "preservation_waiting_for_recovery"
+					? "保全待恢复"
+					: "正在保全成果"
+			: isClosed
+				? TASK_CLOSURE_OUTCOME_LABELS[
+						resolveTaskClosureOutcomeForBoardColumn("trash", card.taskClosureSummary) ??
+							"closure_outcome_unspecified"
+					]
+				: card.taskClosureSummary?.eventKind === "reopened"
+					? "已重新打开"
+					: "已取消结案";
 	const records = history?.records.length ? history.records : card.taskClosureSummary ? [card.taskClosureSummary] : [];
 	const latestClosed = [...records].reverse().find((record) => record.isCurrentlyClosed);
 	const saveCorrection = async () => {
@@ -124,32 +132,54 @@ export function TaskClosureSummaryAndHistory({
 								{label}：{progress.lastError ?? "正在停止会话并验证可恢复归档"}
 							</p>
 							<p>{progress.recoveryCondition}</p>
-							<Button
-								disabled={submitting || !workspaceId}
-								onClick={() => {
-									if (workspaceId) {
-										setSubmitting(true);
-										void cancelTaskClosureOperationInWorkspace(workspaceId, card.id, card.createdAt)
-											.then(() => refresh())
-											.catch((failure: unknown) => setError(String(failure)))
-											.finally(() => setSubmitting(false));
-									}
-								}}
-							>
-								取消待恢复操作
-							</Button>
+							{progress.automaticRecovery ? (
+								<p>
+									自动尝试已用 {progress.automaticRecovery.automaticAttemptCount} 次，上限{" "}
+									{progress.automaticRecovery.maximumAutomaticAttemptCount} 次。
+									{progress.automaticRecovery.repairSupplementConsumed
+										? "相关修复后的唯一补试已使用。"
+										: "重启和普通空间波动不会增加次数。"}
+								</p>
+							) : null}
 						</div>
 					) : null}
-					{history?.reopeningOperations
-						?.filter((operation) => !["completed", "cancelled"].includes(operation.phase))
-						.map((operation) => (
-							<p key={operation.closureRequestId} className="text-sm text-status-orange">
-								重开待恢复：{operation.lastError ?? operation.phase}
-								。原归档继续保留，运行时会在恢复条件变化或重启后接续。
-							</p>
-						))}
+					{reclamationPending ? (
+						<p className="text-sm text-text-secondary">
+							失败载荷待回收：{reclamation.lastError ?? "正在核验归属、引用与替代恢复来源"}。 回收已执行{" "}
+							{reclamation.automaticAttemptCount} 次，最多三次；源工作树与成功归档继续保留。
+						</p>
+					) : null}
+					{pendingReopenings.map((operation) => (
+						<p key={operation.closureRequestId} className="text-sm text-status-orange">
+							重开待恢复：{operation.lastError ?? operation.phase}
+							。原归档继续保留，仅在相关恢复条件满足且总次数允许时接续。
+							{operation.automaticRecovery
+								? `自动尝试已用 ${operation.automaticRecovery.automaticAttemptCount} 次，上限 ${operation.automaticRecovery.maximumAutomaticAttemptCount} 次。`
+								: null}
+						</p>
+					))}
+					{pending || pendingReopenings.length > 0 ? (
+						<Button
+							disabled={submitting || !workspaceId}
+							onClick={() => {
+								if (workspaceId) {
+									setSubmitting(true);
+									void cancelTaskClosureOperationInWorkspace(workspaceId, card.id, card.createdAt)
+										.then(() => refresh())
+										.catch((failure: unknown) => setError(String(failure)))
+										.finally(() => setSubmitting(false));
+								}
+							}}
+						>
+							取消待恢复操作
+						</Button>
+					) : null}
 					{records.length === 0 ? (
-						<p className="text-sm text-text-secondary">结案结果未标注；历史缺失的成果归档不可用。</p>
+						<p className="text-sm text-text-secondary">
+							{progress?.phase === "cancelled"
+								? "结案请求已取消；历史尝试与保留载荷仍可查询。"
+								: "结案结果未标注；历史缺失的成果归档不可用。"}
+						</p>
 					) : (
 						records.map((record) => <ClosureHistoryRecord key={record.closureRequestId} record={record} />)
 					)}

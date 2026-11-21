@@ -20,9 +20,11 @@ import { dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { splitAgentTerminalAnswerTextIntoSelectedOptionLabelsAndFreeformAnswerText } from "../core/agent-terminal-multi-select-answer-text-parsing";
 import {
+	injectionLedgerTerminalDeliveryReceiptSchema,
 	type RuntimeAgentRaisedDecisionQuestion,
 	type RuntimeAgentRaisedUserQuestionResolvedInAgentTerminalPayload,
 	type RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
+	runtimeAgentConversationPromptSubmissionAcceptanceSchema,
 	runtimeAgentIdSchema,
 	runtimeAgentRaisedDecisionQuestionSchema,
 	runtimeAgentRaisedPendingUserDecisionAnswerDraftSchema,
@@ -37,7 +39,7 @@ const AGENT_RAISED_PENDING_USER_DECISION_FILENAME = "agent-raised-pending-user-d
 // 每 workspace 上限。已回答 / 已放弃的记录留作审计与「答案是否已送达」追踪，超限丢最旧。
 const MAX_RECORDS_PER_WORKSPACE = 200;
 
-export const AGENT_RAISED_PENDING_USER_DECISION_SCHEMA_VERSION = 2;
+export const AGENT_RAISED_PENDING_USER_DECISION_SCHEMA_VERSION = 3;
 
 // ⚠️ 有意不包含 plan_review：计划审批不做 durable carry-forward。新增取值前请回读本文件头部注释。
 export const agentRaisedPendingUserDecisionKindSchema = z.enum([
@@ -65,6 +67,7 @@ export const agentRaisedPendingUserDecisionAnswerDeliveryStateSchema = z.enum([
 	// 答案已原子落盘、期限已作废，但尚未投递（会话可能还没恢复起来）。
 	"answer_recorded",
 	"delivery_in_progress",
+	"delivery_unconfirmed",
 	"delivered",
 	"delivery_failed",
 ]);
@@ -109,6 +112,35 @@ const agentRaisedPendingUserDecisionAnswerSchema = z.object({
 });
 export type AgentRaisedPendingUserDecisionAnswer = z.infer<typeof agentRaisedPendingUserDecisionAnswerSchema>;
 
+const agentRaisedPendingUserDecisionAnswerDeliveryAttemptSchema = z.object({
+	attemptId: z.string(),
+	dispatchIdempotencyKey: z.string(),
+	answerMessageFormatVersion: z.literal(2).optional(),
+	ownerRuntimeProcessInstanceId: z.string(),
+	startedAt: z.number(),
+	submissionPhase: z.enum(["preparing_session", "submission_may_have_started", "settled"]),
+	submissionMayHaveStarted: z.boolean().optional(),
+	state: z.enum(["delivery_in_progress", "delivery_unconfirmed", "delivery_failed", "delivered"]),
+	targetNativeSessionId: z.string().nullable().optional(),
+	targetRuntimeSessionIncarnationId: z.string().nullable().optional(),
+	workingDirectoryPath: z.string().optional(),
+	transcriptPath: z.string().nullable().optional(),
+	promptSha256: z.string(),
+	preSubmissionAcceptance: runtimeAgentConversationPromptSubmissionAcceptanceSchema.nullable().optional(),
+	preSubmissionTranscriptByteOffset: z.number().int().nonnegative().optional(),
+	preSubmissionTranscriptFileIdentity: z.string().optional(),
+	acceptanceVerification: runtimeAgentConversationPromptSubmissionAcceptanceSchema.shape.verification,
+	originalReceipt: injectionLedgerTerminalDeliveryReceiptSchema.optional(),
+	lastReconciliationAt: z.number().optional(),
+	nextReconciliationAt: z.number().nullable().optional(),
+	unchangedReconciliationCount: z.number().int().nonnegative().optional(),
+	evidenceFingerprint: z.string().optional(),
+	reconciliationReason: z.string().optional(),
+});
+export type AgentRaisedPendingUserDecisionAnswerDeliveryAttempt = z.infer<
+	typeof agentRaisedPendingUserDecisionAnswerDeliveryAttemptSchema
+>;
+
 const persistedAgentRaisedPendingUserDecisionSchema = z.object({
 	nativeConversationSessionId: z.string().optional(),
 	nativeToolCallOutcome: z.enum(["interrupted_without_answer", "failed_without_answer"]).optional(),
@@ -146,6 +178,22 @@ const persistedAgentRaisedPendingUserDecisionSchema = z.object({
 	// 幂等键：语义与 task-message-injections.json 一致——同一条答案无论重试多少次，只会真正
 	// 送进 agent 一次。
 	answerDeliveryIdempotencyKey: z.string(),
+	answerDeliveryAttempts: z.array(agentRaisedPendingUserDecisionAnswerDeliveryAttemptSchema).optional(),
+	answerDeliveryReconciliation: agentRaisedPendingUserDecisionAnswerDeliveryAttemptSchema
+		.pick({
+			lastReconciliationAt: true,
+			nextReconciliationAt: true,
+			unchangedReconciliationCount: true,
+			evidenceFingerprint: true,
+			reconciliationReason: true,
+		})
+		.optional(),
+	answerHandledConfirmation: z
+		.object({
+			confirmedAt: z.number(),
+			source: z.literal("kanban_panel_terminal_confirmation"),
+		})
+		.optional(),
 	lastAnswerDeliveryFailureReason: z.string().nullable(),
 	createdAt: z.number(),
 	updatedAt: z.number(),
@@ -210,7 +258,9 @@ export function isOpenAgentRaisedPendingUserDecision(
 	if (record.status === "pending") {
 		return true;
 	}
-	return record.status === "answered" && record.answerDeliveryState !== "delivered";
+	return (
+		record.status === "answered" && !record.answerHandledConfirmation && record.answerDeliveryState !== "delivered"
+	);
 }
 
 function getAgentRaisedPendingUserDecisionPath(workspaceId: string): string {
@@ -257,7 +307,21 @@ async function readRawDecisions(
 async function writeDecisions(workspaceId: string, records: PersistedAgentRaisedPendingUserDecision[]): Promise<void> {
 	await lockedFileSystem.writeJsonFileAtomic(getAgentRaisedPendingUserDecisionPath(workspaceId), records, {
 		lock: null,
+		durable: true,
 	});
+	for (const observer of answerDeliveryStateChangeObservers) observer(workspaceId, records);
+}
+
+const answerDeliveryStateChangeObservers = new Set<
+	(workspaceId: string, records: PersistedAgentRaisedPendingUserDecision[]) => void
+>();
+export function observePendingUserDecisionAnswerDeliveryStateChanges(
+	observer: (workspaceId: string, records: PersistedAgentRaisedPendingUserDecision[]) => void,
+): () => void {
+	answerDeliveryStateChangeObservers.add(observer);
+	return () => {
+		answerDeliveryStateChangeObservers.delete(observer);
+	};
 }
 
 const writeQueueByWorkspaceId = new Map<string, Promise<unknown>>();
@@ -266,7 +330,7 @@ function enqueueWrite<T>(workspaceId: string, operation: () => Promise<T>): Prom
 	const previous = writeQueueByWorkspaceId.get(workspaceId) ?? Promise.resolve();
 	const guardedOperation = async () => {
 		await assertWorkspaceBackgroundStateWritesAreAllowed(workspaceId);
-		return operation();
+		return lockedFileSystem.withLock({ path: getAgentRaisedPendingUserDecisionPath(workspaceId) }, operation);
 	};
 	const next = previous.then(guardedOperation, guardedOperation);
 	writeQueueByWorkspaceId.set(
@@ -284,6 +348,7 @@ function capDecisions(records: PersistedAgentRaisedPendingUserDecision[]): Persi
 	return records.filter(
 		(record, index) =>
 			isOpenAgentRaisedPendingUserDecision(record) ||
+			record.answerHandledConfirmation !== undefined ||
 			(record.agentId === "codex" &&
 				(record.answer?.answerSource === "kanban_panel" || record.status === "dismissed")) ||
 			index >= records.length - MAX_RECORDS_PER_WORKSPACE,
@@ -509,8 +574,9 @@ const ANSWER_DELIVERY_STATE_TRANSITIONS: Record<
 > = {
 	not_answered: ["answer_recorded"],
 	answer_recorded: ["delivery_in_progress"],
-	delivery_in_progress: ["delivered", "delivery_failed"],
-	delivery_failed: ["delivery_in_progress"],
+	delivery_in_progress: ["delivered", "delivery_failed", "delivery_unconfirmed"],
+	delivery_unconfirmed: ["delivered", "delivery_failed"],
+	delivery_failed: ["delivery_in_progress", "delivery_unconfirmed", "delivered"],
 	delivered: [],
 };
 
@@ -528,15 +594,25 @@ export async function updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
 		answerDeliveryState: AgentRaisedPendingUserDecisionAnswerDeliveryState;
 		updatedAt: number;
 		lastAnswerDeliveryFailureReason?: string | null;
+		expectedAttemptId?: string;
+		answerDeliveryAttempt?: AgentRaisedPendingUserDecisionAnswerDeliveryAttempt;
+		answerDeliveryAttemptPatch?: Partial<AgentRaisedPendingUserDecisionAnswerDeliveryAttempt>;
+		answerDeliveryReconciliation?: PersistedAgentRaisedPendingUserDecision["answerDeliveryReconciliation"];
 	},
 ): Promise<PersistedAgentRaisedPendingUserDecision | null> {
 	return await enqueueWrite(workspaceId, async () => {
 		const records = await readRawDecisions(workspaceId);
 		const existing = records.find((record) => record.decisionId === decisionId);
-		if (existing === undefined) {
+		if (existing === undefined || existing.status !== "answered" || existing.answerHandledConfirmation) {
 			return null;
 		}
+		const attempts = existing.answerDeliveryAttempts ?? [];
+		if (input.expectedAttemptId !== undefined && attempts.at(-1)?.attemptId !== input.expectedAttemptId) return null;
 		if (
+			!(
+				((input.expectedAttemptId && input.answerDeliveryAttemptPatch) || input.answerDeliveryReconciliation) &&
+				existing.answerDeliveryState === input.answerDeliveryState
+			) &&
 			!isLegalAgentRaisedPendingUserDecisionAnswerDeliveryTransition(
 				existing.answerDeliveryState,
 				input.answerDeliveryState,
@@ -547,6 +623,21 @@ export async function updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
 		const updated: PersistedAgentRaisedPendingUserDecision = {
 			...existing,
 			answerDeliveryState: input.answerDeliveryState,
+			...(input.answerDeliveryAttempt ? { answerDeliveryReconciliation: undefined } : {}),
+			...(input.answerDeliveryReconciliation
+				? { answerDeliveryReconciliation: input.answerDeliveryReconciliation }
+				: {}),
+			...(input.answerDeliveryAttempt
+				? { answerDeliveryAttempts: [...attempts, input.answerDeliveryAttempt] }
+				: input.answerDeliveryAttemptPatch
+					? {
+							answerDeliveryAttempts: attempts.map((attempt) =>
+								attempt.attemptId === input.expectedAttemptId
+									? { ...attempt, ...input.answerDeliveryAttemptPatch }
+									: attempt,
+							),
+						}
+					: {}),
 			lastAnswerDeliveryFailureReason:
 				input.lastAnswerDeliveryFailureReason !== undefined
 					? input.lastAnswerDeliveryFailureReason
@@ -558,6 +649,30 @@ export async function updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
 			records.map((record) => (record.decisionId === decisionId ? updated : record)),
 		);
 		return updated;
+	});
+}
+
+export async function confirmAgentRaisedPendingUserDecisionAnswerHandled(
+	workspaceId: string,
+	decisionId: string,
+	confirmedAt: number,
+): Promise<PersistedAgentRaisedPendingUserDecision | null> {
+	return enqueueWrite(workspaceId, async () => {
+		const records = await readRawDecisions(workspaceId, true);
+		const existing = records.find((record) => record.decisionId === decisionId);
+		if (!existing || existing.status !== "answered" || existing.answerDeliveryState === "delivery_in_progress")
+			return null;
+		if (existing.answerHandledConfirmation) return existing;
+		const confirmed = {
+			...existing,
+			answerHandledConfirmation: { confirmedAt, source: "kanban_panel_terminal_confirmation" as const },
+			updatedAt: confirmedAt,
+		};
+		await writeDecisions(
+			workspaceId,
+			records.map((record) => (record === existing ? confirmed : record)),
+		);
+		return confirmed;
 	});
 }
 
@@ -706,7 +821,8 @@ export async function resolveAgentRaisedUserQuestionFromAgentTerminal(
 			matchedByToolUseId.answer.answerSource !== "agent_terminal" &&
 			(matchedByToolUseId.answerDeliveryState === "answer_recorded" ||
 				matchedByToolUseId.answerDeliveryState === "delivery_in_progress" ||
-				matchedByToolUseId.answerDeliveryState === "delivery_failed") &&
+				matchedByToolUseId.answerDeliveryState === "delivery_failed" ||
+				matchedByToolUseId.answerDeliveryState === "delivery_unconfirmed") &&
 			typeof resolution.nativeConversationSessionId === "string" &&
 			resolution.nativeConversationSessionId.length > 0 &&
 			resolution.nativeConversationSessionId === matchedByToolUseId.nativeConversationSessionId &&

@@ -30,7 +30,16 @@ export function buildTaskSessionStartRequestFromBoardCard(
 	const resumeFromTrash = hints.resumeFromTrash === true;
 	return {
 		taskId: taskCard.id,
-		prompt: resumeFromTrash ? "" : taskCard.prompt.trim(),
+		prompt: resumeFromTrash
+			? ""
+			: [
+					taskCard.prompt.trim(),
+					...(taskCard.backlogTaskStartReadinessExecutionRevision
+						? [
+								`\n\n## 启动前复核修订\n来源：开启复核 ${taskCard.backlogTaskStartReadinessExecutionRevision.operationId}，采集时间 ${new Date(taskCard.backlogTaskStartReadinessExecutionRevision.assessedAtEpochMs).toISOString()}。原始需求保留于上文；以下仅调整同一目标与授权内的剩余工作。\n${taskCard.backlogTaskStartReadinessExecutionRevision.currentExecutionInstructions}`,
+							]
+						: []),
+				].join(""),
 		taskTitle: taskCard.title,
 		images: resumeFromTrash ? undefined : taskCard.images,
 		startInPlanMode: resumeFromTrash ? undefined : taskCard.startInPlanMode,

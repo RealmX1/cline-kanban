@@ -386,6 +386,9 @@ function formatTaskRecordWithSessionSummary(
 		// 这里直接透出，让 CLI 消费方看到的标题与看板一致。
 		title: task.title,
 		taskDescription: task.taskDescription,
+		backlogTaskStartReadinessConditionsText: task.backlogTaskStartReadinessConditionsText,
+		backlogTaskCreationRepositoryBaseline: task.backlogTaskCreationRepositoryBaseline,
+		backlogTaskStartReadinessReview: task.backlogTaskStartReadinessReview,
 		externalWorkflowRunBinding: task.externalWorkflowRunBinding,
 		prompt: task.prompt,
 		column: columnId,
@@ -655,6 +658,7 @@ interface TaskCreateCommandInput {
 	cwd: string;
 	title?: string;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	prompt: string;
 	projectPath?: string;
 	baseRef?: string;
@@ -804,6 +808,7 @@ async function createTask(input: TaskCreateCommandInput): Promise<JsonRecord> {
 		backlogTaskCardFieldValuesResolvedByKanbanCli: {
 			title: input.title,
 			taskDescription: input.taskDescription,
+			backlogTaskStartReadinessConditionsText: input.backlogTaskStartReadinessConditionsText,
 			prompt: input.prompt,
 			startInPlanMode: effectiveSettings.resolvedSettings.startInPlanMode.value,
 			ompAgentSessionTransportForNewTasks: runtimeConfig.ompAgentSessionTransportForNewTasks,
@@ -875,6 +880,7 @@ async function updateTaskCommand(input: {
 	taskId: string;
 	title?: string;
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	projectPath?: string;
 	prompt?: string;
 	baseRef?: string;
@@ -892,6 +898,7 @@ async function updateTaskCommand(input: {
 	if (
 		input.title === undefined &&
 		input.taskDescription === undefined &&
+		input.backlogTaskStartReadinessConditionsText === undefined &&
 		input.prompt === undefined &&
 		input.baseRef === undefined &&
 		input.startInPlanMode === undefined &&
@@ -920,6 +927,7 @@ async function updateTaskCommand(input: {
 			kanbanCliTaskCardFieldUpdateRawInput: {
 				title: input.title,
 				taskDescription: input.taskDescription,
+				backlogTaskStartReadinessConditionsText: input.backlogTaskStartReadinessConditionsText,
 				prompt: input.prompt,
 				baseRef: input.baseRef,
 				startInPlanMode: input.startInPlanMode,
@@ -948,15 +956,44 @@ async function updateTaskCommand(input: {
 	};
 }
 
-async function startTask(input: { cwd: string; taskId: string; projectPath?: string }): Promise<JsonRecord> {
+async function startTask(input: {
+	cwd: string;
+	taskId: string;
+	projectPath?: string;
+	overrideUnmetBacklogStartConditionsOperationId?: string;
+	overrideUnmetBacklogStartConditionsReason?: string;
+}): Promise<JsonRecord> {
 	const workspaceRepoPath = await resolveWorkspaceRepoPath(input.projectPath, input.cwd);
 	const workspaceId = await resolveRegisteredRuntimeWorkspaceId(workspaceRepoPath);
 	const runtimeClient = createRuntimeTrpcClient(workspaceId);
 	// runtime 一次做完：只收 backlog / in_progress 的卡 → 先移列到 in_progress → ensure worktree → 起会话
 	// （会话已在 agent 回合就不重复起）。卡不存在 / 所在列不允许时 runtime 抛错，原文案与迁移前 CLI 本地报错一致。
+	if (
+		Boolean(input.overrideUnmetBacklogStartConditionsOperationId) !==
+		Boolean(input.overrideUnmetBacklogStartConditionsReason?.trim())
+	)
+		throw new Error("覆盖条件须同时提供当前复核操作 ID 与原因。");
 	const started = await runtimeClient.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress.mutate({
 		taskId: input.taskId,
+		overrideUnmetBacklogTaskStartConditions: input.overrideUnmetBacklogStartConditionsOperationId
+			? {
+					operationId: input.overrideUnmetBacklogStartConditionsOperationId,
+					reason: input.overrideUnmetBacklogStartConditionsReason ?? "",
+				}
+			: undefined,
 	});
+	if (started.agentSessionStartOutcome === "backlog_task_start_readiness_review_pending")
+		return {
+			ok: true,
+			started: false,
+			startRequested: true,
+			task: formatTaskRecordWithSessionSummary(
+				started.taskCardSnapshotAfterAction.taskCard,
+				started.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard,
+				started.taskCardSnapshotAfterAction.taskSessionSummaryPersistedInWorkspaceSessionsFile,
+			),
+			readinessReview: started.taskCardSnapshotAfterAction.taskCard.backlogTaskStartReadinessReview,
+		};
 	// 执行期失败时卡已留在 in_progress（backlog 单向）；命令照旧以失败退出，带回 runtime 给的原因。
 	if (
 		started.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
@@ -2265,6 +2302,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		)
 		.option("--title <text>", "Task title.")
 		.option("--description <text>", "独立任务简介：问题、范围与当前方案。")
+		.option("--backlog-task-start-readiness-conditions-text <text>", "适合开启的条件；自然语言声明，空字符串清除。")
 		.option("--model <id>", "单次模型覆盖，缺省采用 Agent 当前默认配置。")
 		.requiredOption("--prompt <text>", "Task prompt text.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
@@ -2298,6 +2336,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				model?: string;
 				title?: string;
 				description?: string;
+				backlogTaskStartReadinessConditionsText?: string;
 				prompt: string;
 				projectPath?: string;
 				baseRef?: string;
@@ -2320,6 +2359,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 						cwd: process.cwd(),
 						title: options.title,
 						taskDescription: options.description,
+						backlogTaskStartReadinessConditionsText: options.backlogTaskStartReadinessConditionsText,
 						prompt: options.prompt,
 						projectPath: options.projectPath,
 						baseRef: options.baseRef,
@@ -2356,6 +2396,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--title <text>", "Replacement task title.")
 		.option("--description <text>", "独立任务简介；空字符串清除，不修改 Initial Prompt。")
+		.option("--backlog-task-start-readiness-conditions-text <text>", "适合开启的条件；自然语言声明，空字符串清除。")
 		.option("--prompt <text>", "Replacement task prompt.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
 		.option("--base-ref <branch>", "Replacement base branch/ref.")
@@ -2389,6 +2430,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 				taskId: string;
 				title?: string;
 				description?: string;
+				backlogTaskStartReadinessConditionsText?: string;
 				prompt?: string;
 				projectPath?: string;
 				baseRef?: string;
@@ -2410,6 +2452,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 							taskId: options.taskId,
 							title: options.title,
 							taskDescription: options.description,
+							backlogTaskStartReadinessConditionsText: options.backlogTaskStartReadinessConditionsText,
 							projectPath: options.projectPath,
 							prompt: options.prompt,
 							baseRef: options.baseRef,
@@ -2638,16 +2681,58 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 		.description("Start a task session and move task to in_progress.")
 		.requiredOption("--task-id <id>", "Task ID.")
 		.option("--project-path <path>", "Workspace path. Defaults to current directory workspace.")
-		.action(async (options: { taskId: string; projectPath?: string }) => {
-			await runTaskCommand(
-				async () =>
-					await startTask({
-						cwd: process.cwd(),
-						taskId: options.taskId,
-						projectPath: options.projectPath,
-					}),
-			);
-		});
+		.option(
+			"--override-unmet-backlog-start-conditions-operation-id <uuid>",
+			"显式覆盖当前复核中未满足的条件，须同时提供原因。",
+		)
+		.option(
+			"--override-unmet-backlog-start-conditions-reason <text>",
+			"覆盖开启条件的原因；不覆盖权限、Stop 或缺证门禁。",
+		)
+		.action(
+			async (options: {
+				taskId: string;
+				projectPath?: string;
+				overrideUnmetBacklogStartConditionsOperationId?: string;
+				overrideUnmetBacklogStartConditionsReason?: string;
+			}) => {
+				await runTaskCommand(
+					async () =>
+						await startTask({
+							cwd: process.cwd(),
+							taskId: options.taskId,
+							projectPath: options.projectPath,
+							overrideUnmetBacklogStartConditionsOperationId:
+								options.overrideUnmetBacklogStartConditionsOperationId,
+							overrideUnmetBacklogStartConditionsReason: options.overrideUnmetBacklogStartConditionsReason,
+						}),
+				);
+			},
+		);
+
+	for (const commandName of ["assess-backlog-start-readiness", "get-backlog-start-readiness-report"] as const) {
+		task
+			.command(commandName)
+			.description(
+				commandName === "assess-backlog-start-readiness"
+					? "仅评估 Backlog 的开启条件与需求漂移，不启动 Agent。"
+					: "查询持久保存的 Backlog 开启复核报告。",
+			)
+			.requiredOption("--task-id <id>", "任务 ID。")
+			.option("--project-path <path>", "所属主仓库路径。")
+			.action(async (options: { taskId: string; projectPath?: string }) => {
+				await runTaskCommand(async () => {
+					const repositoryPath = await resolveWorkspaceRepoPath(options.projectPath, process.cwd());
+					const workspaceId = await resolveRegisteredRuntimeWorkspaceId(repositoryPath);
+					const actions = createRuntimeTrpcClient(workspaceId).taskCardAction;
+					const result =
+						commandName === "assess-backlog-start-readiness"
+							? await actions.assessBacklogTaskStartReadiness.mutate({ taskId: options.taskId })
+							: await actions.readBacklogTaskStartReadinessReport.query({ taskId: options.taskId });
+					return { ok: true, ...result };
+				});
+			});
+	}
 
 	task
 		.command("park")

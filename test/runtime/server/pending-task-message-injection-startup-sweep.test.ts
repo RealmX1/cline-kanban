@@ -206,6 +206,31 @@ describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（真实
 });
 
 describe("startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime（续排节奏）", () => {
+	it("新答案请求更早核验，正在清扫时只登记下一次时刻且保持单飞", async () => {
+		let finishSweep: () => void = () => undefined;
+		const sweep = vi
+			.fn()
+			.mockImplementationOnce(
+				() =>
+					new Promise((resolve) => {
+						finishSweep = () => resolve({ earliestSkippedPendingBecomesStaleAtEpochMs: null });
+					}),
+			)
+			.mockResolvedValue({ earliestSkippedPendingBecomesStaleAtEpochMs: null });
+		const sweeps = startStalePendingTaskMessageInjectionSweepsForRuntimeLifetime({ sweepAllWorkspacesOnce: sweep });
+		sweeps.requestSweepAt(NOW + 15_000);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(sweep).toHaveBeenCalledTimes(1);
+		finishSweep();
+		await vi.advanceTimersByTimeAsync(9999);
+		expect(sweep).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sweep).toHaveBeenCalledTimes(2);
+		sweeps.stop();
+		await vi.advanceTimersByTimeAsync(120_000);
+		expect(sweep).toHaveBeenCalledTimes(2);
+	});
+
 	it("每趟扫完按本轮最早超期时刻续排，但最迟不超过周期兜底间隔；不止一趟复扫", async () => {
 		const sweptAtEpochMs: number[] = [];
 		const interval = STALE_PENDING_SWEEP_PERIODIC_BACKSTOP_INTERVAL_MS;
