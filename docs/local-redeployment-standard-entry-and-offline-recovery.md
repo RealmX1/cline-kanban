@@ -76,6 +76,10 @@
 
 新部署登记 `ownerSessionInterruptPolicy: "preserve_execution"`。当前回合打断时后台部署继续，明确取消部署或停止整个任务仍会撤销执行。会话换代仍按当前归属门禁核验。
 
+用户已明确允许中断无法跨重启保留的会话时，准备请求可包含 `nonPreservableSessionInterruptionAuthorization`，字段为原始 `sourceReference` 和 `userRequestQuote`。等待期间获得这项授权时，可对理解该协议的冻结执行器使用 `authorize-redeployment-session-interruption --execution-directory <同一执行> --authorization-file <授权 JSON>`。该命令只保存绑定原请求摘要的授权，监督进程复查现场后接续。
+
+授权解除的范围仅为已识别为无法保留的会话。实例身份或独立 PTY 的接管证据有缺口时仍等待补证。正式重启只在当前 runtime 的在线诊断 `acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions` 为 true 时，才通过专用 RPC 提交预检代际和会话清单。旧服务即使报告 `enforcesAuthorizedUnretainableSessionHandoverBinding` 也不识别该 RPC；若在诊断和调用之间换回旧服务，请求失败并保留原件，禁止回退布尔中断。旧服务仍有无法保留的会话时，只读等待这些会话退出；这些会话已经退出后使用默认受保护交接。接收实例在代际已变或有会话不在授权清单内时拒绝重启。若发起部署的会话也在该批次，只有目标代际的原生交接回执同时确认 `handover_restart_started`、同一进程号和启动时刻，以及已执行该绑定且接收时的实际中断清单包含发起会话，再由本执行核验新实例接受候选后，才允许不依赖原会话代际完成后续步骤。候选被另一代加载、请求被拒绝或未送达，都不能单独放宽归属门禁。任务实体、工作树归属和持久 Stop 继续核验。
+
 重复启动同目录只接续原执行；已完成或取消不重跑。原生退出或真实 boot 变化后，外部调用者也可用相同入口在持久语义预算内恢复。机器等待使用原 `machine_evidence_pending` 合同与等价证据。首次复查已经具备阶段恢复证据时也能接续，阶段预算仍按语义指纹去重，跨重启保持。明确取消使用 `cancel-redeployment`；原 session 的持久 Stop 在启动、接回和后续动作前仍有效。
 
 在线受理须原子核对准备时冻结的任务、主会话、native/runtime-session 代际与工作树实体。已登记执行的监督者确证退出且实例离线时，同一入口接续原登记身份。离线监督者在 worker 等待机器证据后继续观察，只在持久语义预算允许且原归属与 Stop 门禁仍通过时恢复派发；实例恢复后接回同一监督者。

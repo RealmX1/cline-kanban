@@ -655,6 +655,28 @@ export function resolveSessionFacets(summary: RuntimeTaskSessionSummary): Sessio
 	});
 }
 
+// ACP 启动及重试可能在握手完成前已创建子进程，此时尚无连接记录，仍须保护。
+// 其余阶段优先查连接账本，避免回合取消时漏报活连接，或连接释放后误报旧进程号。
+export function nonPtySessionWouldEndWhenRuntimeExits(
+	summary: RuntimeTaskSessionSummary,
+	connectionOwnership?: { readonly hasLiveConnection: boolean | null },
+): boolean {
+	const { liveness } = resolveSessionFacets(summary);
+	if (liveness === "starting" || liveness === "retrying") return true;
+	const hasLiveConnection = connectionOwnership?.hasLiveConnection;
+	if (summary.sessionTransport === "acp_stdio_subprocess" && typeof hasLiveConnection === "boolean") {
+		return hasLiveConnection;
+	}
+	if (liveness === "live") return true;
+	return (
+		summary.sessionTransport === "acp_stdio_subprocess" &&
+		liveness === "interrupted" &&
+		typeof summary.pid === "number" &&
+		Number.isInteger(summary.pid) &&
+		summary.pid > 0
+	);
+}
+
 // 「从未启动过的空白占位」判据：与 session-manager 的 `createDefaultSummary` 逐字段同形。
 //
 // 这条谓词存在的唯一原因是它是**数据损坏的形状**，不是一个正常的会话状态。链路是：

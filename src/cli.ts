@@ -57,7 +57,6 @@ import {
 	resolveHostedAgentSessionDispositionForRuntimeShutdownTrigger,
 	resolveRuntimeShutdownDeadlineMilliseconds,
 } from "./core/runtime-shutdown-trigger";
-import { resolveSessionFacets } from "./core/session-activity";
 import { disablePasscode, generateInternalToken, generatePasscode } from "./security/passcode-manager";
 import { terminateProcessForTimeout } from "./server/process-termination";
 import type { RuntimeExitRequestHandler } from "./server/runtime-server";
@@ -498,20 +497,8 @@ async function startServer(startServerOptions: { runtimePortWasAutoSelected: boo
 			),
 	);
 	setNonPtyAgentSessionsPreventingContinuityProvider(() =>
-		workspaceRegistry.listManagedWorkspaces().flatMap(({ workspaceId }) =>
-			(runtimeStateHub?.listTrackedConversationTaskSessionSummaries(workspaceId) ?? []).flatMap((summary) => {
-				if (!["starting", "live", "retrying"].includes(resolveSessionFacets(summary).liveness)) return [];
-				const transport = summary.sessionTransport;
-				if (transport !== "acp_stdio_subprocess" && transport !== "in_process_cline_sdk") return [];
-				return [
-					{
-						workspaceId,
-						conversationSessionId: summary.taskId,
-						processId: summary.pid,
-						sessionTransport: transport,
-					},
-				];
-			}),
+		(runtimeStateHub?.listTrackedConversationSessionsInterruptedByRuntimeExit() ?? []).map(
+			({ sessionKind, ...session }) => ({ ...session, sessionTransport: sessionKind }),
 		),
 	);
 	runtimeStateHub = createRuntimeStateHub({

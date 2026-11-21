@@ -16,7 +16,7 @@
  *     --staging-directory <dir> --distribution-directory <dir>
  * 执行结果以 JSON 打印到 stdout。
  */
-import { lstat, mkdir, readdir, rename, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rename, rm, rmdir } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -81,6 +81,28 @@ export function orderStagedRelativeFilePathsForPromotion(stagedRelativeFilePaths
 	return [...nonEntryFiles, ...entryFiles];
 }
 
+/**
+ * 目标路径上已存在的目录如果是软链接，mkdir/rename 会写进链接另一端。
+ * 发布前整批拒绝，避免先覆盖其他工作树或保留目录，事后校验才发现。
+ */
+async function assertPromotionTargetDoesNotTraverseSymbolicLink(distributionDirectoryPath, relativeFilePath) {
+	let current = distributionDirectoryPath;
+	const segments = relativeFilePath.split("/");
+	for (let index = 0; index < segments.length - 1; index += 1) {
+		current = join(current, segments[index]);
+		let status;
+		try {
+			status = await lstat(current);
+		} catch (error) {
+			if (error?.code === "ENOENT") return;
+			throw error;
+		}
+		if (status.isSymbolicLink()) {
+			throw new Error(`拒绝沿目标目录软链接发布：${current}`);
+		}
+	}
+}
+
 /** 用 lstat：软链接即使指向目录也不算目录，后续删除与遍历都不会跟进它。 */
 async function pathIsRealDirectoryNotSymbolicLink(path) {
 	try {
@@ -117,6 +139,10 @@ export async function promoteStagedKanbanBuildOutputIntoDistributionDirectory({
 	}
 	const stagedRelativeFilePaths = await listRelativeRegularFilePathsRecursivelyRejectingSymbolicLinks(stagingDirectoryPath);
 	const promotedRelativeFilePathsInPromotionOrder = orderStagedRelativeFilePathsForPromotion(stagedRelativeFilePaths);
+
+	for (const relativeFilePath of promotedRelativeFilePathsInPromotionOrder) {
+		await assertPromotionTargetDoesNotTraverseSymbolicLink(distributionDirectoryPath, relativeFilePath);
+	}
 
 	for (const relativeFilePath of promotedRelativeFilePathsInPromotionOrder) {
 		const targetFilePath = join(distributionDirectoryPath, relativeFilePath);
@@ -200,7 +226,7 @@ function readRequiredCommandLineOption(optionName) {
 	return resolve(optionValue);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && (await realpath(process.argv[1]).catch(() => null)) === (await realpath(fileURLToPath(import.meta.url)))) {
 	const stagingDirectoryPath = readRequiredCommandLineOption("--staging-directory");
 	const result = await promoteStagedKanbanBuildOutputIntoDistributionDirectory({
 		stagingDirectoryPath,

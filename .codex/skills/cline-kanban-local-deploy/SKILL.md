@@ -17,6 +17,7 @@ description: Project-local workflow for safely deploying this Cline Kanban runni
 ## 启动标准执行
 
 1. 读取[标准请求与恢复合同](../../../docs/local-redeployment-standard-entry-and-offline-recovery.md)及[会话连续性要求](references/kanban-runtime-upgrades.md)。为本次执行分配 UUID，准备持久执行目录和请求 JSON，其中保留用户授权原话和来源。已知上游原件时按[验证证据交接](references/source-validation-evidence-reuse.md)填入 `sourceValidationEvidenceFilePaths`。
+   已获准中断无法跨重启保留的会话时，在请求中登记 `nonPreservableSessionInterruptionAuthorization`。等待期间获得授权时，使用同一冻结执行器的 `authorize-redeployment-session-interruption` 追加该证据。
 2. 用实际服务 Node 调用已经打包的执行器。准备冻结请求、归属与工具；启动交给所属命令执行或既有独立 supervisor。
 
    ```sh
