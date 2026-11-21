@@ -28,8 +28,8 @@ import {
 } from "../core/codex-native-agent-turn-execution-observation";
 import {
 	type CodexNativeDirectInputReadinessObservation,
+	isCodexAwaitingInputNativeReconciliationCandidate,
 	isCodexNativeConversationRewindSignal,
-	isCodexNeedsInputNativeReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
 
 export interface NativeAgentConversationActivityObservationContext {
@@ -161,9 +161,9 @@ export function createNativeAgentConversationActivityObserver(
 					((shouldContinuouslyObserveCodexNativeTurnExecution(summary) &&
 						summary.codexNativeSessionControlEndpoint &&
 						nowMs() >= state.nextNativeExecutionReadAtMs) ||
-						isCodexNeedsInputNativeReconciliationCandidate(summary))
+						isCodexAwaitingInputNativeReconciliationCandidate(summary))
 				)
-					void scheduleRead(state, false, isCodexNeedsInputNativeReconciliationCandidate(summary));
+					void scheduleRead(state, false, isCodexAwaitingInputNativeReconciliationCandidate(summary));
 			}
 		}, 15_000);
 		nativeExecutionSweepTimer.unref();
@@ -463,7 +463,7 @@ export function createNativeAgentConversationActivityObserver(
 			let skippedNativeReadinessVerification = false;
 			void Promise.resolve()
 				.then(async () => {
-					if (isCodexNeedsInputNativeReconciliationCandidate(summaryBeforeRead)) {
+					if (isCodexAwaitingInputNativeReconciliationCandidate(summaryBeforeRead)) {
 						const paths = [
 							summaryBeforeRead.codexNativeSessionControlEndpoint?.socketPath,
 							summaryBeforeRead.agentNativeConversationSessionIdentity?.transcriptPath,

@@ -10,7 +10,7 @@ import type {
 import type { CodexNativeAgentTurnExecutionObservation } from "../core/codex-native-agent-turn-execution-observation";
 import {
 	type CodexNativeDirectInputReadinessObservation,
-	isCodexNeedsInputNativeReconciliationCandidate,
+	isCodexAwaitingInputNativeReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
 import { parseTranscriptJsonRecord, readBoundedJsonLines } from "./bounded-agent-transcript-reader";
 import {
@@ -272,7 +272,7 @@ async function readCurrentCodexNativeActivity(
 	const independentObservations = {
 		...(execution ? { codexNativeAgentTurnExecution: execution } : {}),
 		...(executionReadFailure ? { codexNativeAgentTurnExecutionReadFailure: executionReadFailure } : {}),
-		...(isCodexNeedsInputNativeReconciliationCandidate(summary) &&
+		...(isCodexAwaitingInputNativeReconciliationCandidate(summary) &&
 		execution?.threadStatus === "idle" &&
 		execution.executionStatus === "finished" &&
 		execution.activeFlags.length === 0 &&

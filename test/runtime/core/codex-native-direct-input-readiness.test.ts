@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { RuntimeTaskSessionSummary, RuntimeTaskSessionUserTurnKind } from "../../../src/core/api-contract";
-import { canReconcileCodexNeedsInputWithNativeDirectInputReadiness } from "../../../src/core/codex-native-direct-input-readiness";
+import { canReconcileCodexAwaitingInputWithNativeDirectInputReadiness } from "../../../src/core/codex-native-direct-input-readiness";
 
 function summary(): RuntimeTaskSessionSummary {
 	return {
@@ -41,7 +41,7 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 		"普通 rewind 的成因为 %s 时均可校正，不要求 RVF 或恢复标记",
 		(reviewReason) => {
 			const before = { ...summary(), reviewReason };
-			expect(canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, before, observation)).toBe(true);
+			expect(canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, before, observation)).toBe(true);
 		},
 	);
 	it.each([
@@ -53,7 +53,22 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 		"interrupted",
 	] satisfies RuntimeTaskSessionUserTurnKind[])("显式 %s 不被兜底状态校正覆盖", (userTurnKind) => {
 		const before = { ...summary(), userTurnKind };
-		expect(canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, before, observation)).toBe(false);
+		expect(canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, before, observation)).toBe(false);
+	});
+	it("只有确属上一代的选择题才可校正，期间收到新 hook 即作废", () => {
+		const before = { ...summary(), userTurnKind: "question" as const };
+		const replacedQuestionSelector = { originRuntimeSessionIncarnationId: "previous", nativeQuestionAskedAtMs: 99 };
+		const proof = { ...observation, replacedQuestionSelector };
+		expect(canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, before, proof)).toBe(true);
+		expect(
+			canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, { ...before, lastHookAt: 250 }, proof),
+		).toBe(false);
+		expect(
+			canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, before, {
+				...proof,
+				replacedQuestionSelector: { ...replacedQuestionSelector, originRuntimeSessionIncarnationId: "incarnation" },
+			}),
+		).toBe(false);
 	});
 	it.each([
 		{ pid: 13 },
@@ -77,13 +92,13 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 	])("查询期间状态变化时丢弃旧观测：%j", (patch) => {
 		const before = summary();
 		expect(
-			canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, { ...before, ...patch }, observation),
+			canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, { ...before, ...patch }, observation),
 		).toBe(false);
 	});
 	it("连续 PTY 重绘与等值 hook 反序列化不使同一回合证明失效", () => {
 		const before = summary();
 		expect(
-			canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
+			canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(
 				before,
 				{ ...before, updatedAt: 900, lastOutputAt: 900 },
 				observation,
@@ -110,12 +125,12 @@ describe("Codex 原生输入就绪后的状态校正边界", () => {
 							socketPath: change === "endpoint" ? "/new/socket" : "/isolated/socket",
 						},
 		};
-		expect(canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, current, observation)).toBe(false);
+		expect(canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, current, observation)).toBe(false);
 	});
 	it.each([199, Number.NaN, Number.POSITIVE_INFINITY])("时间 %s 不是有效的本次观测", (observedAtMs) => {
 		const before = summary();
 		expect(
-			canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, before, { ...observation, observedAtMs }),
+			canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, before, { ...observation, observedAtMs }),
 		).toBe(false);
 	});
 });

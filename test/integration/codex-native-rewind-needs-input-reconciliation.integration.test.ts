@@ -7,10 +7,12 @@ import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-nati
 import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-request-connection";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { createNativeAgentConversationActivityObserver } from "../../src/server/native-agent-conversation-activity-observer";
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
 import type * as AgentSessionAdapters from "../../src/terminal/agent-session-adapters";
 import type { AgentAdapterLaunchInput, PreparedAgentLaunch } from "../../src/terminal/agent-session-adapters";
 import { TerminalSessionManager } from "../../src/terminal/session-manager";
 import { stripAnsiAndControl } from "../../src/terminal/terminal-output-normalization";
+import { type CreateRuntimeApiDependencies, createRuntimeApi } from "../../src/trpc/runtime-api";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
 
@@ -44,8 +46,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 				const codexHome = join(fixture.fixtureRootDirectoryPath, "codex-home");
 				await mkdir(codexHome);
+				const { workspaceId } = await loadWorkspaceContext(repository.repositoryPath);
 				let requestCount = 0;
 				let mainConversationRequestCount = 0;
+				const restoredPanelAnswerMarker = "KANBAN_RESTORED_PANEL_ANSWER";
+				let restoredPanelAnswerRequestCount = 0;
 				const modelRequestObservations: unknown[] = [];
 				const server = createServer(async (request, response) => {
 					let body = "";
@@ -60,6 +65,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 							.at(-1)
 							?.content?.map((part) => part.text ?? "")
 							.join("") ?? "";
+					if (lastUserMessageText.includes(restoredPanelAnswerMarker)) restoredPanelAnswerRequestCount++;
 					// Codex 也会用同一 provider 后台生成标题；它不代表主对话收到新 prompt。
 					if (
 						["ORDINARY_FIRST_PROMPT", "ORDINARY_SECOND_PROMPT", "FIRST_INPUT_AFTER_EMPTY_FORK"].includes(
@@ -181,25 +187,26 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 					});
 				attachTerminal(taskId);
 				const binary = process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY ?? "codex";
+				const buildStartRequest = (resumeFromTrash: boolean, nativeId?: string) => ({
+					taskId,
+					agentId: "codex" as const,
+					binary,
+					args: [
+						"--no-alt-screen",
+						"-C",
+						repository.repositoryPath,
+						...(nativeId ? ["resume", nativeId] : ["ORDINARY_FIRST_PROMPT"]),
+					],
+					cwd: repository.repositoryPath,
+					prompt: "",
+					workspaceId,
+					env: environment,
+					cols: 140,
+					rows: 42,
+					resumeFromTrash,
+				});
 				const start = (resumeFromTrash: boolean, nativeId?: string) =>
-					manager.startTaskSession({
-						taskId,
-						agentId: "codex",
-						binary,
-						args: [
-							"--no-alt-screen",
-							"-C",
-							repository.repositoryPath,
-							...(nativeId ? ["resume", nativeId] : ["ORDINARY_FIRST_PROMPT"]),
-						],
-						cwd: repository.repositoryPath,
-						prompt: "",
-						workspaceId: "isolated-rewind",
-						env: environment,
-						cols: 140,
-						rows: 42,
-						resumeFromTrash,
-					});
+					manager.startTaskSession(buildStartRequest(resumeFromTrash, nativeId));
 				const current = () => manager.getSummary(taskId) as RuntimeTaskSessionSummary;
 				const query = async (conversationSessionId = taskId) => {
 					const endpoint = manager.getSummary(conversationSessionId)?.codexNativeSessionControlEndpoint;
@@ -250,7 +257,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 					onActivity,
 					cooldownMs: 0,
 					onCodexNativeDirectInputReadiness: (observation, before) => {
-						manager.reconcileCodexNeedsInputWithNativeDirectInputReadiness(taskId, before, observation);
+						manager.reconcileCodexAwaitingInputWithNativeDirectInputReadiness(taskId, before, observation);
 					},
 				});
 				try {
@@ -303,7 +310,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 							args: ["--no-alt-screen", "-C", repository.repositoryPath, "fork", first.id],
 							cwd: repository.repositoryPath,
 							prompt: "",
-							workspaceId: "isolated-rewind",
+							workspaceId,
 							env: environment,
 							startInPlanMode: true,
 							cols: 140,
@@ -360,9 +367,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 						);
 					});
 					const beforeCorrection = current();
-					await observer.observeTaskSessionSummary("isolated-rewind", beforeCorrection, current);
+					await observer.observeTaskSessionSummary(workspaceId, beforeCorrection, current);
 					await wait("原生空闲与运行时 review 一致", async () => {
-						await observer.observeTaskSessionSummary("isolated-rewind", current(), current);
+						await observer.observeTaskSessionSummary(workspaceId, current(), current);
 						return current().userTurnKind === "review";
 					});
 					expect(current().pid).toBe(pidBeforeRewind);
@@ -441,7 +448,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 						);
 						manager.transitionToRunning(taskId);
 						manager.transitionToReview(taskId, "hook", "needs_input");
-						await observer.observeTaskSessionSummary("isolated-rewind", current(), current);
+						await observer.observeTaskSessionSummary(workspaceId, current(), current);
 						expect(current().userTurnKind).toBe("needs_input");
 						if (evidenceDirectory)
 							await writeFile(
@@ -456,6 +463,63 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 									2,
 								),
 							);
+						manager.transitionToRunning(taskId);
+						manager.transitionToReview(taskId, "hook", "question");
+						const beforeRestart = current();
+						await observer.observeTaskSessionSummary(workspaceId, beforeRestart, current);
+						expect(current().userTurnKind).toBe("question");
+						const restarted = await manager.refreshTaskTerminal(buildStartRequest(true, first.id));
+						expect(restarted.runtimeSessionIncarnationId).not.toBe(beforeRestart.runtimeSessionIncarnationId);
+						expect(restarted.userTurnKind).toBe("needs_input");
+						await wait("重启后同一原生对话恢复普通输入框", async () => {
+							const native = await query();
+							return native?.id === first.id && native.status.type === "idle" && native.canAcceptDirectInput;
+						});
+						await wait("旧选择器没有阻塞新进程的普通待输入状态", async () => {
+							await observer.observeTaskSessionSummary(workspaceId, current(), current);
+							return current().userTurnKind === "review";
+						});
+						const resumed = await query();
+						if (!resumed) throw new Error("缺少重启后的原生会话");
+						manager.applyAgentNativeConversationSessionIdentity(taskId, {
+							sourceAgentId: "codex",
+							nativeSessionId: resumed.id,
+							transcriptPath: resumed.path,
+							observedAt: Date.now(),
+						});
+						vi.stubEnv("CODEX_HOME", codexHome);
+						vi.stubEnv("CODEX_SQLITE_HOME", codexHome);
+						const runtime = createRuntimeApi({
+							getScopedTerminalManager: async () => manager,
+							loadScopedRuntimeConfig: async () => ({ selectedAgentId: "codex" }),
+						} as unknown as CreateRuntimeApiDependencies);
+						const scope = { workspaceId, workspacePath: repository.repositoryPath };
+						const pending = await runtime.listAgentRaisedPendingUserDecisions(scope, { taskId });
+						expect(pending.decisions).toHaveLength(1);
+						const question = pending.decisions[0];
+						const option = question.orderedQuestions?.[0]?.options[0];
+						if (!option) throw new Error("缺少原生问题选项");
+						const answer = {
+							decisionId: question.decisionId,
+							selectedOptionIds: [option.optionId],
+							freeformText: restoredPanelAnswerMarker,
+							orderedQuestionAnswers: [
+								{
+									decisionQuestionId: "choice",
+									selectedOptionIds: [option.optionId],
+									freeformText: restoredPanelAnswerMarker,
+								},
+							],
+						};
+						expect(await runtime.answerAgentRaisedPendingUserDecision(scope, answer)).toMatchObject({
+							ok: true,
+							delivered: true,
+						});
+						expect((await runtime.answerAgentRaisedPendingUserDecision(scope, answer)).delivered).toBe(true);
+						await wait(
+							"原生对话只处理一次已保存的面板答案",
+							async () => restoredPanelAnswerRequestCount === 1 && (await query())?.status.type === "idle",
+						);
 					}
 				} finally {
 					const evidenceDirectory = process.env.KANBAN_CODEX_REWIND_RECONCILIATION_EVIDENCE_DIRECTORY;

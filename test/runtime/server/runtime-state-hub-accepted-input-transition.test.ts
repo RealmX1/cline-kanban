@@ -135,7 +135,7 @@ function createTrackedManagerHub(initialSummaries: RuntimeTaskSessionSummary[] =
 		listSummaries: () => [...currentByTaskId.values()],
 		getSummary: (taskId: string) => currentByTaskId.get(taskId) ?? null,
 		recordEffectiveAgentConversationActivity: recordEffectiveActivity,
-		reconcileCodexNeedsInputWithNativeDirectInputReadiness: reconcileNativeDirectInputReadiness,
+		reconcileCodexAwaitingInputWithNativeDirectInputReadiness: reconcileNativeDirectInputReadiness,
 		confirmAcceptedAgentConversationInput: confirmAcceptedInput,
 		setCodexReviewMisclassificationPersistenceHandler: (
 			handler: CodexReviewMisclassificationPersistenceHandler | null,

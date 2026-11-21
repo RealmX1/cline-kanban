@@ -2664,7 +2664,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 				if (beforeAnswerDecision?.agentId === "codex") {
 					const summary = answerManager.getSummary(beforeAnswerDecision.taskId);
 					const identity = summary?.agentNativeConversationSessionIdentity;
-					if (identity?.sourceAgentId === "codex") {
+					if (summary?.agentId === "codex" && identity?.sourceAgentId === "codex") {
 						if (
 							beforeAnswerDecision.nativeConversationSessionId &&
 							beforeAnswerDecision.nativeConversationSessionId !== identity.nativeSessionId
@@ -2720,6 +2720,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 						originRuntimeSessionIncarnationId,
 						idempotencyKey,
 						decisionId: answerDecisionId,
+						decisionAgentId,
 						attemptId,
 						dispatchIdempotencyKey,
 						persistSubmissionContext,
@@ -2734,7 +2735,6 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							transcriptPath: deliverySummary?.agentNativeConversationSessionIdentity?.transcriptPath ?? null,
 							preSubmissionAcceptance: deliverySummary?.agentConversationPromptSubmissionAcceptance ?? null,
 						});
-						let observedQuestionDeliveryOutcome: TaskChatInputDeliveryOutcome | null = null;
 						const deliverWithExistingQuestionConstraints = async (): Promise<
 							boolean | AgentRaisedPendingUserDecisionAnswerTransportReceipt
 						> => {
@@ -2799,26 +2799,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							const expectedRuntimeSessionIncarnationId = liveTerminalSummary?.runtimeSessionIncarnationId;
 							let terminalWriteValidationFailure: Error | null = null;
 							const validateCodexQuestionImmediatelyBeforeTerminalWrite =
-								liveTerminalSummary?.agentId === "codex"
+								decisionAgentId === "codex" || liveTerminalSummary?.agentId === "codex"
 									? async () => {
 											try {
 												const currentTerminalSummary = terminalManager.getSummary(taskId);
+												const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
+												if (
+													decisionAgentId !== "codex" ||
+													currentTerminalSummary?.agentId !== "codex" ||
+													identity?.sourceAgentId !== "codex" ||
+													identity.nativeSessionId !== expectedNativeSessionId ||
+													currentTerminalSummary?.runtimeSessionIncarnationId !==
+														expectedRuntimeSessionIncarnationId
+												)
+													throw new Error("无法确认原问题所属的 Codex 对话，答案已保存但未投递。");
 												const records = await readAgentRaisedPendingUserDecisions(
 													workspaceScope.workspaceId,
 												);
-												const identity = currentTerminalSummary?.agentNativeConversationSessionIdentity;
 												const currentDecision = records.find(
 													(decision) => decision.decisionId === answerDecisionId,
 												);
 												if (
-													identity?.sourceAgentId !== "codex" ||
-													identity.nativeSessionId !== expectedNativeSessionId ||
-													currentTerminalSummary?.runtimeSessionIncarnationId !==
-														expectedRuntimeSessionIncarnationId ||
-													(currentDecision?.nativeConversationSessionId &&
+													currentDecision?.agentId !== "codex" ||
+													currentDecision.taskId !== taskId ||
+													(currentDecision.nativeConversationSessionId &&
 														currentDecision.nativeConversationSessionId !== identity.nativeSessionId)
 												)
 													throw new Error("无法确认原问题所属的 Codex 对话，答案已保存但未投递。");
+												// 等账本读完再读转录，覆盖问答 hook 尚未入账的原生记录。
 												const recovered = await recoverCodexUserQuestionsFromKnownConversation({
 													sessionId: identity.nativeSessionId,
 													transcriptPath: identity.transcriptPath,
@@ -2834,11 +2842,14 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 												);
 												if (!nativeQuestion)
 													throw new Error("尚未核实原问题的完整记录，答案已保存但未投递。");
-												if (nativeQuestion?.resolution?.resolutionKind === "answered_in_agent_terminal")
+												if (
+													currentDecision.answer?.answerSource === "agent_terminal" ||
+													nativeQuestion.resolution?.resolutionKind === "answered_in_agent_terminal"
+												)
 													throw new Error("此问题已在 Codex 终端作答，已保存的面板答案不会再次发送。");
 												if (recovered.exchanges.at(-1)?.callId !== nativeQuestion.callId)
 													throw new Error("此问题已被新提问取代，已保存的面板答案不会发送给新问题。");
-												// 转录读取跨 await，最终同步复查当前活体、对话与选择器，随后才允许 manager 写入。
+												// 跨盘读之后同步复查活体、对话与选择器，再允许 manager 写入。
 												const currentAfterTranscriptRead = terminalManager.getSummary(taskId);
 												if (
 													currentAfterTranscriptRead?.agentId !== "codex" ||
@@ -2847,7 +2858,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 													currentAfterTranscriptRead?.runtimeSessionIncarnationId !==
 														expectedRuntimeSessionIncarnationId ||
 													currentAfterTranscriptRead?.agentNativeConversationSessionIdentity
-														?.nativeSessionId !== expectedNativeSessionId
+														?.nativeSessionId !== expectedNativeSessionId ||
+													currentAfterTranscriptRead.agentNativeConversationSessionIdentity
+														.transcriptPath !== identity.transcriptPath
 												)
 													throw new Error("核验期间 Codex 会话已更换，答案已保存但未投递。");
 												const currentTerminalFacets = resolveSessionFacets(currentAfterTranscriptRead);
@@ -2863,13 +2876,16 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 															(decision.answer?.answerSource === "kanban_panel" &&
 																decision.answerDeliveryState !== "delivered")),
 												);
-												if (
-													hasLiveQuestion ||
-													(currentTerminalFacets?.turnOwner === "user" &&
-														currentTerminalFacets.userTurnKind === "question")
-												)
+												if (hasLiveQuestion)
 													throw new Error(
 														"Codex 正在等待终端选择题，请在终端作答；已保存的面板答案尚未投递。",
+													);
+												if (
+													currentTerminalFacets.turnOwner === "user" &&
+													currentTerminalFacets.userTurnKind === "question"
+												)
+													throw new Error(
+														"正在核实 Codex 终端是否仍显示选择题。面板答案已保存，请稍后重试投递。",
 													);
 											} catch (error) {
 												terminalWriteValidationFailure =
@@ -2883,7 +2899,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							} catch (error) {
 								return {
 									status: "delivery_failed",
-									reason: "terminal_prompt_readiness_timeout",
+									reason: "cancelled_before_delivery",
+									submissionMayHaveStarted: false,
 									failureNote: String(error),
 								};
 							}
@@ -2897,19 +2914,20 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									return {
 										status: "delivery_failed",
 										reason: "terminal_prompt_readiness_timeout",
+										submissionMayHaveStarted: false,
 										failureNote: `无法关闭终端里的提问选择器，答案未投递（${selectorDismissalOutcome}）`,
 									};
 								}
 							}
 							const contentionPolicyConfig = await deps.loadScopedRuntimeConfig(workspaceScope);
-							let resolveConfirmedDelivery: (delivered: boolean) => void = () => undefined;
-							const confirmedDelivery = new Promise<boolean>((resolve) => {
-								resolveConfirmedDelivery = resolve;
+							let settleTerminalDeliveryOutcome: (outcome: TaskChatInputDeliveryOutcome) => void = () =>
+								undefined;
+							const terminalDeliveryOutcome = new Promise<TaskChatInputDeliveryOutcome>((resolve) => {
+								settleTerminalDeliveryOutcome = resolve;
 							});
 							let terminalSubmissionWasAuthorized = false;
 							let capturedPreSubmissionPosition = false;
 							const persistPreSubmissionPositionBeforeTerminalWrite = async () => {
-								await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
 								if (!capturedPreSubmissionPosition) {
 									const path = deliverySummary?.agentNativeConversationSessionIdentity?.transcriptPath;
 									const metadata = path ? await stat(path).catch(() => null) : null;
@@ -2920,6 +2938,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 										});
 									capturedPreSubmissionPosition = true;
 								}
+								await validateCodexQuestionImmediatelyBeforeTerminalWrite?.();
 								terminalSubmissionWasAuthorized = true;
 							};
 							const acceptedSummary = terminalManager.submitTaskChatInputWhenReady(taskId, text, {
@@ -2932,10 +2951,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									idempotencyKey: dispatchIdempotencyKey,
 								},
 								validateBeforeTerminalWrite: persistPreSubmissionPositionBeforeTerminalWrite,
-								onDeliveryOutcome: (outcome) => {
-									observedQuestionDeliveryOutcome = outcome;
-									resolveConfirmedDelivery(outcome.status !== "delivery_failed");
-								},
+								onDeliveryOutcome: settleTerminalDeliveryOutcome,
 								mayAutoStashAbsentHumanInputBox:
 									contentionPolicyConfig.programmaticDeliveryMayAutoStashAbsentHumanInputBoxEnabled,
 								preemptivelyStashHumanInputBox: async (contendedTaskId) => {
@@ -2951,23 +2967,21 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 									return stash.outcome;
 								},
 							});
-							if (acceptedSummary) await confirmedDelivery;
-							if (!acceptedSummary) return { status: "delivery_failed", reason: "no_active_terminal_session" };
-							if (terminalWriteValidationFailure)
+							if (!acceptedSummary)
 								return {
-									...(observedQuestionDeliveryOutcome ?? {
-										status: "delivery_failed" as const,
-										reason: "terminal_prompt_readiness_timeout" as const,
-									}),
-									submissionMayHaveStarted: terminalSubmissionWasAuthorized,
-									failureExplanation: String(terminalWriteValidationFailure),
+									status: "delivery_failed",
+									reason: "no_active_terminal_session",
+									submissionMayHaveStarted: false,
 								};
+							const outcome = await terminalDeliveryOutcome;
 							return {
-								...(observedQuestionDeliveryOutcome ?? {
-									status: "delivery_failed" as const,
-									reason: "submit_confirmation_budget_exhausted" as const,
-								}),
-								submissionMayHaveStarted: terminalSubmissionWasAuthorized,
+								...outcome,
+								// 写入守卫曾放行，只代表允许尝试。通道确认写入前取消时，可以重试。
+								submissionMayHaveStarted:
+									outcome.reason !== "cancelled_before_delivery" && terminalSubmissionWasAuthorized,
+								...(terminalWriteValidationFailure
+									? { failureNote: String(terminalWriteValidationFailure) }
+									: {}),
 							};
 						};
 						const ledgerPath = getTaskMessageInjectionLedgerPath(
@@ -3020,7 +3034,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 							codexNativePromptDeliveryEvidence: outcome.codexNativePromptDeliveryEvidence,
 							nowIso: new Date().toISOString(),
 						});
-						await registration?.handle.settle(outcome).catch(() => undefined);
+						await registration?.handle.settle(outcome, outcome.failureNote).catch(() => undefined);
 						return outcome;
 					},
 				}).answerPendingUserDecision({

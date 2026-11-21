@@ -132,8 +132,8 @@ import {
 } from "../core/codex-native-agent-turn-execution-observation";
 import {
 	type CodexNativeDirectInputReadinessObservation,
-	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
-	isUnchangedCodexNeedsInputReconciliationCandidate,
+	canReconcileCodexAwaitingInputWithNativeDirectInputReadiness,
+	isUnchangedCodexAwaitingInputNativeReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
 import {
 	type CodexNativePromptDeliveryLedgerBinding,
@@ -6872,13 +6872,12 @@ export class TerminalSessionManager implements TerminalSessionService {
 			? "attention"
 			: "hook";
 		const startedAt = now();
-		// 恢复已有对话只重建运行时，不能改变仍待用户处理的决策种类。reviewReason="attention" 是
-		// 恢复期的通用运行时成因不足以反推真实模态；进程重启还须保留 stop 改写 facet 之前的快照。
+		// Codex 续跑会保留问题历史，但 request_user_input 选择器属于已经退出的进程。
 		const userTurnKindBeforeAgentConversationRestoration =
 			pendingUserDecisionKindBeforeProcessRestart ?? resolveSessionFacets(entry.summary).userTurnKind;
 		const pendingUserDecisionKindPreservedAcrossRestoration =
 			startsWithoutSendingNewPrompt &&
-			(userTurnKindBeforeAgentConversationRestoration === "question" ||
+			((userTurnKindBeforeAgentConversationRestoration === "question" && request.agentId !== "codex") ||
 				userTurnKindBeforeAgentConversationRestoration === "plan_review" ||
 				userTurnKindBeforeAgentConversationRestoration === "permission")
 				? userTurnKindBeforeAgentConversationRestoration
@@ -8684,7 +8683,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		return "allow_reclamation";
 	}
 
-	reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+	reconcileCodexAwaitingInputWithNativeDirectInputReadiness(
 		taskId: string,
 		summaryBeforeRead: RuntimeTaskSessionSummary,
 		observation: CodexNativeDirectInputReadinessObservation,
@@ -8692,7 +8691,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 		const entry = this.entries.get(taskId);
 		if (
 			!entry?.active ||
-			!canReconcileCodexNeedsInputWithNativeDirectInputReadiness(summaryBeforeRead, entry.summary, observation)
+			!canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(summaryBeforeRead, entry.summary, observation)
 		) {
 			return entry ? cloneSummary(entry.summary) : null;
 		}
@@ -8717,7 +8716,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		progress: NonNullable<RuntimeTaskSessionSummary["codexNativeDirectInputReadinessReconciliation"]>,
 	): void {
 		const entry = this.entries.get(taskId);
-		if (!entry?.active || !isUnchangedCodexNeedsInputReconciliationCandidate(summaryBeforeRead, entry.summary))
+		if (
+			!entry?.active ||
+			!isUnchangedCodexAwaitingInputNativeReconciliationCandidate(summaryBeforeRead, entry.summary)
+		)
 			return;
 		const summary = updateSummary(entry, { codexNativeDirectInputReadinessReconciliation: progress });
 		this.emitSummary(summary);
