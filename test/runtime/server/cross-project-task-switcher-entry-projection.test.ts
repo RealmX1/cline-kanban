@@ -78,6 +78,52 @@ function collect(
 }
 
 describe("collectCrossProjectTaskSwitcherEntriesFromBoard", () => {
+	it("后台等待归属须同时匹配当前卡、主会话与原生会话", () => {
+		const card = makeCard("owner", { createdAt: NOW_MS - 1 });
+		const facts = makeFacts({
+			turnOwner: "agent",
+			liveness: "live",
+			isParkedAwaitingDispatchedBackgroundWork: true,
+			stoppedMainTurnOwnedCommandExecutionIds: ["owned"],
+			nativeSessionId: "current-native",
+			ownedBackgroundWaitRuntimeSessionIncarnationId: "current-incarnation",
+		});
+		const execution = {
+			taskId: card.id,
+			taskIncarnationCreatedAtEpochMs: card.createdAt,
+			originatingConversationSessionId: card.id,
+			originatingNativeSessionId: "current-native",
+			originatingRuntimeSessionIncarnationId: "current-incarnation",
+			requiresOriginatingSessionBinding: true,
+			parkOwned: true,
+			revokedAtEpochMs: null,
+			launchState: "running",
+			businessDisposition: "machine_evidence_pending",
+		} as const;
+		const project = (
+			record: Omit<typeof execution, "originatingNativeSessionId" | "originatingRuntimeSessionIncarnationId"> & {
+				originatingNativeSessionId: string;
+				originatingRuntimeSessionIncarnationId: string;
+			},
+		) =>
+			collectCrossProjectTaskSwitcherEntriesFromBoard({
+				board: makeBoard({ in_progress: [card] }),
+				sessionFactsByTaskId: new Map([[card.id, facts]]),
+				lastOpenedByUserAtByTaskId: new Map(),
+				executionsById: new Map([["owned", record]]),
+				nowMs: NOW_MS,
+				activityHorizonMs: HORIZON_MS,
+			})[0];
+		expect(project(execution)?.ownedBackgroundWorkWaitingStatus).toBe("waiting_for_machine_evidence");
+		expect(
+			project({ ...execution, originatingNativeSessionId: "previous-native" })?.ownedBackgroundWorkWaitingStatus,
+		).toBeUndefined();
+		expect(
+			project({ ...execution, originatingRuntimeSessionIncarnationId: "old-incarnation" })
+				?.ownedBackgroundWorkWaitingStatus,
+		).toBeUndefined();
+	});
+
 	it("启动记录核对创建时间且不覆盖真实会话，等待中的老任务仍进入广播范围", () => {
 		const progress: TaskEditorCreationSubmissionStatus = {
 			resolvedSettings: resolveCreationStartupSettings({

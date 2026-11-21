@@ -17,6 +17,8 @@ export interface CodexNativeAgentTurnExecutionObservation {
 	threadStatus: string;
 	nativeTurnStatus: string | null;
 	nativeTurnErrorMessage?: string | null;
+	nativeTurnFinishedAtMs?: number;
+	source?: "persisted_codex_turn_completion";
 	activeFlags: string[];
 	canAcceptDirectInput: boolean | null;
 	executionStatus: "running" | "waiting_for_user" | "finished" | "unknown";
@@ -86,7 +88,8 @@ export function shouldContinuouslyObserveCodexNativeTurnExecution(summary: Runti
 	return (
 		summary.agentId === "codex" &&
 		facets.liveness === "live" &&
-		!summary.awaitingDispatchedBackgroundWork &&
+		(!summary.awaitingDispatchedBackgroundWork ||
+			(summary.awaitingDispatchedBackgroundWork.owningCommandExecutionIds?.length ?? 0) > 0) &&
 		(facets.turnOwner === "agent" || isCodexReviewMisclassificationNativeReconciliationCandidate(summary))
 	);
 }
@@ -167,4 +170,31 @@ export function canCorrectCodexReviewMisclassificationForSameNativeTurn(
 		summary.agentConversationPromptSubmissionAcceptance?.eventId?.startsWith(eventPrefix) === true ||
 		summary.lastEffectiveAgentConversationActivityObservation?.eventId?.startsWith(eventPrefix) === true
 	);
+}
+
+export function isCodexNativeTerminalOutcomeForCurrentTurn(
+	summary: RuntimeTaskSessionSummary,
+	observation: CodexNativeAgentTurnExecutionObservation,
+): boolean {
+	const nativeTurnId = observation.nativeTurnId;
+	const turnStartedAtMs = observation.nativeTurnStartedAtMs;
+	if (observation.executionStatus !== "finished" || !nativeTurnId || turnStartedAtMs === null) return false;
+	const acceptance = summary.agentConversationPromptSubmissionAcceptance;
+	if ((observation.nativeTurnFinishedAtMs ?? observation.observedAtMs) < (acceptance?.attemptedAtMs ?? 0))
+		return false;
+	const acceptanceEventId = acceptance?.status === "accepted" ? acceptance.eventId : null;
+	const nativeEventPrefix = `codex:${observation.nativeSessionId}:`;
+	const startedAtMs = summary.startedAt ?? 0;
+	if (turnStartedAtMs < Math.floor(startedAtMs / 1_000) * 1_000) return false;
+	if (acceptanceEventId?.startsWith("codex:"))
+		return acceptanceEventId.startsWith(`${nativeEventPrefix}${nativeTurnId}:`);
+	// 秒精度的控制面开始时间不能替未确认的新输入排定同一秒内的顺序。
+	if (
+		acceptance &&
+		(turnStartedAtMs < acceptance.attemptedAtMs ||
+			(turnStartedAtMs === acceptance.attemptedAtMs && observation.source !== "persisted_codex_turn_completion"))
+	)
+		return false;
+	const currentTurnStartedAtMs = summary.agentResponseGenerationTurnStarted?.startedAt ?? startedAtMs;
+	return turnStartedAtMs >= Math.floor(currentTurnStartedAtMs / 1_000) * 1_000;
 }

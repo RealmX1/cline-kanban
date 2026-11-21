@@ -18,6 +18,7 @@ const BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER: readonly CrossPro
 	"pinned",
 	"running",
 	"waiting_automatic_recovery",
+	"waiting_owned_background_work",
 	"prompt_cache_warm",
 	"remaining",
 	"shelved",
@@ -90,7 +91,10 @@ function BoardScopeAllProjectsHomePageSectionColumns({
 	// 列 DOM 同生命周期，否则置顶从无到有时不还原记住的 scrollTop，置顶清空时 hover 展开状态也留在 hook 里。
 	const hasPinnedEntries = sharedSectionRowRendering.sectionsModel.sections.pinnedEntries.length > 0;
 	const renderedSectionColumnsInOrder = BOARD_SCOPE_ALL_PROJECTS_HOME_PAGE_SECTION_COLUMN_ORDER.filter(
-		(section) => section !== "pinned" || hasPinnedEntries,
+		(section) =>
+			(section !== "pinned" || hasPinnedEntries) &&
+			(section !== "waiting_owned_background_work" ||
+				sharedSectionRowRendering.sectionsModel.sections.ownedBackgroundWorkWaitingEntries.length > 0),
 	);
 	return (
 		<div

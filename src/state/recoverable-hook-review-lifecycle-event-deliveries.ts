@@ -101,6 +101,10 @@ interface RecoverableHookReviewLifecycleEventDeliveriesOptions {
 	getWorkspaceDeliveryFilePath: (workspaceId: string) => string;
 	isMainTaskConversationSession?: (request: RuntimeHookIngestRequest) => Promise<boolean>;
 	readTarget: (request: RuntimeHookIngestRequest) => Promise<RecoverableHookReviewLifecycleTarget>;
+	onParkedMainAgentTurnCompletion?: (
+		request: RecoverableHookReviewLifecycleEvent,
+		summary: RuntimeTaskSessionSummary,
+	) => void;
 	probeSnapshotCommitReadiness?: (request: RecoverableHookReviewLifecycleEvent) => Promise<string>;
 	persistApplicationConfirmation: (
 		request: RecoverableHookReviewLifecycleEvent,
@@ -477,6 +481,16 @@ export class RecoverableHookReviewLifecycleEventDeliveries {
 					summary.automaticAgentFailureContinuation?.phase ?? "",
 				))
 		) {
+			// Codex 的 Stop 可能先于失败或后台终端收束，继续以原生终态判定。
+			if (
+				summary?.agentId &&
+				summary.agentId !== "codex" &&
+				summary.runtimeSessionIncarnationId === delivery.request.hookRuntimeSessionIncarnationId &&
+				nativeIdentity?.nativeSessionId &&
+				isParkedAwaitingDispatchedBackgroundWork(summary)
+			) {
+				this.options.onParkedMainAgentTurnCompletion?.(delivery.request, summary);
+			}
 			delivery.status = "waiting_for_recovery_evidence";
 			delivery.nextCheckAtEpochMs = this.readNow() + 15_000;
 			await this.save(delivery);

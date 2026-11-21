@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readCodexNativeAgentTurnExecution } from "../agent-session-history/codex-native-agent-turn-execution-reader";
+import { supplementCodexNativeTurnExecutionWithTranscriptEvidence } from "../agent-session-history/codex-native-turn-completion-transcript-evidence";
 import type { RuntimeAutomaticAgentFailureContinuation, RuntimeTaskSessionSummary } from "../core/api-contract";
 import { createCodexNativePromptDeliveryJournal } from "../core/codex-native-prompt-delivery-journal";
 import {
@@ -15,6 +16,19 @@ import { inspectCodexNativeConnectionRetryContinuationReadiness } from "./codex-
 import { deliverCodexNativePromptWithoutChangingComposer } from "./codex-native-prompt-delivery";
 import { classifyConnectionError } from "./output-reactions/connection-error-patterns";
 import { normalizeTerminalText } from "./terminal-output-normalization";
+
+export function classifyCodexNativeTurnRetryableFailureReason(
+	errorMessage: string,
+): RuntimeAutomaticAgentFailureContinuation["reason"] | null {
+	const normalizedMessage = normalizeTerminalText(errorMessage);
+	const classification = classifyConnectionError(normalizedMessage).classification;
+	if (classification === "permanent") return null;
+	if (normalizedMessage.includes("selected model is at capacity. please try a different model."))
+		return "model_capacity";
+	return classification === "transient" || /\bunexpected status (?:429|502|503|504)\b/u.test(normalizedMessage)
+		? "connection"
+		: null;
+}
 
 export function buildAutomaticAgentFailureContinuationPrompt(
 	reason: RuntimeAutomaticAgentFailureContinuation["reason"],
@@ -161,10 +175,11 @@ export async function deliverAutomaticAgentFailureContinuationNativePrompt(input
 		});
 		const current = input.getCurrentSummary();
 		if (!current) return { outcome: "invalidated" };
-		const execution = await readCodexNativeAgentTurnExecution({
-			workspaceId: record.workspaceId,
-			summary: current,
-			observedAtMs: Date.now(),
+		const nativeTurnReadInput = { workspaceId: record.workspaceId, summary: current, observedAtMs: Date.now() };
+		const execution = await supplementCodexNativeTurnExecutionWithTranscriptEvidence({
+			...nativeTurnReadInput,
+			control: await readCodexNativeAgentTurnExecution(nativeTurnReadInput).catch(() => null),
+			requiredNativeTurnId: result.evidence.nativeTurnId,
 		});
 		if (!input.getCurrentSummary()) return { outcome: "invalidated" };
 		if (!execution || execution.nativeTurnId !== result.evidence.nativeTurnId)
@@ -181,26 +196,28 @@ export async function deliverAutomaticAgentFailureContinuationNativePrompt(input
 			execution.nativeTurnStatus === "failed" &&
 			execution.nativeTurnId
 		) {
-			const errorMessage = normalizeTerminalText(execution.nativeTurnErrorMessage ?? "");
-			const classification = classifyConnectionError(errorMessage).classification;
-			if (classification === "permanent")
-				return { outcome: "invalidated", blockingReason: "non_retryable_native_turn_failure" };
-			// 终结状态只证明失败已结束；新的重试必须有本回合原因，旧 episode 原因不能充当证据。
+			const errorMessage = execution.nativeTurnErrorMessage ?? "";
+			// 新的重试必须有本回合原因，旧 episode 原因不能充当证据。
 			const observedFailure = record.activeDeliveryObservedFailure;
-			const retryableFailureReason = errorMessage.includes(
-				"selected model is at capacity. please try a different model.",
-			)
-				? "model_capacity"
-				: classification === "transient"
-					? "connection"
-					: !errorMessage &&
-							observedFailure &&
-							(observedFailure.nativeTurnId === execution.nativeTurnId ||
-								(observedFailure.nativeTurnId === null && record.faultNativeTurnId === execution.nativeTurnId))
-						? observedFailure.reason
-						: null;
+			const retryableFailureReason =
+				classifyCodexNativeTurnRetryableFailureReason(errorMessage) ??
+				(!errorMessage &&
+				observedFailure &&
+				(observedFailure.nativeTurnId === execution.nativeTurnId ||
+					(observedFailure.nativeTurnId === null && record.faultNativeTurnId === execution.nativeTurnId))
+					? observedFailure.reason
+					: null);
 			if (retryableFailureReason)
 				return { outcome: "accepted_failed", nativeTurnId: execution.nativeTurnId, retryableFailureReason };
+			if (
+				errorMessage ||
+				(record.blockingReason === "waiting_for_failed_native_turn_reason" && record.unchangedCheckCount >= 4)
+			)
+				return {
+					outcome: "accepted_terminal_failure",
+					nativeTurnId: execution.nativeTurnId,
+					blockingReason: errorMessage ? "non_retryable_native_turn_failure" : "native_failure_reason_unavailable",
+				};
 			return {
 				outcome: "unconfirmed",
 				nativeAcceptanceConfirmed: true,

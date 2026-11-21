@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -87,11 +87,12 @@ const evidence = {
 async function deliver(
 	record: RuntimeAutomaticAgentFailureContinuation,
 	sender?: typeof deliverCodexNativePromptWithoutChangingComposer,
+	currentSummary = summary,
 ) {
 	return deliverAutomaticAgentFailureContinuationNativePrompt({
 		record,
-		summary,
-		getCurrentSummary: () => summary,
+		summary: currentSummary,
+		getCurrentSummary: () => currentSummary,
 		beforeSubmit: async () => true,
 		sender: sender ?? (async () => ({ status: "confirmed", evidence })),
 	});
@@ -106,6 +107,43 @@ afterEach(async () => {
 });
 
 describe("原生自动续跑入口", () => {
+	it.each([null, "unexpected status 503 Service Unavailable"])(
+		"已接受续跑的控制查询超时时按同回合转录结算：%s",
+		async (message) => {
+			const path = join(isolatedState.directory, "native.jsonl");
+			const timestamp = new Date(Date.now() - 1_000).toISOString();
+			const records = [
+				{ type: "session_meta", payload: { id: "native", cwd: "/isolated", source: "vscode" } },
+				{ type: "event_msg", timestamp, payload: { type: "task_started", turn_id: evidence.nativeTurnId } },
+				{
+					type: "event_msg",
+					timestamp,
+					payload: {
+						type: "task_complete",
+						turn_id: evidence.nativeTurnId,
+						error: message ? { message } : null,
+					},
+				},
+			];
+			await writeFile(path, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`);
+			isolatedState.readExecution.mockRejectedValue(new Error("控制查询超时"));
+			const currentSummary = {
+				...summary,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex" as const,
+					nativeSessionId: "native",
+					observedAt: 1,
+					transcriptPath: path,
+				},
+			};
+			const result = await deliver(await episode(), undefined, currentSummary);
+			expect(result).toMatchObject({
+				outcome: message ? "accepted_failed" : "accepted_finished",
+				nativeTurnId: evidence.nativeTurnId,
+			});
+		},
+	);
+
 	it("实际调用前才记录新提示的发送边沿，readiness 和模态延期不能提前清除旧交棒", async () => {
 		const record = await episode();
 		const onSubmissionStarted = vi.fn();
@@ -159,7 +197,7 @@ describe("原生自动续跑入口", () => {
 				nativeTurnErrorMessage: message,
 			});
 			expect(await deliver(await episode())).toMatchObject({
-				outcome: "invalidated",
+				outcome: "accepted_terminal_failure",
 				blockingReason: "non_retryable_native_turn_failure",
 			});
 		}
@@ -218,7 +256,7 @@ describe("原生自动续跑入口", () => {
 			threadStatus: "systemError",
 			nativeTurnErrorMessage: "unknown fatal error",
 		});
-		expect((await deliver(record)).outcome).toBe("unconfirmed");
+		expect((await deliver(record)).outcome).toBe("accepted_terminal_failure");
 	});
 	it("执行期 Stop 遇到原生 failed 不会冒充成功，completed 才允许补交棒", async () => {
 		const record = await episode();

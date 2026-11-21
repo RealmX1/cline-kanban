@@ -33,6 +33,7 @@ export type CrossProjectTaskSwitcherTaskRowSection =
 	| "pinned"
 	| "running"
 	| "waiting_automatic_recovery"
+	| "waiting_owned_background_work"
 	| "prompt_cache_warm"
 	| "remaining"
 	| "shelved";
@@ -243,6 +244,27 @@ export function CrossProjectRecentlyActiveTaskSwitcherTaskRow({
 								</span>
 							) : null}
 
+							{section === "running" && entry.codexNativeTurnVerificationPending && (
+								<span className="text-status-orange">
+									{entry.codexNativeTurnVerificationPending.reason === "native_execution_unavailable"
+										? "待核验原生回合"
+										: "待核验原生失败原因"}
+									{" · "}
+									预计 {new Date(entry.codexNativeTurnVerificationPending.nextCheckAtMs).toLocaleTimeString()}{" "}
+									重查
+								</span>
+							)}
+							{entry.ownedBackgroundWorkWaitingStatus && (
+								<span className="text-status-orange">
+									{
+										{
+											background_execution_running: "后台执行中",
+											waiting_for_machine_evidence: "等待机器证据",
+											waiting_for_result_continuation: "等待结果接续",
+										}[entry.ownedBackgroundWorkWaitingStatus]
+									}
+								</span>
+							)}
 							<TaskPromptSubmissionAcceptanceNotice
 								acceptance={entry.agentConversationPromptSubmissionAcceptance}
 							/>

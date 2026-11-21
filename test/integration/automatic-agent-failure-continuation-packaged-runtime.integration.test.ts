@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
 import { afterEach, expect, it } from "vitest";
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 import { waitForConditionWithinLoadSensitiveTwoTierDeadline } from "../utilities/load-sensitive-wall-clock-two-tier-deadline";
@@ -19,6 +20,14 @@ it.skipIf(process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_PACKAGED_RUNTIME_CHE
 	async (test) => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "packaged-capacity-recovery" });
+		const previousHome = process.env.HOME;
+		process.env.HOME = fixture.isolatedHomeDirectoryPath;
+		try {
+			await loadWorkspaceContext(repository.repositoryPath);
+		} finally {
+			if (previousHome === undefined) delete process.env.HOME;
+			else process.env.HOME = previousHome;
+		}
 		const sourceCheckout = resolve(import.meta.dirname, "../..");
 		const distribution = join(sourceCheckout, "dist");
 		expect(await realpath(distribution)).toBe(distribution);

@@ -11,8 +11,8 @@ import { isAutomaticAgentFailureContinuationWaiting } from "./session-activity";
 
 // 跨项目「最近活跃任务」切换面板的区归属（领域词汇见 docs/context-cross-project-recently-active-task-switcher.md）。
 //
-// 五个区自上而下：Pinned → Running → Cache warm · your turn → Recent → Shelved。
-// Shelved 优先且独占归属；其余任务的 Pinned 允许与主分组重复，主分组按 Running > Cache warm > Recent 互斥归属。
+// 从 Pinned、Running 到自动恢复与后台等待，再到 Cache warm、Recent 和 Shelved。
+// Shelved 优先且独占归属；其余任务的 Pinned 允许与主分组重复，主分组互斥。
 // Running 展示可信 Agent 回合与已保存且请求启动的准备状态，不读 PTY 输出新鲜度；准备态不改 session facet。
 // Recent 包含所有阶段，统一按最近触达截取 7 / 30 天，再应用阶段多选与排序。
 // Cache warm 继续只收 In progress / Review，避免提醒用户接续已交付验证或完成的对话。
@@ -84,6 +84,7 @@ export interface CrossProjectTaskSwitcherSections {
 	shelvedEntries: CrossProjectTaskSwitcherEntryInProject[];
 	runningEntries: CrossProjectTaskSwitcherEntryInProject[];
 	automaticRecoveryWaitingEntries: CrossProjectTaskSwitcherEntryInProject[];
+	ownedBackgroundWorkWaitingEntries: CrossProjectTaskSwitcherEntryInProject[];
 	promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[];
 	remainingSection: CrossProjectTaskSwitcherRemainingSection;
 }
@@ -111,11 +112,16 @@ export function buildCrossProjectTaskSwitcherEntryKey(workspaceId: string, taskI
 export function isCrossProjectTaskSwitcherEntryRunning(
 	entry: Pick<
 		RuntimeCrossProjectTaskSwitcherEntry,
-		"turnOwner" | "liveness" | "isParkedAwaitingDispatchedBackgroundWork" | "automaticAgentFailureContinuation"
+		| "turnOwner"
+		| "liveness"
+		| "isParkedAwaitingDispatchedBackgroundWork"
+		| "automaticAgentFailureContinuation"
+		| "ownedBackgroundWorkWaitingStatus"
 	>,
 	_nowMs: number,
 ): boolean {
 	if (
+		entry.ownedBackgroundWorkWaitingStatus ||
 		entry.liveness === "retrying" ||
 		isAutomaticAgentFailureContinuationWaiting(entry.automaticAgentFailureContinuation)
 	)
@@ -430,6 +436,7 @@ export function assignCrossProjectTaskSwitcherSections(
 	const pinnedEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const runningEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const automaticRecoveryWaitingEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
+	const ownedBackgroundWorkWaitingEntries: CrossProjectTaskSwitcherEntryInProject[] = [];
 	const promptCacheWarmAwaitingUserEntries: CrossProjectTaskSwitcherPromptCacheWarmEntryInProject[] = [];
 	const remainingCandidates: CrossProjectTaskSwitcherEntryInProject[] = [];
 	for (const entryInProject of input.entriesInProjects) {
@@ -447,6 +454,10 @@ export function assignCrossProjectTaskSwitcherSections(
 				isAutomaticAgentFailureContinuationWaiting(entry.automaticAgentFailureContinuation))
 		) {
 			automaticRecoveryWaitingEntries.push(entryInProject);
+			continue;
+		}
+		if (entry.ownedBackgroundWorkWaitingStatus) {
+			ownedBackgroundWorkWaitingEntries.push(entryInProject);
 			continue;
 		}
 		if (
@@ -513,6 +524,7 @@ export function assignCrossProjectTaskSwitcherSections(
 		pinnedEntries,
 		runningEntries,
 		automaticRecoveryWaitingEntries,
+		ownedBackgroundWorkWaitingEntries,
 		promptCacheWarmAwaitingUserEntries,
 		remainingSection: assignRemainingSection(remainingCandidates, input),
 	};

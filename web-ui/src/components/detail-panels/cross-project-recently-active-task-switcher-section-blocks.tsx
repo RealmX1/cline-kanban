@@ -76,6 +76,7 @@ interface CrossProjectTaskSwitcherSectionHeaderNavigation {
 }
 
 export interface CrossProjectTaskSwitcherSectionBlockProps {
+	waitingSection?: "waiting_automatic_recovery" | "waiting_owned_background_work";
 	headerNavigation?: CrossProjectTaskSwitcherSectionHeaderNavigation;
 	rendersGroupHeaderRailEntry?: boolean;
 	headerPresentation?: FocusViewGroupHeaderPresentation;
@@ -461,8 +462,9 @@ export function CrossProjectTaskSwitcherRunningSectionBlock({
 	);
 }
 
-/** 等待自动恢复仅在有任务时显示，始终展开，紧邻 Running，供所有宿主共用。 */
-export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
+/** 等待分组仅在有任务时显示，始终展开。 */
+export function CrossProjectTaskSwitcherWaitingSectionBlock({
+	waitingSection = "waiting_automatic_recovery",
 	sectionBlockPresentation,
 	sectionsModel,
 	renderRowInHostingScrollContainer,
@@ -472,30 +474,34 @@ export function CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock({
 	focusedCardContent,
 	headerPresentation,
 }: CrossProjectTaskSwitcherSectionBlockProps): ReactElement | null {
-	const entries = sectionsModel.sections.automaticRecoveryWaitingEntries;
+	const isOwnedBackgroundWork = waitingSection === "waiting_owned_background_work";
+	const entries = isOwnedBackgroundWork
+		? sectionsModel.sections.ownedBackgroundWorkWaitingEntries
+		: sectionsModel.sections.automaticRecoveryWaitingEntries;
+	const title = isOwnedBackgroundWork ? "等待所属后台工作" : "等待自动恢复";
 	if (entries.length === 0) return null;
 	return (
 		<CrossProjectTaskSwitcherSectionFrame
 			rendersGroupHeaderRailEntry={rendersGroupHeaderRailEntry}
 			focusedCardContent={focusedCardContent}
-			testIdSuffix="waiting-automatic-recovery"
+			testIdSuffix={waitingSection.replaceAll("_", "-")}
 			sectionBlockPresentation={sectionBlockPresentation}
 			sectionColumnScrollContainerBinding={sectionColumnScrollContainerBinding}
 			header={
 				sectionBlockPresentation === "stacked_section_in_focus_view_left_column_panel" ? (
 					<FocusViewGroupHeader
 						presentation={headerPresentation}
-						title="等待自动恢复"
+						title={title}
 						icon={<TimerReset size={13} className="text-status-orange" />}
 						count={entries.length}
 						onJumpToSection={headerNavigation?.onJumpToSection}
 					/>
 				) : (
-					<CrossProjectTaskSwitcherSectionTitle title="等待自动恢复" count={entries.length} />
+					<CrossProjectTaskSwitcherSectionTitle title={title} count={entries.length} />
 				)
 			}
 		>
-			{entries.map((entry) => renderRowInHostingScrollContainer(entry, "waiting_automatic_recovery"))}
+			{entries.map((entry) => renderRowInHostingScrollContainer(entry, waitingSection))}
 		</CrossProjectTaskSwitcherSectionFrame>
 	);
 }

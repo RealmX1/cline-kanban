@@ -6,6 +6,7 @@
 kanban task list --all-projects
 kanban task list --all-projects --group shelved
 kanban task list --all-projects --group running
+kanban task list --all-projects --group waiting_owned_background_work
 kanban task list --all-projects --group recent --recent-days 30 --query "修复"
 kanban task watch --all-projects --group running
 kanban task watch --all-projects --group running --interval-ms 5000 --exit-when-empty
@@ -16,14 +17,14 @@ kanban task watch --all-projects --group running --interval-ms 5000 --exit-when-
 | 参数 | 行为 |
 | --- | --- |
 | `--all-projects` | 查询 runtime 已注册的全部项目；与 `--project-path` 互斥，不依赖调用者当前目录 |
-| `--group` | `pinned`、`running`、`cache_warm_awaiting_user`、`recent`、`shelved`；省略时按此顺序返回五组 |
+| `--group` | `pinned`、`running`、`waiting_automatic_recovery`、`waiting_owned_background_work`、`cache_warm_awaiting_user`、`recent`、`shelved`；省略时按此顺序返回全部分组 |
 | `--query` | 任务 ID 或投影标题的不区分大小写字面子串；不搜索 Prompt，不做模糊或语义搜索 |
 | `--column` | 对组内任务进一步筛选；`done` 对应内部列 `trash` |
 | `--recent-days` | `7`（默认）或 `30`；只影响 Recent，按最近触达倒序 |
 | `--interval-ms` | 仅 watch；默认 `5000`，范围 `1000` 至 `2147483647` |
 | `--exit-when-empty` | 仅 watch，必须指定 `--group`；所选组内筛选结果连续两次完整为空后退出 |
 
-Running 使用可信主会话的 `turnOwner`、`liveness` 与明确 park 事实，包含 agent 回合中的 retrying 和后台等待。`in_progress` 列中等待用户的任务可以不在 Running；其他列的任务也可以在 Running。Pinned 可以同时属于主分组，主分组 Running／Cache warm／Recent 互斥。Recent 包含符合时间窗的 Done 卡。搁置任务只属于最后的 Shelved，不受 Recent 时间窗限制，也不再出现在 Pinned 或其他主分组；卡片仍保留置顶意图与原 Stage。
+Running 使用可信主会话的 `turnOwner`、`liveness` 和启动进度。自动恢复待命使用 `waiting_automatic_recovery`。当主回合已有终止证明，且当前主会话仍持有所属后台等待时，任务归入 `waiting_owned_background_work`，条目的 `ownedBackgroundWorkWaitingStatus` 区分后台执行、机器待证与结果接续。`in_progress` 列中的任务也可归入其他分组。Pinned 可以同时属于主分组，其余主分组互斥。Recent 包含符合时间窗的 Done 卡。搁置任务只属于 Shelved，仍保留置顶意图与原 Stage。
 
 CLI 使用共享规则的默认排序，不读取浏览器的本地筛选、展开状态或排序偏好。查询不隐式排除调用者自身的任务；它若仍在 Running，也会被列出。较长标题与界面一样采用现有投影的展示文本。
 
@@ -39,7 +40,7 @@ watch 每次采样输出一行 JSON，即 NDJSON；正常采样也持续输出�
 - `all_projects_task_group_query_unavailable`：本次请求失败及原因。
 - `all_projects_task_group_monitor_stopped`：终止原因与退出码。
 
-`--exit-when-empty` 只证明当时查询结果已清空。离开 Running 可能表示等待用户，并不代表所有任务完成、进入 Done、完成 RVF、回写 main 或具备部署资格；命令不会触发这些动作。新进入范围的任务会参与后续采样，不固定启动时的任务批次。
+`--exit-when-empty` 只证明当时查询结果已清空。离开 Running 可能表示等待后台工作、自动恢复或用户，并不代表所有任务完成、进入 Done、完成 RVF、回写 main 或具备部署资格；命令不会触发这些动作。新进入范围的任务会参与后续采样，不固定启动时的任务批次。
 
 ## 查询完整性与恢复
 
@@ -51,7 +52,7 @@ watch 豁免普通 CLI 的整命令硬超时，但保留上述请求与恢复时
 
 ## 实现与验证边界
 
-实现复用项目注册表的主会话投影及 `assignCrossProjectTaskSwitcherSections`；读取并发有跨请求上限，不请求工作树 Git 元数据。schema、procedure 和 CLI 同时更新，不修改 Web UI 分组算法。
+实现复用项目注册表的主会话投影及 `assignCrossProjectTaskSwitcherSections`；读取并发有跨请求上限，不请求工作树 Git 元数据。首页、Focus View 和 CLI 共用此判定。
 
 自动化覆盖分组一致性、跨项目同号、筛选、缓存到期、损坏数据与恢复、取消、请求超时、旧命令兼容、管道大输出及 runtime 重启接续。默认 guarded 命令执行进程内只读与严格完整性用例，跳过需要打包 CLI 的真实进程用例：
 
