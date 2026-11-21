@@ -4,11 +4,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { extractCodexUserQuestionPayload } from "../../src/commands/codex-user-question-payload-extraction";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
+import * as codexNativePromptDeliveryJournal from "../../src/core/codex-native-prompt-delivery-journal";
+import {
+	getTaskMessageInjectionLedgerPath,
+	readTaskMessageInjectionLedger,
+} from "../../src/core/task-message-injection-ledger";
+import { readCodexReplacedQuestionSelectorEvidence } from "../../src/server/codex-user-question-transcript-reconciliation";
+import * as pendingUserDecisionStore from "../../src/state/agent-raised-pending-user-decision-store";
 import {
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecision,
 } from "../../src/state/agent-raised-pending-user-decision-store";
+import { persistCodexNativeDirectInputReadinessReconciliation } from "../../src/state/persist-codex-native-direct-input-readiness-reconciliation";
 import { readWorkspaceQueuedTaskPromptDeliverySnapshot } from "../../src/state/queued-task-prompt-delivery-store";
+import { getWorkspaceDirectoryPath, loadPersistedWorkspaceStateById } from "../../src/state/workspace-state";
 import { type TaskChatInputDeliveryOutcome, TerminalSessionManager } from "../../src/terminal/session-manager";
 import { createTerminalInputBoxOccupancyTrackerState } from "../../src/terminal/terminal-input-box-occupancy";
 import type { PendingProgrammaticDeliveryReceipt } from "../../src/terminal/terminal-session-active-process-state";
@@ -121,6 +130,7 @@ async function createHarness(workspaceId: string, workspacePath: string, recordM
 	};
 	const entry = {
 		summary,
+		listeners: new Map(),
 		active: {
 			session: { write },
 			deferredStartupPromptText: null,
@@ -169,7 +179,7 @@ async function createHarness(workspaceId: string, workspacePath: string, recordM
 				],
 			},
 		);
-	return { workspaceId, transcriptPath, manager, entry, write, readiness, contention, submit, answer };
+	return { workspaceId, transcriptPath, transcript, manager, entry, write, readiness, contention, submit, answer };
 }
 
 afterEach(() => {
@@ -258,8 +268,172 @@ describe.sequential("Codex 面板答题在实际 PTY 写入前重新读取原生
 		},
 	);
 
-	it("正常恢复时只粘贴和提交一次，重复请求不再发送", async () => {
+	it.each(["real_answer", "successor_call"])("首个 Enter 前读问答账本时追加 %s，禁止写入 Enter", async (change) => {
 		await withSyntheticCodexConversation(async (harness) => {
+			vi.useFakeTimers();
+			const pendingAnswer = harness.answer();
+			await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledOnce());
+			await vi.advanceTimersByTimeAsync(1000);
+			await vi.waitFor(() => expect(harness.write).toHaveBeenCalledOnce());
+			const readDecisionLedger = pendingUserDecisionStore.readAgentRaisedPendingUserDecisions;
+			const appendDuringLedgerRead = vi
+				.spyOn(pendingUserDecisionStore, "readAgentRaisedPendingUserDecisions")
+				.mockImplementationOnce(async (workspaceId) => {
+					await appendFile(
+						harness.transcriptPath,
+						`${change === "real_answer" ? resultLine(JSON.stringify({ answers: { storage: { answers: ["文件"] } } })) : callLine("successor-call")}\n`,
+					);
+					return await readDecisionLedger(workspaceId);
+				});
+			harness.entry.active.ptyOutputChunkArrivalSequenceNumber++;
+			await vi.advanceTimersByTimeAsync(60);
+			await vi.waitFor(() => expect(appendDuringLedgerRead).toHaveBeenCalledOnce());
+			await vi.advanceTimersByTimeAsync(2500);
+			expect((await pendingAnswer).delivered).toBe(false);
+			expect(harness.write).toHaveBeenCalledOnce();
+			const [saved] = await readAgentRaisedPendingUserDecisions(harness.workspaceId);
+			expect(saved).toMatchObject({ answerDeliveryState: "delivery_unconfirmed" });
+			expect(saved?.lastAnswerDeliveryFailureReason).toContain(change === "real_answer" ? "终端作答" : "新提问取代");
+		});
+	});
+
+	it.each(["different_agent", "successor_call_before_paste"])(
+		"%s 使答案确定未写入，三个持久回执一致",
+		async (change) => {
+			await withSyntheticCodexConversation(async (harness) => {
+				vi.useFakeTimers();
+				if (change === "different_agent") {
+					harness.entry.summary.agentId = "claude";
+					harness.entry.summary.agentNativeConversationSessionIdentity = {
+						sourceAgentId: "claude",
+						nativeSessionId: "different-claude-conversation",
+						transcriptPath: null,
+						observedAt: Date.now(),
+					};
+				} else {
+					const createJournal = codexNativePromptDeliveryJournal.createCodexNativePromptDeliveryJournal;
+					vi.spyOn(
+						codexNativePromptDeliveryJournal,
+						"createCodexNativePromptDeliveryJournal",
+					).mockImplementationOnce((binding) => {
+						const journal = createJournal(binding);
+						return {
+							...journal,
+							recordTerminalPtyWriteIntent: async () => {
+								await journal.recordTerminalPtyWriteIntent();
+								await appendFile(harness.transcriptPath, `${callLine("successor-call")}\n`);
+							},
+						};
+					});
+				}
+				const pendingAnswer = harness.answer();
+				let answerFinished = false;
+				void pendingAnswer.then(() => {
+					answerFinished = true;
+				});
+				await vi.waitFor(() => expect(answerFinished || harness.write.mock.calls.length > 0).toBe(true), {
+					timeout: 5000,
+				});
+				expect(harness.write).not.toHaveBeenCalled();
+				expect((await pendingAnswer).delivered).toBe(false);
+				const [saved] = await readAgentRaisedPendingUserDecisions(harness.workspaceId);
+				const failureNote = saved?.lastAnswerDeliveryFailureReason;
+				expect(failureNote).toContain(change === "different_agent" ? "Codex 对话" : "新提问取代");
+				expect(saved).toMatchObject({
+					answer: { freeformText: "保留已保存的答案" },
+					answerDeliveryState: "delivery_failed",
+				});
+				expect(saved?.answerDeliveryAttempts?.at(-1)).toMatchObject({ submissionMayHaveStarted: false });
+				const queue = await readWorkspaceQueuedTaskPromptDeliverySnapshot(harness.workspaceId);
+				expect(queue.entriesByTaskId[harness.entry.summary.taskId]?.[0]).toMatchObject({
+					deliveryState: "cancelled",
+					lastDeliveryFailureNote: failureNote,
+					managedDelivery: {
+						terminalDeliveryReceipt: { reason: "cancelled_before_delivery", submissionMayHaveStarted: false },
+					},
+				});
+				const ledger = await readTaskMessageInjectionLedger(
+					getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(harness.workspaceId)),
+				);
+				expect(ledger[0]).toMatchObject({
+					submission_may_have_started: false,
+					terminal_delivery_failure_detail: failureNote,
+				});
+			}, true);
+		},
+	);
+
+	it.each([false, true])("恢复后只粘贴和提交一次，旧摘要仍写 question=%s", async (hasStaleQuestionSummary) => {
+		await withSyntheticCodexConversation(async (harness) => {
+			if (hasStaleQuestionSummary) {
+				const before = harness.entry.summary;
+				before.userTurnKind = "question";
+				before.runtimeSessionIncarnationId = "3c67bb51-7969-4681-becc-9028d82423f1";
+				before.codexNativeSessionControlEndpoint = {
+					workspaceId: harness.workspaceId,
+					conversationSessionId: before.taskId,
+					runtimeSessionIncarnationId: before.runtimeSessionIncarnationId,
+					socketPath: "/isolated/codex-control",
+				};
+				expect((await harness.answer()).delivered).toBe(false);
+				expect(harness.submit).not.toHaveBeenCalled();
+				expect(harness.write).not.toHaveBeenCalled();
+				const [saved] = await readAgentRaisedPendingUserDecisions(harness.workspaceId);
+				const failureNote = saved?.lastAnswerDeliveryFailureReason;
+				expect(failureNote).toContain("正在核实");
+				expect(saved).toMatchObject({
+					answerDeliveryState: "delivery_failed",
+				});
+				expect(saved?.answerDeliveryAttempts?.at(-1)).toMatchObject({ submissionMayHaveStarted: false });
+				const queue = await readWorkspaceQueuedTaskPromptDeliverySnapshot(harness.workspaceId);
+				expect(queue.entriesByTaskId[before.taskId]?.[0]).toMatchObject({
+					deliveryState: "cancelled",
+					lastDeliveryFailureNote: failureNote,
+					managedDelivery: {
+						terminalDeliveryReceipt: { reason: "cancelled_before_delivery", submissionMayHaveStarted: false },
+					},
+				});
+				const ledger = await readTaskMessageInjectionLedger(
+					getTaskMessageInjectionLedgerPath(getWorkspaceDirectoryPath(harness.workspaceId)),
+				);
+				expect(ledger[0]).toMatchObject({
+					submission_may_have_started: false,
+					terminal_delivery_failure_detail: failureNote,
+				});
+
+				const nativeReadiness = { nativeSessionId, observedAtMs: 3500 };
+				const persistReadiness = (observation: typeof nativeReadiness) =>
+					persistCodexNativeDirectInputReadinessReconciliation({
+						workspaceId: harness.workspaceId,
+						summaryBeforeRead: before,
+						getCurrentSummary: () => harness.manager.getSummary(before.taskId),
+						change: { observation },
+					});
+				expect(await persistReadiness(nativeReadiness)).toBe(false);
+				await appendFile(harness.transcriptPath, "\n{未写完的原生记录");
+				expect(await readCodexReplacedQuestionSelectorEvidence(harness.workspaceId, before)).toBeNull();
+				await writeFile(harness.transcriptPath, harness.transcript);
+				const replacedQuestionSelector = await readCodexReplacedQuestionSelectorEvidence(
+					harness.workspaceId,
+					before,
+				);
+				expect(replacedQuestionSelector).toEqual({
+					originRuntimeSessionIncarnationId: "old-incarnation",
+					nativeQuestionAskedAtMs: 2000,
+				});
+				if (!replacedQuestionSelector) throw new Error("缺少已退出进程的选择题证据");
+				const observation = { ...nativeReadiness, replacedQuestionSelector };
+				expect(await persistReadiness(observation)).toBe(true);
+				const persisted = await loadPersistedWorkspaceStateById(harness.workspaceId);
+				expect(persisted?.sessions[before.taskId]).toMatchObject({ userTurnKind: "review" });
+				harness.manager.reconcileCodexAwaitingInputWithNativeDirectInputReadiness(
+					before.taskId,
+					before,
+					observation,
+				);
+				expect(harness.write).not.toHaveBeenCalled();
+				expect(harness.manager.getSummary(before.taskId)?.userTurnKind).toBe("review");
+			}
 			vi.useFakeTimers();
 			const pendingAnswer = harness.answer();
 			await vi.waitFor(() => expect(harness.submit).toHaveBeenCalledOnce());
@@ -284,7 +458,7 @@ describe.sequential("Codex 面板答题在实际 PTY 写入前重新读取原生
 			expect((await pendingAnswer).delivered).toBe(true);
 			expect((await harness.answer()).delivered).toBe(true);
 			expect(harness.write).toHaveBeenCalledTimes(2);
-		});
+		}, hasStaleQuestionSummary);
 	});
 
 	it("问题答复先登记并等待真实回执，保留 agent 内排队的结果且重复答题不新增消息", async () => {

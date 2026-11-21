@@ -92,6 +92,7 @@ import {
 	moveTaskCardIntoInProgressAfterCodexNativeReviewMisclassification,
 } from "../trpc/task-card-action-api";
 import { createAgentSessionResponseGenerationStopObserver } from "./agent-session-response-generation-stop-observer";
+import { readCodexReplacedQuestionSelectorEvidence } from "./codex-user-question-transcript-reconciliation";
 import { createNativeAgentConversationActivityObserver } from "./native-agent-conversation-activity-observer";
 import { createPersistedAgentTranscriptConversationProgressObserver } from "./persisted-agent-transcript-conversation-progress-observer";
 import { RUNTIME_WEBSOCKET_COMPRESSION_OPTIONS } from "./runtime-websocket-compression-options";
@@ -266,8 +267,16 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 		},
 		onCodexNativeDirectInputReadiness: async (observation, summaryBeforeRead) => {
 			const manager = terminalManagersByWorkspaceId.get(observation.workspaceId);
+			if (!manager) return;
+			if (resolveSessionFacets(summaryBeforeRead).userTurnKind === "question") {
+				const replacedQuestionSelector = await readCodexReplacedQuestionSelectorEvidence(
+					observation.workspaceId,
+					summaryBeforeRead,
+				);
+				if (!replacedQuestionSelector) return;
+				observation = { ...observation, replacedQuestionSelector };
+			}
 			if (
-				!manager ||
 				!(await persistCodexNativeDirectInputReadinessReconciliation({
 					workspaceId: observation.workspaceId,
 					summaryBeforeRead,
@@ -276,7 +285,7 @@ export function createRuntimeStateHub(deps: CreateRuntimeStateHubDependencies): 
 				}))
 			)
 				return;
-			manager.reconcileCodexNeedsInputWithNativeDirectInputReadiness(
+			manager.reconcileCodexAwaitingInputWithNativeDirectInputReadiness(
 				observation.conversationSessionId,
 				summaryBeforeRead,
 				observation,

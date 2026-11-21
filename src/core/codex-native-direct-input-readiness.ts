@@ -6,6 +6,12 @@ import { resolveSessionFacets } from "./session-activity";
 export interface CodexNativeDirectInputReadinessObservation {
 	nativeSessionId: string;
 	observedAtMs: number;
+	replacedQuestionSelector?: CodexReplacedQuestionSelectorEvidence;
+}
+
+export interface CodexReplacedQuestionSelectorEvidence {
+	originRuntimeSessionIncarnationId: string;
+	nativeQuestionAskedAtMs: number;
 }
 
 export function isCodexNativeConversationRewindSignal(metadata: Partial<RuntimeTaskHookActivity> | undefined): boolean {
@@ -15,25 +21,35 @@ export function isCodexNativeConversationRewindSignal(metadata: Partial<RuntimeT
 	);
 }
 
-export function isCodexNeedsInputNativeReconciliationCandidate(summary: RuntimeTaskSessionSummary): boolean {
+export function isCodexAwaitingInputNativeReconciliationCandidate(summary: RuntimeTaskSessionSummary): boolean {
 	const facets = resolveSessionFacets(summary);
 	return (
 		summary.agentId === "codex" &&
 		facets.turnOwner === "user" &&
 		facets.liveness === "live" &&
-		facets.userTurnKind === "needs_input"
+		(facets.userTurnKind === "needs_input" ||
+			(facets.userTurnKind === "question" &&
+				summary.codexNativeSessionControlEndpoint != null &&
+				summary.agentNativeConversationSessionIdentity?.transcriptPath != null))
 	);
 }
 
-export function canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
+export function canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(
 	summaryBeforeRead: RuntimeTaskSessionSummary,
 	current: RuntimeTaskSessionSummary,
 	observation: CodexNativeDirectInputReadinessObservation,
 ): boolean {
 	const identity = current.agentNativeConversationSessionIdentity;
 	const endpoint = current.codexNativeSessionControlEndpoint;
+	const replacedQuestion = observation.replacedQuestionSelector;
 	return (
-		isUnchangedCodexNeedsInputReconciliationCandidate(summaryBeforeRead, current) &&
+		isUnchangedCodexAwaitingInputNativeReconciliationCandidate(summaryBeforeRead, current) &&
+		(resolveSessionFacets(current).userTurnKind === "needs_input" ||
+			(replacedQuestion != null &&
+				replacedQuestion.originRuntimeSessionIncarnationId !== current.runtimeSessionIncarnationId &&
+				current.startedAt !== null &&
+				Number.isFinite(replacedQuestion.nativeQuestionAskedAtMs) &&
+				replacedQuestion.nativeQuestionAskedAtMs < current.startedAt)) &&
 		current.pid !== null &&
 		current.pid === summaryBeforeRead.pid &&
 		current.startedAt === summaryBeforeRead.startedAt &&
@@ -53,13 +69,13 @@ export function canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
 	);
 }
 
-export function isUnchangedCodexNeedsInputReconciliationCandidate(
+export function isUnchangedCodexAwaitingInputNativeReconciliationCandidate(
 	before: RuntimeTaskSessionSummary,
 	current: RuntimeTaskSessionSummary,
 ): boolean {
 	return (
-		isCodexNeedsInputNativeReconciliationCandidate(before) &&
-		isCodexNeedsInputNativeReconciliationCandidate(current) &&
+		isCodexAwaitingInputNativeReconciliationCandidate(before) &&
+		isCodexAwaitingInputNativeReconciliationCandidate(current) &&
 		buildCodexNativeAgentTurnExecutionSemanticGuard(before) ===
 			buildCodexNativeAgentTurnExecutionSemanticGuard(current)
 	);

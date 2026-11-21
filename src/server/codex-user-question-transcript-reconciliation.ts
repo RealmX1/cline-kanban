@@ -1,12 +1,79 @@
+import { stat } from "node:fs/promises";
 import { recoverCodexUserQuestionsForPendingAndHistoryWithFileChangeCache } from "../agent-session-history/codex-user-question-pending-and-history-file-change-cache";
-import { buildCodexUserQuestionTranscriptHistoryEntries } from "../agent-session-history/codex-user-question-transcript-recovery";
+import {
+	buildCodexUserQuestionTranscriptHistoryEntries,
+	recoverCodexUserQuestionsFromKnownConversation,
+} from "../agent-session-history/codex-user-question-transcript-recovery";
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
+import type { CodexReplacedQuestionSelectorEvidence } from "../core/codex-native-direct-input-readiness";
 import {
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecision,
 	resolveAgentRaisedUserQuestionFromAgentTerminal,
 	supersedeEarlierCodexUserQuestionsFromTranscript,
 } from "../state/agent-raised-pending-user-decision-store";
+
+// 原生就绪只说明当前进程空闲，还须确认 summary 上的选择题属于上一代。
+export async function readCodexReplacedQuestionSelectorEvidence(
+	workspaceId: string,
+	summary: RuntimeTaskSessionSummary,
+): Promise<CodexReplacedQuestionSelectorEvidence | null> {
+	const identity = summary.agentNativeConversationSessionIdentity;
+	const startedAt = summary.startedAt;
+	const runtimeSessionIncarnationId = summary.runtimeSessionIncarnationId;
+	if (
+		identity?.sourceAgentId !== "codex" ||
+		!identity.transcriptPath ||
+		startedAt === null ||
+		!runtimeSessionIncarnationId
+	)
+		return null;
+	const transcriptPath = identity.transcriptPath;
+	const before = await stat(transcriptPath, { bigint: true }).catch(() => null);
+	if (!before) return null;
+	const recovered = await recoverCodexUserQuestionsFromKnownConversation({
+		sessionId: identity.nativeSessionId,
+		transcriptPath,
+		homeDirectoryPath: summary.codexConversationStorageHomeDirectoryPath,
+	});
+	const latest = recovered.exchanges.at(-1);
+	if (recovered.coverage !== "complete" || !latest || latest.askedAt >= startedAt) return null;
+	const records = (await readAgentRaisedPendingUserDecisions(workspaceId)).filter(
+		(record) =>
+			record.taskId === summary.taskId &&
+			record.agentId === "codex" &&
+			record.decisionKind === "ordinary_user_question",
+	);
+	if (
+		records.some(
+			(record) =>
+				record.originRuntimeSessionIncarnationId === runtimeSessionIncarnationId || record.askedAt >= startedAt,
+		)
+	)
+		return null;
+	const original = records.find(
+		(record) =>
+			record.nativeConversationSessionId === identity.nativeSessionId &&
+			(record.decisionId === `${summary.taskId}:${latest.payload.decisionSourceId}` ||
+				record.decisionId === `${summary.taskId}:${latest.callId}`),
+	);
+	if (!original?.originRuntimeSessionIncarnationId || records.some((record) => record.askedAt > original.askedAt))
+		return null;
+	const after = await stat(transcriptPath, { bigint: true }).catch(() => null);
+	if (
+		!after ||
+		before.dev !== after.dev ||
+		before.ino !== after.ino ||
+		before.size !== after.size ||
+		before.mtimeNs !== after.mtimeNs ||
+		before.ctimeNs !== after.ctimeNs
+	)
+		return null;
+	return {
+		originRuntimeSessionIncarnationId: original.originRuntimeSessionIncarnationId,
+		nativeQuestionAskedAtMs: latest.askedAt,
+	};
+}
 
 export async function reconcileCodexUserQuestionTranscriptForTask(input: {
 	workspaceId: string;

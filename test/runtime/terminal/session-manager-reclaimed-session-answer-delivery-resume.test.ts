@@ -180,7 +180,7 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 	});
 
 	it.each(["question", "plan_review", "permission"] as const)(
-		"水合出的 %s 待答会话恢复成功后仍以原语义进入持久化载荷",
+		"水合出的 Codex %s 恢复后只保留仍属于新进程的待答语义",
 		async (userTurnKind) => {
 			const taskId = `task-persisted-${userTurnKind}`;
 			const manager = new TerminalSessionManager();
@@ -198,16 +198,42 @@ describe("TerminalSessionManager 回收后为待答决策答案投递恢复会�
 				resumeFromTrash: true,
 			});
 
+			const restoredUserTurnKind = userTurnKind === "question" ? "needs_input" : userTurnKind;
 			expect(manager.getSummary(taskId)).toMatchObject({
 				state: "awaiting_review",
 				reviewReason: "attention",
 				turnOwner: "user",
 				liveness: "live",
-				userTurnKind,
+				userTurnKind: restoredUserTurnKind,
 			});
-			expect(manager.listSummaries()).toContainEqual(expect.objectContaining({ taskId, userTurnKind }));
+			expect(manager.listSummaries()).toContainEqual(
+				expect.objectContaining({ taskId, userTurnKind: restoredUserTurnKind }),
+			);
 		},
 	);
+
+	it("重启 Codex 保留原生对话身份，新进程再次提问仍进入 question", async () => {
+		const manager = new TerminalSessionManager();
+		const taskId = "restart-codex-question";
+		await startTaskSessionOn(manager, taskId);
+		const before = manager.transitionToReview(taskId, "hook", "question");
+		const after = await manager.refreshTaskTerminal({
+			taskId,
+			agentId: "codex",
+			binary: "codex",
+			args: [],
+			cwd: "/tmp/reclaimed-answer-delivery",
+			prompt: "",
+			resumeFromTrash: true,
+		});
+		expect(before?.userTurnKind).toBe("question");
+		expect(after.runtimeSessionIncarnationId).not.toBe(before?.runtimeSessionIncarnationId);
+		expect(after.agentNativeConversationSessionIdentity?.nativeSessionId).toBe(RECLAIMED_CODEX_NATIVE_SESSION_ID);
+		expect(after).toMatchObject({ liveness: "live", userTurnKind: "needs_input" });
+		manager.disarmRestorationContinuationGuard(taskId);
+		manager.transitionToRunning(taskId, { userInitiatedResume: true });
+		expect(manager.transitionToReview(taskId, "hook", "question")?.userTurnKind).toBe("question");
+	});
 
 	it("恢复只重建会话，直到显式用户提交才解除续跑守卫", async () => {
 		const manager = new TerminalSessionManager();
