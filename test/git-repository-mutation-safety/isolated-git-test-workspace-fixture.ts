@@ -36,7 +36,11 @@ export interface IsolatedGitTestRepository {
 			expectedExitCodes?: readonly number[];
 		},
 	): GitCommandResult;
-	commitAllRepositoryFilesAtDate(options: { message: string; authorAndCommitterIsoDate: string }): string;
+	commitAllRepositoryFilesAtDate(options: {
+		message: string;
+		authorAndCommitterIsoDate: string;
+		workingDirectoryPath?: string;
+	}): string;
 	createLinkedWorktree(options: { worktreeDirectoryName: string; branchName: string; startPoint?: string }): {
 		worktreePath: string;
 	};
@@ -367,16 +371,17 @@ export function createIsolatedGitTestWorkspaceFixture(
 				return result;
 			},
 			commitAllRepositoryFilesAtDate(options) {
-				executeGit({ arguments_: ["add", "."], workingDirectoryPath: repositoryPath });
+				const workingDirectoryPath = options.workingDirectoryPath ?? repositoryPath;
+				executeGit({ arguments_: ["add", "."], workingDirectoryPath });
 				executeGit({
 					arguments_: ["commit", "--quiet", "-m", options.message],
-					workingDirectoryPath: repositoryPath,
+					workingDirectoryPath,
 					authorAndCommitterIsoDate: options.authorAndCommitterIsoDate,
 				});
 				assertRepositoryInsideFixture(repositoryPath);
 				return executeGit({
 					arguments_: ["rev-parse", "HEAD"],
-					workingDirectoryPath: repositoryPath,
+					workingDirectoryPath,
 				}).stdout.trim();
 			},
 			createLinkedWorktree(options) {

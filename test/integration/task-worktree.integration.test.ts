@@ -266,7 +266,7 @@ describe.sequential("task-worktree integration", () => {
 		});
 	});
 
-	it("keeps the integrated count unknown when an unobserved task commit was handed back before the first probe", async () => {
+	it("首次探测补采已合回的任务提交，并排除之后快进吸收的 base 提交", async () => {
 		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
 			const taskId = "task-unobserved-handback";
 			const { repository, repoPath, worktreePath } = await createTaskWorktreeForProvenanceTest(
@@ -287,22 +287,22 @@ describe.sequential("task-worktree integration", () => {
 			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
 				commitsAheadOfBaseRef: 0,
 				commitsBehindBaseRef: 0,
-				taskCommitsIntegratedIntoBaseRef: null,
-				taskCommitIntegrationTrackingStatus: "task_commit_ownership_history_incomplete",
+				taskCommitsIntegratedIntoBaseRef: 1,
+				taskCommitIntegrationTrackingStatus: "complete",
 			});
 		});
 	});
 
-	it("keeps the integrated count unknown when HEAD moved by something other than a fast-forward", async () => {
+	it("切换到另一 SHA 且归属证据不足时保持未知", async () => {
 		await withIsolatedGitTaskWorktreeTestHome(async ({ createRepository }) => {
-			const taskId = "task-reset-to-base";
+			const taskId = "task-checkout-to-base";
 			const { repository, repoPath, worktreePath } = await createTaskWorktreeForProvenanceTest(
 				createRepository,
 				taskId,
 			);
 
 			advanceBaseRef(repository, "base-change.txt");
-			repository.runGit(["reset", "--hard", "main"], { workingDirectoryPath: worktreePath });
+			repository.runGit(["checkout", "--detach", "main"], { workingDirectoryPath: worktreePath });
 
 			expect(await probeTaskCommitIntegration({ repoPath, worktreePath, taskId })).toMatchObject({
 				taskCommitsIntegratedIntoBaseRef: null,
@@ -357,6 +357,7 @@ describe.sequential("task-worktree integration", () => {
 			repository.runGit(["reset", "--hard", initialBaseCommit]);
 			repository.runGit(["cherry-pick", taskCommit]);
 			const currentBaseTipCommit = repository.runGit(["rev-parse", "HEAD"]).stdout.trim();
+			repository.runGit(["reset", "--hard", staleBaseTipCommit]);
 
 			concurrentRefreshGitDelay.delayedRevisionRange = `${initialBaseCommit}..${staleBaseTipCommit}`;
 			concurrentRefreshGitDelay.delayedRevisionListEntered = createControllablePromise();
@@ -369,10 +370,10 @@ describe.sequential("task-worktree integration", () => {
 					worktreePath: ensured.path,
 					baseRef: "main",
 					worktreeExists: true,
-					knownBaseRefTipCommit: staleBaseTipCommit,
 					observedAt: 1_000,
 				});
 				await concurrentRefreshGitDelay.delayedRevisionListEntered.promise;
+				repository.runGit(["reset", "--hard", currentBaseTipCommit]);
 				const currentResult = await probeAndRefreshTaskCommitIntegrationProvenance({
 					workspaceId: workspaceContext.workspaceId,
 					taskId: "task-concurrent-live-refresh",
@@ -380,7 +381,6 @@ describe.sequential("task-worktree integration", () => {
 					worktreePath: ensured.path,
 					baseRef: "main",
 					worktreeExists: true,
-					knownBaseRefTipCommit: currentBaseTipCommit,
 					observedAt: 2_000,
 				});
 				concurrentRefreshGitDelay.releaseDelayedRevisionList.resolve();
