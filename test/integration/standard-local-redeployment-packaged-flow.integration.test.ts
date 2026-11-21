@@ -195,6 +195,10 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 		const runtimeHome = join(fixture.isolatedHomeDirectoryPath, ".cline/kanban");
 		await mkdir(runtimeHome, { recursive: true });
 		await writeFile(join(runtimeHome, "config.json"), JSON.stringify({ retained: true }));
+		const retiredWriterDirectoryName = "codex-configuration-writer-bindings-and-sync";
+		const retiredWriterDirectory = join(runtimeHome, retiredWriterDirectoryName);
+		await mkdir(retiredWriterDirectory);
+		await writeFile(join(retiredWriterDirectory, "historical-writer-record.json"), '{"retired":true}');
 		const blockingSessionPath = join(runtimeHome, "fixture-blocking-session");
 		const unavailableBackupEntry = join(runtimeHome, "a-temporarily-unreadable.json");
 		const server = createServer();
@@ -605,6 +609,20 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 			).toBe("agent_review_ready");
 			expect(await readFile(join(executionDirectory, "preserved-runtime-state/config.json"), "utf8")).toContain(
 				"retained",
+			);
+			const runtimeStateBackupReceipt = JSON.parse(
+				await readFile(join(executionDirectory, "runtime-state-backup-receipt.json"), "utf8"),
+			);
+			const ownedCommandSpecification = JSON.parse(
+				await readFile(join(executionDirectory, "owned-command-specification.json"), "utf8"),
+			);
+			expect(ownedCommandSpecification.ownerSessionInterruptPolicy).toBe("preserve_execution");
+			expect(runtimeStateBackupReceipt.preservedInPlaceOrTransientEndpoints).toContain(retiredWriterDirectory);
+			expect(await readdir(join(executionDirectory, "preserved-runtime-state"))).not.toContain(
+				retiredWriterDirectoryName,
+			);
+			expect(await readFile(join(retiredWriterDirectory, "historical-writer-record.json"), "utf8")).toBe(
+				'{"retired":true}',
 			);
 		} catch (error) {
 			const failureEvidenceDirectory = await mkdtemp(join(outputRoot, "retained-failure-evidence-"));
