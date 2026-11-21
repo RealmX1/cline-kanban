@@ -59,6 +59,7 @@ export interface AgentRaisedPendingUserDecisionAnswerDeliveryDependencies {
 		text: string;
 		idempotencyKey: string;
 		decisionId: string;
+		decisionAgentId: PersistedAgentRaisedPendingUserDecision["agentId"];
 		attemptId: string;
 		dispatchIdempotencyKey: string;
 		originRuntimeSessionIncarnationId: string | null;
@@ -168,6 +169,7 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 					text,
 					idempotencyKey: decision.answerDeliveryIdempotencyKey,
 					decisionId: decision.decisionId,
+					decisionAgentId: decision.agentId,
 					attemptId,
 					dispatchIdempotencyKey: attempt.dispatchIdempotencyKey,
 					originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,

@@ -8,7 +8,7 @@ import type {
 } from "../../../src/agent-session-history/native-agent-conversation-activity-reader";
 import { readNativeAgentConversationActivity } from "../../../src/agent-session-history/native-agent-conversation-activity-reader";
 import type { RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
-import { canReconcileCodexNeedsInputWithNativeDirectInputReadiness } from "../../../src/core/codex-native-direct-input-readiness";
+import { canReconcileCodexAwaitingInputWithNativeDirectInputReadiness } from "../../../src/core/codex-native-direct-input-readiness";
 import { applySessionFacets } from "../../../src/core/session-activity";
 import { createNativeAgentConversationActivityObserver } from "../../../src/server/native-agent-conversation-activity-observer";
 
@@ -270,7 +270,7 @@ describe("Codex 原生待输入核验的有界重试", () => {
 			cooldownMs,
 			onCodexNativeDirectInputReadiness(observation, before) {
 				onNativeReadiness(observation, before);
-				if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, state.summary, observation))
+				if (canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, state.summary, observation))
 					state.summary = { ...state.summary, userTurnKind: "review" };
 			},
 			onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {
@@ -629,7 +629,7 @@ describe("Codex 原生待输入核验的有界重试", () => {
 			onAccepted: target.onAccepted,
 			readNativeActivity: target.readNativeActivity,
 			onCodexNativeDirectInputReadiness: (observation, before) => {
-				if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, target.state.summary, observation))
+				if (canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(before, target.state.summary, observation))
 					target.state.summary = { ...target.state.summary, userTurnKind: "review" };
 			},
 			onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {
@@ -679,7 +679,13 @@ describe("Codex 原生待输入核验的有界重试", () => {
 				cooldownMs: 0,
 				readNativeActivity: target.readNativeActivity,
 				onCodexNativeDirectInputReadiness(observation, before) {
-					if (canReconcileCodexNeedsInputWithNativeDirectInputReadiness(before, target.state.summary, observation))
+					if (
+						canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(
+							before,
+							target.state.summary,
+							observation,
+						)
+					)
 						target.state.summary = { ...target.state.summary, userTurnKind: "review" };
 				},
 				onCodexNativeDirectInputReadinessReconciliation(_context, _before, progress) {

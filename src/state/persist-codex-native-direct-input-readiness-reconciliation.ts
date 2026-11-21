@@ -1,8 +1,8 @@
 import type { RuntimeTaskSessionSummary } from "../core/api-contract";
 import {
 	type CodexNativeDirectInputReadinessObservation,
-	canReconcileCodexNeedsInputWithNativeDirectInputReadiness,
-	isUnchangedCodexNeedsInputReconciliationCandidate,
+	canReconcileCodexAwaitingInputWithNativeDirectInputReadiness,
+	isUnchangedCodexAwaitingInputNativeReconciliationCandidate,
 } from "../core/codex-native-direct-input-readiness";
 import { mergeSummaryWithFacets } from "../core/session-activity";
 import { buildTaskMutationIntentForKanbanRuntimeSystemComponent } from "./workspace-board-persistence-funnel-task-mutation-event-capture-port";
@@ -18,7 +18,7 @@ export async function persistCodexNativeDirectInputReadinessReconciliation(input
 		| { observation: CodexNativeDirectInputReadinessObservation };
 }): Promise<boolean> {
 	const beforeLock = input.getCurrentSummary();
-	if (!beforeLock || !isUnchangedCodexNeedsInputReconciliationCandidate(input.summaryBeforeRead, beforeLock))
+	if (!beforeLock || !isUnchangedCodexAwaitingInputNativeReconciliationCandidate(input.summaryBeforeRead, beforeLock))
 		return false;
 	const workspace = await loadWorkspaceContextById(input.workspaceId);
 	if (!workspace) throw new Error("补证所属工作区暂不可读，保留当前状态等待恢复。");
@@ -32,9 +32,9 @@ export async function persistCodexNativeDirectInputReadinessReconciliation(input
 			const current = input.getCurrentSummary();
 			if (
 				!current ||
-				!isUnchangedCodexNeedsInputReconciliationCandidate(input.summaryBeforeRead, current) ||
+				!isUnchangedCodexAwaitingInputNativeReconciliationCandidate(input.summaryBeforeRead, current) ||
 				("observation" in input.change &&
-					!canReconcileCodexNeedsInputWithNativeDirectInputReadiness(
+					!canReconcileCodexAwaitingInputWithNativeDirectInputReadiness(
 						input.summaryBeforeRead,
 						current,
 						input.change.observation,
