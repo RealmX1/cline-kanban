@@ -295,7 +295,6 @@ export function useBoardInteractions({
 		tryProgrammaticCardMove,
 		consumeProgrammaticCardMove,
 		resolvePendingProgrammaticTrashMove,
-		waitForProgrammaticCardMoveAvailability,
 		resetProgrammaticCardMoves,
 		requestMoveTaskToTrashWithAnimation,
 		programmaticCardMoveCycle,
@@ -322,55 +321,6 @@ export function useBoardInteractions({
 			);
 		},
 		[setSelectedTaskId],
-	);
-
-	const getPrimaryBoardTaskElement = useCallback((taskId: string): HTMLElement | null => {
-		const boardElement = document.querySelector<HTMLElement>(".kb-board");
-		if (!boardElement) {
-			return null;
-		}
-		for (const element of boardElement.querySelectorAll<HTMLElement>("[data-task-id]")) {
-			if (element.dataset.taskId === taskId) {
-				return element;
-			}
-		}
-		return null;
-	}, []);
-
-	const waitForBacklogCardHeightToSettle = useCallback(
-		async (taskId: string): Promise<void> => {
-			if (!getPrimaryBoardTaskElement(taskId)) {
-				return;
-			}
-
-			await new Promise<void>((resolve) => {
-				let previousHeight = 0;
-				let stableFrameCount = 0;
-				let framesRemaining = 8;
-
-				const measure = () => {
-					const cardElement = getPrimaryBoardTaskElement(taskId);
-					const nextHeight = cardElement?.getBoundingClientRect().height ?? 0;
-					if (nextHeight > 0 && previousHeight > 0 && Math.abs(nextHeight - previousHeight) < 0.5) {
-						stableFrameCount += 1;
-					} else {
-						stableFrameCount = 0;
-					}
-					previousHeight = nextHeight;
-
-					if (stableFrameCount >= 1 || framesRemaining <= 0) {
-						resolve();
-						return;
-					}
-
-					framesRemaining -= 1;
-					window.requestAnimationFrame(measure);
-				};
-
-				window.requestAnimationFrame(measure);
-			});
-		},
-		[getPrimaryBoardTaskElement],
 	);
 
 	const setTaskMoveToTrashLoading = useCallback((taskId: string, isLoading: boolean) => {
@@ -521,6 +471,7 @@ export function useBoardInteractions({
 					}
 				}
 				if (
+					response.agentSessionStartOutcome === "backlog_task_start_readiness_review_pending" ||
 					response.agentSessionStartOutcome === "task_worktree_ensure_failed" ||
 					response.agentSessionStartOutcome === "agent_session_start_failed"
 				) {
@@ -548,52 +499,6 @@ export function useBoardInteractions({
 			return startTaskCardAgentSessionInCurrentProject(task, { insertAtIndexWithinInProgressBoardColumn: 0 });
 		},
 		[startTaskCardAgentSessionInCurrentProject],
-	);
-
-	const startBacklogTaskWithAnimation = useCallback(
-		async (task: BoardCard): Promise<boolean> => {
-			if (selectedCard || task.taskShelvingState?.isShelved) {
-				return startBacklogTaskImmediately(task);
-			}
-
-			await waitForBacklogCardHeightToSettle(task.id);
-
-			const programmaticMoveAttempt = tryProgrammaticCardMove(task.id, "backlog", "in_progress", {
-				boardMutationInitiator: "web_ui_user_gesture",
-			});
-			if (programmaticMoveAttempt === "blocked") {
-				await waitForProgrammaticCardMoveAvailability();
-				return startBacklogTaskWithAnimation(task);
-			}
-			if (programmaticMoveAttempt === "unavailable") {
-				return startTaskCardAgentSessionInCurrentProject(task, { insertAtIndexWithinInProgressBoardColumn: 0 });
-			}
-
-			let resolveCompletion: ((started: boolean) => void) | null = null;
-			const completionPromise = new Promise<boolean>((resolve) => {
-				resolveCompletion = resolve;
-			});
-			const timeoutId = window.setTimeout(() => {
-				resolvePendingProgrammaticStartMove(task.id, false);
-			}, 5000);
-			pendingProgrammaticStartMoveCompletionByTaskIdRef.current[task.id] = {
-				resolve: (started) => {
-					resolveCompletion?.(started);
-					resolveCompletion = null;
-				},
-				timeoutId,
-			};
-			return completionPromise;
-		},
-		[
-			resolvePendingProgrammaticStartMove,
-			selectedCard,
-			startBacklogTaskImmediately,
-			startTaskCardAgentSessionInCurrentProject,
-			tryProgrammaticCardMove,
-			waitForBacklogCardHeightToSettle,
-			waitForProgrammaticCardMoveAvailability,
-		],
 	);
 
 	// 下方 level-triggered 列自动流转（会话 facet 驱动）在 updater 里逐卡决定移列；直接落列的分支在这里登记发起方，
@@ -1192,11 +1097,11 @@ export function useBoardInteractions({
 				return;
 			}
 			maybeRequestNotificationPermissionForTaskStart();
-			void startBacklogTaskWithAnimation(selection.card);
+			void startBacklogTaskImmediately(selection.card);
 		},
 		[
 			maybeRequestNotificationPermissionForTaskStart,
-			startBacklogTaskWithAnimation,
+			startBacklogTaskImmediately,
 			startTaskCardAgentSessionInCurrentProject,
 		],
 	);

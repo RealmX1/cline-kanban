@@ -11,6 +11,7 @@ import { deliverCodexNativePromptWithoutChangingComposer } from "../terminal/cod
 export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(input: {
 	workspaceId: string;
 	ledgerPath: string;
+	idempotencyKey?: string;
 	reconcilerRuntimeProcessInstanceId?: string;
 	getSummary: (conversationSessionId: string) => RuntimeTaskSessionSummary | null;
 	onAutomaticFailureContinuationDeliveryObserved?: (
@@ -30,6 +31,9 @@ export async function reconcileWorkspaceCodexNativePromptDeliveryAcceptances(inp
 		),
 	)) {
 		const operation = record.codex_native_prompt_delivery_operation;
+		if (input.idempotencyKey && record.idempotency_key !== input.idempotencyKey) continue;
+		// 答案由自己的持久退避进度调度，避免通用清扫绕过暂停门禁。
+		if (record.source === "user_decision_answer" && !input.idempotencyKey) continue;
 		const publishAutomaticContinuationHistory = (acceptanceConfirmed: boolean) => {
 			if (record.source === "automatic_agent_failure_continuation" && operation?.workspaceId === input.workspaceId)
 				input.onAutomaticFailureContinuationDeliveryObserved?.(

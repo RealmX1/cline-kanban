@@ -19,6 +19,7 @@ import { appendDiagnosticEventToRotatingJsonlJournal } from "../diagnostics/rota
  * 新功能接入时在这里加一个成员——那一步正是「这次调用该记成什么」的强制表态点。
  */
 export type ModelUsagePurpose =
+	| "backlog_task_start_readiness_assessment"
 	| "task_name_suggestion"
 	| "notification_assessment"
 	| "task_indexing_support_relation_analysis"

@@ -36,7 +36,7 @@ function execution(
 		...overrides,
 	};
 }
-function fixture(isMisclassified = false) {
+function fixture(isMisclassified = false, connectionEnabled = true) {
 	const summary: RuntimeTaskSessionSummary = {
 		taskId: "background-wait",
 		agentId: "codex",
@@ -102,7 +102,14 @@ function fixture(isMisclassified = false) {
 				}
 			: {}),
 	};
-	const manager = new TerminalSessionManager();
+	const manager = new TerminalSessionManager({
+		readAutomaticFailureContinuationEligibility: async () => ({
+			eligible: true,
+			taskIncarnationCreatedAtEpochMs: 1,
+			connectionEnabled,
+			capacityEnabled: true,
+		}),
+	});
 	managers.push(manager);
 	const entry = {
 		summary,
@@ -127,6 +134,163 @@ function fixture(isMisclassified = false) {
 	const scan = () => (manager as unknown as { scanForStalls: () => Promise<void> }).scanForStalls();
 	return { manager, entry, readiness, scan };
 }
+
+describe("原生回合终止对账", () => {
+	it("未获接受证明的新输入与旧回合同秒时，旧失败不能改变当前回合", async () => {
+		const { manager, entry } = fixture();
+		const oldStartedAtMs = NOW - 600_000;
+		const before = entry.summary;
+		entry.summary = {
+			...before,
+			agentConversationPromptSubmissionAcceptance: {
+				...before.agentConversationPromptSubmissionAcceptance,
+				status: "unconfirmed",
+				attemptedAtMs: oldStartedAtMs + 750,
+				runtimeSessionIncarnationId: "incarnation-1",
+				eventId: undefined,
+			},
+		};
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			before.taskId,
+			entry.summary,
+			execution({
+				nativeTurnStartedAtMs: oldStartedAtMs,
+				executionStatus: "finished",
+				nativeTurnStatus: "failed",
+				nativeTurnErrorMessage: "unexpected status 503 Service Unavailable",
+			}),
+		);
+		expect(manager.getSummary(before.taskId)).toMatchObject({ turnOwner: "agent", userTurnKind: null });
+		expect(manager.getSummary(before.taskId)?.automaticAgentFailureContinuation).toBeUndefined();
+	});
+
+	it("普通回合漏报 Hook 时按已绑定转录的实际结束时刻交棒", async () => {
+		const { manager, entry } = fixture();
+		const { taskId } = entry.summary;
+		const completionAtMs = NOW - 3_000;
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			taskId,
+			entry.summary,
+			execution({
+				executionStatus: "finished",
+				nativeTurnStatus: "completed",
+				nativeTurnFinishedAtMs: completionAtMs,
+				source: "persisted_codex_turn_completion",
+			}),
+		);
+		expect(manager.getSummary(taskId)).toMatchObject({
+			turnOwner: "user",
+			userTurnKind: "review",
+			lastAgentConversationUserHandoffObservation: { observedAtMs: completionAtMs },
+		});
+	});
+
+	it("已 park 的主回合失败显示错误，同时保留所属结果等待", async () => {
+		const { manager, entry } = fixture();
+		const { taskId } = entry.summary;
+		const executionId = "bde4b7dc-a4e4-4ba2-9d8f-69705712e089";
+		expect(
+			manager.parkTaskSessionAwaitingDispatchedBackgroundWork(taskId, { owningCommandExecutionId: executionId }).ok,
+		).toBe(true);
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			taskId,
+			entry.summary,
+			execution({
+				executionStatus: "finished",
+				nativeTurnStatus: "failed",
+				nativeTurnErrorMessage: "unexpected status 503 Service Unavailable",
+			}),
+		);
+		expect(manager.getSummary(taskId)).toMatchObject({
+			turnOwner: "user",
+			userTurnKind: "error",
+			parkedMainAgentTurnCompletion: null,
+			awaitingDispatchedBackgroundWork: { owningCommandExecutionIds: [executionId] },
+		});
+	});
+
+	it.each([
+		"unexpected status 503 Service Unavailable",
+		"stream disconnected before completion: Transport error: network error: error decoding response body",
+	])("识别当前轮的网络失败并进入现有恢复：%s", async (errorMessage) => {
+		const { manager, entry } = fixture();
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			entry.summary.taskId,
+			entry.summary,
+			execution({
+				executionStatus: "finished",
+				nativeTurnStatus: "failed",
+				nativeTurnErrorMessage: errorMessage,
+				threadStatus: "systemError",
+			}),
+		);
+		const summary = manager.getSummary(entry.summary.taskId);
+		expect(summary?.automaticAgentFailureContinuation).toMatchObject({
+			reason: "connection",
+			phase: "waiting_backoff",
+			faultNativeTurnId: "native-turn",
+			attemptCount: 0,
+		});
+	});
+
+	it("跳过旧回合，并将当前不可恢复的失败交棒为错误", async () => {
+		const { manager, entry } = fixture(true);
+		const suppliedFailure = execution({
+			executionStatus: "finished",
+			nativeTurnStatus: "failed",
+			threadStatus: "systemError",
+			nativeTurnErrorMessage: "原生回合内部错误",
+		});
+		const { taskId } = entry.summary;
+		await manager.reconcileCodexNativeTurnTerminalOutcome(taskId, entry.summary, {
+			...suppliedFailure,
+			nativeTurnId: "old-native-turn",
+		});
+		expect(manager.getSummary(taskId)?.userTurnKind).toBe("review");
+		await manager.reconcileCodexNativeTurnTerminalOutcome(taskId, entry.summary, suppliedFailure);
+		expect(manager.getSummary(taskId)).toMatchObject({ turnOwner: "user", liveness: "live", userTurnKind: "error" });
+	});
+
+	it("网络恢复关闭时结束已确认的失败回合", async () => {
+		const { manager, entry } = fixture(false, false);
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			entry.summary.taskId,
+			entry.summary,
+			execution({
+				executionStatus: "finished",
+				nativeTurnStatus: "failed",
+				threadStatus: "systemError",
+				nativeTurnErrorMessage: "unexpected status 503 Service Unavailable",
+			}),
+		);
+		const summary = manager.getSummary(entry.summary.taskId);
+		expect(summary?.userTurnKind).toBe("error");
+		expect(summary?.automaticAgentFailureContinuation).toBeUndefined();
+	});
+
+	it("所属等待只记录已结束的主回合，不改变 facet 或解除其他所属等待", async () => {
+		const { manager, entry } = fixture();
+		const executionId = "bde4b7dc-a4e4-4ba2-9d8f-69705712e089";
+		const { taskId } = entry.summary;
+		expect(
+			manager.parkTaskSessionAwaitingDispatchedBackgroundWork(taskId, { owningCommandExecutionId: executionId }).ok,
+		).toBe(true);
+		await manager.reconcileCodexNativeTurnTerminalOutcome(
+			taskId,
+			entry.summary,
+			execution({
+				executionStatus: "finished",
+				nativeTurnStatus: "completed",
+				threadStatus: "idle",
+			}),
+		);
+		expect(manager.getSummary(taskId)).toMatchObject({
+			turnOwner: "agent",
+			awaitingDispatchedBackgroundWork: { owningCommandExecutionIds: [executionId] },
+			parkedMainAgentTurnCompletion: { runtimeSessionIncarnationId: "incarnation-1", turnSequence: 7 },
+		});
+	});
+});
 
 function continuedAfterStopFixture() {
 	const result = fixture(true);

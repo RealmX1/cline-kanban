@@ -89,6 +89,8 @@ function renderPanel(props: {
 	agentResponseGenerationTurnSequence: number;
 	onAnswer?: (answers: PendingUserDecisionQuestionAnswerDraft[]) => Promise<boolean>;
 	onDismiss?: () => Promise<boolean>;
+	onReconcileDelivery?: () => Promise<boolean>;
+	onConfirmHandled?: () => Promise<boolean>;
 	decision?: RuntimeAgentRaisedPendingUserDecision;
 	isAgentStoppedOnThisQuestionSelectorInLiveTerminal?: boolean;
 	isQuestionRaisedByEarlierAgentSessionIncarnation?: boolean;
@@ -103,6 +105,8 @@ function renderPanel(props: {
 				isSubmitting={false}
 				onAnswer={props.onAnswer ?? vi.fn(async () => true)}
 				onDismiss={props.onDismiss ?? vi.fn(async () => true)}
+				onReconcileDelivery={props.onReconcileDelivery ?? vi.fn(async () => true)}
+				onConfirmHandled={props.onConfirmHandled ?? vi.fn(async () => true)}
 				agentResponseGenerationTurnSequence={props.agentResponseGenerationTurnSequence}
 				isAgentStoppedOnThisQuestionSelectorInLiveTerminal={
 					props.isAgentStoppedOnThisQuestionSelectorInLiveTerminal ?? false
@@ -326,6 +330,7 @@ describe("AgentRaisedPendingUserDecisionPanel", () => {
 			},
 		});
 		expect(host.textContent).toContain("答案已保存，尚未送达 agent");
+		act(() => host.querySelector<HTMLButtonElement>('[aria-label="展开问题"]')?.click());
 		expect(host.textContent).toContain("你的选择：恢复并继续");
 		expect(host.textContent).toContain("补充说明：先测再修");
 		expect(host.textContent).toContain("未送达原因：无法恢复该任务的 agent 会话运行时");
@@ -334,6 +339,65 @@ describe("AgentRaisedPendingUserDecisionPanel", () => {
 			findButtonByText(host, "重试投递")?.click();
 		});
 		expect(onAnswer).toHaveBeenCalledWith(recordedAnswerQuestionAnswers);
+	});
+
+	it("只保存尚未开始发送的答案仍提供首次投递入口", async () => {
+		const onAnswer = vi.fn(async () => true);
+		const recordedAnswerQuestionAnswers = [
+			{ decisionQuestionId: "question-0", selectedOptionIds: [], freeformText: "采用现有实现" },
+		];
+		const host = renderPanel({
+			agentResponseGenerationTurnSequence: 3,
+			onAnswer,
+			decision: { ...decision, answerDeliveryState: "answer_recorded", recordedAnswerQuestionAnswers },
+		});
+		act(() => host.querySelector<HTMLButtonElement>('[aria-label="展开问题"]')?.click());
+		const send = findButtonByText(host, "投递已保存的回答");
+		expect(send).toBeDefined();
+		await act(async () => send?.click());
+		expect(onAnswer).toHaveBeenCalledWith(recordedAnswerQuestionAnswers);
+	});
+
+	it("待确认答案默认折叠，核验和人工确认均不重投，换代后保持折叠", async () => {
+		const onAnswer = vi.fn(async () => true);
+		const onReconcileDelivery = vi.fn(async () => true);
+		const onConfirmHandled = vi.fn(async () => true);
+		const savedDecision: RuntimeAgentRaisedPendingUserDecision = {
+			...decision,
+			answerDeliveryState: "delivery_unconfirmed",
+			recordedAnswerQuestionAnswers: [
+				{ decisionQuestionId: "question-0", selectedOptionIds: [], freeformText: "已处理" },
+			],
+		};
+		const host = renderPanel({
+			decision: savedDecision,
+			agentResponseGenerationTurnSequence: 3,
+			onAnswer,
+			onReconcileDelivery,
+			onConfirmHandled,
+		});
+		expect(host.textContent).toContain("答案已保存，送达待确认");
+		expect(host.textContent).not.toContain("补充说明：已处理");
+		renderPanel({
+			decision: savedDecision,
+			agentResponseGenerationTurnSequence: 3,
+			isQuestionRaisedByEarlierAgentSessionIncarnation: true,
+		});
+		expect(host.querySelector('[aria-label="展开问题"]')).not.toBeNull();
+		renderPanel({
+			decision: savedDecision,
+			agentResponseGenerationTurnSequence: 3,
+			onAnswer,
+			onReconcileDelivery,
+			onConfirmHandled,
+		});
+		act(() => host.querySelector<HTMLButtonElement>('[aria-label="展开问题"]')?.click());
+		expect(findButtonByText(host, "重试投递")).toBeUndefined();
+		await act(async () => findButtonByText(host, "重新核验送达")?.click());
+		await act(async () => findButtonByText(host, "我已在终端确认处理")?.click());
+		expect(onReconcileDelivery).toHaveBeenCalledOnce();
+		expect(onConfirmHandled).toHaveBeenCalledOnce();
+		expect(onAnswer).not.toHaveBeenCalled();
 	});
 });
 

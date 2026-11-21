@@ -1,5 +1,6 @@
 import { AlertCircle } from "lucide-react";
 import type { ReactElement } from "react";
+import { GlobalMarkdownDraftEntry } from "@/components/global-markdown-draft-window";
 import { RuntimeSystemLoadAndRuntimeStatus } from "@/components/runtime-system-load-and-runtime-status";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 
@@ -8,6 +9,7 @@ export function RuntimeDisconnectedFallback(): ReactElement {
 	return (
 		<div className="relative flex h-[100svh] items-center justify-center bg-surface-0 p-6">
 			<div className="absolute inset-x-0 top-0 flex justify-end border-b border-border bg-surface-1 px-2 py-1">
+				<GlobalMarkdownDraftEntry isMobile={isMobile} />
 				<RuntimeSystemLoadAndRuntimeStatus isMobile={isMobile} />
 			</div>
 			<div className="flex flex-col items-center justify-center gap-3 py-12 text-text-tertiary">

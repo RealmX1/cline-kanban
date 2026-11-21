@@ -5,106 +5,71 @@
 //      —— **先作废计时，再动进程**，否则「刚恢复起来就被上一轮的陈旧期限杀掉」；
 //   ② 恢复 / 新建 agent 会话；
 //   ③ 用稳定幂等键投递「原问题 + 用户答案」；
-//   ④ 成功 → delivered；失败 → delivery_failed + 退避重试。
+//   ④ 已接受 → delivered；明确未发送 → delivery_failed；其余 → delivery_unconfirmed，只补证。
 //
 // 幂等由 store 的投递状态机守门：`delivered` 是终态，任何再投递都会被存储层拒绝，
 // 所以「重试」永远不会变成「重复送两次」。
-import type { RuntimeAgentSessionTransport } from "../core/api-contract";
+import { createHash, randomUUID } from "node:crypto";
+import type {
+	InjectionLedgerTerminalDeliveryReceipt,
+	RuntimeAgentSessionTransport,
+	RuntimeTaskSessionSummary,
+} from "../core/api-contract";
 import {
 	logAgentSessionRetentionInfo,
 	logAgentSessionRetentionWarning,
 } from "../diagnostics/agent-session-retention-logger";
 import {
 	type AgentRaisedPendingUserDecisionAnswer,
+	type AgentRaisedPendingUserDecisionAnswerDeliveryAttempt,
+	confirmAgentRaisedPendingUserDecisionAnswerHandled,
 	type PersistedAgentRaisedPendingUserDecision,
 	readAgentRaisedPendingUserDecisions,
 	recordAgentRaisedPendingUserDecisionAnswer,
-	resolveAgentRaisedPendingUserDecisionOrderedQuestions,
 	resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession,
 	updateAgentRaisedPendingUserDecisionAnswerDeliveryState,
 } from "../state/agent-raised-pending-user-decision-store";
 import { supersedeAgentSessionRetentionDeadlinesForTask } from "../state/agent-session-reclamation-deadline-store";
+import { getThisRuntimeProcessInstanceId } from "../state/runtime-process-instance-heartbeat-registry";
+import {
+	activePendingUserDecisionAnswerDeliveryAttemptIds,
+	isPendingUserDecisionAnswerDefinitelyNotSubmitted,
+	type PendingUserDecisionAnswerDeliveryEvidence,
+	reconcileAgentRaisedPendingUserDecisionAnswerDelivery,
+} from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 
-// 投递给 agent 的正文。刻意把**原问题**也带上：会话可能已经被回收重启，新活体并不知道
-// 「你刚才问了什么」，只发一句「我选 B」它无从对应。
-// 开头措辞必须对两种投递情形都成立：会话已被回收 / 重启后恢复；或会话仍活着、为投递先用 Esc 关掉了
-// 终端里的选择器（此时原工具调用被记为拒绝）。两种情形下原 AskUserQuestion 都没有正式的作答结果。
-export function buildAgentRaisedPendingUserDecisionAnswerMessage(
-	decision: PersistedAgentRaisedPendingUserDecision,
-	answer: AgentRaisedPendingUserDecisionAnswer,
-): string {
-	const lines = [
-		"这是用户在 Cline Kanban 面板中对你先前提出的待答问题给出的答复。",
-		"原提问工具调用已被中断或记为拒绝，没有正式的作答结果——请以这里为准，不要重新提问。",
-		"",
-		"以下逐项重述你当时提出的全部问题、全部选项及用户答案。",
-	];
-	const orderedQuestions = resolveAgentRaisedPendingUserDecisionOrderedQuestions(decision);
-	for (const [questionIndex, question] of orderedQuestions.entries()) {
-		const questionAnswer = answer.orderedQuestionAnswers?.find(
-			(candidate) => candidate.decisionQuestionId === question.decisionQuestionId,
-		);
-		const selectedOptionIds =
-			questionAnswer?.selectedOptionIds ?? (questionIndex === 0 ? answer.selectedOptionIds : []);
-		const freeformText = (questionAnswer?.freeformText ?? (questionIndex === 0 ? answer.freeformText : null))?.trim();
-		lines.push("", `问题 ${questionIndex + 1}${question.headerMarkdown ? `（${question.headerMarkdown}）` : ""}：`);
-		lines.push(
-			question.questionMarkdown,
-			"",
-			`全部选项（${question.selectionMode === "multiple" ? "多选" : "单选"}）：`,
-		);
-		for (const option of question.options) {
-			lines.push(`- [${option.optionId}] ${option.label}${option.description ? ` — ${option.description}` : ""}`);
-		}
-		const selectedLabels = selectedOptionIds.map((optionId) => {
-			const structuredQuestionOptionLabel = question.options.find((option) => option.optionId === optionId)?.label;
-			if (structuredQuestionOptionLabel !== undefined) {
-				return structuredQuestionOptionLabel;
-			}
-			// 旧客户端只提交顶层 selectedOptionIds；AskUserQuestion 的单问 payload 曾让顶层选项使用
-			// `option-N`、orderedQuestions[0] 使用 `question-0-option-N`。首问在结构化 ID 未命中时
-			// 回退顶层选项，确保恢复投递给 agent 的仍是人类可读标签。
-			return questionAnswer === undefined && questionIndex === 0
-				? (decision.options.find((option) => option.optionId === optionId)?.label ?? optionId)
-				: optionId;
-		});
-		if (selectedLabels.length > 0) {
-			lines.push("", `用户选择：${selectedLabels.join("、")}`);
-		}
-		if (freeformText) {
-			lines.push(selectedLabels.length > 0 ? `用户补充：${freeformText}` : `用户自由回答：${freeformText}`);
-		}
-		if (selectedLabels.length === 0 && !freeformText) {
-			lines.push("", "我没有选择任何选项，也未填写自由回答。");
-		}
-	}
-	lines.push("", "请仅在以上用户答复的基础上继续先前工作。");
-	return lines.join("\n");
+import { buildAgentRaisedPendingUserDecisionAnswerMessage } from "./agent-raised-pending-user-decision-answer-message";
+
+export { buildAgentRaisedPendingUserDecisionAnswerMessage } from "./agent-raised-pending-user-decision-answer-message";
+
+export interface AgentRaisedPendingUserDecisionAnswerTransportReceipt extends InjectionLedgerTerminalDeliveryReceipt {
+	failureExplanation?: string;
 }
 
 export interface AgentRaisedPendingUserDecisionAnswerDeliveryDependencies {
-	// 确保该任务的会话处于可投递状态（必要时先恢复 / 新建），返回是否就绪。
-	// 三种 transport 各自的恢复手法不同，故由调用方注入。
-	// 语义要求（这一步是整条闭环的承重点）：会话被回收后账本里的 summary 仍在，**光看 summary
-	// 存不存在不算就绪判据**——必须真的把运行时（PTY / ACP 连接 / Cline SDK 会话）拉回来，
-	// 否则随后的 deliverTaskSessionInput 必然落空、答案永远送不到 agent 手里。
-	// 返回 false = 这次恢复不了（答案已 durable 落库，不会丢），交由退避重试。
 	ensureTaskSessionReadyForDelivery: (input: {
 		workspaceId: string;
 		taskId: string;
 		sessionTransport: RuntimeAgentSessionTransport;
 	}) => Promise<boolean>;
-	// 真正把文本送进会话。返回 true 必须表示 transport 已完成实际写入；仅排入异步定时器不算。
-	// 返回 false = 写入前会话退出、投递被取消或仍未准备好（不是答案丢失，稍后重试）。
 	deliverTaskSessionInput: (input: {
 		workspaceId: string;
 		taskId: string;
 		sessionTransport: RuntimeAgentSessionTransport;
 		text: string;
 		idempotencyKey: string;
-		// 提问它的会话活体。与当前活体相同即说明 agent 仍停在终端的提问选择器上，终端 transport 须先关掉它。
+		decisionId: string;
+		attemptId: string;
+		dispatchIdempotencyKey: string;
 		originRuntimeSessionIncarnationId: string | null;
-	}) => Promise<boolean>;
+		persistSubmissionContext: (
+			context: Partial<AgentRaisedPendingUserDecisionAnswerDeliveryAttempt>,
+		) => Promise<void>;
+	}) => Promise<boolean | AgentRaisedPendingUserDecisionAnswerTransportReceipt>;
+	reconcileDeliveryEvidence?: (
+		decision: PersistedAgentRaisedPendingUserDecision,
+	) => Promise<PendingUserDecisionAnswerDeliveryEvidence>;
+	getSummary?: (taskId: string) => RuntimeTaskSessionSummary | null;
 	now?: () => number;
 }
 
@@ -118,75 +83,164 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 	dependencies: AgentRaisedPendingUserDecisionAnswerDeliveryDependencies,
 ) {
 	const now = dependencies.now ?? (() => Date.now());
+	const reconcile = (input: { workspaceId: string; decisionId: string }) =>
+		reconcileAgentRaisedPendingUserDecisionAnswerDelivery({
+			...input,
+			now: now(),
+			readEvidence: dependencies.reconcileDeliveryEvidence,
+			getSummary: dependencies.getSummary,
+			force: true,
+		});
 
-	// 已经记下答案、但尚未确认送达的记录：把它推进到 delivered / delivery_failed。
-	// 幂等：状态机拒绝任何从 delivered 出发的迁移，故重复调用不会重复送。
 	const attemptDelivery = async (
 		workspaceId: string,
-		decision: PersistedAgentRaisedPendingUserDecision,
+		suppliedDecision: PersistedAgentRaisedPendingUserDecision,
 	): Promise<boolean> => {
-		const answer = decision.answer;
-		if (!answer || decision.answerDeliveryState === "delivered") {
-			return decision.answerDeliveryState === "delivered";
-		}
-		const inProgress = await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
-			workspaceId,
-			decision.decisionId,
-			{
-				answerDeliveryState: "delivery_in_progress",
-				updatedAt: now(),
-			},
-		);
-		if (!inProgress) {
-			// 非法迁移（多半是并发的另一次投递已经在跑）——交给那一次，绝不重复送。
+		const decision = await reconcile({ workspaceId, decisionId: suppliedDecision.decisionId });
+		if (!decision?.answer || decision.answerHandledConfirmation || decision.status !== "answered") return false;
+		if (decision.answerDeliveryState === "delivered") return true;
+		if (decision.answerDeliveryState !== "answer_recorded" && decision.answerDeliveryState !== "delivery_failed")
 			return false;
-		}
-		const markFailed = async (reason: string): Promise<boolean> => {
+		const attemptId = randomUUID();
+		const messageIdentity = {
+			dispatchIdempotencyKey: `${decision.answerDeliveryIdempotencyKey}:attempt:${attemptId}`,
+			answerMessageFormatVersion: 2 as const,
+		};
+		const text = buildAgentRaisedPendingUserDecisionAnswerMessage(decision, decision.answer, messageIdentity);
+		const attempt: AgentRaisedPendingUserDecisionAnswerDeliveryAttempt = {
+			attemptId,
+			...messageIdentity,
+			ownerRuntimeProcessInstanceId: getThisRuntimeProcessInstanceId(),
+			startedAt: now(),
+			submissionPhase: "preparing_session",
+			state: "delivery_in_progress",
+			promptSha256: createHash("sha256").update(text).digest("hex"),
+		};
+		activePendingUserDecisionAnswerDeliveryAttemptIds.add(attemptId);
+		let submissionMayHaveStarted = false;
+		try {
+			const claimed = await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
+				workspaceId,
+				decision.decisionId,
+				{
+					answerDeliveryState: "delivery_in_progress",
+					updatedAt: now(),
+					answerDeliveryAttempt: attempt,
+				},
+			);
+			if (!claimed) return false;
+			await supersedeAgentSessionRetentionDeadlinesForTask(workspaceId, decision.taskId, now());
+			const persistSubmissionContext = async (
+				context: Partial<AgentRaisedPendingUserDecisionAnswerDeliveryAttempt>,
+			) => {
+				const saved = await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(
+					workspaceId,
+					decision.decisionId,
+					{
+						answerDeliveryState: "delivery_in_progress",
+						expectedAttemptId: attemptId,
+						updatedAt: now(),
+						answerDeliveryAttemptPatch: context,
+					},
+				);
+				if (!saved) throw new Error("答案投递尝试已失效，未继续发送");
+			};
+			let result: boolean | AgentRaisedPendingUserDecisionAnswerTransportReceipt;
+			if (
+				!(await dependencies.ensureTaskSessionReadyForDelivery({
+					workspaceId,
+					taskId: decision.taskId,
+					sessionTransport: decision.sessionTransport,
+				}))
+			) {
+				result = {
+					status: "delivery_failed",
+					reason: "no_active_terminal_session",
+					failureNote: "无法恢复该任务的 agent 会话运行时",
+				};
+			} else {
+				await persistSubmissionContext({ submissionPhase: "submission_may_have_started" });
+				submissionMayHaveStarted = true;
+				result = await dependencies.deliverTaskSessionInput({
+					workspaceId,
+					taskId: decision.taskId,
+					sessionTransport: decision.sessionTransport,
+					text,
+					idempotencyKey: decision.answerDeliveryIdempotencyKey,
+					decisionId: decision.decisionId,
+					attemptId,
+					dispatchIdempotencyKey: attempt.dispatchIdempotencyKey,
+					originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
+					persistSubmissionContext,
+				});
+			}
+			const receipt: AgentRaisedPendingUserDecisionAnswerTransportReceipt =
+				typeof result === "boolean"
+					? result
+						? { status: "delivered_and_submit_confirmed", reason: null }
+						: {
+								status: "delivery_failed",
+								reason: "no_active_terminal_session",
+								failureNote: "投递未完成实际会话写入",
+							}
+					: result;
+			const delivered =
+				receipt.status === "delivered_and_submit_confirmed" ||
+				receipt.status === "delivered_queued_behind_active_agent_turn";
+			const state = delivered
+				? "delivered"
+				: isPendingUserDecisionAnswerDefinitelyNotSubmitted(receipt)
+					? "delivery_failed"
+					: "delivery_unconfirmed";
 			await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(workspaceId, decision.decisionId, {
-				answerDeliveryState: "delivery_failed",
+				answerDeliveryState: state,
+				expectedAttemptId: attemptId,
 				updatedAt: now(),
-				lastAnswerDeliveryFailureReason: reason,
+				lastAnswerDeliveryFailureReason: delivered
+					? null
+					: (receipt.failureExplanation ?? receipt.failureNote ?? receipt.reason),
+				answerDeliveryAttemptPatch: {
+					state,
+					submissionPhase: "settled",
+					originalReceipt: receipt,
+					submissionMayHaveStarted: receipt.submissionMayHaveStarted,
+					nextReconciliationAt: delivered ? null : now() + 15_000,
+				},
+			});
+			if (delivered)
+				logAgentSessionRetentionInfo(
+					`pending-user-decision-delivered workspaceId=${workspaceId} taskId=${decision.taskId}`,
+				);
+			return delivered;
+		} catch (error) {
+			const state = submissionMayHaveStarted ? "delivery_unconfirmed" : "delivery_failed";
+			await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(workspaceId, decision.decisionId, {
+				answerDeliveryState: state,
+				expectedAttemptId: attemptId,
+				updatedAt: now(),
+				lastAnswerDeliveryFailureReason: error instanceof Error ? error.message : String(error),
+				answerDeliveryAttemptPatch: { state, submissionPhase: "settled", nextReconciliationAt: now() + 15_000 },
 			});
 			logAgentSessionRetentionWarning(
-				`pending-user-decision-delivery-failed workspaceId=${workspaceId} taskId=${decision.taskId} decisionKind=${decision.decisionKind} reason=${reason}`,
+				`pending-user-decision-delivery-unconfirmed workspaceId=${workspaceId} taskId=${decision.taskId}`,
 			);
 			return false;
-		};
-		try {
-			const ready = await dependencies.ensureTaskSessionReadyForDelivery({
-				workspaceId,
-				taskId: decision.taskId,
-				sessionTransport: decision.sessionTransport,
-			});
-			if (!ready) {
-				return await markFailed("无法恢复该任务的 agent 会话运行时");
-			}
-			const delivered = await dependencies.deliverTaskSessionInput({
-				workspaceId,
-				taskId: decision.taskId,
-				sessionTransport: decision.sessionTransport,
-				text: buildAgentRaisedPendingUserDecisionAnswerMessage(decision, answer),
-				idempotencyKey: decision.answerDeliveryIdempotencyKey,
-				originRuntimeSessionIncarnationId: decision.originRuntimeSessionIncarnationId,
-			});
-			if (!delivered) {
-				return await markFailed("投递未完成实际会话写入");
-			}
-		} catch (error) {
-			return await markFailed(error instanceof Error ? error.message : String(error));
+		} finally {
+			activePendingUserDecisionAnswerDeliveryAttemptIds.delete(attemptId);
 		}
-		await updateAgentRaisedPendingUserDecisionAnswerDeliveryState(workspaceId, decision.decisionId, {
-			answerDeliveryState: "delivered",
-			updatedAt: now(),
-			lastAnswerDeliveryFailureReason: null,
-		});
-		logAgentSessionRetentionInfo(
-			`pending-user-decision-delivered workspaceId=${workspaceId} taskId=${decision.taskId} decisionKind=${decision.decisionKind}`,
-		);
-		return true;
 	};
 
 	return {
+		reconcileAgentRaisedPendingUserDecisionAnswerDelivery: reconcile,
+		async confirmAgentRaisedPendingUserDecisionAnswerHandled(input: { workspaceId: string; decisionId: string }) {
+			await reconcile(input);
+			const confirmed = await confirmAgentRaisedPendingUserDecisionAnswerHandled(
+				input.workspaceId,
+				input.decisionId,
+				now(),
+			);
+			return { ok: confirmed !== null, ...(confirmed ? {} : { error: "仍有发送操作未收敛，请等待后再确认处理。" }) };
+		},
 		async answerPendingUserDecision(input: {
 			workspaceId: string;
 			decisionId: string;
@@ -194,62 +248,43 @@ export function createAgentRaisedPendingUserDecisionAnswerDelivery(
 			freeformText: string | null;
 			orderedQuestionAnswers?: AgentRaisedPendingUserDecisionAnswer["orderedQuestionAnswers"];
 		}): Promise<DeliverAgentRaisedPendingUserDecisionAnswerResult> {
-			const { workspaceId } = input;
-			// UI 可能还拿着同一次提问的重复记录的 id（旧版本一问两记），沿重复链找到真正在等答的那条。
 			const existing = resolveAgentRaisedPendingUserDecisionThroughDuplicateSupersession(
-				await readAgentRaisedPendingUserDecisions(workspaceId),
+				await readAgentRaisedPendingUserDecisions(input.workspaceId),
 				input.decisionId,
 			);
-			const decisionId = existing?.decisionId ?? input.decisionId;
-			if (!existing) {
-				return { ok: false, delivered: false, error: `Pending decision "${decisionId}" not found` };
-			}
-			if (existing.status === "answered") {
-				// 已答过：不覆盖答案，但把「记下了却没送达」的推进一次（幂等重试入口）。
-				const delivered = await attemptDelivery(workspaceId, existing);
-				return { ok: true, delivered };
-			}
-			if (existing.status !== "pending") {
-				return { ok: false, delivered: false, error: `Pending decision "${decisionId}" is ${existing.status}` };
-			}
-
+			if (!existing)
+				return { ok: false, delivered: false, error: `Pending decision "${input.decisionId}" not found` };
+			if (existing.status === "answered")
+				return { ok: true, delivered: await attemptDelivery(input.workspaceId, existing) };
+			if (existing.status !== "pending")
+				return {
+					ok: false,
+					delivered: false,
+					error: `Pending decision "${input.decisionId}" is ${existing.status}`,
+				};
 			const answeredAt = now();
-			const answered = await recordAgentRaisedPendingUserDecisionAnswer(workspaceId, decisionId, {
+			const answered = await recordAgentRaisedPendingUserDecisionAnswer(input.workspaceId, existing.decisionId, {
 				selectedOptionIds: input.selectedOptionIds,
 				freeformText: input.freeformText,
 				...(input.orderedQuestionAnswers ? { orderedQuestionAnswers: input.orderedQuestionAnswers } : {}),
 				answeredAt,
 				answerSource: "kanban_panel",
 			});
-			if (!answered) {
-				return { ok: false, delivered: false, error: `Pending decision "${decisionId}" could not be answered` };
-			}
-			// **先作废计时，再动进程**：否则刚恢复起来的新会话可能被上一轮的陈旧期限直接杀掉。
-			await supersedeAgentSessionRetentionDeadlinesForTask(workspaceId, answered.taskId, answeredAt);
-
-			const delivered = await attemptDelivery(workspaceId, answered);
-			return { ok: true, delivered };
+			if (!answered) return { ok: true, delivered: false };
+			await supersedeAgentSessionRetentionDeadlinesForTask(input.workspaceId, answered.taskId, answeredAt);
+			return { ok: true, delivered: await attemptDelivery(input.workspaceId, answered) };
 		},
-
-		// 重试入口：把该 workspace 里所有「已记下答案但未送达」的决策再推一次。
 		async retryUndeliveredAnswers(workspaceId: string): Promise<number> {
-			const decisions = await readAgentRaisedPendingUserDecisions(workspaceId);
-			let deliveredCount = 0;
-			for (const decision of decisions) {
-				if (decision.status !== "answered") {
-					continue;
-				}
+			let delivered = 0;
+			for (const decision of await readAgentRaisedPendingUserDecisions(workspaceId)) {
 				if (
-					decision.answerDeliveryState !== "answer_recorded" &&
-					decision.answerDeliveryState !== "delivery_failed"
-				) {
-					continue;
-				}
-				if (await attemptDelivery(workspaceId, decision)) {
-					deliveredCount += 1;
-				}
+					decision.status === "answered" &&
+					!decision.answerHandledConfirmation &&
+					decision.answerDeliveryState !== "delivered"
+				)
+					if (await attemptDelivery(workspaceId, decision)) delivered++;
 			}
-			return deliveredCount;
+			return delivered;
 		},
 	};
 }

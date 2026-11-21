@@ -87,6 +87,7 @@ function resolveLedgerRecordHistoryResolution(
 ): RuntimeAgentRaisedUserDecisionHistoryEntry["resolution"] | null {
 	switch (record.status) {
 		case "answered":
+			if (record.answerHandledConfirmation) return "user_confirmed_answer_handled";
 			return record.answer?.answerSource === "agent_terminal"
 				? "answered_in_agent_terminal"
 				: "answered_in_kanban_panel";
@@ -145,7 +146,7 @@ export function buildAgentRaisedUserDecisionHistoryEntriesFromDecisionLedger(
 				record.status === "pending"
 					? null
 					: record.status === "answered"
-						? (record.answer?.answeredAt ?? record.updatedAt)
+						? (record.answerHandledConfirmation?.confirmedAt ?? record.answer?.answeredAt ?? record.updatedAt)
 						: record.updatedAt,
 			resolution,
 			orderedQuestions,

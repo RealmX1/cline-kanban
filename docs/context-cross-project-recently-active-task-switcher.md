@@ -9,7 +9,9 @@
 **Shelved（搁置组）**：任务独立搁置状态的投影，优先于所有其他展示归属，位于最后且默认收起；保留真实 Stage、置顶意图与会话。完整状态、拖放和持久化契约见 [任务搁置状态与展示分组](task-shelving-state-and-display-groups.md)。
 
 **Adjacent Task Keyboard Navigation（相邻任务快捷键）**：
-Focus View 的 `Option/Alt + ↑/↓` 在 All projects 下按左栏 Pinned → Running → Cache warm → Recent → Shelved 的显示顺序跨项目循环切换；折叠、筛选及「显示更多」隐藏的行不参与，滚出视口的行仍参与。普通 Backlog 打开编辑器，不参与详情切换；搁置 Backlog 归属 Shelved，可参与定位与导航。任务身份同时包含 workspaceId 和 taskId；置顶副本不额外占位，优先采用可见主分组行的位置。当前任务因折叠而保留的定位行仍可作为导航起点，分组外顶部焦点区向下进首项、向上进末项。
+Focus View 的 `Option/Alt + ↑/↓` 在 All projects 下按左栏 Pinned → Running → 等待自动恢复 → 等待所属后台工作 → Cache warm → Recent → Shelved 的显示顺序跨项目循环切换；折叠、筛选及「显示更多」隐藏的行不参与，滚出视口的行仍参与。普通 Backlog 打开编辑器，不参与详情切换；搁置 Backlog 归属 Shelved，可参与定位与导航。任务身份同时包含 workspaceId 和 taskId；置顶副本不额外占位，优先采用可见主分组行的位置。当前任务因折叠而保留的定位行仍可作为导航起点，分组外顶部焦点区向下进首项、向上进末项。
+
+**等待所属后台工作**：当前主会话已确认结束本轮，且当前任务、会话与原生身份仍绑定有效的所属执行。后台执行、机器待证、结果接续各显示对应状态。park 仍按其所属执行解除，分组本身没有投递、交棒或看板移列权限。主回合状态未知时显示待核验原因，到达重验时间后沿用既有观察器。
 
 按住 Option 连续切换期间，Recent 的显示与导航顺序一起锁定，内容和打开时间照常更新；新项追加到末尾，失效项立即移除。松开 Option、失焦、页面隐藏、退出 Focus View、切换范围或改变排序/筛选后恢复实时排序。导航所有者常驻 App，跨项目加载期间以在途目标为当前位置，不依赖详情组件是否挂载。单项目范围按当前展示分组循环，Shelved 可包含来自不同原 Stage 的任务。
 

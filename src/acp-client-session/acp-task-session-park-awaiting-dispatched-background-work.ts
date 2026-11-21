@@ -12,6 +12,7 @@ import { type AcpTaskSessionEntry, now, updateAcpSummary } from "./acp-session-s
 // 但 park 保留，决策回给 agent 之后它仍在等自己派发的后台工作。未 parked 时这个补丁是 no-op。
 export const ACP_SUMMARY_PATCH_CLEARING_PARK_AWAITING_DISPATCHED_BACKGROUND_WORK = {
 	awaitingDispatchedBackgroundWork: null,
+	parkedMainAgentTurnCompletion: null,
 } satisfies Partial<RuntimeTaskSessionSummary>;
 
 export type AcpTaskSessionParkAwaitingDispatchedBackgroundWorkResult =
@@ -44,6 +45,7 @@ export function parkAcpTaskSessionEntryAwaitingDispatchedBackgroundWork(input: {
 	return {
 		ok: true,
 		summary: updateAcpSummary(input.entry, {
+			...(!previousPark ? { parkedMainAgentTurnCompletion: null } : {}),
 			awaitingDispatchedBackgroundWork: {
 				sinceMs,
 				...((!input.owningCommandExecutionId && previousPark?.owningCommandExecutionIds?.length) ||

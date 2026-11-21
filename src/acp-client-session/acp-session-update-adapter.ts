@@ -374,7 +374,22 @@ export function applyAcpPromptTurnCompletion(
 	if (isParkedAwaitingDispatchedBackgroundWork(context.entry.summary)) {
 		return updateAcpSummary(
 			context.entry,
-			withEffectiveAgentConversationActivity({ lastOutputAt: timestamp }, "agent_turn_boundary"),
+			withEffectiveAgentConversationActivity(
+				{
+					lastOutputAt: timestamp,
+					...(context.entry.summary.runtimeSessionIncarnationId &&
+					context.entry.summary.awaitingDispatchedBackgroundWork?.owningCommandExecutionIds?.length
+						? {
+								parkedMainAgentTurnCompletion: {
+									runtimeSessionIncarnationId: context.entry.summary.runtimeSessionIncarnationId,
+									turnSequence: context.entry.summary.agentResponseGenerationTurnSequence ?? 0,
+									observedAtMs: timestamp,
+								},
+							}
+						: {}),
+				},
+				"agent_turn_boundary",
+			),
 		);
 	}
 

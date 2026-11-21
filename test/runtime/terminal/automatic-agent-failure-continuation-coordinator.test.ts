@@ -49,6 +49,21 @@ function setup(options?: { canAttempt?: () => boolean; softDeferralReason?: () =
 	};
 }
 describe("共用故障恢复协调器", () => {
+	it("Codex 工具活动后仍能识别当前回合再次失败", () => {
+		const harness = setup();
+		harness.coordinator.observeFailure("connection", "native-turn");
+		harness.setNow(2_000);
+		harness.coordinator.observeProgress(2_000);
+		expect(harness.coordinator.snapshot()?.phase).toBe("waiting_backoff");
+		harness.setNow(3_000);
+		harness.coordinator.observeFailure("connection", "native-turn");
+		expect(harness.coordinator.snapshot()).toMatchObject({
+			phase: "waiting_backoff",
+			lastErrorAtMs: 3_000,
+			attemptCount: 0,
+		});
+	});
+
 	it("旧 Codex 记录缺提交边沿时，实际调用证据仍能绑定接受补证前的当前 Stop", async () => {
 		const h = setup();
 		h.coordinator.observeFailure("connection");

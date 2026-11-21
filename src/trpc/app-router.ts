@@ -27,6 +27,8 @@ import type {
 	RuntimeCommandRunResponse,
 	RuntimeConfigResponse,
 	RuntimeConfigSaveRequest,
+	RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequest,
+	RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponse,
 	RuntimeConfirmExploratoryFindingRequest,
 	RuntimeConfirmExploratoryFindingResponse,
 	// Post-Deploy Verification / deployment tRPC I/O 类型（本阶段新增，供 RuntimeTrpcContext.deploymentApi 使用）
@@ -106,6 +108,8 @@ import type {
 	RuntimePromptLibraryResponse,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequest,
 	RuntimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponse,
+	RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequest,
+	RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponse,
 	RuntimeRecordCurrentTaskProgressRequest,
 	RuntimeRecordTaskOpenedByUserRequest,
 	RuntimeRecordTaskOpenedByUserResponse,
@@ -216,6 +220,12 @@ import type {
 	RuntimeWorktreeEnsureResponse,
 } from "../core/api-contract";
 import {
+	globalMarkdownDraftCreateInputSchema,
+	globalMarkdownDraftDeleteInputSchema,
+	globalMarkdownDraftDeleteResultSchema,
+	globalMarkdownDraftSchema,
+	globalMarkdownDraftUpdateInputSchema,
+	globalMarkdownDraftUpdateResultSchema,
 	type RuntimeAutomaticAgentFailureContinuationActionRequest,
 	type RuntimeGetPostDeployVerificationDeploymentGroupRequest,
 	type RuntimeGetPostDeployVerificationDeploymentGroupResponse,
@@ -259,6 +269,8 @@ import {
 	runtimeConditionalWorkspaceChangesResponseSchema,
 	runtimeConfigResponseSchema,
 	runtimeConfigSaveRequestSchema,
+	runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema,
+	runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema,
 	runtimeConfirmExploratoryFindingRequestSchema,
 	runtimeConfirmExploratoryFindingResponseSchema,
 	// Post-Deploy Verification / deployment tRPC I/O schemas（本阶段新增，供 deployment router 校验）
@@ -346,6 +358,8 @@ import {
 	runtimeReadTaskCardsForPostDeployVerificationResponseSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesRequestSchema,
 	runtimeReadTaskWorktreeGitMetadataForCrossProjectTaskSwitcherEntriesResponseSchema,
+	runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema,
+	runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema,
 	runtimeRecordCurrentTaskProgressRequestSchema,
 	runtimeRecordTaskOpenedByUserRequestSchema,
 	runtimeRecordTaskOpenedByUserResponseSchema,
@@ -474,8 +488,11 @@ import {
 	runtimeWorktreeEnsureRequestSchema,
 	runtimeWorktreeEnsureResponseSchema,
 } from "../core/api-contract";
+import {
+	backlogTaskStartReadinessAssessmentRequestSchema,
+	backlogTaskStartReadinessAssessmentResponseSchema,
+} from "../core/backlog-task-start-readiness-contract";
 import { projectWorkspaceStateForBrowser } from "../core/browser-task-session-summary-projection";
-
 import {
 	type RuntimeCodexConversationStorageOperationRequest,
 	type RuntimeCodexConversationStorageOperationResponse,
@@ -675,6 +692,7 @@ import {
 import { getTaskRvfHistory } from "../rvf-task-review-history/task-rvf-history-query-service";
 import { buildConditionalWorkspaceChangesResponse } from "../server/conditional-workspace-changes";
 import { assertWorkspaceHasNotBeenConsolidated } from "../state/duplicate-project-consolidation-status";
+import { globalMarkdownDraftStore } from "../state/global-markdown-draft-store";
 import { savePersistentAgentPromptFileAttachment } from "../state/persistent-agent-prompt-file-attachments";
 import {
 	readPersistentAgentPromptImageAttachments,
@@ -830,6 +848,7 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskSessionStartRequest,
 			beforeAgentProcessLaunch?: (launchingSummary: RuntimeTaskSessionSummary) => Promise<void>,
+			backlogTaskStartReadinessOperationId?: string,
 		) => Promise<RuntimeTaskSessionStartResponse>;
 		stopTaskSession: (
 			scope: RuntimeTrpcWorkspaceScope,
@@ -856,6 +875,15 @@ export interface RuntimeTrpcContext {
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeAnswerAgentRaisedPendingUserDecisionRequest,
 		) => Promise<RuntimeAnswerAgentRaisedPendingUserDecisionResponse>;
+		reconcileAgentRaisedPendingUserDecisionAnswerDelivery: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequest,
+		) => Promise<RuntimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponse>;
+		confirmAgentRaisedPendingUserDecisionAnswerHandled: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequest,
+		) => Promise<RuntimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponse>;
+
 		saveAgentRaisedPendingUserDecisionAnswerDraft: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequest,
@@ -1139,6 +1167,15 @@ export interface RuntimeTrpcContext {
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 			beforeAgentProcessLaunch?: () => Promise<void>,
 		) => Promise<RuntimeTaskCardActionStartAgentSessionResponse>;
+		assessBacklogTaskStartReadiness: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof backlogTaskStartReadinessAssessmentRequestSchema>,
+			evidence: KanbanRequestOriginActorEvidence,
+		) => Promise<z.infer<typeof backlogTaskStartReadinessAssessmentResponseSchema>>;
+		readBacklogTaskStartReadinessReport: (
+			scope: RuntimeTrpcWorkspaceScope,
+			input: z.infer<typeof backlogTaskStartReadinessAssessmentRequestSchema>,
+		) => Promise<z.infer<typeof backlogTaskStartReadinessAssessmentResponseSchema>>;
 		moveTaskCardIntoReviewByHandingTurnToUser: (
 			scope: RuntimeTrpcWorkspaceScope,
 			input: RuntimeTaskCardActionMoveIntoReviewRequest,
@@ -2067,6 +2104,19 @@ const runtimeApplicationRuntimeProcedureRouter = t.router({
 		.query(async ({ ctx, input }) => {
 			return await ctx.runtimeApi.listAgentRaisedUserDecisionHistoryForTask(ctx.workspaceScope, input);
 		}),
+	reconcileAgentRaisedPendingUserDecisionAnswerDelivery: workspaceProcedure
+		.input(runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryRequestSchema)
+		.output(runtimeReconcileAgentRaisedPendingUserDecisionAnswerDeliveryResponseSchema)
+		.mutation(async ({ ctx, input }) =>
+			ctx.runtimeApi.reconcileAgentRaisedPendingUserDecisionAnswerDelivery(ctx.workspaceScope, input),
+		),
+	confirmAgentRaisedPendingUserDecisionAnswerHandled: workspaceProcedure
+		.input(runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledRequestSchema)
+		.output(runtimeConfirmAgentRaisedPendingUserDecisionAnswerHandledResponseSchema)
+		.mutation(async ({ ctx, input }) =>
+			ctx.runtimeApi.confirmAgentRaisedPendingUserDecisionAnswerHandled(ctx.workspaceScope, input),
+		),
+
 	saveAgentRaisedPendingUserDecisionAnswerDraft: workspaceProcedure
 		.input(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftRequestSchema)
 		.output(runtimeSaveAgentRaisedPendingUserDecisionAnswerDraftResponseSchema)
@@ -2628,6 +2678,20 @@ const runtimeApplicationTaskCardActionProcedureRouter = t.router({
 				ctx.kanbanRequestOriginActorEvidence,
 			);
 		}),
+	assessBacklogTaskStartReadiness: workspaceProcedure
+		.input(backlogTaskStartReadinessAssessmentRequestSchema)
+		.output(backlogTaskStartReadinessAssessmentResponseSchema)
+		.mutation(({ ctx, input }) =>
+			ctx.taskCardActionApi.assessBacklogTaskStartReadiness(
+				ctx.workspaceScope,
+				input,
+				ctx.kanbanRequestOriginActorEvidence,
+			),
+		),
+	readBacklogTaskStartReadinessReport: workspaceProcedure
+		.input(backlogTaskStartReadinessAssessmentRequestSchema)
+		.output(backlogTaskStartReadinessAssessmentResponseSchema)
+		.query(({ ctx, input }) => ctx.taskCardActionApi.readBacklogTaskStartReadinessReport(ctx.workspaceScope, input)),
 	moveTaskCardIntoReviewByHandingTurnToUser: workspaceProcedure
 		.input(runtimeTaskCardActionMoveIntoReviewRequestSchema)
 		.output(runtimeTaskCardActionMoveIntoReviewResponseSchema)
@@ -3121,8 +3185,27 @@ const runtimeApplicationExploratoryProcedureRouter = t.router({
 		}),
 });
 
+const runtimeApplicationGlobalMarkdownDraftProcedureRouter = t.router({
+	list: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.output(z.array(globalMarkdownDraftSchema))
+		.query(() => globalMarkdownDraftStore.list()),
+	create: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftCreateInputSchema)
+		.output(globalMarkdownDraftSchema.nullable())
+		.mutation(({ input }) => globalMarkdownDraftStore.create(input)),
+	update: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftUpdateInputSchema)
+		.output(globalMarkdownDraftUpdateResultSchema)
+		.mutation(({ input }) => globalMarkdownDraftStore.update(input)),
+	delete: procedureRejectingUnknownWebUiPageLoadRequestOriginNonce
+		.input(globalMarkdownDraftDeleteInputSchema)
+		.output(globalMarkdownDraftDeleteResultSchema)
+		.mutation(({ input }) => globalMarkdownDraftStore.delete(input)),
+});
+
 // 保留具名子路由类型，避免新契约使声明输出超过 TypeScript 的序列化长度上限。
 type RuntimeAppRouterProcedureRecord = {
+	globalMarkdownDraft: typeof runtimeApplicationGlobalMarkdownDraftProcedureRouter;
 	taskCommandExecution: typeof runtimeApplicationTaskCommandExecutionProcedureRouter;
 	dailyWorkProgressStatistics: typeof runtimeApplicationDailyWorkProgressStatisticsProcedureRouter;
 	notificationIntelligence: typeof runtimeApplicationNotificationIntelligenceProcedureRouter;
@@ -3141,6 +3224,7 @@ type RuntimeAppRouterProcedureRecord = {
 	exploratory: typeof runtimeApplicationExploratoryProcedureRouter;
 };
 const runtimeAppRouterProcedureRecord: RuntimeAppRouterProcedureRecord = {
+	globalMarkdownDraft: runtimeApplicationGlobalMarkdownDraftProcedureRouter,
 	taskCommandExecution: runtimeApplicationTaskCommandExecutionProcedureRouter,
 	dailyWorkProgressStatistics: runtimeApplicationDailyWorkProgressStatisticsProcedureRouter,
 	notificationIntelligence: runtimeApplicationNotificationIntelligenceProcedureRouter,

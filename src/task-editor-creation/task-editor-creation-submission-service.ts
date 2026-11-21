@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { TRPCError } from "@trpc/server";
+import { readBacklogTaskStartReadinessOperation } from "../backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
 import type {
 	RuntimeBoardCard,
 	RuntimeCreationResolvedSettings,
@@ -195,6 +196,17 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 	};
 	const reconcileStartEvidence = async (record: TaskEditorCreationSubmissionRecord) => {
 		const current = await observation(record);
+		const readiness = current.card
+			? await readBacklogTaskStartReadinessOperation(
+					current.scope.workspaceId,
+					current.card.id,
+					current.card.createdAt,
+				)
+			: null;
+		if (readiness) {
+			record.status.startCompleted = readiness.review.phase === "started";
+			return record.status.startCompleted;
+		}
 		if (
 			current.card?.mostRecentlyLaunchedAgentSessionAgentId ||
 			(current.liveSession?.pid != null &&
@@ -330,6 +342,22 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 						}
 						current = await assertEligible(record);
 						if (!current.card) throw new Error("启动前无法确认任务身份。");
+						const closeStartIntentWithoutRemainingWork = () => {
+							record.status.startRequested = false;
+							record.status.startCancellationReason = "no_remaining_work";
+							record.status.phase = "completed";
+							record.status.lastError = null;
+							record.status.recoveryCondition = null;
+						};
+						const readiness = await readBacklogTaskStartReadinessOperation(
+							current.scope.workspaceId,
+							current.card.id,
+							current.card.createdAt,
+						);
+						if (readiness?.review.phase === "no_remaining_work" && !readiness.startRequested) {
+							closeStartIntentWithoutRemainingWork();
+							break;
+						}
 						record.status.phase = "starting_agent";
 						await persistRecord(record);
 						const result = await deps.startAgent(current.scope, current.card, record, async () => {
@@ -345,10 +373,18 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 								throw error;
 							}
 						});
+						const readinessPhase =
+							result.taskCardSnapshotAfterAction?.taskCard.backlogTaskStartReadinessReview?.phase;
+						if (readinessPhase === "no_remaining_work") {
+							closeStartIntentWithoutRemainingWork();
+							break;
+						}
+						if (readinessPhase === "start_failed") record.agentProcessLaunchMayHaveBegun = false;
 						if (
 							!["agent_session_started", "agent_session_already_in_agent_turn_so_start_was_skipped"].includes(
 								result.agentSessionStartOutcome,
-							)
+							) ||
+							(readinessPhase && readinessPhase !== "started")
 						)
 							throw new Error(result.agentSessionStartFailureMessage ?? "Agent 启动尚未完成。");
 						record.status.startCompleted = true;

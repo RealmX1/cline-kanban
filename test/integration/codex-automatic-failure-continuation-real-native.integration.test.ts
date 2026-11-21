@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { readNativeAgentConversationActivity } from "../../src/agent-session-history/native-agent-conversation-activity-reader";
 import { prepareCodexNativeSessionControlHostLaunch } from "../../src/codex-native-session-control-host/prepare-codex-native-session-control-host-launch";
 import { withRunningCodexAppServerControlSocketConnection } from "../../src/codex-native-session-protocol/codex-app-server-control-socket-request-connection";
 import { readCodexConversationTurns } from "../../src/codex-native-session-protocol/codex-native-conversation-history";
@@ -26,11 +27,17 @@ vi.mock("../../src/terminal/agent-session-adapters", async (importOriginal) => (
 	}),
 }));
 
+const nativeFailureCases = ["capacity", "http_503", "stream_disconnect"] as const;
+
 describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.platform === "win32")(
-	"真实 Codex 容量不足自动恢复（隔离本地模型）",
+	"真实 Codex 原生失败自动恢复（隔离本地模型）",
 	{ timeout: 120_000 },
 	() => {
-		it("一次容量失败只接受一条 self prompt，并保留原生会话、模型、推理档、Plan Mode 与权限", async (test) => {
+		it.for(nativeFailureCases)("%s 只续跑一次并保留原生配置", async (failureCase, test) => {
+			const evidenceRoot = process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY;
+			const evidenceDirectory = evidenceRoot ? join(evidenceRoot, failureCase) : undefined;
+			if (evidenceDirectory) await mkdir(evidenceDirectory, { recursive: true });
+			const expectedReason = failureCase === "capacity" ? "model_capacity" : "connection";
 			const fixture = createIsolatedGitTestWorkspaceFixture({ fixtureRootDirectoryNamePrefix: "kac-capacity-" });
 			const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "capacity" });
 			const codexHome = join(fixture.fixtureRootDirectoryPath, "codex-home");
@@ -41,7 +48,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 			vi.stubEnv("TMPDIR", "/tmp");
 			const requests: Record<string, unknown>[] = [];
 			let releaseSuccess: (() => void) | undefined;
-			let releaseCapacityFailure: (() => void) | undefined;
+			let releaseIsolatedModelFailure: (() => void) | undefined;
 			const server = createServer(async (request, response) => {
 				let body = "";
 				for await (const chunk of request) body += String(chunk);
@@ -54,6 +61,13 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				const isTitleRequest = JSON.stringify(parsed.input).includes("Generate a concise, single-line task title");
 				if (!isTitleRequest) requests.push(parsed);
 				const ordinal = requests.length;
+				if (!isTitleRequest && ordinal === 1 && failureCase === "http_503") {
+					releaseIsolatedModelFailure = () => {
+						response.writeHead(503, { "Content-Type": "text/plain" });
+						response.end("upstream connect error or disconnect/reset before headers");
+					};
+					return;
+				}
 				response.writeHead(200, { "Content-Type": "text/event-stream" });
 				const send = (type: string, fields: Record<string, unknown>) =>
 					response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`);
@@ -67,7 +81,11 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				};
 				send("response.created", { response: { ...base, status: "in_progress" } });
 				if (!isTitleRequest && ordinal === 1) {
-					releaseCapacityFailure = () => {
+					releaseIsolatedModelFailure = () => {
+						if (failureCase === "stream_disconnect") {
+							response.end();
+							return;
+						}
 						send("response.failed", {
 							response: {
 								...base,
@@ -242,7 +260,6 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 					acceptedNativeAgentTurnIsInProgress: true,
 				});
 				if (process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_BROWSER_CHECK === "1") {
-					const evidenceDirectory = process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY;
 					if (!evidenceDirectory) throw new Error("浏览器验证必须保存持久证据");
 					browserVerification = await createAutomaticFailureContinuationBrowserVerificationFixture({
 						fixture,
@@ -252,17 +269,40 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 						evidenceDirectory,
 					});
 				}
-				await wait("本地容量失败响应已准备", () => !!releaseCapacityFailure);
-				releaseCapacityFailure?.();
-				await wait(
-					"容量失败进入持久等待恢复",
-					() => manager.getSummary(taskId)?.automaticAgentFailureContinuation?.reason === "model_capacity",
-				);
+				await wait("本地失败响应已准备", () => !!releaseIsolatedModelFailure);
+				releaseIsolatedModelFailure?.();
+				await wait("同代原生失败进入持久等待恢复", async () => {
+					const before = manager.getSummary(taskId);
+					if (!before) return false;
+					if (!browserVerification && before.automaticAgentFailureContinuation?.reason !== expectedReason) {
+						const result = await readNativeAgentConversationActivity({
+							workspaceId,
+							summary: before,
+							cursor: null,
+							observedAtMs: Date.now(),
+						}).catch(() => null);
+						if (result?.codexNativeAgentTurnExecution)
+							await manager.reconcileCodexNativeTurnTerminalOutcome(
+								taskId,
+								before,
+								result.codexNativeAgentTurnExecution,
+							);
+					}
+					return manager.getSummary(taskId)?.automaticAgentFailureContinuation?.reason === expectedReason;
+				});
 				const initial = manager.getSummary(taskId)?.automaticAgentFailureContinuation;
 				if (!initial) throw new Error("未登记恢复 episode");
-				expect(initial.nextCheckAtMs).toBe(initial.firstErrorAtMs + 30_000);
-				expect(initial.deadlineAtMs).toBe(initial.firstErrorAtMs + 30 * 60_000);
-				await browserVerification?.assertPhase("waiting_backoff");
+				const initialBackoffMs = failureCase === "capacity" ? 30_000 : 4_000;
+				const scheduledDelayMs = (initial.nextCheckAtMs ?? 0) - initial.firstErrorAtMs;
+				expect(scheduledDelayMs).toBeGreaterThanOrEqual(initialBackoffMs);
+				expect(scheduledDelayMs).toBeLessThan(initialBackoffMs + 1_000);
+				expect(initial.deadlineAtMs).toBe(
+					failureCase === "capacity" ? (initial.firstCapacityErrorAtMs ?? NaN) + 30 * 60_000 : null,
+				);
+				await browserVerification?.assertPhase(
+					"waiting_backoff",
+					failureCase === "capacity" ? "容量不足" : "网络中断",
+				);
 				expect(await manager.actOnAutomaticFailureContinuation(taskId, initial.episodeId, "retry_now")).toBe(true);
 				await wait(
 					"原生 self prompt 唯一接受且执行",
@@ -299,12 +339,9 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 						return [];
 					}
 				});
-				if (process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY)
+				if (evidenceDirectory)
 					await writeFile(
-						join(
-							process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY,
-							"native-settings-contexts.json",
-						),
+						join(evidenceDirectory, "native-settings-contexts.json"),
 						JSON.stringify(contexts, null, 2),
 					);
 				expect(contexts).toHaveLength(2);
@@ -321,11 +358,10 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 				);
 				expect(ledger).toHaveLength(1);
 				expect(ledger[0]?.codex_native_prompt_delivery_operation?.actualSendAttemptCount).toBe(1);
-				const evidenceDirectory = process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY;
 				if (evidenceDirectory) {
 					await mkdir(evidenceDirectory, { recursive: true });
 					await writeFile(
-						join(evidenceDirectory, "real-native-capacity-result.json"),
+						join(evidenceDirectory, "real-native-recovery-result.json"),
 						JSON.stringify(
 							{
 								externalInferenceRequestCount: 0,
@@ -342,7 +378,7 @@ describe.skipIf(!process.env.KANBAN_CODEX_NATIVE_SESSION_TEST_BINARY || process.
 					);
 				}
 			} finally {
-				const failureEvidenceDirectory = process.env.KANBAN_AUTOMATIC_FAILURE_CONTINUATION_EVIDENCE_DIRECTORY;
+				const failureEvidenceDirectory = evidenceDirectory;
 				if (failureEvidenceDirectory) {
 					await mkdir(failureEvidenceDirectory, { recursive: true });
 					await writeFile(

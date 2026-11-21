@@ -131,6 +131,7 @@ import { useMostRecentlyUsedTaskCreateBaseRefByProjectIdPreference } from "@/run
 import { useWorkspacePersistence } from "@/runtime/use-workspace-persistence";
 import { fetchTaskWorkspaceInfoForWorkspace, saveWorkspaceState } from "@/runtime/workspace-state-query";
 import { findCardSelection } from "@/state/board-state";
+import { globalMarkdownDraftBrowserSession } from "@/state/global-markdown-draft-browser-session";
 import { applyPendingTaskCardCommandBoardOverlay } from "@/state/pending-task-card-command-board-overlay";
 import {
 	prunePendingTaskCardCommandBoardOverlayEntriesSatisfiedByBoard,
@@ -159,6 +160,7 @@ function BindTaskNavigationToFloatingFormWindowHost({
 }
 
 export default function App(): ReactElement {
+	useEffect(globalMarkdownDraftBrowserSession.start, []);
 	const [floatingFormWindowHost, setFloatingFormWindowHost] = useState<NonModalFloatingFormWindowHost | null>(null);
 	const expandedForegroundView = useExpandedForegroundViewNavigation();
 	const terminalThemeColors = useTerminalThemeColors();
@@ -256,6 +258,9 @@ export default function App(): ReactElement {
 		onProjectSwitchStart: handleProjectSwitchStart,
 		onTaskSessionSummaries: handleStreamedTaskSessionSummaries,
 	});
+	useEffect(() => {
+		if (!isRuntimeDisconnected) globalMarkdownDraftBrowserSession.retry();
+	}, [isRuntimeDisconnected]);
 	const currentProjectSummary = projects.find((project) => project.id === currentProjectId) ?? null;
 	const currentUnavailableProject =
 		currentProjectSummary?.availability.status === "unavailable"

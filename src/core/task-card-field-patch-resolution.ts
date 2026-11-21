@@ -71,6 +71,7 @@ export function buildRuntimeUpdateTaskInputFromKanbanCliTaskCardFieldUpdateRawIn
 	return {
 		title: rawInput.title ?? currentTaskCard.title,
 		taskDescription: rawInput.taskDescription,
+		backlogTaskStartReadinessConditionsText: rawInput.backlogTaskStartReadinessConditionsText,
 		prompt: rawInput.prompt ?? currentTaskCard.prompt,
 		baseRef: rawInput.baseRef ?? currentTaskCard.baseRef,
 		startInPlanMode: rawInput.startInPlanMode ?? currentTaskCard.startInPlanMode,
@@ -100,6 +101,7 @@ export function buildRuntimeUpdateTaskInputFromThreeStateTaskCardFieldValuePatch
 		title: patch.title === undefined ? currentTaskCard.title : (patch.title ?? undefined),
 		prompt: patch.prompt ?? currentTaskCard.prompt,
 		taskDescription: patch.taskDescription,
+		backlogTaskStartReadinessConditionsText: patch.backlogTaskStartReadinessConditionsText,
 		startInPlanMode: patch.startInPlanMode ?? currentTaskCard.startInPlanMode,
 		taskAgentPermissionMode: patch.taskAgentPermissionMode,
 		codexReasoningEffortOverride: patch.codexReasoningEffortOverride,

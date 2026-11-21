@@ -3,13 +3,13 @@ import { buildCrossProjectTaskSwitcherEntryKey } from "@runtime-cross-project-re
 import { type ReactElement, type ReactNode, useEffect, useMemo, useRef } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
 import {
-	CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
 	CrossProjectTaskSwitcherPinnedSectionBlock,
 	CrossProjectTaskSwitcherPromptCacheWarmAwaitingUserSectionBlock,
 	CrossProjectTaskSwitcherRemainingRecentSectionBlock,
 	CrossProjectTaskSwitcherRunningSectionBlock,
 	type CrossProjectTaskSwitcherSectionBlockProps,
 	CrossProjectTaskSwitcherShelvedSectionBlock,
+	CrossProjectTaskSwitcherWaitingSectionBlock,
 } from "@/components/detail-panels/cross-project-recently-active-task-switcher-section-blocks";
 import type { CrossProjectTaskSwitcherTaskRowSection } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row";
 import type { CurrentProjectTaskCardsForCrossProjectTaskSwitcherRowExpansion } from "@/components/detail-panels/cross-project-recently-active-task-switcher-task-row-expanded-task-card";
@@ -99,6 +99,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 	const focusedTaskEntryInProject = [
 		...sectionsModel.sections.shelvedEntries,
 		...sectionsModel.sections.automaticRecoveryWaitingEntries,
+		...sectionsModel.sections.ownedBackgroundWorkWaitingEntries,
 		...sectionsModel.sections.runningEntries,
 		...sectionsModel.sections.promptCacheWarmAwaitingUserEntries,
 		...sectionsModel.sections.remainingSection.entries,
@@ -146,7 +147,17 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 			? [
 					{
 						id: "waiting_automatic_recovery",
-						Component: CrossProjectTaskSwitcherAutomaticRecoveryWaitingSectionBlock,
+						Component: CrossProjectTaskSwitcherWaitingSectionBlock,
+						isExpanded: true,
+						setExpanded: (_expanded: boolean) => {},
+					},
+				]
+			: []),
+		...(sectionsModel.sections.ownedBackgroundWorkWaitingEntries.length > 0
+			? [
+					{
+						id: "waiting_owned_background_work",
+						Component: CrossProjectTaskSwitcherWaitingSectionBlock,
 						isExpanded: true,
 						setExpanded: (_expanded: boolean) => {},
 					},
@@ -308,6 +319,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 						<Component
 							key={id}
 							{...sectionBlockProps}
+							waitingSection={id === "waiting_owned_background_work" ? id : undefined}
 							headerNavigation={{ onJumpToSection: () => groupNavigation.jumpToStageSectionBelowTopRail(id) }}
 						/>
 					))}
@@ -339,6 +351,7 @@ export function CrossProjectRecentlyActiveTaskSwitcherPanel({
 							<group.Component
 								key={groupId}
 								{...sectionBlockProps}
+								waitingSection={groupId === "waiting_owned_background_work" ? groupId : undefined}
 								headerPresentation={presentation}
 								rendersGroupHeaderRailEntry
 								headerNavigation={{

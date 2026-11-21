@@ -6,6 +6,7 @@ const taskGroupSemanticColors: Record<string, string> = {
 	pinned: "var(--color-accent)",
 	running: "var(--color-status-blue)",
 	waiting_automatic_recovery: "var(--color-status-orange)",
+	waiting_owned_background_work: "var(--color-status-orange)",
 	prompt_cache_warm: "var(--color-status-orange)",
 	remaining: "var(--color-text-secondary)",
 	shelved: "var(--color-text-secondary)",

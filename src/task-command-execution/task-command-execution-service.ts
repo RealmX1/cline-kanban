@@ -62,6 +62,7 @@ export interface TaskCommandExecutionDependencies {
 		execution?: TaskCommandExecutionRecord,
 	) => Promise<TaskCommandExecutionOwner | null>;
 	park: (record: TaskCommandExecutionRecord) => Promise<boolean>;
+	onOwnedBackgroundWorkWaitingProjectionChanged?: () => void;
 	unpark: (record: TaskCommandExecutionRecord) => Promise<void>;
 	deliver: (
 		record: TaskCommandExecutionRecord,
@@ -199,15 +200,28 @@ export function createTaskCommandExecutionService(deps: TaskCommandExecutionDepe
 		workspaceId: string,
 		executionId: string,
 		change: (record: TaskCommandExecutionRecord) => TaskCommandExecutionRecord,
-	) =>
-		mutateTaskCommandExecutions(workspaceId, (records) => {
+	) => {
+		const result = await mutateTaskCommandExecutions(workspaceId, (records) => {
 			const current = records.find((record) => record.executionId === executionId);
 			if (!current) throw new Error("所属执行记录不存在");
 			const changed = change(current);
-			if (isDeepStrictEqual(current, changed)) return { records: null, result: current };
+			if (isDeepStrictEqual(current, changed))
+				return { records: null, result: { record: current, projectionChanged: false } };
 			const next = { ...changed, updatedAtEpochMs: Date.now() };
-			return { records: records.map((record) => (record === current ? next : record)), result: next };
+			const projectionChanged =
+				(current.parkOwned || next.parkOwned) &&
+				(current.parkOwned !== next.parkOwned ||
+					current.launchState !== next.launchState ||
+					current.businessDisposition !== next.businessDisposition ||
+					current.revokedAtEpochMs !== next.revokedAtEpochMs);
+			return {
+				records: records.map((record) => (record === current ? next : record)),
+				result: { record: next, projectionChanged },
+			};
 		});
+		if (result.projectionChanged) deps.onOwnedBackgroundWorkWaitingProjectionChanged?.();
+		return result.record;
+	};
 	const inspect = async (
 		workspaceId: string,
 		identity: TaskCommandExecutionIdentityRequest,

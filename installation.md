@@ -53,7 +53,7 @@ CI 走的是 `npm ci` 对三处分别安装，见 `.github/workflows/test.yml`�
 ### 把当前 checkout 装成全局 `kanban` 命令
 
 ```bash
-npm run link     # 等价于 npm run build && npm link
+npm run link     # 构建并核验目标 runtime home 的结案协议，再更新全局入口
 ```
 
 验证：
@@ -66,7 +66,8 @@ kanban --version
 两个容易踩的点：
 
 - `npm run link` 会**先构建**。改完源码后要重新 `npm run build`（或再跑一次 `npm run link`），全局命令才会用上新代码。
-- 在多个 worktree 之间切换时，**从你要测试的那个 worktree 重跑 `npm run link`**，全局 `kanban` 才指向对应的 `dist/cli.js`。
+- 在多个 worktree 之间切换时，只能从带有结案协议安装门禁的 checkout 执行 `npm run link`；它会先比较当前用户 runtime home 的协议下界与候选 `dist` 的能力，不兼容时保留当前全局入口和数据。
+- runtime home 采用 v2 后，旧 checkout 中的历史 `npm run link`、直接 `npm link` 和旧版 `npx kanban` 不再是受支持的替换入口；旧脚本无法追溯加入新门禁。切换旧候选须经现行标准部署入口核验，且候选必须支持已采用的协议。不要删除协议下界或降级数据来强行安装。
 
 移除全局链接：
 

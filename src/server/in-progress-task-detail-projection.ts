@@ -48,6 +48,10 @@ export interface TaskSessionFactsForCrossProjectTaskViews {
 	liveness: RuntimeTaskSessionLiveness;
 	userTurnKind: RuntimeTaskSessionUserTurnKind;
 	isParkedAwaitingDispatchedBackgroundWork: boolean;
+	stoppedMainTurnOwnedCommandExecutionIds?: readonly string[];
+	nativeSessionId?: string;
+	ownedBackgroundWaitRuntimeSessionIncarnationId?: string;
+	codexNativeTurnVerificationPending?: RuntimeTaskSessionSummary["codexNativeTurnVerificationPending"];
 }
 
 /**
@@ -73,6 +77,16 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 	summary: RuntimeTaskSessionSummary,
 ): TaskSessionFactsForCrossProjectTaskViews {
 	const facets = resolveSessionFacets(summary);
+	const parkedTurnCompletion = summary.parkedMainAgentTurnCompletion;
+	const park = summary.awaitingDispatchedBackgroundWork;
+	const stoppedMainTurnOwnedCommandExecutionIds =
+		parkedTurnCompletion &&
+		park?.owningCommandExecutionIds?.length &&
+		parkedTurnCompletion.runtimeSessionIncarnationId === summary.runtimeSessionIncarnationId &&
+		parkedTurnCompletion.turnSequence === (summary.agentResponseGenerationTurnSequence ?? 0) &&
+		parkedTurnCompletion.observedAtMs >= (summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0)
+			? park.owningCommandExecutionIds
+			: undefined;
 	return {
 		agentSessionHasNoEstablishedAcpConnection:
 			summary.sessionTransport === "acp_stdio_subprocess" &&
@@ -106,6 +120,20 @@ export function extractTaskSessionFactsForCrossProjectTaskViews(
 		liveness: facets.liveness,
 		userTurnKind: facets.userTurnKind,
 		isParkedAwaitingDispatchedBackgroundWork: isParkedAwaitingDispatchedBackgroundWork(summary),
+		...(summary.codexNativeTurnVerificationPending?.runtimeSessionIncarnationId ===
+			summary.runtimeSessionIncarnationId &&
+		summary.codexNativeTurnVerificationPending?.turnSequence === (summary.agentResponseGenerationTurnSequence ?? 0) &&
+		(summary.codexNativeTurnVerificationPending?.firstObservedAtMs ?? 0) >=
+			(summary.agentConversationPromptSubmissionAcceptance?.attemptedAtMs ?? 0)
+			? { codexNativeTurnVerificationPending: summary.codexNativeTurnVerificationPending }
+			: {}),
+		...(stoppedMainTurnOwnedCommandExecutionIds
+			? {
+					stoppedMainTurnOwnedCommandExecutionIds,
+					nativeSessionId: summary.agentNativeConversationSessionIdentity?.nativeSessionId,
+					ownedBackgroundWaitRuntimeSessionIncarnationId: parkedTurnCompletion?.runtimeSessionIncarnationId,
+				}
+			: {}),
 	};
 }
 

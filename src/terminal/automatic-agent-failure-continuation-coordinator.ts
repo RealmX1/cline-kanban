@@ -22,6 +22,7 @@ export interface AutomaticFailureContinuationAttemptResult {
 		| "unconfirmed"
 		| "accepted_running"
 		| "accepted_failed"
+		| "accepted_terminal_failure"
 		| "accepted_finished"
 		| "accepted_progressed"
 		| "completed_without_submission"
@@ -309,9 +310,9 @@ export function createAutomaticAgentFailureContinuationCoordinator(port: {
 				isAutomaticAgentFailureContinuationActive(record) &&
 				observedAtMs > record.lastErrorAtMs
 			) {
-				if (record.agentId === "codex" && hasCompletionReviewForSubmittedAutomaticFailureContinuation(record))
-					schedule(0);
-				else finish("recovered", "trusted_conversation_progress");
+				if (record.agentId === "codex") {
+					if (hasCompletionReviewForSubmittedAutomaticFailureContinuation(record)) schedule(0);
+				} else finish("recovered", "trusted_conversation_progress");
 			}
 		},
 		async attempt(manual = false) {
@@ -416,6 +417,10 @@ export function createAutomaticAgentFailureContinuationCoordinator(port: {
 					}
 					if (result.outcome === "accepted_progressed") {
 						finish("recovered", "trusted_conversation_progress");
+						return;
+					}
+					if (result.outcome === "accepted_terminal_failure") {
+						finish("failed", result.blockingReason ?? "non_retryable_native_turn_failure");
 						return;
 					}
 					if (result.outcome === "accepted_failed") {

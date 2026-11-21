@@ -29,9 +29,12 @@ import {
 	type TaskImage,
 } from "@/types";
 import {
+	backlogTaskCreationRepositoryBaselineSchema,
+	backlogTaskStartReadinessReviewSchema,
 	independentTaskCreationProvenanceSchema,
 	runtimeAgentIdSchema,
 	runtimeAgentSessionTransportSchema,
+	runtimeBoardCardSchema,
 	runtimeExternalWorkflowRunBindingSchema,
 	runtimeTaskAgentPermissionModeSchema,
 	runtimeTaskAgentSessionInitializationSchema,
@@ -44,6 +47,7 @@ import {
 
 export interface TaskDraft {
 	taskDescription?: string;
+	backlogTaskStartReadinessConditionsText?: string;
 	codexReasoningEffortOverride?: string;
 	title?: string;
 	prompt: string;
@@ -263,6 +267,10 @@ export const BOARD_CARD_FIELDS_CARRIED_THROUGH_NORMALIZATION_ON_HYDRATION = {
 	title: true,
 	taskNameVersion: true,
 	taskDescription: true,
+	backlogTaskStartReadinessConditionsText: true,
+	backlogTaskCreationRepositoryBaseline: true,
+	backlogTaskStartReadinessReview: true,
+	backlogTaskStartReadinessExecutionRevision: true,
 	externalWorkflowRunBinding: true,
 	prompt: true,
 	startInPlanMode: true,
@@ -420,6 +428,20 @@ function normalizeCard(rawCard: unknown, now: number): BoardCard | null {
 				}
 			: {}),
 		...(typeof card.taskDescription === "string" ? { taskDescription: card.taskDescription } : {}),
+		backlogTaskStartReadinessConditionsText:
+			typeof card.backlogTaskStartReadinessConditionsText === "string"
+				? card.backlogTaskStartReadinessConditionsText
+				: undefined,
+		backlogTaskCreationRepositoryBaseline: backlogTaskCreationRepositoryBaselineSchema.safeParse(
+			card.backlogTaskCreationRepositoryBaseline,
+		).data,
+		backlogTaskStartReadinessReview: backlogTaskStartReadinessReviewSchema.safeParse(
+			card.backlogTaskStartReadinessReview,
+		).data,
+		backlogTaskStartReadinessExecutionRevision:
+			runtimeBoardCardSchema.in.shape.backlogTaskStartReadinessExecutionRevision.safeParse(
+				card.backlogTaskStartReadinessExecutionRevision,
+			).data,
 		...(typeof card.taskNameVersion === "number" &&
 		Number.isInteger(card.taskNameVersion) &&
 		card.taskNameVersion >= 0
@@ -582,6 +604,7 @@ export function addTaskToColumnWithResult(
 			taskId: trimmedRuntimeAllocatedTaskId,
 			title: draft.title,
 			taskDescription: draft.taskDescription,
+			backlogTaskStartReadinessConditionsText: draft.backlogTaskStartReadinessConditionsText,
 			prompt,
 			startInPlanMode: draft.startInPlanMode,
 			taskAgentPermissionMode: draft.taskAgentPermissionMode,
@@ -857,6 +880,10 @@ export function updateTask(board: BoardData, taskId: string, draft: TaskDraft): 
 				title: title || card.title,
 				taskDescription:
 					draft.taskDescription === undefined ? card.taskDescription : draft.taskDescription.trim() || undefined,
+				backlogTaskStartReadinessConditionsText:
+					draft.backlogTaskStartReadinessConditionsText === undefined
+						? card.backlogTaskStartReadinessConditionsText
+						: draft.backlogTaskStartReadinessConditionsText.trim() || undefined,
 				prompt,
 				startInPlanMode: Boolean(draft.startInPlanMode),
 				taskAgentPermissionMode: shouldUpdateTaskAgentPermissionMode

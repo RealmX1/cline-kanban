@@ -31,6 +31,7 @@ export function findCrossProjectTaskSwitcherFocusedTaskSourceSection(
 	// 主分组优先于 Pinned 副本，导航和焦点卡几何共用同一定位源。
 	if (sections.shelvedEntries.some(matches)) return "shelved";
 	if (sections.automaticRecoveryWaitingEntries.some(matches)) return "waiting_automatic_recovery";
+	if (sections.ownedBackgroundWorkWaitingEntries.some(matches)) return "waiting_owned_background_work";
 	if (sections.runningEntries.some(matches)) return "running";
 	if (sections.promptCacheWarmAwaitingUserEntries.some(matches)) return "prompt_cache_warm";
 	if (sections.remainingSection.entries.some(matches)) return "remaining";
@@ -60,6 +61,7 @@ export function collectVisibleCrossProjectTaskSwitcherSectionEntries<T extends C
 						(visibility.showsAllPinnedEntries || index < DEFAULT_VISIBLE_PINNED_ENTRY_COUNT_IN_FOCUS_VIEW))
 				);
 			case "waiting_automatic_recovery":
+			case "waiting_owned_background_work":
 				return true;
 			case "running":
 				return !isFocusViewLeftColumnPresentation || visibility.isRunningSectionExpanded || isFocusedRow;
@@ -97,6 +99,7 @@ export function collectAllProjectsFocusViewAdjacentTaskNavigationCandidates({
 	const mainSectionEntries = [
 		...visibleEntries(sections.runningEntries, "running"),
 		...visibleEntries(sections.automaticRecoveryWaitingEntries, "waiting_automatic_recovery"),
+		...visibleEntries(sections.ownedBackgroundWorkWaitingEntries, "waiting_owned_background_work"),
 		...visibleEntries(sections.promptCacheWarmAwaitingUserEntries, "prompt_cache_warm"),
 		...visibleEntries(sections.remainingSection.entries, "remaining"),
 		...visibleEntries(sections.shelvedEntries, "shelved"),

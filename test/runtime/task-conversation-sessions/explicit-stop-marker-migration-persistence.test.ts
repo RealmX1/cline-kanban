@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTaskConversationSessionOperationStore } from "../../../src/task-conversation-sessions/task-conversation-session-operation-store";
 
@@ -28,12 +28,34 @@ async function isolatedStore() {
 }
 
 describe("显式 Stop 的合并复制边界", () => {
-	it("旧的会话 ID 数组仍可读，普通解除继续写回数组", async () => {
+	it("复开只能清除授权时观察到的 Stop，后来重复 Stop 也不能被旧请求清除", async () => {
+		const { operations } = await isolatedStore();
+		await operations.recordExplicitStopMarkers(scope, ["main-session"]);
+		const observed = await operations.observeExplicitStopMarkerVersion(scope);
+		await operations.recordExplicitStopMarkers(scope, ["main-session"]);
+		expect(await operations.clearExplicitStopMarkersIfObservationUnchanged(scope, ["main-session"], observed)).toBe(
+			false,
+		);
+		expect((await operations.read(scope)).explicitlyStoppedSessionIds).toContain("main-session");
+		const authorized = await operations.observeExplicitStopMarkerVersion(scope);
+		expect(await operations.clearExplicitStopMarkersIfObservationUnchanged(scope, ["main-session"], authorized)).toBe(
+			true,
+		);
+		// 清除已完成而复开回执尚未保存时，重启可用当前事实补齐，不能重写 Stop。
+		expect(await operations.clearExplicitStopMarkersIfObservationUnchanged(scope, ["main-session"], authorized)).toBe(
+			true,
+		);
+	});
+	it("旧的会话 ID 数组仍可读，解除时原子保存名单与观察身份", async () => {
 		const { operations, markerPath } = await isolatedStore();
-		await operations.recordExplicitStopMarkers(scope, ["kept", "cleared"]);
+		await mkdir(dirname(markerPath), { recursive: true });
+		await writeFile(markerPath, JSON.stringify(["kept", "cleared"]));
 		expect(JSON.parse(await readFile(markerPath, "utf8"))).toEqual(["kept", "cleared"]);
 		await operations.clearExplicitStopMarker(scope, "cleared");
-		expect(JSON.parse(await readFile(markerPath, "utf8"))).toEqual(["kept"]);
+		expect(JSON.parse(await readFile(markerPath, "utf8"))).toMatchObject({
+			sessionIds: ["kept"],
+			observationId: expect.any(String),
+		});
 		expect((await operations.read(scope)).explicitlyStoppedSessionIds).toEqual(["kept"]);
 	});
 
@@ -41,7 +63,7 @@ describe("显式 Stop 的合并复制边界", () => {
 		const { operations, markerPath } = await isolatedStore();
 		await operations.recordExplicitStopMarkers(scope, ["already-there"]);
 		await operations.migrateTransferredExplicitStopMarkers(scope, migration, ["already-there", "from-source"]);
-		expect(JSON.parse(await readFile(markerPath, "utf8"))).toEqual({
+		expect(JSON.parse(await readFile(markerPath, "utf8"))).toMatchObject({
 			schemaVersion: 1,
 			sessionIds: ["already-there", "from-source"],
 			appliedDuplicateProjectStopMigrations: [migration],

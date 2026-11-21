@@ -64,18 +64,27 @@ describe("全项目分组查询", () => {
 				isParkedAwaitingDispatchedBackgroundWork: true,
 				agentProcessStartedAt: 5,
 			}),
+			entry("owned-waiting", {
+				turnOwner: "agent",
+				liveness: "live",
+				isParkedAwaitingDispatchedBackgroundWork: true,
+				ownedBackgroundWorkWaitingStatus: "waiting_for_result_continuation",
+			}),
 			entry("question", { turnOwner: "user", liveness: "live", userTurnKind: "question", columnId: "in_progress" }),
 		]);
 		expect(
 			buildAllProjectsTaskGroupQueryResult(input, { group: "running" }).groups[0].tasks.map((row) => row.taskId),
 		).toEqual(["parked", "later"]);
+		expect(
+			buildAllProjectsTaskGroupQueryResult(input, { group: "waiting_owned_background_work" }).groups[0].tasks,
+		).toMatchObject([{ taskId: "owned-waiting" }]);
 	});
 
 	it("Pinned 可重复归组，去重计数保留跨项目同号身份", () => {
 		const input = snapshot([entry("same", { turnOwner: "agent", liveness: "live", pinnedToTaskPinboardAt: 1 })]);
 		input.projects.push({ ...input.projects[0], workspaceId: "project-b", projectPath: "/project-b" });
 		const result = buildAllProjectsTaskGroupQueryResult(input, {});
-		expect(result.groups.map((group) => group.tasks.length)).toEqual([2, 2, 0, 0, 0, 0]);
+		expect(result.groups.map((group) => group.tasks.length)).toEqual([2, 2, 0, 0, 0, 0, 0]);
 		expect(result.count).toBe(2);
 		expect(result.groups[1].tasks.map((row) => row.workspaceId)).toEqual(["project-a", "project-b"]);
 	});
