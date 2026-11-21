@@ -52,7 +52,7 @@ async function createIsolatedBacklogTaskProjectTransferScenario() {
 			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 		});
 	}
-	const originalCard: RuntimeBoardCard = {
+	const taskCardBeforeCreation: RuntimeBoardCard = {
 		id: "move2",
 		title: "保留完整原文的任务",
 		prompt: "迁移前完整正文",
@@ -66,15 +66,17 @@ async function createIsolatedBacklogTaskProjectTransferScenario() {
 		],
 	};
 	const initialSourceState = await loadWorkspaceState(source.repositoryPath);
-	await saveWorkspaceState(source.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+	const savedSourceState = await saveWorkspaceState(source.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
 		board: {
 			...initialSourceState.board,
 			columns: initialSourceState.board.columns.map((column) =>
-				column.id === "backlog" ? { ...column, cards: [originalCard] } : column,
+				column.id === "backlog" ? { ...column, cards: [taskCardBeforeCreation] } : column,
 			),
 		},
 		sessions: {},
 	});
+	const originalCard = savedSourceState.board.columns.find((column) => column.id === "backlog")?.cards[0];
+	if (!originalCard?.backlogTaskCreationRepositoryBaseline?.commit) throw new Error("隔离任务缺少创建基线");
 	const sourceScope = await loadWorkspaceContext(source.repositoryPath);
 	const targetSnapshotBeforeTransfer = await loadWorkspaceState(target.repositoryPath);
 	const targetScope = await loadWorkspaceContext(target.repositoryPath);
@@ -107,7 +109,7 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 				authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 			});
 		}
-		const card: RuntimeBoardCard = {
+		const taskCardBeforeCreation: RuntimeBoardCard = {
 			id: "move1",
 			title: "保持身份的任务",
 			prompt: "完整任务正文",
@@ -119,10 +121,12 @@ describe("未启动 Backlog 跨项目迁移", { timeout: 60000 }, () => {
 				{ taskCommentEntryId: randomUUID(), commentText: "保留备注", createdAt: 1234, updatedAt: 1234 },
 			],
 		};
-		await saveWorkspaceState(source.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
-			board: { columns: [{ id: "backlog", title: "Backlog", cards: [card] }] },
+		const savedSourceState = await saveWorkspaceState(source.repositoryPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, {
+			board: { columns: [{ id: "backlog", title: "Backlog", cards: [taskCardBeforeCreation] }] },
 			sessions: {},
 		});
+		const card = savedSourceState.board.columns.find((column) => column.id === "backlog")?.cards[0];
+		if (!card?.backlogTaskCreationRepositoryBaseline?.commit) throw new Error("隔离任务缺少创建基线");
 		const sourceScope = await loadWorkspaceContext(source.repositoryPath);
 		const targetScope = await loadWorkspaceContext(target.repositoryPath);
 		const capture = activateKanbanRuntimeInterWorkUnitRelationLedgerLiveCapture();

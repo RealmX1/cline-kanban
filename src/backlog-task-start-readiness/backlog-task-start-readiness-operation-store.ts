@@ -33,6 +33,7 @@ const operationSchema = z.object({
 	taskIncarnationCreatedAtEpochMs: z.number(),
 	acceptedAtEpochMs: z.number(),
 	startRequested: z.boolean(),
+	authorizedBacklogUnshelvingLastChangedAt: z.number().optional(),
 	acceptedStartRequest: runtimeTaskCardActionStartAgentSessionRequestSchema,
 	acceptedRequestOriginEvidence: requestOriginEvidenceSchema,
 	review: backlogTaskStartReadinessReviewSchema,

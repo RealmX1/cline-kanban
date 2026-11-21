@@ -1461,6 +1461,10 @@ export function createTaskCardActionApi(
 						request: input,
 						evidence: kanbanRequestOriginActorEvidence,
 						startRequested: true,
+						authorizeUnshelvingForExplicitBacklogStart:
+							initialFound.boardColumnId === "backlog" &&
+							!input.resumeBacklogTaskStartReadinessOperationId &&
+							!beforeAgentProcessLaunch,
 						publishReview: (review) =>
 							publishBacklogTaskStartReadinessReview(workspaceScope, initialFound.taskCard, review),
 					});
@@ -1508,13 +1512,14 @@ export function createTaskCardActionApi(
 						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					let boardBeforeMovement = state.board;
-					if (readinessOperation && readinessWorktree?.ok) {
+					if (readinessOperation)
 						await assertBacklogTaskReadinessReportStillCurrent(
 							readinessOperation,
 							found.taskCard,
 							found.boardColumnId,
-							readinessWorktree.path,
+							readinessWorktree?.ok ? readinessWorktree.path : undefined,
 						);
+					if (readinessOperation && readinessWorktree?.ok) {
 						const report = readinessOperation.reports.at(-1);
 						const revision = report?.decision.remainingWorkRevision;
 						if (report && revision && !isBacklogTaskReadinessRevisionFromReport(found.taskCard, report)) {
@@ -1554,7 +1559,8 @@ export function createTaskCardActionApi(
 							found = { ...found, taskCard: revised };
 						}
 					}
-					if (beforeAgentProcessLaunch) assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
+					if (beforeAgentProcessLaunch && !readinessOperation)
+						assertTaskCardUnshelvedBeforeStageAction(found.taskCard);
 					if (found.boardColumnId !== "backlog" && found.boardColumnId !== "in_progress") {
 						throw createTaskCardInBoardColumnNotAllowingActionError(
 							`Task "${input.taskId}" is in "${found.boardColumnId}" and can only be started from backlog or in_progress.`,

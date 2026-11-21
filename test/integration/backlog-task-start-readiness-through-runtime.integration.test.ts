@@ -321,6 +321,37 @@ describe("Backlog 开启复核的持久运行时链路", () => {
 		);
 		expect(h.launches).toHaveLength(2);
 	});
+	it("显式启动担保同一次搁置，重新搁置后原启动不能自动解除搁置", async () => {
+		const harness = await createHarness();
+		const card = await harness.add("核验显式启动搁置任务", "需要复核开启条件");
+		const start = { taskId: card.id, expectedTaskIncarnationCreatedAtEpochMs: card.createdAt };
+		const setShelved = (isShelved: boolean) =>
+			harness.caller.taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects({ ...start, isShelved });
+		await setShelved(true);
+		model.respond.mockResolvedValueOnce(null).mockResolvedValue(ready());
+		const waiting = await harness.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress(start);
+		expect(waiting.agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		expect(waiting.taskCardSnapshotAfterAction.taskCard.taskShelvingState?.isShelved).toBe(true);
+		const operationId = waiting.taskCardSnapshotAfterAction.taskCard.backlogTaskStartReadinessReview?.operationId;
+		expect(operationId).toBeDefined();
+
+		await setShelved(false);
+		await setShelved(true);
+		await expect(
+			harness.api.startTaskCardAgentSessionMovingItIntoInProgress(
+				harness.scope,
+				{ ...start, resumeBacklogTaskStartReadinessOperationId: operationId },
+				harness.evidence,
+				async () => {},
+			),
+		).rejects.toThrow("任务已搁置");
+		expect(harness.launches).toHaveLength(0);
+		const started = await harness.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress(start);
+		expect(started.agentSessionStartOutcome).toBe("agent_session_started");
+		expect(started.taskCardSnapshotAfterAction.taskCard.taskShelvingState?.isShelved).toBe(false);
+		expect(harness.launches).toHaveLength(1);
+	});
+
 	it("迁移时保留原 Stop，即使目标项目已存在独立评估记录", async () => {
 		const h = await createHarness();
 		const card = await h.add("迁移前需要补证", "等待依赖");

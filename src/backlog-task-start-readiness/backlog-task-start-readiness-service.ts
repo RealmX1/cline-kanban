@@ -143,6 +143,21 @@ function uniquePersistedReadOnlyEvidence(evidence: unknown[]) {
 		.map(([, value]) => value);
 }
 
+function assertBacklogTaskShelvingAndStageAllowReadinessOperation(
+	record: BacklogTaskStartReadinessOperation,
+	card: RuntimeBoardCard,
+	columnId: string,
+) {
+	const shelving = card.taskShelvingState;
+	const shelvingBlocksStart =
+		shelving?.isShelved &&
+		(!record.startRequested ||
+			columnId !== "backlog" ||
+			shelving.lastChangedAt !== record.authorizedBacklogUnshelvingLastChangedAt);
+	if (shelvingBlocksStart || card.taskClosureSummary || !["backlog", "in_progress"].includes(columnId))
+		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "任务已搁置、关闭或离开可启动阶段。" });
+}
+
 export async function assertBacklogTaskStartOperationEligible(
 	record: BacklogTaskStartReadinessOperation,
 	card: RuntimeBoardCard,
@@ -163,8 +178,7 @@ export async function assertBacklogTaskStartOperationEligible(
 		await writeBacklogTaskStartReadinessOperation(record);
 		throw new TRPCError({ code: "PRECONDITION_FAILED", message: record.review.summary });
 	}
-	if (card.taskShelvingState?.isShelved || card.taskClosureSummary || !["backlog", "in_progress"].includes(columnId))
-		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "任务已搁置、关闭或离开可启动阶段。" });
+	assertBacklogTaskShelvingAndStageAllowReadinessOperation(record, card, columnId);
 }
 
 // 由目标卡片的命令串行器调用，保留原受理时间和各项目中的 Stop 证据。
@@ -202,6 +216,7 @@ export async function transferBacklogTaskStartReadinessIntentAfterMigration(
 					workspaceId: scope.workspaceId,
 					workspacePath: scope.workspacePath,
 					previousWorkspaceIds,
+					authorizedBacklogUnshelvingLastChangedAt: undefined,
 					reports: [...(destination?.reports ?? []), ...source.reports],
 					lastDependencyFingerprint: null,
 				};
@@ -221,11 +236,20 @@ export async function prepareBacklogTaskStartReadiness(input: {
 	request: RuntimeTaskCardActionStartAgentSessionRequest;
 	evidence: KanbanRequestOriginActorEvidence;
 	startRequested: boolean;
+	authorizeUnshelvingForExplicitBacklogStart?: boolean;
 	publishReview: (review: BacklogTaskStartReadinessReview) => Promise<void>;
 }) {
 	const { scope, card, request } = input;
 	let record = await readBacklogTaskStartReadinessOperation(scope.workspaceId, card.id, card.createdAt);
-	const initiallyStartRequested = record?.startRequested ?? false;
+	const authorizedBacklogUnshelvingLastChangedAt =
+		input.authorizeUnshelvingForExplicitBacklogStart && card.taskShelvingState?.isShelved
+			? card.taskShelvingState.lastChangedAt
+			: undefined;
+	const startAuthorizationChanged =
+		input.startRequested &&
+		(!record?.startRequested ||
+			(authorizedBacklogUnshelvingLastChangedAt !== undefined &&
+				record.authorizedBacklogUnshelvingLastChangedAt !== authorizedBacklogUnshelvingLastChangedAt));
 	if (
 		request.resumeBacklogTaskStartReadinessOperationId &&
 		(record?.review.operationId !== request.resumeBacklogTaskStartReadinessOperationId || !record.startRequested)
@@ -258,8 +282,9 @@ export async function prepareBacklogTaskStartReadiness(input: {
 			conditionOverrides: record?.conditionOverrides ?? [],
 		};
 	}
-	if (input.startRequested && !record.startRequested) {
+	if (startAuthorizationChanged) {
 		record.startRequested = true;
+		record.authorizedBacklogUnshelvingLastChangedAt = authorizedBacklogUnshelvingLastChangedAt;
 		record.acceptedAtEpochMs = Date.now();
 		record.acceptedStartRequest = { ...request, expectedTaskIncarnationCreatedAtEpochMs: card.createdAt };
 		record.acceptedRequestOriginEvidence = input.evidence;
@@ -274,7 +299,7 @@ export async function prepareBacklogTaskStartReadiness(input: {
 		record.review.phase = "reviewing";
 		record.review.summary = "启动前复核";
 		await persist();
-	} else if (input.startRequested && !initiallyStartRequested) await writeBacklogTaskStartReadinessOperation(record);
+	} else if (startAuthorizationChanged) await writeBacklogTaskStartReadinessOperation(record);
 	try {
 		const [collected, modelAvailability] = await Promise.all([
 			collectBacklogTaskStartReadinessEvidence({
@@ -505,8 +530,7 @@ export function assertBacklogTaskReadinessCardMatchesReport(
 	card: RuntimeBoardCard,
 	columnId: string,
 ) {
-	if (card.taskShelvingState?.isShelved || card.taskClosureSummary || !["backlog", "in_progress"].includes(columnId))
-		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "任务已搁置、关闭或离开可启动阶段。" });
+	assertBacklogTaskShelvingAndStageAllowReadinessOperation(record, card, columnId);
 	const report = record.reports.at(-1);
 	if (
 		!report ||

@@ -23,6 +23,8 @@ export function fingerprintBacklogTaskStartReadinessInput(card: RuntimeBoardCard
 	const {
 		backlogTaskStartReadinessReview: _review,
 		backlogTaskStartReadinessExecutionRevision: _revision,
+		// 搁置变更由启动授权和移列门禁核验。
+		taskShelvingState: _shelving,
 		updatedAt: _updatedAt,
 		...input
 	} = card;

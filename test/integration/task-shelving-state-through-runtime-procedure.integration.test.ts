@@ -1,3 +1,5 @@
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue } from "../../src/core/kanban-cli-invocation-environment-actor-claims";
@@ -29,7 +31,15 @@ async function withShelvingRuntimeFixture(
 	const previousHome = process.env.HOME;
 	process.env.HOME = fixture.isolatedHomeDirectoryPath;
 	try {
-		const repository = fixture.createNonBareRepository({ repositoryDirectoryName: "shelving-runtime-project" });
+		const repository = fixture.createNonBareRepository({
+			repositoryDirectoryName: "shelving-runtime-project",
+			initialBranchName: "main",
+		});
+		writeFileSync(join(repository.repositoryPath, "project.txt"), "隔离启动复核\n");
+		repository.commitAllRepositoryFilesAtDate({
+			message: "建立隔离项目",
+			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
+		});
 		await run(await createShelvingRuntimeFixture(repository.repositoryPath));
 	} finally {
 		process.env.HOME = previousHome;
@@ -39,6 +49,7 @@ async function withShelvingRuntimeFixture(
 
 async function createShelvingRuntimeFixture(repositoryPath: string) {
 	const context = await loadWorkspaceContext(repositoryPath);
+	const createdAt = Date.now();
 	const board: RuntimeBoardData = {
 		columns: stages.map((id) => ({
 			id,
@@ -50,8 +61,9 @@ async function createShelvingRuntimeFixture(repositoryPath: string) {
 					prompt: id,
 					startInPlanMode: false,
 					baseRef: "main",
-					createdAt: 1,
-					updatedAt: 1,
+					worktreeMode: "inplace",
+					createdAt: id === "backlog" ? createdAt : 1,
+					updatedAt: id === "backlog" ? createdAt : 1,
 				},
 			],
 		})),
@@ -70,14 +82,14 @@ async function createShelvingRuntimeFixture(repositoryPath: string) {
 	const deleteWorktree = vi.fn(async () => ({ ok: true, removed: false }));
 	const ensureWorktree = vi.fn<CreateTaskCardActionApiDependencies["workspaceApi"]["ensureWorktree"]>(async () => ({
 		ok: true,
-		path: repositoryPath,
+		path: context.repoPath,
 		baseRef: "main",
 		baseCommit: "0".repeat(40),
 	}));
 	const broadcast = vi.fn();
 	const caller = runtimeAppRouter.createCaller({
 		requestedWorkspaceId: context.workspaceId,
-		workspaceScope: { workspaceId: context.workspaceId, workspacePath: repositoryPath },
+		workspaceScope: { workspaceId: context.workspaceId, workspacePath: context.repoPath },
 		kanbanRequestOriginActorEvidence: {
 			decodedCliActorClaimsRequestHeader:
 				decodeKanbanCliInvocationEnvironmentActorClaimsRequestHeaderValue(undefined),
@@ -179,11 +191,11 @@ describe("搁置的服务端持久化与执行边界", () => {
 				ensureWorktree,
 				broadcast,
 			}) => {
-				for (const taskId of stages) {
+				for (const { id: taskId, createdAt } of board.columns.flatMap((column) => column.cards)) {
 					const first = await caller.taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects({
 						taskId,
 						isShelved: true,
-						expectedTaskIncarnationCreatedAtEpochMs: 1,
+						expectedTaskIncarnationCreatedAtEpochMs: createdAt,
 					});
 					expect(first.boardWasSaved).toBe(true);
 					const calls = broadcast.mock.calls.length;
@@ -257,24 +269,28 @@ describe("搁置的服务端持久化与执行边界", () => {
 				isShelved: true,
 			});
 			if (succeeds)
-				startTaskSession.mockImplementation(async () => ({
-					ok: true,
-					summary: {
+				startTaskSession.mockImplementation(async (_scope, _request, beforeLaunch) => {
+					const summary = {
 						taskId: "backlog",
 						state: "running",
 						agentId: "codex",
-						workspacePath: null,
+						workspacePath: context.repoPath,
 						pid: null,
 						startedAt: 10,
 						updatedAt: 10,
 						lastOutputAt: null,
 						reviewReason: null,
 						exitCode: null,
-					} as RuntimeTaskSessionSummary,
-				}));
+					} as RuntimeTaskSessionSummary;
+					await beforeLaunch?.(summary);
+					return { ok: true, summary };
+				});
 			const result = await caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({
 				taskId: "backlog",
 			});
+			expect(result.agentSessionStartOutcome).toBe(
+				succeeds ? "agent_session_started" : "agent_session_start_failed",
+			);
 			expect(result.taskCardSnapshotAfterAction.boardColumnIdContainingTaskCard).toBe("in_progress");
 			expect(result.taskCardSnapshotAfterAction.taskCard.taskShelvingState?.isShelved).toBe(false);
 			const reloaded = await loadWorkspaceState(context.repoPath);
@@ -291,12 +307,22 @@ describe("搁置的服务端持久化与执行边界", () => {
 			const taskSessionStartupMayFinish = new Promise<void>((resolve) => {
 				allowTaskSessionStartupToFinish = resolve;
 			});
+			let signalTaskSessionStartupEntered = () => {};
+			const taskSessionStartupEntered = new Promise<void>((resolve) => {
+				signalTaskSessionStartupEntered = resolve;
+			});
 			startTaskSession.mockImplementationOnce(async () => {
+				signalTaskSessionStartupEntered();
 				await taskSessionStartupMayFinish;
 				return { ok: false, summary: null, error: "隔离启动失败" };
 			});
 			const starting = caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: "backlog" });
-			await vi.waitFor(() => expect(startTaskSession).toHaveBeenCalledOnce());
+			await Promise.race([
+				taskSessionStartupEntered,
+				starting.then(() => {
+					throw new Error("隔离启动未进入进程准备阶段");
+				}),
+			]);
 			const shelving = caller.taskCardAction.setTaskCardShelvingStateWithoutSessionSideEffects({
 				taskId: "backlog",
 				isShelved: true,
