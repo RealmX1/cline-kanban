@@ -1,6 +1,7 @@
 export * from "./agent-session-pty-host-diagnostics-contract";
 
 import { z } from "zod";
+
 import {
 	taskClosureArchiveCleanupCredentialSchema,
 	taskClosureOperationProgressSchema,
@@ -5350,6 +5351,45 @@ export const promptLibraryUserPromptMatchEvidenceSchema = z.object({
 	matchKind: z.enum(["normalized_exact", "exact_substring", "approximate_substring"]),
 });
 export type PromptLibraryUserPromptMatchEvidence = z.infer<typeof promptLibraryUserPromptMatchEvidenceSchema>;
+
+export const GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH = 120;
+export function createGlobalMarkdownDraftRecoveryTitle(title: string): string {
+	return `恢复草稿 · ${title}`.slice(0, GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH).trimEnd();
+}
+
+export const globalMarkdownDraftCreateInputSchema = z.object({
+	id: z.string().uuid(),
+	title: z.string().trim().min(1).max(GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH),
+	markdown: z.string(),
+});
+export const globalMarkdownDraftSchema = globalMarkdownDraftCreateInputSchema.extend({
+	version: z.number().int().positive(),
+	updatedAt: z.number().int().nonnegative(),
+});
+export const globalMarkdownDraftDeleteInputSchema = globalMarkdownDraftCreateInputSchema.pick({ id: true }).extend({
+	expectedVersion: globalMarkdownDraftSchema.shape.version,
+});
+export const globalMarkdownDraftSaveIdentitySchema = z.object({
+	saveRequestId: z.string().uuid(),
+	saveWriterId: z.string().uuid(),
+	saveSequence: z.number().int().positive(),
+});
+export const globalMarkdownDraftUpdateInputSchema = globalMarkdownDraftCreateInputSchema.extend({
+	expectedVersion: globalMarkdownDraftSchema.shape.version,
+	...globalMarkdownDraftSaveIdentitySchema.shape,
+});
+export const globalMarkdownDraftUpdateResultSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("saved"), draft: globalMarkdownDraftSchema.nullable() }),
+	z.object({
+		status: z.literal("recovered"),
+		draft: globalMarkdownDraftSchema.nullable(),
+		currentDraft: globalMarkdownDraftSchema.nullable(),
+	}),
+]);
+export const globalMarkdownDraftDeleteResultSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("deleted") }),
+	z.object({ status: z.literal("conflict"), currentDraft: globalMarkdownDraftSchema }),
+]);
 
 export const storedPromptLibraryEntrySchema = z.object({
 	id: z.string(),
