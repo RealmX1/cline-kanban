@@ -66,6 +66,11 @@ export const taskClosureArchiveManifestSchema = z.object({
 	availability: z.enum(["verified_recoverable", "no_task_worktree", "historical_artifacts_unavailable"]),
 	preservedFileCount: z.number().int().nonnegative(),
 	selectedArtifactRelativePaths: z.array(z.string()),
+	archivePayloadIntegritySha256: z
+		.string()
+		.regex(/^[a-f0-9]{64}$/u)
+		.optional(),
+	archivePayloadSizeBytes: z.number().nonnegative().optional(),
 });
 export type TaskClosureArchiveManifest = z.infer<typeof taskClosureArchiveManifestSchema>;
 export const taskClosureRecordSchema = z.object({
@@ -81,6 +86,46 @@ export const taskClosureRecordSchema = z.object({
 	archiveManifest: taskClosureArchiveManifestSchema,
 });
 export type TaskClosureRecord = z.infer<typeof taskClosureRecordSchema>;
+
+export const taskClosureAutomaticRecoveryStateSchema = z.object({
+	automaticAttemptCount: z.number().int().nonnegative(),
+	maximumAutomaticAttemptCount: z.number().int().min(3),
+	repairSupplementConsumed: z.boolean(),
+	pendingSideEffect: z
+		.enum([
+			"preserve_archive",
+			"remove_source_worktree",
+			"restore_archive",
+			"resume_session",
+			"repair_archive",
+			"verify_legacy_archive",
+		])
+		.nullable(),
+	failureClassification: z
+		.enum([
+			"insufficient_storage_space",
+			"owned_process_exit_unconfirmed",
+			"source_working_state_changed",
+			"archive_restoration_verification_failed",
+			"archive_payload_integrity_failed",
+			"archive_payload_persistence_failed",
+			"temporary_io_failure",
+			"task_session_resume_failed",
+			"storage_limit_exceeded",
+			"recovery_evidence_unavailable",
+			"unclassified_failure",
+			"explicit_execution_stop_still_effective",
+			"restoration_workspace_contains_unpreserved_work",
+		])
+		.nullable(),
+	failureRecoveryEvidenceFingerprint: z.string().nullable(),
+	minimumRequiredAvailableStorageBytes: z.number().nonnegative().nullable(),
+	lastFailureAtEpochMs: z.number().nullable(),
+	lastFailureMessage: z.string().optional(),
+	observedRecoveryEvidenceFingerprint: z.string().optional(),
+	observedRecoveryEvidenceFirstSeenAtEpochMs: z.number().optional(),
+});
+export type TaskClosureAutomaticRecoveryState = z.infer<typeof taskClosureAutomaticRecoveryStateSchema>;
 
 export function resolveTaskClosureOutcomeForBoardColumn(
 	columnId: string,
@@ -103,6 +148,14 @@ export const taskClosureOperationProgressSchema = z.object({
 	lastError: z.string().nullable(),
 	recoveryCondition: z.string().nullable(),
 	nextRetryAtEpochMs: z.number().nullable(),
+	automaticRecovery: taskClosureAutomaticRecoveryStateSchema.optional(),
+	unverifiedCandidateReclamation: z
+		.object({
+			phase: z.enum(["pending", "waiting_for_recovery", "completed"]),
+			automaticAttemptCount: z.number().int().nonnegative(),
+			lastError: z.string().nullable(),
+		})
+		.optional(),
 });
 export type TaskClosureOperationProgress = z.infer<typeof taskClosureOperationProgressSchema>;
 export const taskClosureHistoryRequestSchema = z.object({
@@ -113,7 +166,14 @@ export const taskClosureHistoryResponseSchema = z.object({
 	records: z.array(taskClosureRecordSchema),
 	operations: z.array(taskClosureOperationProgressSchema),
 	reopeningOperations: z
-		.array(z.object({ closureRequestId: z.string().uuid(), phase: z.string(), lastError: z.string().nullable() }))
+		.array(
+			z.object({
+				closureRequestId: z.string().uuid(),
+				phase: z.string(),
+				lastError: z.string().nullable(),
+				automaticRecovery: taskClosureAutomaticRecoveryStateSchema.optional(),
+			}),
+		)
 		.optional(),
 });
 export const taskClosureOutcomeCorrectionRequestSchema = taskClosureHistoryRequestSchema.extend({

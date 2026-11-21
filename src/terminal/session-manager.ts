@@ -275,6 +275,7 @@ import {
 	type OutputReactionEngine,
 } from "./output-reactions";
 import { ensureNetworkInterruptionResumeInstructionsFile } from "./output-reactions/network-interruption-continuation-instructions";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "./pty-agent-process-confirmed-not-spawned-error";
 import { type PtyExitEvent, PtySession } from "./pty-session";
 import { reduceSessionTransition, type SessionTransitionEvent } from "./session-state-machine";
 import type { StashTaskTerminalInputBoxIntoPromptLibraryRequest } from "./stash-task-terminal-input-box-into-prompt-library";
@@ -1477,6 +1478,7 @@ export class TerminalSessionManager implements TerminalSessionService {
 	}
 
 	private readonly entries = new Map<string, SessionEntry>();
+	private readonly explicitStopGenerationBySessionEntry = new WeakMap<SessionEntry, number>();
 	private readonly nativeInputReadyStartupDiagnosticContextByActiveProcess = new WeakMap<
 		ActiveProcessState,
 		{ workspaceId: string; runtimeSessionIncarnationId: string }
@@ -6216,8 +6218,11 @@ export class TerminalSessionManager implements TerminalSessionService {
 		// 到达时刻在闸门**之外**取，才看得见排队并发；闸门时刻在闸门**之内**取，才判得出互斥是否失效。
 		const taskSessionStartExclusivityAcquiredAtIso = new Date().toISOString();
 		const entry = this.ensureEntry(request.taskId);
+		const explicitStopGenerationAtStart = this.explicitStopGenerationBySessionEntry.get(entry) ?? 0;
 		const isTaskSessionStartCancelled = () =>
 			isTaskSessionStartStillRequested?.() === false ||
+			(request.beforeAgentProcessLaunch !== undefined &&
+				explicitStopGenerationAtStart !== (this.explicitStopGenerationBySessionEntry.get(entry) ?? 0)) ||
 			(request.automaticFailureContinuationEpisodeId !== undefined &&
 				(this.taskSessionNativeConversationIdentityRecoveryStoppedForRuntimeShutdown ||
 					entry.summary.automaticAgentFailureContinuation?.episodeId !==
@@ -6630,14 +6635,18 @@ export class TerminalSessionManager implements TerminalSessionService {
 				});
 			throwIfTaskSessionStartWasCancelled();
 			const beforeAgentProcessLaunch = request.beforeAgentProcessLaunch
-				? async () =>
+				? async () => {
 						await request.beforeAgentProcessLaunch?.({
 							...cloneSummary(entry.summary),
+							agentId: request.agentId,
 							runtimeSessionIncarnationId,
 							workspacePath: request.cwd,
-						})
+						});
+						throwIfTaskSessionStartWasCancelled();
+					}
 				: undefined;
 			if (!hostedTerminalPtyProcessSpawner) await beforeAgentProcessLaunch?.();
+			throwIfTaskSessionStartWasCancelled();
 			// host 模式下 spawn 是异步的：await 期间到达的输出与退出由上面的装载前缓存兜住（preActiveOutputChunks /
 			// ptyExitEventArrivedBeforeActiveWasInstalled）。非 host 模式保持同步 spawn，时序与以往完全一致。
 			session = hostedTerminalPtyProcessSpawner
@@ -6712,7 +6721,22 @@ export class TerminalSessionManager implements TerminalSessionService {
 				terminalStateMirror,
 				spawnFailureMessage,
 			);
+			if (error instanceof PtyAgentProcessConfirmedNotSpawnedError)
+				throw new PtyAgentProcessConfirmedNotSpawnedError(spawnFailureMessage, { cause: error });
 			throw new Error(spawnFailureMessage);
+		}
+		if (isTaskSessionStartCancelled()) {
+			session.stop();
+			terminalStateMirror.dispose();
+			if (managedArgumentStartupRegistration) {
+				this.managedArgumentStartupDeliveryByTaskId.delete(request.taskId);
+				settleManagedTaskPromptDeliveryWithoutBlocking(managedArgumentStartupRegistration.handle, {
+					status: "delivery_failed",
+					reason: "cancelled_before_delivery",
+				});
+			}
+			void launch.cleanup?.().catch(() => {});
+			return cloneSummary(entry.summary);
 		}
 
 		// 输出反应框架：仅当「连接中断自动续跑」开关开启、且有 reaction 适用于该 agent
@@ -10123,6 +10147,10 @@ export class TerminalSessionManager implements TerminalSessionService {
 		if (!entry) {
 			return null;
 		}
+		this.explicitStopGenerationBySessionEntry.set(
+			entry,
+			(this.explicitStopGenerationBySessionEntry.get(entry) ?? 0) + 1,
+		);
 		this.cancelRequestedTaskSessionResumeWaitingForNativeConversationIdentity(entry);
 		// 掐在早退**之前**：退避在途时 entry.active 恰恰是 null（上一条 PTY 已经死了、新的还没起），
 		// 放在早退之后等于这条路径永远碰不到它——用户按了停止，几秒后机器照样把会话拉起来，

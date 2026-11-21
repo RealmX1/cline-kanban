@@ -1262,6 +1262,8 @@ describe("TaskEditorDialog interactions", () => {
 			onCreatingTaskNameChange: vi.fn(),
 			taskDescription: "A 的独立简介",
 			onTaskDescriptionChange: vi.fn(),
+			backlogTaskStartReadinessConditionsText: "依赖完成后开启 A",
+			onBacklogTaskStartReadinessConditionsTextChange: vi.fn(),
 			images: [{ id: "image1", name: "附件.png", data: "aW1hZ2U=", mimeType: "image/png" }],
 			startInPlanMode: true,
 			onCreate: vi.fn(() => "more1"),
@@ -1276,9 +1278,27 @@ describe("TaskEditorDialog interactions", () => {
 		expect(props.onOpenChange).not.toHaveBeenCalled();
 		expect(props.onCreatingTaskNameChange).toHaveBeenCalledWith("");
 		expect(props.onTaskDescriptionChange).toHaveBeenCalledWith("");
+		expect(props.onBacklogTaskStartReadinessConditionsTextChange).toHaveBeenCalledWith("");
 		expect(props.onImagesChange).toHaveBeenCalledWith([]);
 		expect(props.onStartInPlanModeChange).not.toHaveBeenCalled();
 		expect(props.onWorktreeModeChange).not.toHaveBeenCalled();
+	});
+
+	it("恢复未完成的批量创建时同时恢复本批开启条件", async () => {
+		const { resolveDraftRead } = prepareDeferredRelationDraftRead();
+		const props = makeProps({ onBacklogTaskStartReadinessConditionsTextChange: vi.fn() });
+		await render(props);
+		const key = creationBrowserRecovery.taskEditorPendingCreationStorageKey("project-1");
+		localStorage.setItem(
+			`${key}:remaining-batch-prompts`,
+			JSON.stringify({
+				prompts: ["剩余创建项"],
+				backlogTaskStartReadinessConditionsText: "共同依赖完成后开启",
+			}),
+		);
+		await act(async () => resolveDraftRead(null));
+		expect(props.onBacklogTaskStartReadinessConditionsTextChange).toHaveBeenCalledWith("共同依赖完成后开启");
+		expect(document.querySelector('input[value="剩余创建项"]')).not.toBeNull();
 	});
 
 	it("旧建卡草稿先迁入详情，后来的正文仍创建独立任务", async () => {

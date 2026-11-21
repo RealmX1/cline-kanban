@@ -15,6 +15,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { z } from "zod";
 import { createGitProcessEnv } from "../core/git-process-env";
@@ -33,6 +34,24 @@ const snapshotSchema = z.object({
 	),
 });
 export type SourceGitWorkingStateSnapshot = z.infer<typeof snapshotSchema>;
+export const sourceGitWorkingStateSnapshotSchema = snapshotSchema;
+
+export interface GitWorkingStateSnapshotStorageLimits {
+	maximumPayloadBytes: number;
+	signal?: AbortSignal;
+}
+
+function createSnapshotPayloadByteAccount(limits?: GitWorkingStateSnapshotStorageLimits) {
+	let bytes = 0;
+	return (additionalBytes: number) => {
+		limits?.signal?.throwIfAborted();
+		bytes += additionalBytes;
+		if (limits && bytes > limits.maximumPayloadBytes)
+			throw Object.assign(new Error("Git 工作状态快照超过本请求冻结的字节上限，保留来源。"), {
+				code: "KANBAN_SNAPSHOT_PAYLOAD_LIMIT_EXCEEDED",
+			});
+	};
+}
 
 const fingerprint = (content: Buffer | string) => createHash("sha256").update(content).digest("hex");
 const gitReadOptions = () => ({ trimStdout: false, env: createGitProcessEnv({ GIT_OPTIONAL_LOCKS: "0" }) });
@@ -65,7 +84,13 @@ async function fingerprintFile(path: string) {
 	return hash.digest("hex");
 }
 
-async function transferGitObjectPack(repoPath: string, packPath: string, revisions?: string[]) {
+async function transferGitObjectPack(
+	repoPath: string,
+	packPath: string,
+	revisions?: string[],
+	accountBytes?: (bytes: number) => void,
+	signal?: AbortSignal,
+) {
 	const child = spawn(
 		"git",
 		revisions ? ["pack-objects", "--stdout", "--revs", "--threads=1"] : ["index-pack", "--stdin"],
@@ -73,7 +98,7 @@ async function transferGitObjectPack(repoPath: string, packPath: string, revisio
 			cwd: repoPath,
 			env: createGitProcessEnv({ GIT_OPTIONAL_LOCKS: "0" }),
 			stdio: ["pipe", "pipe", "pipe"],
-			signal: AbortSignal.timeout(120_000),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120_000)]) : AbortSignal.timeout(120_000),
 		},
 	);
 	let stderr = "";
@@ -90,7 +115,23 @@ async function transferGitObjectPack(repoPath: string, packPath: string, revisio
 	try {
 		if (revisions) {
 			child.stdin.end(`${revisions.join("\n")}\n`);
-			await Promise.all([exited, pipeline(child.stdout, createWriteStream(packPath))]);
+			await Promise.all([
+				exited,
+				pipeline(
+					child.stdout,
+					new Transform({
+						transform(chunk: Buffer, _encoding, done) {
+							try {
+								accountBytes?.(chunk.byteLength);
+								done(null, chunk);
+							} catch (error) {
+								done(error as Error);
+							}
+						},
+					}),
+					createWriteStream(packPath),
+				),
+			]);
 		} else {
 			child.stdout.resume();
 			await Promise.all([exited, pipeline(createReadStream(packPath), child.stdin)]);
@@ -172,7 +213,10 @@ export async function captureSourceGitWorkingState(
 	sourcePath: string,
 	artifactDirectory: string,
 	selectedArtifactRelativePaths: string[] = [],
+	limits?: GitWorkingStateSnapshotStorageLimits,
 ) {
+	const accountBytes = createSnapshotPayloadByteAccount(limits);
+	const inventory = await readSourceGitWorkingStateCaptureInventory(sourcePath, selectedArtifactRelativePaths);
 	const identity = await readSnapshotIdentity(sourcePath);
 	identity.paths = [
 		...new Set([
@@ -181,27 +225,44 @@ export async function captureSourceGitWorkingState(
 		]),
 	].sort();
 	const index = await readFile(identity.indexPath);
+	if (fingerprint(index) !== inventory.indexHash) throw new Error("复制期间来源 Git 状态发生变化。");
 	await mkdir(join(artifactDirectory, "working-files"), { recursive: true });
+	const inventoryText = JSON.stringify(inventory);
+	accountBytes(Buffer.byteLength(inventoryText));
+	await writeFile(join(artifactDirectory, "git-working-state-capture-inventory.json"), inventoryText);
 	const entries: SourceGitWorkingStateSnapshot["entries"] = [];
 	for (const path of identity.paths) {
 		const entry = await inspectEntry(sourcePath, path);
+		const expected = inventory.entries.find((entry) => entry.path === path);
+		if (!expected || expected.hash !== entry.hash || expected.kind !== entry.kind || expected.mode !== entry.mode)
+			throw new Error("复制期间来源文件发生变化，请等写入结束后重试。");
 		entries.push({ path, kind: entry.kind, hash: entry.hash, mode: entry.mode });
 		if (entry.kind === "absent") continue;
 		const target = await assertSafeParentDirectories(join(artifactDirectory, "working-files"), path);
 		await mkdir(dirname(target), { recursive: true });
 		// 符号链接在快照中以链接文本保存，避免交接目录自身出现可穿越的链接。
+		accountBytes(Buffer.byteLength(entry.content));
 		await writeFile(target, entry.content);
 	}
+	accountBytes(index.byteLength);
 	await writeFile(join(artifactDirectory, "source-git-index"), index);
-	if (identity.shared)
+	if (identity.shared) {
+		accountBytes((await lstat(resolve(sourcePath, identity.shared))).size);
 		await copyFile(resolve(sourcePath, identity.shared), join(artifactDirectory, "source-git-shared-index"));
+	}
 	// HEAD 历史和暂存 blob 一并归档，来源清理或 gc 后仍能恢复；pack-objects 不修改来源。
 	const stagedObjects = (await git(sourcePath, ["ls-files", "--stage", "-z"])).split("\0").flatMap((entry) => {
 		const objectId = entry.match(/^\d+ ([a-f0-9]+) /u)?.[1];
 		return objectId && !/^0+$/u.test(objectId) ? [objectId] : [];
 	});
 	const objectPackPath = join(artifactDirectory, "source-git-objects.pack");
-	await transferGitObjectPack(sourcePath, objectPackPath, [identity.head, ...new Set(stagedObjects)]);
+	await transferGitObjectPack(
+		sourcePath,
+		objectPackPath,
+		[identity.head, ...new Set(stagedObjects)],
+		accountBytes,
+		limits?.signal,
+	);
 	const after = await readSnapshotIdentity(sourcePath);
 	after.paths = [
 		...new Set([
@@ -232,8 +293,96 @@ export async function captureSourceGitWorkingState(
 		selectedArtifactRelativePaths,
 		entries,
 	};
-	await writeFile(join(artifactDirectory, "git-working-state.json"), JSON.stringify(snapshot));
+	const snapshotText = JSON.stringify(snapshot);
+	accountBytes(Buffer.byteLength(snapshotText));
+	await writeFile(join(artifactDirectory, "git-working-state.json"), snapshotText);
 	return snapshot;
+}
+
+/** 捕获前冻结来源证据；未写完的候选只有仍受此清单覆盖时才可回收。 */
+export async function readSourceGitWorkingStateCaptureInventory(
+	sourcePath: string,
+	selectedPaths: string[] = [],
+): Promise<SourceGitWorkingStateSnapshot> {
+	const identity = await readSnapshotIdentity(sourcePath);
+	const paths = [
+		...new Set([...identity.paths, ...(await collectExplicitArtifactFilePaths(sourcePath, selectedPaths))]),
+	].sort();
+	const entries: SourceGitWorkingStateSnapshot["entries"] = [];
+	for (const path of paths) {
+		const entry = await inspectEntry(sourcePath, path);
+		entries.push({ path, kind: entry.kind, hash: entry.hash, mode: entry.mode });
+	}
+	return {
+		headCommit: identity.head,
+		gitCommonDirectory: identity.common,
+		indexHash: fingerprint(await readFile(identity.indexPath)),
+		sharedIndexName: identity.shared ? basename(identity.shared) : null,
+		sourceHadUncommittedChanges: Boolean((await git(sourcePath, ["status", "--porcelain=v1"])).trim()),
+		selectedArtifactRelativePaths: selectedPaths,
+		entries,
+	};
+}
+
+export async function estimateSourceGitWorkingStateStorageRequirements(
+	sourcePath: string,
+	selectedPaths: string[] = [],
+) {
+	const identity = await readSnapshotIdentity(sourcePath);
+	const paths = [
+		...new Set([...identity.paths, ...(await collectExplicitArtifactFilePaths(sourcePath, selectedPaths))]),
+	];
+	let workingFileBytes = 0;
+	for (const path of paths) {
+		try {
+			const absolute = await assertSafeParentDirectories(sourcePath, path);
+			const info = await lstat(absolute);
+			workingFileBytes += info.isSymbolicLink()
+				? Buffer.byteLength(await readlink(absolute))
+				: info.isFile()
+					? info.size
+					: 0;
+		} catch (error) {
+			if (!["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+		}
+	}
+	const objectSizes = (await git(sourcePath, ["cat-file", "--batch-all-objects", "--batch-check=%(objectsize)"]))
+		.trim()
+		.split("\n")
+		.filter(Boolean);
+	const maximumPackBytes = objectSizes.reduce((sum, text) => {
+		const size = Number(text);
+		if (!Number.isSafeInteger(size) || size < 0) throw new Error("无法取得 Git 对象体积上界，未开始归档。");
+		return sum + 2 * size + 128;
+	}, 1024 * 1024);
+	const indexBytes =
+		(await lstat(identity.indexPath)).size +
+		(identity.shared ? (await lstat(resolve(sourcePath, identity.shared))).size : 0);
+	const metadataBytes = Buffer.byteLength(JSON.stringify(paths)) * 12 + paths.length * 2048 + 1024 * 1024;
+	return {
+		maximumArchivePayloadBytes: workingFileBytes + indexBytes + maximumPackBytes + metadataBytes,
+		maximumRestorationWorkspaceBytes: workingFileBytes + indexBytes + metadataBytes,
+	};
+}
+
+export async function assertSourceGitWorkingStateMatchesCaptureInventory(
+	sourcePath: string,
+	artifactDirectory: string,
+) {
+	const inventory = snapshotSchema.parse(
+		JSON.parse(await readFile(join(artifactDirectory, "git-working-state-capture-inventory.json"), "utf8")),
+	);
+	await assertSourceGitWorkingStateMatchesInventory(sourcePath, inventory);
+}
+
+export async function assertSourceGitWorkingStateMatchesInventory(
+	sourcePath: string,
+	inventory: SourceGitWorkingStateSnapshot,
+) {
+	const current = await readSourceGitWorkingStateCaptureInventory(sourcePath, inventory.selectedArtifactRelativePaths);
+	const { objectPackHash: _objectPackHash, ...withoutPack } = inventory;
+	if (JSON.stringify(current) !== JSON.stringify(withoutPack))
+		throw new Error("来源已不再覆盖未完成候选，保留载荷等待恢复。");
 }
 
 /** 清理与恢复共用同一比对，包含 ignored 成果和原始 index，任何未知都不放行删除。 */
@@ -264,7 +413,12 @@ export async function readSourceGitWorkingStateSnapshot(artifactDirectory: strin
 	return snapshotSchema.parse(JSON.parse(await readFile(join(artifactDirectory, "git-working-state.json"), "utf8")));
 }
 
-export async function restoreSourceGitWorkingState(targetPath: string, artifactDirectory: string) {
+export async function restoreSourceGitWorkingState(
+	targetPath: string,
+	artifactDirectory: string,
+	limits?: GitWorkingStateSnapshotStorageLimits,
+) {
+	const accountBytes = createSnapshotPayloadByteAccount(limits);
 	const snapshot = await readSourceGitWorkingStateSnapshot(artifactDirectory);
 	await restoreSourceGitObjectSnapshot(targetPath, artifactDirectory);
 	const identity = await readSnapshotIdentity(targetPath);
@@ -284,6 +438,7 @@ export async function restoreSourceGitWorkingState(targetPath: string, artifactD
 	for (const entry of snapshot.entries.filter((entry) => entry.kind !== "absent")) {
 		const target = await assertSafeParentDirectories(targetPath, entry.path);
 		const content = await readFile(join(artifactDirectory, "working-files", entry.path));
+		accountBytes(content.byteLength);
 		if (fingerprint(content) !== entry.hash) throw new Error("持久 Git 快照校验失败。");
 		await mkdir(dirname(target), { recursive: true });
 		await rm(target, { force: true, recursive: true });
@@ -298,11 +453,14 @@ export async function restoreSourceGitWorkingState(targetPath: string, artifactD
 		}
 	}
 	const index = await readFile(join(artifactDirectory, "source-git-index"));
+	accountBytes(index.byteLength);
 	if (fingerprint(index) !== snapshot.indexHash) throw new Error("持久 Git index 快照校验失败。");
-	if (snapshot.sharedIndexName)
+	if (snapshot.sharedIndexName) {
+		accountBytes((await lstat(join(artifactDirectory, "source-git-shared-index"))).size);
 		await copyFile(
 			join(artifactDirectory, "source-git-shared-index"),
 			join(dirname(identity.indexPath), snapshot.sharedIndexName),
 		);
+	}
 	await writeFile(identity.indexPath, index);
 }

@@ -62,6 +62,8 @@ export async function applyKanbanCliTaskBoardMutation(
 					"backlog",
 					{
 						title: fieldValues.title,
+						taskDescription: fieldValues.taskDescription,
+						backlogTaskStartReadinessConditionsText: fieldValues.backlogTaskStartReadinessConditionsText,
 						terminalAgentModelOverrideSettings: fieldValues.terminalAgentModelOverrideSettings,
 						prompt: fieldValues.prompt,
 						startInPlanMode: fieldValues.startInPlanMode,

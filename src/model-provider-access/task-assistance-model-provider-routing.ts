@@ -95,6 +95,27 @@ async function resolveProviderCredential(
 	};
 }
 
+function resolveProviderRecoveryStatePath(storageDirectoryPath?: string) {
+	return join(
+		storageDirectoryPath ??
+			join(
+				process.env.KANBAN_NOTIFICATION_ARCHIVE_TEST_ROOT ?? getRuntimeHomePath(),
+				"task-assistance-model-routing",
+			),
+		"provider-recovery-state.json",
+	);
+}
+
+export async function readTaskAssistancePreferredProviderRecovery(routing: TaskAssistanceModelProviderRoutingSettings) {
+	const providerId = routing.preferredModelProviderId;
+	const access = providerId ? await resolveProviderCredential(providerId) : null;
+	if (!providerId || !access) return null;
+	const state = (await readProviderRecoveryState(resolveProviderRecoveryStatePath()))[providerId];
+	return state?.configurationFingerprint === fingerprint([routing, access.credential, access.supportsImages])
+		? state
+		: null;
+}
+
 /** 每个逻辑阶段每家最多一次；取消不降级，首选冷却状态可跨运行时重启。 */
 export async function requestTaskAssistanceJsonObject<T>(
 	request: TaskAssistanceModelRequest,
@@ -135,14 +156,7 @@ export async function requestTaskAssistanceJsonObject<T>(
 			[routing.preferredModelProviderId, routing.fallbackModelProviderId].filter((id): id is string => Boolean(id)),
 		),
 	];
-	const recoveryPath = join(
-		options.storageDirectoryPath ??
-			join(
-				process.env.KANBAN_NOTIFICATION_ARCHIVE_TEST_ROOT ?? getRuntimeHomePath(),
-				"task-assistance-model-routing",
-			),
-		"provider-recovery-state.json",
-	);
+	const recoveryPath = resolveProviderRecoveryStatePath(options.storageDirectoryPath);
 	const prefixHash = request.stablePromptPrefixSha256 ?? fingerprint(request.systemPrompt);
 	const now = options.now ?? Date.now;
 	let fallbackReason: string | undefined;

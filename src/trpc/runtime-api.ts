@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { recoverCodexUserQuestionsFromKnownConversation } from "../agent-session-history/codex-user-question-transcript-recovery";
-
+import { readBacklogTaskStartReadinessOperation } from "../backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
 import { resolveRecordedCodexConversationHome } from "../codex-conversation-storage/codex-conversation-storage-home";
 import { operateCodexConversationStorage } from "../codex-conversation-storage/codex-conversation-storage-runtime-operation";
 import { assertRuntimeAgentIsNotRetired, CLINE_AGENT_RETIRED_EXECUTION_ERROR } from "../core/agent-catalog";
@@ -37,6 +37,7 @@ import {
 import { readCodexDraftStashOperationStatus } from "../terminal/codex-draft-stash-operation";
 import { exitCodexNativeConversationPlanMode } from "../terminal/codex-native-conversation-plan-mode-exit";
 import { readCreationAgentDefaultModel } from "../terminal/creation-agent-default-model";
+import { PtyAgentProcessConfirmedNotSpawnedError } from "../terminal/pty-agent-process-confirmed-not-spawned-error";
 // Coordinates the runtime-side TRPC handlers used by the browser.
 // This is the main backend entrypoint for sessions, settings, git, and
 // workspace actions, but detailed Cline, terminal, and config behavior
@@ -212,7 +213,11 @@ import {
 	loadWorkspaceBoardById,
 	mutateWorkspaceState,
 } from "../state/workspace-state";
-import { withTaskClosureLifecycleLocks } from "../task-closure/task-closure-operation-store";
+import {
+	listTaskClosureOperations,
+	requestTaskClosureLifecycleCancellation,
+	withTaskClosureLifecycleLocks,
+} from "../task-closure/task-closure-operation-store";
 import { createTaskFileDownloadService } from "../task-file-downloads/task-file-download-service";
 import {
 	readRecordedCreationNameSuggestionResult,
@@ -1294,7 +1299,12 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		suggestTaskNamesFromTaskDescription: async (_workspaceScope, input, abortSignal) => {
 			return await suggestTaskNamesFromTaskDescription(input, { abortSignal });
 		},
-		startTaskSession: async (workspaceScope, input, beforeAgentProcessLaunch) => {
+		startTaskSession: async (
+			workspaceScope,
+			input,
+			beforeAgentProcessLaunch,
+			backlogTaskStartReadinessOperationId,
+		) => {
 			const startRequestReceivedAt = Date.now();
 			let diagnosticTaskId = "(unparsed)";
 			let requestedAgentIdForDiagnostics: RuntimeAgentId | null = null;
@@ -1362,9 +1372,34 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					if (!primary) return { ok: false, summary: null, error: "当前主会话记录缺失，未退回原 Claude 会话。" };
 					const resumed = await buildTaskConversationSessionDurableResumeRequest(workspaceScope, primary);
 					if (!resumed) return { ok: false, summary: null, error: "当前主会话无法恢复。" };
-					return await runtimeApi.startTaskSession(workspaceScope, resumed);
+					return await runtimeApi.startTaskSession(workspaceScope, resumed, beforeAgentProcessLaunch);
 				}
 				const owningCard = findWorkspaceBoardCard(startBoard, body.workspaceTaskId ?? body.taskId);
+				const owningCardIsInBacklog =
+					owningCard &&
+					startBoard.columns.some(
+						(column) => column.id === "backlog" && column.cards.some((card) => card.id === owningCard.id),
+					);
+				const pendingBacklogStart =
+					owningCard && !owningCardIsInBacklog
+						? await readBacklogTaskStartReadinessOperation(
+								workspaceScope.workspaceId,
+								owningCard.id,
+								owningCard.createdAt,
+							)
+						: null;
+				if (
+					owningCardIsInBacklog ||
+					(pendingBacklogStart &&
+						pendingBacklogStart.review.phase !== "started" &&
+						(!beforeAgentProcessLaunch ||
+							pendingBacklogStart.review.operationId !== backlogTaskStartReadinessOperationId))
+				)
+					return {
+						ok: false,
+						summary: null,
+						error: "Backlog 必须通过 taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress 完成启动前复核。",
+					};
 				if (owningCard?.independentTaskCreationProvenance) {
 					await assertIndependentTaskSourceLandedBeforeInitialStart({
 						workspaceId: workspaceScope.workspaceId,
@@ -2011,6 +2046,8 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					body.taskSessionStartOriginDeclaredByClient ?? "external_entry_point",
 				);
 				latestStartedSummaryForDiagnostics = summary;
+				if (backlogTaskStartReadinessOperationId && summary.pid === null && summary.startedAt === null)
+					return { ok: false, summary, error: "用户已停止待启动的会话。" };
 				recordStartDiagnostic("runtime_started", startFailurePhase);
 				const terminalStartRejectedBecauseHostTaskCardRemovedDuringStart =
 					await stopJustStartedTaskSessionWhenHostTaskCardRemovedFromWorkspaceBoardDuringStart(async () =>
@@ -2070,6 +2107,9 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					ok: false,
 					summary: null,
 					error: message,
+					...(error instanceof PtyAgentProcessConfirmedNotSpawnedError
+						? { agentProcessConfirmedNotSpawned: true }
+						: {}),
 				};
 			}
 		},
@@ -2361,6 +2401,25 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		stopTaskSession: async (workspaceScope, input) => {
 			try {
 				const body = parseTaskSessionStopRequest(input);
+				try {
+					const board = await loadWorkspaceBoardById(workspaceScope.workspaceId);
+					const card = board.columns
+						.flatMap((column) => column.cards)
+						.find(
+							(card) => card.id === body.taskId || resolveMainTaskConversationSessionId(card) === body.taskId,
+						);
+					if (card)
+						for (const operation of await listTaskClosureOperations({
+							workspaceId: workspaceScope.workspaceId,
+							taskId: card.id,
+							taskIncarnationCreatedAtEpochMs: card.createdAt,
+						})) {
+							if (operation.reopening && !["completed", "cancelled"].includes(operation.reopening.phase))
+								await requestTaskClosureLifecycleCancellation(operation);
+						}
+				} catch (error) {
+					logAgentSessionRetentionWarning(`重开操作的 Stop 撤销证据暂不可写，继续停止会话：${String(error)}`);
+				}
 				// 自动收尾的持久暂停或取消失败不能拦住用户停止 agent 本体。
 				await deps.onTaskSessionStopRequested?.(workspaceScope.workspaceId, body.taskId).catch((error: unknown) => {
 					logAgentSessionRetentionWarning(
@@ -4415,11 +4474,17 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 		},
 	};
 	const startTaskSessionWithoutClosureLock = runtimeApi.startTaskSession;
-	runtimeApi.startTaskSession = async (scope, input, beforeAgentProcessLaunch) =>
+	runtimeApi.startTaskSession = async (scope, input, beforeAgentProcessLaunch, backlogTaskStartReadinessOperationId) =>
 		await serializeSessionStartupAgainstTaskClosure(
 			scope,
 			() => input.workspaceTaskId ?? resolveSessionCategoryAndAttributedTaskCardId(input).attributedTaskCardId,
-			async () => await startTaskSessionWithoutClosureLock(scope, input, beforeAgentProcessLaunch),
+			async () =>
+				await startTaskSessionWithoutClosureLock(
+					scope,
+					input,
+					beforeAgentProcessLaunch,
+					backlogTaskStartReadinessOperationId,
+				),
 			(error) => ({ ok: false, summary: null, error }),
 		);
 	const refreshTaskTerminalWithoutClosureLock = runtimeApi.refreshTaskTerminal;

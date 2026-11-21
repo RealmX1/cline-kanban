@@ -33,6 +33,7 @@ export const taskEditorCreationSubmissionRequestSchema: z.ZodType<TaskEditorCrea
 			id: true,
 			title: true,
 			taskDescription: true,
+			backlogTaskStartReadinessConditionsText: true,
 			prompt: true,
 			startInPlanMode: true,
 			taskAgentPermissionMode: true,

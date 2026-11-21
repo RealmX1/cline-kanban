@@ -1,6 +1,14 @@
 export * from "./agent-session-pty-host-diagnostics-contract";
 
 import { z } from "zod";
+
+import {
+	backlogTaskCreationRepositoryBaselineSchema,
+	backlogTaskStartReadinessReviewSchema,
+} from "./backlog-task-start-readiness-contract";
+
+export * from "./backlog-task-start-readiness-contract";
+
 import {
 	taskClosureArchiveCleanupCredentialSchema,
 	taskClosureOperationProgressSchema,
@@ -476,6 +484,16 @@ export const runtimeBindTaskExternalWorkflowRunRequestSchema = z
 
 export const runtimeBoardCardSchema = z
 	.object({
+		backlogTaskCreationRepositoryBaseline: backlogTaskCreationRepositoryBaselineSchema.optional(),
+		backlogTaskStartReadinessReview: backlogTaskStartReadinessReviewSchema.optional(),
+		backlogTaskStartReadinessExecutionRevision: z
+			.object({
+				operationId: z.string().uuid(),
+				assessedAtEpochMs: z.number(),
+				currentExecutionInstructions: z.string(),
+				revisedTaskFingerprint: z.string().optional(),
+			})
+			.optional(),
 		id: z.string(),
 		taskShelvingState: runtimeTaskShelvingStateSchema.optional(),
 		taskClosureSummary: taskClosureRecordSchema.optional(),
@@ -487,6 +505,7 @@ export const runtimeBoardCardSchema = z
 		title: z.string().optional(),
 		taskNameVersion: z.number().int().nonnegative().optional(),
 		taskDescription: z.string().trim().max(4000).optional(),
+		backlogTaskStartReadinessConditionsText: z.string().trim().max(4000).optional(),
 		// shortcut: 首版每 Task 只绑定一个原 Run；需要合法新一轮时再设计显式换绑与历史保留。
 		externalWorkflowRunBinding: runtimeExternalWorkflowRunBindingSchema.optional(),
 		prompt: z.string(),
@@ -792,6 +811,7 @@ export const taskEditorCreationSubmissionStatusSchema = z.object({
 	relationsCompleted: z.boolean(),
 	startRequested: z.boolean(),
 	startCompleted: z.boolean(),
+	startCancellationReason: z.literal("no_remaining_work").optional(),
 	phase: z.enum([
 		"saving_card",
 		"saving_relations",
@@ -1852,6 +1872,7 @@ export const runtimeAddBacklogTaskRequestSchema = z.object({
 	prompt: z.string(),
 	title: z.string().optional(),
 	taskDescription: z.string().trim().max(4000).optional(),
+	backlogTaskStartReadinessConditionsText: z.string().trim().max(4000).optional(),
 	images: z.array(runtimeTaskImageSchema).optional(),
 });
 export type RuntimeAddBacklogTaskRequest = z.infer<typeof runtimeAddBacklogTaskRequestSchema>;
@@ -1929,6 +1950,7 @@ export const runtimeKanbanCliBacklogTaskCardFieldValuesResolvedByKanbanCliSchema
 	terminalAgentModelOverrideSettings: runtimeTaskTerminalAgentModelOverrideSettingsSchema.optional(),
 	title: z.string().optional(),
 	taskDescription: z.string().trim().max(4000).optional(),
+	backlogTaskStartReadinessConditionsText: z.string().trim().max(4000).optional(),
 	prompt: z.string(),
 	startInPlanMode: z.boolean(),
 	taskAgentPermissionMode: runtimeTaskAgentPermissionModeSchema,
@@ -2096,6 +2118,10 @@ export type RuntimeTaskCardActionReadTaskCardWithBoardColumnResponse = z.infer<
 // 只允许 backlog / in_progress 的卡。先移列到 in_progress、再 ensure worktree、再启动会话（与浏览器一致，也守住
 // 「backlog 单向」：启动失败后卡留在 in_progress，让会话状态与错误保持可见）。会话已在 agent 回合时不重复启动。
 export const runtimeTaskCardActionStartAgentSessionRequestSchema = z.object({
+	resumeBacklogTaskStartReadinessOperationId: z.string().uuid().optional(),
+	overrideUnmetBacklogTaskStartConditions: z
+		.object({ operationId: z.string().uuid(), reason: z.string().trim().min(1).max(2000) })
+		.optional(),
 	taskId: z.string().min(1),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
@@ -2107,6 +2133,7 @@ export type RuntimeTaskCardActionStartAgentSessionRequest = z.infer<
 	typeof runtimeTaskCardActionStartAgentSessionRequestSchema
 >;
 export const runtimeTaskCardAgentSessionStartOutcomeSchema = z.enum([
+	"backlog_task_start_readiness_review_pending",
 	"agent_session_started",
 	// 会话已在 agent 回合（turnOwner === "agent"）：不重复启动，视为成功。
 	"agent_session_already_in_agent_turn_so_start_was_skipped",
@@ -2223,6 +2250,7 @@ export type RuntimeTaskCardActionMoveIntoDoneResponse = z.infer<typeof runtimeTa
 // 并如实回传失败。成功后关掉卡片的自动 review 动作（与浏览器一致：恢复出来的卡不该被自动提交再次带走）。
 export const runtimeTaskCardActionRestoreFromDoneRequestSchema = z.object({
 	taskId: z.string().min(1),
+	reopeningRequestId: z.string().uuid().optional(),
 	expectedTaskIncarnationCreatedAtEpochMs: z.number().finite().optional(),
 	boardMutationInitiator: runtimeTaskCardActionBoardMutationInitiatorDeclaredByWebUiSchema,
 	agentTerminalGeometryForTaskSessionSpawn: runtimeAgentTerminalGeometryForTaskSessionSpawnSchema.optional(),
@@ -2297,6 +2325,7 @@ export const runtimeKanbanCliTaskCardFieldUpdateRawInputSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	title: z.string().optional(),
 	taskDescription: z.string().trim().max(4000).nullable().optional(),
+	backlogTaskStartReadinessConditionsText: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
 	baseRef: z.string().optional(),
 	startInPlanMode: z.boolean().optional(),
@@ -2324,6 +2353,7 @@ export const runtimeTaskCardFieldValuePatchSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).nullable().optional(),
 	title: z.string().nullable().optional(),
 	taskDescription: z.string().trim().max(4000).nullable().optional(),
+	backlogTaskStartReadinessConditionsText: z.string().trim().max(4000).nullable().optional(),
 	prompt: z.string().optional(),
 	images: z.array(runtimeTaskImageSchema).nullable().optional(),
 	startInPlanMode: z.boolean().optional(),
@@ -4685,6 +4715,7 @@ export const runtimeTaskSessionStartResponseSchema = z.object({
 	ok: z.boolean(),
 	summary: runtimeTaskSessionSummarySchema.nullable(),
 	error: z.string().optional(),
+	agentProcessConfirmedNotSpawned: z.boolean().optional(),
 	taskSessionStartRejectionReason: runtimeTaskSessionStartRejectionReasonSchema.optional(),
 });
 export type RuntimeTaskSessionStartResponse = z.infer<typeof runtimeTaskSessionStartResponseSchema>;
@@ -5379,6 +5410,45 @@ export const promptLibraryUserPromptMatchEvidenceSchema = z.object({
 });
 export type PromptLibraryUserPromptMatchEvidence = z.infer<typeof promptLibraryUserPromptMatchEvidenceSchema>;
 
+export const GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH = 120;
+export function createGlobalMarkdownDraftRecoveryTitle(title: string): string {
+	return `恢复草稿 · ${title}`.slice(0, GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH).trimEnd();
+}
+
+export const globalMarkdownDraftCreateInputSchema = z.object({
+	id: z.string().uuid(),
+	title: z.string().trim().min(1).max(GLOBAL_MARKDOWN_DRAFT_TITLE_MAX_LENGTH),
+	markdown: z.string(),
+});
+export const globalMarkdownDraftSchema = globalMarkdownDraftCreateInputSchema.extend({
+	version: z.number().int().positive(),
+	updatedAt: z.number().int().nonnegative(),
+});
+export const globalMarkdownDraftDeleteInputSchema = globalMarkdownDraftCreateInputSchema.pick({ id: true }).extend({
+	expectedVersion: globalMarkdownDraftSchema.shape.version,
+});
+export const globalMarkdownDraftSaveIdentitySchema = z.object({
+	saveRequestId: z.string().uuid(),
+	saveWriterId: z.string().uuid(),
+	saveSequence: z.number().int().positive(),
+});
+export const globalMarkdownDraftUpdateInputSchema = globalMarkdownDraftCreateInputSchema.extend({
+	expectedVersion: globalMarkdownDraftSchema.shape.version,
+	...globalMarkdownDraftSaveIdentitySchema.shape,
+});
+export const globalMarkdownDraftUpdateResultSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("saved"), draft: globalMarkdownDraftSchema.nullable() }),
+	z.object({
+		status: z.literal("recovered"),
+		draft: globalMarkdownDraftSchema.nullable(),
+		currentDraft: globalMarkdownDraftSchema.nullable(),
+	}),
+]);
+export const globalMarkdownDraftDeleteResultSchema = z.discriminatedUnion("status", [
+	z.object({ status: z.literal("deleted") }),
+	z.object({ status: z.literal("conflict"), currentDraft: globalMarkdownDraftSchema }),
+]);
+
 export const storedPromptLibraryEntrySchema = z.object({
 	id: z.string(),
 	text: z.string(),
@@ -5543,6 +5613,7 @@ export const runtimeTaskEditDraftSchema = z.object({
 	codexReasoningEffortOverride: z.string().trim().min(1).optional(),
 	taskTitleOverride: z.string().optional(),
 	taskDescription: z.string().max(4000).optional(),
+	backlogTaskStartReadinessConditionsText: z.string().max(4000).optional(),
 	taskId: z.string(),
 	prompt: z.string(),
 	images: z.array(runtimeTaskImageSchema),

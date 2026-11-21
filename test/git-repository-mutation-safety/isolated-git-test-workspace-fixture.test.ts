@@ -22,6 +22,30 @@ function captureGitRepositoryMutationCanarySnapshot(
 }
 
 describe("isolated Git test workspace fixture", () => {
+	it("只读 Git 子进程排除独立 PTY 时仍保持 HOME、Git、tmux 和目录隔离", () => {
+		vi.stubEnv("GIT_DIR", "/unowned/repository");
+		vi.stubEnv("TMUX", "/unowned/tmux-socket,1,0");
+		onTestFinished(() => {
+			vi.unstubAllEnvs();
+		});
+		const fixture = createIsolatedGitTestWorkspaceFixture();
+		const environment = fixture.createIsolatedChildProcessEnvironment(
+			{},
+			{ independentPtyHostLaunchIsExcluded: true },
+		);
+		expect(environment.HOME).toBe(fixture.isolatedHomeDirectoryPath);
+		expect(environment.GIT_DIR).toBeUndefined();
+		expect(environment.TMUX).toBeUndefined();
+		expect(environment.GIT_CONFIG_NOSYSTEM).toBe("1");
+		expect(environment.GIT_ALLOW_PROTOCOL).toBe("file");
+		expect(environment.TMPDIR).toBe(join(fixture.fixtureRootDirectoryPath, "isolated-temporary-directory"));
+		expect(() =>
+			fixture.createIsolatedChildProcessEnvironment(
+				{ GIT_DIR: "/unowned/repository" },
+				{ independentPtyHostLaunchIsExcluded: true },
+			),
+		).toThrow("isolation-owned");
+	});
 	it("Git Trace2 仅写入隔离 fixture 的专用目录，不能覆盖 Git 安全环境或逃逸输出路径", () => {
 		const fixture = createIsolatedGitTestWorkspaceFixture();
 		const environment = fixture.createIsolatedChildProcessEnvironment(

@@ -226,6 +226,49 @@ async function scenario() {
 }
 
 describe("编辑器持久创建提交", { timeout: 30000 }, () => {
+	it("没有剩余工作时撤销创建启动意图，重新读盘后不重新申请启动", async () => {
+		const test = await scenario();
+		test.start.mockImplementation(async (_scope, card) => ({
+			agentSessionStartOutcome: "backlog_task_start_readiness_review_pending",
+			agentSessionStartFailureMessage: "没有剩余工作。",
+			ensuredTaskWorktreeWarningMessage: null,
+			startedAgentSessionSummary: null,
+			boardColumnIdOfTaskCardBeforeAction: "backlog",
+			taskCardWasMovedIntoInProgressColumnByThisAction: false,
+			taskCardSnapshotAfterAction: {
+				taskCard: {
+					...card,
+					backlogTaskStartReadinessReview: {
+						operationId: randomUUID(),
+						phase: "no_remaining_work",
+						summary: "没有剩余工作。",
+						updatedAtEpochMs: Date.now(),
+					},
+				},
+				boardColumnIdContainingTaskCard: "backlog",
+				taskSessionSummaryLiveInRuntimeProcessMemory: null,
+				taskSessionSummaryPersistedInWorkspaceSessionsFile: null,
+			},
+		}));
+		const request = test.request("ended", false);
+		await test.service.submit(test.target, request, evidence);
+		await test.service.settle();
+		expect(await readTaskEditorCreationSubmission(test.target.workspaceId, request.submissionId)).toMatchObject({
+			request: { startAgentAfterCreation: true },
+			status: {
+				cardPersisted: true,
+				phase: "completed",
+				startRequested: false,
+				startCompleted: false,
+				startCancellationReason: "no_remaining_work",
+			},
+		});
+		test.changeDependencies();
+		const restarted = test.makeService();
+		await restarted.submit(test.target, request, evidence);
+		await restarted.settle();
+		expect(test.start).toHaveBeenCalledTimes(1);
+	});
 	it("保存确认与阻塞启动即时通知，持久进度按项目恢复，Stop 立即排除旧记录", async () => {
 		const test = await scenario();
 		let releaseStart = () => {};

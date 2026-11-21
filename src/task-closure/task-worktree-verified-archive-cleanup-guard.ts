@@ -6,8 +6,19 @@ import { assertSourceGitWorkingStateMatchesSnapshot } from "../independent-task-
 import {
 	assertTaskClosureArchivePayloadIsRecoverable,
 	captureAndVerifyTaskClosureArchive,
+	reconcileTaskClosureVerifiedArchivePublication,
+	resolveTaskClosureArchiveManifest,
 } from "./task-closure-archive";
-import { readTaskClosureOperation } from "./task-closure-operation-store";
+import {
+	beginTaskClosureAutomaticSideEffect,
+	completeTaskClosureAutomaticSideEffect,
+	recordTaskClosureAutomaticFailure,
+} from "./task-closure-automatic-recovery-policy";
+import {
+	assertTaskClosureLifecycleNotCancelled,
+	readTaskClosureOperation,
+	writeTaskClosureOperation,
+} from "./task-closure-operation-store";
 
 /** 结案、永久删除、公开 delete-worktree 共用。024c5 的其他清理授权也应在此入口组合核验。 */
 export async function assertTaskWorktreeCleanupHasCurrentVerifiedArchive(input: {
@@ -49,17 +60,27 @@ export async function assertTaskWorktreeCleanupHasCurrentVerifiedArchive(input: 
 				card.taskClosureSummary?.archiveManifest.archiveDirectory !== operation.archiveManifest.archiveDirectory))
 	)
 		throw new TRPCError({ code: "PRECONDITION_FAILED", message: "归档凭据已失效或任务已重新打开，未删除工作树。" });
+	await assertTaskClosureLifecycleNotCancelled(operation);
+	await reconcileTaskClosureVerifiedArchivePublication(operation);
 	await assertSourceGitWorkingStateMatchesSnapshot(input.worktreePath, operation.archiveManifest.archiveDirectory);
 	try {
 		await assertTaskClosureArchivePayloadIsRecoverable(operation);
 	} catch {
-		// 来源仍匹配原快照时可修复损坏载荷；元数据缺失或来源漂移时上面的核验已拒绝清理。
-		const recovered = await captureAndVerifyTaskClosureArchive(operation);
-		if (
-			recovered.archiveDirectory !== operation.archiveManifest.archiveDirectory ||
-			recovered.headCommit !== operation.archiveManifest.headCommit
-		)
-			throw new Error("重新保全的归档身份与清理凭据不一致。");
+		try {
+			await beginTaskClosureAutomaticSideEffect(operation, "repair_archive", true);
+			const recovered = await captureAndVerifyTaskClosureArchive(operation, "damaged_archive_replacement");
+			if (recovered.headCommit !== operation.archiveManifest.headCommit)
+				throw new Error("修复归档的 HEAD 与原清理凭据不一致。");
+			operation.archiveRepairManifest = recovered;
+			await completeTaskClosureAutomaticSideEffect(operation);
+			await writeTaskClosureOperation(operation);
+		} catch (failure) {
+			await recordTaskClosureAutomaticFailure(operation, failure);
+			await writeTaskClosureOperation(operation);
+			throw failure;
+		}
 	}
-	await assertSourceGitWorkingStateMatchesSnapshot(input.worktreePath, operation.archiveManifest.archiveDirectory);
+	const resolved = resolveTaskClosureArchiveManifest(operation);
+	await assertSourceGitWorkingStateMatchesSnapshot(input.worktreePath, resolved?.archiveDirectory ?? "");
+	await assertTaskClosureLifecycleNotCancelled(operation);
 }
