@@ -1427,6 +1427,8 @@ export const runtimeAgentConversationPromptSubmissionAcceptanceSchema = z.object
 		.object({
 			checkedAtMs: z.number(),
 			submittedPromptTextNormalization: runtimeSubmittedPromptTextNormalizationSchema.optional(),
+			requiredNativeEventId: z.string().min(1).optional(),
+			exclusiveAcceptedBeforeMs: z.number().optional(),
 			nextCheckAtMs: z.number().nullable(),
 			consecutiveUnchangedCheckCount: z.number().int().nonnegative(),
 			reason: z.enum([

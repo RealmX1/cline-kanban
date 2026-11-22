@@ -1761,6 +1761,7 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 					decodedCliActorClaimsRequestHeader: { cliActorClaimsRequestHeaderStatus: "absent" },
 				},
 				beforeAgentProcessLaunch,
+				record.status.acceptedAtEpochMs,
 			),
 		readDependencyFingerprint: async (record) => {
 			const [config, identities, executableDirectories] = await Promise.all([

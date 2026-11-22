@@ -1,3 +1,4 @@
+import { isCrossProjectTaskSwitcherEntryPreparingAgentStartup } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import type { CrossProjectRecentlyActiveTaskSwitcherHostContextValue } from "@/components/detail-panels/cross-project-recently-active-task-switcher-host-context";
@@ -54,7 +55,14 @@ export function useAllProjectsFocusViewAdjacentTaskKeyboardNavigation({
 			model.beginRecentSectionKeyboardNavigationOrderLock();
 			// 同一帧连发的按键先推进游标，不等待项目握手或 React 提交。
 			navigationCursorRef.current = { workspaceId: next.workspaceId, taskId: next.entry.taskId };
-			latestHost.onOpenTaskInProject(next.workspaceId, next.entry.taskId);
+			if (isCrossProjectTaskSwitcherEntryPreparingAgentStartup(next.entry, next.workspaceId))
+				latestHost.onOpenTaskInProject(
+					next.workspaceId,
+					next.entry.taskId,
+					next.entry.createdAt,
+					"agent_startup_detail",
+				);
+			else latestHost.onOpenTaskInProject(next.workspaceId, next.entry.taskId);
 		},
 		{
 			enabled,

@@ -80,6 +80,44 @@ function persistVerificationThroughSchema(
 }
 
 describe("Codex 持久提交标记的只读接受补证", () => {
+	it("分页期间取得下一代起点后，旧缓存的同文事件不再合格", async () => {
+		const { summary } = await fixture([nativeUser("later", 2_000), { type: "noise", text: "x".repeat(1000) }]);
+		const first = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 3_000,
+			maximumReadBytes: 512,
+		});
+		if (!first) throw new Error("缺少首次分页结果");
+		expect(first.accepted).toBeUndefined();
+		expect(first.verification.matchingNativeMessages?.[0]?.nativeItemId).toBe("later");
+		persistVerificationThroughSchema(summary, first.verification);
+
+		const resumed = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 3_001,
+			exclusiveAcceptedBeforeMs: attemptedAtMs + 1_000,
+		});
+		expect(resumed?.accepted).toBeUndefined();
+		expect(resumed?.verification.matchingNativeMessages).toEqual([]);
+		expect(resumed?.verification.exclusiveAcceptedBeforeMs).toBe(attemptedAtMs + 1_000);
+	});
+
+	it("旧的同文比较已到 EOF 时，晚到的精确事件编号仍能从原记录补证", async () => {
+		const { summary } = await fixture([nativeUser("first"), nativeUser("second", 300), nativeUser("target", 400)]);
+		const first = await reconcileCodexPromptSubmissionAcceptance({ summary, observedAtMs: attemptedAtMs + 1_000 });
+		if (!first) throw new Error("缺少首次扫描结果");
+		expect(first.verification.reason).toBe("ambiguous_native_messages");
+		persistVerificationThroughSchema(summary, first.verification);
+
+		const resumed = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 1_001,
+			requiredNativeEventId: "codex:native:turn:target",
+		});
+		expect(resumed?.accepted?.eventId).toBe("codex:native:turn:target");
+		expect(resumed?.verification.requiredNativeEventId).toBe("codex:native:turn:target");
+	});
+
 	it("旧 hook 在 EOF 且耗尽重试后重新补证，保留折叠摘要的核验来源", async () => {
 		const prompt = "执行修复\r\n\t保留  缩进\n\n并验证";
 		const { summary } = await fixture([nativeUser("input", 90_000, prompt)]);
@@ -502,6 +540,44 @@ describe("Codex 持久提交标记的只读接受补证", () => {
 		const second = await reconcileCodexPromptSubmissionAcceptance({ summary, observedAtMs: attemptedAtMs + 61_000 });
 		expect(second?.accepted).toBeUndefined();
 		expect(second?.verification.reason).toBe("native_identity_changed");
+	});
+
+	it("下一代开始后的同文记录不计入本次提交，已记录的原事件编号仍然唯一", async () => {
+		const prompt = "原启动正文";
+		const { summary } = await fixture([
+			nativeUser("startup-message", 1_000, prompt),
+			nativeUser("later-message", 80_000, prompt),
+		]);
+		const candidate = summary.agentConversationPromptSubmissionAcceptance;
+		if (!candidate) throw new Error("缺少候选");
+		candidate.submittedPromptSha256 = submittedPromptSha256(prompt);
+		const bounded = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 120_000,
+			exclusiveAcceptedBeforeMs: attemptedAtMs + 60_000,
+		});
+		expect(bounded?.accepted).toEqual({
+			eventId: "codex:native:turn:startup-message",
+			acceptedAtMs: attemptedAtMs + 1_000,
+		});
+		const onlyLater = await fixture([nativeUser("later-message", 80_000, prompt)]);
+		const laterCandidate = onlyLater.summary.agentConversationPromptSubmissionAcceptance;
+		if (!laterCandidate) throw new Error("缺少后一代候选");
+		laterCandidate.submittedPromptSha256 = submittedPromptSha256(prompt);
+		const rejected = await reconcileCodexPromptSubmissionAcceptance({
+			summary: onlyLater.summary,
+			observedAtMs: attemptedAtMs + 120_000,
+			exclusiveAcceptedBeforeMs: attemptedAtMs + 60_000,
+		});
+		expect(rejected?.accepted).toBeUndefined();
+		expect(rejected?.verification.reason).toBe("no_matching_native_message");
+		candidate.eventId = "codex:native:turn:startup-message";
+		const pinned = await reconcileCodexPromptSubmissionAcceptance({
+			summary,
+			observedAtMs: attemptedAtMs + 120_000,
+			requiredNativeEventId: candidate.eventId,
+		});
+		expect(pinned?.accepted?.eventId).toBe("codex:native:turn:startup-message");
 	});
 
 	it("无变化三次后取消定时重试，新的证据可显式唤醒", async () => {

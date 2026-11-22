@@ -36,7 +36,7 @@ export function useCrossProjectRecentlyActiveTaskSwitcherHost({
 	selectedCardTaskId: string | null;
 	pendingCrossProjectTaskOpen: PendingCrossProjectTaskOpen | null;
 	onOpenRelationsVisualizationForTask?: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["onOpenRelationsVisualizationForTask"];
-	onOpenTaskInProject: (workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
+	onOpenTaskInProject: CrossProjectRecentlyActiveTaskSwitcherHostContextValue["onOpenTaskInProject"];
 	onOpenBacklogTaskEditorInProject: (workspaceId: string, taskId: string) => void;
 	onRequestCreateTaskInBoardScope: () => void;
 	onRequestPinCurrentProjectTaskToTaskPinboard: (taskId: string) => void;

@@ -258,17 +258,25 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 			acceptedAtEpochMs: NOW_MS,
 			updatedAtEpochMs: NOW_MS,
 		};
+		const onOpenTaskInProject = vi.fn();
+		const onOpenBacklogTaskEditorInProject = vi.fn();
 		const renderEntries = (phase: "starting_agent" | "waiting_for_evidence", live = false) => {
 			const entries = [
 				makeEntry("start", {
 					createdAt: 123,
-					columnId: "in_progress",
+					columnId: live ? "in_progress" : "backlog",
 					taskEditorCreationAgentStartupProgress: { ...progress, phase },
 					...(live ? { turnOwner: "agent" as const, liveness: "live" as const } : {}),
 				}),
 				makeEntry("live", { turnOwner: "agent", liveness: "live" }),
 			];
-			renderBoard(makeHost({ projects: [makeProject("project-a", entries)] }));
+			renderBoard(
+				makeHost({
+					projects: [makeProject("project-a", entries)],
+					onOpenTaskInProject,
+					onOpenBacklogTaskEditorInProject,
+				}),
+			);
 		};
 		renderEntries("starting_agent");
 		const running = container.querySelector<HTMLElement>(
@@ -280,6 +288,15 @@ describe("BoardScopeAllProjectsHomePageCrossProjectTaskSwitcherSectionColumnsBoa
 		).toBe("正在启动");
 		renderEntries("waiting_for_evidence");
 		expect(running?.textContent).toContain("正在核验启动结果");
+		act(() =>
+			running
+				?.querySelector<HTMLButtonElement>(
+					'[data-cross-project-task-switcher-task-id="start"] button[aria-label^="打开任务"]',
+				)
+				?.click(),
+		);
+		expect(onOpenTaskInProject).toHaveBeenCalledWith("project-a", "start", 123, "agent_startup_detail");
+		expect(onOpenBacklogTaskEditorInProject).not.toHaveBeenCalled();
 		renderEntries("starting_agent", true);
 		expect(running?.textContent).toContain("2 运行中");
 		expect(

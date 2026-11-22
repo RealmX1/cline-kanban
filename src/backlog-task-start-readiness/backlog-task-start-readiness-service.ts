@@ -5,6 +5,7 @@ import {
 	submittedPromptSha256,
 } from "../agent-session-history/codex-prompt-submission-acceptance-reconciliation";
 import type {
+	RuntimeAgentConversationPromptSubmissionAcceptance,
 	RuntimeBoardCard,
 	RuntimeBoardData,
 	RuntimeTaskCardActionStartAgentSessionRequest,
@@ -33,6 +34,7 @@ import {
 import type { RuntimeTrpcWorkspaceScope } from "../trpc/app-router";
 import {
 	assessBacklogTaskStartReadiness,
+	BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS,
 	waitingForBacklogTaskReadinessEvidence,
 } from "./backlog-task-start-readiness-assessment";
 import {
@@ -236,8 +238,9 @@ export async function prepareBacklogTaskStartReadiness(input: {
 	request: RuntimeTaskCardActionStartAgentSessionRequest;
 	evidence: KanbanRequestOriginActorEvidence;
 	startRequested: boolean;
+	taskEditorCreationStartAcceptedAtEpochMs?: number;
 	authorizeUnshelvingForExplicitBacklogStart?: boolean;
-	publishReview: (review: BacklogTaskStartReadinessReview) => Promise<void>;
+	publishReview: (review: BacklogTaskStartReadinessReview | undefined) => Promise<void>;
 }) {
 	const { scope, card, request } = input;
 	let record = await readBacklogTaskStartReadinessOperation(scope.workspaceId, card.id, card.createdAt);
@@ -255,6 +258,8 @@ export async function prepareBacklogTaskStartReadiness(input: {
 		(record?.review.operationId !== request.resumeBacklogTaskStartReadinessOperationId || !record.startRequested)
 	)
 		throw new TRPCError({ code: "CONFLICT", message: "原启动操作已变化，不能接续过期操作。" });
+	if (!input.startRequested && record?.startRequested)
+		throw new TRPCError({ code: "CONFLICT", message: "已有待处理的启动请求，不能同时进行独立开启复核。" });
 	if (!record || (record.review.phase === "stopped" && !request.resumeBacklogTaskStartReadinessOperationId)) {
 		record = {
 			schemaVersion: 1,
@@ -285,17 +290,45 @@ export async function prepareBacklogTaskStartReadiness(input: {
 	if (startAuthorizationChanged) {
 		record.startRequested = true;
 		record.authorizedBacklogUnshelvingLastChangedAt = authorizedBacklogUnshelvingLastChangedAt;
-		record.acceptedAtEpochMs = Date.now();
+		record.acceptedAtEpochMs = input.taskEditorCreationStartAcceptedAtEpochMs ?? Date.now();
+		record.startRequestedByTaskEditorCreationSubmission = undefined;
 		record.acceptedStartRequest = { ...request, expectedTaskIncarnationCreatedAtEpochMs: card.createdAt };
 		record.acceptedRequestOriginEvidence = input.evidence;
 	}
+	if (input.taskEditorCreationStartAcceptedAtEpochMs !== undefined)
+		record.startRequestedByTaskEditorCreationSubmission = true;
 	await assertBacklogTaskStartOperationEligible(record, card, "backlog");
-	const persist = async () => {
+	const persist = async (publishAssessment = true) => {
 		record.review.updatedAtEpochMs = Date.now();
 		await writeBacklogTaskStartReadinessOperation(record);
-		await input.publishReview(record.review);
+		await input.publishReview(publishAssessment ? record.review : undefined);
 	};
-	if (!record.reports.length) {
+	const hasExplicitStartConditions = Boolean(card.backlogTaskStartReadinessConditionsText?.trim());
+	const requestedConditionOverride = hasExplicitStartConditions
+		? request.overrideUnmetBacklogTaskStartConditions
+		: undefined;
+	if (
+		!hasExplicitStartConditions &&
+		request.overrideUnmetBacklogTaskStartConditions &&
+		!request.resumeBacklogTaskStartReadinessOperationId
+	)
+		throw new TRPCError({ code: "CONFLICT", message: "任务未声明开启条件，无可覆盖的条件。" });
+	if (
+		input.startRequested &&
+		!hasExplicitStartConditions &&
+		(record.startRequestedByTaskEditorCreationSubmission ||
+			record.acceptedAtEpochMs - card.createdAt < BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS)
+	) {
+		record.unconditionedStartWithoutReadinessReviewTaskFingerprint = fingerprintBacklogTaskStartReadinessInput(card);
+		record.review.phase = "ready";
+		record.review.summary = "已受理直接启动，正在准备原会话。";
+		record.nextAttemptAtEpochMs = 0;
+		await persist(false);
+		return { record, report: null, canStart: true };
+	}
+	const wasStartingWithoutReadinessReview = Boolean(record.unconditionedStartWithoutReadinessReviewTaskFingerprint);
+	record.unconditionedStartWithoutReadinessReviewTaskFingerprint = undefined;
+	if (!record.reports.length || wasStartingWithoutReadinessReview) {
 		record.review.phase = "reviewing";
 		record.review.summary = "启动前复核";
 		await persist();
@@ -326,7 +359,7 @@ export async function prepareBacklogTaskStartReadiness(input: {
 				collected.changedRepositoryPaths,
 				collected.uncertaintyReasons,
 				fingerprintRelatedBacklogTaskWorkSummaries(collected.relatedTaskSummaries),
-				Math.floor(collected.taskAgeMs / 86400000),
+				Math.floor(collected.taskAgeMs / BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS),
 				modelAvailability.fingerprint,
 			]);
 		const observedReadOnlyEvidence = await Promise.all(
@@ -353,7 +386,9 @@ export async function prepareBacklogTaskStartReadiness(input: {
 				? priorAssessmentDependencyBaseFingerprint
 				: buildDependencyBaseFingerprint(taskFingerprint);
 		const dependencyFingerprint = buildDependencyFingerprint(dependencyBaseFingerprint);
-		const dependenciesUnchanged = dependencyFingerprint === record.lastDependencyFingerprint;
+		const dependenciesUnchanged =
+			dependencyFingerprint === record.lastDependencyFingerprint &&
+			(hasExplicitStartConditions || priorReport?.decision.conclusion !== "conditions_not_met");
 		if (
 			dependenciesUnchanged &&
 			priorReport?.decision.conclusion === "waiting_for_evidence" &&
@@ -374,14 +409,14 @@ export async function prepareBacklogTaskStartReadiness(input: {
 			dependenciesUnchanged &&
 			record.sameDependencyAttemptCount >= 3 &&
 			priorReport?.decision.conclusion === "waiting_for_evidence" &&
-			!request.overrideUnmetBacklogTaskStartConditions
+			!requestedConditionOverride
 		)
 			return { record, report: priorReport, canStart: false };
 		if (
 			dependenciesUnchanged &&
 			priorReport &&
 			!["ready", "revise_remaining_work", "waiting_for_evidence"].includes(priorReport.decision.conclusion) &&
-			!request.overrideUnmetBacklogTaskStartConditions
+			!requestedConditionOverride
 		) {
 			if (priorReport.decision.conclusion === "no_remaining_work" && record.startRequested) {
 				record.startRequested = false;
@@ -466,14 +501,16 @@ export async function prepareBacklogTaskStartReadiness(input: {
 		)
 			record.reports.push(report);
 		const override =
-			request.overrideUnmetBacklogTaskStartConditions ??
-			record.conditionOverrides
-				.filter(
-					(entry) =>
-						entry.operationId === record.review.operationId &&
-						entry.dependencyFingerprint === dependencyFingerprint,
-				)
-				.at(-1);
+			requestedConditionOverride ??
+			(hasExplicitStartConditions
+				? record.conditionOverrides
+						.filter(
+							(entry) =>
+								entry.operationId === record.review.operationId &&
+								entry.dependencyFingerprint === dependencyFingerprint,
+						)
+						.at(-1)
+				: undefined);
 		if (override) {
 			if (override.operationId !== record.review.operationId || decision.conclusion !== "conditions_not_met")
 				throw new TRPCError({
@@ -481,7 +518,7 @@ export async function prepareBacklogTaskStartReadiness(input: {
 					message: "只能显式覆盖当前复核中尚未满足的条件；其他门禁继续有效。",
 				});
 			if (
-				request.overrideUnmetBacklogTaskStartConditions &&
+				requestedConditionOverride &&
 				!record.conditionOverrides.some(
 					(entry) => entry.operationId === override.operationId && entry.reason === override.reason,
 				)
@@ -525,12 +562,20 @@ export function isBacklogTaskReadinessRevisionFromReport(
 	);
 }
 
-export function assertBacklogTaskReadinessCardMatchesReport(
+export function assertBacklogTaskStartInputStillCurrent(
 	record: BacklogTaskStartReadinessOperation,
 	card: RuntimeBoardCard,
 	columnId: string,
 ) {
 	assertBacklogTaskShelvingAndStageAllowReadinessOperation(record, card, columnId);
+	if (record.unconditionedStartWithoutReadinessReviewTaskFingerprint) {
+		if (
+			record.unconditionedStartWithoutReadinessReviewTaskFingerprint !==
+			fingerprintBacklogTaskStartReadinessInput(card)
+		)
+			throw new TRPCError({ code: "CONFLICT", message: "启动准备期间任务已编辑，等待重新核验当前启动资格。" });
+		return null;
+	}
 	const report = record.reports.at(-1);
 	if (
 		!report ||
@@ -548,7 +593,8 @@ export async function assertBacklogTaskReadinessReportStillCurrent(
 	launchingWorkspacePath?: string,
 ) {
 	await assertBacklogTaskStartOperationEligible(record, card, columnId);
-	const report = assertBacklogTaskReadinessCardMatchesReport(record, card, columnId);
+	const report = assertBacklogTaskStartInputStillCurrent(record, card, columnId);
+	if (!report) return null;
 	const readRepository =
 		launchingWorkspacePath === undefined
 			? readSharedBacklogProjectRepositoryObservation
@@ -608,11 +654,13 @@ export async function assertBacklogTaskReadinessReportStillCurrent(
 	)
 		throw new TRPCError({ code: "CONFLICT", message: "复核引用的文件或未合入任务工作已变化，旧结果失效。" });
 	await assertBacklogTaskStartOperationEligible(record, card, columnId);
+	return report;
 }
 
 export async function observeBacklogTaskInitialLaunchReceipt(
 	record: BacklogTaskStartReadinessOperation,
 	session: RuntimeTaskSessionSummary | null | undefined,
+	additionalSessions: ReadonlyArray<RuntimeTaskSessionSummary | null | undefined> = [],
 ) {
 	const launchTimestamp = record.agentProcessLaunchMayHaveBegunAtEpochMs;
 	const prepared = record.launchingSessionSnapshot;
@@ -620,14 +668,57 @@ export async function observeBacklogTaskInitialLaunchReceipt(
 	const promptSha256 = record.initialPromptSha256;
 	if (launchTimestamp === null || !prepared || !generation || !promptSha256) return false;
 
-	const sameGeneration = session?.taskId === prepared.taskId && session.runtimeSessionIncarnationId === generation;
-	const observed = sameGeneration ? session : prepared;
-	const candidate = observed.agentConversationPromptSubmissionAcceptance;
-	const matchesPrompt =
-		candidate?.runtimeSessionIncarnationId === generation &&
-		candidate.attemptedAtMs >= launchTimestamp &&
-		candidate.submittedPromptSha256 === promptSha256;
-	if (matchesPrompt && candidate.status === "accepted" && (candidate.confirmedAtMs ?? 0) >= launchTimestamp)
+	const knownSessions = [session, ...additionalSessions].filter(
+		(candidate): candidate is RuntimeTaskSessionSummary => candidate != null,
+	);
+	const sameGenerationSession = knownSessions.find(
+		(candidate) => candidate.taskId === prepared.taskId && candidate.runtimeSessionIncarnationId === generation,
+	);
+	const observed = sameGenerationSession ?? prepared;
+	const persistedLaunchReceiptVerification = prepared.agentConversationPromptSubmissionAcceptance?.verification;
+	const persistedOriginalGenerationEventId = persistedLaunchReceiptVerification?.requiredNativeEventId;
+	let differentGenerationLacksStart = false;
+	// 后续摘要会替换旧摘要。已知的第一条换代边界只允许收紧。
+	let exclusiveAcceptedBeforeMs = persistedLaunchReceiptVerification?.exclusiveAcceptedBeforeMs;
+	for (const candidate of knownSessions) {
+		if (candidate.taskId !== prepared.taskId || candidate.runtimeSessionIncarnationId === generation) continue;
+		if (typeof candidate.startedAt !== "number" || !Number.isFinite(candidate.startedAt)) {
+			differentGenerationLacksStart = true;
+			continue;
+		}
+		exclusiveAcceptedBeforeMs =
+			exclusiveAcceptedBeforeMs === undefined
+				? candidate.startedAt
+				: Math.min(exclusiveAcceptedBeforeMs, candidate.startedAt);
+	}
+	const originalGenerationEventId =
+		persistedOriginalGenerationEventId ??
+		[observed, prepared]
+			.map((summary) => summary.agentConversationPromptSubmissionAcceptance)
+			.find(
+				(candidate) =>
+					candidate?.runtimeSessionIncarnationId === generation &&
+					candidate.attemptedAtMs >= launchTimestamp &&
+					typeof candidate.eventId === "string" &&
+					candidate.eventId.length > 0,
+			)?.eventId;
+	const launchReceiptCandidates = [
+		prepared.agentConversationPromptSubmissionAcceptance,
+		observed.agentConversationPromptSubmissionAcceptance,
+	].filter(
+		(candidate): candidate is RuntimeAgentConversationPromptSubmissionAcceptance =>
+			candidate?.runtimeSessionIncarnationId === generation &&
+			candidate.attemptedAtMs >= launchTimestamp &&
+			candidate.submittedPromptSha256 === promptSha256,
+	);
+	if (
+		launchReceiptCandidates.some(
+			(candidate) =>
+				candidate.status === "accepted" &&
+				(candidate.confirmedAtMs ?? 0) >= launchTimestamp &&
+				(!persistedOriginalGenerationEventId || candidate.eventId === persistedOriginalGenerationEventId),
+		)
+	)
 		return true;
 
 	try {
@@ -644,16 +735,40 @@ export async function observeBacklogTaskInitialLaunchReceipt(
 		)
 			return true;
 
-		// 采用原代次实际捕获的提交候选和原生身份；准备快照本身可能早于这两项证据。
-		if (observed.agentId === "codex" && matchesPrompt) {
+		const nativeIdentity =
+			observed.agentNativeConversationSessionIdentity ?? prepared.agentNativeConversationSessionIdentity;
+		// 换代后若不知道新代次何时开始，共享转录里的同文记录无法归给原代次。
+		if (prepared.agentId === "codex" && nativeIdentity?.sourceAgentId === "codex" && !differentGenerationLacksStart) {
+			// 摘要可能没有正文摘要，或已被后续提交覆盖。沿原启动的代次、时刻和正文摘要只读核对。
+			const candidate = launchReceiptCandidates.find(
+				(candidate) =>
+					candidate.status !== "accepted" &&
+					(!candidate.nativeSessionId || candidate.nativeSessionId === nativeIdentity.nativeSessionId),
+			) ?? {
+				status: "pending" as const,
+				attemptedAtMs: launchTimestamp,
+				runtimeSessionIncarnationId: generation,
+				nativeSessionId: nativeIdentity.nativeSessionId,
+				submittedPromptSha256: promptSha256,
+			};
 			const observation = await reconcileCodexPromptSubmissionAcceptance({
-				summary: observed,
+				summary: {
+					...prepared,
+					agentNativeConversationSessionIdentity: nativeIdentity,
+					agentConversationPromptSubmissionAcceptance: candidate,
+				},
 				observedAtMs: Date.now(),
 				maximumReadBytes: 256000,
+				requiredNativeEventId: originalGenerationEventId,
+				exclusiveAcceptedBeforeMs,
 			});
 			if (observation) {
 				record.launchingSessionSnapshot = {
-					...observed,
+					...prepared,
+					agentNativeConversationSessionIdentity: observation.verification.transcriptCursor
+						?.verifiedSessionMetadata
+						? nativeIdentity
+						: prepared.agentNativeConversationSessionIdentity,
 					agentConversationPromptSubmissionAcceptance: {
 						...candidate,
 						verification: observation.verification,

@@ -1,6 +1,7 @@
 import {
 	buildCrossProjectTaskSwitcherEntryKey,
 	type CrossProjectTaskSwitcherEntryInProject,
+	isCrossProjectTaskSwitcherEntryPreparingAgentStartup,
 } from "@runtime-cross-project-recently-active-task-switcher-section-assignment";
 import { CornerUpLeft } from "lucide-react";
 import { type ReactElement, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
@@ -348,11 +349,18 @@ export function useCrossProjectTaskSwitcherSectionRowRenderingSharedAcrossScroll
 		const { workspaceId, entry } = entryInProject;
 		// 已经点了：待发的 hover 意图作废。已经 hover 展开的行保留，让卡体及其打开的弹窗继续交互。
 		rowHoverExpansionOfHostingScrollContainer.cancelPendingHoverIntent();
-		if (entry.columnId === "backlog" && !entry.taskShelvingState?.isShelved && onOpenBacklogTaskEditorInProject) {
+		if (isCrossProjectTaskSwitcherEntryPreparingAgentStartup(entry, workspaceId)) {
+			host.onOpenTaskInProject(workspaceId, entry.taskId, entry.createdAt, "agent_startup_detail");
+		} else if (
+			entry.columnId === "backlog" &&
+			!entry.taskShelvingState?.isShelved &&
+			onOpenBacklogTaskEditorInProject
+		) {
 			onOpenBacklogTaskEditorInProject(workspaceId, entry.taskId);
 			return;
+		} else {
+			host.onOpenTaskInProject(workspaceId, entry.taskId);
 		}
-		host.onOpenTaskInProject(workspaceId, entry.taskId);
 		if (section === "pinned" && revealsSectionRowWhenPinnedRowActivated) {
 			requestRevealSectionRow(buildCrossProjectTaskSwitcherEntryKey(workspaceId, entry.taskId));
 		}

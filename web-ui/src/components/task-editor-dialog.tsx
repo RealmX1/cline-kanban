@@ -310,7 +310,11 @@ export function TaskEditorDialogForm({
 	images: TaskImage[];
 	onImagesChange: Dispatch<SetStateAction<TaskImage[]>>;
 	onTaskCreationCardPersisted?: (workspaceId: string, card: BoardCard, suggestTitle: boolean) => void;
-	onOpenCreatedTaskWithRelations?: (workspaceId: string, taskId: string) => void;
+	onOpenCreatedTaskWithRelations?: (
+		workspaceId: string,
+		taskId: string,
+		taskIncarnationCreatedAtEpochMs: number,
+	) => void;
 	onCreate: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateAndStart?: (options?: TaskEditorSubmitOptions) => string | null;
 	onCreateMultiple: (prompts: string[], options?: { keepDialogOpen?: boolean }) => string[];
@@ -971,7 +975,11 @@ export function TaskEditorDialogForm({
 				if (!promptOverride) resetForCreateMore();
 				if (!keepOpen) onOpenChange(false);
 				if (pending.openTaskAfterPersistence && confirmedTaskCreationSubmissionStatus.phase !== "identity_conflict")
-					onOpenCreatedTaskWithRelations?.(pending.workspaceId, pending.request.newTaskCard.id);
+					onOpenCreatedTaskWithRelations?.(
+						pending.workspaceId,
+						pending.request.newTaskCard.id,
+						pending.request.newTaskCard.createdAt,
+					);
 				return true;
 			}
 			setSelectedTargetWorkspaceId(assignment.workspaceId);
@@ -1032,7 +1040,12 @@ export function TaskEditorDialogForm({
 					started.response.agentSessionStartOutcome === "agent_session_start_failed"
 				)
 					throw new Error(started.response.agentSessionStartFailureMessage ?? "任务已保存，但 Agent 启动失败。");
-				if (action === "start_and_open") onOpenCreatedTaskWithRelations?.(assignment.workspaceId, taskId);
+				if (action === "start_and_open")
+					onOpenCreatedTaskWithRelations?.(
+						assignment.workspaceId,
+						taskId,
+						started.response.taskCardSnapshotAfterAction.taskCard.createdAt,
+					);
 			}
 			relationModeling.discard();
 			if (!isSubmittedInputStillCurrent()) return true;
@@ -1203,7 +1216,11 @@ export function TaskEditorDialogForm({
 				}
 				if (!pending.keepEditorOpenAfterPersistence) onOpenChange(false);
 				if (pending.openTaskAfterPersistence && status.phase !== "identity_conflict")
-					onOpenCreatedTaskWithRelations?.(pending.workspaceId, pending.request.newTaskCard.id);
+					onOpenCreatedTaskWithRelations?.(
+						pending.workspaceId,
+						pending.request.newTaskCard.id,
+						pending.request.newTaskCard.createdAt,
+					);
 			} catch (error) {
 				if (!cancelled)
 					setRelationAwareCreationError(

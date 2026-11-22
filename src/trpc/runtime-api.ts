@@ -1398,7 +1398,7 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 					return {
 						ok: false,
 						summary: null,
-						error: "Backlog 必须通过 taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress 完成启动前复核。",
+						error: "Backlog 必须通过 taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress 核对启动资格并保留启动记录。",
 					};
 				if (owningCard?.independentTaskCreationProvenance) {
 					await assertIndependentTaskSourceLandedBeforeInitialStart({

@@ -1194,7 +1194,7 @@ describe("TaskEditorDialog interactions", () => {
 		await act(async () => resolveDraftRead(null));
 		await dispatchDocumentKeyDown({ key: "Enter", code: "Enter", altKey: true, shiftKey: true });
 		expect(props.onOpenChange).toHaveBeenCalledWith(false);
-		expect(openDetail).toHaveBeenCalledWith("project-1", "open1");
+		expect(openDetail).toHaveBeenCalledWith("project-1", "open1", expect.any(Number));
 	});
 
 	it("保存已确认但身份冲突时关闭原表单，不自动打开同 ID 的新一世任务", async () => {

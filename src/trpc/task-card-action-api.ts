@@ -10,8 +10,8 @@ import {
 	writeBacklogTaskStartReadinessOperation,
 } from "../backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
 import {
-	assertBacklogTaskReadinessCardMatchesReport,
 	assertBacklogTaskReadinessReportStillCurrent,
+	assertBacklogTaskStartInputStillCurrent,
 	assertBacklogTaskStartNotStoppedAtLaunchBoundary,
 	BacklogTaskStartReadinessRuntimeClosingError,
 	isBacklogTaskReadinessRevisionFromReport,
@@ -420,8 +420,9 @@ export function createTaskCardActionApi(
 	const publishBacklogTaskStartReadinessReview = async (
 		scope: RuntimeTrpcWorkspaceScope,
 		card: RuntimeBoardCard,
-		review: BacklogTaskStartReadinessReview,
+		review: BacklogTaskStartReadinessReview | undefined,
 	) => {
+		if (!review && !card.backlogTaskStartReadinessReview) return;
 		const mutation = await mutateWorkspaceState(
 			scope.workspacePath,
 			buildTaskMutationIntentForKanbanRuntimeSystemComponent(
@@ -435,7 +436,7 @@ export function createTaskCardActionApi(
 						...column,
 						cards: column.cards.map((candidate) =>
 							candidate.id === card.id && candidate.createdAt === card.createdAt
-								? { ...candidate, backlogTaskStartReadinessReview: { ...review } }
+								? { ...candidate, backlogTaskStartReadinessReview: review ? { ...review } : undefined }
 								: candidate,
 						),
 					})),
@@ -1326,7 +1327,8 @@ export function createTaskCardActionApi(
 				input.taskId,
 				found.taskCard.createdAt,
 			);
-			if (!record) throw new TRPCError({ code: "NOT_FOUND", message: "该任务尚未进行开启复核。" });
+			if (!record || (record.unconditionedStartWithoutReadinessReviewTaskFingerprint && !record.reports.length))
+				throw new TRPCError({ code: "NOT_FOUND", message: "该任务尚未进行开启复核。" });
 			return { review: record.review, report: record.reports.at(-1) ?? null };
 		},
 		assessBacklogTaskStartReadiness: async (scope, input, evidence) =>
@@ -1356,6 +1358,7 @@ export function createTaskCardActionApi(
 			input,
 			kanbanRequestOriginActorEvidence,
 			beforeAgentProcessLaunch,
+			taskEditorCreationStartAcceptedAtEpochMs,
 		) =>
 			await runSeriallyForTaskCards(workspaceScope, [input.taskId], async () => {
 				const initialState = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
@@ -1391,6 +1394,15 @@ export function createTaskCardActionApi(
 					workspaceScope.workspacePath,
 					input.expectedTaskIncarnationCreatedAtEpochMs,
 				);
+				const publishStartOperationReview = (
+					card: RuntimeBoardCard,
+					operation: BacklogTaskStartReadinessOperation,
+				) =>
+					publishBacklogTaskStartReadinessReview(
+						workspaceScope,
+						card,
+						operation.unconditionedStartWithoutReadinessReviewTaskFingerprint ? undefined : operation.review,
+					);
 				const respondWithoutStarting = async (): Promise<RuntimeTaskCardActionStartAgentSessionResponse> => ({
 					boardColumnIdOfTaskCardBeforeAction: initialFound.boardColumnId,
 					taskCardWasMovedIntoInProgressColumnByThisAction: false,
@@ -1411,27 +1423,22 @@ export function createTaskCardActionApi(
 				)
 					return await respondWithoutStarting();
 				if (readinessOperation?.agentProcessLaunchMayHaveBegunAtEpochMs) {
+					const launchSessionId = resolveMainTaskConversationSessionId(initialFound.taskCard);
 					const session = deps.findTaskSessionSummaryLiveInRuntimeProcessMemory(
 						workspaceScope.workspaceId,
-						resolveMainTaskConversationSessionId(initialFound.taskCard),
+						launchSessionId,
 					);
 					if (
 						readinessOperation.review.phase === "started" ||
-						(await observeBacklogTaskInitialLaunchReceipt(readinessOperation, session)) ||
-						(await observeBacklogTaskInitialLaunchReceipt(
-							readinessOperation,
-							initialState.sessions[resolveMainTaskConversationSessionId(initialFound.taskCard)],
-						))
+						(await observeBacklogTaskInitialLaunchReceipt(readinessOperation, session, [
+							initialState.sessions[launchSessionId],
+						]))
 					) {
 						readinessOperation.review.phase = "started";
 						readinessOperation.startRequested = false;
 						readinessOperation.review.summary = "已核对原启动事实，未重复发送 Initial Prompt。";
 						await writeBacklogTaskStartReadinessOperation(readinessOperation);
-						await publishBacklogTaskStartReadinessReview(
-							workspaceScope,
-							initialFound.taskCard,
-							readinessOperation.review,
-						);
+						await publishStartOperationReview(initialFound.taskCard, readinessOperation);
 						return {
 							...(await respondWithoutStarting()),
 							agentSessionStartOutcome: "agent_session_already_in_agent_turn_so_start_was_skipped",
@@ -1441,11 +1448,7 @@ export function createTaskCardActionApi(
 					readinessOperation.review.summary =
 						"原启动可能已执行，正在核验原会话与持久启动事实，避免重复发送 Initial Prompt。";
 					await writeBacklogTaskStartReadinessOperation(readinessOperation);
-					await publishBacklogTaskStartReadinessReview(
-						workspaceScope,
-						initialFound.taskCard,
-						readinessOperation.review,
-					);
+					await publishStartOperationReview(initialFound.taskCard, readinessOperation);
 					return await respondWithoutStarting();
 				}
 				if (
@@ -1461,6 +1464,7 @@ export function createTaskCardActionApi(
 						request: input,
 						evidence: kanbanRequestOriginActorEvidence,
 						startRequested: true,
+						taskEditorCreationStartAcceptedAtEpochMs,
 						authorizeUnshelvingForExplicitBacklogStart:
 							initialFound.boardColumnId === "backlog" &&
 							!input.resumeBacklogTaskStartReadinessOperationId &&
@@ -1488,7 +1492,7 @@ export function createTaskCardActionApi(
 						if (readinessOperation.review.phase !== "stopped") readinessOperation.review.phase = "invalidated";
 						readinessOperation.review.summary = toErrorMessage(error);
 						await writeBacklogTaskStartReadinessOperation(readinessOperation);
-						await publishBacklogTaskStartReadinessReview(workspaceScope, card, readinessOperation.review);
+						await publishStartOperationReview(card, readinessOperation);
 						throw error;
 					}
 				};
@@ -1512,15 +1516,15 @@ export function createTaskCardActionApi(
 						input.expectedTaskIncarnationCreatedAtEpochMs,
 					);
 					let boardBeforeMovement = state.board;
-					if (readinessOperation)
-						await assertBacklogTaskReadinessReportStillCurrent(
-							readinessOperation,
-							found.taskCard,
-							found.boardColumnId,
-							readinessWorktree?.ok ? readinessWorktree.path : undefined,
-						);
+					const report = readinessOperation
+						? await assertBacklogTaskReadinessReportStillCurrent(
+								readinessOperation,
+								found.taskCard,
+								found.boardColumnId,
+								readinessWorktree?.ok ? readinessWorktree.path : undefined,
+							)
+						: null;
 					if (readinessOperation && readinessWorktree?.ok) {
-						const report = readinessOperation.reports.at(-1);
 						const revision = report?.decision.remainingWorkRevision;
 						if (report && revision && !isBacklogTaskReadinessRevisionFromReport(found.taskCard, report)) {
 							const updated = updateTask(
@@ -1543,7 +1547,7 @@ export function createTaskCardActionApi(
 								revisedTaskFingerprint: fingerprintBacklogTaskStartReadinessInput(revised),
 							};
 							found = { ...found, taskCard: revised };
-						} else if (report && !revision && found.taskCard.backlogTaskStartReadinessExecutionRevision) {
+						} else if (!revision && found.taskCard.backlogTaskStartReadinessExecutionRevision) {
 							const revised = { ...found.taskCard, backlogTaskStartReadinessExecutionRevision: undefined };
 							boardBeforeMovement = {
 								...state.board,
@@ -1640,11 +1644,7 @@ export function createTaskCardActionApi(
 							? "已核对原启动和 Initial Prompt 接受事实。"
 							: (outcome.agentSessionStartFailureMessage ?? "等待核验原会话是否已接受 Initial Prompt。");
 						await writeBacklogTaskStartReadinessOperation(readinessOperation);
-						await publishBacklogTaskStartReadinessReview(
-							workspaceScope,
-							foundAfterMovement.taskCard,
-							readinessOperation.review,
-						);
+						await publishStartOperationReview(foundAfterMovement.taskCard, readinessOperation);
 					}
 					return {
 						boardColumnIdOfTaskCardBeforeAction,
@@ -1741,7 +1741,7 @@ export function createTaskCardActionApi(
 										input.taskId,
 										initialFound.taskCard.createdAt,
 									);
-									assertBacklogTaskReadinessCardMatchesReport(
+									assertBacklogTaskStartInputStillCurrent(
 										readinessOperation,
 										latestCardBeforeSpawn.taskCard,
 										latestCardBeforeSpawn.boardColumnId,
