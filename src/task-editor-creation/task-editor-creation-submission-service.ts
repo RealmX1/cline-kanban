@@ -167,6 +167,10 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 		let current: unknown;
 		try {
 			const value = await observation(record);
+			const readiness = value.card
+				? await readBacklogTaskStartReadinessOperation(value.scope.workspaceId, value.card.id, value.card.createdAt)
+				: null;
+			const receipt = readiness?.launchingSessionSnapshot?.agentConversationPromptSubmissionAcceptance;
 			current = [
 				value.scope.workspaceId,
 				value.card,
@@ -182,6 +186,11 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 							),
 					),
 				),
+				// 直接启动不把复核投影写到卡片上，只改启动记录也必须唤醒恢复。
+				readiness?.review.phase ?? null,
+				receipt?.status ?? null,
+				receipt?.eventId ?? null,
+				readiness?.launchingSessionSnapshot?.runtimeSessionIncarnationId ?? null,
 			];
 		} catch (error) {
 			current = messageOf(error);
@@ -373,7 +382,13 @@ export function createTaskEditorCreationSubmissionService(deps: TaskEditorCreati
 								throw error;
 							}
 						});
+						const readinessAfterStart = await readBacklogTaskStartReadinessOperation(
+							current.scope.workspaceId,
+							current.card.id,
+							current.card.createdAt,
+						);
 						const readinessPhase =
+							readinessAfterStart?.review.phase ??
 							result.taskCardSnapshotAfterAction?.taskCard.backlogTaskStartReadinessReview?.phase;
 						if (readinessPhase === "no_remaining_work") {
 							closeStartIntentWithoutRemainingWork();

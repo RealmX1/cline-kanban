@@ -2,6 +2,7 @@ import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { submittedPromptSha256 } from "../../src/agent-session-history/codex-prompt-submission-acceptance-reconciliation";
+import { BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS } from "../../src/backlog-task-start-readiness/backlog-task-start-readiness-assessment";
 import {
 	collectBacklogTaskStartReadinessEvidence,
 	readRestrictedBacklogTaskReadinessEvidence,
@@ -10,6 +11,7 @@ import {
 	readBacklogTaskStartReadinessOperation,
 	writeBacklogTaskStartReadinessOperation,
 } from "../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
+import { createBacklogTaskStartReadinessRecovery } from "../../src/backlog-task-start-readiness/backlog-task-start-readiness-recovery";
 import {
 	BacklogTaskStartReadinessRuntimeClosingError,
 	transferBacklogTaskStartReadinessIntentAfterMigration,
@@ -50,8 +52,13 @@ vi.mock("../../src/model-provider-access/task-assistance-model-provider-routing"
 afterEach(() => {
 	vi.unstubAllEnvs();
 	vi.clearAllMocks();
+	vi.restoreAllMocks();
 	model.preferredRecovery.mockResolvedValue(null);
 });
+const launchReceiptTranscriptPagePadding = Array.from({ length: 4 }, () => ({
+	type: "noise",
+	text: "x".repeat(80_000),
+}));
 const ready = () => ({
 	conclusion: "ready",
 	summary: "当前代码与原目标一致，可以开启。",
@@ -85,6 +92,14 @@ async function createHarness() {
 	const context = await loadWorkspaceContext(repository.repositoryPath);
 	const scope = { workspaceId: context.workspaceId, workspacePath: context.repoPath };
 	const sessions = new Map<string, RuntimeTaskSessionSummary>();
+	const persistCurrentSessionSummary = async (summary: RuntimeTaskSessionSummary) => {
+		sessions.set(summary.taskId, summary);
+		await mutateWorkspaceState(context.repoPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
+			board: state.board,
+			sessions: { ...state.sessions, [summary.taskId]: summary },
+			value: null,
+		}));
+	};
 	let ensuredTaskWorktreePath = context.repoPath;
 	let loseLaunchResponse = false;
 	let rejectNextSpawn = false;
@@ -126,12 +141,7 @@ async function createHarness() {
 						runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId,
 						submittedPromptSha256: submittedPromptSha256(request.prompt ?? ""),
 					};
-				sessions.set(request.taskId, summary);
-				await mutateWorkspaceState(context.repoPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => ({
-					board: state.board,
-					sessions: { ...state.sessions, [request.taskId]: summary },
-					value: null,
-				}));
+				await persistCurrentSessionSummary(summary);
 				if (loseLaunchResponse) {
 					loseLaunchResponse = false;
 					throw new Error("模拟启动回执丢失");
@@ -162,7 +172,12 @@ async function createHarness() {
 		kanbanRequestOriginActorEvidence: evidence,
 		taskCardActionApi: api,
 	} as unknown as RuntimeTrpcContext);
-	const add = async (prompt: string, conditions?: string, worktreeMode: "inplace" | "branch" = "inplace") => {
+	const add = async (
+		prompt: string,
+		conditions?: string,
+		worktreeMode: "inplace" | "branch" = "inplace",
+		createdAtEpochMs?: number,
+	) => {
 		const mutation = await mutateWorkspaceState(context.repoPath, TASK_MUTATION_INTENT_FOR_TEST_FIXTURE, (state) => {
 			const created = addTaskToColumn(
 				state.board,
@@ -176,6 +191,7 @@ async function createHarness() {
 					backlogTaskStartReadinessConditionsText: conditions,
 				},
 				() => globalThis.crypto.randomUUID(),
+				createdAtEpochMs,
 			);
 			return { board: created.board, value: created.task.id };
 		});
@@ -194,6 +210,7 @@ async function createHarness() {
 		caller,
 		evidence,
 		sessions,
+		persistCurrentSessionSummary,
 		launches,
 		add,
 		setEnsuredTaskWorktreePath: (path: string) => {
@@ -212,6 +229,144 @@ async function createHarness() {
 }
 
 describe("Backlog 开启复核的持久运行时链路", () => {
+	it("按原受理时间区分不足 24 小时和达到 24 小时，直接启动跳过仓库和辅助 AI 复核", async () => {
+		const h = await createHarness();
+		const acceptedAtEpochMs = Date.now();
+		const threshold = BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS;
+		const recent = await h.add("近期无条件启动", undefined, "inplace", acceptedAtEpochMs - threshold + 1);
+		const aged = await h.add("达到复核年龄的无条件任务", undefined, "inplace", acceptedAtEpochMs - threshold);
+		writeFileSync(join(h.context.repoPath, "untracked-drift.txt"), "尚未提交的无关改动\n");
+		model.respond.mockResolvedValue(null);
+		const clock = vi.spyOn(Date, "now").mockReturnValue(acceptedAtEpochMs);
+		try {
+			const recentStart = await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({
+				taskId: recent.id,
+			});
+			expect(recentStart.agentSessionStartOutcome).toBe("agent_session_started");
+			expect(recentStart.taskCardSnapshotAfterAction.taskCard.backlogTaskStartReadinessReview).toBeUndefined();
+			expect(model.respond).not.toHaveBeenCalled();
+			expect(model.preferredRecovery).not.toHaveBeenCalled();
+			const agedStart = await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({
+				taskId: aged.id,
+			});
+			expect(agedStart.agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+			expect(model.respond).toHaveBeenCalledTimes(1);
+		} finally {
+			clock.mockRestore();
+		}
+		expect(h.launches).toHaveLength(1);
+	});
+
+	it("创建时受理的启动在建卡时间较旧且仓库有改动时仍直接开始", async () => {
+		const h = await createHarness();
+		const acceptedAtEpochMs = Date.now();
+		const card = await h.add(
+			"创建并启动",
+			undefined,
+			"inplace",
+			acceptedAtEpochMs - 2 * BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS,
+		);
+		writeFileSync(join(h.context.repoPath, "feature.ts"), "export const feature = 2;\n");
+		model.respond.mockResolvedValue(null);
+		const start = await h.api.startTaskCardAgentSessionMovingItIntoInProgress(
+			h.scope,
+			{ taskId: card.id },
+			h.evidence,
+			async () => {},
+			acceptedAtEpochMs,
+		);
+		expect(start.agentSessionStartOutcome).toBe("agent_session_started");
+		expect(model.respond).not.toHaveBeenCalled();
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			acceptedAtEpochMs,
+			reports: [],
+			review: { phase: "started" },
+		});
+	});
+
+	it("恢复器以原受理时间接续旧的启动等待，保留历史报告且只启动一次", async () => {
+		const h = await createHarness();
+		const card = await h.add(
+			"不重复发送旧启动的首条内容",
+			"旧复核记录",
+			"inplace",
+			Date.now() - 2 * BACKLOG_TASK_START_READINESS_RECENT_TASK_MAXIMUM_AGE_MS,
+		);
+		model.respond.mockResolvedValue({ ...ready(), conclusion: "conditions_not_met" });
+		await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		const original = await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt);
+		if (!original) throw new Error("缺少隔离环境的旧启动记录");
+		await h.caller.taskCardAction.updateTaskCardFieldValues({
+			taskId: card.id,
+			taskCardFieldUpdate: {
+				taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+				taskCardFieldValuePatch: { backlogTaskStartReadinessConditionsText: null },
+			},
+		});
+		const acceptedAtEpochMs = card.createdAt + 1000;
+		await writeBacklogTaskStartReadinessOperation({ ...original, acceptedAtEpochMs, nextAttemptAtEpochMs: 0 });
+		model.respond.mockClear().mockResolvedValue(null);
+		const recovery = createBacklogTaskStartReadinessRecovery({
+			resolveScope: async () => h.scope,
+			resume: (scope, record, assertStillOpen) =>
+				h.api.startTaskCardAgentSessionMovingItIntoInProgress(
+					scope,
+					{
+						...record.acceptedStartRequest,
+						resumeBacklogTaskStartReadinessOperationId: record.review.operationId,
+					},
+					record.acceptedRequestOriginEvidence,
+					assertStillOpen,
+				),
+			warn: (message) => process.stderr.write(`${message}\n`),
+		});
+		recovery.start();
+		try {
+			await expect.poll(() => h.launches.length).toBe(1);
+		} finally {
+			await recovery.close();
+		}
+		h.sessions.clear();
+		await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		expect(h.launches).toHaveLength(1);
+		expect(model.respond).not.toHaveBeenCalled();
+		const recovered = await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt);
+		expect(recovered).toMatchObject({
+			acceptedAtEpochMs,
+			startRequested: false,
+			review: { operationId: original.review.operationId, phase: "started" },
+			reports: original.reports,
+		});
+	});
+
+	it("直接启动准备期间新增条件，进入复核后才允许启动", async () => {
+		const h = await createHarness();
+		const card = await h.add("启动前补充条件");
+		await h.api.startTaskCardAgentSessionMovingItIntoInProgress(
+			h.scope,
+			{ taskId: card.id },
+			h.evidence,
+			async () => {
+				await h.caller.taskCardAction.updateTaskCardFieldValues({
+					taskId: card.id,
+					taskCardFieldUpdate: {
+						taskCardFieldUpdateInputKind: "three_state_task_card_field_value_patch",
+						taskCardFieldValuePatch: { backlogTaskStartReadinessConditionsText: "等待依赖合入" },
+					},
+				});
+			},
+		);
+		expect(h.launches).toHaveLength(0);
+		expect(model.respond).not.toHaveBeenCalled();
+		model.respond.mockResolvedValue({ ...ready(), conclusion: "conditions_not_met" });
+		const held = await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		expect(held.agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		expect(held.taskCardSnapshotAfterAction.taskCard.backlogTaskStartReadinessReview?.phase).toBe(
+			"conditions_not_met",
+		);
+		expect(h.launches).toHaveLength(0);
+	});
+
 	it("实际执行工作树的改动使原结果失效，并在重新核验后恢复", async () => {
 		const h = await createHarness();
 		const card = await h.add("核验执行目录", "确认任务工作树改动", "branch");
@@ -258,6 +413,358 @@ describe("Backlog 开启复核的持久运行时链路", () => {
 		).toBe("waiting_for_evidence");
 	});
 
+	it("Codex 摘要缺少启动正文摘要时，仅沿原启动代次核对原生回执", async () => {
+		const h = await createHarness();
+		const card = await h.add("补证原始启动消息");
+		h.delayInitialPromptAcceptance();
+		const launch = () => h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		await launch();
+		const started = h.sessions.get(card.id);
+		if (!started?.runtimeSessionIncarnationId) throw new Error("隔离会话缺少启动代次");
+		const acceptedAtMs = Date.now();
+		const nativeSessionId = globalThis.crypto.randomUUID();
+		const transcriptPath = join(h.fixture.isolatedHomeDirectoryPath, "launch-transcript.jsonl");
+		const nativeRecords = [
+			{ type: "session_meta", payload: { id: nativeSessionId, cwd: started.workspacePath, source: "cli" } },
+			{
+				type: "event_msg",
+				timestamp: new Date(acceptedAtMs).toISOString(),
+				payload: {
+					type: "item_completed",
+					thread_id: nativeSessionId,
+					turn_id: "startup-turn",
+					item: {
+						type: "UserMessage",
+						id: "startup-message",
+						content: [{ type: "text", text: h.launches[0] }],
+					},
+				},
+			},
+		];
+		writeFileSync(transcriptPath, `${nativeRecords.map((record) => JSON.stringify(record)).join("\n")}\n`);
+		const originalSession = runtimeTaskSessionSummarySchema.parse({
+			...started,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId,
+				transcriptPath,
+				observedAt: acceptedAtMs,
+			},
+			agentConversationPromptSubmissionAcceptance: {
+				status: "accepted",
+				attemptedAtMs: acceptedAtMs,
+				confirmedAtMs: acceptedAtMs,
+				runtimeSessionIncarnationId: started.runtimeSessionIncarnationId,
+			},
+		});
+		h.sessions.set(card.id, { ...originalSession, runtimeSessionIncarnationId: globalThis.crypto.randomUUID() });
+		expect((await launch()).agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		h.sessions.set(card.id, originalSession);
+		expect((await launch()).agentSessionStartOutcome).toBe(
+			"agent_session_already_in_agent_turn_so_start_was_skipped",
+		);
+		expect(h.launches).toHaveLength(1);
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			review: { phase: "started" },
+			launchingSessionSnapshot: {
+				agentConversationPromptSubmissionAcceptance: {
+					eventId: `codex:${nativeSessionId}:startup-turn:startup-message`,
+					submittedPromptSha256: submittedPromptSha256(h.launches[0] ?? ""),
+				},
+			},
+		});
+	});
+
+	it("第三代摘要替换第二代摘要后，仍按已落盘的最早起点排除第二代同文消息", async () => {
+		const h = await createHarness();
+		const card = await h.add("拒绝后一代同文回执");
+		h.delayInitialPromptAcceptance();
+		const launch = () => h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		await launch();
+		const operation = await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt);
+		const prepared = operation?.launchingSessionSnapshot;
+		const launchTimestamp = operation?.agentProcessLaunchMayHaveBegunAtEpochMs;
+		if (operation == null || !prepared?.runtimeSessionIncarnationId || launchTimestamp == null)
+			throw new Error("缺少原启动快照");
+		const nativeSessionId = globalThis.crypto.randomUUID();
+		const laterStartedAt = launchTimestamp + 1_000;
+		const transcriptPath = join(h.fixture.isolatedHomeDirectoryPath, "later-generation-transcript.jsonl");
+		writeFileSync(
+			transcriptPath,
+			`${JSON.stringify({
+				type: "session_meta",
+				payload: { id: nativeSessionId, cwd: prepared.workspacePath, source: "cli" },
+			})}\n${JSON.stringify({
+				type: "event_msg",
+				timestamp: new Date(laterStartedAt + 1_000).toISOString(),
+				payload: {
+					type: "item_completed",
+					thread_id: nativeSessionId,
+					turn_id: "later-generation-turn",
+					item: {
+						type: "UserMessage",
+						id: "later-generation-message",
+						content: [{ type: "text", text: h.launches[0] }],
+					},
+				},
+			})}\n${launchReceiptTranscriptPagePadding.map((record) => JSON.stringify(record)).join("\n")}\n`,
+		);
+		await writeBacklogTaskStartReadinessOperation({
+			...operation,
+			launchingSessionSnapshot: {
+				...prepared,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId,
+					transcriptPath,
+					observedAt: laterStartedAt,
+				},
+			},
+		});
+		const original = h.sessions.get(card.id);
+		if (!original) throw new Error("缺少原会话");
+		const secondGenerationSession = runtimeTaskSessionSummarySchema.parse({
+			...original,
+			runtimeSessionIncarnationId: globalThis.crypto.randomUUID(),
+			startedAt: laterStartedAt,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId,
+				transcriptPath,
+				observedAt: laterStartedAt,
+			},
+		});
+		await h.persistCurrentSessionSummary(secondGenerationSession);
+		const firstPageObservedAtMs = launchTimestamp + 10_000;
+		const clock = vi.spyOn(Date, "now").mockReturnValue(firstPageObservedAtMs);
+		expect((await launch()).agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			launchingSessionSnapshot: {
+				agentConversationPromptSubmissionAcceptance: {
+					verification: { reason: "scanning_native_transcript", exclusiveAcceptedBeforeMs: laterStartedAt },
+				},
+			},
+		});
+		await h.persistCurrentSessionSummary({
+			...secondGenerationSession,
+			runtimeSessionIncarnationId: globalThis.crypto.randomUUID(),
+			startedAt: launchTimestamp + 5_000,
+		});
+		clock.mockReturnValue(firstPageObservedAtMs + 500);
+		expect((await launch()).agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		clock.mockReturnValue(firstPageObservedAtMs + 1_000);
+		expect((await launch()).agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		expect(h.launches).toHaveLength(1);
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			startRequested: true,
+			review: { phase: "waiting_for_evidence" },
+			launchingSessionSnapshot: {
+				runtimeSessionIncarnationId: prepared.runtimeSessionIncarnationId,
+				agentConversationPromptSubmissionAcceptance: {
+					status: "pending",
+					verification: { reason: "no_matching_native_message", exclusiveAcceptedBeforeMs: laterStartedAt },
+				},
+			},
+		});
+	});
+
+	it.each([false, true])("同代摘要变更后沿用原事件编号（后续带散列：%s）", async (hasPromptSha256) => {
+		const h = await createHarness();
+		const card = await h.add("保留原代次精确回执");
+		h.delayInitialPromptAcceptance();
+		const launch = () => h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		await launch();
+		const started = h.sessions.get(card.id);
+		const operation = await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt);
+		const launchTimestamp = operation?.agentProcessLaunchMayHaveBegunAtEpochMs;
+		if (!started?.runtimeSessionIncarnationId || launchTimestamp == null) throw new Error("缺少原启动代次");
+		const nativeSessionId = globalThis.crypto.randomUUID();
+		const acceptedAtMs = launchTimestamp + 1;
+		const transcriptPath = join(h.fixture.isolatedHomeDirectoryPath, "original-event-transcript.jsonl");
+		const eventId = `codex:${nativeSessionId}:startup-turn:startup-message`;
+		writeFileSync(
+			transcriptPath,
+			`${[
+				{ type: "session_meta", payload: { id: nativeSessionId, cwd: started.workspacePath, source: "cli" } },
+				...launchReceiptTranscriptPagePadding,
+				{
+					type: "event_msg",
+					timestamp: new Date(acceptedAtMs).toISOString(),
+					payload: {
+						type: "item_completed",
+						thread_id: nativeSessionId,
+						turn_id: "startup-turn",
+						item: {
+							type: "UserMessage",
+							id: "startup-message",
+							content: [{ type: "text", text: h.launches[0] }],
+						},
+					},
+				},
+				{
+					type: "event_msg",
+					timestamp: new Date(acceptedAtMs + 2).toISOString(),
+					payload: {
+						type: "item_completed",
+						thread_id: nativeSessionId,
+						turn_id: "later-turn",
+						item: {
+							type: "UserMessage",
+							id: "later-message",
+							content: [{ type: "text", text: h.launches[0] }],
+						},
+					},
+				},
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		const originalSession = runtimeTaskSessionSummarySchema.parse({
+			...started,
+			agentNativeConversationSessionIdentity: {
+				sourceAgentId: "codex",
+				nativeSessionId,
+				transcriptPath,
+				observedAt: acceptedAtMs,
+			},
+			agentConversationPromptSubmissionAcceptance: {
+				status: "accepted",
+				attemptedAtMs: acceptedAtMs,
+				confirmedAtMs: acceptedAtMs,
+				eventId,
+				runtimeSessionIncarnationId: started.runtimeSessionIncarnationId,
+			},
+		});
+		await h.persistCurrentSessionSummary(originalSession);
+		const firstPageObservedAtMs = launchTimestamp + 10_000;
+		const clock = vi.spyOn(Date, "now").mockReturnValue(firstPageObservedAtMs);
+		expect((await launch()).agentSessionStartOutcome).toBe("backlog_task_start_readiness_review_pending");
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			launchingSessionSnapshot: {
+				agentConversationPromptSubmissionAcceptance: {
+					verification: { reason: "scanning_native_transcript", requiredNativeEventId: eventId },
+				},
+			},
+		});
+		await h.persistCurrentSessionSummary({
+			...originalSession,
+			agentConversationPromptSubmissionAcceptance: {
+				status: "accepted",
+				attemptedAtMs: acceptedAtMs + 2,
+				confirmedAtMs: acceptedAtMs + 2,
+				eventId: `codex:${nativeSessionId}:later-turn:later-message`,
+				runtimeSessionIncarnationId: started.runtimeSessionIncarnationId,
+				submittedPromptSha256: hasPromptSha256 ? submittedPromptSha256(h.launches[0] ?? "") : undefined,
+			},
+		});
+		clock.mockReturnValue(firstPageObservedAtMs + 500);
+		expect((await launch()).agentSessionStartOutcome).toBe(
+			"agent_session_already_in_agent_turn_so_start_was_skipped",
+		);
+		expect(h.launches).toHaveLength(1);
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			review: { phase: "started" },
+			launchingSessionSnapshot: {
+				runtimeSessionIncarnationId: started.runtimeSessionIncarnationId,
+				agentConversationPromptSubmissionAcceptance: { eventId },
+			},
+		});
+	});
+
+	it("下一代开始前的原代次同文记录仍可补证，下一代记录不参与唯一性", async () => {
+		const h = await createHarness();
+		const card = await h.add("只采纳原代次窗口内的回执");
+		h.delayInitialPromptAcceptance();
+		const launch = () => h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: card.id });
+		await launch();
+		const operation = await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt);
+		const prepared = operation?.launchingSessionSnapshot;
+		const launchTimestamp = operation?.agentProcessLaunchMayHaveBegunAtEpochMs;
+		const original = h.sessions.get(card.id);
+		if (operation == null || !prepared?.runtimeSessionIncarnationId || launchTimestamp == null || !original)
+			throw new Error("缺少原启动快照");
+		const nativeSessionId = globalThis.crypto.randomUUID();
+		const originalEventAt = launchTimestamp + 1;
+		const laterStartedAt = launchTimestamp + 20;
+		const transcriptPath = join(h.fixture.isolatedHomeDirectoryPath, "bounded-generation-transcript.jsonl");
+		writeFileSync(
+			transcriptPath,
+			`${[
+				{ type: "session_meta", payload: { id: nativeSessionId, cwd: prepared.workspacePath, source: "cli" } },
+				{
+					type: "event_msg",
+					timestamp: new Date(originalEventAt).toISOString(),
+					payload: {
+						type: "item_completed",
+						thread_id: nativeSessionId,
+						turn_id: "startup-turn",
+						item: {
+							type: "UserMessage",
+							id: "startup-message",
+							content: [{ type: "text", text: h.launches[0] }],
+						},
+					},
+				},
+				{
+					type: "event_msg",
+					timestamp: new Date(laterStartedAt + 5).toISOString(),
+					payload: {
+						type: "item_completed",
+						thread_id: nativeSessionId,
+						turn_id: "later-generation-turn",
+						item: {
+							type: "UserMessage",
+							id: "later-generation-message",
+							content: [{ type: "text", text: h.launches[0] }],
+						},
+					},
+				},
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		await writeBacklogTaskStartReadinessOperation({
+			...operation,
+			launchingSessionSnapshot: {
+				...prepared,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId,
+					transcriptPath,
+					observedAt: originalEventAt,
+				},
+			},
+		});
+		h.sessions.set(
+			card.id,
+			runtimeTaskSessionSummarySchema.parse({
+				...original,
+				runtimeSessionIncarnationId: globalThis.crypto.randomUUID(),
+				startedAt: laterStartedAt,
+				agentNativeConversationSessionIdentity: {
+					sourceAgentId: "codex",
+					nativeSessionId,
+					transcriptPath,
+					observedAt: laterStartedAt,
+				},
+			}),
+		);
+		expect((await launch()).agentSessionStartOutcome).toBe(
+			"agent_session_already_in_agent_turn_so_start_was_skipped",
+		);
+		expect(h.launches).toHaveLength(1);
+		expect(await readBacklogTaskStartReadinessOperation(h.scope.workspaceId, card.id, card.createdAt)).toMatchObject({
+			startRequested: false,
+			review: { phase: "started" },
+			launchingSessionSnapshot: {
+				runtimeSessionIncarnationId: prepared.runtimeSessionIncarnationId,
+				agentConversationPromptSubmissionAcceptance: {
+					eventId: `codex:${nativeSessionId}:startup-turn:startup-message`,
+				},
+			},
+		});
+	});
+
 	it("进程明确未创建时清除可能已启动标记，显式重试可启动", async () => {
 		const h = await createHarness();
 		const card = await h.add("允许明确失败后重试");
@@ -286,7 +793,7 @@ describe("Backlog 开启复核的持久运行时链路", () => {
 	it("启动边界保留 Stop 撤销，运行时关闭则可由后继实例安全接续", async () => {
 		const h = await createHarness();
 		model.respond.mockResolvedValue(ready());
-		const stopped = await h.add("spawn 前被 Stop", "条件已经满足");
+		const stopped = await h.add("spawn 前被 Stop");
 		await h.api.startTaskCardAgentSessionMovingItIntoInProgress(
 			h.scope,
 			{ taskId: stopped.id },
@@ -302,7 +809,7 @@ describe("Backlog 开启复核的持久运行时链路", () => {
 		).toBe("stopped");
 		await h.caller.taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress({ taskId: stopped.id });
 		expect(h.launches).toHaveLength(1);
-		const closing = await h.add("spawn 前运行时关闭", "条件已经满足");
+		const closing = await h.add("spawn 前运行时关闭");
 		await h.api.startTaskCardAgentSessionMovingItIntoInProgress(
 			h.scope,
 			{ taskId: closing.id },

@@ -72,11 +72,21 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 	observedAtMs: number;
 	maximumReadBytes?: number;
 	force?: boolean;
+	// 只核对本代次已记录的事件。后来的同文消息不参与唯一性。
+	requiredNativeEventId?: string;
+	// 下一代运行时开始时刻。没有精确事件编号时，此界之后的转录不属于本次提交。
+	exclusiveAcceptedBeforeMs?: number;
 }): Promise<CodexPromptSubmissionAcceptanceReconciliation | null> {
 	const { summary, observedAtMs } = input;
 	const candidate = summary.agentConversationPromptSubmissionAcceptance;
 	const identity = summary.agentNativeConversationSessionIdentity;
-	const restartLegacyNormalizationScan = shouldRestartLegacyHookPromptAcceptanceReconciliation(candidate);
+	const requiredNativeEventId = input.requiredNativeEventId || undefined;
+	const exclusiveAcceptedBeforeMs = requiredNativeEventId ? undefined : input.exclusiveAcceptedBeforeMs;
+	const previousVerification = candidate?.verification;
+	const restartNativeTranscriptScan =
+		shouldRestartLegacyHookPromptAcceptanceReconciliation(candidate) ||
+		previousVerification?.requiredNativeEventId !== requiredNativeEventId ||
+		previousVerification?.exclusiveAcceptedBeforeMs !== exclusiveAcceptedBeforeMs;
 	if (
 		!candidate ||
 		candidate.status === "accepted" ||
@@ -84,7 +94,7 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 		!summary.runtimeSessionIncarnationId ||
 		candidate.runtimeSessionIncarnationId !== summary.runtimeSessionIncarnationId ||
 		(!input.force &&
-			!restartLegacyNormalizationScan &&
+			!restartNativeTranscriptScan &&
 			candidate.verification?.nextCheckAtMs !== undefined &&
 			candidate.verification.nextCheckAtMs !== null &&
 			observedAtMs < candidate.verification.nextCheckAtMs)
@@ -92,15 +102,15 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 		return null;
 	const submittedPromptTextNormalization = resolvePromptSubmissionTextNormalization(candidate);
 	const verification: PromptSubmissionAcceptanceVerificationProgress = {
-		// 旧比较的 EOF 和匹配不能用于新比较；格式标记与新游标一起持久保存，只重置一次。
-		...(!restartLegacyNormalizationScan ? candidate.verification : {}),
+		// 比较规则改变时从头核对，旧游标可能已经缓存了不合格记录或跳过了新的精确目标。
+		...(!restartNativeTranscriptScan ? previousVerification : {}),
 		checkedAtMs: observedAtMs,
 		submittedPromptTextNormalization,
+		...(requiredNativeEventId ? { requiredNativeEventId } : {}),
+		...(exclusiveAcceptedBeforeMs !== undefined ? { exclusiveAcceptedBeforeMs } : {}),
 		nextCheckAtMs: null,
 		consecutiveUnchangedCheckCount:
-			input.force || restartLegacyNormalizationScan
-				? 0
-				: (candidate.verification?.consecutiveUnchangedCheckCount ?? 0),
+			input.force || restartNativeTranscriptScan ? 0 : (candidate.verification?.consecutiveUnchangedCheckCount ?? 0),
 		reason: "native_evidence_unavailable",
 	};
 	const result: CodexPromptSubmissionAcceptanceReconciliation = {
@@ -210,6 +220,9 @@ export async function reconcileCodexPromptSubmissionAcceptance(input: {
 			const eventId = `codex:${identity.nativeSessionId}:${payload.turn_id}:${item.id}`;
 			if (eventId === candidate.predecessorAcceptedEventId || matches.some((match) => match.eventId === eventId))
 				continue;
+			if (requiredNativeEventId && eventId !== requiredNativeEventId) continue;
+			// 精确事件编号本身就是原代次证据；没有编号时，下一代开始后的同文记录不能冒领。
+			if (exclusiveAcceptedBeforeMs !== undefined && acceptedAtMs >= exclusiveAcceptedBeforeMs) continue;
 			if (candidate.submittedPromptSha256) {
 				const prompt = extractSubmittedUserPromptFromTranscriptRecord("codex", {
 					type: "response_item",

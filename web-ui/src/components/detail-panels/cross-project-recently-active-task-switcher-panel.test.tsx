@@ -405,7 +405,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				readTaskCardWithBoardColumnInWorkspace.mockReturnValue(new Promise(() => {}));
 			} else {
 				readTaskCardWithBoardColumnInWorkspace.mockResolvedValue(
-					makeOtherProjectTaskCardSnapshot("start", "in_progress"),
+					makeOtherProjectTaskCardSnapshot("start", "backlog"),
 				);
 			}
 			window.localStorage.setItem(LocalStorageKey.CrossProjectTaskSwitcherRunningSectionExpanded, "true");
@@ -425,6 +425,8 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				acceptedAtEpochMs: NOW_MS,
 				updatedAtEpochMs: NOW_MS,
 			};
+			const onOpenTaskInProject = vi.fn();
+			const onOpenBacklogTaskEditorInProject = vi.fn();
 			const renderEntries = (
 				phase: "starting_agent" | "waiting_for_evidence" | "waiting_for_dependency",
 				live = false,
@@ -432,7 +434,7 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				const entries = [
 					makeEntry("start", {
 						createdAt: 123,
-						columnId: "in_progress",
+						columnId: live ? "in_progress" : "backlog",
 						taskEditorCreationAgentStartupProgress: { ...progress, phase },
 						...(live ? { turnOwner: "agent" as const, liveness: "live" as const } : {}),
 					}),
@@ -441,7 +443,12 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 				act(() =>
 					root.render(
 						<CrossProjectRecentlyActiveTaskSwitcherPanel
-							host={makeHost({ currentProjectId: null, projects: [makeProject("project-a", entries)] })}
+							host={makeHost({
+								currentProjectId: null,
+								projects: [makeProject("project-a", entries)],
+								onOpenTaskInProject,
+								onOpenBacklogTaskEditorInProject,
+							})}
 						/>,
 					),
 				);
@@ -454,6 +461,9 @@ describe("CrossProjectRecentlyActiveTaskSwitcherPanel", () => {
 					?.textContent,
 			).toBe("正在启动");
 			const startupRow = running.querySelector<HTMLElement>('[data-cross-project-task-switcher-task-id="start"]');
+			act(() => startupRow?.querySelector<HTMLButtonElement>('button[aria-label^="打开任务"]')?.click());
+			expect(onOpenTaskInProject).toHaveBeenCalledWith("project-a", "start", 123, "agent_startup_detail");
+			expect(onOpenBacklogTaskEditorInProject).not.toHaveBeenCalled();
 			const assertStartupNoticeFollowsTitleInStatusArea = (cardRoot: Element | null) => {
 				const title = cardRoot?.querySelector(
 					"[data-cross-project-task-switcher-row-title], [data-task-card-title]",

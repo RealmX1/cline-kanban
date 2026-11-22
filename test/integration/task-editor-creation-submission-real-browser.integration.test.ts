@@ -1,8 +1,9 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { buildAllProjectsTaskGroupQueryResult } from "../../src/core/all-projects-task-group-query";
 import { lockedFileSystem } from "../../src/fs/locked-file-system";
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { Browser } from "../../web-ui/node_modules/playwright-core";
 import {
 	createSpawnedChildProcessRegistrySigkilledAfterEachTest,
@@ -13,7 +14,10 @@ import { createTaskEditorPackagedRuntimeBrowserTestFixture } from "./task-editor
 
 const packagedCliPath = process.env.KANBAN_TASK_EDITOR_CREATION_PACKAGED_CLI_PATH;
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
-afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
+afterEach(async () => {
+	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+	vi.unstubAllEnvs();
+});
 
 it.skipIf(!packagedCliPath)(
 	"打包浏览器：保存即关闭、跨项目独立创建、响应丢失、批量与重启恢复",
@@ -32,6 +36,13 @@ it.skipIf(!packagedCliPath)(
 		});
 		const [source, target] = repositories;
 		if (!source || !target) throw new Error("隔离仓库初始化失败");
+		const isolatedRelationLedgerRoot = join(fixture.isolatedHomeDirectoryPath, "isolated-relation-ledger");
+		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+		vi.stubEnv("KANBAN_INTER_WORK_UNIT_RELATION_LEDGER_STORAGE_ROOT", isolatedRelationLedgerRoot);
+		browserFixture.environment.KANBAN_INTER_WORK_UNIT_RELATION_LEDGER_STORAGE_ROOT = isolatedRelationLedgerRoot;
+		// 只在隔离 HOME 预置两个项目的归属，项目注册授权由独立用例覆盖。
+		const { workspaceId: sourceId } = await loadWorkspaceContext(source.repositoryPath);
+		const { workspaceId: targetId } = await loadWorkspaceContext(target.repositoryPath);
 		const isolatedAgentExecutableDirectory = join(fixture.isolatedHomeDirectoryPath, "isolated-agent-executables");
 		mkdirSync(isolatedAgentExecutableDirectory, { recursive: true });
 		writeFileSync(
@@ -51,14 +62,14 @@ it.skipIf(!packagedCliPath)(
 		let launchedFixtureTaskId: string | undefined;
 		let fixtureTaskWorkspaceId: string | undefined;
 		try {
-			const addedSource = await client().projects.add.mutate({ path: source.repositoryPath });
-			const addedTarget = await client().projects.add.mutate({ path: target.repositoryPath });
-			const sourceId = addedSource.project?.id;
-			const targetId = addedTarget.project?.id;
-			if (!sourceId || !targetId) throw new Error("隔离项目注册失败");
 			const sourceClient = client(sourceId);
 			const targetClient = client(targetId);
-			await sourceClient.runtime.saveConfig.mutate({ selectedAgentId: "codex" });
+			await sourceClient.runtime.saveConfig.mutate({
+				selectedAgentId: "codex",
+				userInterfacePreferencesSharedAcrossBrowserOrigins: {
+					taskProjectAssignmentAutomaticAnalysisEnabled: false,
+				},
+			});
 			await targetClient.runtime.saveConfig.mutate({ selectedAgentId: "codex" });
 			browser = await browserFixture.launchBrowser();
 			const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
@@ -114,6 +125,12 @@ it.skipIf(!packagedCliPath)(
 			);
 			await worktreeSetupLockAcquired;
 			const observerPage = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+			observerPage.setDefaultTimeout(15_000);
+			const startupRequestsFromNavigation: string[] = [];
+			observerPage.on("request", (request) => {
+				if (/(startTaskSession|startTaskCardAgentSessionMovingItIntoInProgress)/u.test(request.url()))
+					startupRequestsFromNavigation.push(request.url());
+			});
 			await observerPage.addInitScript(() => {
 				localStorage.setItem("kanban.onboarding.dialog.shown", "true");
 				sessionStorage.setItem("kanban.selected-board-or-single-project-scope.v1", "board_scope_all_projects");
@@ -124,7 +141,8 @@ it.skipIf(!packagedCliPath)(
 			await runningSection.waitFor({ state: "visible" });
 
 			const editorA = await openCreate(sourceId, "任务 A 的原始正文", "[TEST]独立任务 A");
-			await editorA.getByRole("button", { name: "创建并启动", exact: true }).click();
+			await editorA.getByRole("button", { name: "More start options", exact: true }).click();
+			await page.getByRole("menuitem", { name: /^创建、启动并打开/u }).click();
 			await editorA.waitFor({ state: "hidden" });
 			const savedConfirmationObservedAt = Date.now();
 			await runningSection.getByText("正在启动", { exact: true }).waitFor({ state: "visible", timeout: 6_000 });
@@ -133,10 +151,12 @@ it.skipIf(!packagedCliPath)(
 				process.stderr.write(`启动展示软目标超出：${savedConfirmationToVisibleMs}ms\n`);
 			expect(runningSection && (await runningSection.innerText())).toContain("0 运行中 · 1 正在启动");
 
-			const cardsA = (await sourceClient.workspace.getState.query()).board.columns.flatMap((column) => column.cards);
-			expect(cardsA).toHaveLength(1);
-			const cardA = cardsA[0];
+			const boardDuringStartup = (await sourceClient.workspace.getState.query()).board;
+			expect(boardDuringStartup.columns.flatMap((column) => column.cards)).toHaveLength(1);
+			const cardA = boardDuringStartup.columns.find((column) => column.id === "backlog")?.cards[0];
 			if (!cardA) throw new Error("任务 A 尚未保存");
+			const startupProgressSelector = `[data-verification-anchor="task-editor-creation-progress:${cardA.id}"]`;
+			await page.locator(startupProgressSelector).waitFor({ state: "visible" });
 			await observerPage.screenshot({ path: join(evidenceDirectory, "running-startup-before-agent-process.png") });
 			const startingRow = runningSection.locator(`[data-cross-project-task-switcher-task-id="${cardA.id}"]`);
 			const compactStartingRowHeight = await startingRow.evaluate(
@@ -154,6 +174,20 @@ it.skipIf(!packagedCliPath)(
 			});
 			await observerPage.mouse.move(1400, 900);
 			await floatingStartingCard.waitFor({ state: "hidden" });
+			const assertStartingRowOpensDetail = async (fromWorkspaceId: string) => {
+				await observerPage.goto(`${origin}/${fromWorkspaceId}`);
+				await startingRow.getByRole("button", { name: /^打开任务/u }).click();
+				await observerPage.waitForURL(
+					(url) => url.pathname === `/${sourceId}` && url.searchParams.get("task") === cardA.id,
+				);
+				await observerPage.locator(startupProgressSelector).waitFor({ state: "visible" });
+				expect(await observerPage.getByRole("button", { name: "关闭任务编辑器", exact: true }).count()).toBe(0);
+			};
+			await assertStartingRowOpensDetail(sourceId);
+			await assertStartingRowOpensDetail(targetId);
+			expect(startupRequestsFromNavigation).toHaveLength(0);
+			await observerPage.screenshot({ path: join(evidenceDirectory, "cross-project-startup-detail.png") });
+			await observerPage.goto(`${origin}/${sourceId}`);
 
 			const queryResult = buildAllProjectsTaskGroupQueryResult(
 				await sourceClient.projects.getAllProjectsTaskGroupQuerySnapshot.query({ recentDays: 7 }),
@@ -203,10 +237,25 @@ it.skipIf(!packagedCliPath)(
 			expect(cardsB).toHaveLength(1);
 			expect(cardsB[0]?.id).not.toBe(cardA.id);
 			expect(cardsB[0]?.prompt).toBe("任务 B 的独立正文");
-			expect(cardsB[0]?.terminalAgentModelOverrideSettings).toEqual({
-				agentId: "codex",
-				modelId: "isolated-non-runnable-codex-model",
-			});
+			expect(cardsB[0]?.agentId).toBe("codex");
+			// Codex 的默认模型由原生配置解析，卡片仅保存显式选择。
+			expect(cardsB[0]?.terminalAgentModelOverrideSettings).toBeUndefined();
+			await observerPage
+				.getByRole("group", { name: "Filter recent tasks by stage" })
+				.getByRole("button", { name: "All", exact: true })
+				.click();
+			await observerPage
+				.locator(`[data-cross-project-task-switcher-task-id="${cardsB[0]?.id}"]`)
+				.getByRole("button", { name: /^打开任务/u })
+				.press("Enter");
+			const ordinaryBacklogEditor = observerPage
+				.getByRole("dialog")
+				.filter({ has: observerPage.getByRole("button", { name: "关闭任务编辑器", exact: true }) });
+			await ordinaryBacklogEditor.waitFor({ state: "visible" });
+			expect(await ordinaryBacklogEditor.getByRole("textbox", { name: "任务正文", exact: true }).inputValue()).toBe(
+				"任务 B 的独立正文",
+			);
+			await ordinaryBacklogEditor.getByRole("button", { name: "关闭任务编辑器", exact: true }).click();
 			let droppedSubmissionResponse = false;
 			await page.route("**/api/trpc/**", async (route) => {
 				if (!droppedSubmissionResponse && route.request().url().includes("taskEditorCreation.submit")) {
@@ -260,6 +309,7 @@ it.skipIf(!packagedCliPath)(
 			await page.setViewportSize({ width: 390, height: 844 });
 			await page.screenshot({ path: join(evidenceDirectory, "creation-progress-after-runtime-restart-mobile.png") });
 			await page.setViewportSize({ width: 1440, height: 1000 });
+			writeFileSync(join(source.repositoryPath, "unrelated-work-in-progress.txt"), "无关的 Git 工作树改动\n");
 			const liveEditor = await openCreate(
 				sourceId,
 				"仅运行隔离 PTY fixture，不调用真实模型",
@@ -267,12 +317,13 @@ it.skipIf(!packagedCliPath)(
 			);
 			await liveEditor.getByRole("button", { name: "Agent：codex", exact: true }).click();
 			await liveEditor.getByRole("button", { name: "Claude Code", exact: true }).click();
-			await liveEditor.getByRole("button", { name: "创建并启动", exact: true }).click();
+			await liveEditor.getByRole("button", { name: /^创建.*启动/u }).click();
 			await liveEditor.waitFor({ state: "hidden" });
 			const liveCard = (await sourceClient.workspace.getState.query()).board.columns
 				.flatMap((column) => column.cards)
 				.find((card) => card.prompt === "仅运行隔离 PTY fixture，不调用真实模型");
 			if (!liveCard) throw new Error("未找到隔离 PTY 任务");
+			expect(liveCard.backlogTaskStartReadinessReview).toBeUndefined();
 			launchedFixtureTaskId = liveCard.id;
 			fixtureTaskWorkspaceId = sourceId;
 			await expect

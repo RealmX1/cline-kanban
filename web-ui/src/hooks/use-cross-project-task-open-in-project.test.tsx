@@ -117,6 +117,28 @@ function render(props: Partial<HarnessProps> = {}): void {
 }
 
 describe("useCrossProjectTaskOpenInProject", () => {
+	it.each(["project-a", "project-b"])(
+		"打开 %s 刚保存的任务时等待看板，再进入 Backlog 启动详情",
+		async (workspaceId) => {
+			render();
+			await act(async () => latest?.handleOpenTaskInProject(workspaceId, "new-startup", 0, "agent_startup_detail"));
+			expect(latest?.pendingCrossProjectTaskOpen).toMatchObject({ repoId: workspaceId, taskId: "new-startup" });
+			render({ currentProjectId: workspaceId, board: makeBoard({}) });
+			expect(latest?.pendingCrossProjectTaskOpen).not.toBeNull();
+			render({ currentProjectId: workspaceId, board: makeBoard({ backlog: ["new-startup"] }) });
+			expect(setSelectedTaskId).toHaveBeenCalledWith("new-startup");
+			expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		},
+	);
+
+	it("启动详情拒绝打开删除后重建的同 ID 卡片", async () => {
+		render({ board: makeBoard({ backlog: ["new-startup"] }) });
+		await act(async () => latest?.handleOpenTaskInProject("project-a", "new-startup", 42, "agent_startup_detail"));
+		expect(setSelectedTaskId).not.toHaveBeenCalled();
+		expect(openBacklogTaskEditor).not.toHaveBeenCalled();
+		expect(showAppToastMock).toHaveBeenCalled();
+	});
+
 	it("可等待的打开回报要等详情真实显示，取消与失败分别结算", async () => {
 		render();
 		let outcome: unknown;

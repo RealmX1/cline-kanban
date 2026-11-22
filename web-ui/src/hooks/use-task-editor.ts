@@ -184,7 +184,11 @@ interface UseTaskEditorInput {
 	// Board Scope 往其他项目建卡后（不切项目）：由宿主提示「建到了哪个项目」。
 	onTaskCardsCreatedInOtherProject?: (workspaceId: string, createdTaskCardCount: number) => void;
 	// 「建卡、启动并打开」的目标在其他项目时，启动成功后跨项目打开它。
-	openTaskInOtherProjectAfterStart?: (workspaceId: string, taskId: string) => void;
+	openTaskInOtherProjectAfterStart?: (
+		workspaceId: string,
+		taskId: string,
+		taskIncarnationCreatedAtEpochMs: number,
+	) => void;
 }
 
 /** 这次把编辑表单铺成现在这样的那份「种子」：用的是哪份草稿（null = 任务本体），铺进去的是哪些值。 */
@@ -1686,7 +1690,7 @@ export function useTaskEditor({
 						return;
 					}
 					if (options?.openTaskAfterStart) {
-						openTaskInOtherProjectAfterStart?.(workspaceId, taskId);
+						openTaskInOtherProjectAfterStart?.(workspaceId, taskId, createdTaskCard.createdAt);
 					}
 				});
 			}

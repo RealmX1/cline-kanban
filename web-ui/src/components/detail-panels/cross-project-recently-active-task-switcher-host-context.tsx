@@ -1,6 +1,7 @@
 import type { KanbanBoardCardWorkUnitQualifiedReference } from "@runtime-inter-work-unit-relation-ledger-event-contract";
 import { createContext, useContext } from "react";
 import type { CrossProjectRecentlyActiveTaskSwitcherSectionsModel } from "@/hooks/use-cross-project-recently-active-task-switcher-sections";
+import type { OpenTaskInProject } from "@/hooks/use-cross-project-task-open-in-project";
 import type { TaskCardActionHandlersForOtherProjectCardsInCrossProjectTaskSwitcher } from "@/hooks/use-task-card-action-handlers-for-other-project-cards-in-cross-project-task-switcher";
 import type { RuntimeAgentId, RuntimeNotificationFeedEntry, RuntimeProjectSummary } from "@/runtime/types";
 
@@ -27,8 +28,8 @@ export interface CrossProjectRecentlyActiveTaskSwitcherHostContextValue {
 	// 同项目直接选中；跨项目先切 workspace，目标 board 加载出该任务后再打开（App 的 pendingCrossProjectTaskOpen）。
 	// 关联预览始终传被预览任务的完整一世身份，作为前台关系图的根。
 	onOpenRelationsVisualizationForTask?: (task: KanbanBoardCardWorkUnitQualifiedReference) => void;
-	onOpenTaskInProject: (workspaceId: string, taskId: string, expectedTaskIncarnationCreatedAtEpochMs?: number) => void;
-	// backlog 卡没有详情页：点它在 Focus View 之上原地打开任意项目的编辑对话框，不切项目、焦点任务不动。
+	onOpenTaskInProject: OpenTaskInProject;
+	// 普通 Backlog 在 Focus View 之上原地打开编辑对话框，项目和焦点任务不变。
 	// 缺省（单测宿主）时 backlog 行退回 onOpenTaskInProject。
 	onOpenBacklogTaskEditorInProject?: (workspaceId: string, taskId: string) => void;
 	// 面板顶部「Create task (c)」：Board Scope 建卡框（带目标项目字段，默认上下文项目）。缺省时不显示按钮。

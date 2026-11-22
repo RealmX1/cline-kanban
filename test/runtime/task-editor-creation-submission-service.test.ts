@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AcpClientConnectionRuntime } from "../../src/acp-client-session/acp-client-connection-runtime";
 import { AcpTaskSessionService } from "../../src/acp-client-session/acp-task-session-service";
+import { writeBacklogTaskStartReadinessOperation } from "../../src/backlog-task-start-readiness/backlog-task-start-readiness-operation-store";
 import type { RuntimeBoardCard, RuntimeTaskCardActionStartAgentSessionResponse } from "../../src/core/api-contract";
 import { resolveCreationStartupSettings } from "../../src/core/creation-startup-settings";
 import { assignCrossProjectTaskSwitcherSections } from "../../src/core/cross-project-recently-active-task-switcher-section-assignment";
@@ -498,6 +499,60 @@ describe("编辑器持久创建提交", { timeout: 30000 }, () => {
 		await restarted.sweep();
 		await restarted.settle();
 		expect((await restarted.getStatus(test.source, request))?.phase).toBe("completed");
+		expect(test.start).toHaveBeenCalledTimes(1);
+	});
+	it("直接启动只补齐首发记录时，定期恢复收口且不再次启动", async () => {
+		const test = await scenario();
+		const request = test.request("rcpt1", false);
+		test.start.mockImplementationOnce(async (_scope, _card, _record, beforeLaunch) => {
+			await beforeLaunch();
+			throw new Error("启动响应丢失");
+		});
+		await test.service.submit(test.source, request, evidence);
+		await test.service.settle();
+		expect((await test.service.getStatus(test.source, request))?.phase).toBe("waiting_for_evidence");
+		const card = (await loadPersistedWorkspaceStateById(test.source.workspaceId)).board.columns
+			.flatMap((column) => column.cards)
+			.find((entry) => entry.id === request.newTaskCard.id);
+		if (!card) throw new Error("隔离卡片不存在");
+		const now = Date.now();
+		await writeBacklogTaskStartReadinessOperation({
+			schemaVersion: 1,
+			workspaceId: test.source.workspaceId,
+			workspacePath: test.source.workspacePath,
+			taskId: card.id,
+			taskIncarnationCreatedAtEpochMs: card.createdAt,
+			acceptedAtEpochMs: now,
+			startRequested: false,
+			acceptedStartRequest: {
+				taskId: card.id,
+				expectedTaskIncarnationCreatedAtEpochMs: card.createdAt,
+			},
+			acceptedRequestOriginEvidence: evidence,
+			review: {
+				operationId: randomUUID(),
+				phase: "started",
+				summary: "已核对原启动。",
+				updatedAtEpochMs: now,
+			},
+			reports: [],
+			completedReadOnlyRoundCount: 0,
+			readOnlyEvidence: [],
+			lastDependencyFingerprint: null,
+			sameDependencyAttemptCount: 0,
+			nextAttemptAtEpochMs: 0,
+			agentProcessLaunchMayHaveBegunAtEpochMs: now,
+			launchingSessionSnapshot: null,
+			initialPromptSha256: null,
+			appliedRevisionTaskFingerprint: null,
+			failureHistory: [],
+			previousWorkspaceIds: [],
+			conditionOverrides: [],
+		});
+		await test.service.sweep();
+		await test.service.settle();
+		expect((await test.service.getStatus(test.source, request))?.phase).toBe("completed");
+		expect((await test.service.getStatus(test.source, request))?.startCompleted).toBe(true);
 		expect(test.start).toHaveBeenCalledTimes(1);
 	});
 	it("未到真正启动边界的失败可以有界重试", async () => {

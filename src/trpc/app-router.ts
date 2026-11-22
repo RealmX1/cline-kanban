@@ -1167,6 +1167,7 @@ export interface RuntimeTrpcContext {
 			input: RuntimeTaskCardActionStartAgentSessionRequest,
 			kanbanRequestOriginActorEvidence: KanbanRequestOriginActorEvidence,
 			beforeAgentProcessLaunch?: () => Promise<void>,
+			taskEditorCreationStartAcceptedAtEpochMs?: number,
 		) => Promise<RuntimeTaskCardActionStartAgentSessionResponse>;
 		assessBacklogTaskStartReadiness: (
 			scope: RuntimeTrpcWorkspaceScope,

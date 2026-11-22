@@ -54,6 +54,22 @@ describe("Backlog 按证据分层复核", () => {
 		);
 		expect(result.conclusion).toBe("waiting_for_evidence");
 	});
+	it("无显式开启条件时不接受模型判为条件未满足", async () => {
+		const result = await assessBacklogTaskStartReadiness(
+			task,
+			{ ...evidence, taskAgeMs: 48 * 60 * 60 * 1000 },
+			{
+				requestDecision: vi.fn().mockResolvedValue({
+					conclusion: "conditions_not_met",
+					summary: "模型误把上下文缺失当作条件。",
+					evidenceReferences: ["current_repository"],
+					remainingWorkRevision: null,
+					readOnlyEvidenceRequests: [],
+				}),
+			},
+		);
+		expect(result.conclusion).toBe("waiting_for_evidence");
+	});
 	it("没有足够引用和剩余说明时拒绝自动修订", async () => {
 		const result = await assessBacklogTaskStartReadiness(
 			task,

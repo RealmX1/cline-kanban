@@ -555,6 +555,11 @@ export default function App(): ReactElement {
 		onOrdinaryTaskOpenRequested: () => cancelVisitedTaskHistoryNavigationRef.current(),
 		floatingFormWindowHost,
 	});
+	const handleOpenTaskAgentStartupDetail = useCallback(
+		(workspaceId: string, taskId: string, taskIncarnationCreatedAtEpochMs: number) =>
+			handleOpenTaskInProject(workspaceId, taskId, taskIncarnationCreatedAtEpochMs, "agent_startup_detail"),
+		[handleOpenTaskInProject],
+	);
 	const visitedTaskNavigation = useVisitedTaskNavigationHistoryController({
 		displayedTask:
 			selectedCard &&
@@ -860,7 +865,7 @@ export default function App(): ReactElement {
 		newTaskAgentPermissionModeByDefault: "bypass_all_permission_prompts",
 		queueTaskStartAfterEdit,
 		onTaskCardsCreatedInOtherProject: handleTaskCardsCreatedInOtherProject,
-		openTaskInOtherProjectAfterStart: handleOpenTaskInProject,
+		openTaskInOtherProjectAfterStart: handleOpenTaskAgentStartupDetail,
 	});
 
 	const [postDeployVerificationFollowUpTaskCreationDraftSeed, setPostDeployVerificationFollowUpTaskCreationDraftSeed] =
@@ -2300,7 +2305,7 @@ export default function App(): ReactElement {
 					onPromptChange={editingTaskId ? setEditTaskPrompt : setNewTaskPrompt}
 					images={editingTaskId ? editTaskImages : newTaskImages}
 					onImagesChange={editingTaskId ? setEditTaskImages : setNewTaskImages}
-					onOpenCreatedTaskWithRelations={handleOpenTaskInProject}
+					onOpenCreatedTaskWithRelations={handleOpenTaskAgentStartupDetail}
 					onTaskCreationCardPersisted={handleTaskEditorCreationCardPersisted}
 					onCreate={editingTaskId ? handleSaveEditedTask : handleCreateTask}
 					onCreateAndStart={

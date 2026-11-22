@@ -331,7 +331,10 @@ describe("createRuntimeApi PTY 与 ACP 启动恢复安全", () => {
 			{ workspaceId: "workspace-1", workspacePath: "/tmp/repo" },
 			{ taskId: "task-1", prompt: "原始需求", baseRef: "main" },
 		);
-		expect(response).toMatchObject({ ok: false, error: expect.stringContaining("启动前复核") });
+		expect(response).toMatchObject({
+			ok: false,
+			error: expect.stringContaining("taskCardAction.startTaskCardAgentSessionMovingItIntoInProgress"),
+		});
 		expect(getScopedTerminalManager).not.toHaveBeenCalled();
 	});
 	it("自动恢复动作按 workspace、会话与当前 episode 投递，不把过期动作冒充成功", async () => {
