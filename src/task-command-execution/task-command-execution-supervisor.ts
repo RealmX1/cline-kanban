@@ -14,11 +14,22 @@ const executeFile = promisify(execFile);
 const limitProcessIdentityQueries = pLimit(8);
 export async function readSystemBootIdentity(): Promise<string | null> {
 	try {
-		return process.platform === "linux"
-			? (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim()
-			: process.platform === "darwin"
-				? (await executeFile("sysctl", ["-n", "kern.bootsessionuuid"], { timeout: 5_000 })).stdout.trim()
-				: null;
+		if (process.platform === "linux") {
+			const bootId = (await readFile("/proc/sys/kernel/random/boot_id", "utf8")).trim();
+			return bootId || null;
+		}
+		if (process.platform !== "darwin") return null;
+		// 冻结验收和精简 PATH 不含 /usr/sbin。先按命令名找，找不到再读系统绝对路径。
+		const readBootSession = (binary: string) =>
+			executeFile(binary, ["-n", "kern.bootsessionuuid"], { timeout: 5_000 });
+		try {
+			const bootSession = (await readBootSession("sysctl")).stdout.trim();
+			return bootSession || null;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null;
+			const bootSession = (await readBootSession("/usr/sbin/sysctl")).stdout.trim();
+			return bootSession || null;
+		}
 	} catch {
 		return null;
 	}

@@ -83,6 +83,10 @@ const agentSessionPtyHostDiagnosticsStructureSchema = z.object({
 	runtimeProcessId: z.number().int().positive().nullable(),
 	runtimeProcessStartTimeText: z.string().nullable(),
 	runtimeLoadedEntrypointSha256: z.string().nullable().optional(),
+	// 缺省表示旧 runtime。它不认识交接绑定，调用方不能靠追加字段约束它的布尔中断。
+	enforcesAuthorizedUnretainableSessionHandoverBinding: z.boolean().optional(),
+	// 已验收基线会报告上面的绑定字段，但没有专用 procedure。只有本 build 的在线诊断给出 true。
+	acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions: z.boolean().optional(),
 	runtimeProcessStatus: z.enum(["running", "offline", "unknown"]),
 	startupDecision: agentSessionPtyHostStartupDecisionSchema.nullable(),
 	configurationReadError: z.string().nullable(),
@@ -115,6 +119,9 @@ const agentSessionPtyHostDiagnosticsStructureSchema = z.object({
 			conversationSessionId: z.string(),
 			processId: z.number().nullable(),
 			sessionTransport: z.enum(["acp_stdio_subprocess", "in_process_cline_sdk"]),
+			// 交接前登记 owner 中断回执要用这两项。旧快照没有它们时保持缺省，不能把缺省当成另一代会话。
+			nativeConversationSessionId: z.string().nullable().optional(),
+			runtimeSessionIncarnationId: z.string().nullable().optional(),
 		}),
 	),
 	pendingHostedSessionSpawnOwnership: z.array(

@@ -1,5 +1,6 @@
 import type {
 	AcpConnectionRuntimeHandlers,
+	AcpStartingTaskSessionProcessOwnership,
 	AcpTaskConnection,
 	AcpTaskConnectionStartInput,
 } from "../acp-client-session/acp-client-connection-runtime";
@@ -13,6 +14,7 @@ export type StructuredAgentConversationTaskConnection = Omit<AcpTaskConnection, 
 
 export interface StructuredAgentConversationConnectionRuntime {
 	getConnection(taskId: string): StructuredAgentConversationTaskConnection | null;
+	getStartingTaskSessionProcessOwnership?(taskId: string): AcpStartingTaskSessionProcessOwnership | null;
 	isReplayingPersistedConversationHistory(taskId: string): boolean;
 	startTaskConnection(input: AcpTaskConnectionStartInput): Promise<StructuredAgentConversationTaskConnection>;
 	disposeTaskConnection(taskId: string): void;

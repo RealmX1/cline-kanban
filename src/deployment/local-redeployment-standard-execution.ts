@@ -4,10 +4,19 @@ import { existsSync } from "node:fs";
 import { cp, lstat, mkdir, open, readdir, readFile, realpath } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as waitForRuntimeReadiness } from "node:timers/promises";
+import {
+	type AuthorizedUnretainableHandoverSession,
+	authorizedUnretainableHandoverSessionSchema,
+	authorizedUnretainableSessionHandoverSchema,
+} from "../core/api-contract";
 import { getRuntimeFetch } from "../core/runtime-endpoint";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import {
+	liveRuntimeAcceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions,
+	plannedRedeploymentHandoverDispatch,
+} from "../server/authorized-unretainable-session-handover";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
-import { loadPersistedWorkspaceStateById } from "../state/workspace-state";
+import { loadPersistedWorkspaceSessionsById, loadPersistedWorkspaceStateById } from "../state/workspace-state";
 import { assertTaskClosureStorageProtocolCompatibleWithDistribution } from "../task-closure/task-closure-storage-protocol-compatibility";
 import {
 	readProcessIdentity,
@@ -50,12 +59,15 @@ import {
 	createBoundLocalRedeploymentSourceValidationArguments,
 	executeLocalRedeploymentFile,
 	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME,
 	LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME,
 	LocalRedeploymentIdentityMismatch,
+	localRedeploymentAuthorizedOwnerInterruptionSchema,
 	localRedeploymentRuntimeBaselineSchema,
 	localRedeploymentSha256,
 	readFrozenLocalRedeploymentRequest,
 	readLocalRedeploymentJson,
+	readLocalRedeploymentSessionInterruptionAuthorization,
 	writeLocalRedeploymentJson,
 } from "./local-redeployment-preparation";
 import { observeLocalRedeploymentRepairValidationEligibility } from "./local-redeployment-repair-continuation";
@@ -78,6 +90,169 @@ export function localRedeploymentStageCommandStatus(
 	return "machine_evidence_pending";
 }
 const normalizeStart = (value: string): string => value.trim().replace(/\s+/gu, " ");
+
+class LocalRedeploymentStandardCommandFailure extends Error {
+	readonly stdout: string;
+	readonly exitCode: number | null;
+	constructor(name: string, original: string, stdout: string, exitCode: number | null) {
+		super(`标准部署命令未成功：${name}；原件 ${original}`);
+		this.name = "LocalRedeploymentStandardCommandFailure";
+		this.stdout = stdout;
+		this.exitCode = exitCode;
+	}
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return !!value && typeof value === "object";
+}
+
+export function canonicalizeInterruptedSessionsForHandover(
+	blockingSessions: readonly unknown[],
+): { ok: true; interruptedSessions: AuthorizedUnretainableHandoverSession[] } | { ok: false; reason: string } {
+	const interruptedSessions: AuthorizedUnretainableHandoverSession[] = [];
+	for (const session of blockingSessions) {
+		if (!isRecord(session)) return { ok: false, reason: "不可保留会话清单含无法识别的条目" };
+		const { workspaceId, conversationSessionId } = session;
+		if (typeof workspaceId !== "string" || workspaceId.length === 0) {
+			return { ok: false, reason: "不可保留会话缺少工作区身份" };
+		}
+		if (typeof conversationSessionId !== "string" || conversationSessionId.length === 0) {
+			return { ok: false, reason: "不可保留会话缺少会话身份" };
+		}
+		const processId =
+			session.processId === null
+				? null
+				: typeof session.processId === "number" && Number.isInteger(session.processId) && session.processId > 0
+					? session.processId
+					: undefined;
+		if (processId === undefined) return { ok: false, reason: "不可保留会话缺少可核对的进程身份" };
+		const nativeConversationSessionId =
+			typeof session.nativeConversationSessionId === "string" ? session.nativeConversationSessionId : null;
+		const runtimeSessionIncarnationId =
+			typeof session.runtimeSessionIncarnationId === "string" ? session.runtimeSessionIncarnationId : null;
+		const sessionKind =
+			session.sessionTransport === "acp_stdio_subprocess" || session.sessionTransport === "in_process_cline_sdk"
+				? session.sessionTransport
+				: session.ownership === "runtime_process"
+					? "runtime_process_pty"
+					: session.ownership === "ownership_unknown"
+						? "ownership_unknown_pty"
+						: null;
+		if (!sessionKind) return { ok: false, reason: "不可保留会话缺少可绑定的通道或归属" };
+		interruptedSessions.push({
+			workspaceId,
+			conversationSessionId,
+			processId,
+			nativeConversationSessionId,
+			runtimeSessionIncarnationId,
+			sessionKind,
+		});
+	}
+	return { ok: true, interruptedSessions };
+}
+
+export function resolveAuthorizedOwnerSessionFromBlockingInventory(input: {
+	blockingSessions: readonly unknown[];
+	workspaceId: string;
+	owner: {
+		conversationSessionId: string;
+		nativeSessionId: string;
+		runtimeSessionIncarnationId: string | null;
+	};
+	persistedOwnerSummary: {
+		nativeSessionId: string | null;
+		runtimeSessionIncarnationId: string | null;
+	} | null;
+}):
+	| {
+			status: "matched";
+			session: {
+				workspaceId: string;
+				conversationSessionId: string;
+				nativeConversationSessionId: string;
+				runtimeSessionIncarnationId: string | null;
+			};
+	  }
+	| { status: "not_present" }
+	| { status: "unconfirmed" } {
+	let sawUnconfirmedOwner = false;
+	for (const session of input.blockingSessions) {
+		if (!isRecord(session)) continue;
+		if (session.workspaceId !== input.workspaceId) continue;
+		if (session.conversationSessionId !== input.owner.conversationSessionId) continue;
+		const identityOnDiagnostic = "nativeConversationSessionId" in session || "runtimeSessionIncarnationId" in session;
+		if (identityOnDiagnostic) {
+			const native = session.nativeConversationSessionId;
+			const incarnation = session.runtimeSessionIncarnationId ?? null;
+			if (native === input.owner.nativeSessionId && incarnation === input.owner.runtimeSessionIncarnationId) {
+				return {
+					status: "matched",
+					session: {
+						workspaceId: input.workspaceId,
+						conversationSessionId: input.owner.conversationSessionId,
+						nativeConversationSessionId: input.owner.nativeSessionId,
+						runtimeSessionIncarnationId: input.owner.runtimeSessionIncarnationId,
+					},
+				};
+			}
+			continue;
+		}
+		if (session.sessionTransport !== "acp_stdio_subprocess" && session.sessionTransport !== "in_process_cline_sdk") {
+			sawUnconfirmedOwner = true;
+			continue;
+		}
+		const persisted = input.persistedOwnerSummary;
+		if (
+			persisted?.nativeSessionId === input.owner.nativeSessionId &&
+			persisted.runtimeSessionIncarnationId === input.owner.runtimeSessionIncarnationId
+		) {
+			return {
+				status: "matched",
+				session: {
+					workspaceId: input.workspaceId,
+					conversationSessionId: input.owner.conversationSessionId,
+					nativeConversationSessionId: input.owner.nativeSessionId,
+					runtimeSessionIncarnationId: input.owner.runtimeSessionIncarnationId,
+				},
+			};
+		}
+		sawUnconfirmedOwner = true;
+	}
+	return sawUnconfirmedOwner ? { status: "unconfirmed" } : { status: "not_present" };
+}
+
+function readNativeHandoverOutcome(stdout: string): {
+	outcome?: string;
+	runtimeProcessId?: number;
+	runtimeProcessStartTimeText?: string;
+	authorizedUnretainableSessionHandoverBound?: boolean;
+	authorizedUnretainableSessionsAtHandoverAcceptance?: AuthorizedUnretainableHandoverSession[];
+} | null {
+	const trimmed = stdout.trim();
+	if (!trimmed) return null;
+	try {
+		const parsed = JSON.parse(trimmed) as {
+			outcome?: unknown;
+			runtimeProcessId?: unknown;
+			runtimeProcessStartTimeText?: unknown;
+			authorizedUnretainableSessionHandoverBound?: unknown;
+			authorizedUnretainableSessionsAtHandoverAcceptance?: unknown;
+		};
+		if (!parsed || typeof parsed !== "object") return null;
+		return {
+			outcome: typeof parsed.outcome === "string" ? parsed.outcome : undefined,
+			runtimeProcessId: typeof parsed.runtimeProcessId === "number" ? parsed.runtimeProcessId : undefined,
+			runtimeProcessStartTimeText:
+				typeof parsed.runtimeProcessStartTimeText === "string" ? parsed.runtimeProcessStartTimeText : undefined,
+			authorizedUnretainableSessionHandoverBound: parsed.authorizedUnretainableSessionHandoverBound === true,
+			authorizedUnretainableSessionsAtHandoverAcceptance: authorizedUnretainableHandoverSessionSchema
+				.array()
+				.safeParse(parsed.authorizedUnretainableSessionsAtHandoverAcceptance).data,
+		};
+	} catch {
+		return null;
+	}
+}
 const candidateCheckout = (directory: string) => join(directory, "candidate-source-checkout");
 const frozenExecutor = (directory: string) => join(directory, "frozen-local-redeployment-executor.mjs");
 
@@ -136,14 +311,19 @@ export async function observeLocalRedeploymentRuntimeBaseline(
 		if (refused) {
 			try {
 				let noListener = false;
-				try {
-					await executeLocalRedeploymentFile(
-						"lsof",
-						["-nP", `-iTCP:${request.runtimeIdentity.runtimePort}`, "-sTCP:LISTEN"],
-						{ timeout: 3_000 },
-					);
-				} catch (nativeError) {
-					noListener = (nativeError as { code?: number }).code === 1;
+				const listenerProbeArguments = ["-nP", `-iTCP:${request.runtimeIdentity.runtimePort}`, "-sTCP:LISTEN"];
+				const listenerProbeBinaries = process.platform === "darwin" ? ["lsof", "/usr/sbin/lsof"] : ["lsof"];
+				for (const binary of listenerProbeBinaries) {
+					try {
+						await executeLocalRedeploymentFile(binary, listenerProbeArguments, { timeout: 3_000 });
+						noListener = false;
+						break;
+					} catch (nativeError) {
+						const code = (nativeError as { code?: number | string }).code;
+						if (code === "ENOENT") continue;
+						noListener = code === 1;
+						break;
+					}
 				}
 				const systemBootIdentity = await readSystemBootIdentity();
 				if (noListener && systemBootIdentity)
@@ -182,6 +362,7 @@ async function observeLocalRedeploymentSessionContinuity(
 		};
 	let output: string;
 	let readinessCommandSucceeded = false;
+	const authorization = await readLocalRedeploymentSessionInterruptionAuthorization(directory, frozen);
 	try {
 		output = (
 			await executeLocalRedeploymentFile(
@@ -190,7 +371,7 @@ async function observeLocalRedeploymentSessionContinuity(
 					join(candidateCheckout(directory), "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
 					"--candidate-source-commit",
 					request.candidateSourceCommit,
-					"--before-runtime-restart",
+					...(authorization ? [] : ["--before-runtime-restart"]),
 					"--expected-runtime-process-id",
 					String(baseline.runtimeBefore.processId),
 				],
@@ -229,7 +410,9 @@ async function observeLocalRedeploymentSessionContinuity(
 			status: ready ? "ready" : currentGenerationMatches && readiness.ok === false ? "blocked" : "unavailable",
 			blockingReasons,
 			blockingSessions,
-			readiness: ready ? readiness : null,
+			readiness: ready
+				? { ...readiness, blockingSessions, nonPreservableSessionInterruptionAuthorization: authorization }
+				: null,
 		};
 	} catch {
 		return {
@@ -257,7 +440,9 @@ async function recordLocalRedeploymentSessionContinuity(
 		blockingSessions: observation.blockingSessions,
 		checkedAtEpochMs,
 		nextCheckAtEpochMs: waiting ? checkedAtEpochMs + 30_000 : null,
-		recoveryCondition: waiting ? "阻塞会话自然退出或当前实例诊断恢复后，重新核验会话与运行代际" : null,
+		recoveryCondition: waiting
+			? "阻塞会话自然退出、登记已获准的会话中断，或当前实例诊断恢复后，重新核验会话与运行代际"
+			: null,
 	};
 	const firstObservationPath = join(directory, "initial-session-continuity-preflight.json");
 	if (!existsSync(firstObservationPath)) await writeLocalRedeploymentJson(firstObservationPath, receipt);
@@ -342,7 +527,7 @@ export async function runLocalRedeploymentStandardCommand(
 	if (exitCode !== 0) {
 		if (name === "source-validation" && output.includes('"quality_validation_failed"'))
 			throw new LocalRedeploymentQualityFailure(`源码验证真实失败，读取 ${original}`);
-		throw new Error(`标准部署命令未成功：${name}；原件 ${original}`);
+		throw new LocalRedeploymentStandardCommandFailure(name, original, output, exitCode);
 	}
 	assertLocalRedeploymentNotRevoked(directory);
 	return output;
@@ -499,6 +684,7 @@ export async function initializeStandardLocalRedeployment(directory: string): Pr
 	const {
 		serviceLaunch: _serviceLaunch,
 		sourceValidationEvidenceFilePaths: _sourceEvidence,
+		nonPreservableSessionInterruptionAuthorization: _sessionInterruptionAuthorization,
 		...manifestFields
 	} = frozen.request;
 	const manifest = localDeploymentExecutionManifestSchema.parse({
@@ -968,6 +1154,7 @@ export async function executeStandardLocalRedeploymentStage(
 				runtimeProcessId?: number;
 				runtimeProcessStartTimeText?: string;
 				runtimeLoadedEntrypointSha256?: string;
+				acceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions?: boolean;
 			};
 			if (
 				diagnostic.runtimeProcessId !== current.runtimeBefore.processId ||
@@ -987,20 +1174,108 @@ export async function executeStandardLocalRedeploymentStage(
 				if (!readiness) throw new Error("原监听实例未通过当前代际核验");
 				await writeLocalRedeploymentJson(join(directory, "runtime-restart-target-baseline.json"), current);
 				await writeLocalRedeploymentJson(join(directory, "before-runtime-restart.json"), readiness);
+				const allowInterruption = readiness.nonPreservableSessionInterruptionAuthorization !== null;
+				const blockingSessions = Array.isArray(readiness.blockingSessions) ? readiness.blockingSessions : [];
+				const handoverDispatch = plannedRedeploymentHandoverDispatch({
+					allowInterruption,
+					receiverAcceptsDedicatedProcedure:
+						liveRuntimeAcceptsPlannedHandoverRestartWithAuthorizedUnretainableSessions(diagnostic),
+					blockingSessionCount: blockingSessions.length,
+				});
+				if (handoverDispatch === "wait_for_unretainable_sessions") {
+					throw new Error("当前 runtime 没有专用交接入口，拒绝用布尔值重启；等这些会话自然结束后重新核验");
+				}
+				const sendBoundInterruption = handoverDispatch === "send_dedicated_binding";
+				const interruptedSessions = sendBoundInterruption
+					? canonicalizeInterruptedSessionsForHandover(blockingSessions)
+					: { ok: true as const, interruptedSessions: [] };
+				if (!interruptedSessions.ok) {
+					throw new Error(`${interruptedSessions.reason}，拒绝把中断授权放宽到未核验会话`);
+				}
+				let persistedOwnerSummary: {
+					nativeSessionId: string | null;
+					runtimeSessionIncarnationId: string | null;
+				} | null = null;
+				if (sendBoundInterruption && frozen.owner) {
+					try {
+						const summary = (
+							await loadPersistedWorkspaceSessionsById(request.workspaceId, { requireCompleteRead: true })
+						)[frozen.owner.conversationSessionId];
+						persistedOwnerSummary = summary
+							? {
+									nativeSessionId: summary.agentNativeConversationSessionIdentity?.nativeSessionId ?? null,
+									runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
+								}
+							: null;
+					} catch {
+						persistedOwnerSummary = null;
+					}
+				}
+				const authorizedOwner =
+					sendBoundInterruption && frozen.owner
+						? resolveAuthorizedOwnerSessionFromBlockingInventory({
+								blockingSessions,
+								workspaceId: request.workspaceId,
+								owner: frozen.owner,
+								persistedOwnerSummary,
+							})
+						: { status: "not_present" as const };
+				if (authorizedOwner.status === "unconfirmed") {
+					throw new Error("发起会话位于不可保留清单，交接前无法核对原生身份，拒绝重启");
+				}
+				const handoverArguments = [node, cli, "runtime", "handover-restart"];
+				if (sendBoundInterruption) {
+					handoverArguments.push(
+						"--authorized-unretainable-session-handover",
+						JSON.stringify(
+							authorizedUnretainableSessionHandoverSchema.parse({
+								runtimeProcessId: restartBaseline.processId,
+								runtimeProcessStartTimeText: restartBaseline.processStartTimeText,
+								interruptedSessions: interruptedSessions.interruptedSessions,
+							}),
+						),
+					);
+				}
+				handoverArguments.push("--wait-for-successor-seconds", "60");
+				let handoverStdout = "";
 				try {
-					await run("handover-restart", [
-						node,
-						cli,
-						"runtime",
-						"handover-restart",
-						"--wait-for-successor-seconds",
-						"60",
-					]);
+					handoverStdout = await run("handover-restart", handoverArguments);
 				} catch (error) {
+					handoverStdout = error instanceof LocalRedeploymentStandardCommandFailure ? error.stdout : "";
 					await writeLocalRedeploymentJson(join(directory, "handover-command-failure.json"), {
 						error: String(error),
 						historicalCommandFailurePreserved: true,
 					});
+				}
+				const nativeHandover = readNativeHandoverOutcome(handoverStdout);
+				if (
+					authorizedOwner.status === "matched" &&
+					nativeHandover?.outcome === "handover_restart_started" &&
+					nativeHandover.runtimeProcessId === restartBaseline.processId &&
+					nativeHandover.authorizedUnretainableSessionHandoverBound === true &&
+					typeof nativeHandover.runtimeProcessStartTimeText === "string" &&
+					normalizeStart(nativeHandover.runtimeProcessStartTimeText) ===
+						normalizeStart(restartBaseline.processStartTimeText)
+				) {
+					const ownerInterruption = localRedeploymentAuthorizedOwnerInterruptionSchema.safeParse({
+						requestSha256: frozen.requestSha256,
+						dispatchedAtEpochMs: Date.now(),
+						runtimeBefore: restartBaseline,
+						nativeHandover: {
+							outcome: "handover_restart_started",
+							runtimeProcessId: nativeHandover.runtimeProcessId,
+							runtimeProcessStartTimeText: nativeHandover.runtimeProcessStartTimeText,
+							authorizedUnretainableSessionHandoverBound: true,
+							authorizedUnretainableSessionsAtHandoverAcceptance:
+								nativeHandover.authorizedUnretainableSessionsAtHandoverAcceptance,
+						},
+						authorizedOwnerSession: authorizedOwner.session,
+					});
+					if (ownerInterruption.success)
+						await writeLocalRedeploymentJson(
+							join(directory, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME),
+							ownerInterruption.data,
+						);
 				}
 			}
 		}

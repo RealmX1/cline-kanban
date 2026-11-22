@@ -19,6 +19,7 @@ import type {
 	RuntimeHookIngestRequest,
 	RuntimeHookIngestResponse,
 	RuntimeIngestExploratoryFindingCandidateRequest,
+	RuntimePlannedHandoverRestartRequest,
 	RuntimePlannedHandoverRestartResponse,
 	RuntimeRunUpdateResponse,
 	RuntimeStopTerminatingHostedAgentSessionsResponse,
@@ -68,6 +69,7 @@ import {
 import { startVerificationExecutionRecoveryLifecycle } from "../deployment/verification-execution-recovery";
 import { startEventLoopDelayMonitor } from "../diagnostics/event-loop-delay-monitor";
 import { startKanbanRuntimeProcessSelfResourceSampleMonitor } from "../diagnostics/kanban-runtime-process-self-resource-sample-monitor";
+import { readPosixProcessResourceTable } from "../diagnostics/posix-process-table-with-resource-columns-reader";
 import { startProcessFileDescriptorWatermarkMonitor } from "../diagnostics/process-file-descriptor-watermark-monitor";
 import { createTaskAgentConversationModelTokenUsageJournalMonitor } from "../diagnostics/task-agent-conversation-model-token-usage-journal-monitor";
 import { createTaskAttributedProcessTreeResourceSampler } from "../diagnostics/task-attributed-process-tree-resource-sampler";
@@ -178,11 +180,13 @@ import { createWorkspaceApi } from "../trpc/workspace-api";
 import {
 	type ActiveRuntimeSessionShutdownResult,
 	countAcpTaskSessionsInterruptedByRuntimeExit,
+	listConversationSessionsInterruptedByRuntimeExit,
 	stopActiveTerminalAndAcpRuntimeSessionsForWorkspace,
 } from "./active-runtime-session-shutdown";
 import { reconcilePendingUserDecisionAnswerDeliveriesForWorkspace } from "./agent-raised-pending-user-decision-answer-delivery-reconciliation";
 import { createAgentSessionInactivityReclamationScheduler } from "./agent-session-inactivity-reclamation-scheduler";
 import { getRuntimeAssetCacheControl, getWebUiDir, normalizeRequestPath, readAsset } from "./assets";
+import { plannedHandoverInterruptionDecision } from "./authorized-unretainable-session-handover";
 import { createCrossProjectTaskWorktreeGitMetadataCache } from "./cross-project-task-worktree-git-metadata-cache";
 import { createDuplicateProjectConsolidationService } from "./duplicate-project-consolidation";
 import { loadHostedSessionOrphanReclamationEligibleAtReaderForWorkspace } from "./hosted-agent-session-orphan-reclamation-deadline-at-runtime-detach";
@@ -869,10 +873,52 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		}
 		return runtimeExitRequestHandler;
 	};
-	const requestPlannedHandoverRestartPreservingHostedAgentSessions = async (input: {
-		allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost?: boolean;
-	}): Promise<RuntimePlannedHandoverRestartResponse> => {
+	const listSessionsThatPlannedHandoverWouldInterrupt = () => {
+		const ptySessions = deps.workspaceRegistry.listManagedWorkspaces().flatMap(({ workspaceId, terminalManager }) =>
+			terminalManager.listLivePtySessionProcessOwnership().flatMap((session) => {
+				if (session.ownership === "independent_host") return [];
+				if (!Number.isInteger(session.processId) || session.processId <= 0) {
+					throw new Error("runtime 自有 PTY 会话缺少可核对的进程身份，拒绝按中断授权重启");
+				}
+				return [
+					{
+						workspaceId,
+						conversationSessionId: session.conversationSessionId,
+						processId: session.processId,
+						nativeConversationSessionId: session.nativeConversationSessionId,
+						runtimeSessionIncarnationId: session.runtimeSessionIncarnationId,
+						sessionKind:
+							session.ownership === "runtime_process"
+								? ("runtime_process_pty" as const)
+								: ("ownership_unknown_pty" as const),
+					},
+				];
+			}),
+		);
+		const nonPtySessions = Array.from(acpTaskSessionServiceByWorkspaceId).flatMap(([workspaceId, service]) =>
+			listConversationSessionsInterruptedByRuntimeExit(workspaceId, service),
+		);
+		if (
+			nonPtySessions.some(({ processId }) => processId !== null && (!Number.isInteger(processId) || processId <= 0))
+		) {
+			throw new Error("非 PTY 会话缺少可核对的进程身份，拒绝按中断授权重启");
+		}
+		return [...ptySessions, ...nonPtySessions];
+	};
+	const requestPlannedHandoverRestartPreservingHostedAgentSessions = async (
+		input: RuntimePlannedHandoverRestartRequest,
+	): Promise<RuntimePlannedHandoverRestartResponse> => {
 		const runtimeExitRequestHandler = requireRuntimeExitRequestHandler();
+		let currentProcessStartTimeText: string | null = null;
+		if (input.authorizedUnretainableSessionHandover) {
+			try {
+				currentProcessStartTimeText =
+					(await readPosixProcessResourceTable()).find((entry) => entry.processId === process.pid)
+						?.processStartTimeText ?? null;
+			} catch {
+				currentProcessStartTimeText = null;
+			}
+		}
 		const agentSessionCountsAffectedByRuntimeExit = countAgentSessionsAffectedByRuntimeExit();
 		const responseFacts = {
 			runtimeProcessId: process.pid,
@@ -882,13 +928,22 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 		if (runtimeExitRequestHandler.isRuntimeShutdownInProgress()) {
 			return { outcome: "runtime_shutdown_already_in_progress", ...responseFacts };
 		}
+		const allowInterruption = input.allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost === true;
 		const agentSessionsThatHandoverWouldInterrupt =
 			agentSessionCountsAffectedByRuntimeExit.agentSessionsWithPtyOwnedByRuntimeProcess +
 			agentSessionCountsAffectedByRuntimeExit.conversationAgentSessionsRunningInsideRuntimeProcess;
-		if (
-			agentSessionsThatHandoverWouldInterrupt > 0 &&
-			input.allowInterruptingAgentSessionsNotPreservedByAgentSessionPtyHost !== true
-		) {
+		const currentSessions = input.authorizedUnretainableSessionHandover
+			? listSessionsThatPlannedHandoverWouldInterrupt()
+			: [];
+		const interruption = plannedHandoverInterruptionDecision({
+			allowInterruption,
+			binding: input.authorizedUnretainableSessionHandover,
+			currentProcessId: process.pid,
+			currentProcessStartTimeText,
+			currentSessions,
+			countedSessionsThatWouldEnd: agentSessionsThatHandoverWouldInterrupt,
+		});
+		if (interruption.outcome === "refuse") {
 			return {
 				outcome: "refused_because_agent_sessions_not_preserved_by_agent_session_pty_host_would_be_interrupted",
 				...responseFacts,
@@ -898,7 +953,17 @@ export async function createRuntimeServer(deps: CreateRuntimeServerDependencies)
 			kind: "planned_handover_restart_preserving_hosted_agent_sessions",
 			requestedVia: "runtime_trpc_procedure",
 		});
-		return { outcome: "handover_restart_started", ...responseFacts };
+		return {
+			outcome: "handover_restart_started",
+			...responseFacts,
+			...(interruption.outcome === "start_bound"
+				? {
+						runtimeProcessStartTimeText: interruption.runtimeProcessStartTimeText,
+						authorizedUnretainableSessionHandoverBound: true as const,
+						authorizedUnretainableSessionsAtHandoverAcceptance: currentSessions,
+					}
+				: {}),
+		};
 	};
 	const requestRuntimeStopTerminatingHostedAgentSessions =
 		async (): Promise<RuntimeStopTerminatingHostedAgentSessionsResponse> => {

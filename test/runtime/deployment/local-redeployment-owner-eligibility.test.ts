@@ -1,10 +1,11 @@
-import { readFile, realpath, stat } from "node:fs/promises";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runtimeBoardCardSchema, runtimeTaskSessionSummarySchema } from "../../../src/core/api-contract";
 import {
 	assertLocalRedeploymentOwnerStillEligible,
 	type FrozenLocalRedeploymentRequest,
+	LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME,
 } from "../../../src/deployment/local-redeployment-preparation";
 import {
 	listWorkspaceIndexEntries,
@@ -44,6 +45,7 @@ afterEach(() => sandbox.cleanup());
 async function createOwnerContext() {
 	const metadata = await stat(sandbox.path);
 	const frozen = {
+		requestSha256: "b".repeat(64),
 		request: {
 			workspaceId: "workspace",
 			taskId: "task",
@@ -129,5 +131,126 @@ describe("后续部署动作严格复核冻结会话", () => {
 			executionId: "deployment",
 			source: "persistent_explicit_session_stop",
 		});
+	});
+	it("只在该执行已验收授权交接之后允许原发起会话退出，明确 Stop 仍撤销", async () => {
+		const { frozen } = await createOwnerContext();
+		frozen.request.nonPreservableSessionInterruptionAuthorization = {
+			sourceReference: "test:isolated-restart-approval",
+			userRequestQuote: "允许中断无法保留的隔离会话",
+		};
+		vi.mocked(loadPersistedWorkspaceSessionsById).mockResolvedValue({});
+		const interruptionReceiptPath = join(sandbox.path, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME);
+		const authorizedOwnerSession = {
+			workspaceId: "workspace",
+			conversationSessionId: "original-session",
+			nativeConversationSessionId: "original-native",
+			runtimeSessionIncarnationId: "original-generation",
+		};
+		const interruptionReceipt = {
+			requestSha256: frozen.requestSha256,
+			dispatchedAtEpochMs: 10,
+			runtimeBefore: { processId: 100, processStartTimeText: "previous-runtime" },
+			nativeHandover: {
+				outcome: "handover_restart_started",
+				runtimeProcessId: 100,
+				runtimeProcessStartTimeText: "previous-runtime",
+				authorizedUnretainableSessionHandoverBound: true,
+			},
+			authorizedOwnerSession,
+		};
+		await writeFile(interruptionReceiptPath, JSON.stringify(interruptionReceipt));
+		const manifest = {
+			executionId: frozen.request.executionId,
+			redeploymentRequestSha256: frozen.requestSha256,
+			candidateDistributionSha256: "c".repeat(64),
+		};
+		await writeFile(join(sandbox.path, "local-deployment-execution.json"), JSON.stringify({ manifest }));
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("变化");
+		await writeFile(
+			join(sandbox.path, "runtime-restart-acceptance.json"),
+			JSON.stringify({
+				executionId: manifest.executionId,
+				candidateDistributionSha256: manifest.candidateDistributionSha256,
+				observedAtEpochMs: 11,
+				runtime: { ok: true, runtimeProcessId: 101, runtimeProcessStartTimeText: "replacement-runtime" },
+			}),
+		);
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("变化");
+		await writeFile(
+			interruptionReceiptPath,
+			JSON.stringify({
+				...interruptionReceipt,
+				nativeHandover: {
+					...interruptionReceipt.nativeHandover,
+					authorizedUnretainableSessionsAtHandoverAcceptance: [
+						{ ...authorizedOwnerSession, processId: 99, sessionKind: "acp_stdio_subprocess" },
+					],
+				},
+			}),
+		);
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).resolves.toBeUndefined();
+		readOperations.mockResolvedValue({ explicitlyStoppedSessionIds: ["original-session"] });
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("持久 Stop");
+	});
+	it("候选换代但缺少目标代际的原生交接回执时，不放宽原会话归属", async () => {
+		const { frozen } = await createOwnerContext();
+		frozen.request.nonPreservableSessionInterruptionAuthorization = {
+			sourceReference: "test:isolated-restart-approval",
+			userRequestQuote: "允许中断无法保留的隔离会话",
+		};
+		vi.mocked(loadPersistedWorkspaceSessionsById).mockResolvedValue({});
+		await writeFile(
+			join(sandbox.path, "local-deployment-execution.json"),
+			JSON.stringify({
+				manifest: {
+					executionId: frozen.request.executionId,
+					redeploymentRequestSha256: frozen.requestSha256,
+					candidateDistributionSha256: "c".repeat(64),
+				},
+			}),
+		);
+		await writeFile(
+			join(sandbox.path, "runtime-restart-acceptance.json"),
+			JSON.stringify({
+				executionId: frozen.request.executionId,
+				candidateDistributionSha256: "c".repeat(64),
+				observedAtEpochMs: 11,
+				runtime: { ok: true, runtimeProcessId: 101, runtimeProcessStartTimeText: "replacement-runtime" },
+			}),
+		);
+		await writeFile(
+			join(sandbox.path, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME),
+			JSON.stringify({
+				requestSha256: frozen.requestSha256,
+				dispatchedAtEpochMs: 10,
+				runtimeBefore: { processId: 100, processStartTimeText: "previous-runtime" },
+			}),
+		);
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("变化");
+		const receipt = JSON.parse(
+			await readFile(join(sandbox.path, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME), "utf8"),
+		);
+		receipt.nativeHandover = { outcome: "handover_restart_started", runtimeProcessId: 404 };
+		await writeFile(
+			join(sandbox.path, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME),
+			JSON.stringify(receipt),
+		);
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("变化");
+		receipt.nativeHandover = {
+			outcome: "handover_restart_started",
+			runtimeProcessId: 100,
+			runtimeProcessStartTimeText: "previous-runtime",
+		};
+		receipt.authorizedOwnerSession = {
+			workspaceId: "workspace",
+			conversationSessionId: "original-session",
+			nativeConversationSessionId: "original-native",
+			runtimeSessionIncarnationId: "original-generation",
+		};
+		await writeFile(
+			join(sandbox.path, LOCAL_REDEPLOYMENT_AUTHORIZED_OWNER_INTERRUPTION_FILENAME),
+			JSON.stringify(receipt),
+		);
+		await expect(assertLocalRedeploymentOwnerStillEligible(sandbox.path, frozen)).rejects.toThrow("变化");
 	});
 });
