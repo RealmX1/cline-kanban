@@ -2,6 +2,7 @@
 import argparse
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -491,7 +492,8 @@ def run_analysis(manifest_path, output_directory):
     try:
         manifest = read_json(manifest_path)
     except (OSError, UnicodeError) as error:
-        raise InvalidAnalysisInput('manifest_unreadable') from error
+        reason = 'manifest_path_unresolvable' if isinstance(error, OSError) and error.errno == errno.ELOOP else 'manifest_unreadable'
+        raise InvalidAnalysisInput(reason) from error
     validate_manifest(manifest)
     if output_directory.exists() and not output_directory.is_dir():
         raise InvalidAnalysisInput('artifacts_directory_is_file')
