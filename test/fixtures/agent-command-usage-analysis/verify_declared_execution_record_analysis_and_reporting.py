@@ -801,7 +801,9 @@ class AgentInteractionSummaryAndBatchTests(AnalysisFixture):
 
     def test_unresolvable_manifest_preserves_prior_and_following_batch_receipts(self):
         write_json(self.manifest_path, self.manifest)
-        unresolvable_manifest = self.root / 'self-referential-analysis-manifest.json'
+        aliased_root = self.root / 'analysis-manifest-root-alias'
+        aliased_root.symlink_to(self.root, target_is_directory=True)
+        unresolvable_manifest = aliased_root / 'self-referential-analysis-manifest.json'
         unresolvable_manifest.symlink_to(unresolvable_manifest.name)
         result = self.run_batch([self.manifest_path, unresolvable_manifest, self.manifest_path], 3)
         self.assertEqual(result['status'], 'partial')

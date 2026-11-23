@@ -583,6 +583,7 @@ def run_analysis(manifest_path, output_directory):
 
 
 def analyze_one_declared_manifest(manifest_path, output_directory):
+    requested_manifest_path = manifest_path
     try:
         if sys.version_info < (3, 11):
             raise InvalidAnalysisInput('python_3_11_required')
@@ -598,7 +599,10 @@ def analyze_one_declared_manifest(manifest_path, output_directory):
                 'detailFiles': ['aggregate-usage-summary.json', 'agent-command-usage-analysis.html',
                                 'private-analysis-run-manifest.json', 'private-goal-evidence-catalog.json']}, 3 if completed['status'] == 'partial' else 0
     except InvalidAnalysisInput as error:
-        failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': str(error)}
+        reason = str(error)
+        if reason == 'manifest_path_unresolvable':
+            manifest_path = requested_manifest_path
+        failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': reason}
         code = 2
     except json.JSONDecodeError as error:
         failure = {'errorCategory': 'invalid_analysis_input', 'reasonCode': 'invalid_json',
