@@ -1,6 +1,6 @@
 import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { describe, expect, it, onTestFinished } from "vitest";
+import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { analyzeLocalDeploymentExecutions } from "../../../src/deployment/local-deployment-execution";
 import { localDeploymentExecutionManifestSchema } from "../../../src/deployment/local-deployment-execution-contract";
 import {
@@ -8,7 +8,15 @@ import {
 	prepareLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
 } from "../../../src/deployment/local-redeployment-preparation";
+import type * as LockedFileSystemModule from "../../../src/fs/locked-file-system";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+
+vi.mock("../../../src/fs/locked-file-system", async (importOriginal) => {
+	const actual = await importOriginal<typeof LockedFileSystemModule>();
+	const guardedTestDirectory = process.env.TMPDIR;
+	if (!guardedTestDirectory) throw new Error("必须通过 guarded runner 提供独占测试目录。");
+	return { ...actual, lockedFileSystem: await actual.LockedFileSystem.forIsolatedTestDirectory(guardedTestDirectory) };
+});
 
 describe("构建前准备标准重部署", () => {
 	it("只冻结本地提交、工具与授权，既不构建也不碰共享输出；同身份不能更换材料", async () => {
@@ -36,6 +44,10 @@ describe("构建前准备标准重部署", () => {
 			originatingTaskWorktreePath: repository.repositoryPath,
 			sourceCheckoutPath: repository.repositoryPath,
 			candidateSourceCommit: commit,
+			previousDeploymentExecution: {
+				executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14",
+				executionDirectory: join(fixture.fixtureRootDirectoryPath, "unavailable-predecessor"),
+			},
 			sourceValidationEvidenceFilePaths: [join(fixture.fixtureRootDirectoryPath, "upstream", "validation.json")],
 			deploymentNodeBinaryPath: process.execPath,
 			distributionDirectoryPath: join(repository.repositoryPath, "dist"),
@@ -53,6 +65,7 @@ describe("构建前准备标准重部署", () => {
 		await expect(readFile(join(repository.repositoryPath, "dist/cli.js"))).rejects.toThrow();
 		expect((await readFrozenLocalRedeploymentRequest(directory)).request).toMatchObject({
 			candidateSourceCommit: commit,
+			previousDeploymentExecution: request.previousDeploymentExecution,
 			sourceValidationEvidenceFilePaths: request.sourceValidationEvidenceFilePaths,
 		});
 		expect((await analyzeLocalDeploymentExecutions([directory])).executions[0]).toMatchObject({
@@ -60,7 +73,7 @@ describe("构建前准备标准重部署", () => {
 			executionIdentityEvidenceKind: "bound_redeployment_request",
 			candidateSourceCommit: commit,
 			deploymentOutcome: "prepared",
-			operationalProgress: { sourceValidation: { evidenceReferenceCount: 1, status: "pending" } },
+			operationalProgress: { sourceValidation: { evidenceReferenceCount: 2, status: "pending" } },
 		});
 		await expect(
 			prepareLocalRedeployment(

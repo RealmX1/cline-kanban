@@ -1,8 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { lstat, mkdir, readdir, readFile, realpath } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { runtimePtySessionProcessOwnershipSchema } from "../core/agent-session-pty-host-diagnostics-contract";
+import { getRuntimeFetch } from "../core/runtime-endpoint";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
+import { readTaskCommandExecutions } from "../task-command-execution/task-command-execution-store";
+import {
+	inspectOwnedCommandSupervisor,
+	readProcessIdentity,
+} from "../task-command-execution/task-command-execution-supervisor";
 import {
 	LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES,
 	LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER,
@@ -278,7 +286,25 @@ export interface LocalDeploymentExecutionAnalysis {
 			attemptsUsed: number;
 			recoveryEvidenceConsumed: number;
 			blockingFailure: unknown;
+			latestAttemptExecutionId?: string | null;
+			latestAttemptExecutionDirectory?: string | null;
+			latestAttemptReservedAtEpochMs?: number | null;
 		} | null;
+		executionOwnedBlockingFailure?: unknown;
+		activeAction?: { kind: string; stage: string | null; resource: string | null; observedAtEpochMs: number } | null;
+		blockingResources?: Array<{ resource: string; reason: string; source: string }>;
+		lastObservationAtEpochMs?: number | null;
+		supervisorNextEvidenceObservationAtEpochMs?: number | null;
+		continuedIndependentWork?: { completedBackupCount: number; reusedBackupCount: number } | null;
+		acceptedEffects?: Partial<Record<LocalDeploymentStage, { observedAtEpochMs: number; evidenceReference: string }>>;
+		currentRuntime?: {
+			state: "verified_online" | "unknown";
+			sampledAtEpochMs: number;
+			processId: number | null;
+			processStartTimeText: string | null;
+			loadedEntrypointSha256: string | null;
+			ptySessionOwnershipCounts: { independentHost: number; runtimeProcess: number; unknown: number } | null;
+		};
 		verifiedCheckpointFilePaths: string[];
 		failedAttemptCleanup: unknown;
 		sessionContinuityPreflight?: {
@@ -299,7 +325,13 @@ export interface LocalDeploymentExecutionAnalysis {
 			blockingReason: string | null;
 			reportPath: string | null;
 		};
-		runtimeStateBackupProgress?: unknown;
+		runtimeStateBackupProgress?: {
+			requestExecutionId?: string;
+			observedAtEpochMs?: number;
+			activeEntryName?: string | null;
+			pendingEntries?: Array<{ entryName: string; resource?: string; reason: string }>;
+			backupMeasurements?: { reusedCheckpointCount?: number };
+		} | null;
 	};
 	metrics: {
 		commandAttempts: number | null;
@@ -461,10 +493,24 @@ async function readLocalDeploymentOperationalProgress(
 	binding: LocalDeploymentTargetStageBinding,
 	stage: LocalDeploymentRecoveryBudgetStage | null,
 	frozen?: FrozenLocalRedeploymentRequest,
+	record?: LocalDeploymentExecutionRecord,
 ): Promise<NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>> {
 	const standardProgress = frozen ? await readFrozenLocalRedeploymentOperationalProgress(directory, frozen) : {};
 	try {
 		const budget = stage ? await readLocalDeploymentTargetStageRecoveryBudget(binding, stage) : null;
+		const latestAttempt = budget?.attempts.at(-1);
+		const originalFailure = budget?.blockingFailure;
+		const currentExecutionBlockingFailure =
+			latestAttempt?.executionId === binding.executionId &&
+			latestAttempt.executionDirectory === directory &&
+			originalFailure &&
+			(originalFailure.originalErrorReference === directory ||
+				originalFailure.originalErrorReference.startsWith(`${directory}${sep}`))
+				? originalFailure
+				: null;
+		const executionOwnedBlockingFailure =
+			currentExecutionBlockingFailure ??
+			(stage ? await readExecutionOwnedStageFailure(directory, stage, record) : null);
 		const verifiedCheckpointFilePaths: string[] = [];
 		for (const root of ["verification-checkpoints", "runtime-backup-checkpoints"]) {
 			for (const name of await readdir(join(directory, root)).catch((error: unknown) => {
@@ -481,8 +527,39 @@ async function readLocalDeploymentOperationalProgress(
 						attemptsUsed: budget.attempts.length,
 						recoveryEvidenceConsumed: budget.consumedRecoveryEvidence.length,
 						blockingFailure: budget.blockingFailure,
+						latestAttemptExecutionId: latestAttempt?.executionId ?? null,
+						latestAttemptExecutionDirectory: latestAttempt?.executionDirectory ?? null,
+						latestAttemptReservedAtEpochMs: latestAttempt?.reservedAtEpochMs ?? null,
 					}
 				: null,
+			executionOwnedBlockingFailure,
+			blockingResources: [
+				...(executionOwnedBlockingFailure && executionOwnedBlockingFailure.originalErrorReference !== directory
+					? [
+							{
+								resource: executionOwnedBlockingFailure.logicalResource,
+								reason: executionOwnedBlockingFailure.recoveryCondition,
+								source: "execution_failure_original",
+							},
+						]
+					: []),
+				...(
+					(standardProgress as Partial<NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>>)
+						.runtimeStateBackupProgress?.pendingEntries ?? []
+				).map((item) => ({
+					resource: item.resource ?? item.entryName,
+					reason: item.reason,
+					source: "backup_checkpoint_progress",
+				})),
+			],
+			continuedIndependentWork: {
+				completedBackupCount: verifiedCheckpointFilePaths.filter(
+					(path) => dirname(path) === join(directory, "runtime-backup-checkpoints"),
+				).length,
+				reusedBackupCount:
+					(standardProgress as Partial<NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>>)
+						.runtimeStateBackupProgress?.backupMeasurements?.reusedCheckpointCount ?? 0,
+			},
 			verifiedCheckpointFilePaths,
 			failedAttemptCleanup: await readJsonIfPresent(join(directory, "failed-attempt-artifact-cleanup.json")),
 		};
@@ -496,15 +573,226 @@ async function readLocalDeploymentOperationalProgress(
 	}
 }
 
+async function readExecutionOwnedStageFailure(
+	directory: string,
+	stage: LocalDeploymentRecoveryBudgetStage,
+	record?: LocalDeploymentExecutionRecord,
+) {
+	const originalRoot = join(directory, "stage-failure-originals", stage);
+	if (record) {
+		const observation = record.observations
+			.filter(
+				(item) =>
+					item.stage === stage && ["command_failed", "command_succeeded", "effect_verified"].includes(item.kind),
+			)
+			.at(-1);
+		if (observation?.kind !== "command_failed") return null;
+		const commandDirectory = join(
+			directory,
+			"stage-command-originals",
+			stage,
+			`attempt-${observation.attemptNumber}`,
+		);
+		if (observation.commandOutputDirectory !== commandDirectory) return null;
+		try {
+			const original = localDeploymentCommandOriginalSchema.parse(
+				await readJsonIfPresent(join(commandDirectory, "command-result.json")),
+			);
+			const identity = original.attemptIdentity;
+			const command = record.manifest.stages.find((entry) => entry.stage === stage)?.command;
+			const stdoutPath = join(commandDirectory, "stdout.txt");
+			if (
+				!original.processWasStarted ||
+				original.exitCode !== observation.exitCode ||
+				original.cwd !== record.manifest.sourceCheckoutPath ||
+				JSON.stringify(original.command) !== JSON.stringify(command) ||
+				(identity &&
+					(identity.executionId !== record.manifest.executionId ||
+						identity.stage !== stage ||
+						identity.attemptNumber !== observation.attemptNumber ||
+						identity.commandOutputDirectory !== commandDirectory)) ||
+				(await realpath(stdoutPath)) !== stdoutPath
+			)
+				return null;
+			const report = (await readJsonIfPresent(stdoutPath)) as { blockingFailure?: unknown } | null;
+			const failure = localDeploymentBlockingFailureSchema.parse(report?.blockingFailure);
+			const originalPath = failure.originalErrorReference;
+			if (dirname(originalPath) === originalRoot && (await realpath(originalPath)) === originalPath) return failure;
+		} catch {
+			return null;
+		}
+		return null;
+	}
+	if (stage !== "candidate_bootstrap") return null;
+	const entries = await readdir(originalRoot).catch(() => []);
+	const originals = await Promise.all(
+		entries
+			.filter((name) => name.endsWith(".json"))
+			.map(async (name) => {
+				const path = join(originalRoot, name);
+				try {
+					const metadata = await lstat(path);
+					if (!metadata.isFile() || (await realpath(path)) !== path) return null;
+					const original = (await readJsonIfPresent(path)) as Record<string, unknown> | null;
+					if (original?.stage !== stage) return null;
+					const failure = localDeploymentBlockingFailureSchema.parse({
+						classification: original.classification,
+						logicalResource: original.logicalResource,
+						recoveryCondition: original.recoveryCondition,
+						originalErrorReference: path,
+						...(typeof original.sourcePath === "string"
+							? {
+									sourcePath: original.sourcePath,
+									sourceObservationAfterFailure: original.sourceObservation,
+								}
+							: {}),
+					});
+					return { failure, recordedAt: metadata.mtimeMs };
+				} catch {
+					return null;
+				}
+			}),
+	);
+	return (
+		originals.filter((original) => original !== null).sort((a, b) => b.recordedAt - a.recordedAt)[0]?.failure ?? null
+	);
+}
+
+async function readBoundRedeploymentSupervisorProgress(directory: string, frozen: FrozenLocalRedeploymentRequest) {
+	const { request } = frozen;
+	const reference = (await readJsonIfPresent(
+		join(directory, "independent-redeployment-supervisor-reference.json"),
+	)) as {
+		workspaceId?: string;
+		executionId?: string;
+		launchNonce?: string;
+	} | null;
+	const registered =
+		getRuntimeHomePath() === request.runtimeIdentity.runtimeHomeDirectoryPath
+			? (await readTaskCommandExecutions(request.workspaceId)).find(
+					(item) =>
+						item.taskId === request.taskId &&
+						item.idempotencyKey === `local-redeployment:${request.executionId}` &&
+						item.specification.resultFile === join(directory, "owned-command-business-result.json"),
+				)
+			: null;
+	const owner = registered ?? reference;
+	if (
+		owner?.workspaceId !== request.workspaceId ||
+		!owner.executionId ||
+		!owner.launchNonce ||
+		!/^[a-f0-9-]{36}$/u.test(owner.executionId) ||
+		!/^[a-f0-9-]{36}$/u.test(owner.launchNonce)
+	)
+		return null;
+	const supervisorDirectory = join(
+		request.runtimeIdentity.runtimeHomeDirectoryPath,
+		"workspaces",
+		request.workspaceId,
+		"task-command-executions",
+		owner.executionId,
+	);
+	const [materials, progress] = await Promise.all([
+		readJsonIfPresent(join(supervisorDirectory, `launch-materials-${owner.launchNonce}.json`)) as Promise<{
+			semanticRecovery?: { resultFile?: string; materialSha256?: string };
+		} | null>,
+		readJsonIfPresent(join(supervisorDirectory, `supervisor-progress-${owner.launchNonce}.json`)) as Promise<{
+			launchNonce?: string;
+			status?: string;
+			updatedAtEpochMs?: number;
+			nextSemanticEvidenceObservationAtEpochMs?: number;
+		} | null>,
+	]);
+	if (
+		progress?.launchNonce !== owner.launchNonce ||
+		materials?.semanticRecovery?.resultFile !== join(directory, "owned-command-business-result.json") ||
+		materials.semanticRecovery.materialSha256 !== sha256(JSON.stringify(frozen))
+	)
+		return null;
+	const live = await inspectOwnedCommandSupervisor(
+		{ workspaceId: owner.workspaceId, executionId: owner.executionId, launchNonce: owner.launchNonce },
+		{ artifactDirectory: supervisorDirectory },
+	);
+	return { ...progress, live: live === "running" };
+}
+
+async function observeLocalDeploymentAnalysisRuntime(binding: LocalDeploymentExecutionManifest["runtimeIdentity"]) {
+	const sampledAtEpochMs = Date.now();
+	try {
+		const host = binding.runtimeHost === "::1" ? "[::1]" : binding.runtimeHost;
+		const fetch = await getRuntimeFetch();
+		const response = await fetch(
+			`http://${host}:${binding.runtimePort}/api/trpc/runtime.getAgentSessionPtyHostDiagnostics`,
+			{ signal: AbortSignal.timeout(2_000) },
+		);
+		const receipt = (
+			(await response.json()) as {
+				result?: {
+					data?: {
+						runtimeIdentity?: { runtimeHomeDirectoryPath?: string; runtimePort?: number };
+						runtimeProcessId?: number;
+						runtimeProcessStartTimeText?: string;
+						runtimeLoadedEntrypointSha256?: string;
+						runtimePtySessions?: unknown;
+					};
+				};
+			}
+		).result?.data;
+		if (
+			!response.ok ||
+			receipt?.runtimeIdentity?.runtimeHomeDirectoryPath !== binding.runtimeHomeDirectoryPath ||
+			receipt.runtimeIdentity.runtimePort !== binding.runtimePort ||
+			typeof receipt.runtimeProcessId !== "number" ||
+			!Number.isSafeInteger(receipt.runtimeProcessId) ||
+			typeof receipt.runtimeProcessStartTimeText !== "string"
+		)
+			throw new Error("监听身份未核验");
+		const processIdentity = await readProcessIdentity(receipt.runtimeProcessId);
+		const startText = receipt.runtimeProcessStartTimeText.trim().replace(/\s+/gu, " ");
+		if (!processIdentity?.startAndCommand.trim().replace(/\s+/gu, " ").startsWith(`${startText} `))
+			throw new Error("监听进程代际未核验");
+		const sessions = runtimePtySessionProcessOwnershipSchema.array().safeParse(receipt.runtimePtySessions);
+		const ptySessionOwnershipCounts = sessions.success
+			? {
+					independentHost: sessions.data.filter(({ ownership }) => ownership === "independent_host").length,
+					runtimeProcess: sessions.data.filter(({ ownership }) => ownership === "runtime_process").length,
+					unknown: sessions.data.filter(({ ownership }) => ownership === "ownership_unknown").length,
+				}
+			: null;
+		return {
+			state: "verified_online" as const,
+			sampledAtEpochMs,
+			processId: receipt.runtimeProcessId,
+			processStartTimeText: startText,
+			ptySessionOwnershipCounts,
+			loadedEntrypointSha256: /^[a-f0-9]{64}$/u.test(receipt.runtimeLoadedEntrypointSha256 ?? "")
+				? (receipt.runtimeLoadedEntrypointSha256 ?? null)
+				: null,
+		};
+	} catch {
+		return {
+			state: "unknown" as const,
+			sampledAtEpochMs,
+			processId: null,
+			processStartTimeText: null,
+			loadedEntrypointSha256: null,
+			ptySessionOwnershipCounts: null,
+		};
+	}
+}
+
 async function readFrozenLocalRedeploymentOperationalProgress(
 	directory: string,
 	frozen: FrozenLocalRedeploymentRequest,
 ) {
 	const reportPath = join(directory, "source-validation", "source-validation-evidence-reuse-report.json");
-	const [continuity, report, backupProgress] = await Promise.allSettled([
+	const [continuity, report, backupProgress, supervisorProgress] = await Promise.allSettled([
 		readJsonIfPresent(join(directory, LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME)),
 		readJsonIfPresent(reportPath),
-		readJsonIfPresent(join(directory, "runtime-state-backup-progress.json")),
+		readJsonIfPresent(join(directory, "runtime-state-backup-progress.json")) as Promise<
+			NonNullable<LocalDeploymentExecutionAnalysis["operationalProgress"]>["runtimeStateBackupProgress"]
+		>,
+		readBoundRedeploymentSupervisorProgress(directory, frozen),
 	]);
 	const sessionContinuityPreflight =
 		continuity.status === "fulfilled"
@@ -526,11 +814,48 @@ async function readFrozenLocalRedeploymentOperationalProgress(
 	const checkResults = Array.isArray(boundReport?.sourceValidationCheckResults)
 		? boundReport.sourceValidationCheckResults
 		: null;
+	const backup = backupProgress.status === "fulfilled" ? backupProgress.value : null;
+	const boundBackup =
+		backup?.requestExecutionId && backup.requestExecutionId !== frozen.request.executionId ? null : backup;
+	const supervisor = supervisorProgress.status === "fulfilled" ? supervisorProgress.value : null;
+	const observedAt = supervisor?.updatedAtEpochMs;
 	return {
+		lastObservationAtEpochMs:
+			Math.max(
+				observedAt ?? 0,
+				boundBackup?.observedAtEpochMs ?? 0,
+				sessionContinuityPreflight?.requestSha256 === frozen.requestSha256
+					? sessionContinuityPreflight.checkedAtEpochMs
+					: 0,
+			) || null,
+		activeAction:
+			supervisor?.live &&
+			observedAt &&
+			["running", "dispatch_committed", "machine_evidence_pending"].includes(supervisor?.status ?? "")
+				? {
+						kind:
+							supervisor?.status === "machine_evidence_pending"
+								? "supervisor_observing"
+								: boundBackup?.activeEntryName
+									? "runtime_state_backup"
+									: "supervisor_executing",
+						stage: boundBackup?.activeEntryName ? "state_preservation" : null,
+						resource: boundBackup?.activeEntryName ?? null,
+						observedAtEpochMs: observedAt,
+					}
+				: null,
+		supervisorNextEvidenceObservationAtEpochMs:
+			supervisor?.live &&
+			supervisor.status === "machine_evidence_pending" &&
+			(supervisor.nextSemanticEvidenceObservationAtEpochMs ?? 0) >= Date.now()
+				? (supervisor.nextSemanticEvidenceObservationAtEpochMs ?? null)
+				: null,
 		sessionContinuityPreflight:
 			sessionContinuityPreflight?.requestSha256 === frozen.requestSha256 ? sessionContinuityPreflight : null,
 		sourceValidation: {
-			evidenceReferenceCount: frozen.request.sourceValidationEvidenceFilePaths?.length ?? 0,
+			evidenceReferenceCount:
+				(frozen.request.sourceValidationEvidenceFilePaths?.length ?? 0) +
+				Number(!!frozen.request.previousDeploymentExecution),
 			status: boundReport?.status ?? (report.status === "rejected" ? "unavailable" : "pending"),
 			reusedSourceValidationCheckCount:
 				checkResults?.filter((check) => check.decision === "reused_source_evidence").length ?? null,
@@ -541,7 +866,7 @@ async function readFrozenLocalRedeploymentOperationalProgress(
 			blockingReason: boundReport?.reason ?? null,
 			reportPath: boundReport ? reportPath : null,
 		},
-		runtimeStateBackupProgress: backupProgress.status === "fulfilled" ? backupProgress.value : null,
+		runtimeStateBackupProgress: boundBackup,
 	};
 }
 
@@ -558,6 +883,7 @@ async function readPreparedLocalRedeploymentAnalysis(
 		readJsonIfPresent(join(directory, "redeployment-revocation.json")),
 		readJsonIfPresent(join(directory, "runtime-starting-state-evidence.json")),
 	]);
+	operationalProgress.currentRuntime = await observeLocalDeploymentAnalysisRuntime(frozen.request.runtimeIdentity);
 	const deploymentOutcome =
 		revocation || businessResult?.disposition === "cancelled"
 			? "permission_revoked"
@@ -572,7 +898,7 @@ async function readPreparedLocalRedeploymentAnalysis(
 							: "prepared";
 	const preflight = operationalProgress.sessionContinuityPreflight;
 	const blockingFailure = localDeploymentBlockingFailureSchema.safeParse(
-		operationalProgress.targetStageBudget?.blockingFailure,
+		operationalProgress.executionOwnedBlockingFailure,
 	);
 	return {
 		executionDirectory: directory,
@@ -587,7 +913,9 @@ async function readPreparedLocalRedeploymentAnalysis(
 		recovery: {
 			unfinishedStage: "candidate_bootstrap",
 			nextCheckAtEpochMs:
-				deploymentOutcome === "permission_revoked" ? null : (preflight?.nextCheckAtEpochMs ?? null),
+				deploymentOutcome === "permission_revoked"
+					? null
+					: (operationalProgress.supervisorNextEvidenceObservationAtEpochMs ?? null),
 			condition:
 				deploymentOutcome === "permission_revoked"
 					? "本次执行已有持久撤销"
@@ -1270,17 +1598,42 @@ export async function analyzeLocalDeploymentExecutions(directories: string[]) {
 				record.manifest.schemaVersion === 2 && record.manifest.redeploymentRequestSha256 === frozen?.requestSha256
 					? frozen
 					: undefined,
+				record,
 			);
 			const preflight = operationalProgress.sessionContinuityPreflight;
 			const failure = localDeploymentBlockingFailureSchema.safeParse(
-				operationalProgress.targetStageBudget?.blockingFailure,
+				operationalProgress.executionOwnedBlockingFailure,
 			);
+			operationalProgress.acceptedEffects = Object.fromEntries(
+				record.observations
+					.filter(
+						(item) =>
+							item.kind === "effect_verified" ||
+							(item.stage === "runtime_validation" && item.kind === "command_succeeded"),
+					)
+					.map((item) => [
+						item.stage,
+						{ observedAtEpochMs: item.observedAtEpochMs, evidenceReference: item.commandOutputDirectory },
+					]),
+			);
+			operationalProgress.lastObservationAtEpochMs =
+				Math.max(
+					operationalProgress.lastObservationAtEpochMs ?? 0,
+					record.observations.at(-1)?.observedAtEpochMs ?? 0,
+				) || null;
+			if (frozen)
+				operationalProgress.currentRuntime = await observeLocalDeploymentAnalysisRuntime(
+					record.manifest.runtimeIdentity,
+				);
+			if (operationalProgress.activeAction && !operationalProgress.activeAction.stage)
+				operationalProgress.activeAction.stage = summary.recovery.unfinishedStage;
 			if (summary.deploymentOutcome === "machine_evidence_pending") {
+				summary.recovery.nextCheckAtEpochMs =
+					operationalProgress.supervisorNextEvidenceObservationAtEpochMs ?? null;
 				if (failure.success && failure.data.logicalResource !== "session-readiness")
 					summary.recovery.condition = failure.data.recoveryCondition;
 				else if (preflight?.recoveryCondition) {
 					summary.recovery.condition = preflight.recoveryCondition;
-					summary.recovery.nextCheckAtEpochMs = preflight.nextCheckAtEpochMs;
 				}
 			}
 			return {

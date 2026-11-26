@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, mkdir, readFile, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { cp, lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { authorizedUnretainableHandoverSessionSchema } from "../core/api-contract";
@@ -12,6 +12,7 @@ import {
 } from "../core/task-command-execution-contract";
 import { resolveMainTaskConversationSessionId } from "../core/task-main-conversation-session-binding";
 import { lockedFileSystem } from "../fs/locked-file-system";
+import { getRuntimeHomePath } from "../state/runtime-home-path";
 import {
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceSessionsById,
@@ -48,6 +49,12 @@ export const localRedeploymentRequestSchema = z.strictObject({
 	originatingTaskWorktreePath: absolutePath,
 	sourceCheckoutPath: absolutePath,
 	candidateSourceCommit: z.string().regex(/^[a-f0-9]{40}$/u),
+	previousDeploymentExecution: z
+		.strictObject({
+			executionId: z.uuid(),
+			executionDirectory: absolutePath,
+		})
+		.optional(),
 	sourceValidationEvidenceFilePaths: z.array(absolutePath.refine((path) => !path.includes("\0"))).optional(),
 	deploymentNodeBinaryPath: absolutePath,
 	distributionDirectoryPath: absolutePath,
@@ -77,6 +84,7 @@ export type LocalRedeploymentRequest = z.infer<typeof localRedeploymentRequestSc
 export const LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME =
 	"local-redeployment-source-validation-preparer.mjs";
 export const LOCAL_REDEPLOYMENT_SESSION_CONTINUITY_PREFLIGHT_FILENAME = "session-continuity-preflight.json";
+const deploymentSourceValidationReportFilename = "source-validation-evidence-reuse-report.json";
 const frozenRequestSchema = z.strictObject({
 	request: localRedeploymentRequestSchema,
 	requestSha256: z.string().length(64),
@@ -85,6 +93,13 @@ const frozenRequestSchema = z.strictObject({
 	npmCliEntrypointPath: absolutePath,
 	serviceExecutableSha256: z.string().length(64),
 	owner: taskCommandExecutionAdoptExistingSupervisorRequestSchema.shape.expectedOwner.nullable(),
+	previousDeploymentTaskIdentity: z
+		.strictObject({
+			taskIncarnationCreatedAtEpochMs: z.number().nullable(),
+			worktreeIdentity:
+				taskCommandExecutionAdoptExistingSupervisorRequestSchema.shape.expectedOwner.shape.worktreeIdentity,
+		})
+		.optional(),
 });
 export type FrozenLocalRedeploymentRequest = z.infer<typeof frozenRequestSchema>;
 export const localRedeploymentRuntimeBaselineSchema = z.discriminatedUnion("state", [
@@ -263,19 +278,33 @@ export async function readCurrentBoundLocalRedeploymentOwner(
 		(await realpath(summary.workspacePath)) !== (await realpath(request.originatingTaskWorktreePath))
 	)
 		throw new Error("会话绑定存在，但无法证明原任务与工作树归属，等待权威快照恢复");
-	const metadata = await stat(request.originatingTaskWorktreePath);
 	return {
 		taskIncarnationCreatedAtEpochMs: card.createdAt,
 		conversationSessionId,
 		nativeSessionId,
 		runtimeSessionIncarnationId: summary.runtimeSessionIncarnationId ?? null,
-		worktreeIdentity: {
-			realPath: await realpath(request.originatingTaskWorktreePath),
-			device: metadata.dev,
-			inode: metadata.ino,
-			createdAtEpochMs: metadata.birthtimeMs,
-		},
+		worktreeIdentity: await readLocalRedeploymentWorktreeIdentity(request.originatingTaskWorktreePath),
 	};
+}
+
+async function readLocalRedeploymentWorktreeIdentity(path: string) {
+	const metadata = await stat(path);
+	return {
+		realPath: await realpath(path),
+		device: metadata.dev,
+		inode: metadata.ino,
+		createdAtEpochMs: metadata.birthtimeMs,
+	};
+}
+
+function optionalPredecessorEvidenceUnavailable(error: unknown): null {
+	if (
+		error instanceof SyntaxError ||
+		error instanceof z.ZodError ||
+		(error instanceof Error && "syscall" in error && "code" in error)
+	)
+		return null;
+	throw error;
 }
 
 export async function canonicalizeLocalRedeploymentRequest(
@@ -283,6 +312,17 @@ export async function canonicalizeLocalRedeploymentRequest(
 ): Promise<LocalRedeploymentRequest> {
 	return {
 		...parsedRequest,
+		...(parsedRequest.previousDeploymentExecution
+			? {
+					previousDeploymentExecution: {
+						...parsedRequest.previousDeploymentExecution,
+						executionDirectory:
+							(await realpath(parsedRequest.previousDeploymentExecution.executionDirectory).catch(
+								optionalPredecessorEvidenceUnavailable,
+							)) ?? resolve(parsedRequest.previousDeploymentExecution.executionDirectory),
+					},
+				}
+			: {}),
 		sourceCheckoutPath: await realpath(parsedRequest.sourceCheckoutPath),
 		originatingTaskWorktreePath: await realpath(parsedRequest.originatingTaskWorktreePath),
 		distributionDirectoryPath: existsSync(parsedRequest.distributionDirectoryPath)
@@ -321,6 +361,16 @@ export async function prepareLocalRedeployment(directory: string, raw: unknown, 
 			serviceExecutableSha256: localRedeploymentSha256(await readFile(request.serviceLaunch.command[0])),
 			owner: await readCurrentBoundLocalRedeploymentOwner(request),
 		};
+		if (!frozen.owner && getRuntimeHomePath() === request.runtimeIdentity.runtimeHomeDirectoryPath) {
+			const { board } = await loadPersistedWorkspaceStateById(request.workspaceId);
+			const card = board.columns.flatMap((column) => column.cards).find((card) => card.id === request.taskId);
+			if (card)
+				frozen.previousDeploymentTaskIdentity = {
+					taskIncarnationCreatedAtEpochMs: card.createdAt,
+					worktreeIdentity: await readLocalRedeploymentWorktreeIdentity(request.originatingTaskWorktreePath),
+				};
+		}
+		await readBoundPreviousLocalRedeployment(directory, frozen);
 		const previous = await readLocalRedeploymentJson(join(directory, "frozen-redeployment-request.json"));
 		if (previous && JSON.stringify(frozenRequestSchema.parse(previous)) !== JSON.stringify(frozen))
 			throw new LocalRedeploymentIdentityMismatch("相同执行目录已绑定不同请求、工具或会话归属");
@@ -378,10 +428,63 @@ export async function readFrozenLocalRedeploymentRequest(directory: string): Pro
 	return frozen;
 }
 
-export function createBoundLocalRedeploymentSourceValidationArguments(
+export async function readBoundPreviousLocalRedeployment(
+	directory: string,
+	current: FrozenLocalRedeploymentRequest,
+): Promise<FrozenLocalRedeploymentRequest | null> {
+	const { request } = current;
+	const previous = request.previousDeploymentExecution;
+	if (!previous) return null;
+	if (previous.executionId === request.executionId || previous.executionDirectory === (await realpath(directory)))
+		throw new LocalRedeploymentIdentityMismatch("前序执行目录或身份与当前执行冲突");
+	const previousRealPath = await realpath(previous.executionDirectory).catch(optionalPredecessorEvidenceUnavailable);
+	if (!previousRealPath) return null;
+	if (previous.executionDirectory !== previousRealPath)
+		throw new LocalRedeploymentIdentityMismatch("前序执行目录与冻结的规范路径冲突");
+	const frozen = await readFrozenLocalRedeploymentRequest(previousRealPath).catch(
+		optionalPredecessorEvidenceUnavailable,
+	);
+	if (!frozen) return null;
+	const previousTask = frozen.owner ?? frozen.previousDeploymentTaskIdentity;
+	const currentTask = current.owner ?? current.previousDeploymentTaskIdentity;
+	if (
+		frozen.request.executionId !== previous.executionId ||
+		frozen.request.workspaceId !== request.workspaceId ||
+		frozen.request.taskId !== request.taskId ||
+		frozen.request.originatingTaskWorktreePath !== request.originatingTaskWorktreePath ||
+		JSON.stringify(frozen.request.runtimeIdentity) !== JSON.stringify(request.runtimeIdentity) ||
+		frozen.request.distributionDirectoryPath !== request.distributionDirectoryPath
+	)
+		throw new LocalRedeploymentIdentityMismatch("前序执行与当前任务、部署目标或指定执行身份不匹配");
+	if (
+		currentTask &&
+		(JSON.stringify(currentTask.worktreeIdentity) !==
+			JSON.stringify(await readLocalRedeploymentWorktreeIdentity(request.originatingTaskWorktreePath)) ||
+			(previousTask &&
+				JSON.stringify(previousTask.worktreeIdentity) !== JSON.stringify(currentTask.worktreeIdentity)))
+	)
+		throw new LocalRedeploymentIdentityMismatch("前序执行与当前工作树实体不匹配");
+	if (previousTask?.taskIncarnationCreatedAtEpochMs == null || currentTask?.taskIncarnationCreatedAtEpochMs == null)
+		return null;
+	if (previousTask.taskIncarnationCreatedAtEpochMs !== currentTask.taskIncarnationCreatedAtEpochMs)
+		throw new LocalRedeploymentIdentityMismatch("前序执行与当前任务代际不匹配");
+	return frozen;
+}
+
+export async function createBoundLocalRedeploymentSourceValidationArguments(
 	directory: string,
 	frozen: FrozenLocalRedeploymentRequest,
-): string[] {
+): Promise<string[]> {
+	const predecessor = await readBoundPreviousLocalRedeployment(directory, frozen);
+	const previousDirectory = frozen.request.previousDeploymentExecution?.executionDirectory;
+	const previousReportPath =
+		predecessor && previousDirectory
+			? join(previousDirectory, "source-validation", deploymentSourceValidationReportFilename)
+			: null;
+	const boundPreviousReportPath =
+		previousReportPath && (await isBoundPredecessorSourceValidationReportPath(previousReportPath))
+			? previousReportPath
+			: null;
 	return [
 		join(directory, LOCAL_REDEPLOYMENT_SOURCE_VALIDATION_PREPARER_FILENAME),
 		"--source-checkout-path",
@@ -392,11 +495,25 @@ export function createBoundLocalRedeploymentSourceValidationArguments(
 		frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
 		"--output-directory",
 		join(directory, "source-validation"),
-		...(frozen.request.sourceValidationEvidenceFilePaths ?? []).flatMap((path) => [
-			"--source-validation-evidence-file-path",
-			path,
-		]),
+		...[
+			...(frozen.request.sourceValidationEvidenceFilePaths ?? []).filter(
+				(path) => basename(resolve(path)) !== deploymentSourceValidationReportFilename,
+			),
+			...(boundPreviousReportPath ? [boundPreviousReportPath] : []),
+		].flatMap((path) => ["--source-validation-evidence-file-path", path]),
 	];
+}
+
+async function isBoundPredecessorSourceValidationReportPath(path: string): Promise<boolean> {
+	try {
+		if (!(await lstat(dirname(path))).isDirectory()) return false;
+		return (await lstat(path)).isFile();
+	} catch (error) {
+		// 同一执行可能已有该规范路径的持久原件副本。
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+		optionalPredecessorEvidenceUnavailable(error);
+		return false;
+	}
 }
 
 export function createLocalRedeploymentOwnedCommandSpecification(

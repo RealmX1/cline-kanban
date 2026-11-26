@@ -3,6 +3,8 @@ import { constants, existsSync } from "node:fs";
 import { access, lstat, mkdir, readdir, readFile, readlink, rm, statfs, symlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { setTimeout as waitBetweenSourceStabilitySamples } from "node:timers/promises";
+import { readRegisteredWorkspaceIdsForRawSnapshot, readRegisteredWorkspaceRawSnapshot } from "../state/workspace-state";
+import { WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME } from "../state/workspace-state-snapshot-storage";
 import { LOCAL_DEPLOYMENT_EXECUTION_RECORD_FILENAME } from "./local-deployment-execution";
 import {
 	LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER,
@@ -86,9 +88,23 @@ export async function classifyLocalRedeploymentStageFailure(
 	) {
 		classification = "copy_identity_mismatch";
 		recoveryCondition = "实际冻结执行器的复制身份隔离回归通过；源稳定不能证明复制语义已修复";
-	} else if (sourcePath && ["ENOENT", "EACCES", "EPERM", "ENOSPC", "EROFS"].includes(fields?.code ?? "")) {
+	} else if (
+		sourcePath &&
+		[
+			"ENOENT",
+			"EACCES",
+			"EPERM",
+			"ENOSPC",
+			"EROFS",
+			"WORKSPACE_SNAPSHOT_UNAVAILABLE",
+			"WORKSPACE_INDEX_UNAVAILABLE",
+		].includes(fields?.code ?? "")
+	) {
 		classification = "filesystem_unavailable";
-		recoveryCondition = "当前逻辑资源的访问或空间条件恢复，不使用文件内容、时间或 nonce 刷新预算";
+		recoveryCondition =
+			fields?.code === "WORKSPACE_SNAPSHOT_UNAVAILABLE"
+				? "已登记工作区的当前日志或原始投影通过只读一致性核验"
+				: "当前逻辑资源的访问或空间条件恢复，不使用文件内容、时间或 nonce 刷新预算";
 	} else if (
 		!sourcePath &&
 		(fields?.verificationCheckKey || (await readLocalRedeploymentMachineEvidenceRequests(directory)).length)
@@ -373,7 +389,10 @@ async function observeSourceValidationDiscoveryBudgetRecovery(
 		if (!frozen.sourceValidationPreparerSha256) return null;
 		const result = await executeLocalRedeploymentFile(
 			frozen.request.deploymentNodeBinaryPath,
-			[...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen), "--observe-recovery-evidence"],
+			[
+				...(await createBoundLocalRedeploymentSourceValidationArguments(directory, frozen)),
+				"--observe-recovery-evidence",
+			],
 			{ timeout: 7_000, maxBuffer: 1024 * 1024 },
 		);
 		if (JSON.parse(result.stdout).sourceValidationDiscoveryCompleted === true)
@@ -448,7 +467,38 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 			}
 			if (!proof) {
 				const runtimeHome = resolve(frozen.request.runtimeIdentity.runtimeHomeDirectoryPath);
+				const [workspaceRoot, workspaceId, filename, ...extraPath] = relative(runtimeHome, path).split(sep);
 				if (
+					original?.stage === "state_preservation" &&
+					original.code === "WORKSPACE_INDEX_UNAVAILABLE" &&
+					path === join(runtimeHome, "workspaces", "index.json")
+				) {
+					await readRegisteredWorkspaceIdsForRawSnapshot(runtimeHome, { requireExistingIndex: true });
+					proof = { logicalResource: path, workspaceRegistrationInventoryReadable: true };
+				} else if (
+					original?.stage === "state_preservation" &&
+					original.syscall === "lstat_workspace_directory" &&
+					workspaceRoot === "workspaces" &&
+					workspaceId &&
+					filename === undefined
+				) {
+					const snapshot = await readRegisteredWorkspaceRawSnapshot(runtimeHome, workspaceId);
+					if (snapshot.kind !== "uninitialized")
+						proof = { logicalResource: path, currentWorkspaceSnapshotVerified: true };
+				} else if (
+					original?.stage === "state_preservation" &&
+					original.sourcePath === path &&
+					workspaceRoot === "workspaces" &&
+					filename === WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME &&
+					extraPath.length === 0
+				) {
+					const snapshot = await readRegisteredWorkspaceRawSnapshot(runtimeHome, workspaceId);
+					if (
+						snapshot.commitId !== null ||
+						(snapshot.kind === "legacy" && original.code === "WORKSPACE_SNAPSHOT_UNAVAILABLE")
+					)
+						proof = { logicalResource: path, currentWorkspaceSnapshotVerified: true };
+				} else if (
 					original?.stage === "state_preservation" &&
 					original?.code === "ENOENT" &&
 					original.sourcePath === path &&
@@ -480,10 +530,61 @@ export async function observeLocalRedeploymentBlockingFailureRecovery(
 		const interrupted = await observeInterruptedLocalRedeploymentBackup(frozen, failure);
 		if (interrupted) proof = { kind: "bound_interrupted_backup", completed: interrupted.completed };
 	}
+	const originalFailureDirectory = dirname(dirname(dirname(failure.originalErrorReference)));
+	const backupProgress = failure.originalErrorReference.startsWith(
+		join(originalFailureDirectory, "stage-failure-originals", "state_preservation") + sep,
+	)
+		? ((await readLocalRedeploymentJson(join(originalFailureDirectory, "runtime-state-backup-progress.json")).catch(
+				() => null,
+			)) as {
+				pendingEntries?: Array<{ resource?: string; code?: string }>;
+			} | null)
+		: null;
+	const runtimeHome = resolve(frozen.request.runtimeIdentity.runtimeHomeDirectoryPath);
+	const recoveryResources = await Promise.all(
+		(backupProgress?.pendingEntries ?? []).map(async ({ resource, code }) => {
+			if (
+				!resource ||
+				resource === failure.logicalResource ||
+				resolve(resource) !== resource ||
+				!resource.startsWith(runtimeHome + sep)
+			)
+				return null;
+			try {
+				const [root, workspaceId, filename, ...extra] = relative(runtimeHome, resource).split(sep);
+				if (code === "WORKSPACE_INDEX_UNAVAILABLE" && resource === join(runtimeHome, "workspaces", "index.json")) {
+					await readRegisteredWorkspaceIdsForRawSnapshot(runtimeHome, { requireExistingIndex: true });
+					return resource;
+				}
+				if (
+					code === "WORKSPACE_SNAPSHOT_UNAVAILABLE" &&
+					root === "workspaces" &&
+					(filename === WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME || filename === undefined) &&
+					extra.length === 0
+				) {
+					const snapshot = await readRegisteredWorkspaceRawSnapshot(runtimeHome, workspaceId);
+					return snapshot.kind !== "uninitialized" ? resource : null;
+				}
+				if ((code === "ENOENT" || code === "EACCES" || code === "EPERM") && (await lstat(resource)).isFile()) {
+					await access(resource, constants.R_OK);
+					return resource;
+				}
+			} catch {
+				/* 其余未恢复资源继续等待。 */
+			}
+			return null;
+		}),
+	);
+	const recoveredIndependentResources = [...new Set(recoveryResources.filter((path) => path !== null))].sort();
 	return {
 		evidenceSha256: localRedeploymentSha256(
-			JSON.stringify({ classification: failure.classification, logicalResource: failure.logicalResource, proof }),
+			JSON.stringify({
+				classification: failure.classification,
+				logicalResource: failure.logicalResource,
+				proof,
+				...(recoveredIndependentResources.length ? { recoveredIndependentResources } : {}),
+			}),
 		),
-		recoveryEvidenceReady: proof !== null,
+		recoveryEvidenceReady: proof !== null || recoveredIndependentResources.length > 0,
 	};
 }
