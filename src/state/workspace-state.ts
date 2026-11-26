@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { channel } from "node:diagnostics_channel";
-import { readFile, realpath, stat, statfs } from "node:fs/promises";
+import { lstat, readFile, realpath, stat, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { z } from "zod";
 import { captureRepositoryBaselinesForNewBacklogTaskCards } from "../backlog-task-start-readiness/backlog-task-creation-repository-baseline";
 import { isSameAgentNativeConversationSessionIdentity } from "../commands/hook-events/agent-native-conversation-session-identity-extraction";
@@ -73,6 +73,7 @@ import {
 import {
 	createWorkspaceStateSnapshotCommit,
 	projectWorkspaceStateSnapshotCommitWithinLock,
+	readRawWorkspaceStateSnapshot,
 	readWorkspaceSnapshotFileText,
 	readWorkspaceStateSnapshotCommit,
 	readWorkspaceStateSnapshotReadFingerprint,
@@ -261,8 +262,8 @@ export function getWorkspacesRootPath(): string {
 	return join(getRuntimeHomePath(), WORKSPACES_DIR);
 }
 
-function getWorkspaceIndexPath(): string {
-	return join(getWorkspacesRootPath(), INDEX_FILENAME);
+function getWorkspaceIndexPath(runtimeHome = getRuntimeHomePath()): string {
+	return join(runtimeHome, WORKSPACES_DIR, INDEX_FILENAME);
 }
 
 export function getWorkspaceDirectoryPath(workspaceId: string): string {
@@ -974,6 +975,45 @@ export async function listWorkspaceIndexEntries(
 			repoPath: entry.repoPath,
 		}))
 		.sort((left, right) => left.repoPath.localeCompare(right.repoPath));
+}
+
+export async function readRegisteredWorkspaceIdsForRawSnapshot(
+	runtimeHome: string,
+	{ requireExistingIndex = false }: { requireExistingIndex?: boolean } = {},
+): Promise<Set<string>> {
+	const indexPath = getWorkspaceIndexPath(runtimeHome);
+	const metadata = await lstat(indexPath).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT" && !requireExistingIndex) return null;
+		throw error;
+	});
+	if (!metadata) return new Set();
+	if (!metadata.isFile()) throw new Error(`工作区索引不是普通文件：${indexPath}`);
+	const index = workspaceIndexFileSchema.parse(JSON.parse(await readFile(indexPath, "utf8")));
+	return new Set(Object.keys(index.entries));
+}
+
+export async function readRegisteredWorkspaceRawSnapshot(runtimeHome: string, workspaceId: string) {
+	const workspaceRoot = join(runtimeHome, WORKSPACES_DIR);
+	const directory = join(workspaceRoot, workspaceId);
+	const [rootMetadata, directoryMetadata, registeredWorkspaceIds] = await Promise.all([
+		lstat(workspaceRoot),
+		lstat(directory).catch((error: NodeJS.ErrnoException) => {
+			if (error.code === "ENOENT") return null;
+			throw error;
+		}),
+		readRegisteredWorkspaceIdsForRawSnapshot(runtimeHome),
+	]);
+	if (
+		dirname(directory) !== workspaceRoot ||
+		!rootMetadata.isDirectory() ||
+		(directoryMetadata !== null && !directoryMetadata.isDirectory()) ||
+		!registeredWorkspaceIds.has(workspaceId)
+	)
+		throw new Error(`无法核验工作区快照目录归属：${directory}`);
+	return readRawWorkspaceStateSnapshot(directory, workspaceId, (board, sessions) => {
+		if (board !== undefined) runtimeBoardDataSchema.parse(board);
+		workspaceSessionsSchema.parse(sessions);
+	});
 }
 
 export async function removeWorkspaceIndexEntry(workspaceId: string): Promise<boolean> {

@@ -557,6 +557,7 @@ async function readReferencedSourceValidationChecks(
 	contentManifestSha256,
 	sourceValidationEvidenceFilePaths,
 	currentEnvironment,
+	visitedDeploymentValidationReports = new Set(),
 ) {
 	const sourceValidationCheckResults = [];
 	let legacyPythonContentManifestSha256;
@@ -792,6 +793,7 @@ async function readReferencedSourceValidationChecks(
 						/vitest run --project precommit-safe/.test(await readFile(log, "utf8")),
 						"提交检查原件未证明执行 precommit-safe",
 					);
+					const bundleSha256 = await computeEvidenceFileSha256Once(bundlePath);
 					sourceValidationCheckResults.push({
 						commandKeys: [
 							createSourceValidationCommandIdentityKey(["npm", "run", "test:precommit"], sourceCheckoutPath),
@@ -800,8 +802,8 @@ async function readReferencedSourceValidationChecks(
 						coverage: ["precommit-safe"],
 						taskId: bundle.taskId,
 						evidencePath: bundlePath,
-						evidenceSha256: await computeEvidenceFileSha256Once(bundlePath),
-						proofFiles: [log],
+						evidenceSha256: bundleSha256,
+						proofFiles: [log, await verifyAndSnapshotEvidenceFile(bundlePath, bundleSha256, directory)],
 						environmentCompatible: precommitEnvironmentCompatible,
 						status: isSourceValidationInterruptedExitCode(precommit.exitCode)
 							? "interrupted"
@@ -948,13 +950,172 @@ async function readReferencedSourceValidationChecks(
 			}
 	}
 
+	async function readPriorDeploymentValidation(reportPath) {
+		reportPath = await realpath(reportPath);
+		if (visitedDeploymentValidationReports.has(reportPath)) return;
+		assert(visitedDeploymentValidationReports.size < 8, "前序验证报告超过有界追溯预算");
+		visitedDeploymentValidationReports.add(reportPath);
+		const report = await readBoundedJsonEvidenceFile(reportPath);
+		const outputDirectory = dirname(reportPath);
+		const priorCheckout = join(dirname(outputDirectory), "candidate-source-checkout");
+		assert(
+			report.kind === "local-deployment-source-validation-evidence-reuse" &&
+				report.schemaVersion === 1 && report.sourceCheckoutPath === priorCheckout &&
+				report.gitCommonDirectory === gitCommonDirectory,
+			"前序报告与私有检出或当前仓库不匹配",
+		);
+		assert(report.treeOid === treeOid && report.contentManifestSha256 === contentManifestSha256,
+			"前序验证的完整源码树不同");
+		assert(serializePythonCompatibleCommandFingerprintJson(report.validationEnvironmentIdentity) ===
+			serializePythonCompatibleCommandFingerprintJson(currentEnvironment),
+			"前序验证的 Node、依赖或进程环境不同");
+		const statePath = join(outputDirectory, "source-validation-execution-state.json");
+		const state = await readBoundedJsonEvidenceFile(statePath);
+		assert(state.schemaVersion === 1 && Array.isArray(state.attempts), "前序验证接续记录格式不合法");
+		const reportSha256 = await computeEvidenceFileSha256Once(reportPath);
+		const priorContextFingerprint = sha256(JSON.stringify({
+			sourceCheckoutPath: priorCheckout,
+			gitCommonDirectory,
+			treeOid,
+			contentManifestSha256,
+			validationEnvironmentIdentity: report.validationEnvironmentIdentity,
+		}));
+		for (const attempt of state.attempts || []) {
+			if (!["passed", "failed"].includes(attempt.status) ||
+				attempt.contextFingerprintSha256 !== priorContextFingerprint) continue;
+			try {
+				const commandIdentity = createSourceValidationCommandIdentityKey(attempt.argv, priorCheckout);
+				assert(attempt.cwd === priorCheckout && commandIdentity === attempt.sourceValidationCommandIdentityKey &&
+					attempt.commandEnvironmentFingerprintSha256 ===
+						await computeSourceValidationCommandEnvironmentFingerprint(attempt.argv, priorCheckout),
+					"前序验证的命令语义或可执行文件不同");
+				const attemptDirectory = dirname(attempt.nativeSupervisionPath);
+				assert(isPathInsideDirectory(join(outputDirectory, "source-validation-command-originals"), attemptDirectory) &&
+					attempt.nativeSupervisionPath === join(attemptDirectory, "native-supervision.json") &&
+					attempt.stdoutPath === join(attemptDirectory, "stdout") &&
+					attempt.stderrPath === join(attemptDirectory, "stderr"), "前序命令原件越出所属验证目录");
+				const native = await readBoundedJsonEvidenceFile(attempt.nativeSupervisionPath);
+				assert(native.schemaVersion === 1 && native.status === "completed" && native.interrupted === false &&
+					native.launchToken === attempt.launchToken && native.concludedAt === attempt.concludedAt &&
+					JSON.stringify(native.argv) === JSON.stringify(attempt.argv) && native.exitCode === attempt.exitCode &&
+					Number.isInteger(native.exitCode) && (native.exitCode === 0) === (attempt.status === "passed"),
+					"前序检查缺少匹配的原始退出证据");
+				const proofFiles = [];
+				const nativeSha256 = await computeEvidenceFileSha256Once(attempt.nativeSupervisionPath);
+				for (const [path, digest] of [
+					[reportPath, reportSha256],
+					[statePath, await computeEvidenceFileSha256Once(statePath)],
+					[attempt.nativeSupervisionPath, nativeSha256],
+					[attempt.stdoutPath, attempt.stdoutSha256],
+					[attempt.stderrPath, attempt.stderrSha256],
+				]) proofFiles.push(await verifyAndSnapshotEvidenceFile(path, digest, gitCommonDirectory));
+				sourceValidationCheckResults.push({
+					commandKeys: [commandIdentity],
+					argv: attempt.argv,
+					coverage: ["local-deployment-native-validation"],
+					evidencePath: attempt.nativeSupervisionPath,
+					evidenceSha256: nativeSha256,
+					commandWorkingDirectory: attempt.cwd,
+					commandEnvironmentFingerprintSha256: attempt.commandEnvironmentFingerprintSha256,
+					proofFiles,
+					environmentCompatible: true,
+					status: attempt.status,
+					sourceFormat: "local-deployment-native-validation",
+					concludedAt: attempt.concludedAt,
+				});
+			} catch (error) {
+				addIssue(attempt.nativeSupervisionPath ?? statePath, error);
+			}
+		}
+		const inheritedPaths = new Set();
+		for (const imported of state.importedEvidence || []) {
+			const check = imported.check;
+			if (
+				imported.contextFingerprintSha256 !== priorContextFingerprint ||
+				!report.sourceValidationEvidenceFilePaths?.includes(check?.boundEvidencePath) ||
+				sha256(JSON.stringify(check)) !== imported.checkSha256 ||
+				!report.availableSourceValidationChecks?.some(
+					(available) => sha256(JSON.stringify(available)) === imported.checkSha256,
+				)
+			) continue;
+			try {
+				const snapshots = imported.snapshots || [];
+				const retainedCheck = snapshots.find((snapshot) => snapshot.sha256 === check.evidenceSha256);
+				const requiredSnapshots = new Set([retainedCheck]);
+				for (const proofPath of check.proofFiles || []) {
+					requiredSnapshots.add(snapshots.find(
+						(snapshot) => snapshot.snapshotPath === proofPath || snapshot.sourcePath === proofPath,
+					));
+				}
+				const proofFiles = [];
+				for (const snapshot of requiredSnapshots) {
+					assert(
+						snapshot &&
+							snapshot.snapshotPath === join(outputDirectory, "consumed-source-validation-evidence", snapshot.sha256) &&
+							(await realpath(snapshot.snapshotPath)) === snapshot.snapshotPath,
+						"前序验证缺少归属于该检查的持久副本",
+					);
+					proofFiles.push(await verifyAndSnapshotEvidenceFile(
+						snapshot.snapshotPath, snapshot.sha256, outputDirectory,
+					));
+				}
+				let commandKeys = check.commandKeys;
+				let commandWorkingDirectory = check.commandWorkingDirectory;
+				let commandEnvironmentFingerprintSha256 = check.commandEnvironmentFingerprintSha256;
+				if (check.sourceFormat === "base-branch-sync-current-tree-validation") {
+					const record = await readBoundedJsonEvidenceFile(retainedCheck.snapshotPath);
+					commandWorkingDirectory = record.worktree;
+					commandEnvironmentFingerprintSha256 = record.commandEnvironmentFingerprintSha256;
+				} else if (check.sourceFormat === "local-deployment-native-validation" && !commandWorkingDirectory) {
+					const originalStatePath = resolve(dirname(check.evidencePath), "../../../source-validation-execution-state.json");
+					const stateProof = [...requiredSnapshots].find((snapshot) => snapshot.sourcePath === originalStatePath);
+					assert(stateProof, "前序验证的持久副本缺少原始命令环境");
+					const originalState = await readBoundedJsonEvidenceFile(stateProof.snapshotPath);
+					const attempt = originalState.attempts?.find((item) => item.nativeSupervisionPath === check.evidencePath);
+					assert(attempt, "前序验证状态缺少绑定的原始命令");
+					commandWorkingDirectory = attempt.cwd;
+					commandEnvironmentFingerprintSha256 = attempt.commandEnvironmentFingerprintSha256;
+				} else if (check.sourceFormat === "final-complete-tree-verification-evidence") {
+					const record = await readBoundedJsonEvidenceFile(retainedCheck.snapshotPath);
+					const originalWrapperSha256 = await computeEvidenceFileSha256Once(record.argv[1]).catch((error) => {
+						if (error.code !== "ENOENT") throw error;
+						return null;
+					});
+					if (originalWrapperSha256 !== record.runnerSha256) {
+						const wrapperCommandKey = createSourceValidationCommandIdentityKey(record.argv, record.cwd);
+						commandKeys = commandKeys.filter((key) => key !== wrapperCommandKey);
+					}
+				}
+				if (commandWorkingDirectory || commandEnvironmentFingerprintSha256) {
+					assert(commandEnvironmentFingerprintSha256 ===
+						await computeSourceValidationCommandEnvironmentFingerprint(check.argv, commandWorkingDirectory),
+						"前序验证的命令或包装脚本指纹不匹配");
+				}
+				sourceValidationCheckResults.push({
+					...check, commandKeys, proofFiles,
+					commandWorkingDirectory, commandEnvironmentFingerprintSha256,
+				});
+			} catch (error) {
+				addIssue(check.boundEvidencePath, error);
+				inheritedPaths.add(check.boundEvidencePath);
+			}
+		}
+		if (inheritedPaths.size)
+			sourceValidationCheckResults.push(...await readReferencedSourceValidationChecks(
+				sourceCheckoutPath, gitCommonDirectory, treeOid, contentManifestSha256, [...inheritedPaths],
+				currentEnvironment, visitedDeploymentValidationReports,
+			));
+	}
+
 	const consumedPaths = new Set();
 	for (const evidencePath of new Set(sourceValidationEvidenceFilePaths.map((path) => resolve(path)))) {
 		try {
 			const filename = basename(evidencePath);
 			const directory = dirname(evidencePath);
 			const checkCountBefore = sourceValidationCheckResults.length;
-			if (filename === "operation-state.json") {
+			if (filename === REPORT_FILENAME) {
+				await readPriorDeploymentValidation(evidencePath);
+			} else if (filename === "operation-state.json") {
 				await readStandardOperation(evidencePath);
 			} else if (filename === "current-tree-validation.json") {
 				await readStandardOperation(join(directory, "../../operation-state.json"), evidencePath);
@@ -1466,7 +1627,15 @@ async function readSourceValidationEnvironmentIdentity(sourceCheckoutPath) {
 		lockfiles: {},
 		installedDependencyMetadata: {},
 		processEnvironmentSha256: sha256(
-			serializePythonCompatibleCommandFingerprintJson(currentSourceValidationProcessEnvironment()),
+			serializePythonCompatibleCommandFingerprintJson(
+				Object.fromEntries(Object.entries(currentSourceValidationProcessEnvironment()).filter(([key]) =>
+					![
+						"KANBAN_OWNED_COMMAND_EXECUTION_NONCE",
+						"KANBAN_COMMAND_EXECUTION_ID",
+						"KANBAN_COMMAND_EXECUTION_REVOCATION_FILE",
+						"KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY",
+					].includes(key))),
+			),
 		),
 	};
 	for (const project of [".", "web-ui", "packages/desktop"]) {
@@ -1719,6 +1888,12 @@ async function main() {
 				sourceCheckoutPath,
 			);
 			const checkKey = sha256(`${fingerprint}:${commandIdentity}:${commandFingerprint}`);
+			const checkEvidenceMismatches = availableSourceValidationChecks
+				.filter((record) => !record.commandKeys.includes(commandIdentity) || !record.environmentCompatible)
+				.map((record) => ({
+					evidencePath: record.evidencePath,
+					reason: record.commandKeys.includes(commandIdentity) ? "validation_environment_mismatch" : "command_coverage_mismatch",
+				}));
 			const matches = availableSourceValidationChecks.filter(
 				(record) =>
 					record.commandKeys.includes(commandIdentity) &&
@@ -1768,6 +1943,8 @@ async function main() {
 						{ commit, snapshot: { treeOid, contentManifestSha256 } },
 					),
 				);
+			if (checkEvidenceMismatches.length && !sourceValidationCheckResults.at(-1).decision.startsWith("reused_"))
+				sourceValidationCheckResults.at(-1).evidenceMismatches = checkEvidenceMismatches;
 			if (sourceValidationCheckResults.at(-1).decision === "quality_validation_failed" || stopped) break;
 		}
 		assert(

@@ -86,9 +86,10 @@ function createValidationFixture() {
 	};
 	writeJson(planPath, { schemaVersion: 1, commands: [command] });
 	function childProcessEnvironment() {
-		return fixture.createIsolatedChildProcessEnvironment({
-			RVF_USER_LOCAL_DATA_ROOT: join(fixture.isolatedHomeDirectoryPath, ".rvf/user-local-data"),
-		});
+		return fixture.createIsolatedChildProcessEnvironment(
+			{ RVF_USER_LOCAL_DATA_ROOT: join(fixture.isolatedHomeDirectoryPath, ".rvf/user-local-data") },
+			{ independentPtyHostLaunchIsExcluded: true },
+		);
 	}
 	function pythonRuntimeIdentity(environment: NodeJS.ProcessEnv) {
 		const result = spawnSync(
@@ -102,14 +103,21 @@ function createValidationFixture() {
 		expect(result.status).toBe(0);
 		return JSON.parse(result.stdout) as { pythonExecutable: string; pythonVersion: string; platform: string };
 	}
-	function currentEnvironmentIdentity() {
+	function currentEnvironmentIdentity({ excludeDeploymentSupervisionVariablesForExplicitBundle = false } = {}) {
 		const environment = Object.fromEntries(
 			Object.entries(childProcessEnvironment()).filter(
 				([key]) =>
 					!key.startsWith("GIT_") &&
 					!key.startsWith("BASE_BRANCH_SYNC_") &&
 					!key.startsWith("RVF_INDEPENDENT_") &&
-					!["_", "SHLVL", "PWD", "OLDPWD", "__PYVENV_LAUNCHER__"].includes(key),
+					!["_", "SHLVL", "PWD", "OLDPWD", "__PYVENV_LAUNCHER__"].includes(key) &&
+					(!excludeDeploymentSupervisionVariablesForExplicitBundle ||
+						![
+							"KANBAN_OWNED_COMMAND_EXECUTION_NONCE",
+							"KANBAN_COMMAND_EXECUTION_ID",
+							"KANBAN_COMMAND_EXECUTION_REVOCATION_FILE",
+							"KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY",
+						].includes(key)),
 			),
 		);
 		environment.PATH = `${dirname(process.execPath)}:${environment.PATH || ""}`;
@@ -132,18 +140,20 @@ function createValidationFixture() {
 			commit?: string;
 			environment?: Record<string, string>;
 			evidenceFilePaths?: readonly string[];
+			checkoutPath?: string;
+			outputDirectory?: string;
 		} = {},
 	) {
 		const arguments_ = [
 			preparationScript,
 			"--source-checkout-path",
-			sourceCheckoutPath,
+			options.checkoutPath ?? sourceCheckoutPath,
 			"--candidate-source-commit",
 			options.commit ?? commit,
 			"--runtime-home-directory",
 			runtimeHomeDirectoryPath,
 			"--output-directory",
-			output,
+			options.outputDirectory ?? output,
 			...(options.plan === false ? [] : ["--validation-plan", planPath]),
 			...(options.inspectOnly ? ["--inspect-only"] : []),
 			...(options.observeRecovery ? ["--observe-recovery-evidence"] : []),
@@ -170,7 +180,10 @@ function createValidationFixture() {
 			},
 			report: () =>
 				JSON.parse(
-					readFileSync(join(output, "source-validation-evidence-reuse-report.json"), "utf8"),
+					readFileSync(
+						join(options.outputDirectory ?? output, "source-validation-evidence-reuse-report.json"),
+						"utf8",
+					),
 				) as ReuseReport,
 		};
 	}
@@ -211,12 +224,18 @@ function createValidationFixture() {
 		writeFileSync(stdoutPath, "隔离检查原件\n");
 		writeFileSync(stderrPath, "");
 		const recordPath = join(recordDirectory, "current-tree-validation.json");
+		const scriptSha256 = Object.fromEntries(
+			validationCommand.argv
+				.slice(1)
+				.filter((argument) => /\.mjs$/u.test(argument))
+				.map((scriptPath) => [scriptPath, digest(readFileSync(scriptPath))]),
+		);
 		const commandFingerprint = digest(
 			pythonJson({
 				argv: validationCommand.argv,
 				executable: process.execPath,
 				executableSha256: nodeBinarySha256,
-				scriptSha256: {},
+				scriptSha256,
 			}),
 		);
 		const identity = {
@@ -352,7 +371,9 @@ function createValidationFixture() {
 			runnerSha256: digest(runner),
 			before: snapshot,
 			after: snapshot,
-			validationEnvironment: currentEnvironmentIdentity(),
+			validationEnvironment: currentEnvironmentIdentity({
+				excludeDeploymentSupervisionVariablesForExplicitBundle: true,
+			}),
 			status: options.interruptedExitCode === undefined ? "passed" : "interrupted",
 			exitCode: options.interruptedExitCode ?? 0,
 			stdoutPath,
@@ -442,6 +463,90 @@ function createValidationFixture() {
 }
 
 describe("local deploy 自动复用源码验证证据", () => {
+	it.each([
+		"same",
+		"inherited_check",
+		"inherited_check_original_removed",
+		"inherited_check_original_and_snapshot_damaged",
+		"inherited_check_original_removed_and_wrapper_changed",
+		"changed_command",
+		"changed_environment",
+		"changed_tree",
+		"damaged_original",
+	] as const)("标准前序执行只复用匹配且仍可核验的原生检查：%s", (scenario) => {
+		const fixture = createValidationFixture();
+		const prior = fixture.repository.createLinkedWorktree({
+			worktreeDirectoryName: "candidate-source-checkout",
+			branchName: "previous-execution",
+		});
+		const previousOutput = join(dirname(prior.worktreePath), "source-validation");
+		const inheritsCheck = scenario.startsWith("inherited_check");
+		const wrapperPath = join(fixture.fixture.fixtureRootDirectoryPath, "external-validation-wrapper.mjs");
+		if (scenario === "inherited_check_original_removed_and_wrapper_changed") {
+			writeFileSync(wrapperPath, "process.exitCode = 0;\n");
+			const command = { ...fixture.command, argv: [process.execPath, wrapperPath] };
+			writeJson(fixture.planPath, { schemaVersion: 1, commands: [command] });
+			fixture.addStandardRecord({ command });
+		} else if (inheritsCheck) fixture.addStandardRecord();
+		const priorRun = fixture.run({ checkoutPath: prior.worktreePath, outputDirectory: previousOutput });
+		expect(priorRun.summary.executedMissingSourceValidationCheckCount).toBe(inheritsCheck ? 0 : 1);
+		let previousReport = join(previousOutput, "source-validation-evidence-reuse-report.json");
+		if (scenario.startsWith("inherited_check_original_")) {
+			for (const evidence of fixture.sourceValidationEvidenceFilePaths)
+				rmSync(dirname(evidence), { recursive: true });
+			if (scenario === "inherited_check_original_and_snapshot_damaged")
+				for (const snapshot of priorRun.report().consumedEvidenceSnapshots)
+					writeFileSync(snapshot.snapshotPath, "已损坏的持久副本");
+			if (scenario === "inherited_check_original_removed_and_wrapper_changed")
+				writeFileSync(wrapperPath, "// 外置验证脚本已改写\nprocess.exitCode = 0;\n");
+		}
+		if (scenario === "inherited_check_original_removed") {
+			const intermediateOutput = join(dirname(prior.worktreePath), "intermediate-source-validation");
+			const intermediate = fixture.run({
+				checkoutPath: prior.worktreePath,
+				outputDirectory: intermediateOutput,
+				evidenceFilePaths: [previousReport],
+			});
+			expect(intermediate.summary.reusedSourceValidationCheckCount).toBe(1);
+			rmSync(previousOutput, { recursive: true });
+			previousReport = join(intermediateOutput, "source-validation-evidence-reuse-report.json");
+		}
+		if (scenario === "changed_command")
+			writeJson(fixture.planPath, {
+				schemaVersion: 1,
+				commands: [
+					{
+						...fixture.command,
+						argv: [...fixture.command.argv, "other-command"],
+					},
+				],
+			});
+		if (scenario === "damaged_original") {
+			const priorState = JSON.parse(
+				readFileSync(join(previousOutput, "source-validation-execution-state.json"), "utf8"),
+			);
+			writeFileSync(priorState.attempts[0].stdoutPath, "已篡改日志");
+		}
+		let commit = fixture.commit;
+		if (scenario === "changed_tree") {
+			writeFileSync(join(fixture.sourceCheckoutPath, "candidate-source.txt"), "新源码树");
+			commit = fixture.repository.commitAllRepositoryFilesAtDate({
+				message: "改变完整树",
+				authorAndCommitterIsoDate: "2026-11-05T00:00:00Z",
+			});
+		}
+		const resumed = fixture.run({
+			commit,
+			evidenceFilePaths: [previousReport],
+			environment: scenario === "changed_environment" ? { REDEPLOYMENT_VALIDATION_FIXTURE_DRIFT: "1" } : {},
+		});
+		const canReuse = ["same", "inherited_check", "inherited_check_original_removed"].includes(scenario);
+		expect(resumed.summary).toMatchObject({
+			status: "passed",
+			reusedSourceValidationCheckCount: canReuse ? 1 : 0,
+			executedMissingSourceValidationCheckCount: canReuse ? 0 : 1,
+		});
+	});
 	it("五项完整时全量复用，未随部署冻结的历史记录不会被扫描", () => {
 		const fixture = createValidationFixture();
 		const commands = ["typecheck", "web:typecheck", "test", "web:test", "lint"].map((name) => ({
@@ -487,7 +592,7 @@ describe("local deploy 自动复用源码验证证据", () => {
 		const bundle = fixture.addLegacyBundle();
 		rmSync(bundle.originals, { recursive: true });
 		const result = fixture.run();
-		expect(result.status).toBe(0);
+		expect(result.status, JSON.stringify(result.report().evidenceDiscoveryIssues)).toBe(0);
 		expect(result.summary.reusedSourceValidationCheckCount).toBe(2);
 		expect(result.report().evidenceDiscoveryIssues).toEqual([]);
 	});
@@ -504,10 +609,11 @@ describe("local deploy 自动复用源码验证证据", () => {
 			],
 		});
 		const result = fixture.run({ inspectOnly: true });
-		expect(result.report().sourceValidationCheckResults.map((check) => check.decision)).toEqual([
-			"reused_source_evidence",
-			"missing_check",
-		]);
+		const report = result.report();
+		expect(
+			report.sourceValidationCheckResults.map((check) => check.decision),
+			JSON.stringify(report.evidenceDiscoveryIssues),
+		).toEqual(["reused_source_evidence", "missing_check"]);
 	});
 
 	it("只执行缺失项，独立调用接续复用完成结果，不重复执行", () => {

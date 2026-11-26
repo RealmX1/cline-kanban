@@ -1,24 +1,46 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { lstat, mkdir, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { describe, expect, it, onTestFinished, vi } from "vitest";
 import { fingerprintLocalDeploymentDistribution } from "../../../src/deployment/local-deployment-distribution-manifest";
-import { initializeLocalDeploymentExecution } from "../../../src/deployment/local-deployment-execution";
+import {
+	analyzeLocalDeploymentExecutions,
+	initializeLocalDeploymentExecution,
+	readLocalDeploymentExecution,
+} from "../../../src/deployment/local-deployment-execution";
 import { LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER } from "../../../src/deployment/local-deployment-execution-contract";
 import {
 	recordLocalDeploymentTargetStageFailure,
 	reserveLocalDeploymentTargetStageAttempt,
 } from "../../../src/deployment/local-deployment-target-stage-recovery-budget";
-import { localRedeploymentSha256 } from "../../../src/deployment/local-redeployment-preparation";
+import {
+	canonicalizeLocalRedeploymentRequest,
+	createBoundLocalRedeploymentSourceValidationArguments,
+	localRedeploymentRequestSchema,
+	localRedeploymentSha256,
+	readBoundPreviousLocalRedeployment,
+	readFrozenLocalRedeploymentRequest,
+} from "../../../src/deployment/local-redeployment-preparation";
 import {
 	executeStandardLocalRedeploymentStage,
 	observeStandardLocalRedeploymentStageRecoveryEvidence,
+	readCompletedCandidateBuildCommandOriginal,
+	runLocalRedeploymentStandardCommand,
+	verifyLocalRedeploymentCandidateBuildReceipt,
 } from "../../../src/deployment/local-redeployment-standard-execution";
 import {
 	backupLocalRedeploymentRuntimeState,
 	queryLocalRedeploymentRuntime,
 } from "../../../src/deployment/local-redeployment-state-preservation";
+import type * as LockedFileSystemModule from "../../../src/fs/locked-file-system";
 import { readProcessIdentity } from "../../../src/task-command-execution/task-command-execution-supervisor";
 import { createTempDir } from "../../utilities/temp-dir";
+
+vi.mock("../../../src/fs/locked-file-system", async (importOriginal) => {
+	const actual = await importOriginal<typeof LockedFileSystemModule>();
+	const guardedTestDirectory = process.env.TMPDIR;
+	if (!guardedTestDirectory) throw new Error("必须通过 guarded runner 提供独占测试目录。");
+	return { ...actual, lockedFileSystem: await actual.LockedFileSystem.forIsolatedTestDirectory(guardedTestDirectory) };
+});
 
 vi.mock("../../../src/deployment/local-redeployment-state-preservation", () => ({
 	queryLocalRedeploymentRuntime: vi.fn(),
@@ -38,7 +60,7 @@ async function createStandardStageFixture(
 	onTestFinished(() => {
 		vi.clearAllMocks();
 	});
-	const directory = temporary.path;
+	const directory = await realpath(temporary.path);
 	const source = join(directory, "source");
 	const candidate = join(directory, "candidate-source-checkout");
 	await mkdir(join(source, "scripts"), { recursive: true });
@@ -193,8 +215,421 @@ describe("标准部署当前代际与恢复语义", () => {
 		);
 	});
 
-	it("从派发前就绪到阶段内阻塞再恢复就绪时获得一次新证据", async () => {
+	it("分析历史执行时把后来尝试的阻塞留在共享目标预算", async () => {
 		const { directory, request } = await createStandardStageFixture();
+		const stage = "candidate_preparation";
+		const newerId = "132609d8-7508-4bdc-b202-1d7bd7da8a14";
+		const newerDirectory = join(dirname(directory), "later-deployment");
+		const attempt = {
+			binding: { ...request, executionId: newerId },
+			stage,
+			executionDirectory: newerDirectory,
+			attemptNumber: 1,
+		} as const;
+		await reserveLocalDeploymentTargetStageAttempt({
+			...attempt,
+			recoveryEvidenceReady: true,
+			recoveryEvidenceSha256: "a".repeat(64),
+		});
+		await recordLocalDeploymentTargetStageFailure({
+			...attempt,
+			failure: {
+				classification: "filesystem_unavailable",
+				logicalResource: "later-resource",
+				recoveryCondition: "等待后继执行的文件",
+				originalErrorReference: join(newerDirectory, "stage-failure-originals", stage, "new-error.json"),
+			},
+		});
+		const { executions } = await analyzeLocalDeploymentExecutions([directory]);
+		expect(executions[0]?.recovery.condition).not.toContain("后继执行");
+		expect(executions[0]?.operationalProgress?.executionOwnedBlockingFailure).toBeNull();
+		expect(executions[0]?.operationalProgress?.targetStageBudget).toMatchObject({
+			latestAttemptExecutionId: newerId,
+			blockingFailure: { logicalResource: "later-resource" },
+		});
+		expect(executions[0]?.recovery.nextCheckAtEpochMs).toBeNull();
+		const commandDirectory = join(directory, "stage-command-originals", stage, "attempt-1");
+		const originalDirectory = join(directory, "stage-failure-originals", stage);
+		await mkdir(commandDirectory, { recursive: true });
+		await mkdir(originalDirectory, { recursive: true });
+		const historicalFailure = {
+			classification: "filesystem_unavailable",
+			logicalResource: "original-resource",
+			recoveryCondition: "等待历史执行的文件",
+			originalErrorReference: join(originalDirectory, "original-error.json"),
+		};
+		await writeFile(historicalFailure.originalErrorReference, JSON.stringify({ stage, ...historicalFailure }));
+		const executionPath = join(directory, "local-deployment-execution.json");
+		const record = JSON.parse(await readFile(executionPath, "utf8"));
+		const attemptIdentity = {
+			executionId: request.executionId,
+			stage,
+			attemptNumber: 1,
+			commandOutputDirectory: commandDirectory,
+		};
+		await writeFile(
+			join(commandDirectory, "command-result.json"),
+			JSON.stringify({
+				command: record.manifest.stages[0].command,
+				cwd: request.sourceCheckoutPath,
+				processWasStarted: true,
+				processId: 1,
+				exitCode: 2,
+				startedAtEpochMs: 1,
+				finishedAtEpochMs: 2,
+				attemptIdentity,
+			}),
+		);
+		await writeFile(
+			join(commandDirectory, "stdout.txt"),
+			JSON.stringify({ ok: false, blockingFailure: historicalFailure }),
+		);
+		record.observations.push({
+			stage,
+			sequence: 1,
+			kind: "command_failed",
+			observedAtEpochMs: 3,
+			attemptNumber: 1,
+			recoveryEvidenceSha256: "a".repeat(64),
+			exitCode: 2,
+			commandOutputDirectory: commandDirectory,
+			detail: "保留历史失败",
+			commandFailureKind: "machine_evidence_pending",
+		});
+		await writeFile(executionPath, JSON.stringify(record));
+		const history = (await analyzeLocalDeploymentExecutions([directory])).executions[0];
+		expect(history?.operationalProgress?.executionOwnedBlockingFailure).toEqual(historicalFailure);
+		expect(history?.operationalProgress?.targetStageBudget?.blockingFailure).toMatchObject({
+			logicalResource: "later-resource",
+		});
+	});
+
+	it("前序执行必须来自同一任务代际及同一工作树实体", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const frozenPath = join(directory, "frozen-redeployment-request.json");
+		const original = await readFrozenLocalRedeploymentRequest(directory);
+		const metadata = await lstat(request.originatingTaskWorktreePath);
+		const worktreeIdentity = {
+			realPath: request.originatingTaskWorktreePath,
+			device: metadata.dev,
+			inode: metadata.ino,
+			createdAtEpochMs: metadata.birthtimeMs,
+		};
+		const previousDeploymentTaskIdentity = { taskIncarnationCreatedAtEpochMs: 123, worktreeIdentity };
+		await writeFile(frozenPath, JSON.stringify({ ...original, previousDeploymentTaskIdentity }));
+		const currentDirectory = join(directory, "new-execution");
+		await mkdir(currentDirectory);
+		const current = {
+			...original,
+			previousDeploymentTaskIdentity,
+			request: {
+				...original.request,
+				executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14",
+				previousDeploymentExecution: { executionId: request.executionId, executionDirectory: directory },
+			},
+		};
+		const previousReport = join(directory, "source-validation", "source-validation-evidence-reuse-report.json");
+		await mkdir(dirname(previousReport));
+		await writeFile(previousReport, "{}");
+		expect((await readBoundPreviousLocalRedeployment(currentDirectory, current))?.request.executionId).toBe(
+			request.executionId,
+		);
+		expect(await createBoundLocalRedeploymentSourceValidationArguments(currentDirectory, current)).toContain(
+			previousReport,
+		);
+		const foreignReport = join(currentDirectory, "foreign-deployment-validation-report.json");
+		await rename(previousReport, foreignReport);
+		await symlink(foreignReport, previousReport);
+		expect(await createBoundLocalRedeploymentSourceValidationArguments(currentDirectory, current)).not.toContain(
+			previousReport,
+		);
+		for (const changedIdentity of [
+			{ ...previousDeploymentTaskIdentity, taskIncarnationCreatedAtEpochMs: 124 },
+			{ ...previousDeploymentTaskIdentity, worktreeIdentity: { ...worktreeIdentity, inode: metadata.ino + 1 } },
+		])
+			await expect(
+				readBoundPreviousLocalRedeployment(currentDirectory, {
+					...current,
+					previousDeploymentTaskIdentity: changedIdentity,
+				}),
+			).rejects.toThrow("前序执行");
+		await writeFile(frozenPath, JSON.stringify({ ...original, owner: null }));
+		await expect(readBoundPreviousLocalRedeployment(currentDirectory, current)).resolves.toBeNull();
+		const argumentsWithoutUnverifiedPredecessor = await createBoundLocalRedeploymentSourceValidationArguments(
+			currentDirectory,
+			{
+				...current,
+				request: {
+					...current.request,
+					sourceValidationEvidenceFilePaths: [previousReport, join(directory, "independent", "validation.json")],
+				},
+			},
+		);
+		expect(argumentsWithoutUnverifiedPredecessor).not.toContain(previousReport);
+		expect(argumentsWithoutUnverifiedPredecessor).toContain(join(directory, "independent", "validation.json"));
+
+		const unavailableDirectory = join(directory, "unrecorded-predecessor");
+		const requestWithUnavailablePredecessor = {
+			...current.request,
+			previousDeploymentExecution: {
+				executionId: request.executionId,
+				executionDirectory: unavailableDirectory,
+			},
+		};
+		const canonicalRequest = await canonicalizeLocalRedeploymentRequest(requestWithUnavailablePredecessor);
+		expect(canonicalRequest.previousDeploymentExecution).toEqual(
+			requestWithUnavailablePredecessor.previousDeploymentExecution,
+		);
+		await expect(
+			readBoundPreviousLocalRedeployment(currentDirectory, { ...current, request: canonicalRequest }),
+		).resolves.toBeNull();
+		await mkdir(unavailableDirectory);
+		await expect(
+			readBoundPreviousLocalRedeployment(currentDirectory, { ...current, request: canonicalRequest }),
+		).resolves.toBeNull();
+		await writeFile(join(unavailableDirectory, "frozen-redeployment-request.json"), "{");
+		await expect(
+			readBoundPreviousLocalRedeployment(currentDirectory, { ...current, request: canonicalRequest }),
+		).resolves.toBeNull();
+	});
+
+	it("构建和 ABI 的成功原件可在最终回执之前各自恢复，拒绝改写产物", async () => {
+		const { directory } = await createStandardStageFixture();
+		const frozen = await readFrozenLocalRedeploymentRequest(directory);
+		const candidate = join(directory, "candidate-source-checkout");
+		const inputs = "a".repeat(64);
+		const build = [process.execPath, "-e", "process.stdout.write('built')"];
+		const failingAbi = [process.execPath, "-e", "process.exitCode = 1"];
+		const passedAbi = [process.execPath, "-e", "process.stdout.write('checked')"];
+		await runLocalRedeploymentStandardCommand(
+			directory,
+			frozen,
+			"production-build",
+			build,
+			candidate,
+			undefined,
+			inputs,
+		);
+		await expect(
+			runLocalRedeploymentStandardCommand(
+				directory,
+				frozen,
+				"candidate-native-abi",
+				failingAbi,
+				candidate,
+				undefined,
+				inputs,
+			),
+		).rejects.toThrow("candidate-native-abi");
+		const recover = (name: string, command: string[], fingerprint = inputs) =>
+			readCompletedCandidateBuildCommandOriginal(directory, frozen, name, command, fingerprint);
+		expect(await recover("production-build", build)).toContain("production-build-");
+		expect(await recover("production-build", build, "b".repeat(64))).toBeNull();
+		expect(await recover("candidate-native-abi", failingAbi)).toBeNull();
+		await runLocalRedeploymentStandardCommand(
+			directory,
+			frozen,
+			"candidate-native-abi",
+			passedAbi,
+			candidate,
+			undefined,
+			inputs,
+		);
+		expect(await recover("candidate-native-abi", passedAbi)).toContain("candidate-native-abi-");
+		await writeFile(join(candidate, "dist", "cli.js"), "已改写产物");
+		await expect(recover("production-build", build)).rejects.toThrow("私有分发产物发生变化");
+	});
+
+	it("前序构建的持久接受原件可补最终回执，成功 ABI 不覆盖构建原件的输入与分发绑定", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const frozenBase = await readFrozenLocalRedeploymentRequest(directory);
+		const boundRequest = {
+			...frozenBase.request,
+			previousDeploymentExecution: {
+				executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14",
+				executionDirectory: join(directory, "previous-execution"),
+			},
+		};
+		const frozen = {
+			...frozenBase,
+			request: boundRequest,
+			requestSha256: localRedeploymentSha256(JSON.stringify(boundRequest)),
+		};
+		const candidate = join(directory, "candidate-source-checkout");
+		const inputsSha256 = "a".repeat(64);
+		const distribution = await fingerprintLocalDeploymentDistribution(join(candidate, "dist"));
+		const build = [request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "build"];
+		const buildCommandResultPath = join(directory, "previous-candidate-build-command-result.json");
+		const buildResultBytes = JSON.stringify({
+			command: build,
+			exitCode: 0,
+			completedCandidateBuild: {
+				inputsSha256,
+				candidateDistributionSha256: distribution.candidateDistributionSha256,
+			},
+		});
+		const buildCommandResultSha256 = localRedeploymentSha256(buildResultBytes);
+		await writeFile(buildCommandResultPath, buildResultBytes);
+		const recover = () =>
+			readCompletedCandidateBuildCommandOriginal(directory, frozen, "production-build", build, inputsSha256);
+		await expect(recover()).resolves.toBeNull();
+		await writeFile(
+			join(directory, "previous-candidate-build-import-receipt.json"),
+			JSON.stringify({ requestSha256: frozen.requestSha256, buildCommandResultSha256 }),
+		);
+		await expect(recover()).resolves.toBe(buildCommandResultPath);
+		const abiScript = join(candidate, "scripts/verify-notification-archive-native-runtime.mjs");
+		await writeFile(abiScript, "process.exitCode = 0;");
+		const abiCommand = [request.deploymentNodeBinaryPath, abiScript];
+		const recordAbi = async (inputs: string) => {
+			let nativeAbiResultPath = "";
+			await runLocalRedeploymentStandardCommand(
+				directory,
+				frozen,
+				"candidate-native-abi",
+				abiCommand,
+				candidate,
+				(path) => {
+					nativeAbiResultPath = path;
+				},
+				inputs,
+			);
+			return {
+				nativeAbiResultPath,
+				nativeAbiResultSha256: localRedeploymentSha256(await readFile(nativeAbiResultPath)),
+			};
+		};
+		const receipt = {
+			requestSha256: frozen.requestSha256,
+			inputsSha256,
+			buildCommandResultPath,
+			buildCommandResultSha256,
+			...(await recordAbi(inputsSha256)),
+			...distribution,
+		};
+		await expect(verifyLocalRedeploymentCandidateBuildReceipt(directory, frozen, receipt)).resolves.toBeUndefined();
+		const changedInputsSha256 = "b".repeat(64);
+		await expect(
+			verifyLocalRedeploymentCandidateBuildReceipt(directory, frozen, {
+				...receipt,
+				inputsSha256: changedInputsSha256,
+				...(await recordAbi(changedInputsSha256)),
+			}),
+		).rejects.toThrow("输入、分发或归属不匹配");
+		await writeFile(join(candidate, "dist", "cli.js"), "构建完成后改写分发");
+		await expect(recover()).rejects.toThrow("私有分发产物发生变化");
+		await expect(
+			verifyLocalRedeploymentCandidateBuildReceipt(directory, frozen, {
+				...receipt,
+				...(await recordAbi(inputsSha256)),
+				...(await fingerprintLocalDeploymentDistribution(join(candidate, "dist"))),
+			}),
+		).rejects.toThrow("输入、分发或归属不匹配");
+	});
+
+	it("备份阶段只接续到具备逐代归属与写入者退出原件的前序执行", async () => {
+		const { directory, request } = await createStandardStageFixture();
+		const original = await readFrozenLocalRedeploymentRequest(directory);
+		const record = await readLocalDeploymentExecution(directory);
+		const stage = "state_preservation";
+		const metadata = await lstat(request.originatingTaskWorktreePath);
+		const previousDeploymentTaskIdentity = {
+			taskIncarnationCreatedAtEpochMs: 123,
+			worktreeIdentity: {
+				realPath: request.originatingTaskWorktreePath,
+				device: metadata.dev,
+				inode: metadata.ino,
+				createdAtEpochMs: metadata.birthtimeMs,
+			},
+		};
+		const initial = {
+			executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14",
+			executionDirectory: join(directory, "initial-backup-execution"),
+		};
+		const intermediate = {
+			executionId: "232609d8-7508-4bdc-b202-1d7bd7da8a14",
+			executionDirectory: join(directory, "intermediate-backup-execution"),
+		};
+		for (const [execution, previousDeploymentExecution] of [
+			[initial, undefined],
+			[intermediate, initial],
+			[{ executionId: request.executionId, executionDirectory: directory }, intermediate],
+		] as const) {
+			const { executionId, executionDirectory } = execution;
+			const boundRequest = localRedeploymentRequestSchema.parse({
+				...original.request,
+				executionId,
+				previousDeploymentExecution,
+			});
+			const requestSha256 = localRedeploymentSha256(JSON.stringify(boundRequest));
+			const commandOutputDirectory = join(executionDirectory, "stage-command-originals", stage, "attempt-1");
+			await mkdir(commandOutputDirectory, { recursive: true });
+			await writeFile(
+				join(executionDirectory, "frozen-local-redeployment-executor.mjs"),
+				await readFile(join(directory, "frozen-local-redeployment-executor.mjs")),
+			);
+			await writeFile(
+				join(executionDirectory, "frozen-redeployment-request.json"),
+				JSON.stringify({ ...original, request: boundRequest, requestSha256, previousDeploymentTaskIdentity }),
+			);
+			await writeFile(
+				join(executionDirectory, "local-deployment-execution.json"),
+				JSON.stringify({
+					...record,
+					manifest: { ...record.manifest, executionId, redeploymentRequestSha256: requestSha256 },
+					observations:
+						executionDirectory === directory
+							? []
+							: [
+									{
+										sequence: 1,
+										stage,
+										kind: "command_succeeded",
+										observedAtEpochMs: 2,
+										attemptNumber: 1,
+										recoveryEvidenceSha256: "b".repeat(64),
+										exitCode: 0,
+										commandOutputDirectory,
+										detail: "隔离终结原件",
+									},
+								],
+				}),
+			);
+			await writeFile(
+				join(commandOutputDirectory, "command-result.json"),
+				JSON.stringify({
+					command: ["isolated-stage"],
+					cwd: join(executionDirectory, "candidate-source-checkout"),
+					processWasStarted: true,
+					processId: 1,
+					exitCode: 0,
+					startedAtEpochMs: 1,
+					finishedAtEpochMs: 2,
+					attemptIdentity: { executionId, stage, attemptNumber: 1, commandOutputDirectory },
+				}),
+			);
+		}
+		const backup = vi.mocked(backupLocalRedeploymentRuntimeState);
+		backup.mockRejectedValue(new Error("已核对入口的前序目录"));
+		const expectVerifiedDirectories = async (expected: string[]) => {
+			await expect(executeStandardLocalRedeploymentStage(directory, stage)).rejects.toThrow("已核对入口的前序目录");
+			expect(backup).toHaveBeenLastCalledWith(
+				expect.objectContaining({ executionId: request.executionId }),
+				directory,
+				expected,
+			);
+		};
+		await expectVerifiedDirectories([intermediate.executionDirectory, initial.executionDirectory]);
+		await writeFile(
+			join(initial.executionDirectory, "stage-command-originals", stage, "attempt-1", "command-result.json"),
+			"{}",
+		);
+		await expectVerifiedDirectories([intermediate.executionDirectory]);
+		backup.mockReset();
+	});
+
+	it("会话恢复按已核验的运行时代际消费一次资格", async () => {
+		const { directory, request, current, reportPath } = await createStandardStageFixture();
 		const stage = "state_preservation";
 		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, stage);
 		const before = await observe();
@@ -217,6 +652,25 @@ describe("标准部署当前代际与恢复语义", () => {
 		expect(recovered.recoveryEvidenceReady).toBe(true);
 		expect(recovered.evidenceSha256).not.toBe(before.evidenceSha256);
 		expect(await observe()).toEqual(recovered);
+		const reserveRecovered = (evidence: typeof recovered) =>
+			reserveLocalDeploymentTargetStageAttempt({
+				...attempt,
+				attemptNumber: 2,
+				recoveryEvidenceSha256: evidence.evidenceSha256,
+				recoveryEvidenceReady: evidence.recoveryEvidenceReady,
+			});
+		expect(await reserveRecovered(recovered)).toBe(true);
+		expect(await reserveRecovered(await observe())).toBe(false);
+
+		const replacement = { ...current, runtimeProcessStartTimeText: "Fri Nov 13 12:30:00 2026" };
+		await writeFile(reportPath, JSON.stringify({ ...replacement, ok: false }));
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		await writeFile(reportPath, JSON.stringify(replacement));
+		const recoveredAfterReplacement = await observe();
+		expect(recoveredAfterReplacement.recoveryEvidenceReady).toBe(true);
+		expect(recoveredAfterReplacement.evidenceSha256).not.toBe(recovered.evidenceSha256);
+		expect(await reserveRecovered(recoveredAfterReplacement)).toBe(true);
+		expect(await reserveRecovered(await observe())).toBe(false);
 	});
 
 	it("已提交的备注失败打开一次独立恢复条件", async () => {

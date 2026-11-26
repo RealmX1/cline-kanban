@@ -15,6 +15,11 @@ import {
 	localRedeploymentSha256,
 } from "../../../src/deployment/local-redeployment-preparation";
 import { observeStandardLocalRedeploymentStageRecoveryEvidence } from "../../../src/deployment/local-redeployment-standard-execution";
+import {
+	createWorkspaceStateSnapshotCommit,
+	projectWorkspaceStateSnapshotCommitWithinLock,
+	WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME,
+} from "../../../src/state/workspace-state-snapshot-storage";
 import { createTempDir } from "../../utilities/temp-dir";
 
 describe("部署失败分类及原件", () => {
@@ -150,6 +155,86 @@ describe("部署失败分类及原件", () => {
 		expect(await observeLocalRedeploymentBlockingFailureRecovery(temporary.path, failure)).toEqual(present);
 	});
 
+	it("未记录日志身份的旧 ENOENT 由当前投影补证，普通写入不增加派发资格", async () => {
+		const temporary = createTempDir("local-redeployment-projected-journal-recovery-");
+		onTestFinished(temporary.cleanup);
+		const directory = temporary.path;
+		const runtimeHome = join(directory, "runtime-home");
+		const workspaces = join(runtimeHome, "workspaces");
+		const workspaceId = "project";
+		const workspace = join(workspaces, workspaceId);
+		await mkdir(workspace, { recursive: true });
+		await writeFile(
+			join(workspaces, "index.json"),
+			JSON.stringify({
+				version: 1,
+				entries: { [workspaceId]: { workspaceId, repoPath: directory } },
+				repoPathToId: { [directory]: workspaceId },
+			}),
+		);
+		const request = localRedeploymentRequestSchema.parse({
+			schemaVersion: 1,
+			executionId: "032609d8-7508-4bdc-b202-1d7bd7da8a14",
+			workspaceId,
+			taskId: "isolated-journal-recovery",
+			originatingTaskWorktreePath: directory,
+			sourceCheckoutPath: directory,
+			candidateSourceCommit: "a".repeat(40),
+			deploymentNodeBinaryPath: process.execPath,
+			distributionDirectoryPath: join(directory, "distribution"),
+			runtimeIdentity: { runtimeHomeDirectoryPath: runtimeHome, runtimeHost: "127.0.0.1", runtimePort: 39884 },
+			serviceLaunch: { command: [process.execPath] },
+			authorization: { sourceReference: "test:historical-journal-disappearance", userRequestQuote: "仅隔离观察" },
+		});
+		const executor = "// 隔离旧日志补证\n";
+		await writeFile(join(directory, "frozen-local-redeployment-executor.mjs"), executor);
+		await writeFile(
+			join(directory, "frozen-redeployment-request.json"),
+			JSON.stringify({
+				request,
+				requestSha256: localRedeploymentSha256(JSON.stringify(request)),
+				executorSha256: localRedeploymentSha256(executor),
+				npmCliEntrypointPath: process.execPath,
+				serviceExecutableSha256: "b".repeat(64),
+				owner: null,
+			}),
+		);
+		const journal = join(workspace, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME);
+		const failure = await classifyLocalRedeploymentStageFailure(
+			directory,
+			Object.assign(new Error("原枚举资源已消失"), { code: "ENOENT", path: journal, syscall: "lstat" }),
+			"state_preservation",
+		);
+		const originalBytes = await readFile(failure.originalErrorReference);
+		const observe = () => observeLocalRedeploymentBlockingFailureRecovery(directory, failure);
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		const independentResource = join(workspace, "independent-file.json");
+		await writeFile(
+			join(directory, "runtime-state-backup-progress.json"),
+			JSON.stringify({
+				pendingEntries: [{ resource: independentResource, code: "ENOENT" }],
+			}),
+		);
+		await writeFile(independentResource, "{}");
+		expect((await observe()).recoveryEvidenceReady).toBe(true);
+		const project = (revision: number) =>
+			projectWorkspaceStateSnapshotCommitWithinLock(
+				workspace,
+				createWorkspaceStateSnapshotCommit({
+					workspaceId,
+					boardJsonText: '{"columns":[]}',
+					sessionsJsonText: "{}",
+					meta: { revision, updatedAt: revision },
+				}),
+			);
+		await project(1);
+		const recovered = await observe();
+		expect(recovered.recoveryEvidenceReady).toBe(true);
+		await project(2);
+		expect(await observe()).toEqual(recovered);
+		expect(await readFile(failure.originalErrorReference)).toEqual(originalBytes);
+		await expect(readFile(journal)).rejects.toMatchObject({ code: "ENOENT" });
+	});
 	it("实例起点未知登记可重新观察的监听身份条件", async () => {
 		const temporary = createTempDir("local-redeployment-listener-identity-");
 		onTestFinished(temporary.cleanup);

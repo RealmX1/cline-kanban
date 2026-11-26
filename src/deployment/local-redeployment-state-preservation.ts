@@ -22,7 +22,13 @@ import {
 	listWorkspaceIndexEntries,
 	loadPersistedWorkspaceStateById,
 	type PersistedWorkspaceStateById,
+	readRegisteredWorkspaceIdsForRawSnapshot,
+	readRegisteredWorkspaceRawSnapshot,
 } from "../state/workspace-state";
+import {
+	WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME,
+	WORKSPACE_STATE_SNAPSHOT_PROJECTION_FILENAMES,
+} from "../state/workspace-state-snapshot-storage";
 import { reuseLocalRedeploymentCheck } from "./local-redeployment-persistent-checks";
 import {
 	assertLocalRedeploymentNotRevoked,
@@ -107,6 +113,18 @@ async function readOnlyWorktreeGit(path: string, arguments_: string[]): Promise<
 }
 
 export async function preserveLocalRedeploymentWorktree(path: string, directory: string, preserveContents: boolean) {
+	const scanStartedAt = performance.now();
+	let worktreeScanElapsedMs = 0;
+	let worktreeHashedBytes = 0;
+	let worktreeHashElapsedMs = 0;
+	let worktreeCopiedBytes = 0;
+	function hashWorktreeBytes(bytes: Buffer) {
+		const startedAt = performance.now();
+		const digest = localRedeploymentSha256(bytes);
+		worktreeHashedBytes += bytes.length;
+		worktreeHashElapsedMs += performance.now() - startedAt;
+		return digest;
+	}
 	const gitArguments = [
 		["status", "--porcelain=v1", "-z"],
 		["diff", "--binary", "--full-index", "HEAD", "--"],
@@ -116,6 +134,7 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 		["rev-parse", "HEAD"],
 	];
 	const results = await Promise.all(gitArguments.map((arguments_) => readOnlyWorktreeGit(path, arguments_)));
+	worktreeScanElapsedMs = performance.now() - scanStartedAt;
 	for (const index of [3, 4])
 		if (!Buffer.from(results[index].toString("utf8")).equals(results[index]))
 			throw new Error("Git 路径不是可无损表示的 UTF-8，保留原始 NUL 清单，不能虚报保全");
@@ -134,7 +153,7 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 			if (metadata.isSymbolicLink()) files[name] = { symlinkTarget: await readlink(source) };
 			else if (metadata.isFile())
 				files[name] = {
-					sha256: localRedeploymentSha256(await readFile(source)),
+					sha256: hashWorktreeBytes(await readFile(source)),
 					sourceFilePermissionMode: metadata.mode & 0o7777,
 				};
 			else throw new Error(`WIP 包含无法保全的文件类型：${name}`);
@@ -146,9 +165,9 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 	const contentIdentity = {
 		path,
 		headCommit: results[5].toString("utf8").trim(),
-		statusSha256: localRedeploymentSha256(results[0]),
-		diffSha256: localRedeploymentSha256(results[1]),
-		stagedSha256: localRedeploymentSha256(results[2]),
+		statusSha256: hashWorktreeBytes(results[0]),
+		diffSha256: hashWorktreeBytes(results[1]),
+		stagedSha256: hashWorktreeBytes(results[2]),
 		files,
 	};
 	const target = join(
@@ -161,7 +180,19 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 	const cached = (await readLocalRedeploymentJson(receiptPath)) as
 		| (typeof contentIdentity & { concurrentChangeDuringCapture: boolean; preservedDirectory: string | null })
 		| null;
-	if (cached) return cached;
+	const copyStartedAt = performance.now();
+	if (cached && !cached.concurrentChangeDuringCapture)
+		return {
+			...cached,
+			preservationMeasurements: {
+				worktreeScanElapsedMs,
+				worktreeHashElapsedMs,
+				worktreeHashedBytes,
+				worktreeCopiedBytes,
+				worktreeCopyElapsedMs: 0,
+				reusedWorktreeCheckpoint: true,
+			},
+		};
 	await mkdir(target, { recursive: true });
 	if (preserveContents) {
 		const directoriesToSynchronize = new Set<string>([target]);
@@ -183,7 +214,7 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 					throw new Error("已保留符号链接原件与内容摘要不一致");
 			} else {
 				const bytes = await readFile(join(path, name));
-				if (localRedeploymentSha256(bytes) !== fingerprint.sha256)
+				if (hashWorktreeBytes(bytes) !== fingerprint.sha256)
 					throw Object.assign(new Error("文件在保全期间变化，等待逐项重验"), {
 						code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
 						path: join(path, name),
@@ -194,13 +225,14 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 						throw error;
 					})
 				) {
-					if (localRedeploymentSha256(await readFile(destination)) !== fingerprint.sha256)
+					if (hashWorktreeBytes(await readFile(destination)) !== fingerprint.sha256)
 						throw new Error("未完成的保全原件摘要不一致，禁止覆盖");
 				} else {
 					const file = await open(destination, "wx", 0o600);
 					try {
 						await file.writeFile(bytes);
 						await file.sync();
+						worktreeCopiedBytes += bytes.length;
 					} finally {
 						await file.close();
 					}
@@ -220,13 +252,26 @@ export async function preserveLocalRedeploymentWorktree(path: string, directory:
 			"working-tree-vs-head.patch",
 			"index-vs-head.patch",
 			"untracked-files.bin",
-		].entries())
+		].entries()) {
 			await lockedWriteBuffer(join(target, filename), results[index]);
+			worktreeCopiedBytes += results[index].length;
+		}
 	}
+	const worktreeCopyElapsedMs = preserveContents ? performance.now() - copyStartedAt : 0;
+	const finalScanStartedAt = performance.now();
 	const afterStatus = await readOnlyWorktreeGit(path, ["status", "--porcelain=v1", "-z"]);
 	const afterDifference = await readOnlyWorktreeGit(path, ["diff", "--binary", "--full-index", "HEAD", "--"]);
+	worktreeScanElapsedMs += performance.now() - finalScanStartedAt;
 	const snapshot = {
 		...contentIdentity,
+		preservationMeasurements: {
+			worktreeScanElapsedMs,
+			worktreeHashElapsedMs,
+			worktreeHashedBytes,
+			worktreeCopiedBytes,
+			worktreeCopyElapsedMs,
+			reusedWorktreeCheckpoint: false,
+		},
 		concurrentChangeDuringCapture: !results[0].equals(afterStatus) || !results[1].equals(afterDifference),
 		preservedDirectory: preserveContents ? target : null,
 	};
@@ -286,10 +331,14 @@ export async function captureLocalRedeploymentState(
 		}
 	}
 	const snapshots = [];
+	const preservedCanonicalWorktreePaths = new Set<string>();
 	for (const path of [...worktrees].sort()) {
 		assertLocalRedeploymentNotRevoked(directory);
 		try {
-			snapshots.push(await preserveLocalRedeploymentWorktree(await realpath(path), target, preserveContents));
+			const canonicalWorktreePath = await realpath(path);
+			if (preservedCanonicalWorktreePaths.has(canonicalWorktreePath)) continue;
+			preservedCanonicalWorktreePaths.add(canonicalWorktreePath);
+			snapshots.push(await preserveLocalRedeploymentWorktree(canonicalWorktreePath, target, preserveContents));
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			snapshots.push({ path, missing: true });
@@ -303,8 +352,9 @@ export async function captureLocalRedeploymentState(
 export async function backupLocalRedeploymentRuntimeState(
 	request: LocalRedeploymentRequest,
 	directory: string,
-	checkpointReuseDirectory?: string,
+	verifiedPredecessorBackupDirectories: readonly string[] = [],
 ): Promise<void> {
+	const [checkpointReuseDirectory] = verifiedPredecessorBackupDirectories;
 	let lastProgressReport = -Infinity;
 	function reportBackupProgress(): void {
 		const now = Date.now();
@@ -328,6 +378,32 @@ export async function backupLocalRedeploymentRuntimeState(
 		"filesystem-kernel-write-locks",
 	]);
 	const skipped: string[] = [];
+	const runtimeHome = request.runtimeIdentity.runtimeHomeDirectoryPath;
+	const workspaceRoot = join(runtimeHome, "workspaces");
+	const observedWorkspaceDirectoryNames = new Set<string>();
+	const workspaceSnapshotFilenames = new Set<string>([
+		WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME,
+		...WORKSPACE_STATE_SNAPSHOT_PROJECTION_FILENAMES,
+	]);
+	const measurements = {
+		inventoryScanElapsedMs: 0,
+		contentHashElapsedMs: 0,
+		hashedBytes: 0,
+		copyElapsedMs: 0,
+		copiedBytes: 0,
+		checkpointVerificationElapsedMs: 0,
+		reusedCheckpointCount: 0,
+		reusedBytes: 0,
+	};
+	let measuredBytes = 0;
+	async function readRuntimeStateDirectory(path: string) {
+		const start = performance.now();
+		try {
+			return (await readdir(path)).sort();
+		} finally {
+			measurements.inventoryScanElapsedMs += performance.now() - start;
+		}
+	}
 	const currentEntryBackups: Array<{
 		source: string;
 		destination: string;
@@ -366,13 +442,24 @@ export async function backupLocalRedeploymentRuntimeState(
 	}
 	async function hashRuntimeStateFileContents(path: string): Promise<string> {
 		const hash = createHash("sha256");
-		for await (const chunk of createReadStream(path)) {
-			hash.update(chunk);
-			reportBackupProgress();
+		const start = performance.now();
+		try {
+			for await (const chunk of createReadStream(path)) {
+				hash.update(chunk);
+				measurements.hashedBytes += chunk.length;
+				measuredBytes += chunk.length;
+				reportBackupProgress();
+			}
+			return hash.digest("hex");
+		} finally {
+			measurements.contentHashElapsedMs += performance.now() - start;
 		}
-		return hash.digest("hex");
 	}
-	async function fingerprintRuntimeStateEntry(path: string, recordSkipped = false): Promise<string | null> {
+	async function fingerprintRuntimeStateEntry(
+		path: string,
+		recordSkipped = false,
+		readWorkspaceSnapshot?: () => ReturnType<typeof readRegisteredWorkspaceRawSnapshot>,
+	): Promise<string | null> {
 		assertLocalRedeploymentNotRevoked(directory);
 		// 活跃监督原件原地保留；内核发布前临时文件可随 rename 消失，不作为正式状态。
 		if (
@@ -398,9 +485,23 @@ export async function backupLocalRedeploymentRuntimeState(
 		const mode = metadata.mode & 0o7777;
 		if (metadata.isDirectory()) {
 			const children: Array<[string, string]> = [];
-			for (const name of (await readdir(path)).sort()) {
+			for (const name of await readRuntimeStateDirectory(path)) {
+				if (readWorkspaceSnapshot && workspaceSnapshotFilenames.has(name)) continue;
 				const fingerprint = await fingerprintRuntimeStateEntry(join(path, name), recordSkipped);
 				if (fingerprint !== null) children.push([name, fingerprint]);
+			}
+			if (readWorkspaceSnapshot) {
+				const snapshot = await readWorkspaceSnapshot();
+				for (const { filename, bytes, mode } of snapshot.files) {
+					const start = performance.now();
+					children.push([
+						filename,
+						localRedeploymentSha256(JSON.stringify({ mode, sha256: localRedeploymentSha256(bytes) })),
+					]);
+					measurements.contentHashElapsedMs += performance.now() - start;
+					measurements.hashedBytes += bytes.length;
+					measuredBytes += bytes.length;
+				}
 			}
 			return localRedeploymentSha256(JSON.stringify({ mode, children }));
 		}
@@ -419,7 +520,11 @@ export async function backupLocalRedeploymentRuntimeState(
 			}),
 		);
 	}
-	async function copyRuntimeStateEntry(source: string, destination: string): Promise<void> {
+	async function copyRuntimeStateEntry(
+		source: string,
+		destination: string,
+		readWorkspaceSnapshot?: () => ReturnType<typeof readRegisteredWorkspaceRawSnapshot>,
+	): Promise<void> {
 		assertLocalRedeploymentNotRevoked(directory);
 		if (
 			isRuntimeWorkspaceCommandExecutionArtifactDirectory(source) ||
@@ -441,8 +546,26 @@ export async function backupLocalRedeploymentRuntimeState(
 		}
 		if (metadata.isDirectory()) {
 			await mkdir(destination, { recursive: true });
-			for (const name of (await readdir(source)).sort())
+			for (const name of await readRuntimeStateDirectory(source)) {
+				if (readWorkspaceSnapshot && workspaceSnapshotFilenames.has(name)) continue;
 				await copyRuntimeStateEntry(join(source, name), join(destination, name));
+			}
+			if (readWorkspaceSnapshot) {
+				const snapshot = await readWorkspaceSnapshot();
+				for (const { filename, bytes, mode } of snapshot.files) {
+					const file = await open(join(destination, filename), "wx", mode);
+					try {
+						await file.writeFile(bytes);
+						await file.chmod(mode);
+						await file.sync();
+						if (!(await readFile(join(destination, filename))).equals(bytes))
+							throw new Error(`工作区原始快照副本与捕获字节不同：${filename}`);
+						measurements.copiedBytes += bytes.length;
+					} finally {
+						await file.close();
+					}
+				}
+			}
 			await chmod(destination, metadata.mode & 0o7777);
 		} else if (metadata.isFile() && /\.(?:sqlite|sqlite3|db)$/u.test(source)) {
 			await mkdir(dirname(destination), { recursive: true });
@@ -462,6 +585,7 @@ export async function backupLocalRedeploymentRuntimeState(
 				database.close();
 			}
 			await chmod(destination, metadata.mode & 0o7777);
+			measurements.copiedBytes += (await lstat(destination)).size;
 			const preservedDatabase = new Database(destination, { readonly: true, fileMustExist: true });
 			try {
 				if (preservedDatabase.pragma("quick_check", { simple: true }) !== "ok")
@@ -471,6 +595,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			}
 		} else {
 			await cp(source, destination, { dereference: false, verbatimSymlinks: true });
+			if (metadata.isFile()) measurements.copiedBytes += metadata.size;
 			if ((await fingerprintRuntimeStateEntry(source)) !== (await fingerprintRuntimeStateEntry(destination)))
 				throw Object.assign(new Error("运行时文件副本与源内容不一致，等待逐项重验"), {
 					code: "SOURCE_CONTENT_CHANGED_DURING_CAPTURE",
@@ -486,8 +611,8 @@ export async function backupLocalRedeploymentRuntimeState(
 			}
 		}
 	}
-	async function preserveRuntimeStateEntry(name: string): Promise<void> {
-		const source = join(request.runtimeIdentity.runtimeHomeDirectoryPath, name);
+	async function preserveRuntimeStateEntry(name: string, workspaceId?: string): Promise<void> {
+		const source = join(runtimeHome, name);
 		if (
 			preservedInPlace.has(name) ||
 			isUnpublishedNativeRuntimeAtomicWriteTemporaryFile(source) ||
@@ -497,45 +622,127 @@ export async function backupLocalRedeploymentRuntimeState(
 			skipped.push(source);
 			return;
 		}
-		const sourceMetadataBeforeCapture = await lstat(source);
+		const sourceMetadataBeforeCapture = await lstat(source).catch((error: NodeJS.ErrnoException) => {
+			if (workspaceId && error.code === "ENOENT") return null;
+			throw error;
+		});
+		if (
+			!workspaceId &&
+			dirname(name) === "workspaces" &&
+			sourceMetadataBeforeCapture?.isDirectory() &&
+			(await readRuntimeStateDirectory(source)).includes(WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME)
+		)
+			throw Object.assign(new Error("工作区事务日志缺少登记归属"), {
+				code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+				path: join(source, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME),
+			});
 		const receiptRelativePath = join("runtime-backup-checkpoints", `${localRedeploymentSha256(name)}.json`);
 		const receiptPath = join(directory, receiptRelativePath);
-		const localCheckpoint = await readLocalRedeploymentJson(receiptPath);
+		async function readReusableCheckpoint(path: string) {
+			const bytes = await readFile(path).catch((error: NodeJS.ErrnoException) => {
+				if (error.code === "ENOENT") return null;
+				throw error;
+			});
+			if (!bytes) return null;
+			try {
+				return JSON.parse(bytes.toString("utf8"));
+			} catch (error) {
+				if (!(error instanceof SyntaxError)) throw error;
+				await writeLocalRedeploymentJson(
+					join(
+						directory,
+						"runtime-backup-rejected-checkpoints",
+						`${localRedeploymentSha256(path + localRedeploymentSha256(bytes))}.json`,
+					),
+					{ checkpointPath: path, originalBytesBase64: bytes.toString("base64") },
+				);
+				return null;
+			}
+		}
+		const localCheckpoint = await readReusableCheckpoint(receiptPath);
 		const previous = (localCheckpoint ??
 			(checkpointReuseDirectory &&
-				(await readLocalRedeploymentJson(join(checkpointReuseDirectory, receiptRelativePath))))) as {
+				(await readReusableCheckpoint(join(checkpointReuseDirectory, receiptRelativePath))))) as {
 			source?: string;
 			destination?: string;
 			sourceFingerprint?: string;
 			preservedFingerprint?: string;
+			reusedFromExecutionDirectory?: string;
+			workspaceSnapshotKind?: "uninitialized" | "legacy" | "journal" | "projection";
 		} | null;
-		const sourceFingerprint = await fingerprintRuntimeStateEntry(source, true);
-		if (sourceFingerprint === null) return;
-		if (previous?.source === source && previous.sourceFingerprint === sourceFingerprint && previous.destination) {
-			const previousDestination = previous.destination;
-			const preservedParent =
-				!localCheckpoint && checkpointReuseDirectory
-					? await realpath(dirname(previousDestination)).catch(() => null)
-					: null;
-			const reuseDirectory = !localCheckpoint && checkpointReuseDirectory;
-			const belongsToVerifiedBackup =
-				!reuseDirectory ||
-				preservedParent === join(reuseDirectory, "preserved-runtime-state") ||
-				(preservedParent !== null &&
-					dirname(preservedParent) ===
-						join(reuseDirectory, "preserved-runtime-state-versions", localRedeploymentSha256(name)));
-			const preservedFingerprint =
-				!belongsToVerifiedBackup || basename(previousDestination) !== name
-					? null
-					: await fingerprintRuntimeStateEntry(previousDestination).catch((error: unknown) => {
-							if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-							throw error;
+		const priorFailure = pendingEntries.get(name);
+		let workspaceSnapshotKind: NonNullable<typeof previous>["workspaceSnapshotKind"];
+		let initializedWorkspaceSnapshotObserved =
+			(previous?.source === source && previous.workspaceSnapshotKind !== "uninitialized") ||
+			priorFailure?.code === "WORKSPACE_SNAPSHOT_UNAVAILABLE";
+		const readWorkspaceSnapshot = workspaceId
+			? async () => {
+					const snapshot = await readRegisteredWorkspaceRawSnapshot(runtimeHome, workspaceId);
+					if (snapshot.kind === "uninitialized" && initializedWorkspaceSnapshotObserved)
+						throw Object.assign(new Error("已有保全或失败证据的工作区缺少状态"), {
+							code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+							path: join(source, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME),
 						});
+					workspaceSnapshotKind = snapshot.kind;
+					initializedWorkspaceSnapshotObserved ||= snapshot.kind !== "uninitialized";
+					return snapshot;
+				}
+			: undefined;
+		if (!sourceMetadataBeforeCapture || (workspaceId && !sourceMetadataBeforeCapture.isDirectory())) {
+			if (
+				readWorkspaceSnapshot &&
+				!sourceMetadataBeforeCapture &&
+				previous?.source !== source &&
+				!priorFailure?.code &&
+				!observedWorkspaceDirectoryNames.has(name) &&
+				(await readWorkspaceSnapshot()).kind === "uninitialized"
+			)
+				return;
+			throw Object.assign(new Error("已观察到的工作区快照目录缺失或类型无效"), {
+				code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+				path: source,
+				syscall: "lstat_workspace_directory",
+			});
+		}
+		const sourceFingerprint = await fingerprintRuntimeStateEntry(source, true, readWorkspaceSnapshot);
+		if (sourceFingerprint === null) return;
+		if (
+			previous?.source === source &&
+			previous.sourceFingerprint === sourceFingerprint &&
+			typeof previous.destination === "string"
+		) {
+			const previousDestination = previous.destination;
+			const checkpointStarted = performance.now();
+			const checkpointBytesBefore = measuredBytes;
+			const checkpointDirectory = localCheckpoint ? directory : checkpointReuseDirectory;
+			const receiptOwnerDirectory = previous.reusedFromExecutionDirectory ?? checkpointDirectory;
+			const verifiedReceiptOwner =
+				typeof receiptOwnerDirectory === "string" &&
+				(receiptOwnerDirectory === checkpointDirectory ||
+					verifiedPredecessorBackupDirectories.includes(receiptOwnerDirectory));
+			const preservedParent = await realpath(dirname(previousDestination)).catch(() => null);
+			const directBackupParent = verifiedReceiptOwner
+				? join(receiptOwnerDirectory, "preserved-runtime-state", dirname(name))
+				: null;
+			const versionBackupRoot = verifiedReceiptOwner
+				? join(receiptOwnerDirectory, "preserved-runtime-state-versions", localRedeploymentSha256(name))
+				: null;
+			const belongsToVerifiedBackup =
+				verifiedReceiptOwner &&
+				preservedParent !== null &&
+				(preservedParent === directBackupParent || dirname(preservedParent) === versionBackupRoot);
+			const preservedFingerprint =
+				!belongsToVerifiedBackup || basename(previousDestination) !== basename(name)
+					? null
+					: await fingerprintRuntimeStateEntry(previousDestination).catch(() => null);
+			measurements.checkpointVerificationElapsedMs += performance.now() - checkpointStarted;
 			if (preservedFingerprint !== null && preservedFingerprint === previous.preservedFingerprint) {
-				if (reuseDirectory)
+				measurements.reusedCheckpointCount++;
+				measurements.reusedBytes += measuredBytes - checkpointBytesBefore;
+				if (!localCheckpoint)
 					await writeLocalRedeploymentJson(receiptPath, {
 						...previous,
-						reusedFromExecutionDirectory: reuseDirectory,
+						reusedFromExecutionDirectory: receiptOwnerDirectory,
 					});
 				currentEntryBackups.push({
 					source,
@@ -552,12 +759,23 @@ export async function backupLocalRedeploymentRuntimeState(
 			throw error;
 		});
 		const captureDirectory = join(directory, "runtime-state-backup-capture-attempts", randomUUID());
-		const capturedEntry = join(captureDirectory, name);
+		const capturedEntry = join(captureDirectory, basename(name));
 		await mkdir(captureDirectory, { recursive: true });
-		await copyRuntimeStateEntry(source, capturedEntry);
+		const copyStarted = performance.now();
+		try {
+			await copyRuntimeStateEntry(source, capturedEntry, readWorkspaceSnapshot);
+		} finally {
+			measurements.copyElapsedMs += performance.now() - copyStarted;
+		}
+		const preservedWorkspaceSnapshotKind = workspaceSnapshotKind;
 		const preservedFingerprint = await fingerprintRuntimeStateEntry(capturedEntry);
-		const sourceFingerprintAfterCapture = await fingerprintRuntimeStateEntry(source);
+		const sourceFingerprintAfterCapture = await fingerprintRuntimeStateEntry(source, false, readWorkspaceSnapshot);
 		const concurrentSourceChangesObserved = sourceFingerprintAfterCapture !== sourceFingerprint;
+		if (preservedWorkspaceSnapshotKind === "uninitialized" && workspaceSnapshotKind !== "uninitialized")
+			throw Object.assign(new Error("工作区在保全期间首次写入快照，等待补齐新状态"), {
+				code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+				path: join(source, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME),
+			});
 		// 活目录采用逐文件核验与 SQLite 在线快照；之后的新活动不使已保全副本作废。
 		const supportsConcurrentSourceChanges =
 			sourceMetadataBeforeCapture.isDirectory() ||
@@ -568,7 +786,13 @@ export async function backupLocalRedeploymentRuntimeState(
 				path: source,
 			});
 		const destination = initialBackupExists
-			? join(directory, "preserved-runtime-state-versions", localRedeploymentSha256(name), randomUUID(), name)
+			? join(
+					directory,
+					"preserved-runtime-state-versions",
+					localRedeploymentSha256(name),
+					randomUUID(),
+					basename(name),
+				)
 			: initialDestination;
 		await mkdir(dirname(destination), { recursive: true });
 		await rename(capturedEntry, destination);
@@ -586,6 +810,7 @@ export async function backupLocalRedeploymentRuntimeState(
 			sourceFingerprintAfterCapture,
 			concurrentSourceChangesObserved,
 			preservedFingerprint,
+			workspaceSnapshotKind: preservedWorkspaceSnapshotKind,
 			copiedAtEpochMs: Date.now(),
 		};
 		await writeLocalRedeploymentJson(join(captureDirectory, "verified-entry-backup.json"), receipt);
@@ -595,22 +820,95 @@ export async function backupLocalRedeploymentRuntimeState(
 	const progressPath = join(directory, "runtime-state-backup-progress.json");
 	const previousProgress = (await readLocalRedeploymentJson(progressPath)) as {
 		activeEntryName?: string | null;
-		pendingEntries?: Array<{ entryName: string; reason: string }>;
+		pendingEntries?: Array<{ entryName: string; reason: string; resource?: string; code?: string }>;
 	} | null;
 	const pendingEntries = new Map(
-		(previousProgress?.pendingEntries ?? []).map(({ entryName, reason }) => [entryName, reason]),
+		(previousProgress?.pendingEntries ?? []).map(({ entryName, ...failure }) => [entryName, failure]),
 	);
-	if (previousProgress?.activeEntryName)
-		pendingEntries.set(previousProgress.activeEntryName, "原备份进程在本项未完成时退出");
-	const runtimeEntryNames = (await readdir(request.runtimeIdentity.runtimeHomeDirectoryPath)).sort();
+	if (previousProgress?.activeEntryName && !pendingEntries.has(previousProgress.activeEntryName))
+		pendingEntries.set(previousProgress.activeEntryName, { reason: "原备份进程在本项未完成时退出" });
+	const runtimeEntryNames = await readRuntimeStateDirectory(runtimeHome);
+	const registeredWorkspaceIds = new Set<string>();
+	const workspaceIndexEntryName = join("workspaces", "index.json");
+	const workspaceIndexPath = join(runtimeHome, workspaceIndexEntryName);
+	async function workspaceInventoryWasObserved(): Promise<boolean> {
+		if (
+			pendingEntries.has("workspaces") ||
+			pendingEntries.has(workspaceIndexEntryName) ||
+			[...pendingEntries.values()].some((failure) => failure.code === "WORKSPACE_SNAPSHOT_UNAVAILABLE")
+		)
+			return true;
+		const checkpointRelativePath = join(
+			"runtime-backup-checkpoints",
+			`${localRedeploymentSha256(workspaceIndexEntryName)}.json`,
+		);
+		for (const checkpointOwnerDirectory of [directory, checkpointReuseDirectory]) {
+			if (!checkpointOwnerDirectory) continue;
+			const checkpoint = await lstat(join(checkpointOwnerDirectory, checkpointRelativePath)).catch(
+				(error: NodeJS.ErrnoException) => {
+					if (error.code === "ENOENT") return null;
+					throw error;
+				},
+			);
+			if (checkpoint?.isFile()) return true;
+		}
+		return false;
+	}
+	let workspaceInventoryFailure: unknown;
+	try {
+		if (runtimeEntryNames.includes("workspaces")) {
+			const workspaceRootMetadata = await lstat(workspaceRoot);
+			if (!workspaceRootMetadata.isDirectory()) throw new Error("工作区库存根目录类型无效");
+			const workspaceEntries = await readRuntimeStateDirectory(workspaceRoot);
+			for (const workspaceEntry of workspaceEntries)
+				observedWorkspaceDirectoryNames.add(join("workspaces", workspaceEntry));
+			const requireExistingIndex =
+				workspaceEntries.includes("index.json") || (await workspaceInventoryWasObserved());
+			for (const workspaceId of await readRegisteredWorkspaceIdsForRawSnapshot(runtimeHome, {
+				requireExistingIndex,
+			})) {
+				if (basename(workspaceId) !== workspaceId || [".", "..", "index.json"].includes(workspaceId))
+					throw new Error(`工作区索引包含无效目录名称：${workspaceId}`);
+				registeredWorkspaceIds.add(workspaceId);
+			}
+			runtimeEntryNames.splice(
+				runtimeEntryNames.indexOf("workspaces"),
+				1,
+				...[...new Set([...workspaceEntries, ...registeredWorkspaceIds])].map((name) => join("workspaces", name)),
+			);
+			const preservedWorkspaces = join(backupRoot, "workspaces");
+			await mkdir(preservedWorkspaces, { recursive: true });
+			await chmod(preservedWorkspaces, workspaceRootMetadata.mode & 0o7777);
+		} else if (await workspaceInventoryWasObserved()) {
+			throw new Error("已观察到的工作区库存目录缺失");
+		}
+	} catch (error) {
+		const failure = error as NodeJS.ErrnoException;
+		const inventoryPathDisappeared =
+			failure.code === "ENOENT" && (failure.path === workspaceRoot || failure.path === workspaceIndexPath);
+		workspaceInventoryFailure = Object.assign(new Error(`工作区库存待证：${String(error)}`, { cause: error }), {
+			code: inventoryPathDisappeared
+				? "WORKSPACE_INDEX_UNAVAILABLE"
+				: (failure.code ?? "WORKSPACE_INDEX_UNAVAILABLE"),
+			path: inventoryPathDisappeared ? workspaceIndexPath : (failure.path ?? workspaceIndexPath),
+		});
+		if (!runtimeEntryNames.includes("workspaces")) runtimeEntryNames.push("workspaces");
+	}
 	for (const pendingName of pendingEntries.keys()) {
-		if (!runtimeEntryNames.includes(pendingName)) pendingEntries.delete(pendingName);
+		if (
+			!runtimeEntryNames.includes(pendingName) &&
+			!(workspaceInventoryFailure && dirname(pendingName) === "workspaces")
+		)
+			pendingEntries.delete(pendingName);
 	}
 	runtimeEntryNames.sort((left, right) => Number(pendingEntries.has(left)) - Number(pendingEntries.has(right)));
 	const recordBackupProgress = (activeEntryName: string | null) =>
 		writeLocalRedeploymentJson(progressPath, {
+			requestExecutionId: request.executionId,
+			observedAtEpochMs: Date.now(),
+			backupMeasurements: measurements,
 			activeEntryName,
-			pendingEntries: [...pendingEntries].map(([entryName, reason]) => ({ entryName, reason })),
+			pendingEntries: [...pendingEntries].map(([entryName, failure]) => ({ entryName, ...failure })),
 			recoveryCondition: pendingEntries.size ? "待保全项恢复可读或可复制后，重新核验并接续原检查点" : null,
 		});
 	const failures: unknown[] = [];
@@ -618,11 +916,15 @@ export async function backupLocalRedeploymentRuntimeState(
 		assertLocalRedeploymentNotRevoked(directory);
 		await recordBackupProgress(name);
 		try {
-			await preserveRuntimeStateEntry(name);
+			if (name === "workspaces" && workspaceInventoryFailure) throw workspaceInventoryFailure;
+			const workspaceId =
+				dirname(name) === "workspaces" && registeredWorkspaceIds.has(basename(name)) ? basename(name) : undefined;
+			await preserveRuntimeStateEntry(name, workspaceId);
 			pendingEntries.delete(name);
 		} catch (error) {
 			assertLocalRedeploymentNotRevoked(directory);
-			pendingEntries.set(name, String(error));
+			const failure = error as NodeJS.ErrnoException;
+			pendingEntries.set(name, { reason: String(error), resource: failure.path, code: failure.code });
 			failures.push(error);
 			await recordBackupProgress(null);
 		}
@@ -640,7 +942,8 @@ export async function backupLocalRedeploymentRuntimeState(
 	if (failures.length) throw failures[0];
 	await writeLocalRedeploymentJson(join(directory, "runtime-state-backup-receipt.json"), {
 		backupRoot,
-		captureConsistency: "individually_verified_files_and_online_sqlite_snapshots",
+		captureConsistency: "workspace_snapshot_units_individually_verified_files_and_online_sqlite_snapshots",
+		measurements,
 		currentEntryBackups,
 		preservedInPlaceOrTransientEndpoints: skipped,
 	});
