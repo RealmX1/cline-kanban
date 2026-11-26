@@ -1728,7 +1728,22 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		}
 	}
 	return {
-		evidenceSha256: localRedeploymentSha256(JSON.stringify(semantic)),
+		evidenceSha256: localRedeploymentSha256(
+			JSON.stringify({
+				...semantic,
+				// 相同的就绪结论可以来自不同进程，只有同一已核验代际才共用会话重试资格。
+				...(semantic.sessionContinuityWaitRecorded &&
+				semantic.sessionReadiness === "ready" &&
+				baseline.runtimeBefore
+					? {
+							verifiedSessionReadinessRuntimeGeneration: {
+								processId: baseline.runtimeBefore.processId,
+								processStartTimeText: normalizeStart(baseline.runtimeBefore.processStartTimeText),
+							},
+						}
+					: {}),
+			}),
+		),
 		recoveryEvidenceReady:
 			baseline.state !== "unknown" &&
 			!["unavailable", "blocked"].includes(semantic.sessionReadiness) &&

@@ -193,8 +193,8 @@ describe("标准部署当前代际与恢复语义", () => {
 		);
 	});
 
-	it("从派发前就绪到阶段内阻塞再恢复就绪时获得一次新证据", async () => {
-		const { directory, request } = await createStandardStageFixture();
+	it("会话恢复按已核验的运行时代际消费一次资格", async () => {
+		const { directory, request, current, reportPath } = await createStandardStageFixture();
 		const stage = "state_preservation";
 		const observe = () => observeStandardLocalRedeploymentStageRecoveryEvidence(directory, stage);
 		const before = await observe();
@@ -217,6 +217,25 @@ describe("标准部署当前代际与恢复语义", () => {
 		expect(recovered.recoveryEvidenceReady).toBe(true);
 		expect(recovered.evidenceSha256).not.toBe(before.evidenceSha256);
 		expect(await observe()).toEqual(recovered);
+		const reserveRecovered = (evidence: typeof recovered) =>
+			reserveLocalDeploymentTargetStageAttempt({
+				...attempt,
+				attemptNumber: 2,
+				recoveryEvidenceSha256: evidence.evidenceSha256,
+				recoveryEvidenceReady: evidence.recoveryEvidenceReady,
+			});
+		expect(await reserveRecovered(recovered)).toBe(true);
+		expect(await reserveRecovered(await observe())).toBe(false);
+
+		const replacement = { ...current, runtimeProcessStartTimeText: "Fri Nov 13 12:30:00 2026" };
+		await writeFile(reportPath, JSON.stringify({ ...replacement, ok: false }));
+		expect((await observe()).recoveryEvidenceReady).toBe(false);
+		await writeFile(reportPath, JSON.stringify(replacement));
+		const recoveredAfterReplacement = await observe();
+		expect(recoveredAfterReplacement.recoveryEvidenceReady).toBe(true);
+		expect(recoveredAfterReplacement.evidenceSha256).not.toBe(recovered.evidenceSha256);
+		expect(await reserveRecovered(recoveredAfterReplacement)).toBe(true);
+		expect(await reserveRecovered(await observe())).toBe(false);
 	});
 
 	it("已提交的备注失败打开一次独立恢复条件", async () => {
