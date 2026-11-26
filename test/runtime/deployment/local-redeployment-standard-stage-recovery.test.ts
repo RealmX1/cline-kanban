@@ -68,7 +68,7 @@ async function createStandardStageFixture(
 	await mkdir(join(candidate, "scripts"), { recursive: true });
 	await mkdir(join(candidate, "dist"), { recursive: true });
 	const candidateBytes = "已绑定候选入口";
-	await writeFile(join(candidate, "dist/cli.js"), candidateBytes);
+	await writeFile(join(candidate, "dist/cli.js"), candidateBytes, { mode: 0o755 });
 	const request = {
 		schemaVersion: 1 as const,
 		executionId: "032609d8-7508-4bdc-b202-1d7bd7da8a14",
@@ -730,7 +730,7 @@ describe("标准部署当前代际与恢复语义", () => {
 				bin: { kanban: "dist/cli.js" },
 			}),
 		);
-		await writeFile(join(request.distributionDirectoryPath, "cli.js"), candidateBytes);
+		await writeFile(join(request.distributionDirectoryPath, "cli.js"), candidateBytes, { mode: 0o755 });
 		await writeFile(join(directory, "runtime-state-backup-receipt.json"), "{}");
 		await mkdir(join(directory, "preserved-previous-distribution"));
 		await writeFile(join(directory, "preserved-previous-distribution/cli.js"), "原版入口");

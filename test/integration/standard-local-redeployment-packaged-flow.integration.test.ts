@@ -193,6 +193,7 @@ if(existsSync(interruptAfterRegistration)){unlinkSync(join(directory,'deployment
 process.stdout.write(receipt);
 }
 `,
+			{ mode: 0o755 },
 		);
 		if (repairAfterQualityFailure)
 			await writeFile(join(repository.repositoryPath, "fixture-source-validation.mjs"), "process.exitCode = 1;\n");
@@ -201,7 +202,10 @@ process.stdout.write(receipt);
 			authorAndCommitterIsoDate: "2026-11-13T00:00:00Z",
 		});
 		await mkdir(join(repository.repositoryPath, "dist"));
-		await writeFile(join(repository.repositoryPath, "dist/cli.js"), "旧版隔离入口");
+		const publishedCli = join(repository.repositoryPath, "dist/cli.js");
+		const globalCliLink = join(binaryDirectory, "kanban");
+		await writeFile(publishedCli, "旧版隔离入口", { mode: 0o755 });
+		if (!repairAfterQualityFailure) await symlink(publishedCli, globalCliLink);
 		const runtimeHome = join(fixture.isolatedHomeDirectoryPath, ".cline/kanban");
 		await mkdir(runtimeHome, { recursive: true });
 		await writeFile(join(runtimeHome, "config.json"), JSON.stringify({ retained: true }));
@@ -517,6 +521,11 @@ process.stdout.write(receipt);
 					},
 					{ timeout: 45_000 },
 				);
+				// 模拟文件已发布、CLI 权限未完整恢复，且全局链接指向正确路径。
+				await cp(join(executionDirectory, "candidate-source-checkout", "dist"), dirname(publishedCli), {
+					recursive: true,
+				});
+				await chmod(publishedCli, 0o644);
 				const previousExecutionDirectory = executionDirectory;
 				const nextExecutionDirectory = join(fixture.fixtureRootDirectoryPath, "same-candidate-redeployment");
 				await mkdir(nextExecutionDirectory);
@@ -698,6 +707,14 @@ process.stdout.write(receipt);
 					).toBe("succeeded"),
 				{ timeout: 100_000, interval: 200 },
 			);
+			expect(await realpath(globalCliLink)).toBe(await realpath(publishedCli));
+			const publicationCommandOriginals = await readdir(join(executionDirectory, "standard-command-originals"));
+			expect(publicationCommandOriginals.filter((name) => name.startsWith("promote-bound-candidate-"))).toHaveLength(
+				1,
+			);
+			expect(
+				publicationCommandOriginals.filter((name) => name.startsWith("preserve-global-cli-link-")),
+			).toHaveLength(repairAfterQualityFailure ? 1 : 0);
 			const sourceValidationPlan = JSON.parse(
 				await readFile(join(executionDirectory, "frozen-source-validation-plan.json"), "utf8"),
 			) as { commands: Array<{ name: string; argv: string[] }> };

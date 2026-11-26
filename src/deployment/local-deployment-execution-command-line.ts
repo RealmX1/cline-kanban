@@ -11,6 +11,7 @@ import { taskCommandExecutionSpecificationSchema } from "../core/task-command-ex
 import { lockedFileSystem } from "../fs/locked-file-system";
 import {
 	fingerprintLocalDeploymentDistribution,
+	localDeploymentGlobalCliLinkMatchesPublishedEntrypoint,
 	verifyLocalDeploymentPublishedFiles,
 } from "./local-deployment-distribution-manifest";
 import {
@@ -613,13 +614,10 @@ export function createLocalDeploymentExecutionCommandLineProgram(): Command {
 				if (operation === "verify-publication") {
 					ok = await verifyLocalDeploymentPublishedFiles(manifest);
 					if (ok && manifest.schemaVersion === 2) {
-						try {
-							ok =
-								(await realpath(join(dirname(manifest.deploymentNodeBinaryPath), "kanban"))) ===
-								(await realpath(join(manifest.distributionDirectoryPath, "cli.js")));
-						} catch {
-							ok = false;
-						}
+						ok = await localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(
+							manifest.deploymentNodeBinaryPath,
+							manifest.distributionDirectoryPath,
+						).catch(() => false);
 					}
 				}
 				if (operation === "verify-runtime-restart" && (await verifyLocalDeploymentPublishedFiles(manifest))) {

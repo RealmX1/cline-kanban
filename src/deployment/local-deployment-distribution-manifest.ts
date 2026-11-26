@@ -1,6 +1,36 @@
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { constants } from "node:fs";
+import { access, lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { dirname, join } from "node:path";
+
+export async function localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(
+	deploymentNodeBinaryPath: string,
+	distributionDirectoryPath: string,
+): Promise<boolean> {
+	const expectedEntrypoint = await realpath(join(distributionDirectoryPath, "cli.js"));
+	const globalCli = join(dirname(deploymentNodeBinaryPath), "kanban");
+	try {
+		if ((await realpath(globalCli)) !== expectedEntrypoint) return false;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ELOOP"))
+			return false;
+		throw error;
+	}
+	return localDeploymentPublishedCliEntrypointIsExecutable(distributionDirectoryPath);
+}
+
+export async function localDeploymentPublishedCliEntrypointIsExecutable(
+	distributionDirectoryPath: string,
+): Promise<boolean> {
+	try {
+		await access(join(distributionDirectoryPath, "cli.js"), constants.X_OK);
+		return true;
+	} catch (error) {
+		if (error instanceof Error && "code" in error && (error.code === "EACCES" || error.code === "ENOENT"))
+			return false;
+		throw error;
+	}
+}
 
 export async function fingerprintLocalDeploymentDistribution(directory: string) {
 	const root = await realpath(directory);

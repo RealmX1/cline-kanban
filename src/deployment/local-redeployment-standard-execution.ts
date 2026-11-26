@@ -31,6 +31,8 @@ import {
 import { inspectFilesystemLockProtocolTransitionPreflight } from "./filesystem-lock-protocol-transition-preflight";
 import {
 	fingerprintLocalDeploymentDistribution,
+	localDeploymentGlobalCliLinkMatchesPublishedEntrypoint,
+	localDeploymentPublishedCliEntrypointIsExecutable,
 	verifyLocalDeploymentPublishedFiles,
 } from "./local-deployment-distribution-manifest";
 import { initializeLocalDeploymentExecution, readLocalDeploymentExecution } from "./local-deployment-execution";
@@ -1520,7 +1522,12 @@ export async function executeStandardLocalRedeploymentStage(
 			);
 		if (!existsSync(join(directory, "runtime-state-backup-receipt.json"))) throw new Error("发布前缺少持久备份");
 		await verifyBoundFilesystemLockProtocolBeforePublication(directory, frozen);
-		const needsCandidatePublication = !(await verifyLocalDeploymentPublishedFiles(manifest));
+		if (!(await localDeploymentPublishedCliEntrypointIsExecutable(manifest.candidateDistributionDirectoryPath)))
+			throw new Error("私有候选的 CLI 入口不可执行");
+		const candidatePublicationIsComplete = async () =>
+			(await verifyLocalDeploymentPublishedFiles(manifest)) &&
+			(await localDeploymentPublishedCliEntrypointIsExecutable(request.distributionDirectoryPath));
+		const needsCandidatePublication = !(await candidatePublicationIsComplete());
 		const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
 		if (needsCandidatePublication) {
 			await registerLocalRedeploymentRebuildableArtifact(directory, {
@@ -1550,16 +1557,18 @@ export async function executeStandardLocalRedeploymentStage(
 				"--distribution-directory",
 				request.distributionDirectoryPath,
 			]);
-			if (!(await verifyLocalDeploymentPublishedFiles(manifest))) throw new Error("发布文件清单尚未完整");
+			if (!(await candidatePublicationIsComplete())) throw new Error("发布文件清单不完整或 CLI 入口不可执行");
 		}
 		await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
-		await run(
-			"preserve-global-cli-link",
-			[node, frozen.npmCliEntrypointPath, "link", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
-			request.sourceCheckoutPath,
-		);
-		if ((await realpath(join(dirname(node), "kanban"))) !== (await realpath(cli)))
-			throw new Error("实际 Node 的 CLI 链接与冻结目标不一致");
+		if (!(await localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(node, request.distributionDirectoryPath))) {
+			await run(
+				"preserve-global-cli-link",
+				[node, frozen.npmCliEntrypointPath, "link", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
+				request.sourceCheckoutPath,
+			);
+			if (!(await localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(node, request.distributionDirectoryPath)))
+				throw new Error("实际 Node 的 CLI 链接与冻结目标不一致或入口不可执行");
+		}
 	}
 	if (stage === "runtime_restart") {
 		await assertTaskClosureStorageProtocolCompatibleWithDistribution(
