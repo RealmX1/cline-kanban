@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	chmod,
 	copyFile,
@@ -160,12 +160,16 @@ const program = new Command(); registerDeploymentCommand(program); await program
 		);
 		await writeFile(
 			join(repository.repositoryPath, "scripts/verify-agent-session-pty-host-runtime-readiness.mjs"),
-			`const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data; const blocked=process.argv.includes('--before-runtime-restart')&&data.fixtureContinuityBlocked; const blockingSession={workspaceId:'isolated-workspace',conversationSessionId:'active-fixture-session',processId:1,sessionTransport:'acp_stdio_subprocess'}; process.stdout.write(JSON.stringify({...data,ok:!blocked,validatedHostedSessions:[],blockingSessions:data.fixtureContinuityBlocked?[blockingSession]:[],failures:blocked?['等待隔离会话自然退出']:[]})); process.exitCode=blocked?2:0;`,
+			`import {existsSync,writeFileSync} from 'node:fs'; import {dirname,join} from 'node:path'; import {setTimeout} from 'node:timers/promises';
+const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'/api/trpc/runtime.getAgentSessionPtyHostDiagnostics'); const data=(await response.json()).result.data;
+const beforeRestart=process.argv.includes('--before-runtime-restart');
+if(!beforeRestart&&process.env.KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY){const execution=dirname(dirname(process.env.KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY)); if(existsSync(join(execution,'fixture-interrupt-after-runtime-restart'))){writeFileSync(join(execution,'fixture-runtime-restart-effect-observed.json'),JSON.stringify(data)); await setTimeout(120000);}}
+const blocked=beforeRestart&&data.fixtureContinuityBlocked; const blockingSession={workspaceId:'isolated-workspace',conversationSessionId:'active-fixture-session',processId:1,sessionTransport:'acp_stdio_subprocess'}; process.stdout.write(JSON.stringify({...data,ok:!blocked,validatedHostedSessions:[],blockingSessions:data.fixtureContinuityBlocked?[blockingSession]:[],failures:blocked?['等待隔离会话自然退出']:[]})); process.exitCode=blocked?2:0;`,
 		);
 		await writeFile(
 			join(repository.repositoryPath, "fixture-cli.mjs"),
 			`#!/usr/bin/env node
-import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,appendFileSync,existsSync,unlinkSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os';
+import {createServer} from 'node:http'; import {execFileSync} from 'node:child_process'; import {readFileSync,appendFileSync,existsSync,unlinkSync,writeFileSync} from 'node:fs'; import {createHash} from 'node:crypto'; import {join} from 'node:path'; import {homedir} from 'node:os'; import {setTimeout} from 'node:timers/promises';
 const runtimeHome=join(homedir(),'.cline/kanban'); const args=process.argv.slice(2);
 if(args[0]==='serve') { const loaded=createHash('sha256').update(readFileSync(process.argv[1])).digest('hex'); const start=execFileSync('ps',['-p',String(process.pid),'-o','lstart='],{encoding:'utf8',env:{...process.env,LC_ALL:'C'}}).trim();
 const server=createServer((request,response)=>{response.setHeader('content-type','application/json'); const procedure=request.url.split('?')[0].split('/').pop(); let data;
@@ -182,12 +186,14 @@ const response=await fetch('http://127.0.0.1:'+process.env.KANBAN_RUNTIME_PORT+'
 if(!(await response.json()).ok) throw new Error('隔离服务未接受交接');
 } else if(args[0]==='deployment'&&args[1]==='record') {
 const directory=args[args.indexOf('--execution-directory')+1];
+appendFileSync(join(directory,'registration-invocations.txt'),'once\\n');
 const receipt=execFileSync(process.execPath,[join(import.meta.dirname,'deployment-cli-for-fixture.mjs'),...args],{encoding:'utf8',env:process.env});
 const interruptAfterRegistration=join(directory,'fixture-interrupt-after-registration');
-if(existsSync(interruptAfterRegistration)){unlinkSync(interruptAfterRegistration);unlinkSync(join(directory,'deployment-record-receipt.json'));process.exitCode=75;}
-else {appendFileSync(join(directory,'registration-invocations.txt'),'once');process.stdout.write(receipt);}
+if(existsSync(interruptAfterRegistration)){unlinkSync(join(directory,'deployment-record-receipt.json'));writeFileSync(join(directory,'fixture-registration-effect-observed.json'),receipt);await setTimeout(120000);}
+process.stdout.write(receipt);
 }
 `,
+			{ mode: 0o755 },
 		);
 		if (repairAfterQualityFailure)
 			await writeFile(join(repository.repositoryPath, "fixture-source-validation.mjs"), "process.exitCode = 1;\n");
@@ -196,7 +202,10 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 			authorAndCommitterIsoDate: "2026-11-13T00:00:00Z",
 		});
 		await mkdir(join(repository.repositoryPath, "dist"));
-		await writeFile(join(repository.repositoryPath, "dist/cli.js"), "旧版隔离入口");
+		const publishedCli = join(repository.repositoryPath, "dist/cli.js");
+		const globalCliLink = join(binaryDirectory, "kanban");
+		await writeFile(publishedCli, "旧版隔离入口", { mode: 0o755 });
+		if (!repairAfterQualityFailure) await symlink(publishedCli, globalCliLink);
 		const runtimeHome = join(fixture.isolatedHomeDirectoryPath, ".cline/kanban");
 		await mkdir(runtimeHome, { recursive: true });
 		await writeFile(join(runtimeHome, "config.json"), JSON.stringify({ retained: true }));
@@ -281,6 +290,85 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 			]);
 			expect(registered.code, registered.stdout + registered.stderr).toBe(0);
 			const workspaceId = (JSON.parse(registered.stdout) as { workspaceId: string }).workspaceId;
+			const registeredWorkspaceDirectory = join(runtimeHome, "workspaces", workspaceId);
+			await mkdir(registeredWorkspaceDirectory, { recursive: true });
+			if (!repairAfterQualityFailure) {
+				const taskCreatedAt = Date.now();
+				await writeFile(
+					join(registeredWorkspaceDirectory, "board.json"),
+					JSON.stringify({
+						columns: [
+							{
+								id: "backlog",
+								title: "Backlog",
+								cards: [
+									{
+										id: "external-caller",
+										createdAt: taskCreatedAt,
+										updatedAt: taskCreatedAt,
+										prompt: "核验同任务前序成果复用",
+										baseRef: "main",
+										startInPlanMode: false,
+									},
+								],
+							},
+						],
+					}),
+				);
+				await writeFile(join(registeredWorkspaceDirectory, "sessions.json"), "{}");
+				await writeFile(
+					join(registeredWorkspaceDirectory, "meta.json"),
+					JSON.stringify({ revision: 1, updatedAt: taskCreatedAt }),
+				);
+			}
+			async function restartIsolatedSupervisor(interruptedEffectMarkerPath?: string) {
+				const reference = JSON.parse(
+					await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
+				);
+				const artifactDirectory = join(
+					runtimeHome,
+					"workspaces",
+					workspaceId,
+					"task-command-executions",
+					reference.executionId,
+				);
+				const options = { artifactDirectory };
+				const identity = JSON.parse(
+					await readFile(join(artifactDirectory, `supervisor-identity-${reference.launchNonce}.json`), "utf8"),
+				);
+				expect(await inspectOwnedCommandSupervisor(reference, options)).toBe("running");
+				expect(identity.launchNonce).toBe(reference.launchNonce);
+				const observed = await readProcessIdentity(identity.pid);
+				expect(hasSameProcessGeneration(observed, identity)).toBe(true);
+				expect(observed?.startAndCommand).toContain(artifactDirectory);
+				// 活跃派发时让监督者终止自有子进程并保存退出原件，接续才有可核验的依据。
+				process.kill(identity.pid, interruptedEffectMarkerPath ? "SIGTERM" : "SIGKILL");
+				await vi.waitFor(
+					async () => expect(await inspectOwnedCommandSupervisor(reference, options)).toBe("exited"),
+					{ timeout: 10_000 },
+				);
+				if (interruptedEffectMarkerPath) {
+					const progress = JSON.parse(
+						await readFile(join(artifactDirectory, `supervisor-progress-${reference.launchNonce}.json`), "utf8"),
+					);
+					expect(progress).toMatchObject({ status: "cancelled", launchNonce: reference.launchNonce });
+					await expect(readFile(reference.revocationFile)).rejects.toMatchObject({ code: "ENOENT" });
+					await expect(readFile(join(executionDirectory, "redeployment-revocation.json"))).rejects.toMatchObject({
+						code: "ENOENT",
+					});
+					await rm(interruptedEffectMarkerPath);
+				}
+				const restarted = await invoke("start-redeployment");
+				expect(restarted.code, restarted.stdout + restarted.stderr).toBe(0);
+				expect(JSON.parse(restarted.stdout)).toMatchObject({
+					executionId: reference.executionId,
+					launchAttemptCount: reference.launchAttemptCount + 1,
+				});
+				const currentReference = JSON.parse(
+					await readFile(join(executionDirectory, "independent-redeployment-supervisor-reference.json"), "utf8"),
+				);
+				expect(currentReference.launchNonce).not.toBe(reference.launchNonce);
+			}
 			const requestFile = join(executionDirectory, "request.json");
 			await writeFile(
 				requestFile,
@@ -433,6 +521,60 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					},
 					{ timeout: 45_000 },
 				);
+				// 模拟文件已发布、CLI 权限未完整恢复，且全局链接指向正确路径。
+				await cp(join(executionDirectory, "candidate-source-checkout", "dist"), dirname(publishedCli), {
+					recursive: true,
+				});
+				await chmod(publishedCli, 0o644);
+				const previousExecutionDirectory = executionDirectory;
+				const nextExecutionDirectory = join(fixture.fixtureRootDirectoryPath, "same-candidate-redeployment");
+				await mkdir(nextExecutionDirectory);
+				const nextRequest = join(nextExecutionDirectory, "request.json");
+				const previousRequest = JSON.parse(await readFile(requestFile, "utf8"));
+				await writeFile(
+					nextRequest,
+					JSON.stringify({
+						...previousRequest,
+						executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14",
+						previousDeploymentExecution: {
+							executionId: previousRequest.executionId,
+							executionDirectory: previousExecutionDirectory,
+						},
+					}),
+				);
+				const invokeNext = (operation: string, args: string[] = []) =>
+					invokePackagedCommand(executable, [operation, "--execution-directory", nextExecutionDirectory, ...args]);
+				const preparedNext = await invokeNext("prepare-redeployment", ["--request-file", nextRequest]);
+				expect(preparedNext.code, preparedNext.stdout + preparedNext.stderr).toBe(0);
+				const nextStarted = await invokeNext("start-redeployment");
+				expect(nextStarted.code, nextStarted.stdout + nextStarted.stderr).toBe(0);
+				try {
+					await vi.waitFor(
+						async () => {
+							const reuse = JSON.parse(
+								await readFile(join(nextExecutionDirectory, "candidate-build-reuse-observation.json"), "utf8"),
+							);
+							expect(reuse).toMatchObject({ status: "candidate_distribution_reused" });
+							await readFile(join(nextExecutionDirectory, "candidate-build-receipt.json"));
+						},
+						{ timeout: 30_000 },
+					);
+					const nextValidation = JSON.parse(
+						await readFile(
+							join(nextExecutionDirectory, "source-validation", "source-validation-evidence-reuse-report.json"),
+							"utf8",
+						),
+					);
+					expect(
+						nextValidation.sourceValidationCheckResults.map((result: { decision: string }) => result.decision),
+					).toEqual(Array(5).fill("reused_source_evidence"));
+					const nextOriginals = await readdir(join(nextExecutionDirectory, "standard-command-originals"));
+					expect(nextOriginals.filter((name) => name.startsWith("production-build-"))).toHaveLength(0);
+					expect(nextOriginals.filter((name) => name.startsWith("candidate-native-abi-"))).toHaveLength(1);
+				} finally {
+					const canceled = await invokeNext("cancel-redeployment");
+					expect(canceled.code, canceled.stdout + canceled.stderr).toBe(0);
+				}
 				const blockedAnalysis = await invokePackagedCommand(deploymentCli, [
 					"deployment",
 					"analyze",
@@ -461,8 +603,6 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					"task-command-executions",
 					originalSupervisor.executionId,
 				);
-				const inspectOriginalSupervisor = () =>
-					inspectOwnedCommandSupervisor(originalSupervisor, { artifactDirectory: supervisorDirectory });
 				await vi.waitFor(
 					async () => {
 						const progress = JSON.parse(
@@ -475,26 +615,10 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					},
 					{ timeout: 20_000 },
 				);
-				const supervisorIdentity = JSON.parse(
-					await readFile(
-						join(supervisorDirectory, `supervisor-identity-${originalSupervisor.launchNonce}.json`),
-						"utf8",
-					),
-				);
-				expect(await inspectOriginalSupervisor()).toBe("running");
-				expect(supervisorIdentity.launchNonce).toBe(originalSupervisor.launchNonce);
-				const currentSupervisor = await readProcessIdentity(supervisorIdentity.pid);
-				expect(hasSameProcessGeneration(currentSupervisor, supervisorIdentity)).toBe(true);
-				expect(currentSupervisor?.startAndCommand).toContain(supervisorDirectory);
-				process.kill(supervisorIdentity.pid, "SIGKILL");
-				await vi.waitFor(async () => expect(await inspectOriginalSupervisor()).toBe("exited"), { timeout: 10_000 });
-				const resumed = await invoke("start-redeployment");
-				expect(resumed.code, resumed.stdout + resumed.stderr).toBe(0);
-				expect(JSON.parse(resumed.stdout)).toMatchObject({
-					executionId: originalSupervisor.executionId,
-					launchAttemptCount: 2,
-				});
+				await restartIsolatedSupervisor();
 				const authorizationFile = join(executionDirectory, "session-interruption-approval.json");
+				const restartInterruption = join(executionDirectory, "fixture-interrupt-after-runtime-restart");
+				await writeFile(restartInterruption, "模拟监听换代后、重启验收回执落盘前中断");
 				const interruptionAuthorization = {
 					sourceReference: "test:isolated-session-interruption",
 					userRequestQuote: "允许中断无法跨重启保留的隔离会话",
@@ -521,6 +645,59 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					);
 					await chmod(unavailableBackupEntry, 0o600);
 				}
+				const restartEffectPath = join(executionDirectory, "fixture-runtime-restart-effect-observed.json");
+				await vi.waitFor(() => readFile(restartEffectPath, "utf8").then(JSON.parse), { timeout: 55_000 });
+				const restartEffect = JSON.parse(await readFile(restartEffectPath, "utf8"));
+				const restartBaseline = JSON.parse(
+					await readFile(join(executionDirectory, "runtime-restart-target-baseline.json"), "utf8"),
+				).runtimeBefore;
+				expect([restartEffect.runtimeProcessId, restartEffect.runtimeProcessStartTimeText]).not.toEqual([
+					restartBaseline.processId,
+					restartBaseline.processStartTimeText,
+				]);
+				expect(restartEffect.runtimeLoadedEntrypointSha256).toBe(
+					createHash("sha256")
+						.update(await readFile(join(repository.repositoryPath, "dist/cli.js")))
+						.digest("hex"),
+				);
+				await expect(readFile(join(executionDirectory, "runtime-restart-acceptance.json"))).rejects.toMatchObject({
+					code: "ENOENT",
+				});
+				await restartIsolatedSupervisor(restartInterruption);
+				const registrationEffectPath = join(executionDirectory, "fixture-registration-effect-observed.json");
+				await vi.waitFor(() => readFile(registrationEffectPath, "utf8").then(JSON.parse), { timeout: 55_000 });
+				expect(
+					JSON.parse(await readFile(join(executionDirectory, "runtime-restart-acceptance.json"), "utf8")).runtime,
+				).toMatchObject({
+					runtimeProcessId: restartEffect.runtimeProcessId,
+					runtimeProcessStartTimeText: restartEffect.runtimeProcessStartTimeText,
+				});
+				const registrationEffect = JSON.parse(await readFile(registrationEffectPath, "utf8"));
+				const verificationState = await readFile(join(runtimeHome, "post-deploy-verification-state.json"), "utf8");
+				const marker = await readFile(join(runtimeHome, "last-deployed-source-commit.json"), "utf8");
+				await expect(readFile(join(executionDirectory, "deployment-record-receipt.json"))).rejects.toMatchObject({
+					code: "ENOENT",
+				});
+				await restartIsolatedSupervisor(join(executionDirectory, "fixture-interrupt-after-registration"));
+				await vi.waitFor(
+					async () =>
+						expect(
+							JSON.parse(await readFile(join(executionDirectory, "deployment-record-receipt.json"), "utf8")),
+						).toMatchObject({
+							deploymentId: registrationEffect.deploymentId,
+							registrationReceiptRecoveredFromPersistedGroup: true,
+						}),
+					{ timeout: 55_000 },
+				);
+				expect(await readFile(join(runtimeHome, "post-deploy-verification-state.json"), "utf8")).toBe(
+					verificationState,
+				);
+				expect(await readFile(join(runtimeHome, "last-deployed-source-commit.json"), "utf8")).toBe(marker);
+				expect(
+					(await readdir(join(executionDirectory, "standard-command-originals"))).filter((name) =>
+						name.startsWith("handover-restart-"),
+					),
+				).toHaveLength(1);
 			}
 			await vi.waitFor(
 				async () =>
@@ -530,6 +707,14 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 					).toBe("succeeded"),
 				{ timeout: 100_000, interval: 200 },
 			);
+			expect(await realpath(globalCliLink)).toBe(await realpath(publishedCli));
+			const publicationCommandOriginals = await readdir(join(executionDirectory, "standard-command-originals"));
+			expect(publicationCommandOriginals.filter((name) => name.startsWith("promote-bound-candidate-"))).toHaveLength(
+				1,
+			);
+			expect(
+				publicationCommandOriginals.filter((name) => name.startsWith("preserve-global-cli-link-")),
+			).toHaveLength(repairAfterQualityFailure ? 1 : 0);
 			const sourceValidationPlan = JSON.parse(
 				await readFile(join(executionDirectory, "frozen-source-validation-plan.json"), "utf8"),
 			) as { commands: Array<{ name: string; argv: string[] }> };
@@ -575,7 +760,9 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 			);
 			const repeated = await invoke("start-redeployment");
 			expect(repeated.code, repeated.stdout + repeated.stderr).toBe(0);
-			expect(await readFile(join(executionDirectory, "registration-invocations.txt"), "utf8")).toBe("once");
+			expect(await readFile(join(executionDirectory, "registration-invocations.txt"), "utf8")).toBe(
+				"once\n".repeat(repairAfterQualityFailure ? 1 : 2),
+			);
 			const awaitedCleanupSupervisorReference = cleanupSupervisorReference;
 			const awaitedCleanupSupervisorArtifactDirectory = cleanupSupervisorArtifactDirectory;
 			await vi.waitFor(
@@ -663,10 +850,47 @@ else {appendFileSync(join(directory,'registration-invocations.txt'),'once');proc
 			} catch (captureError) {
 				await writeFile(join(failureEvidenceDirectory, "evidence-capture-error.txt"), String(captureError));
 			}
+			await invoke("cancel-redeployment").catch(() => undefined);
 			throw new Error(`标准重部署隔离验收失败，阶段与监督原件：${failureEvidenceDirectory}`, { cause: error });
 		} finally {
+			const runtimeUrl = `http://127.0.0.1:${port}`;
+			const runtime = await fetch(`${runtimeUrl}/api/trpc/runtime.getAgentSessionPtyHostDiagnostics`, {
+				signal: AbortSignal.timeout(1_000),
+			})
+				.then((response) => response.json())
+				.catch(() => null);
+			const fixtureRuntime = (
+				runtime as {
+					result?: {
+						data?: {
+							runtimeIdentity?: { runtimeHomeDirectoryPath?: string; runtimePort?: number };
+							runtimeProcessId?: number;
+						};
+					};
+				} | null
+			)?.result?.data;
+			const listeningProcess =
+				fixtureRuntime?.runtimeIdentity?.runtimeHomeDirectoryPath === runtimeHome &&
+				fixtureRuntime.runtimeIdentity.runtimePort === port &&
+				typeof fixtureRuntime.runtimeProcessId === "number"
+					? await readProcessIdentity(fixtureRuntime.runtimeProcessId)
+					: null;
+			if (listeningProcess?.startAndCommand.includes(fixture.fixtureRootDirectoryPath))
+				await fetch(`${runtimeUrl}/fixture-shutdown`, { method: "POST", signal: AbortSignal.timeout(1_000) }).catch(
+					() => undefined,
+				);
 			isolatedTestOwnedTmuxServer.cleanup();
 			await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+			if (listeningProcess)
+				await vi.waitFor(
+					async () => {
+						expect(
+							hasSameProcessGeneration(await readProcessIdentity(listeningProcess.pid), listeningProcess),
+						).toBe(false);
+						await expect(fetch(runtimeUrl, { signal: AbortSignal.timeout(1_000) })).rejects.toThrow();
+					},
+					{ timeout: 10_000 },
+				);
 			if (cleanupSupervisorReference && cleanupSupervisorArtifactDirectory) {
 				const reference = cleanupSupervisorReference;
 				const artifactDirectory = cleanupSupervisorArtifactDirectory;

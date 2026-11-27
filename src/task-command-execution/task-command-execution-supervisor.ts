@@ -450,7 +450,7 @@ if(owner.pid===process.pid) {
    const budget=fingerprint?budgets[fingerprint]:null;
    const maximumResumeAttempts=budget?Math.min(3,maximumUnchangedRetries+(budget.includesEvidenceTransitionLaunch?1:0)):0;
    await save(budgetName,{materialSha256:materials.semanticRecovery.materialSha256,baselineEvidence,budgets});
-   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'machine_evidence_pending',ownedProcesses:[],businessDispatchQuiescent:true,semanticRecoveryObservationCount,semanticRecoveryEvidenceSha256:fingerprint??null,semanticRecoveryBudget:budget,maximumResumeAttempts,updatedAtEpochMs:Date.now()});
+   await save('supervisor-progress-'+nonce+'.json',{launchNonce:nonce,status:'machine_evidence_pending',ownedProcesses:[],businessDispatchQuiescent:true,semanticRecoveryObservationCount,semanticRecoveryEvidenceSha256:fingerprint??null,semanticRecoveryBudget:budget,maximumResumeAttempts,nextSemanticEvidenceObservationAtEpochMs:Date.now()+interval,updatedAtEpochMs:Date.now()});
    if(cancelled||await revoked()){cancelled=true;return false;}
    if(materials.deadlineAtEpochMs&&Date.now()>=materials.deadlineAtEpochMs){timedOut=true;return false;}
    if(budget&&budget.resumeAttemptsUsed<maximumResumeAttempts&&Date.now()>=(result.recovery.retry_not_before_epoch_ms??0)&&(result.recovery.require_ready_recovery_evidence!==true||recoveryEvidenceReady)) {

@@ -18,12 +18,32 @@ import {
 	backupLocalRedeploymentRuntimeState,
 	preserveLocalRedeploymentWorktree,
 } from "../../../src/deployment/local-redeployment-state-preservation";
+import type * as LockedFileSystemModule from "../../../src/fs/locked-file-system";
 import { isFilesystemKernelAtomicWriteTemporaryFilePath, lockedFileSystem } from "../../../src/fs/locked-file-system";
+import {
+	createWorkspaceStateSnapshotCommit,
+	projectWorkspaceStateSnapshotCommitWithinLock,
+	WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME,
+	writeWorkspaceStateSnapshotCommitDurably,
+} from "../../../src/state/workspace-state-snapshot-storage";
 import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
+
+vi.mock("../../../src/fs/locked-file-system", async (importOriginal) => {
+	const actual = await importOriginal<typeof LockedFileSystemModule>();
+	const guardedTestDirectory = process.env.TMPDIR;
+	if (!guardedTestDirectory) throw new Error("必须通过 guarded runner 提供独占测试目录。");
+	return { ...actual, lockedFileSystem: await actual.LockedFileSystem.forIsolatedTestDirectory(guardedTestDirectory) };
+});
 
 vi.mock("node:fs/promises", async (importOriginal) => {
 	const actual = await importOriginal<typeof filesystem>();
-	return { ...actual, cp: vi.fn(actual.cp), rename: vi.fn(actual.rename) };
+	return {
+		...actual,
+		cp: vi.fn(actual.cp),
+		rename: vi.fn(actual.rename),
+		open: vi.fn(actual.open),
+		readdir: vi.fn(actual.readdir),
+	};
 });
 
 describe("重部署局部补证与真实 WIP 保全", () => {
@@ -110,7 +130,7 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 			await backupLocalRedeploymentRuntimeState(
 				{ ...request, executionId: "132609d8-7508-4bdc-b202-1d7bd7da8a14", candidateSourceCommit: "b".repeat(40) },
 				nextDirectory,
-				directory,
+				[directory],
 			);
 			const receipt = JSON.parse(await readFile(join(nextDirectory, "runtime-state-backup-receipt.json"), "utf8"));
 			const accepted = receipt.currentEntryBackups.find((entry: { source: string }) => entry.source === source);
@@ -121,8 +141,30 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 			expect(accepted.destination === preserved).toBe(change === "unchanged");
 			if (change === "unchanged") {
 				vi.mocked(filesystem.cp).mockClear();
-				await backupLocalRedeploymentRuntimeState(request, nextDirectory);
+				await backupLocalRedeploymentRuntimeState(request, nextDirectory, [directory]);
 				expect(vi.mocked(filesystem.cp).mock.calls.some(([copiedSource]) => copiedSource === source)).toBe(false);
+
+				const thirdDirectory = join(dirname(directory), "third-redeployment-execution");
+				await mkdir(thirdDirectory);
+				await backupLocalRedeploymentRuntimeState(request, thirdDirectory, [nextDirectory, directory]);
+				const thirdReceipt = JSON.parse(
+					await readFile(join(thirdDirectory, "runtime-state-backup-receipt.json"), "utf8"),
+				);
+				expect(thirdReceipt.measurements.reusedCheckpointCount).toBe(1);
+				expect(thirdReceipt.currentEntryBackups).toContainEqual(
+					expect.objectContaining({ source, destination: preserved }),
+				);
+				await backupLocalRedeploymentRuntimeState(request, thirdDirectory, [nextDirectory]);
+				const unverifiedOwnerReceipt = JSON.parse(
+					await readFile(join(thirdDirectory, "runtime-state-backup-receipt.json"), "utf8"),
+				);
+				expect(unverifiedOwnerReceipt.measurements.reusedCheckpointCount).toBe(0);
+				expect(unverifiedOwnerReceipt.currentEntryBackups).toContainEqual(
+					expect.objectContaining({
+						source,
+						destination: join(thirdDirectory, "preserved-runtime-state", "config.json"),
+					}),
+				);
 			}
 		},
 	);
@@ -185,6 +227,238 @@ describe("重部署局部补证与真实 WIP 保全", () => {
 		expect(receipt.preservedInPlaceOrTransientEndpoints).toContain(
 			join(workspaceDirectory, "task-command-executions"),
 		);
+	});
+	it.each(["enumeration", "read", "copy", "pending", "damaged", "wrong_workspace", "ordinary_file"] as const)(
+		"工作区事务日志保全只承认已登记的原生一致状态：%s",
+		async (scenario) => {
+			const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+			const workspaces = join(runtimeHomeDirectoryPath, "workspaces");
+			const workspace = join(workspaces, request.workspaceId);
+			await mkdir(workspace, { recursive: true });
+			await writeFile(
+				join(workspaces, "index.json"),
+				JSON.stringify({
+					version: 1,
+					entries: {
+						[request.workspaceId]: { workspaceId: request.workspaceId, repoPath: request.sourceCheckoutPath },
+					},
+					repoPathToId: { [request.sourceCheckoutPath]: request.workspaceId },
+				}),
+			);
+			const snapshot = createWorkspaceStateSnapshotCommit({
+				workspaceId: scenario === "wrong_workspace" ? "another-workspace" : request.workspaceId,
+				boardJsonText: '{ "columns": [] }\n',
+				sessionsJsonText: "{}\n",
+				meta: { revision: 1, updatedAt: 2 },
+			});
+			const journal = join(workspace, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME);
+			await writeWorkspaceStateSnapshotCommitDurably(workspace, snapshot);
+			const journalBytes = await readFile(journal);
+			const ordinaryFile = join(workspace, "a-note.json");
+			const disappearingFile = join(workspace, "z-note.json");
+			await writeFile(ordinaryFile, "{}");
+			await writeFile(disappearingFile, "{}");
+			if (scenario === "damaged") await writeFile(journal, "{");
+			const realCopy = vi.mocked(filesystem.cp).getMockImplementation();
+			const realOpen = vi.mocked(filesystem.open).getMockImplementation();
+			const realReaddir = vi.mocked(filesystem.readdir).getMockImplementation();
+			if (!realCopy || !realOpen || !realReaddir) throw new Error("缺少原文件系统入口");
+			onTestFinished(() => {
+				vi.mocked(filesystem.cp).mockImplementation(realCopy);
+				vi.mocked(filesystem.open).mockImplementation(realOpen);
+				vi.mocked(filesystem.readdir).mockImplementation(realReaddir);
+			});
+			let retired = false;
+			async function projectOnce() {
+				if (retired) return;
+				retired = true;
+				await projectWorkspaceStateSnapshotCommitWithinLock(workspace, snapshot);
+			}
+			vi.mocked(filesystem.readdir).mockImplementation((async (path, ...args) => {
+				const entries = await Reflect.apply(realReaddir, null, [path, ...args]);
+				if (scenario === "enumeration" && path === workspace) await projectOnce();
+				return entries;
+			}) as typeof readdir);
+			vi.mocked(filesystem.open).mockImplementation(async (path, ...args) => {
+				if (scenario === "read" && path === journal) await projectOnce();
+				return realOpen(path, ...args);
+			});
+			vi.mocked(filesystem.cp).mockImplementation(async (source, ...args) => {
+				if (source === ordinaryFile && scenario === "copy") await projectOnce();
+				if (source === ordinaryFile && scenario === "ordinary_file") await unlink(disappearingFile);
+				await realCopy(source, ...args);
+			});
+			if (["damaged", "wrong_workspace", "ordinary_file"].includes(scenario)) {
+				await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toThrow();
+				return;
+			}
+			await backupLocalRedeploymentRuntimeState(request, directory);
+			const receipt = JSON.parse(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8"));
+			const destination = receipt.currentEntryBackups.find(
+				(entry: { source: string }) => entry.source === workspace,
+			).destination;
+			if (scenario === "pending") {
+				expect(await readFile(join(destination, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME))).toEqual(journalBytes);
+			} else {
+				expect(retired).toBe(true);
+				expect(await readFile(join(destination, "board.json"), "utf8")).toBe(snapshot.boardJsonText);
+				expect(await readFile(join(destination, "sessions.json"), "utf8")).toBe(snapshot.sessionsJsonText);
+				expect(JSON.parse(await readFile(join(destination, "meta.json"), "utf8"))).toEqual(snapshot.meta);
+			}
+		},
+	);
+	it("新登记目录缺失时保全索引，已保全的工作区消失时等待其快照恢复", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const workspaceRoot = join(runtimeHomeDirectoryPath, "workspaces");
+		const missingWorkspace = join(workspaceRoot, request.workspaceId);
+		await mkdir(workspaceRoot);
+		await writeFile(
+			join(workspaceRoot, "index.json"),
+			JSON.stringify({
+				version: 1,
+				entries: {
+					[request.workspaceId]: { workspaceId: request.workspaceId, repoPath: request.sourceCheckoutPath },
+				},
+				repoPathToId: { [request.sourceCheckoutPath]: request.workspaceId },
+			}),
+		);
+		await writeFile(join(runtimeHomeDirectoryPath, "independent.json"), "{}");
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		let receipt = JSON.parse(await readFile(join(directory, "runtime-state-backup-receipt.json"), "utf8"));
+		expect(receipt.currentEntryBackups.map((entry: { source: string }) => entry.source)).toContain(
+			join(workspaceRoot, "index.json"),
+		);
+		await expect(filesystem.lstat(missingWorkspace)).rejects.toMatchObject({ code: "ENOENT" });
+		await mkdir(missingWorkspace);
+		const sessionsPath = join(missingWorkspace, "sessions.json");
+		const metaPath = join(missingWorkspace, "meta.json");
+		await writeFile(sessionsPath, "{}\n");
+		await writeFile(metaPath, '{"revision":1,"updatedAt":2}\n');
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		await unlink(sessionsPath);
+		await unlink(metaPath);
+		await filesystem.rmdir(missingWorkspace);
+		const receiptPath = join(directory, "runtime-state-backup-receipt.json");
+		await unlink(receiptPath);
+		for (const attempt of [1, 2]) {
+			await expect(backupLocalRedeploymentRuntimeState(request, directory), `尝试 ${attempt}`).rejects.toMatchObject(
+				{
+					code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+					path: missingWorkspace,
+				},
+			);
+			await expect(readFile(receiptPath)).rejects.toMatchObject({ code: "ENOENT" });
+			const progress = JSON.parse(await readFile(join(directory, "runtime-state-backup-progress.json"), "utf8"));
+			expect(progress.pendingEntries).toMatchObject([
+				{ entryName: `workspaces/${request.workspaceId}`, resource: missingWorkspace },
+			]);
+		}
+		await mkdir(missingWorkspace);
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toThrow("工作区缺少状态");
+		await writeFile(sessionsPath, "{}\n");
+		await writeFile(
+			metaPath,
+			JSON.stringify({
+				revision: 2,
+				updatedAt: 3,
+				workspaceStateSnapshotCommitId: "032609d8-7508-4bdc-b202-1d7bd7da8a14",
+			}),
+		);
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toThrow("提交投影的 board 缺失");
+		await expect(readFile(receiptPath)).rejects.toMatchObject({ code: "ENOENT" });
+		await writeFile(metaPath, '{"revision":3,"updatedAt":4}\n');
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+		expect(receipt.measurements.reusedCheckpointCount).toBe(2);
+		const destination = receipt.currentEntryBackups.find(
+			(entry: { source: string }) => entry.source === missingWorkspace,
+		).destination;
+		expect(await readdir(destination)).toEqual(["meta.json", "sessions.json"]);
+		expect(await readFile(join(destination, "sessions.json"), "utf8")).toBe("{}\n");
+		expect(await readFile(join(destination, "meta.json"), "utf8")).toBe('{"revision":3,"updatedAt":4}\n');
+
+		const indexPath = join(workspaceRoot, "index.json");
+		await unlink(receiptPath);
+		for (const inventoryPath of [indexPath, workspaceRoot]) {
+			const unavailableInventoryPath = join(dirname(runtimeHomeDirectoryPath), "unavailable-workspace-inventory");
+			await filesystem.rename(inventoryPath, unavailableInventoryPath);
+			await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toMatchObject({
+				code: "WORKSPACE_INDEX_UNAVAILABLE",
+				path: indexPath,
+			});
+			await expect(readFile(receiptPath)).rejects.toMatchObject({ code: "ENOENT" });
+			await filesystem.rename(unavailableInventoryPath, inventoryPath);
+		}
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		expect(JSON.parse(await readFile(receiptPath, "utf8")).measurements.reusedCheckpointCount).toBe(3);
+	});
+	it("备份中断后保留没有成功检查点的工作区失败原件", async () => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");
+		const workspaceRoot = join(runtimeHomeDirectoryPath, "workspaces");
+		const workspace = join(workspaceRoot, request.workspaceId);
+		const journal = join(workspace, WORKSPACE_STATE_SNAPSHOT_COMMIT_FILENAME);
+		await mkdir(workspace, { recursive: true });
+		await writeFile(
+			join(workspaceRoot, "index.json"),
+			JSON.stringify({
+				version: 1,
+				entries: {
+					[request.workspaceId]: { workspaceId: request.workspaceId, repoPath: request.sourceCheckoutPath },
+				},
+				repoPathToId: { [request.sourceCheckoutPath]: request.workspaceId },
+			}),
+		);
+		await writeFile(journal, "{");
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toMatchObject({
+			code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+			path: journal,
+		});
+		const progressPath = join(directory, "runtime-state-backup-progress.json");
+		const progress = JSON.parse(await readFile(progressPath, "utf8"));
+		await writeFile(
+			progressPath,
+			JSON.stringify({ ...progress, activeEntryName: join("workspaces", request.workspaceId) }),
+		);
+		await unlink(journal);
+		await expect(backupLocalRedeploymentRuntimeState(request, directory)).rejects.toMatchObject({
+			code: "WORKSPACE_SNAPSHOT_UNAVAILABLE",
+			path: journal,
+		});
+		await expect(readFile(join(directory, "runtime-state-backup-receipt.json"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+	it.each(["current", "predecessor"] as const)("损坏的%s检查点只使其对应条目重新捕获", async (owner) => {
+		const { request, directory, runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("nested_child");
+		const nextDirectory = owner === "current" ? directory : join(dirname(directory), "next-redeployment-execution");
+		await mkdir(nextDirectory, { recursive: true });
+		for (const name of ["settings.json", "independent.json"])
+			await writeFile(join(runtimeHomeDirectoryPath, name), "{}");
+		await backupLocalRedeploymentRuntimeState(request, directory);
+		const checkpoint = join(
+			directory,
+			"runtime-backup-checkpoints",
+			`${localRedeploymentSha256("settings.json")}.json`,
+		);
+		await writeFile(checkpoint, "{");
+		await backupLocalRedeploymentRuntimeState(
+			request,
+			nextDirectory,
+			owner === "predecessor" ? [directory] : undefined,
+		);
+		const rejectedRoot = join(nextDirectory, "runtime-backup-rejected-checkpoints");
+		const rejected = JSON.parse(await readFile(join(rejectedRoot, (await readdir(rejectedRoot))[0]), "utf8"));
+		expect(rejected).toEqual({
+			checkpointPath: checkpoint,
+			originalBytesBase64: Buffer.from("{").toString("base64"),
+		});
+		const receipt = JSON.parse(await readFile(join(nextDirectory, "runtime-state-backup-receipt.json"), "utf8"));
+		expect(receipt.measurements.reusedCheckpointCount).toBe(1);
+		const recovered = receipt.currentEntryBackups.find((entry: { source: string }) =>
+			entry.source.endsWith("/settings.json"),
+		);
+		expect(await readFile(recovered.destination, "utf8")).toBe("{}");
+		if (owner === "predecessor") expect(await readFile(checkpoint, "utf8")).toBe("{");
 	});
 	it("临时文件识别与真实内核原子写的命名一致", async () => {
 		const { runtimeHomeDirectoryPath } = await createRuntimeStateBackupFixture("direct_child");

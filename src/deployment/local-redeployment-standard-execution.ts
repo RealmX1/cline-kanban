@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { cp, lstat, mkdir, open, readdir, readFile, realpath } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readdir, readFile, realpath, rename } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as waitForRuntimeReadiness } from "node:timers/promises";
 import {
@@ -16,7 +16,7 @@ import {
 	plannedRedeploymentHandoverDispatch,
 } from "../server/authorized-unretainable-session-handover";
 import { getRuntimeHomePath } from "../state/runtime-home-path";
-import { loadPersistedWorkspaceSessionsById, loadPersistedWorkspaceStateById } from "../state/workspace-state";
+import { loadPersistedWorkspaceSessionsById, readRegisteredWorkspaceRawSnapshot } from "../state/workspace-state";
 import { assertTaskClosureStorageProtocolCompatibleWithDistribution } from "../task-closure/task-closure-storage-protocol-compatibility";
 import {
 	readProcessIdentity,
@@ -31,6 +31,8 @@ import {
 import { inspectFilesystemLockProtocolTransitionPreflight } from "./filesystem-lock-protocol-transition-preflight";
 import {
 	fingerprintLocalDeploymentDistribution,
+	localDeploymentGlobalCliLinkMatchesPublishedEntrypoint,
+	localDeploymentPublishedCliEntrypointIsExecutable,
 	verifyLocalDeploymentPublishedFiles,
 } from "./local-deployment-distribution-manifest";
 import { initializeLocalDeploymentExecution, readLocalDeploymentExecution } from "./local-deployment-execution";
@@ -38,15 +40,13 @@ import {
 	LOCAL_DEPLOYMENT_IRREVERSIBLE_STAGES,
 	LOCAL_DEPLOYMENT_STAGES_IN_EXECUTION_ORDER,
 	type LocalDeploymentStage,
+	localDeploymentCommandOriginalSchema,
 	localDeploymentExecutionManifestSchema,
 } from "./local-deployment-execution-contract";
 import { observeLocalDeploymentRecoveryEvidence } from "./local-deployment-recovery-evidence";
 import { readLocalDeploymentTargetStageRecoveryBudget } from "./local-deployment-target-stage-recovery-budget";
 import { registerLocalRedeploymentRebuildableArtifact } from "./local-redeployment-failed-attempt-artifact-cleanup";
-import {
-	observeInterruptedLocalRedeploymentBackup,
-	observeLocalRedeploymentBlockingFailureRecovery,
-} from "./local-redeployment-failure-recovery-evidence";
+import { observeLocalRedeploymentBlockingFailureRecovery } from "./local-redeployment-failure-recovery-evidence";
 import {
 	clearLocalRedeploymentFilesystemEvidenceRequests,
 	observeLocalRedeploymentFilesystemEvidence,
@@ -65,6 +65,7 @@ import {
 	localRedeploymentAuthorizedOwnerInterruptionSchema,
 	localRedeploymentRuntimeBaselineSchema,
 	localRedeploymentSha256,
+	readBoundPreviousLocalRedeployment,
 	readFrozenLocalRedeploymentRequest,
 	readLocalRedeploymentJson,
 	readLocalRedeploymentSessionInterruptionAuthorization,
@@ -470,6 +471,8 @@ export async function runLocalRedeploymentStandardCommand(
 	name: string,
 	command: string[],
 	cwd: string,
+	acceptCompletedOriginal?: (resultPath: string) => void,
+	candidateBuildInputsSha256?: string,
 ): Promise<string> {
 	assertLocalRedeploymentNotRevoked(directory);
 	const original = join(directory, "standard-command-originals", `${name}-${randomUUID()}`);
@@ -484,6 +487,7 @@ export async function runLocalRedeploymentStandardCommand(
 		startedAtEpochMs,
 	});
 	let exitCode: number | null = null;
+	let candidateDistributionVerificationError: unknown;
 	try {
 		assertLocalRedeploymentNotRevoked(directory);
 		exitCode = await new Promise<number | null>((resolve, reject) => {
@@ -514,6 +518,24 @@ export async function runLocalRedeploymentStandardCommand(
 		await stderr.sync();
 		await stdout.close();
 		await stderr.close();
+		let completedCandidateBuild: { inputsSha256: string; candidateDistributionSha256: string } | undefined;
+		if (exitCode === 0 && candidateBuildInputsSha256) {
+			try {
+				const expectedDistribution = join(cwd, "dist");
+				const distribution = await fingerprintLocalDeploymentDistribution(expectedDistribution);
+				if (distribution.distributionDirectoryPath === expectedDistribution)
+					completedCandidateBuild = {
+						inputsSha256: candidateBuildInputsSha256,
+						candidateDistributionSha256: distribution.candidateDistributionSha256,
+					};
+				else
+					candidateDistributionVerificationError = new LocalRedeploymentIdentityMismatch(
+						"命令的私有分发目录已改写为外部路径",
+					);
+			} catch (error) {
+				candidateDistributionVerificationError = error;
+			}
+		}
 		await writeLocalRedeploymentJson(join(original, "result.json"), {
 			requestSha256: frozen.requestSha256,
 			command,
@@ -521,8 +543,13 @@ export async function runLocalRedeploymentStandardCommand(
 			startedAtEpochMs,
 			exitCode,
 			finishedAtEpochMs: Date.now(),
+			...(completedCandidateBuild ? { completedCandidateBuild } : {}),
+			...(candidateDistributionVerificationError
+				? { candidateDistributionVerificationError: String(candidateDistributionVerificationError) }
+				: {}),
 		});
 	}
+	if (candidateDistributionVerificationError) throw candidateDistributionVerificationError;
 	const output = await readFile(join(original, "stdout.txt"), "utf8");
 	if (exitCode !== 0) {
 		if (name === "source-validation" && output.includes('"quality_validation_failed"'))
@@ -530,7 +557,244 @@ export async function runLocalRedeploymentStandardCommand(
 		throw new LocalRedeploymentStandardCommandFailure(name, original, output, exitCode);
 	}
 	assertLocalRedeploymentNotRevoked(directory);
+	acceptCompletedOriginal?.(join(original, "result.json"));
 	return output;
+}
+
+const importedCandidateBuildOriginalFilename = "previous-candidate-build-command-result.json";
+const importedCandidateBuildAcceptanceFilename = "previous-candidate-build-import-receipt.json";
+
+export async function readCompletedCandidateBuildCommandOriginal(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	commandName: string,
+	command: string[],
+	inputsSha256: string,
+): Promise<string | null> {
+	const originals = join(directory, "standard-command-originals");
+	const checkout = candidateCheckout(directory);
+	const results = [];
+	const originalEntries = await readdir(originals, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT") return [];
+		throw error;
+	});
+	for (const entry of originalEntries) {
+		if (!entry.isDirectory() || !entry.name.startsWith(`${commandName}-`)) continue;
+		const path = join(originals, entry.name, "result.json");
+		const result = (await readLocalRedeploymentJson(path)) as {
+			requestSha256: string;
+			command: string[];
+			cwd: string;
+			exitCode: number | null;
+			startedAtEpochMs: number;
+			finishedAtEpochMs: number;
+			completedCandidateBuild?: { inputsSha256: string; candidateDistributionSha256: string };
+		} | null;
+		if (
+			result?.exitCode === 0 &&
+			result.requestSha256 === frozen.requestSha256 &&
+			result.cwd === checkout &&
+			JSON.stringify(result.command) === JSON.stringify(command) &&
+			Number.isFinite(result.finishedAtEpochMs) &&
+			result.completedCandidateBuild?.inputsSha256 === inputsSha256 &&
+			/^[a-f0-9]{64}$/u.test(result.completedCandidateBuild.candidateDistributionSha256) &&
+			(await realpath(path)) === path
+		) {
+			const intentPath = join(originals, entry.name, "intent.json");
+			const intent = (await readLocalRedeploymentJson(intentPath)) as Pick<
+				NonNullable<typeof result>,
+				"requestSha256" | "command" | "cwd" | "startedAtEpochMs"
+			> | null;
+			if (
+				intent?.requestSha256 !== result.requestSha256 ||
+				intent.cwd !== result.cwd ||
+				JSON.stringify(intent.command) !== JSON.stringify(command) ||
+				!Number.isFinite(result.startedAtEpochMs) ||
+				intent.startedAtEpochMs !== result.startedAtEpochMs ||
+				result.finishedAtEpochMs < result.startedAtEpochMs ||
+				(await realpath(intentPath)) !== intentPath
+			)
+				continue;
+			results.push({ path, result, digest: result.completedCandidateBuild.candidateDistributionSha256 });
+		}
+	}
+	let completed: { path: string; digest: string } | undefined = results.sort(
+		(a, b) => b.result.finishedAtEpochMs - a.result.finishedAtEpochMs,
+	)[0];
+	if (!completed && commandName === "production-build" && frozen.request.previousDeploymentExecution) {
+		const acceptance = (await readLocalRedeploymentJson(
+			join(directory, importedCandidateBuildAcceptanceFilename),
+		)) as {
+			requestSha256: string;
+			buildCommandResultSha256: string;
+		} | null;
+		if (acceptance) {
+			const path = join(directory, importedCandidateBuildOriginalFilename);
+			const bytes = await readFile(path).catch((error: NodeJS.ErrnoException) => {
+				if (error.code === "ENOENT") return null;
+				throw error;
+			});
+			if (!bytes) return null;
+			const result = JSON.parse(bytes.toString("utf8"));
+			if (
+				acceptance.requestSha256 !== frozen.requestSha256 ||
+				acceptance.buildCommandResultSha256 !== localRedeploymentSha256(bytes) ||
+				(await realpath(path)) !== path ||
+				result?.exitCode !== 0 ||
+				JSON.stringify(result.command) !== JSON.stringify(command) ||
+				result.completedCandidateBuild?.inputsSha256 !== inputsSha256 ||
+				!/^[a-f0-9]{64}$/u.test(result.completedCandidateBuild.candidateDistributionSha256)
+			)
+				throw new LocalRedeploymentIdentityMismatch("已接受的前序构建原件与当前冻结请求或构建输入不匹配");
+			completed = { path, digest: result.completedCandidateBuild.candidateDistributionSha256 };
+		}
+	}
+	if (!completed) return null;
+	const distribution = await fingerprintLocalDeploymentDistribution(join(checkout, "dist"));
+	if (
+		distribution.distributionDirectoryPath !== join(checkout, "dist") ||
+		distribution.candidateDistributionSha256 !== completed.digest
+	)
+		throw new LocalRedeploymentIdentityMismatch("已完成命令绑定的私有分发产物发生变化");
+	return completed.path;
+}
+
+interface LocalRedeploymentCandidateBuildReceipt {
+	requestSha256: string;
+	inputsSha256: string;
+	candidateDistributionSha256: string;
+	distributionDirectoryPath: string;
+	buildCommandResultPath: string;
+	buildCommandResultSha256: string;
+	nativeAbiResultPath: string;
+	nativeAbiResultSha256: string;
+}
+
+async function fingerprintLocalRedeploymentCandidateBuildInputs(
+	candidate: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	directory: string,
+) {
+	const validation = (await readLocalRedeploymentJson(
+		join(directory, "source-validation", "source-validation-evidence-reuse-report.json"),
+	)) as {
+		candidateSourceCommit: string;
+		treeOid: string;
+		contentManifestSha256: string;
+		validationEnvironmentIdentity: unknown;
+	} | null;
+	if (
+		validation?.candidateSourceCommit !== frozen.request.candidateSourceCommit ||
+		!validation.treeOid ||
+		!validation.contentManifestSha256
+	)
+		throw new Error("构建缺少与冻结候选匹配的完整源码验证输入");
+	const localBuildConfiguration = await Promise.all(
+		[".", "web-ui"].flatMap((project) =>
+			[".env", ".env.local", ".env.production", ".env.production.local"].map(async (filename) => {
+				const path = join(candidate, project, filename);
+				const bytes = await readFile(path).catch((error: NodeJS.ErrnoException) => {
+					if (error.code === "ENOENT") return null;
+					throw error;
+				});
+				return [project, filename, bytes ? localRedeploymentSha256(bytes) : null];
+			}),
+		),
+	);
+	const environment = Object.entries(process.env)
+		.filter(
+			([key]) =>
+				![
+					"KANBAN_BUILD_DISTRIBUTION_OUTPUT_DIRECTORY",
+					"KANBAN_OWNED_COMMAND_EXECUTION_NONCE",
+					"KANBAN_COMMAND_EXECUTION_ID",
+					"KANBAN_COMMAND_EXECUTION_REVOCATION_FILE",
+					"PWD",
+					"OLDPWD",
+					"SHLVL",
+					"_",
+				].includes(key),
+		)
+		.sort(([left], [right]) => left.localeCompare(right));
+	return localRedeploymentSha256(
+		JSON.stringify({
+			tree: validation.treeOid,
+			content: validation.contentManifestSha256,
+			validationEnvironment: validation.validationEnvironmentIdentity,
+			environment,
+			localBuildConfiguration,
+			nodeSha256: localRedeploymentSha256(await readFile(frozen.request.deploymentNodeBinaryPath)),
+			npmSha256: localRedeploymentSha256(await readFile(frozen.npmCliEntrypointPath)),
+		}),
+	);
+}
+
+export async function verifyLocalRedeploymentCandidateBuildReceipt(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	receipt: LocalRedeploymentCandidateBuildReceipt,
+) {
+	const checkout = candidateCheckout(directory);
+	const expectedDistribution = join(checkout, "dist");
+	if (
+		receipt.requestSha256 !== frozen.requestSha256 ||
+		receipt.distributionDirectoryPath !== expectedDistribution ||
+		(await realpath(expectedDistribution)) !== expectedDistribution ||
+		(await fingerprintLocalDeploymentDistribution(expectedDistribution)).candidateDistributionSha256 !==
+			receipt.candidateDistributionSha256
+	)
+		throw new LocalRedeploymentIdentityMismatch("已绑定的候选产物位置或完整摘要变化");
+	await verifyLocalRedeploymentCandidateBuildCommandResults(directory, frozen, receipt);
+}
+
+async function verifyLocalRedeploymentCandidateBuildCommandResults(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+	receipt: LocalRedeploymentCandidateBuildReceipt,
+) {
+	const checkout = candidateCheckout(directory);
+	for (const [path, digest, commandName, expectedCommand] of [
+		[
+			receipt.buildCommandResultPath,
+			receipt.buildCommandResultSha256,
+			"production-build",
+			[frozen.request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "build"],
+		],
+		[
+			receipt.nativeAbiResultPath,
+			receipt.nativeAbiResultSha256,
+			"candidate-native-abi",
+			[
+				frozen.request.deploymentNodeBinaryPath,
+				join(checkout, "scripts/verify-notification-archive-native-runtime.mjs"),
+			],
+		],
+	] as const) {
+		const bytes = await readFile(path);
+		const result = JSON.parse(bytes.toString("utf8"));
+		const originalParent = dirname(path);
+		const directlyProduced =
+			dirname(originalParent) === join(directory, "standard-command-originals") &&
+			originalParent.startsWith(join(directory, "standard-command-originals", `${commandName}-`)) &&
+			path === join(originalParent, "result.json") &&
+			result?.requestSha256 === frozen.requestSha256 &&
+			result.cwd === checkout &&
+			JSON.stringify(result.command) === JSON.stringify(expectedCommand);
+		const importedProductionProof =
+			commandName === "production-build" &&
+			!!frozen.request.previousDeploymentExecution &&
+			path === join(directory, importedCandidateBuildOriginalFilename) &&
+			JSON.stringify(result?.command) === JSON.stringify(expectedCommand);
+		if (
+			(!directlyProduced && !importedProductionProof) ||
+			(await realpath(path)) !== path ||
+			result?.exitCode !== 0 ||
+			localRedeploymentSha256(bytes) !== digest ||
+			result.completedCandidateBuild?.inputsSha256 !== receipt.inputsSha256 ||
+			result.completedCandidateBuild?.candidateDistributionSha256 !== receipt.candidateDistributionSha256
+		)
+			throw new LocalRedeploymentIdentityMismatch("构建或原生 ABI 的成功原件与候选回执的输入、分发或归属不匹配");
+	}
 }
 
 async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRedeploymentRequest): Promise<void> {
@@ -621,41 +885,135 @@ async function preparePrivateCandidate(directory: string, frozen: FrozenLocalRed
 			"source-validation",
 			[
 				request.deploymentNodeBinaryPath,
-				...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen),
+				...(await createBoundLocalRedeploymentSourceValidationArguments(directory, frozen)),
 				"--validation-plan",
 				plan,
 			],
 			candidate,
 		);
-		const buildReceipt = (await readLocalRedeploymentJson(join(directory, "candidate-build-receipt.json"))) as {
-			candidateDistributionSha256?: string;
-		} | null;
-		if (buildReceipt && existsSync(join(candidate, "dist/cli.js"))) {
-			if (
-				(await fingerprintLocalDeploymentDistribution(join(candidate, "dist"))).candidateDistributionSha256 !==
-				buildReceipt.candidateDistributionSha256
-			)
-				throw new Error("已构建候选摘要变化，拒绝用新产物替换同一执行");
+		const buildReceiptPath = join(directory, "candidate-build-receipt.json");
+		const buildReceipt = (await readLocalRedeploymentJson(
+			buildReceiptPath,
+		)) as LocalRedeploymentCandidateBuildReceipt | null;
+		const inputsSha256 = await fingerprintLocalRedeploymentCandidateBuildInputs(candidate, frozen, directory);
+		if (buildReceipt) {
+			await verifyLocalRedeploymentCandidateBuildReceipt(directory, frozen, buildReceipt);
+			if (buildReceipt.inputsSha256 !== inputsSha256)
+				throw new LocalRedeploymentIdentityMismatch("同一执行的构建输入已变化");
 			return;
 		}
-		await runLocalRedeploymentStandardCommand(
+		const buildCommand = [request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "build"];
+		const nativeAbiCommand = [
+			request.deploymentNodeBinaryPath,
+			join(candidate, "scripts/verify-notification-archive-native-runtime.mjs"),
+		];
+		let buildCommandResultPath = await readCompletedCandidateBuildCommandOriginal(
 			directory,
 			frozen,
 			"production-build",
-			[request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "build"],
-			candidate,
+			buildCommand,
+			inputsSha256,
 		);
-		await runLocalRedeploymentStandardCommand(
+		const predecessor = buildCommandResultPath ? null : await readBoundPreviousLocalRedeployment(directory, frozen);
+		const previousDirectory = request.previousDeploymentExecution?.executionDirectory;
+		if (!buildCommandResultPath && request.previousDeploymentExecution && !predecessor)
+			await writeLocalRedeploymentJson(join(directory, "candidate-build-reuse-observation.json"), {
+				previousExecutionId: request.previousDeploymentExecution.executionId,
+				status: "previous_execution_ownership_unverified",
+				reason: "前序执行缺少本任务代际及工作树实体归属原件，当前执行独立验证、构建和保全",
+			});
+		if (!buildCommandResultPath && previousDirectory && predecessor) {
+			const previousReceipt = (await readLocalRedeploymentJson(
+				join(previousDirectory, "candidate-build-receipt.json"),
+			)) as LocalRedeploymentCandidateBuildReceipt | null;
+			if (previousReceipt?.inputsSha256 === inputsSha256) {
+				await verifyLocalRedeploymentCandidateBuildReceipt(previousDirectory, predecessor, previousReceipt);
+				const privateDistribution = join(candidate, "dist");
+				const alreadyImported = existsSync(privateDistribution);
+				const privateCopy = alreadyImported
+					? privateDistribution
+					: join(directory, `candidate-distribution-import-${randomUUID()}`);
+				if (!alreadyImported)
+					await cp(previousReceipt.distributionDirectoryPath, privateCopy, {
+						recursive: true,
+						dereference: false,
+					});
+				if (
+					(await fingerprintLocalDeploymentDistribution(privateCopy)).candidateDistributionSha256 !==
+					previousReceipt.candidateDistributionSha256
+				)
+					throw new LocalRedeploymentIdentityMismatch("私有候选分发清单与前序原件不同");
+				if (!alreadyImported) await rename(privateCopy, privateDistribution);
+				const previousBuildBytes = await readFile(previousReceipt.buildCommandResultPath);
+				const buildCommandResultSha256 = localRedeploymentSha256(previousBuildBytes);
+				if (buildCommandResultSha256 !== previousReceipt.buildCommandResultSha256)
+					throw new LocalRedeploymentIdentityMismatch("前序构建原件在导入期间发生变化");
+				buildCommandResultPath = join(directory, importedCandidateBuildOriginalFilename);
+				await writeLocalRedeploymentJson(join(directory, importedCandidateBuildAcceptanceFilename), {
+					requestSha256: frozen.requestSha256,
+					buildCommandResultSha256,
+				});
+				await lockedFileSystem.writeTextFileAtomic(buildCommandResultPath, previousBuildBytes.toString("utf8"), {
+					durable: true,
+					fileMode: 0o600,
+				});
+			}
+			await writeLocalRedeploymentJson(join(directory, "candidate-build-reuse-observation.json"), {
+				previousExecutionId: predecessor.request.executionId,
+				status: buildCommandResultPath ? "candidate_distribution_reused" : "build_inputs_unmatched",
+				reason: buildCommandResultPath ? null : "缺少绑定构建输入的前序回执，或完整树、Node、依赖和构建环境有变化",
+			});
+		}
+		if (!buildCommandResultPath)
+			await runLocalRedeploymentStandardCommand(
+				directory,
+				frozen,
+				"production-build",
+				buildCommand,
+				candidate,
+				(path) => {
+					buildCommandResultPath = path;
+				},
+				inputsSha256,
+			);
+		const distributionBeforeAbi = await fingerprintLocalDeploymentDistribution(join(candidate, "dist"));
+		let nativeAbiResultPath = await readCompletedCandidateBuildCommandOriginal(
 			directory,
 			frozen,
 			"candidate-native-abi",
-			[request.deploymentNodeBinaryPath, join(candidate, "scripts/verify-notification-archive-native-runtime.mjs")],
-			candidate,
+			nativeAbiCommand,
+			inputsSha256,
 		);
-		await writeLocalRedeploymentJson(join(directory, "candidate-build-receipt.json"), {
+		if (!nativeAbiResultPath)
+			await runLocalRedeploymentStandardCommand(
+				directory,
+				frozen,
+				"candidate-native-abi",
+				nativeAbiCommand,
+				candidate,
+				(path) => {
+					nativeAbiResultPath = path;
+				},
+				inputsSha256,
+			);
+		if (!buildCommandResultPath || !nativeAbiResultPath) throw new Error("构建或 ABI 核验缺少成功原件");
+		const distribution = await fingerprintLocalDeploymentDistribution(join(candidate, "dist"));
+		if (
+			distribution.candidateDistributionSha256 !== distributionBeforeAbi.candidateDistributionSha256 ||
+			distribution.distributionDirectoryPath !== join(candidate, "dist")
+		)
+			throw new LocalRedeploymentIdentityMismatch("ABI 核验时私有分发发生变化");
+		const completedBuildReceipt = {
 			requestSha256: frozen.requestSha256,
-			...(await fingerprintLocalDeploymentDistribution(join(candidate, "dist"))),
-		});
+			inputsSha256,
+			buildCommandResultPath,
+			buildCommandResultSha256: localRedeploymentSha256(await readFile(buildCommandResultPath)),
+			nativeAbiResultPath,
+			nativeAbiResultSha256: localRedeploymentSha256(await readFile(nativeAbiResultPath)),
+			...distribution,
+		};
+		await verifyLocalRedeploymentCandidateBuildCommandResults(directory, frozen, completedBuildReceipt);
+		await writeLocalRedeploymentJson(buildReceiptPath, completedBuildReceipt);
 	});
 }
 
@@ -684,6 +1042,7 @@ export async function initializeStandardLocalRedeployment(directory: string): Pr
 	const {
 		serviceLaunch: _serviceLaunch,
 		sourceValidationEvidenceFilePaths: _sourceEvidence,
+		previousDeploymentExecution: _previousExecution,
 		nonPreservableSessionInterruptionAuthorization: _sessionInterruptionAuthorization,
 		...manifestFields
 	} = frozen.request;
@@ -1001,6 +1360,75 @@ async function validateHistoricalSessionAdoption(
 	});
 }
 
+async function readVerifiedPredecessorBackupDirectories(
+	directory: string,
+	frozen: FrozenLocalRedeploymentRequest,
+): Promise<string[]> {
+	const stage = "state_preservation";
+	const verifiedDirectories: string[] = [];
+	const visitedDirectories = new Set([directory]);
+	const visitedExecutionIds = new Set([frozen.request.executionId]);
+	let successorDirectory = directory;
+	let successor = frozen;
+	while (successor.request.previousDeploymentExecution) {
+		const { executionDirectory: predecessorDirectory, executionId: predecessorExecutionId } =
+			successor.request.previousDeploymentExecution;
+		if (
+			successorDirectory !== directory &&
+			(visitedDirectories.has(predecessorDirectory) || visitedExecutionIds.has(predecessorExecutionId))
+		)
+			break;
+		const predecessor = await readBoundPreviousLocalRedeployment(successorDirectory, successor).catch(
+			(error: unknown) => {
+				if (successorDirectory !== directory && error instanceof LocalRedeploymentIdentityMismatch) return null;
+				throw error;
+			},
+		);
+		if (!predecessor) break;
+		const record = await readLocalDeploymentExecution(predecessorDirectory).catch(() => null);
+		const latest = record?.observations
+			.filter(
+				(item) =>
+					item.stage === stage &&
+					["command_execution_intent_persisted", "command_succeeded", "command_failed"].includes(item.kind),
+			)
+			.at(-1);
+		if (
+			record?.manifest.schemaVersion !== 2 ||
+			record.manifest.executionId !== predecessor.request.executionId ||
+			record.manifest.redeploymentRequestSha256 !== predecessor.requestSha256 ||
+			!latest ||
+			!["command_succeeded", "command_failed"].includes(latest.kind) ||
+			latest.commandOutputDirectory !==
+				join(predecessorDirectory, "stage-command-originals", stage, `attempt-${latest.attemptNumber}`)
+		)
+			break;
+		const command = localDeploymentCommandOriginalSchema.safeParse(
+			await readLocalRedeploymentJson(join(latest.commandOutputDirectory, "command-result.json")).catch(() => null),
+		);
+		if (
+			!command.success ||
+			!command.data.processWasStarted ||
+			command.data.cwd !== candidateCheckout(predecessorDirectory) ||
+			!command.data.processId ||
+			(command.data.exitCode === null && !command.data.signal) ||
+			command.data.attemptIdentity?.executionId !== predecessor.request.executionId ||
+			command.data.attemptIdentity.attemptNumber !== latest.attemptNumber ||
+			command.data.attemptIdentity.stage !== stage ||
+			command.data.attemptIdentity.commandOutputDirectory !== latest.commandOutputDirectory ||
+			JSON.stringify(command.data.command) !==
+				JSON.stringify(record.manifest.stages.find((item) => item.stage === stage)?.command)
+		)
+			break;
+		verifiedDirectories.push(predecessorDirectory);
+		visitedDirectories.add(predecessorDirectory);
+		visitedExecutionIds.add(predecessorExecutionId);
+		successorDirectory = predecessorDirectory;
+		successor = predecessor;
+	}
+	return verifiedDirectories;
+}
+
 export async function executeStandardLocalRedeploymentStage(
 	directory: string,
 	stage: LocalDeploymentStage,
@@ -1049,10 +1477,12 @@ export async function executeStandardLocalRedeploymentStage(
 				attemptNumber,
 				path: join(directory, "preserved-previous-distribution"),
 			});
-		const backupBudget = await readLocalDeploymentTargetStageRecoveryBudget(request, stage);
-		const interruptedBackup = await observeInterruptedLocalRedeploymentBackup(frozen, backupBudget?.blockingFailure);
 		try {
-			await backupLocalRedeploymentRuntimeState(request, directory, interruptedBackup?.directory);
+			await backupLocalRedeploymentRuntimeState(
+				request,
+				directory,
+				await readVerifiedPredecessorBackupDirectories(directory, frozen),
+			);
 		} finally {
 			if (process.connected) process.send?.("runtime_state_backup_finished", () => undefined);
 		}
@@ -1092,7 +1522,12 @@ export async function executeStandardLocalRedeploymentStage(
 			);
 		if (!existsSync(join(directory, "runtime-state-backup-receipt.json"))) throw new Error("发布前缺少持久备份");
 		await verifyBoundFilesystemLockProtocolBeforePublication(directory, frozen);
-		const needsCandidatePublication = !(await verifyLocalDeploymentPublishedFiles(manifest));
+		if (!(await localDeploymentPublishedCliEntrypointIsExecutable(manifest.candidateDistributionDirectoryPath)))
+			throw new Error("私有候选的 CLI 入口不可执行");
+		const candidatePublicationIsComplete = async () =>
+			(await verifyLocalDeploymentPublishedFiles(manifest)) &&
+			(await localDeploymentPublishedCliEntrypointIsExecutable(request.distributionDirectoryPath));
+		const needsCandidatePublication = !(await candidatePublicationIsComplete());
 		const staging = join(request.distributionDirectoryPath, `.kanban-redeployment-staging-${request.executionId}`);
 		if (needsCandidatePublication) {
 			await registerLocalRedeploymentRebuildableArtifact(directory, {
@@ -1122,16 +1557,18 @@ export async function executeStandardLocalRedeploymentStage(
 				"--distribution-directory",
 				request.distributionDirectoryPath,
 			]);
-			if (!(await verifyLocalDeploymentPublishedFiles(manifest))) throw new Error("发布文件清单尚未完整");
+			if (!(await candidatePublicationIsComplete())) throw new Error("发布文件清单不完整或 CLI 入口不可执行");
 		}
 		await assertLocalRedeploymentOwnerStillEligible(directory, frozen);
-		await run(
-			"preserve-global-cli-link",
-			[node, frozen.npmCliEntrypointPath, "link", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
-			request.sourceCheckoutPath,
-		);
-		if ((await realpath(join(dirname(node), "kanban"))) !== (await realpath(cli)))
-			throw new Error("实际 Node 的 CLI 链接与冻结目标不一致");
+		if (!(await localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(node, request.distributionDirectoryPath))) {
+			await run(
+				"preserve-global-cli-link",
+				[node, frozen.npmCliEntrypointPath, "link", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"],
+				request.sourceCheckoutPath,
+			);
+			if (!(await localDeploymentGlobalCliLinkMatchesPublishedEntrypoint(node, request.distributionDirectoryPath)))
+				throw new Error("实际 Node 的 CLI 链接与冻结目标不一致或入口不可执行");
+		}
 	}
 	if (stage === "runtime_restart") {
 		await assertTaskClosureStorageProtocolCompatibleWithDistribution(
@@ -1573,6 +2010,30 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		const repair = await observeLocalRedeploymentRepairValidationEligibility(directory, failure);
 		if (repair) return repair;
 	}
+	if (
+		activeStage === "candidate_bootstrap" &&
+		failure?.classification === "unclassified_failure" &&
+		failure.logicalResource === activeStage &&
+		(failure.originalErrorReference === directory ||
+			dirname(failure.originalErrorReference) === join(directory, "stage-failure-originals", activeStage))
+	) {
+		try {
+			const candidate = candidateCheckout(directory);
+			const inputs = await fingerprintLocalRedeploymentCandidateBuildInputs(candidate, frozen, directory);
+			const command = [frozen.request.deploymentNodeBinaryPath, frozen.npmCliEntrypointPath, "run", "build"];
+			const original = await readCompletedCandidateBuildCommandOriginal(
+				directory,
+				frozen,
+				"production-build",
+				command,
+				inputs,
+			);
+			if (original)
+				return { evidenceSha256: localRedeploymentSha256(await readFile(original)), recoveryEvidenceReady: true };
+		} catch {
+			// 部分构建、工具变化和产物漂移都不能给同一输入补发预算。
+		}
+	}
 	if (failure && failure.classification !== "verification_evidence_pending")
 		return observeLocalRedeploymentBlockingFailureRecovery(directory, failure);
 	if (failure?.logicalResource === "filesystem-lock-protocol-transition") {
@@ -1624,14 +2085,11 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			try {
 				if (request.checkKey?.startsWith("workspace-state:")) {
 					const workspaceId = request.checkKey.slice("workspace-state:".length);
-					const state = await loadPersistedWorkspaceStateById(workspaceId);
-					return {
-						checkKey: request.checkKey,
-						status:
-							state.workspaceId === workspaceId && Array.isArray(state.board.columns)
-								? "equivalent_snapshot_readable"
-								: "unknown",
-					};
+					await readRegisteredWorkspaceRawSnapshot(
+						frozen.request.runtimeIdentity.runtimeHomeDirectoryPath,
+						workspaceId,
+					);
+					return { checkKey: request.checkKey, status: "equivalent_snapshot_readable" };
 				}
 				const procedure =
 					request.checkKey === "notification-archive"
@@ -1716,7 +2174,7 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 			const response = await executeLocalRedeploymentFile(
 				frozen.request.deploymentNodeBinaryPath,
 				[
-					...createBoundLocalRedeploymentSourceValidationArguments(directory, frozen),
+					...(await createBoundLocalRedeploymentSourceValidationArguments(directory, frozen)),
 					"--observe-recovery-evidence",
 				],
 				{ timeout: 7_000, maxBuffer: 1024 * 1024 },
@@ -1728,7 +2186,22 @@ export async function observeStandardLocalRedeploymentStageRecoveryEvidence(
 		}
 	}
 	return {
-		evidenceSha256: localRedeploymentSha256(JSON.stringify(semantic)),
+		evidenceSha256: localRedeploymentSha256(
+			JSON.stringify({
+				...semantic,
+				// 相同的就绪结论可以来自不同进程，只有同一已核验代际才共用会话重试资格。
+				...(semantic.sessionContinuityWaitRecorded &&
+				semantic.sessionReadiness === "ready" &&
+				baseline.runtimeBefore
+					? {
+							verifiedSessionReadinessRuntimeGeneration: {
+								processId: baseline.runtimeBefore.processId,
+								processStartTimeText: normalizeStart(baseline.runtimeBefore.processStartTimeText),
+							},
+						}
+					: {}),
+			}),
+		),
 		recoveryEvidenceReady:
 			baseline.state !== "unknown" &&
 			!["unavailable", "blocked"].includes(semantic.sessionReadiness) &&
