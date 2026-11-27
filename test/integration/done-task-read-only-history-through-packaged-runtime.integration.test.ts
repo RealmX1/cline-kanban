@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -6,6 +7,7 @@ import { createTRPCProxyClient, httpBatchLink } from "@trpc/client";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { compress } from "zstd-stream";
+import { encodeClaudeProjectDirectoryName } from "../../src/agent-session-history/bounded-agent-transcript-reader";
 import type { RuntimeBoardData, RuntimeTaskSessionSummary } from "../../src/core/api-contract";
 import { getWorkspaceDirectoryPath, loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
@@ -32,7 +34,7 @@ describe(
 	},
 	() => {
 		it("工作树已删除时可分页读取主会话和侧会话，跨项目不串内容且不改任务、会话与队列", async () => {
-			const fixture = createIsolatedGitTestWorkspaceFixture();
+			const fixture = createIsolatedGitTestWorkspaceFixture({ fixtureRootDirectoryNamePrefix: "knh-" });
 			vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
 			vi.stubEnv("USERPROFILE", fixture.isolatedHomeDirectoryPath);
 			const repository = fixture.createNonBareRepository({
@@ -132,6 +134,53 @@ describe(
 					},
 				};
 			}
+			const legacyTaskId = "legacy-task";
+			const legacyNativeSessionId = "9a378e6f-c46c-47ce-b150-e9c455a1f610";
+			const isolatedWorktreeParentDirectoryPath = join(
+				fixture.isolatedHomeDirectoryPath,
+				".cline/worktrees",
+				legacyTaskId,
+			);
+			await mkdir(isolatedWorktreeParentDirectoryPath, { recursive: true });
+			const { worktreePath: legacyWorktree } = repository.createLinkedWorktree({
+				isolatedWorktreeParentDirectoryPath,
+				worktreeDirectoryName: "done-history-project",
+				branchName: "legacy-history-test",
+			});
+			const legacyCard = {
+				...board.columns[0].cards[0],
+				id: legacyTaskId,
+				mainTaskConversationSessionId: undefined,
+				agentId: "claude" as const,
+			};
+			board.columns[0].cards.push(legacyCard);
+			sessions[legacyTaskId] = {
+				...sessions[mainSessionId],
+				taskId: legacyTaskId,
+				agentId: "claude",
+				workspacePath: null,
+				taskConversationSessionMetadata: undefined,
+				agentNativeConversationSessionIdentity: undefined,
+			};
+			const legacyProject = join(
+				fixture.isolatedHomeDirectoryPath,
+				".claude/projects",
+				encodeClaudeProjectDirectoryName(legacyWorktree),
+			);
+			await mkdir(legacyProject, { recursive: true });
+			const legacyTranscript = join(legacyProject, `${legacyNativeSessionId}.jsonl`);
+			await writeFile(
+				legacyTranscript,
+				`${JSON.stringify({
+					type: "user",
+					sessionId: legacyNativeSessionId,
+					cwd: legacyWorktree,
+					timestamp: new Date(1).toISOString(),
+					promptSource: "typed",
+					parentUuid: null,
+					message: { role: "user", content: legacyCard.prompt },
+				})}\n`,
+			);
 			const workspaceDirectory = getWorkspaceDirectoryPath(workspace.workspaceId);
 			await mkdir(workspaceDirectory, { recursive: true });
 			await mkdir(getWorkspaceDirectoryPath(foreignWorkspace.workspaceId), { recursive: true });
@@ -233,6 +282,100 @@ describe(
 				});
 				expect(foreign.availability).toBe("unavailable");
 				expect(foreign.messages).toEqual([]);
+				const readLegacyTask = () =>
+					api.runtime.getTaskConversationHistoryPage.query({
+						workspaceTaskId: legacyTaskId,
+						taskConversationSessionId: legacyTaskId,
+						transcriptReadConsistency: "stable_snapshot",
+					});
+				const firstLegacyRead = await readLegacyTask();
+				expect(firstLegacyRead.nativeHistoryLookup?.status).toMatch(/scanning|verified/u);
+				await expect.poll(async () => (await readLegacyTask()).nativeHistorySource).toBe("verified_read_only");
+				expect((await readLegacyTask()).messages.map((message) => message.content)).toEqual([legacyCard.prompt]);
+				const runAudit = (extraArguments: string[] = []) => {
+					const audit = spawnSync(
+						process.execPath,
+						[
+							packagedCliPath,
+							"task",
+							"audit-native-history",
+							"--project-path",
+							repository.repositoryPath,
+							"--task-id",
+							legacyTaskId,
+							"--task-id",
+							legacyTaskId,
+							...extraArguments,
+						],
+						{
+							encoding: "utf8",
+							timeout: 10_000,
+							env: fixture.createIsolatedChildProcessEnvironment({ PATH: "/usr/bin:/bin", DO_NOT_TRACK: "1" }),
+						},
+					);
+					expect(audit.stderr).not.toContain("Error");
+					expect(audit.status).toBe(0);
+					return JSON.parse(audit.stdout);
+				};
+				const audit = runAudit();
+				expect(audit.rows).toHaveLength(1);
+				expect(audit.rows[0].nativeHistory).toMatchObject({
+					readOnlyBinding: "verified_worktree_and_initial_prompt",
+					messageCount: 1,
+				});
+				expect(JSON.stringify(audit)).not.toContain(legacyCard.prompt);
+
+				const archiveIdentity = {
+					sourceWorkspaceId: workspace.workspaceId,
+					sourceTaskId: legacyTaskId,
+					sourceTaskIncarnationCreatedAtEpochMs: legacyCard.createdAt,
+					sourceConversationSessionId: legacyTaskId,
+					sourceAgentId: "claude",
+				};
+				const digest = (value: string) => createHash("sha256").update(value).digest("hex");
+				const archivedMessages = JSON.stringify([
+					{ id: "archive-message", role: "assistant", content: "归档正文", createdAt: 1 },
+				]);
+				const archiveText = JSON.stringify({
+					schemaVersion: 1,
+					...archiveIdentity,
+					availability: "partial",
+					sourceNativeSessionId: null,
+					capturedAtEpochMs: 2,
+					pageDigests: [digest(archivedMessages)],
+					gaps: [{ source: "fixture", reason: "旧分段缺失", retryCondition: "分段出现后重验" }],
+				});
+				const archiveRoot = join(fixture.fixtureRootDirectoryPath, "isolated-archive");
+				const archiveDirectory = join(archiveRoot, digest(archiveText));
+				await mkdir(archiveDirectory, { recursive: true });
+				await writeFile(join(archiveDirectory, "archive.json"), archiveText);
+				const archivePagePath = join(archiveDirectory, "0.json");
+				await writeFile(archivePagePath, archivedMessages);
+				const sourceManifest = join(archiveRoot, "trusted-source.json");
+				await writeFile(
+					sourceManifest,
+					JSON.stringify({
+						schemaVersion: 1,
+						sourceInstanceId: "source-fixture",
+						sessions: [{ ...archiveIdentity, archiveDigest: digest(archiveText) }],
+					}),
+				);
+				const archiveArguments = [
+					"--archive-directory",
+					archiveRoot,
+					"--archive-source-manifest",
+					sourceManifest,
+					"--archive-source-instance-id",
+					"source-fixture",
+					"--include-archive-messages",
+				];
+				expect(runAudit(archiveArguments).rows[0].archive).toMatchObject({
+					status: "partial",
+					verifiedPageCount: 1,
+					messages: [{ content: "归档正文" }],
+				});
+				await writeFile(archivePagePath, "损坏");
+				expect(runAudit(archiveArguments).rows[0].archive).toMatchObject({ status: "unverified" });
 				expect(await readFile(boardPath, "utf8")).toBe(beforeBoard);
 				expect(await readFile(sessionsPath, "utf8")).toBe(beforeSessions);
 				expect(await api.runtime.getTaskPromptDeliveryQueue.query({})).toEqual(beforeQueue);
@@ -254,6 +397,7 @@ describe(
 				});
 				expect(resumedOlder.availability).toBe("available");
 				expect(resumedOlder.messages).toEqual(older.messages);
+				await expect.poll(async () => (await readLegacyTask()).nativeHistorySource).toBe("verified_read_only");
 				expect(await readFile(sessionsPath, "utf8")).toBe(persistedBeforeRead);
 				expect(existsSync(deletedWorktreePath)).toBe(false);
 			} finally {

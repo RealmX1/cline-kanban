@@ -52,3 +52,27 @@ function readCodexThreadRolloutPathWithBuiltinSqlite(
 		database?.close();
 	}
 }
+
+const codexWorkingDirectoryRolloutRowsSchema = z.array(z.object({ rollout_path: z.string() }));
+const codexWorkingDirectoryRolloutQuery = "SELECT rollout_path FROM threads WHERE cwd = ? ORDER BY id LIMIT 257";
+
+/** 使用原生索引的精确 cwd，候选仍须重新核验原生转录。 */
+export function readCodexThreadRolloutPathsByWorkingDirectory(databasePath: string, cwd: string) {
+	let database: Database.Database | DatabaseSync | null = null;
+	try {
+		try {
+			database = new Database(databasePath, { readonly: true, fileMustExist: true, timeout: 50 });
+		} catch (error) {
+			if (!isBetterSqliteNativeAbiMismatch(error)) throw error;
+			const { DatabaseSync: BuiltinDatabaseSync } = requireNodeModule("node:sqlite") as {
+				DatabaseSync: typeof DatabaseSync;
+			};
+			database = new BuiltinDatabaseSync(databasePath, { readOnly: true });
+		}
+		return codexWorkingDirectoryRolloutRowsSchema
+			.parse(database.prepare(codexWorkingDirectoryRolloutQuery).all(cwd))
+			.map((row) => row.rollout_path);
+	} finally {
+		database?.close();
+	}
+}

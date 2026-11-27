@@ -94,6 +94,7 @@ import { MAX_WAIT_FOR_AGENT_IDLE_UPPER_BOUND_MS } from "../trpc/agent-idle-gated
 import type { RuntimeAppRouter } from "../trpc/app-router";
 import { retryCliRuntimeRequestWhileKanbanRuntimeRestarts } from "./cli-runtime-request-retry-while-kanban-runtime-restarts";
 import { registerAllProjectsTaskGroupQueryCommands } from "./task-all-projects-group-query";
+import { registerTaskNativeHistoryAuditCommand } from "./task-audit-native-history";
 import { registerTaskConversationSessionCommands } from "./task-conversation-session";
 import {
 	resolveTaskCreateEffectiveSettings,
@@ -2556,6 +2557,7 @@ ${AGENT_WORK_DELEGATION_SELECTION_CAVEAT}`,
 					}),
 			);
 		});
+	registerTaskNativeHistoryAuditCommand(task, runTaskCommand);
 	registerTaskRvfHistoryCommand(task, {
 		queryRuntime: (workspaceId, input, timeoutMs) =>
 			createRuntimeTrpcClient(workspaceId, {

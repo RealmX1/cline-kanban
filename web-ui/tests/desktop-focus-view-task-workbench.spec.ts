@@ -675,3 +675,60 @@ test("评论对话框新评论只显式提交，失败可重试且既有评论�
 	await expect.poll(() => savedComments[0]?.commentText).toBe("修改已有评论");
 	expect(writes).toHaveLength(3);
 });
+
+test("普通详情从后台核验打开旧正文，权威绑定出现时保留已加载页", async ({ page }) => {
+	const connections = await openWorkbench(page, 1440, 900, "legacy_native_history&column=review");
+	const initialConnections = connections();
+	let reads = 0;
+	let authorityAvailable = false;
+	const chatRecord = (id: string, content: string) => ({ id, content, role: "assistant", createdAt: 1 });
+	await page.route("**/api/trpc/runtime.getTaskConversationHistoryPage*", async (route) => {
+		reads++;
+		const input = new URL(route.request().url()).searchParams.get("input") ?? "";
+		const older = input.includes("older-cursor");
+		const value =
+			reads === 1
+				? {
+						availability: "unavailable",
+						messages: [],
+						nextCursor: null,
+						notice: "正在后台核验原生转录目录",
+						unavailabilityReason: "binding_pending",
+						nativeHistoryLookup: { status: "scanning", searchedDirectories: [] },
+					}
+				: authorityAvailable
+					? {
+							availability: "available",
+							messages: [chatRecord("bound", "权威绑定的正文")],
+							nextCursor: null,
+							notice: null,
+						}
+					: {
+							availability: "available",
+							messages: [older ? chatRecord("older", "更早的只读正文") : chatRecord("latest", "最新的只读正文")],
+							nextCursor: older ? null : "older-cursor",
+							notice: "已核实，仅供阅读。",
+							nativeHistorySource: "verified_read_only",
+							nativeHistoryLookup: { status: "verified", searchedDirectories: [] },
+						};
+		await route.fulfill({ json: [{ result: { data: value } }] });
+	});
+	await page.getByRole("button", { name: "终端工具与更多信息", exact: true }).click();
+	await page.getByRole("button", { name: "以文档阅读会话记录", exact: true }).click();
+	const reader = page.getByRole("region", { name: "会话转录文档" });
+	await expect(reader.getByText("正在后台核验原生转录目录")).toBeVisible();
+	await expect(reader.getByText("最新的只读正文")).toBeVisible();
+	await reader.getByRole("button", { name: "加载更早记录" }).click();
+	await expect(reader.getByText("更早的只读正文")).toBeVisible();
+	authorityAvailable = true;
+	await page.evaluate(() =>
+		(
+			window as unknown as { publishWorkbenchAuthoritativeNativeHistoryBinding: () => void }
+		).publishWorkbenchAuthoritativeNativeHistoryBinding(),
+	);
+	await expect(reader.getByText("历史读取来源已切换", { exact: false })).toBeVisible();
+	await expect(reader.getByText("更早的只读正文")).toBeVisible();
+	await reader.getByRole("button", { name: "刷新到最新" }).click();
+	await expect(reader.getByText("权威绑定的正文")).toBeVisible();
+	expect(connections()).toBe(initialConnections);
+});

@@ -1060,7 +1060,12 @@ export function createTaskConversationSessionService(deps: TaskConversationSessi
 							cursor,
 						})
 						.catch(() => null);
-					if (!history || history.availability === "unavailable") {
+					if (
+						!history ||
+						history.availability === "unavailable" ||
+						history.nativeHistorySource === "verified_read_only"
+					) {
+						// 阅读补证不能登记回报或把扫描标成完成；权威绑定出现后再读取。
 						await operations.update(scope, (store) => {
 							const current = store.assistantReportHistoryScans.find(
 								(entry) =>

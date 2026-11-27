@@ -123,7 +123,7 @@ describe("cli-process-guards", () => {
 	});
 
 	describe("installCliHardTimeoutIfNeeded", () => {
-		it("仅豁免 task watch 和 tasks watch，普通 list 继续安装硬超时", () => {
+		it("task 和 tasks watch 豁免硬超时，普通 list 继续安装硬超时", () => {
 			const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 			try {
 				installCliHardTimeoutIfNeeded(["task", "watch", "--all-projects"], false)();
@@ -133,6 +133,21 @@ describe("cli-process-guards", () => {
 				expect(setTimeoutSpy).toHaveBeenCalledTimes(1);
 			} finally {
 				setTimeoutSpy.mockRestore();
+			}
+		});
+		it("离线批量审计使用自身扫描预算，并保留显式 CLI 硬超时", () => {
+			vi.stubEnv("KANBAN_CLI_HARD_TIMEOUT_MS", "");
+			const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+			try {
+				installCliHardTimeoutIfNeeded(["task", "audit-native-history", "--project-path", "/isolated"], false)();
+				installCliHardTimeoutIfNeeded(["tasks", "audit-native-history", "--project-path", "/isolated"], false)();
+				expect(setTimeoutSpy).not.toHaveBeenCalled();
+				vi.stubEnv("KANBAN_CLI_HARD_TIMEOUT_MS", "120000");
+				installCliHardTimeoutIfNeeded(["task", "audit-native-history", "--project-path", "/isolated"], false)();
+				expect(setTimeoutSpy).toHaveBeenCalledExactlyOnceWith(expect.any(Function), 120_000);
+			} finally {
+				setTimeoutSpy.mockRestore();
+				vi.unstubAllEnvs();
 			}
 		});
 		it("returns a no-op cancel function for server-style invocations", () => {

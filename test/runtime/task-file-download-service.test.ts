@@ -179,6 +179,20 @@ it("正文核验后文件被替换时下载已核实 Markdown，不返回新字�
 	expect(download).toEqual({ markdown: "# 已核实完整计划", fileName: "same-id-main-session-plan.md" });
 	expect(await readFile(path, "utf8")).toBe("# 在核验后替换的新文件\n");
 });
+it("只读补证不能成为可下载的主会话 Plan", async () => {
+	const f = await fixture();
+	f.readHistory.mockResolvedValue({
+		availability: "available",
+		messages: [{ id: "1", role: "assistant", content: "<proposed_plan># 只读计划</proposed_plan>", createdAt: 1 }],
+		nextCursor: null,
+		notice: "已核对任务工作树、原生记录时间和精确首提示词，仅供阅读。",
+		nativeHistorySource: "verified_read_only",
+	});
+	const plan = await f.service.getMainSessionPlan(f.scope, f.input);
+	expect(plan.availability).toBe("unknown");
+	expect(plan.candidates).toEqual([]);
+	expect(plan.notice).toContain("只读补证");
+});
 it("历史不可读、读取预算不足和无计划状态分别保留", async () => {
 	const f = await fixture();
 	f.readHistory.mockResolvedValue({

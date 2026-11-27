@@ -743,6 +743,35 @@ describe("Agent 侧会话创建与回报", () => {
 		await f.service.reconcile(scope);
 		expect(f.enqueueReport).not.toHaveBeenCalled();
 	});
+	it("只读补证不登记侧会话回报，随后的权威历史仍可回报", async () => {
+		const f = await fixture();
+		const created = await f.service.create(scope, request({ sessionRole: "by_the_way" }), human);
+		if (!created.summary) throw new Error("缺少侧问");
+		const message: RuntimeTaskChatMessage = {
+			id: "read-only-report",
+			role: "assistant",
+			content: '<kanban-session-report>\n{"text":"只读结论"}\n</kanban-session-report>',
+			createdAt: 1001,
+			meta: { nativeMessagePhase: "final_answer" },
+		};
+		f.dependencies.readHistory = async () => ({
+			availability: "available",
+			messages: [message],
+			nextCursor: null,
+			notice: null,
+			nativeHistorySource: "verified_read_only",
+		});
+		await f.service.reconcile(scope);
+		expect(f.enqueueReport).not.toHaveBeenCalled();
+		f.dependencies.readHistory = async () => ({
+			availability: "available",
+			messages: [message],
+			nextCursor: null,
+			notice: null,
+		});
+		await f.service.reconcile(scope);
+		expect(f.enqueueReport).toHaveBeenCalledTimes(1);
+	});
 
 	it("peer 可回报创建者、当前主或任意同 Task 会话，拒绝跨 Task 目标和身份冒用", async () => {
 		const f = await fixture();

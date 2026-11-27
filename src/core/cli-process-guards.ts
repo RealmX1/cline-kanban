@@ -47,6 +47,10 @@ function parsePositiveIntEnv(name: string, fallback: number): number {
 	return parsed;
 }
 
+export function resolveCliHardTimeoutOverrideMs(): number | undefined {
+	return parsePositiveIntEnv("KANBAN_CLI_HARD_TIMEOUT_MS", 0) || undefined;
+}
+
 export function resolveCliHardTimeoutMs(argv: readonly string[] = process.argv): number {
 	const runtimeCommandIndex = argv.indexOf("runtime");
 	let fallback = isTaskIndexingSupportTriageInvocation(argv) ? 240_000 : DEFAULT_CLI_HARD_TIMEOUT_MS;
@@ -66,7 +70,7 @@ export function resolveCliHardTimeoutMs(argv: readonly string[] = process.argv):
 		// 等待从 tRPC 成功返回后才开始；还须覆盖一次 HTTP 探测及最终输出、遥测排空。
 		fallback = Math.max(fallback, resolveCliTrpcTimeoutMs(argv) + successorWaitSeconds * 1000 + 5_000);
 	}
-	return parsePositiveIntEnv("KANBAN_CLI_HARD_TIMEOUT_MS", fallback);
+	return resolveCliHardTimeoutOverrideMs() ?? fallback;
 }
 
 export function resolveCliTrpcTimeoutMs(argv: readonly string[] = process.argv): number {
@@ -161,15 +165,15 @@ export function installCliFatalErrorHandlers(): void {
 	});
 }
 
-function isTaskGroupWatchInvocation(argv: readonly string[]): boolean {
+function readCliTaskSubcommand(argv: readonly string[]): string | undefined {
 	const taskCommandIndex = argv.findIndex((argument) => argument === "task" || argument === "tasks");
-	return taskCommandIndex >= 0 && argv[taskCommandIndex + 1] === "watch";
+	return taskCommandIndex >= 0 ? argv[taskCommandIndex + 1] : undefined;
 }
 
 export function installCliTaskGroupWatchInterruptionGuard(
 	argv: readonly string[],
 ): { signal: AbortSignal; dispose: () => void } | undefined {
-	if (!isTaskGroupWatchInvocation(argv)) return undefined;
+	if (readCliTaskSubcommand(argv) !== "watch") return undefined;
 	const controller = new AbortController();
 	let interruptedShutdownTimeout: ReturnType<typeof setTimeout> | undefined;
 	const interrupt = (signalName: "SIGINT" | "SIGTERM") => {
@@ -198,7 +202,12 @@ export function installCliTaskGroupWatchInterruptionGuard(
 }
 
 export function installCliHardTimeoutIfNeeded(argv: string[], isServerStyleInvocation: boolean): () => void {
-	if (isServerStyleInvocation || isTaskGroupWatchInvocation(argv)) {
+	const taskSubcommand = readCliTaskSubcommand(argv);
+	if (isServerStyleInvocation || taskSubcommand === "watch") {
+		return () => {};
+	}
+	// 离线批量核验有自己的收口预算，默认允许输出已完成的部分结果。
+	if (taskSubcommand === "audit-native-history" && resolveCliHardTimeoutOverrideMs() === undefined) {
 		return () => {};
 	}
 	const timeoutMs = resolveCliHardTimeoutMs(argv);

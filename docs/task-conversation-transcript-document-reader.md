@@ -48,7 +48,7 @@ npm run web:typecheck
 
 定义位于 `docs/verification-definitions/task-conversation-transcript-document-reader.json`，按稳定 verificationId 幂等更新。只登记，不执行真实实例验证、不写 `verifiedAt`。兜底清理：`kanban verification cleanup --verification-id 1a175138-3d4f-4ee8-98e3-23c19e30d982`。没有临时插桩。
 
-本次注册回执与 `verification list` 均确认：workspace `cline-kanban`、task `982d3`，共 1 项 `guided_manual`，清理模式 `automatic`，资产目录 `/Users/bominzhang/.cline/kanban/verifications/1a175138-3d4f-4ee8-98e3-23c19e30d982`。没有自动脚本，dry-run 不适用。后续 deployment record 预计挂载引导项 1 项、自动项 0 项；当前没有执行或勾选该验证。
+本次注册回执与 `verification list` 均确认：workspace `cline-kanban`、task `982d3`，共 1 项 `guided_manual`，清理模式 `automatic`，资产目录 `~/.cline/kanban/verifications/1a175138-3d4f-4ee8-98e3-23c19e30d982`。没有自动脚本，dry-run 不适用。后续 deployment record 预计挂载引导项 1 项、自动项 0 项；当前没有执行或勾选该验证。
 
 ## 本次实施验证结果
 
@@ -57,3 +57,18 @@ npm run web:typecheck
 - 根项目与 Web UI 的 typecheck、改动文件 Biome 检查、`git diff --check`、独立目录的完整构建通过。
 - 本机共享依赖存在版本漂移；只在 task 的独立 `node_modules` 中采用与锁文件一致的 thread-graph commit `233d3e765405fd27df0499c6cb4916ee3566d86b` 产物。后端单元测试也在 Node 22 通过；真实 runtime / 构建使用与既有原生依赖 ABI 匹配的 Node 24，没有重编共享安装。
 - 源码保留在当前 task 工作树，未创建提交、未部署。真实 agent 进程、正式打包界面和实际移动设备上的集成表现由已登记的部署后观察项承接。
+
+## 旧会话的只读补证与批量核验
+
+普通任务详情的文档阅读和 `runtime.getTaskConversationHistoryPage` 优先读取持久绑定。Codex 或 Claude 的位置缺失或失效时，先按已记录的原生 ID 核验新位置。无 ID 的旧主会话需要已登记的独立 Git worktree、同一任务创建代次、可信原生头和精确首提示词。共享目录、多个 Kanban 会话、继承或竞争转录会保留未决状态，直到取得独立归属证据。
+
+Codex 先按精确 `cwd` 查原生 SQLite，再用会话日期范围限定后台目录读头。Claude 使用账户配置根及编码后的项目目录。同一来源时段的并发查询共用有界扫描。浏览器在扫描中自动重查，也可手动刷新。接口通过 `nativeHistoryLookup` 返回检索范围及状态，通过 `nativeHistorySource: "verified_read_only"` 标记读到的补证历史。来源切换时，旧游标要求刷新，界面继续显示此前加载的正文；两个只读来源的标记相同也保留已加载页。补证不会写入权威会话摘要、续跑身份或侧会话回报。完成扫描后若来源目录出现新转录，缓存立即失效。批量核验遇到较晚的损坏页时，`availability` 为 `partially_available`，`pagination` 也不再是 `end_reached`。显式清单里仍存在的任务，即使当前没有会话摘要，也会核验并按要求导出归档。
+
+```sh
+kanban task audit-native-history --project-path /path/to/registered/repository \
+  --task-id "$FIRST_TASK_ID" --task-id "$SECOND_TASK_ID"
+```
+
+省略 `--task-id` 时检查项目中的 Codex 和 Claude 会话。报告按任务和会话排序，包含正文条数、分页进度、候选、拒绝原因与扫描成本。发现扫描范围未覆盖或原件不可读时，结论只适用于已检查的范围。批量命令默认有 10 分钟核验预算，各来源扫描及各会话分页也各有预算。用尽整批预算时，JSON 保留已完成且归属复核通过的范围，并通过 `auditTimeBudget` 标出仍待核验的任务。可按 `--task-id` 分批重验。显式设置 `KANBAN_CLI_HARD_TIMEOUT_MS` 时继续启用整条命令的硬超时，核验预算会留出归属复核和报告输出的时间。
+
+M2 V1 归档另需提供从可信交接记录提取的来源清单。清单格式为 JSON 对象，包含 `schemaVersion: 1`、`sourceInstanceId` 与 `sessions`。每个会话条目使用原归档的 `sourceWorkspaceId`、`sourceTaskId`、`sourceTaskIncarnationCreatedAtEpochMs`、`sourceConversationSessionId`、`sourceAgentId`，另加来源记录中的 `archiveDigest`。将归档所在的 `history` 目录传给 `--archive-directory`，将清单和预期来源实例分别传给 `--archive-source-manifest`、`--archive-source-instance-id`。只有加上 `--include-archive-messages` 时，报告才输出校验全部分页摘要后的归档正文。报告保留归档完整度、缺口和重验条件。

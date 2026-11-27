@@ -1,8 +1,15 @@
-import { appendFile, mkdir, mkdtemp, readFile, rm, truncate, writeFile } from "node:fs/promises";
+import * as fileSystemPromises from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { compress } from "zstd-stream";
+import { resolveLegacyNativeHistorySource } from "../../../src/agent-session-history/legacy-native-history-source";
+import {
+	inspectLegacyNativeHistoryTranscript,
+	requestLegacyNativeHistorySourceScan,
+} from "../../../src/agent-session-history/legacy-native-history-source-scan";
 import { loadTaskConversationHistoryPage } from "../../../src/agent-session-history/task-conversation-history-page";
 import {
 	getCodexConversationMigrationRecordPath,
@@ -10,8 +17,10 @@ import {
 } from "../../../src/codex-conversation-storage/codex-conversation-storage-home";
 import type { RuntimeBoardCard, RuntimeTaskSessionSummary } from "../../../src/core/api-contract";
 import { findLatestCompleteTaskPlan } from "../../../src/task-file-downloads/task-main-session-plan";
+import { createIsolatedGitTestWorkspaceFixture } from "../../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
 
 const directories: string[] = [];
+vi.mock("node:fs/promises", { spy: true });
 afterEach(async () => {
 	vi.unstubAllEnvs();
 	for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
@@ -920,4 +929,497 @@ describe("Done 任务只读会话历史", () => {
 		expect(stale.availability).toBe("unavailable");
 		expect(stale.notice).toContain("刷新");
 	});
+});
+
+it.each(["不存在", "原生 ID 不符"])("Claude 持久路径失效（%s）时继续只读分页", async (invalidPath) => {
+	const f = await fixture("claude", []);
+	const home = dirname(f.path);
+	vi.stubEnv("CLAUDE_CONFIG_DIR", home);
+	const nativeSessionId = "0b1d15a6-73fd-42dd-9a07-b128a1212670";
+	const workspacePath = f.summary.workspacePath ?? "";
+	const projectDirectory = join(home, "projects", workspacePath.replace(/[^a-zA-Z0-9]/gu, "-"));
+	await mkdir(projectDirectory, { recursive: true });
+	const transcriptPath = join(projectDirectory, `${nativeSessionId}.jsonl`);
+	await writeFile(
+		transcriptPath,
+		`${Array.from({ length: 110 }, (_, index) =>
+			JSON.stringify({
+				type: "assistant",
+				sessionId: nativeSessionId,
+				cwd: workspacePath,
+				message: { role: "assistant", content: `恢复正文 ${index}` },
+			}),
+		).join("\n")}\n`,
+	);
+	const identity = {
+		sourceAgentId: "claude" as const,
+		nativeSessionId,
+		transcriptPath: join(home, "moved.jsonl"),
+		observedAt: 1,
+	};
+	f.input.sessions.task.agentNativeConversationSessionIdentity = identity;
+	if (invalidPath === "原生 ID 不符")
+		await writeFile(identity.transcriptPath, `${JSON.stringify({ type: "user", sessionId: "different-session" })}\n`);
+	const input = {
+		...f.input,
+		nativeHistoryScope: { workspaceId: "test-workspace", workspacePath: home },
+		request: { ...f.input.request, transcriptReadConsistency: "stable_snapshot" as const },
+	};
+	const page = await loadTaskConversationHistoryPage(input);
+	expect(page.nativeHistorySource).toBe("verified_read_only");
+	expect(page.messages.at(-1)?.content).toBe("恢复正文 109");
+	expect(page.nextCursor).toBeTruthy();
+	expect(f.input.sessions.task.agentNativeConversationSessionIdentity).toEqual(identity);
+	const next = await loadTaskConversationHistoryPage({
+		...input,
+		request: { ...input.request, cursor: page.nextCursor },
+	});
+	expect(page.messages).toHaveLength(100);
+	expect(next.nativeHistorySource).toBe("verified_read_only");
+	expect(next.messages).toHaveLength(10);
+	expect(next.messages[0]?.content).toBe("恢复正文 0");
+	f.input.sessions.task.agentNativeConversationSessionIdentity = { ...identity, transcriptPath };
+	const rejected = await loadTaskConversationHistoryPage({
+		...input,
+		request: { ...input.request, cursor: page.nextCursor },
+	});
+	expect(rejected.unavailabilityReason).toBe("snapshot_invalid");
+});
+
+it("Codex 按任务代次核验压缩原件，拒绝多会话、同提示竞争和继承历史，并复用目录扫描", async () => {
+	const isolated = createIsolatedGitTestWorkspaceFixture();
+	vi.stubEnv("HOME", isolated.isolatedHomeDirectoryPath);
+	vi.stubEnv("CODEX_HOME", undefined);
+	vi.stubEnv("CODEX_SQLITE_HOME", undefined);
+	const repository = isolated.createNonBareRepository({ repositoryDirectoryName: "legacy-history-project" });
+	await writeFile(join(repository.repositoryPath, "README.md"), "隔离 Git 仓库");
+	repository.commitAllRepositoryFilesAtDate({ message: "测试工作树", authorAndCommitterIsoDate: "2026-07-01T00:00Z" });
+	const isolatedWorktreeParentDirectoryPath = join(isolated.isolatedHomeDirectoryPath, ".cline/worktrees", "task");
+	await mkdir(isolatedWorktreeParentDirectoryPath, { recursive: true });
+	const { worktreePath: worktree } = repository.createLinkedWorktree({
+		isolatedWorktreeParentDirectoryPath,
+		worktreeDirectoryName: "legacy-history-project",
+		branchName: "legacy-history-test",
+	});
+	const codexHome = join(isolated.isolatedHomeDirectoryPath, ".codex");
+	const transcriptDirectory = join(codexHome, "sessions", "2026", "07", "15");
+	await mkdir(transcriptDirectory, { recursive: true });
+	const createdAt = Date.parse("2026-07-15T01:00:00Z");
+	const updatedAt = Date.parse("2026-07-15T02:00:00Z");
+	const f = await fixture("codex", []);
+	const summary = { ...f.summary, workspacePath: null, updatedAt, agentNativeConversationSessionIdentity: undefined };
+	const legacyCard = { ...card, createdAt };
+	const scope = { workspaceId: "legacy-history-project", workspacePath: repository.repositoryPath };
+	const sessions = { task: summary };
+	const writeRollout = async (candidate: number, timestamp: number, prompt: string, forkedFrom?: string) => {
+		const id = `9a378e6f-c46c-47ce-b150-e9c455a1f61${candidate}`;
+		const path = join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}.jsonl`);
+		const turn = [
+			{ type: "session_meta", payload: { id, cwd: worktree, timestamp, forked_from_id: forkedFrom } },
+			{ type: "event_msg", payload: { type: "user_message", message: prompt } },
+			{ type: "event_msg", payload: { type: "agent_message", message: "匹配的原生正文" } },
+		];
+		const contents = Buffer.from(`${turn.map((record) => JSON.stringify(record)).join("\n")}\n`);
+		await writeFile(candidate === 0 ? `${path}.zst` : path, candidate === 0 ? await compress(contents) : contents);
+		return { id, path };
+	};
+	const good = await writeRollout(0, createdAt + 1, card.prompt);
+	await writeRollout(1, createdAt - 1, card.prompt);
+	await writeRollout(2, createdAt + 1, "相似的原始需求");
+	const database = new DatabaseSync(join(codexHome, "state_5.sqlite"));
+	database.exec("CREATE TABLE threads (id TEXT, cwd TEXT, rollout_path TEXT)");
+	database.prepare("INSERT INTO threads VALUES (?, ?, ?)").run(good.id, worktree, good.path);
+	database.close();
+
+	const lookup = () =>
+		resolveLegacyNativeHistorySource({ scope, card: legacyCard, summary, sessions, waitForScan: true });
+	const cold = await lookup();
+	expect(cold.status).toBe("verified");
+	expect(cold.scanCost.transcriptFilesRead).toBeGreaterThan(2);
+	expect(cold.rejectedCandidates.map(({ reason }) => reason)).toEqual([
+		"outside_task_incarnation_observation",
+		"initial_prompt_mismatch",
+	]);
+	const warm = await lookup();
+	expect(warm.evidence).toEqual(cold.evidence);
+	expect(warm.scanCost.transcriptFilesRead).toBeLessThan(cold.scanCost.transcriptFilesRead);
+	const page = await loadTaskConversationHistoryPage({
+		request: f.input.request,
+		card: legacyCard,
+		sessions,
+		nativeHistoryScope: scope,
+		waitForNativeHistoryScan: true,
+	});
+	expect(page.nativeHistorySource).toBe("verified_read_only");
+	expect(page.messages.map(({ content }) => content)).toEqual([card.prompt, "匹配的原生正文"]);
+	const withSideSession = await resolveLegacyNativeHistorySource({
+		scope,
+		card: legacyCard,
+		summary,
+		sessions: {
+			...sessions,
+			side: {
+				...summary,
+				taskId: "side",
+				taskConversationSessionMetadata: {
+					workspaceTaskId: card.id,
+					taskConversationSessionRole: "by_the_way",
+					taskConversationSessionContextSource: "main",
+					parentTaskConversationSessionId: card.id,
+					mainSessionOriginTurnNumber: null,
+					mainSessionOriginUserMessagePreview: null,
+					latestUserMessagePreview: null,
+				},
+			},
+		},
+	});
+	expect(withSideSession.status).toBe("ownership_unproven");
+
+	const duplicate = await writeRollout(3, createdAt + 100, card.prompt);
+	const fork = await writeRollout(4, createdAt + 100, card.prompt, good.id);
+	// 显式新扫描来源模拟进程中断、重启后重新发现的目录和竞争候选。
+	const nextCodexHome = join(isolated.isolatedHomeDirectoryPath, "new-configured-codex");
+	vi.stubEnv("CODEX_HOME", nextCodexHome);
+	await mkdir(join(nextCodexHome, "sessions"), { recursive: true });
+	await writeFile(
+		join(nextCodexHome, "sessions", `rollout-2026-07-15T01-00-00-${duplicate.id}.jsonl`),
+		await readFile(duplicate.path),
+	);
+	await writeFile(
+		join(nextCodexHome, "sessions", `rollout-2026-07-15T01-00-00-${fork.id}.jsonl`),
+		await readFile(fork.path),
+	);
+	const ambiguous = await lookup();
+	expect(ambiguous.status).toBe("ambiguous");
+	expect(ambiguous.rejectedCandidates.some(({ reason }) => reason === "inherited_native_history")).toBe(true);
+	expect(summary.agentNativeConversationSessionIdentity).toBeUndefined();
+});
+
+it("Codex 只有附件的首轮不能把后一条文字当成精确首提示词", async () => {
+	const nativeSessionId = "9a378e6f-c46c-47ce-b150-e9c455a1f610";
+	const header = {
+		type: "session_meta",
+		payload: { id: nativeSessionId, cwd: "/work", timestamp: "2026-07-15T01:00:00Z", source: "cli" },
+	};
+	const attachmentOnly = await fixture("codex", [
+		header,
+		{
+			type: "event_msg",
+			payload: { type: "user_message", message: "", images: ["image.png"], local_images: [] },
+		},
+		{ type: "event_msg", payload: { type: "agent_message", message: "看到图片" } },
+		{ type: "event_msg", payload: { type: "user_message", message: card.prompt } },
+	]);
+	const fromEvent = await inspectLegacyNativeHistoryTranscript(attachmentOnly.path, "codex", true);
+	expect(fromEvent.header?.nativeSessionId).toBe(nativeSessionId);
+	expect(fromEvent.initialPrompt).toBeNull();
+	expect(fromEvent.incomplete).toBe(false);
+	const imageTurn = await fixture("codex", [
+		header,
+		{
+			type: "response_item",
+			payload: {
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", image_url: "data:image/png;base64,aa" }],
+			},
+		},
+		{ type: "event_msg", payload: { type: "user_message", message: card.prompt } },
+	]);
+	const fromResponse = await inspectLegacyNativeHistoryTranscript(imageTurn.path, "codex", true);
+	expect(fromResponse.initialPrompt).toBeNull();
+	expect(fromResponse.incomplete).toBe(false);
+});
+
+async function legacyCodexWorktree() {
+	const isolated = createIsolatedGitTestWorkspaceFixture();
+	vi.stubEnv("HOME", isolated.isolatedHomeDirectoryPath);
+	vi.stubEnv("CODEX_HOME", undefined);
+	vi.stubEnv("CODEX_SQLITE_HOME", undefined);
+	const repository = isolated.createNonBareRepository({ repositoryDirectoryName: "legacy-history-project" });
+	await writeFile(join(repository.repositoryPath, "README.md"), "隔离 Git 仓库");
+	repository.commitAllRepositoryFilesAtDate({ message: "测试工作树", authorAndCommitterIsoDate: "2026-07-01T00:00Z" });
+	const isolatedWorktreeParentDirectoryPath = join(isolated.isolatedHomeDirectoryPath, ".cline/worktrees", "task");
+	await mkdir(isolatedWorktreeParentDirectoryPath, { recursive: true });
+	const { worktreePath: worktree } = repository.createLinkedWorktree({
+		isolatedWorktreeParentDirectoryPath,
+		worktreeDirectoryName: "legacy-history-project",
+		branchName: "legacy-history-test",
+	});
+	const codexHome = join(isolated.isolatedHomeDirectoryPath, ".codex");
+	const transcriptDirectory = join(codexHome, "sessions", "2026", "07", "15");
+	await mkdir(transcriptDirectory, { recursive: true });
+	const createdAt = Date.parse("2026-07-15T01:00:00Z");
+	const updatedAt = Date.parse("2026-07-15T02:00:00Z");
+	const f = await fixture("codex", []);
+	const summary = { ...f.summary, workspacePath: null, updatedAt, agentNativeConversationSessionIdentity: undefined };
+	const legacyCard = { ...card, createdAt };
+	const scope = { workspaceId: "legacy-history-project", workspacePath: repository.repositoryPath };
+	const sessions = { task: summary };
+	return {
+		isolated,
+		worktree,
+		codexHome,
+		transcriptDirectory,
+		createdAt,
+		updatedAt,
+		f,
+		summary,
+		legacyCard,
+		scope,
+		sessions,
+	};
+}
+
+it("同一目录在缓存有效期内出现竞争转录后不再视为唯一来源", async () => {
+	const { worktree, transcriptDirectory, createdAt, legacyCard, scope, summary, sessions } =
+		await legacyCodexWorktree();
+	const writeRollout = async (suffix: string) => {
+		const id = `9a378e6f-c46c-47ce-b150-e9c455a1f6${suffix}`;
+		const path = join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}.jsonl`);
+		await writeFile(
+			path,
+			`${[
+				{ type: "session_meta", payload: { id, cwd: worktree, timestamp: createdAt + 1, source: "cli" } },
+				{ type: "event_msg", payload: { type: "user_message", message: card.prompt } },
+				{ type: "event_msg", payload: { type: "agent_message", message: "匹配的原生正文" } },
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		return path;
+	};
+	await writeRollout("10");
+	const lookup = () =>
+		resolveLegacyNativeHistorySource({ scope, card: legacyCard, summary, sessions, waitForScan: true });
+	expect((await lookup()).status).toBe("verified");
+	await writeRollout("11");
+	expect((await lookup()).status).toBe("ambiguous");
+});
+
+it("缓存有效期内原地改写已有转录后不再沿用旧的唯一来源", async () => {
+	const { worktree, transcriptDirectory, createdAt, legacyCard, scope, summary, sessions } =
+		await legacyCodexWorktree();
+	const writeRollout = async (suffix: string, cwd: string, prompt: string) => {
+		const id = `9a378e6f-c46c-47ce-b150-e9c455a1f6${suffix}`;
+		const path = join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}.jsonl`);
+		await writeFile(
+			path,
+			`${[
+				{ type: "session_meta", payload: { id, cwd, timestamp: createdAt + 1, source: "cli" } },
+				{ type: "event_msg", payload: { type: "user_message", message: prompt } },
+				{ type: "event_msg", payload: { type: "agent_message", message: "匹配的原生正文" } },
+			]
+				.map((record) => JSON.stringify(record))
+				.join("\n")}\n`,
+		);
+		return path;
+	};
+	await writeRollout("20", worktree, card.prompt);
+	const other = await writeRollout("21", "/unrelated-worktree", "另一段会话");
+	const lookup = () =>
+		resolveLegacyNativeHistorySource({ scope, card: legacyCard, summary, sessions, waitForScan: true });
+	expect((await lookup()).status).toBe("verified");
+	expect(await writeRollout("21", worktree, card.prompt)).toBe(other);
+	const rewritten = await lookup();
+	expect(rewritten.status).toBe("ambiguous");
+	expect(rewritten.scanCost.cachedHeaders).toBeGreaterThan(0);
+});
+
+it("目录重扫期间的旧游标保持可重试，扫描结束后仍能读取更早记录", async () => {
+	const { worktree, transcriptDirectory, createdAt, f, legacyCard, scope, sessions } = await legacyCodexWorktree();
+	const id = "9a378e6f-c46c-47ce-b150-e9c455a1f610";
+	const records = [
+		{ type: "session_meta", payload: { id, cwd: worktree, timestamp: createdAt + 1, source: "cli" } },
+		{ type: "event_msg", payload: { type: "user_message", message: card.prompt } },
+		...Array.from({ length: 119 }, (_, index) => ({
+			type: "event_msg",
+			payload: { type: "agent_message", message: `回答 ${index}` },
+		})),
+	];
+	await writeFile(
+		join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}.jsonl`),
+		`${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+	);
+	const input = {
+		request: { ...f.input.request, transcriptReadConsistency: "stable_snapshot" as const },
+		card: legacyCard,
+		sessions,
+		nativeHistoryScope: scope,
+		waitForNativeHistoryScan: true,
+	};
+	const first = await loadTaskConversationHistoryPage(input);
+	expect(first.nextCursor).toBeTruthy();
+	const later = Date.now() + 31_000;
+	const dateNow = vi.spyOn(Date, "now").mockReturnValue(later);
+	try {
+		const duringRescan = await loadTaskConversationHistoryPage({
+			...input,
+			request: { ...input.request, cursor: first.nextCursor },
+			waitForNativeHistoryScan: false,
+		});
+		expect(duringRescan.nativeHistoryLookup?.status).toBe("scanning");
+		expect(duringRescan.unavailabilityReason).not.toBe("snapshot_invalid");
+	} finally {
+		dateNow.mockRestore();
+	}
+	const older = await loadTaskConversationHistoryPage({
+		...input,
+		request: { ...input.request, cursor: first.nextCursor },
+	});
+	expect(older.unavailabilityReason).not.toBe("snapshot_invalid");
+	expect(older.messages.length).toBeGreaterThan(0);
+});
+
+it("已记录的 Codex ID 读取索引指向的当前分段，而不是退回旧根", async () => {
+	const isolated = createIsolatedGitTestWorkspaceFixture();
+	vi.stubEnv("HOME", isolated.isolatedHomeDirectoryPath);
+	const codexHome = join(isolated.isolatedHomeDirectoryPath, ".codex");
+	vi.stubEnv("CODEX_HOME", codexHome);
+	vi.stubEnv("CODEX_SQLITE_HOME", undefined);
+	const transcriptDirectory = join(codexHome, "sessions", "2026", "07", "15");
+	await mkdir(transcriptDirectory, { recursive: true });
+	const id = "9a378e6f-c46c-47ce-b150-e9c455a1f610";
+	const createdAt = Date.parse("2026-07-15T01:00:00Z");
+	const f = await fixture("codex", []);
+	const workspacePath = f.summary.workspacePath ?? "/task";
+	const rootPath = join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}.jsonl`);
+	const segmentPath = join(transcriptDirectory, `rollout-2026-07-15T01-00-00-${id}_segment-1.jsonl`);
+	const rootBody = `${[
+		{ type: "session_meta", payload: { id, cwd: workspacePath, timestamp: "2026-07-15T01:00:00Z", source: "cli" } },
+		{ type: "event_msg", payload: { type: "agent_message", message: "旧根回答" } },
+	]
+		.map((record) => JSON.stringify(record))
+		.join("\n")}\n`;
+	await writeFile(rootPath, rootBody);
+	await writeFile(
+		segmentPath,
+		`${[
+			{
+				type: "session_meta",
+				payload: {
+					id,
+					cwd: workspacePath,
+					timestamp: "2026-07-15T01:05:00Z",
+					source: "cli",
+					history_mode: "paginated",
+					history_base: { thread_id: id, end_byte_offset: Buffer.byteLength(rootBody), end_ordinal_exclusive: 2 },
+				},
+			},
+			{ type: "event_msg", payload: { type: "agent_message", message: "续接后的回答" } },
+		]
+			.map((record) => JSON.stringify(record))
+			.join("\n")}\n`,
+	);
+	const database = new DatabaseSync(join(codexHome, "state_5.sqlite"));
+	database.exec("CREATE TABLE threads (id TEXT, cwd TEXT, rollout_path TEXT)");
+	database.prepare("INSERT INTO threads VALUES (?, ?, ?)").run(id, workspacePath, segmentPath);
+	database.close();
+	const summary = {
+		...f.summary,
+		workspacePath,
+		updatedAt: createdAt + 60_000,
+		agentNativeConversationSessionIdentity: {
+			sourceAgentId: "codex" as const,
+			nativeSessionId: id,
+			transcriptPath: join(transcriptDirectory, "missing.jsonl"),
+			observedAt: createdAt,
+		},
+	};
+	const legacyCard = { ...card, createdAt };
+	const sessions = { task: summary };
+	const scope = { workspaceId: "legacy-segment", workspacePath: isolated.isolatedHomeDirectoryPath };
+	const resolution = await resolveLegacyNativeHistorySource({
+		scope,
+		card: legacyCard,
+		summary,
+		sessions,
+		waitForScan: true,
+	});
+	expect(resolution.status).toBe("verified");
+	expect(resolution.evidence?.identity.transcriptPath).toBe(await realpath(segmentPath));
+	const page = await loadTaskConversationHistoryPage({
+		request: f.input.request,
+		card: legacyCard,
+		sessions,
+		nativeHistoryScope: scope,
+		waitForNativeHistoryScan: true,
+	});
+	expect(page.messages.map((message) => message.content)).toContain("续接后的回答");
+	expect(page.nextCursor).toBeTruthy();
+});
+
+it("目录变化后并发读取共享同一轮重新扫描", async () => {
+	const f = await fixture("claude", []);
+	const directory = dirname(f.path);
+	const initial = await requestLegacyNativeHistorySourceScan(directory, "claude");
+	await initial?.completion;
+	await writeFile(join(directory, "new-native.jsonl"), "\n");
+	const rescans = await Promise.all(
+		Array.from({ length: 3 }, () => requestLegacyNativeHistorySourceScan(directory, "claude")),
+	);
+	await Promise.all(rescans.map((rescan) => rescan?.completion));
+	expect(rescans[0]).not.toBe(initial);
+	expect(rescans.every((rescan) => rescan === rescans[0])).toBe(true);
+});
+
+it.each(["转录元信息", "目录成员"])("缓存核验已读取%s时新增转录，后发请求可见该转录", async (blockedCheck) => {
+	const f = await fixture("claude", []);
+	const directory = dirname(f.path);
+	const initial = await requestLegacyNativeHistorySourceScan(directory, "claude");
+	await initial?.completion;
+	let markStatRead = () => {};
+	const statWasRead = new Promise<void>((resolve) => {
+		markStatRead = resolve;
+	});
+	let releaseStatResult = () => {};
+	const statResultReleased = new Promise<void>((resolve) => {
+		releaseStatResult = resolve;
+	});
+	const { stat: actualStat } = await vi.importActual<typeof fileSystemPromises>("node:fs/promises");
+	const blockedPath = blockedCheck === "目录成员" ? directory : f.path;
+	let blocked = false;
+	const statMock = vi.spyOn(fileSystemPromises, "stat").mockImplementation(async (...args) => {
+		const metadata = await actualStat(...args);
+		if (args[0] === blockedPath && !blocked) {
+			blocked = true;
+			markStatRead();
+			await statResultReleased;
+		}
+		return metadata;
+	});
+	try {
+		const first = requestLegacyNativeHistorySourceScan(directory, "claude");
+		await statWasRead;
+		const newTranscript = join(directory, "competing-native.jsonl");
+		await writeFile(newTranscript, "");
+		const later = requestLegacyNativeHistorySourceScan(directory, "claude");
+		releaseStatResult();
+		const [firstScan, laterScan] = await Promise.all([first, later]);
+		await laterScan?.completion;
+		expect(firstScan).toBe(laterScan);
+		expect(laterScan?.files.has(newTranscript)).toBe(true);
+	} finally {
+		releaseStatResult();
+		statMock.mockReset();
+	}
+});
+
+it("缺失的 Claude 项目目录经轮询收敛，目录出现后重新扫描", async () => {
+	const f = await fixture("claude", []);
+	const directory = join(dirname(f.path), "missing-project");
+	const first = await requestLegacyNativeHistorySourceScan(directory, "claude");
+	await first?.completion;
+	const next = await requestLegacyNativeHistorySourceScan(directory, "claude");
+	await next?.completion;
+	expect(next).toBe(first);
+	expect(next?.status).toBe("complete");
+	expect(next?.uncheckedPaths.size).toBe(0);
+	await mkdir(directory);
+	const transcript = join(directory, "native.jsonl");
+	await writeFile(transcript, "");
+	const rescan = await requestLegacyNativeHistorySourceScan(directory, "claude");
+	await rescan?.completion;
+	expect(rescan).not.toBe(first);
+	expect(rescan?.files.has(transcript)).toBe(true);
 });

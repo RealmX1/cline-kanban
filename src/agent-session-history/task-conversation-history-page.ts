@@ -27,6 +27,13 @@ import {
 } from "./codex-transcript-read-source";
 import { parseAcceptedKimiMainUserMessage } from "./kimi-native-conversation-activity-reader";
 import {
+	type LegacyNativeHistoryEvidence,
+	type LegacyNativeHistoryResolution,
+	type LegacyNativeHistoryWorkspaceScope,
+	resolveLegacyNativeHistorySource,
+} from "./legacy-native-history-source";
+import { nativeHistoryFileRevision } from "./legacy-native-history-source-scan";
+import {
 	assertNativeTranscriptFilePrefixSnapshot,
 	captureNativeTranscriptFilePrefixSnapshot,
 	NativeTranscriptSnapshotInvalidError,
@@ -46,6 +53,7 @@ const snapshotFilesSchema = z
 	.max(32);
 const historyCursorSchema = z.object({
 	internalVersion: z.literal(2).optional(),
+	readOnlyNativeHistorySourceKey: z.string().optional(),
 	nativeSessionId: z.string().optional(),
 	codexContentSnapshotFiles: snapshotFilesSchema.optional(),
 	sourceRevision: z.string(),
@@ -374,6 +382,9 @@ export interface LoadTaskConversationHistoryPageInput {
 	card: RuntimeBoardCard | null;
 	sessions: Record<string, RuntimeTaskSessionSummary>;
 	retainedMessages?: readonly RuntimeTaskChatMessage[];
+	nativeHistoryScope?: LegacyNativeHistoryWorkspaceScope;
+	waitForNativeHistoryScan?: boolean;
+	onNativeHistoryResolution?: (resolution: LegacyNativeHistoryResolution) => void;
 	// 交接材料保存已核实的原生分段，不按目录猜选或漏掉 history_base 祖先。
 	onVerifiedTranscriptSegment?: (transcriptPath: string) => void;
 }
@@ -452,6 +463,66 @@ export async function loadTaskConversationHistoryPage(
 	input: LoadTaskConversationHistoryPageInput,
 ): Promise<RuntimeTaskConversationHistoryPageResponse> {
 	const { request, card, sessions } = input;
+	const summary = sessions[request.taskConversationSessionId];
+	const boundPage = await loadTaskConversationHistoryPageFromSummary(input);
+	if (
+		!input.nativeHistoryScope ||
+		!card ||
+		card.id !== request.workspaceTaskId ||
+		!summary ||
+		summary.taskId !== request.taskConversationSessionId ||
+		!doesConversationSessionBelongToTask(summary, card.id) ||
+		(summary.agentId !== "codex" && summary.agentId !== "claude") ||
+		boundPage.availability !== "unavailable"
+	)
+		return boundPage;
+
+	let cursor: HistoryCursor | null = null;
+	if (request.cursor) {
+		try {
+			cursor = decodeTaskConversationHistoryCursor(request.cursor);
+		} catch {
+			return boundPage;
+		}
+		if (!cursor?.readOnlyNativeHistorySourceKey) return boundPage;
+		if (boundPage.unavailabilityReason === "snapshot_invalid") return boundPage;
+	}
+	const resolution = await resolveLegacyNativeHistorySource({
+		scope: input.nativeHistoryScope,
+		card,
+		summary,
+		sessions,
+		waitForScan: input.waitForNativeHistoryScan,
+	});
+	input.onNativeHistoryResolution?.(resolution);
+	const evidence = resolution.evidence;
+	const lookup = { status: resolution.status, searchedDirectories: resolution.roots };
+	if (!evidence)
+		return {
+			...buildUnavailableTaskConversationHistoryPage(
+				resolution.notice,
+				resolution.status === "scanning" || !cursor ? boundPage.unavailabilityReason : "snapshot_invalid",
+			),
+			nativeHistoryLookup: lookup,
+		};
+	const page = await loadTaskConversationHistoryPageFromSummary(input, evidence);
+	return {
+		...page,
+		nativeHistoryLookup: lookup,
+		...(page.availability === "unavailable"
+			? {}
+			: {
+					nativeHistorySource: "verified_read_only" as const,
+					notice: page.notice ? `${resolution.notice} ${page.notice}` : resolution.notice,
+				}),
+	};
+}
+
+async function loadTaskConversationHistoryPageFromSummary(
+	input: LoadTaskConversationHistoryPageInput,
+	readOnlyEvidence?: LegacyNativeHistoryEvidence,
+): Promise<RuntimeTaskConversationHistoryPageResponse> {
+	const { request, card, sessions } = input;
 	const retainedMessages =
 		request.transcriptReadConsistency === "stable_snapshot" ? undefined : input.retainedMessages;
 	let summary = sessions[request.taskConversationSessionId];
@@ -479,7 +550,13 @@ export async function loadTaskConversationHistoryPage(
 		}
 	}
 	try {
-		summary = await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
+		summary = readOnlyEvidence
+			? {
+					...summary,
+					workspacePath: readOnlyEvidence.workingDirectoryPath,
+					agentNativeConversationSessionIdentity: readOnlyEvidence.identity,
+				}
+			: await resolveTaskConversationHistorySummaryForCodexStorageBinding(summary);
 		if (summary.agentId === "cursor" || summary.agentId === "kimi") {
 			const transcriptPath = await resolveVerifiedAdditionalNativeConversationTranscriptPath(summary);
 			if (!transcriptPath || !summary.agentNativeConversationSessionIdentity)
@@ -548,8 +625,37 @@ export async function loadTaskConversationHistoryPage(
 		if (!metadata.isFile()) return buildUnavailableTaskConversationHistoryPage("会话记录不是可读取的文件。");
 		const rootMetadata = metadata;
 		const rootNativePath = handle.nativePath ?? identity.transcriptPath;
-		const usesStableSnapshot = request.transcriptReadConsistency === "stable_snapshot";
+		const usesStableSnapshot = Boolean(readOnlyEvidence) || request.transcriptReadConsistency === "stable_snapshot";
 		const decodedCursor = decodeTaskConversationHistoryCursor(request.cursor);
+		const readOnlyNativeHistorySourceKey =
+			readOnlyEvidence &&
+			createHash("sha256")
+				.update(
+					JSON.stringify([
+						readOnlyEvidence.sourceInstanceId,
+						readOnlyEvidence.workspaceId,
+						readOnlyEvidence.taskId,
+						readOnlyEvidence.taskIncarnationCreatedAtEpochMs,
+						readOnlyEvidence.conversationSessionId,
+						readOnlyEvidence.agentId,
+						readOnlyEvidence.identity.nativeSessionId,
+						readOnlyEvidence.agentId === "codex" && readOnlyEvidence.identity.transcriptPath
+							? codexTranscriptJsonlPath(readOnlyEvidence.identity.transcriptPath)
+							: readOnlyEvidence.identity.transcriptPath,
+					]),
+				)
+				.digest("hex");
+		if (decodedCursor && decodedCursor.readOnlyNativeHistorySourceKey !== readOnlyNativeHistorySourceKey) {
+			// 持久路径的原生身份通过核验后，才可使补证来源的游标失效。
+			if (!readOnlyEvidence && decodedCursor.readOnlyNativeHistorySourceKey)
+				await assertNativeTranscriptIdentity(handle, summary);
+			return buildUnavailableTaskConversationHistoryPage("历史读取来源已切换，请刷新后重试。", "snapshot_invalid");
+		}
+		if (
+			readOnlyEvidence &&
+			nativeHistoryFileRevision(await stat(rootNativePath)) !== readOnlyEvidence.transcriptRevision
+		)
+			throw new NativeTranscriptSnapshotInvalidError();
 		const usesCodexLogicalCursor =
 			identity.sourceAgentId === "codex" && (!decodedCursor || decodedCursor.internalVersion === 2);
 		const sourceRevision = createHash("sha256")
@@ -614,9 +720,10 @@ export async function loadTaskConversationHistoryPage(
 				identity.sourceAgentId === "codex",
 			);
 		let segmentMetadata = await assertNativeTranscriptIdentity(handle, summary);
-		input.onVerifiedTranscriptSegment?.(handle.nativePath ?? identity.transcriptPath);
+		if (!readOnlyEvidence) input.onVerifiedTranscriptSegment?.(handle.nativePath ?? identity.transcriptPath);
 		const cursor: HistoryCursor = decodedCursor ?? {
 			internalVersion: 2,
+			readOnlyNativeHistorySourceKey,
 			nativeSessionId: identity.nativeSessionId,
 			sourceRevision,
 			beforeByteOffset: rootFilePrefix?.endByteOffset ?? metadata.size,

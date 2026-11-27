@@ -4,9 +4,10 @@ import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { createTRPCProxyClient, httpLink } from "@trpc/client";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { compress, decompress } from "zstd-stream";
 import type { RuntimeTaskSessionSummary } from "../../src/core/api-contract";
+import { loadWorkspaceContext } from "../../src/state/workspace-state";
 import type { RuntimeAppRouter } from "../../src/trpc/app-router";
 import type { BrowserType } from "../../web-ui/node_modules/playwright-core";
 import { createIsolatedGitTestWorkspaceFixture } from "../git-repository-mutation-safety/isolated-git-test-workspace-fixture";
@@ -27,7 +28,10 @@ interface NativeTranscriptReaderBrowserGlobal {
 }
 
 const children = createSpawnedChildProcessRegistrySigkilledAfterEachTest();
-afterEach(() => children.sigkillEveryStillRunningChildProcessAndWaitForExit());
+afterEach(async () => {
+	await children.sigkillEveryStillRunningChildProcessAndWaitForExit();
+	vi.unstubAllEnvs();
+});
 
 it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1")(
 	"桌面和手机经隔离 runtime 读取普通与压缩历史，格式转换保留分页、阅读位置且不启动 Agent",
@@ -40,6 +44,9 @@ it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1
 			message: "初始化隔离测试",
 			authorAndCommitterIsoDate: "2026-01-01T00:00:00Z",
 		});
+		vi.stubEnv("HOME", fixture.isolatedHomeDirectoryPath);
+		vi.stubEnv("USERPROFILE", fixture.isolatedHomeDirectoryPath);
+		await loadWorkspaceContext(project.repositoryPath);
 		const reservePort = async () => {
 			const server = createServer();
 			await new Promise<void>((ready) => server.listen(0, "127.0.0.1", ready));
@@ -124,6 +131,7 @@ it.skipIf(process.env.KANBAN_RUN_NATIVE_TRANSCRIPT_DOCUMENT_BROWSER_CHECK !== "1
 					.then((response) => response.ok)
 					.catch(() => false),
 			);
+
 			const workspaceId = (await client().projects.list.query()).projects.find(
 				(entry) => entry.path === project.repositoryPath,
 			)?.id;

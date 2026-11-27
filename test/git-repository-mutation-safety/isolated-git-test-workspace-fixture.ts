@@ -41,7 +41,12 @@ export interface IsolatedGitTestRepository {
 		authorAndCommitterIsoDate: string;
 		workingDirectoryPath?: string;
 	}): string;
-	createLinkedWorktree(options: { worktreeDirectoryName: string; branchName: string; startPoint?: string }): {
+	createLinkedWorktree(options: {
+		worktreeDirectoryName: string;
+		branchName: string;
+		startPoint?: string;
+		isolatedWorktreeParentDirectoryPath?: string;
+	}): {
 		worktreePath: string;
 	};
 }
@@ -387,7 +392,10 @@ export function createIsolatedGitTestWorkspaceFixture(
 			createLinkedWorktree(options) {
 				assertSimpleDirectoryName(options.worktreeDirectoryName, "worktreeDirectoryName");
 				const worktreePath = assertPotentialPathInsideFixture(
-					join(linkedWorktreesDirectoryPath, options.worktreeDirectoryName),
+					join(
+						options.isolatedWorktreeParentDirectoryPath ?? linkedWorktreesDirectoryPath,
+						options.worktreeDirectoryName,
+					),
 					"Linked worktree target",
 				);
 				if (existsSync(worktreePath)) throw new Error(`Linked worktree target already exists: ${worktreePath}`);

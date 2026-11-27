@@ -83,6 +83,16 @@ export async function readLatestTaskMainSessionPlan(input: {
 	const seenCursors = new Set<string>();
 	for (let index = 0; index < 32; index++) {
 		const page = await input.readPage(cursor);
+		// 公开阅读入口会带回仅供阅读的补证。Plan 下载只接受当前绑定的可信历史。
+		if (page.nativeHistorySource === "verified_read_only")
+			return {
+				response: {
+					availability: "unknown",
+					candidates: [],
+					notice: "只读补证不能作为主会话 Plan 的可信来源。",
+				},
+				version: null,
+			};
 		if (page.availability !== "available")
 			return {
 				response: {

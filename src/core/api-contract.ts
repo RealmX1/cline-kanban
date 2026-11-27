@@ -5158,6 +5158,20 @@ export const runtimeTaskConversationHistoryPageResponseSchema = z.object({
 	unavailabilityReason: z
 		.enum(["binding_pending", "source_unavailable", "identity_mismatch", "snapshot_invalid"])
 		.optional(),
+	nativeHistorySource: z.literal("verified_read_only").optional(),
+	nativeHistoryLookup: z
+		.object({
+			status: z.enum([
+				"verified",
+				"ambiguous",
+				"scanning",
+				"search_limited",
+				"no_matching_transcript",
+				"ownership_unproven",
+			]),
+			searchedDirectories: z.array(z.string()),
+		})
+		.optional(),
 });
 export type RuntimeTaskConversationHistoryPageResponse = z.infer<
 	typeof runtimeTaskConversationHistoryPageResponseSchema

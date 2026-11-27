@@ -57,6 +57,7 @@ import {
 } from "../agent-session-history/agent-raised-user-decision-history-builder";
 import { listAvailableAgentSessions } from "../agent-session-history/available-agent-session-index";
 import { encodeClaudeProjectDirectoryName } from "../agent-session-history/bounded-agent-transcript-reader";
+import { nativeHistoryOwnershipFingerprint } from "../agent-session-history/legacy-native-history-source";
 import { salvageLatestUnansweredClaudeUserQuestionForTask } from "../agent-session-history/pending-user-decision-transcript-salvage";
 import {
 	probePersistedAgentTranscriptLastConversationModelIdentity,
@@ -3425,31 +3426,55 @@ export function createRuntimeApi(deps: CreateRuntimeApiDependencies): RuntimeTrp
 			}
 		},
 		getTaskConversationHistoryPage: async (workspaceScope, input) => {
-			// 只读持久快照；不取 terminal manager，不创建占位会话，不启动 SDK host 或 ACP 进程。
-			const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
-			const sessions = removeTaskSessionSummariesOwnedByOtherWorkspaces({
-				workspaceId: workspaceScope.workspaceId,
-				workspaceRepositoryPath: workspaceScope.workspacePath,
-				taskWorktreesHomePath: getTaskWorktreesHomePath(),
-				sessions: state.sessions,
-			}).sessionsWithoutSummariesOwnedByOtherWorkspaces;
-			const card = findWorkspaceBoardCard(state.board, input.workspaceTaskId);
-			const summary = sessions[input.taskConversationSessionId];
+			// 仅从持久快照读取，历史查询不取得 terminal manager。
+			const readSnapshot = async () => {
+				const state = await loadPersistedWorkspaceStateById(workspaceScope.workspaceId);
+				const sessions = removeTaskSessionSummariesOwnedByOtherWorkspaces({
+					workspaceId: workspaceScope.workspaceId,
+					workspaceRepositoryPath: workspaceScope.workspacePath,
+					taskWorktreesHomePath: getTaskWorktreesHomePath(),
+					sessions: state.sessions,
+				}).sessionsWithoutSummariesOwnedByOtherWorkspaces;
+				const card = findWorkspaceBoardCard(state.board, input.workspaceTaskId);
+				return { card, sessions, summary: sessions[input.taskConversationSessionId] };
+			};
+			const initial = await readSnapshot();
 			const retainedMessages =
-				card &&
-				summary &&
-				doesConversationSessionBelongToTask(summary, input.workspaceTaskId) &&
-				isRuntimeAgentSessionSummaryDrivenByAcpProtocol(summary)
+				initial.card &&
+				initial.summary &&
+				doesConversationSessionBelongToTask(initial.summary, input.workspaceTaskId) &&
+				isRuntimeAgentSessionSummaryDrivenByAcpProtocol(initial.summary)
 					? (await deps.getScopedAcpTaskSessionService(workspaceScope)).listMessages(
 							input.taskConversationSessionId,
 						)
 					: undefined;
-			return await loadTaskConversationHistoryPage({
+			const page = await loadTaskConversationHistoryPage({
 				request: input,
-				card,
-				sessions,
+				card: initial.card,
+				sessions: initial.sessions,
 				retainedMessages,
+				nativeHistoryScope: workspaceScope,
 			});
+			if (!page.nativeHistoryLookup) return page;
+			const current = await readSnapshot();
+			const superseded =
+				nativeHistoryOwnershipFingerprint(initial.card, initial.summary, initial.sessions) !==
+				nativeHistoryOwnershipFingerprint(current.card, current.summary, current.sessions);
+			if (!superseded) return page;
+			// 读取期间补写身份或更换任务代次时，只以新快照及权威绑定回应。
+			if (
+				initial.card?.createdAt === current.card?.createdAt &&
+				!input.cursor &&
+				current.summary?.agentNativeConversationSessionIdentity
+			)
+				return loadTaskConversationHistoryPage({ request: input, card: current.card, sessions: current.sessions });
+			return {
+				availability: "unavailable",
+				messages: [],
+				nextCursor: null,
+				unavailabilityReason: "snapshot_invalid",
+				notice: "原生会话归属在读取期间发生变化，请刷新后重试。",
+			};
 		},
 		getTaskChatMessages: async (workspaceScope, input) => {
 			try {
